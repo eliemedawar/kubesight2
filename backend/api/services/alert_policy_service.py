@@ -15,11 +15,12 @@ from ..alert_policy_catalog import (
     normalize_evaluation_interval_seconds,
     validate_condition,
     validate_evaluation_interval,
+    normalize_scope,
     validate_scope,
 )
 from ..audit import log_audit
 from ..db import db
-from ..models import AlertHistory, AlertPolicy, AlertRoutingReceiver, User
+from ..models import AlertHistory, AlertPolicy, AlertRoutingReceiver, AlertRoutingReceiverGroup, User
 
 
 def policy_show_on_dashboard(policy: AlertPolicy) -> bool:
@@ -52,6 +53,24 @@ def _receiver_destination(receiver: AlertRoutingReceiver) -> str:
     if receiver.receiver_type == "email":
         return receiver.email_address or ""
     return receiver.url or ""
+
+
+def list_receiver_groups_for_policy_catalog() -> List[Dict[str, Any]]:
+    rows = (
+        AlertRoutingReceiverGroup.query.filter_by(enabled=True)
+        .order_by(AlertRoutingReceiverGroup.name.asc())
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "name": row.name,
+            "description": row.description or "",
+            "memberCount": len(list(row.members or [])),
+            "receiverNames": [member.name for member in list(row.members or [])],
+        }
+        for row in rows
+    ]
 
 
 def list_receivers_for_policy_catalog() -> List[Dict[str, Any]]:
@@ -91,6 +110,41 @@ def _normalize_receiver_ids(payload: Dict[str, Any], *, existing: Optional[Alert
     return result
 
 
+def _normalize_receiver_group_ids(payload: Dict[str, Any], *, existing: Optional[AlertPolicy] = None) -> List[int]:
+    if "receiverGroupIds" in payload:
+        raw = payload.get("receiverGroupIds") or []
+    elif existing is not None:
+        return [group.id for group in existing.notification_receiver_groups]
+    else:
+        raw = []
+    if not isinstance(raw, list):
+        return []
+    result: List[int] = []
+    seen: set[int] = set()
+    for item in raw:
+        group_id = int(item)
+        if group_id in seen:
+            continue
+        seen.add(group_id)
+        result.append(group_id)
+    return result
+
+
+def _sync_policy_receiver_groups(policy: AlertPolicy, group_ids: List[int]) -> None:
+    if not group_ids:
+        policy.notification_receiver_groups = []
+        return
+    groups = (
+        AlertRoutingReceiverGroup.query.filter(
+            AlertRoutingReceiverGroup.id.in_(group_ids),
+            AlertRoutingReceiverGroup.enabled.is_(True),
+        )
+        .order_by(AlertRoutingReceiverGroup.name.asc())
+        .all()
+    )
+    policy.notification_receiver_groups = groups
+
+
 def _sync_policy_receivers(policy: AlertPolicy, receiver_ids: List[int]) -> None:
     if not receiver_ids:
         policy.notification_receivers = []
@@ -108,6 +162,7 @@ def _sync_policy_receivers(policy: AlertPolicy, receiver_ids: List[int]) -> None
 
 def _policy_dict(policy: AlertPolicy) -> Dict[str, Any]:
     receivers = list(policy.notification_receivers or [])
+    groups = list(policy.notification_receiver_groups or [])
     return {
         "id": policy.id,
         "name": policy.name,
@@ -117,10 +172,12 @@ def _policy_dict(policy: AlertPolicy) -> Dict[str, Any]:
         "severity": policy.severity,
         "conditionLogic": policy.condition_logic,
         "conditions": policy.conditions or [],
-        "scope": policy.scope or {},
+        "scope": normalize_scope(policy.scope),
         "showOnDashboard": policy_show_on_dashboard(policy),
         "receiverIds": [receiver.id for receiver in receivers],
         "receiverNames": [receiver.name for receiver in receivers],
+        "receiverGroupIds": [group.id for group in groups],
+        "receiverGroupNames": [group.name for group in groups],
         "evaluationIntervalSeconds": int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS),
         "evaluationIntervalLabel": evaluation_interval_display(
             int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS)
@@ -172,6 +229,19 @@ def _validate_payload(payload: Dict[str, Any], *, partial: bool = False) -> Opti
             missing = [rid for rid in receiver_ids if rid not in found]
             if missing:
                 return "One or more selected receivers are invalid or disabled."
+    if "receiverGroupIds" in payload:
+        group_ids = _normalize_receiver_group_ids(payload)
+        if group_ids:
+            found = {
+                row.id
+                for row in AlertRoutingReceiverGroup.query.filter(
+                    AlertRoutingReceiverGroup.id.in_(group_ids),
+                    AlertRoutingReceiverGroup.enabled.is_(True),
+                ).all()
+            }
+            missing = [gid for gid in group_ids if gid not in found]
+            if missing:
+                return "One or more selected receiver groups are invalid or disabled."
     if "evaluationIntervalSeconds" in payload:
         try:
             interval = int(payload.get("evaluationIntervalSeconds"))
@@ -219,7 +289,7 @@ def create_policy(user: Optional[User], payload: Dict[str, Any]) -> Tuple[Option
         severity=str(payload.get("severity") or "warning").lower(),
         condition_logic=str(payload.get("conditionLogic") or "any").lower(),
         conditions=payload.get("conditions") or [],
-        scope=payload.get("scope") or {"type": "cluster"},
+        scope=normalize_scope(payload.get("scope")),
         notification_channels=_dashboard_channels_from_payload(payload),
         evaluation_interval_seconds=normalize_evaluation_interval_seconds(
             payload.get("evaluationIntervalSeconds", DEFAULT_EVALUATION_INTERVAL_SECONDS)
@@ -231,6 +301,7 @@ def create_policy(user: Optional[User], payload: Dict[str, Any]) -> Tuple[Option
     db.session.add(policy)
     db.session.flush()
     _sync_policy_receivers(policy, _normalize_receiver_ids(payload))
+    _sync_policy_receiver_groups(policy, _normalize_receiver_group_ids(payload))
     db.session.commit()
     log_audit("alert_policy_created", actor=user, target_type="alert_policy", target_id=str(policy.id))
     return _policy_dict(policy), None, 201
@@ -269,7 +340,7 @@ def update_policy(
     if "conditions" in payload:
         policy.conditions = payload.get("conditions") or []
     if "scope" in payload:
-        policy.scope = payload.get("scope") or {}
+        policy.scope = normalize_scope(payload.get("scope"))
     if "showOnDashboard" in payload or "notificationChannels" in payload:
         policy.notification_channels = _dashboard_channels_from_payload(
             payload,
@@ -277,6 +348,8 @@ def update_policy(
         )
     if "receiverIds" in payload:
         _sync_policy_receivers(policy, _normalize_receiver_ids(payload))
+    if "receiverGroupIds" in payload:
+        _sync_policy_receiver_groups(policy, _normalize_receiver_group_ids(payload))
     if "evaluationIntervalSeconds" in payload:
         interval = normalize_evaluation_interval_seconds(payload.get("evaluationIntervalSeconds"))
         if policy.evaluation_interval_seconds != interval:
@@ -362,4 +435,7 @@ def policy_stats(cluster_id: Optional[str] = None) -> Dict[str, Any]:
 
 
 def get_catalog() -> Dict[str, Any]:
-    return catalog_payload(receivers=list_receivers_for_policy_catalog())
+    return catalog_payload(
+        receivers=list_receivers_for_policy_catalog(),
+        receiver_groups=list_receiver_groups_for_policy_catalog(),
+    )

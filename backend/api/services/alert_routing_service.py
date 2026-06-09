@@ -4,7 +4,7 @@ import json
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from ..db import db
@@ -14,6 +14,7 @@ from ..models import (
     AlertPolicy,
     AlertRoutingDeliverySent,
     AlertRoutingReceiver,
+    AlertRoutingReceiverGroup,
     AlertRoutingSmtp,
 )
 from ..secret_encryption import decrypt_secret, encrypt_secret
@@ -115,8 +116,18 @@ def _receiver_assigned_policies(row: AlertRoutingReceiver) -> List[Dict[str, Any
     return [{"id": policy.id, "name": policy.name} for policy in policies]
 
 
+def _receiver_group_names(row: AlertRoutingReceiver) -> List[str]:
+    return sorted({group.name for group in row.receiver_groups.all()})
+
+
+def _group_assigned_policies(row: AlertRoutingReceiverGroup) -> List[Dict[str, Any]]:
+    policies = row.policies.order_by(AlertPolicy.name.asc()).all()
+    return [{"id": policy.id, "name": policy.name} for policy in policies]
+
+
 def _serialize_receiver(row: AlertRoutingReceiver) -> Dict[str, Any]:
     assigned = _receiver_assigned_policies(row)
+    group_names = _receiver_group_names(row)
     return {
         "id": row.id,
         "name": row.name,
@@ -127,6 +138,7 @@ def _serialize_receiver(row: AlertRoutingReceiver) -> Dict[str, Any]:
         "headers": row.headers if isinstance(row.headers, dict) else {},
         "secretConfigured": bool(row.secret_encrypted),
         "enabled": bool(row.enabled),
+        "groupNames": group_names,
         "assignedPolicies": assigned,
         "assignedPolicyNames": [policy["name"] for policy in assigned],
         "lastTestAt": _iso(row.last_test_at),
@@ -229,6 +241,174 @@ def delete_receiver(receiver_id: int) -> None:
     db.session.commit()
 
 
+def _parse_email_list(raw: Any) -> List[str]:
+    if not raw:
+        return []
+    emails: List[str] = []
+    seen: set[str] = set()
+    for line in str(raw).replace(",", "\n").split("\n"):
+        address = line.strip()
+        if "@" not in address:
+            continue
+        key = address.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        emails.append(address)
+    return emails
+
+
+def _find_or_create_email_receiver(email: str) -> AlertRoutingReceiver:
+    address = email.strip()
+    existing = AlertRoutingReceiver.query.filter_by(receiver_type="email", email_address=address).first()
+    if existing:
+        return existing
+    local_part = address.split("@", 1)[0].strip() or "email"
+    base_name = f"{local_part.replace('.', ' ').title()} Email"
+    name = base_name
+    suffix = 2
+    while AlertRoutingReceiver.query.filter_by(name=name).first():
+        name = f"{base_name} {suffix}"
+        suffix += 1
+    row = AlertRoutingReceiver(
+        name=name,
+        receiver_type="email",
+        email_address=address,
+        enabled=True,
+    )
+    db.session.add(row)
+    db.session.flush()
+    return row
+
+
+def _normalize_receiver_ids(raw: Any) -> List[int]:
+    if not isinstance(raw, list):
+        return []
+    result: List[int] = []
+    seen: set[int] = set()
+    for item in raw:
+        receiver_id = int(item)
+        if receiver_id in seen:
+            continue
+        seen.add(receiver_id)
+        result.append(receiver_id)
+    return result
+
+
+def _sync_group_members(group: AlertRoutingReceiverGroup, receiver_ids: List[int]) -> None:
+    if not receiver_ids:
+        group.members = []
+        return
+    receivers = (
+        AlertRoutingReceiver.query.filter(
+            AlertRoutingReceiver.id.in_(receiver_ids),
+            AlertRoutingReceiver.enabled.is_(True),
+        )
+        .order_by(AlertRoutingReceiver.name.asc())
+        .all()
+    )
+    group.members = receivers
+
+
+def _serialize_receiver_group(row: AlertRoutingReceiverGroup) -> Dict[str, Any]:
+    members = list(row.members or [])
+    assigned = _group_assigned_policies(row)
+    return {
+        "id": row.id,
+        "name": row.name,
+        "description": row.description or "",
+        "enabled": bool(row.enabled),
+        "receiverIds": [member.id for member in members],
+        "receiverNames": [member.name for member in members],
+        "memberCount": len(members),
+        "assignedPolicies": assigned,
+        "assignedPolicyNames": [policy["name"] for policy in assigned],
+        "createdAt": _iso(row.created_at),
+        "updatedAt": _iso(row.updated_at),
+    }
+
+
+def list_receiver_groups() -> List[Dict[str, Any]]:
+    rows = AlertRoutingReceiverGroup.query.order_by(AlertRoutingReceiverGroup.name.asc()).all()
+    return [_serialize_receiver_group(row) for row in rows]
+
+
+def _validate_group_payload(
+    payload: Dict[str, Any],
+    *,
+    existing: Optional[AlertRoutingReceiverGroup] = None,
+) -> None:
+    name = str(payload.get("name", existing.name if existing else "")).strip()
+    if not name:
+        raise ValueError("Group name is required.")
+
+
+def create_receiver_group(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _validate_group_payload(payload)
+    name = str(payload.get("name")).strip()
+    if AlertRoutingReceiverGroup.query.filter_by(name=name).first():
+        raise ValueError("A receiver group with this name already exists.")
+
+    row = AlertRoutingReceiverGroup(
+        name=name,
+        description=(payload.get("description") or None),
+        enabled=bool(payload.get("enabled", True)),
+    )
+    db.session.add(row)
+    db.session.flush()
+
+    receiver_ids = list(_normalize_receiver_ids(payload.get("receiverIds") or []))
+    for email in _parse_email_list(payload.get("emailList")):
+        receiver_ids.append(_find_or_create_email_receiver(email).id)
+    receiver_ids = _normalize_receiver_ids(receiver_ids)
+    _sync_group_members(row, receiver_ids)
+    db.session.commit()
+    return _serialize_receiver_group(row)
+
+
+def update_receiver_group(group_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    row = AlertRoutingReceiverGroup.query.get(group_id)
+    if not row:
+        raise LookupError("Receiver group not found.")
+    _validate_group_payload(payload, existing=row)
+
+    if "name" in payload:
+        name = str(payload["name"]).strip()
+        conflict = AlertRoutingReceiverGroup.query.filter(
+            AlertRoutingReceiverGroup.name == name,
+            AlertRoutingReceiverGroup.id != row.id,
+        ).first()
+        if conflict:
+            raise ValueError("A receiver group with this name already exists.")
+        row.name = name
+    if "description" in payload:
+        row.description = payload.get("description") or None
+    if "enabled" in payload:
+        row.enabled = bool(payload["enabled"])
+
+    if "receiverIds" in payload or "emailList" in payload:
+        if "receiverIds" in payload:
+            receiver_ids = _normalize_receiver_ids(payload.get("receiverIds"))
+        else:
+            receiver_ids = [member.id for member in row.members]
+        if "emailList" in payload:
+            for email in _parse_email_list(payload.get("emailList")):
+                receiver_ids.append(_find_or_create_email_receiver(email).id)
+            receiver_ids = _normalize_receiver_ids(receiver_ids)
+        _sync_group_members(row, receiver_ids)
+
+    db.session.commit()
+    return _serialize_receiver_group(row)
+
+
+def delete_receiver_group(group_id: int) -> None:
+    row = AlertRoutingReceiverGroup.query.get(group_id)
+    if not row:
+        raise LookupError("Receiver group not found.")
+    db.session.delete(row)
+    db.session.commit()
+
+
 def list_delivery_logs(*, limit: int = 100) -> List[Dict[str, Any]]:
     rows = (
         AlertDeliveryLog.query.order_by(AlertDeliveryLog.delivered_at.desc())
@@ -242,6 +422,7 @@ def list_delivery_logs(*, limit: int = 100) -> List[Dict[str, Any]]:
             "alertName": row.alert_name or "",
             "policyId": row.policy_id,
             "policyName": row.policy_name or "",
+            "groupName": row.group_name or "",
             "receiverId": row.receiver_id,
             "receiverName": row.receiver_name,
             "receiverType": row.receiver_type,
@@ -260,6 +441,7 @@ def _record_delivery_log(
     status: str,
     error_message: Optional[str] = None,
     alert: Optional[Dict[str, Any]] = None,
+    group_name: str = "",
 ) -> None:
     alert_payload = alert or {}
     db.session.add(
@@ -268,6 +450,7 @@ def _record_delivery_log(
             alert_name=str(alert_payload.get("title") or alert_payload.get("policyName") or ""),
             policy_id=alert_payload.get("policyId"),
             policy_name=str(alert_payload.get("policyName") or ""),
+            group_name=group_name or "",
             receiver_id=receiver.id,
             receiver_name=receiver.name,
             receiver_type=receiver.receiver_type,
@@ -407,11 +590,28 @@ def send_receiver_test(receiver_id: int) -> Dict[str, Any]:
         raise EmailDeliveryError(str(exc)) from exc
 
 
-def _receivers_for_policy(policy_id: int) -> List[AlertRoutingReceiver]:
+def _destinations_for_policy(policy_id: int) -> List[Tuple[AlertRoutingReceiver, str]]:
     policy = AlertPolicy.query.get(policy_id)
     if not policy:
         return []
-    return [receiver for receiver in policy.notification_receivers if receiver.enabled]
+
+    destinations: Dict[int, Tuple[AlertRoutingReceiver, str]] = {}
+    for group in list(policy.notification_receiver_groups or []):
+        if not group.enabled:
+            continue
+        for receiver in list(group.members or []):
+            if not receiver.enabled:
+                continue
+            if receiver.id not in destinations:
+                destinations[receiver.id] = (receiver, group.name)
+
+    for receiver in list(policy.notification_receivers or []):
+        if not receiver.enabled:
+            continue
+        if receiver.id not in destinations:
+            destinations[receiver.id] = (receiver, "")
+
+    return list(destinations.values())
 
 
 def _slack_alert_payload(alert: Dict[str, Any]) -> Dict[str, Any]:
@@ -459,7 +659,10 @@ def _deliver_to_receiver(receiver: AlertRoutingReceiver, alert: Dict[str, Any]) 
     _post_webhook(receiver, alert)
 
 
-def _dispatch_to_receivers(alert: Dict[str, Any], receivers: List[AlertRoutingReceiver]) -> Dict[str, Any]:
+def _dispatch_to_destinations(
+    alert: Dict[str, Any],
+    destinations: List[Tuple[AlertRoutingReceiver, str]],
+) -> Dict[str, Any]:
     alert_id = str(alert.get("id") or "").strip()
     alert_status = str(alert.get("status") or "firing").strip().lower()
     if not alert_id:
@@ -469,14 +672,20 @@ def _dispatch_to_receivers(alert: Dict[str, Any], receivers: List[AlertRoutingRe
         return {"sent": 0, "skipped": 0, "errors": []}
 
     summary: Dict[str, Any] = {"sent": 0, "skipped": 0, "errors": []}
-    for receiver in receivers:
+    for receiver, group_name in destinations:
         if _already_delivered(alert_id, receiver.id, alert_status):
             summary["skipped"] += 1
             continue
         try:
             _deliver_to_receiver(receiver, alert)
             _mark_delivered(alert_id, receiver.id, alert_status)
-            _record_delivery_log(alert_id=alert_id, receiver=receiver, status="success", alert=alert)
+            _record_delivery_log(
+                alert_id=alert_id,
+                receiver=receiver,
+                status="success",
+                alert=alert,
+                group_name=group_name,
+            )
             db.session.commit()
             summary["sent"] += 1
         except Exception as exc:
@@ -487,12 +696,14 @@ def _dispatch_to_receivers(alert: Dict[str, Any], receivers: List[AlertRoutingRe
                 status="failed",
                 error_message=str(exc),
                 alert=alert,
+                group_name=group_name,
             )
             try:
                 db.session.commit()
             except Exception:
                 db.session.rollback()
-            summary["errors"].append(f"{receiver.name}: {exc}")
+            label = f"{group_name}: {receiver.name}" if group_name else receiver.name
+            summary["errors"].append(f"{label}: {exc}")
 
     return summary
 
@@ -501,7 +712,7 @@ def dispatch_policy_alert_notifications(alert: Dict[str, Any]) -> Dict[str, Any]
     policy_id = alert.get("policyId")
     if not policy_id:
         return {"sent": 0, "skipped": 0, "errors": ["Policy alert missing policyId"]}
-    return _dispatch_to_receivers(alert, _receivers_for_policy(int(policy_id)))
+    return _dispatch_to_destinations(alert, _destinations_for_policy(int(policy_id)))
 
 
 def dispatch_firing_alerts(alerts: List[Dict[str, Any]]) -> Dict[str, Any]:

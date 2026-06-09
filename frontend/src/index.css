@@ -3558,6 +3558,12 @@ button:focus-visible {
   border-top: 1px solid var(--border);
 }
 
+.alert-policy-subheading {
+  margin: var(--space-3) 0 var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
 .alert-policy-section h3 {
   margin: 0 0 var(--space-3);
   font-size: var(--font-size-md);
@@ -3660,6 +3666,15 @@ button:focus-visible {
 .receiver-assigned-policies {
   margin: 0;
   padding-left: 1.1rem;
+}
+
+.receivers-tab-shell {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.receiver-sub-tabs {
+  margin-bottom: 0;
 }
 
 .routing-rule-receiver-list {

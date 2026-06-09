@@ -14,7 +14,7 @@ SAMPLE_POLICY = {
     "severity": "warning",
     "conditionLogic": "any",
     "conditions": [{"metricKey": "cpu_usage_percent", "operator": ">", "threshold": 70}],
-    "scope": {"type": "cluster"},
+    "scope": {"type": "deployment", "namespace": "default", "resourceName": "*"},
     "showOnDashboard": True,
 }
 
@@ -106,6 +106,36 @@ def test_admin_crud_alert_policy(client, admin_token):
         headers=auth_headers(admin_token),
     )
     assert delete.status_code == 200
+
+
+def test_alert_policy_scope_validation(client, admin_token):
+    missing_namespace = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Missing Namespace",
+            "scope": {"type": "deployment", "namespace": "", "resourceName": "*"},
+        },
+    )
+    assert missing_namespace.status_code == 400
+
+    legacy_cluster = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Legacy Cluster Scope",
+            "scope": {"type": "cluster"},
+        },
+    )
+    assert legacy_cluster.status_code in (200, 201)
+    created = legacy_cluster.get_json()["data"]
+    assert created["scope"]["type"] == "deployment"
+    assert created["scope"]["namespace"] == "default"
+    assert created["scope"]["resourceName"] == "*"
+
+    client.delete(f"/api/alert-policies/{created['id']}", headers=auth_headers(admin_token))
 
 
 def test_alert_policy_validation_rejects_empty_conditions(client, admin_token):

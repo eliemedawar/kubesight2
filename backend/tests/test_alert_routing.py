@@ -85,7 +85,7 @@ def test_receiver_crud_and_policy_dispatch(client, admin_token):
             "severity": "critical",
             "conditionLogic": "any",
             "conditions": [{"metricKey": "cpu_usage_percent", "operator": ">", "threshold": 70}],
-            "scope": {"type": "cluster"},
+            "scope": {"type": "deployment", "namespace": "default", "resourceName": "*"},
             "showOnDashboard": True,
             "receiverIds": [email_id, webhook_id],
         },
@@ -163,6 +163,83 @@ def test_delete_receiver(client, admin_token):
 def test_routing_rules_endpoint_removed(client, admin_token):
     response = client.get("/api/alert-routing/rules", headers=auth_headers(admin_token))
     assert response.status_code == 404
+
+
+def test_receiver_group_crud_and_policy_dispatch(client, admin_token):
+    email_resp = client.post(
+        "/api/alert-routing/receivers",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "Elie Email",
+            "type": "email",
+            "emailAddress": "elie@company.com",
+            "enabled": True,
+        },
+    )
+    assert email_resp.status_code == 201
+    email_id = email_resp.get_json()["data"]["id"]
+
+    group_resp = client.post(
+        "/api/alert-routing/receiver-groups",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "DevOps Team",
+            "description": "DevOps notifications",
+            "enabled": True,
+            "receiverIds": [email_id],
+            "emailList": "marc@company.com",
+        },
+    )
+    assert group_resp.status_code == 201
+    group = group_resp.get_json()["data"]
+    assert group["memberCount"] >= 2
+
+    policy_resp = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "High CPU",
+            "clusterId": "prod-us-east",
+            "severity": "warning",
+            "conditionLogic": "any",
+            "conditions": [{"metricKey": "cpu_usage_percent", "operator": ">", "threshold": 70}],
+            "scope": {"type": "deployment", "namespace": "default", "resourceName": "*"},
+            "showOnDashboard": True,
+            "receiverGroupIds": [group["id"]],
+        },
+    )
+    assert policy_resp.status_code in (200, 201)
+    policy_id = policy_resp.get_json()["data"]["id"]
+
+    with patch("api.services.alert_routing_service.smtp_is_configured", return_value=True), patch(
+        "api.services.alert_routing_service.send_alert_email"
+    ) as send_email:
+        from api.services.alert_routing_service import dispatch_policy_alert_notifications
+
+        alert = {
+            "id": "history-group-1",
+            "policyId": policy_id,
+            "policyName": "High CPU",
+            "severity": "warning",
+            "status": "firing",
+            "clusterId": "prod-us-east",
+            "title": "High CPU",
+        }
+        summary = dispatch_policy_alert_notifications(alert)
+        assert summary["sent"] >= 2
+        assert send_email.call_count >= 2
+
+    logs = client.get("/api/alert-routing/delivery-logs", headers=auth_headers(admin_token))
+    log_items = logs.get_json()["data"]["items"]
+    assert any(item.get("groupName") == "DevOps Team" for item in log_items)
+
+    receivers = client.get("/api/alert-routing/receivers", headers=auth_headers(admin_token))
+    email_row = next(item for item in receivers.get_json()["data"]["items"] if item["id"] == email_id)
+    assert "DevOps Team" in email_row.get("groupNames", [])
+
+    client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
+    client.delete(f"/api/alert-routing/receiver-groups/{group['id']}", headers=auth_headers(admin_token))
+    client.delete(f"/api/alert-routing/receivers/{email_id}", headers=auth_headers(admin_token))
 
 
 def test_deleted_receiver_not_recreated_on_startup_migration(client, admin_token, app):

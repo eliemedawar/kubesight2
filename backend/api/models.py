@@ -320,6 +320,71 @@ alert_policy_receivers = db.Table(
     ),
 )
 
+alert_receiver_group_members = db.Table(
+    "alert_receiver_group_members",
+    db.Column(
+        "group_id",
+        db.Integer,
+        db.ForeignKey("alert_routing_receiver_groups.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    db.Column(
+        "receiver_id",
+        db.Integer,
+        db.ForeignKey("alert_routing_receivers.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+)
+
+alert_policy_receiver_groups = db.Table(
+    "alert_policy_receiver_groups",
+    db.Column(
+        "policy_id",
+        db.Integer,
+        db.ForeignKey("alert_policies.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    db.Column(
+        "group_id",
+        db.Integer,
+        db.ForeignKey("alert_routing_receiver_groups.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+)
+
+
+class AlertRoutingReceiverGroup(db.Model):
+    __tablename__ = "alert_routing_receiver_groups"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    description = db.Column(db.Text, nullable=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True, index=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    members = db.relationship(
+        "AlertRoutingReceiver",
+        secondary=alert_receiver_group_members,
+        lazy="joined",
+        back_populates="receiver_groups",
+    )
+    policies = db.relationship(
+        "AlertPolicy",
+        secondary=alert_policy_receiver_groups,
+        lazy="dynamic",
+        back_populates="notification_receiver_groups",
+    )
+
 
 class AlertRoutingReceiver(db.Model):
     __tablename__ = "alert_routing_receivers"
@@ -357,6 +422,12 @@ class AlertRoutingReceiver(db.Model):
         lazy="dynamic",
         back_populates="notification_receivers",
     )
+    receiver_groups = db.relationship(
+        "AlertRoutingReceiverGroup",
+        secondary=alert_receiver_group_members,
+        lazy="dynamic",
+        back_populates="members",
+    )
 
 
 class AlertRoutingDeliverySent(db.Model):
@@ -385,6 +456,7 @@ class AlertDeliveryLog(db.Model):
     alert_name = db.Column(db.String(255), nullable=False, default="")
     policy_id = db.Column(db.Integer, nullable=True, index=True)
     policy_name = db.Column(db.String(120), nullable=False, default="")
+    group_name = db.Column(db.String(120), nullable=False, default="")
     receiver_id = db.Column(db.Integer, nullable=True, index=True)
     receiver_name = db.Column(db.String(120), nullable=False, default="")
     receiver_type = db.Column(db.String(32), nullable=False, default="")
@@ -430,6 +502,12 @@ class AlertPolicy(db.Model):
     notification_receivers = db.relationship(
         "AlertRoutingReceiver",
         secondary=alert_policy_receivers,
+        lazy="joined",
+        back_populates="policies",
+    )
+    notification_receiver_groups = db.relationship(
+        "AlertRoutingReceiverGroup",
+        secondary=alert_policy_receiver_groups,
         lazy="joined",
         back_populates="policies",
     )

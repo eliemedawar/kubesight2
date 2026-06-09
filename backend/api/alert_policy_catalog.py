@@ -85,7 +85,8 @@ METRIC_DEFINITIONS: List[Dict[str, Any]] = [
 
 METRIC_BY_KEY = {item["key"]: item for item in METRIC_DEFINITIONS}
 
-SCOPE_TYPES = ("cluster", "namespace", "deployment", "pod")
+SCOPE_TYPES = ("deployment", "pod")
+ALL_RESOURCES_SCOPE_NAME = "*"
 
 SEVERITY_LEVELS = ("info", "warning", "critical")
 
@@ -133,7 +134,11 @@ def evaluation_interval_display(seconds: int) -> str:
     return mapping.get(seconds, f"Every {seconds}s")
 
 
-def catalog_payload(*, receivers: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+def catalog_payload(
+    *,
+    receivers: Optional[List[Dict[str, Any]]] = None,
+    receiver_groups: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     return {
         "metrics": METRIC_DEFINITIONS,
         "operators": OPERATORS,
@@ -143,6 +148,7 @@ def catalog_payload(*, receivers: Optional[List[Dict[str, Any]]] = None) -> Dict
         "evaluationIntervals": EVALUATION_INTERVALS,
         "defaultEvaluationIntervalSeconds": DEFAULT_EVALUATION_INTERVAL_SECONDS,
         "receivers": receivers or [],
+        "receiverGroups": receiver_groups or [],
     }
 
 
@@ -170,14 +176,40 @@ def validate_condition(condition: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def normalize_scope(scope: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    raw = scope if isinstance(scope, dict) else {}
+    legacy_type = str(raw.get("type") or "deployment").strip().lower()
+    scope_type = legacy_type if legacy_type in SCOPE_TYPES else "deployment"
+    namespace = str(raw.get("namespace") or "").strip()
+    resource_name = str(raw.get("resourceName") or ALL_RESOURCES_SCOPE_NAME).strip() or ALL_RESOURCES_SCOPE_NAME
+
+    if legacy_type == "cluster":
+        scope_type = "deployment"
+        resource_name = ALL_RESOURCES_SCOPE_NAME
+        if not namespace:
+            namespace = "default"
+    elif legacy_type == "namespace":
+        scope_type = "deployment"
+        resource_name = ALL_RESOURCES_SCOPE_NAME
+
+    if resource_name in {"", ALL_RESOURCES_SCOPE_NAME}:
+        resource_name = ALL_RESOURCES_SCOPE_NAME
+
+    return {
+        "type": scope_type,
+        "namespace": namespace,
+        "resourceName": resource_name,
+    }
+
+
 def validate_scope(scope: Dict[str, Any]) -> Optional[str]:
-    scope_type = str(scope.get("type") or "cluster").strip().lower()
-    if scope_type not in SCOPE_TYPES:
-        return f"Invalid scope type: {scope_type}"
-    if scope_type in ("namespace", "deployment", "pod") and not str(scope.get("namespace") or "").strip():
-        return "Namespace is required for namespace-scoped policies"
-    if scope_type in ("deployment", "pod") and not str(scope.get("resourceName") or "").strip():
-        return f"Resource name is required for {scope_type} scope"
+    normalized = normalize_scope(scope)
+    if normalized["type"] not in SCOPE_TYPES:
+        return "Scope target must be deployment or pod"
+    if not normalized["namespace"]:
+        return "Namespace is required"
+    if not normalized["resourceName"]:
+        return "Resource selection is required"
     return None
 
 

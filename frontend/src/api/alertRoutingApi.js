@@ -25,5 +25,16 @@ export const deleteReceiver = (id) =>
 export const testReceiver = (id) =>
   request(`/api/alert-routing/receivers/${id}/test`, { method: "POST" });
 
+export const listReceiverGroups = () => request("/api/alert-routing/receiver-groups");
+
+export const createReceiverGroup = (payload) =>
+  request("/api/alert-routing/receiver-groups", { method: "POST", body: payload });
+
+export const updateReceiverGroup = (id, payload) =>
+  request(`/api/alert-routing/receiver-groups/${id}`, { method: "PUT", body: payload });
+
+export const deleteReceiverGroup = (id) =>
+  request(`/api/alert-routing/receiver-groups/${id}`, { method: "DELETE" });
+
 export const listDeliveryLogs = (limit = 100) =>
   request("/api/alert-routing/delivery-logs", { query: { limit } });

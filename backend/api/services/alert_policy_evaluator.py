@@ -19,13 +19,14 @@ def _iso_now() -> str:
 
 
 def _scope_targets(scope: Dict[str, Any]) -> List[Dict[str, Optional[str]]]:
-    scope_type = str(scope.get("type") or "cluster").lower()
-    namespace = str(scope.get("namespace") or "").strip() or None
-    resource_name = str(scope.get("resourceName") or "").strip() or None
-    if scope_type == "cluster":
-        return [{"namespace": None, "resourceType": "cluster", "resourceName": None}]
-    if scope_type == "namespace":
-        return [{"namespace": namespace, "resourceType": "namespace", "resourceName": namespace}]
+    from ..alert_policy_catalog import ALL_RESOURCES_SCOPE_NAME, normalize_scope
+
+    normalized = normalize_scope(scope)
+    scope_type = normalized["type"]
+    namespace = normalized["namespace"] or None
+    resource_name = normalized["resourceName"]
+    if resource_name == ALL_RESOURCES_SCOPE_NAME:
+        resource_name = None
     return [
         {
             "namespace": namespace,

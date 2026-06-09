@@ -13,6 +13,10 @@ import {
   setAlertPolicyEnabled,
   updateAlertPolicy,
 } from "../api/alertPoliciesApi.js";
+import PolicyScopeFields, {
+  ALL_RESOURCES_VALUE,
+  normalizeScope,
+} from "../components/alerts/PolicyScopeFields.jsx";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
 
 const RECEIVER_TYPE_LABELS = {
@@ -34,6 +38,13 @@ function formatReceiverList(names) {
     return names.join(", ");
   }
   return `${names.slice(0, 2).join(", ")} +${names.length - 2} more`;
+}
+
+function formatNotificationDestinations(policy) {
+  const groups = policy?.receiverGroupNames || [];
+  const receivers = policy?.receiverNames || [];
+  const combined = [...groups, ...receivers];
+  return formatReceiverList(combined);
 }
 
 const DEFAULT_EVALUATION_INTERVAL_SECONDS = 300;
@@ -59,9 +70,10 @@ const EMPTY_POLICY = {
   severity: "warning",
   conditionLogic: "any",
   conditions: [{ metricKey: "cpu_usage_percent", operator: ">", threshold: 70 }],
-  scope: { type: "cluster", namespace: "", resourceName: "" },
+  scope: { type: "deployment", namespace: "", resourceName: ALL_RESOURCES_VALUE },
   showOnDashboard: true,
   receiverIds: [],
+  receiverGroupIds: [],
   evaluationIntervalSeconds: DEFAULT_EVALUATION_INTERVAL_SECONDS,
 };
 
@@ -125,6 +137,7 @@ function PolicyFormModal({
   };
 
   const receivers = catalog?.receivers || [];
+  const receiverGroups = catalog?.receiverGroups || [];
 
   const toggleReceiver = (receiverId) => {
     setForm((prev) => {
@@ -133,6 +146,16 @@ function PolicyFormModal({
         ? current.filter((id) => id !== receiverId)
         : [...current, receiverId];
       return { ...prev, receiverIds: next };
+    });
+  };
+
+  const toggleReceiverGroup = (groupId) => {
+    setForm((prev) => {
+      const current = prev.receiverGroupIds || [];
+      const next = current.includes(groupId)
+        ? current.filter((id) => id !== groupId)
+        : [...current, groupId];
+      return { ...prev, receiverGroupIds: next };
     });
   };
 
@@ -163,7 +186,17 @@ function PolicyFormModal({
             Cluster
             <select
               value={form.clusterId}
-              onChange={(e) => setForm((p) => ({ ...p, clusterId: e.target.value }))}
+              onChange={(e) =>
+                setForm((p) => ({
+                  ...p,
+                  clusterId: e.target.value,
+                  scope: {
+                    ...normalizeScope(p.scope),
+                    namespace: "",
+                    resourceName: ALL_RESOURCES_VALUE,
+                  },
+                }))
+              }
               required
             >
               <option value="">Select cluster</option>
@@ -222,55 +255,15 @@ function PolicyFormModal({
 
         <section className="alert-policy-section">
           <h3>Scope</h3>
-          <div className="alert-policy-form-grid">
-            <label>
-              Target
-              <select
-                value={form.scope?.type || "cluster"}
-                onChange={(e) =>
-                  setForm((p) => ({
-                    ...p,
-                    scope: { ...p.scope, type: e.target.value },
-                  }))
-                }
-              >
-                <option value="cluster">Entire Cluster</option>
-                <option value="namespace">Namespace</option>
-                <option value="deployment">Deployment</option>
-                <option value="pod">Pod</option>
-              </select>
-            </label>
-            {form.scope?.type !== "cluster" ? (
-              <label>
-                Namespace
-                <input
-                  value={form.scope?.namespace || ""}
-                  onChange={(e) =>
-                    setForm((p) => ({
-                      ...p,
-                      scope: { ...p.scope, namespace: e.target.value },
-                    }))
-                  }
-                  required
-                />
-              </label>
-            ) : null}
-            {["deployment", "pod"].includes(form.scope?.type) ? (
-              <label>
-                Resource Name
-                <input
-                  value={form.scope?.resourceName || ""}
-                  onChange={(e) =>
-                    setForm((p) => ({
-                      ...p,
-                      scope: { ...p.scope, resourceName: e.target.value },
-                    }))
-                  }
-                  required
-                />
-              </label>
-            ) : null}
-          </div>
+          <p className="muted alert-policy-routing-hint">
+            Choose a namespace and deployment or pod. Use the all-resources option to evaluate every
+            workload in the namespace.
+          </p>
+          <PolicyScopeFields
+            clusterId={form.clusterId}
+            scope={form.scope}
+            onChange={(scope) => setForm((p) => ({ ...p, scope }))}
+          />
         </section>
 
         <section className="alert-policy-section">
@@ -359,26 +352,54 @@ function PolicyFormModal({
             Choose where to send notifications when this policy fires. Configure receivers under
             Administration → Alert Routing.
           </p>
+          {receiverGroups.length ? (
+            <>
+              <h4 className="alert-policy-subheading">Receiver Groups</h4>
+              <div className="routing-rule-receiver-list">
+                {receiverGroups.map((group) => (
+                  <label key={group.id} className="routing-rule-receiver-option checkbox-label settings-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={(form.receiverGroupIds || []).includes(group.id)}
+                      onChange={() => toggleReceiverGroup(group.id)}
+                    />
+                    <span className="routing-rule-receiver-meta">
+                      <strong>{group.name}</strong>
+                      <span className="muted">
+                        {(group.memberCount || 0)} member{(group.memberCount || 0) === 1 ? "" : "s"}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </>
+          ) : null}
+
           {receivers.length ? (
-            <div className="routing-rule-receiver-list">
-              {receivers.map((receiver) => (
-                <label key={receiver.id} className="routing-rule-receiver-option checkbox-label settings-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={(form.receiverIds || []).includes(receiver.id)}
-                    onChange={() => toggleReceiver(receiver.id)}
-                  />
-                  <span className="routing-rule-receiver-meta">
-                    <strong>{receiver.name}</strong>
-                    <ReceiverTypeBadge type={receiver.type} />
-                    <span className="muted">{receiver.destination || "—"}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          ) : (
-            <p className="muted">No receivers configured yet. Add email, Slack, or webhook receivers in Alert Routing.</p>
-          )}
+            <>
+              <h4 className="alert-policy-subheading">Individual Receivers</h4>
+              <div className="routing-rule-receiver-list">
+                {receivers.map((receiver) => (
+                  <label key={receiver.id} className="routing-rule-receiver-option checkbox-label settings-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={(form.receiverIds || []).includes(receiver.id)}
+                      onChange={() => toggleReceiver(receiver.id)}
+                    />
+                    <span className="routing-rule-receiver-meta">
+                      <strong>{receiver.name}</strong>
+                      <ReceiverTypeBadge type={receiver.type} />
+                      <span className="muted">{receiver.destination || "—"}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </>
+          ) : null}
+
+          {!receiverGroups.length && !receivers.length ? (
+            <p className="muted">No receivers configured yet. Add receivers or groups in Alert Routing.</p>
+          ) : null}
         </section>
 
         <section className="alert-policy-section">
@@ -465,9 +486,10 @@ export default function AlertPoliciesPage({
     setModalMode("edit");
     setEditing({
       ...policy,
-      scope: policy.scope || { type: "cluster" },
+      scope: normalizeScope(policy.scope),
       showOnDashboard: policy.showOnDashboard !== false,
       receiverIds: policy.receiverIds || [],
+      receiverGroupIds: policy.receiverGroupIds || [],
       evaluationIntervalSeconds:
         policy.evaluationIntervalSeconds ?? DEFAULT_EVALUATION_INTERVAL_SECONDS,
     });
@@ -524,7 +546,7 @@ export default function AlertPoliciesPage({
         status: policy.enabled ? "Enabled" : "Disabled",
         logic: policy.conditionLogic === "all" ? "ALL" : "ANY",
         conditions: `${(policy.conditions || []).length} rule(s)`,
-        receivers: formatReceiverList(policy.receiverNames),
+        receivers: formatNotificationDestinations(policy),
         evaluationInterval: formatEvaluationInterval(policy),
         dashboard: policy.showOnDashboard !== false ? "Yes" : "No",
         actions: policy,

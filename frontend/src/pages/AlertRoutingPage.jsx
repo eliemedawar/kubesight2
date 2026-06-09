@@ -3,11 +3,13 @@ import PageTitle from "../components/common/PageTitle.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import DataTable from "../components/common/DataTable.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
+import ReceiverGroupsPanel from "../components/alerts/ReceiverGroupsPanel.jsx";
 import {
   createReceiver,
   deleteReceiver,
   getSmtpSettings,
   listDeliveryLogs,
+  listReceiverGroups,
   listReceivers,
   saveSmtpSettings,
   testReceiver,
@@ -418,6 +420,7 @@ function ReceiverDetailsModal({ open, receiver, onClose }) {
   }
 
   const policyNames = receiver.assignedPolicyNames || [];
+  const groupNames = receiver.groupNames || [];
 
   return (
     <div className="modal-overlay" role="presentation" onClick={onClose}>
@@ -448,6 +451,20 @@ function ReceiverDetailsModal({ open, receiver, onClose }) {
             <dt>Status</dt>
             <dd>
               <StatusBadge ok={receiver.enabled} label={receiver.enabled ? "Enabled" : "Disabled"} />
+            </dd>
+          </div>
+          <div className="full-width">
+            <dt>Receiver groups</dt>
+            <dd>
+              {groupNames.length ? (
+                <ul className="receiver-assigned-policies">
+                  {groupNames.map((name) => (
+                    <li key={name}>{name}</li>
+                  ))}
+                </ul>
+              ) : (
+                <span className="muted">Not a member of any group.</span>
+              )}
             </dd>
           </div>
           <div className="full-width">
@@ -486,7 +503,8 @@ function ReceiverDetailsModal({ open, receiver, onClose }) {
   );
 }
 
-function ReceiversTab({ receivers, onChanged }) {
+function ReceiversTab({ receivers, groups, onChanged }) {
+  const [receiverView, setReceiverView] = useState("individual");
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState("create");
   const [editing, setEditing] = useState(null);
@@ -569,8 +587,8 @@ function ReceiversTab({ receivers, onChanged }) {
     }
   };
 
-  const formatAssignedPolicies = (receiver) => {
-    const names = receiver.assignedPolicyNames || [];
+  const formatGroups = (receiver) => {
+    const names = receiver.groupNames || [];
     return names.length ? names.join(", ") : "—";
   };
 
@@ -578,8 +596,7 @@ function ReceiversTab({ receivers, onChanged }) {
     id: receiver.id,
     name: receiver.name,
     typeDisplay: <ReceiverTypeBadge type={receiver.type} />,
-    destination: receiverDestination(receiver),
-    assignedPolicies: formatAssignedPolicies(receiver),
+    groups: formatGroups(receiver),
     statusDisplay: (
       <StatusBadge ok={receiver.enabled} label={receiver.enabled ? "Enabled" : "Disabled"} />
     ),
@@ -611,55 +628,78 @@ function ReceiversTab({ receivers, onChanged }) {
   const columns = [
     { key: "name", label: "Name" },
     { key: "typeDisplay", label: "Type" },
-    { key: "destination", label: "Destination" },
-    { key: "assignedPolicies", label: "Assigned Policies" },
-    { key: "statusDisplay", label: "Status" },
+    { key: "groups", label: "Groups" },
+    { key: "statusDisplay", label: "Enabled" },
     { key: "lastTestDisplay", label: "Last test" },
     { key: "actionsDisplay", label: "" },
   ];
 
   return (
-    <section className="card alert-routing-panel">
-      <header className="alert-routing-panel-header">
-        <div>
-          <h3>Notification receivers</h3>
-          <p className="muted">Email inboxes and webhook endpoints that can receive alerts.</p>
-        </div>
-        <button type="button" onClick={openCreate}>
-          Add receiver
+    <div className="receivers-tab-shell">
+      <nav className="tab-bar receiver-sub-tabs" aria-label="Receiver views">
+        <button
+          type="button"
+          className={receiverView === "individual" ? "active" : ""}
+          onClick={() => setReceiverView("individual")}
+        >
+          Individual Receivers
         </button>
-      </header>
+        <button
+          type="button"
+          className={receiverView === "groups" ? "active" : ""}
+          onClick={() => setReceiverView("groups")}
+        >
+          Receiver Groups
+        </button>
+      </nav>
 
-      {testMessage ? <p className="routing-test-message">{testMessage}</p> : null}
-
-      {receivers.length ? (
-        <DataTable columns={columns} rows={tableRows} />
+      {receiverView === "groups" ? (
+        <ReceiverGroupsPanel groups={groups} receivers={receivers} onChanged={onChanged} />
       ) : (
-        <EmptyState message="Add an email, Slack, or webhook receiver to get started." />
+        <section className="card alert-routing-panel">
+          <header className="alert-routing-panel-header">
+            <div>
+              <h3>Individual receivers</h3>
+              <p className="muted">Email inboxes and webhook endpoints that can receive alerts.</p>
+            </div>
+            <button type="button" onClick={openCreate}>
+              Add receiver
+            </button>
+          </header>
+
+          {testMessage ? <p className="routing-test-message">{testMessage}</p> : null}
+
+          {receivers.length ? (
+            <DataTable columns={columns} rows={tableRows} />
+          ) : (
+            <EmptyState message="Add an email, Slack, or webhook receiver to get started." />
+          )}
+
+          <ReceiverModal
+            open={modalOpen}
+            mode={modalMode}
+            initial={editing || EMPTY_RECEIVER}
+            onClose={() => setModalOpen(false)}
+            onSave={save}
+            saving={saving}
+            error={error}
+          />
+
+          <ReceiverDetailsModal
+            open={Boolean(detailsReceiver)}
+            receiver={detailsReceiver}
+            onClose={() => setDetailsReceiver(null)}
+          />
+        </section>
       )}
-
-      <ReceiverModal
-        open={modalOpen}
-        mode={modalMode}
-        initial={editing || EMPTY_RECEIVER}
-        onClose={() => setModalOpen(false)}
-        onSave={save}
-        saving={saving}
-        error={error}
-      />
-
-      <ReceiverDetailsModal
-        open={Boolean(detailsReceiver)}
-        receiver={detailsReceiver}
-        onClose={() => setDetailsReceiver(null)}
-      />
-    </section>
+    </div>
   );
 }
 
 function LogsTab({ logs, onRefresh, loading }) {
   const logRows = logs.map((log) => ({
     ...log,
+    groupName: log.groupName || "—",
     deliveredAtDisplay: log.deliveredAt ? new Date(log.deliveredAt).toLocaleString() : "—",
     typeDisplay: <ReceiverTypeBadge type={log.receiverType} />,
     statusDisplay: (
@@ -674,6 +714,7 @@ function LogsTab({ logs, onRefresh, loading }) {
   const columns = [
     { key: "alertName", label: "Alert" },
     { key: "policyName", label: "Policy" },
+    { key: "groupName", label: "Group" },
     { key: "receiverName", label: "Receiver" },
     { key: "typeDisplay", label: "Type" },
     { key: "statusDisplay", label: "Status" },
@@ -708,19 +749,22 @@ export default function AlertRoutingPage() {
   const [error, setError] = useState("");
   const [smtp, setSmtp] = useState(null);
   const [receivers, setReceivers] = useState([]);
+  const [receiverGroups, setReceiverGroups] = useState([]);
   const [logs, setLogs] = useState([]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const [smtpRes, receiversRes, logsRes] = await Promise.all([
+      const [smtpRes, receiversRes, groupsRes, logsRes] = await Promise.all([
         getSmtpSettings(),
         listReceivers(),
+        listReceiverGroups(),
         listDeliveryLogs(),
       ]);
       setSmtp(smtpRes);
       setReceivers(receiversRes.items || []);
+      setReceiverGroups(groupsRes.items || []);
       setLogs(logsRes.items || []);
     } catch (err) {
       setError(err.message);
@@ -735,9 +779,14 @@ export default function AlertRoutingPage() {
 
   const refreshPartial = async () => {
     try {
-      const [smtpRes, receiversRes] = await Promise.all([getSmtpSettings(), listReceivers()]);
+      const [smtpRes, receiversRes, groupsRes] = await Promise.all([
+        getSmtpSettings(),
+        listReceivers(),
+        listReceiverGroups(),
+      ]);
       setSmtp(smtpRes);
       setReceivers(receiversRes.items || []);
+      setReceiverGroups(groupsRes.items || []);
     } catch (err) {
       setError(err.message);
     }
@@ -777,7 +826,7 @@ export default function AlertRoutingPage() {
 
       {activeTab === "smtp" ? <SmtpTab smtp={smtp} onSaved={refreshPartial} /> : null}
       {activeTab === "receivers" ? (
-        <ReceiversTab receivers={receivers} onChanged={refreshPartial} />
+        <ReceiversTab receivers={receivers} groups={receiverGroups} onChanged={refreshPartial} />
       ) : null}
       {activeTab === "logs" ? <LogsTab logs={logs} onRefresh={refreshLogs} loading={loading} /> : null}
     </>

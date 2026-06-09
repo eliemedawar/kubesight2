@@ -84,6 +84,44 @@ def test_receiver(receiver_id: int):
         return error_response(str(exc), 400)
 
 
+@alert_routing_bp.route("/receiver-groups", methods=["GET"])
+@require_admin
+def list_receiver_groups():
+    return success_response({"items": svc.list_receiver_groups()})
+
+
+@alert_routing_bp.route("/receiver-groups", methods=["POST"])
+@require_admin
+def create_receiver_group():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return success_response(svc.create_receiver_group(payload), status_code=201)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+
+
+@alert_routing_bp.route("/receiver-groups/<int:group_id>", methods=["PUT"])
+@require_admin
+def update_receiver_group(group_id: int):
+    payload = request.get_json(silent=True) or {}
+    try:
+        return success_response(svc.update_receiver_group(group_id, payload))
+    except LookupError:
+        return error_response("Receiver group not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+
+
+@alert_routing_bp.route("/receiver-groups/<int:group_id>", methods=["DELETE"])
+@require_admin
+def delete_receiver_group(group_id: int):
+    try:
+        svc.delete_receiver_group(group_id)
+        return success_response({"deleted": True})
+    except LookupError:
+        return error_response("Receiver group not found.", 404)
+
+
 @alert_routing_bp.route("/delivery-logs", methods=["GET"])
 @require_admin
 def delivery_logs():

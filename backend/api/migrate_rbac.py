@@ -135,6 +135,12 @@ def _migrate_alert_policy_evaluation_columns() -> None:
     _add_column_if_missing("alert_policies", "last_evaluated_at", "DATETIME")
 
 
+def _migrate_alert_delivery_log_group_column() -> None:
+    if "alert_delivery_logs" not in inspect(db.engine).get_table_names():
+        return
+    _add_column_if_missing("alert_delivery_logs", "group_name", "VARCHAR(120)")
+
+
 def _migrate_app_catalog_helm_columns() -> None:
     if "app_catalog_entries" not in inspect(db.engine).get_table_names():
         return
@@ -153,6 +159,7 @@ def run_migrations() -> None:
     _migrate_clusters_table()
     _migrate_app_catalog_helm_columns()
     _migrate_alert_policy_evaluation_columns()
+    _migrate_alert_delivery_log_group_column()
     _migrate_legacy_users()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations
