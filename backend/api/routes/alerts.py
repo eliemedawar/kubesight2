@@ -128,7 +128,8 @@ def list_alerts():
 @alerts_bp.route("/alerts/notifications/email/test", methods=["POST"])
 @require_permission("alerts:manage")
 def test_alert_email():
+    payload = request.get_json(silent=True) or {}
     try:
-        return success_response(send_test_alert_email())
+        return success_response(send_test_alert_email(payload.get("recipient")))
     except EmailDeliveryError as exc:
         return error_response(str(exc), 400)

@@ -15,6 +15,42 @@ import {
 } from "../api/alertPoliciesApi.js";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
 
+const RECEIVER_TYPE_LABELS = {
+  email: "Email",
+  slack: "Slack",
+  webhook: "Webhook",
+};
+
+function ReceiverTypeBadge({ type }) {
+  const label = RECEIVER_TYPE_LABELS[type] || type || "Unknown";
+  return <span className={`receiver-type-badge receiver-type-${type || "unknown"}`}>{label}</span>;
+}
+
+function formatReceiverList(names) {
+  if (!names?.length) {
+    return "—";
+  }
+  if (names.length <= 2) {
+    return names.join(", ");
+  }
+  return `${names.slice(0, 2).join(", ")} +${names.length - 2} more`;
+}
+
+const DEFAULT_EVALUATION_INTERVAL_SECONDS = 300;
+
+const EVALUATION_INTERVAL_OPTIONS = [
+  { seconds: 60, label: "1 minute" },
+  { seconds: 300, label: "5 minutes" },
+  { seconds: 600, label: "10 minutes" },
+  { seconds: 900, label: "15 minutes" },
+  { seconds: 1800, label: "30 minutes" },
+  { seconds: 3600, label: "1 hour" },
+];
+
+function formatEvaluationInterval(policy) {
+  return policy?.evaluationIntervalLabel || "Every 5 min";
+}
+
 const EMPTY_POLICY = {
   name: "",
   clusterId: "",
@@ -24,13 +60,10 @@ const EMPTY_POLICY = {
   conditionLogic: "any",
   conditions: [{ metricKey: "cpu_usage_percent", operator: ">", threshold: 70 }],
   scope: { type: "cluster", namespace: "", resourceName: "" },
-  notificationChannels: [{ channel: "dashboard" }],
+  showOnDashboard: true,
+  receiverIds: [],
+  evaluationIntervalSeconds: DEFAULT_EVALUATION_INTERVAL_SECONDS,
 };
-
-function channelLabel(channel) {
-  const labels = { dashboard: "Dashboard", email: "Email", slack: "Slack", webhook: "Webhook" };
-  return labels[channel] || channel;
-}
 
 function PolicyFormModal({
   open,
@@ -86,20 +119,21 @@ function PolicyFormModal({
     }));
   };
 
-  const toggleChannel = (channel) => {
-    setForm((prev) => {
-      const current = prev.notificationChannels || [];
-      const exists = current.some((c) => c.channel === channel);
-      const next = exists
-        ? current.filter((c) => c.channel !== channel)
-        : [...current, { channel }];
-      return { ...prev, notificationChannels: next.length ? next : [{ channel: "dashboard" }] };
-    });
-  };
-
   const handleSubmit = (event) => {
     event.preventDefault();
     onSave(form);
+  };
+
+  const receivers = catalog?.receivers || [];
+
+  const toggleReceiver = (receiverId) => {
+    setForm((prev) => {
+      const current = prev.receiverIds || [];
+      const next = current.includes(receiverId)
+        ? current.filter((id) => id !== receiverId)
+        : [...current, receiverId];
+      return { ...prev, receiverIds: next };
+    });
   };
 
   return (
@@ -111,7 +145,7 @@ function PolicyFormModal({
       >
         <header className="modal-header">
           <h2>{mode === "edit" ? "Edit Alert Policy" : "Create Alert Policy"}</h2>
-          <p className="muted">Define cluster-level conditions, logic, and notification channels.</p>
+          <p className="muted">Define when alerts should fire based on metrics and workload health.</p>
         </header>
 
         {error ? <ErrorBanner message={error} /> : null}
@@ -167,6 +201,21 @@ function PolicyFormModal({
             >
               <option value="enabled">Enabled</option>
               <option value="disabled">Disabled</option>
+            </select>
+          </label>
+          <label>
+            Evaluation Interval
+            <select
+              value={form.evaluationIntervalSeconds ?? DEFAULT_EVALUATION_INTERVAL_SECONDS}
+              onChange={(e) =>
+                setForm((p) => ({ ...p, evaluationIntervalSeconds: Number(e.target.value) }))
+              }
+            >
+              {(catalog?.evaluationIntervals || EVALUATION_INTERVAL_OPTIONS).map((option) => (
+                <option key={option.seconds} value={option.seconds}>
+                  Every {option.label}
+                </option>
+              ))}
             </select>
           </label>
         </div>
@@ -305,24 +354,43 @@ function PolicyFormModal({
         </section>
 
         <section className="alert-policy-section">
-          <h3>Notifications</h3>
-          <div className="alert-policy-channels">
-            {(catalog?.notificationChannels || ["dashboard", "email", "slack", "webhook"]).map(
-              (channel) => {
-                const checked = (form.notificationChannels || []).some((c) => c.channel === channel);
-                return (
-                  <label key={channel} className="alert-policy-channel">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleChannel(channel)}
-                    />
-                    {channelLabel(channel)}
-                  </label>
-                );
-              }
-            )}
-          </div>
+          <h3>Notification Receivers</h3>
+          <p className="muted alert-policy-routing-hint">
+            Choose where to send notifications when this policy fires. Configure receivers under
+            Administration → Alert Routing.
+          </p>
+          {receivers.length ? (
+            <div className="routing-rule-receiver-list">
+              {receivers.map((receiver) => (
+                <label key={receiver.id} className="routing-rule-receiver-option checkbox-label settings-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={(form.receiverIds || []).includes(receiver.id)}
+                    onChange={() => toggleReceiver(receiver.id)}
+                  />
+                  <span className="routing-rule-receiver-meta">
+                    <strong>{receiver.name}</strong>
+                    <ReceiverTypeBadge type={receiver.type} />
+                    <span className="muted">{receiver.destination || "—"}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">No receivers configured yet. Add email, Slack, or webhook receivers in Alert Routing.</p>
+          )}
+        </section>
+
+        <section className="alert-policy-section">
+          <h3>Dashboard</h3>
+          <label className="alert-policy-channel checkbox-label settings-checkbox">
+            <input
+              type="checkbox"
+              checked={form.showOnDashboard !== false}
+              onChange={(e) => setForm((p) => ({ ...p, showOnDashboard: e.target.checked }))}
+            />
+            Create dashboard alert
+          </label>
         </section>
 
         <footer className="modal-footer">
@@ -398,7 +466,10 @@ export default function AlertPoliciesPage({
     setEditing({
       ...policy,
       scope: policy.scope || { type: "cluster" },
-      notificationChannels: policy.notificationChannels || [{ channel: "dashboard" }],
+      showOnDashboard: policy.showOnDashboard !== false,
+      receiverIds: policy.receiverIds || [],
+      evaluationIntervalSeconds:
+        policy.evaluationIntervalSeconds ?? DEFAULT_EVALUATION_INTERVAL_SECONDS,
     });
     setModalError("");
     setModalOpen(true);
@@ -453,7 +524,9 @@ export default function AlertPoliciesPage({
         status: policy.enabled ? "Enabled" : "Disabled",
         logic: policy.conditionLogic === "all" ? "ALL" : "ANY",
         conditions: `${(policy.conditions || []).length} rule(s)`,
-        channels: (policy.notificationChannels || []).map((c) => channelLabel(c.channel)).join(", "),
+        receivers: formatReceiverList(policy.receiverNames),
+        evaluationInterval: formatEvaluationInterval(policy),
+        dashboard: policy.showOnDashboard !== false ? "Yes" : "No",
         actions: policy,
       })),
     [policies]
@@ -530,7 +603,9 @@ export default function AlertPoliciesPage({
                 { key: "status", label: "Status" },
                 { key: "logic", label: "Logic" },
                 { key: "conditions", label: "Conditions" },
-                { key: "channels", label: "Notifications" },
+                { key: "receivers", label: "Receivers" },
+                { key: "evaluationInterval", label: "Evaluation Interval" },
+                { key: "dashboard", label: "Dashboard" },
                 { key: "actions", label: "Actions" },
               ]}
               rows={policyRows.map((row) => ({

@@ -8,18 +8,106 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..access_engine import can_access_cluster, is_admin
 from ..alert_policy_catalog import (
     CONDITION_LOGIC,
-    NOTIFICATION_CHANNELS,
+    DEFAULT_EVALUATION_INTERVAL_SECONDS,
     SEVERITY_LEVELS,
     catalog_payload,
+    evaluation_interval_display,
+    normalize_evaluation_interval_seconds,
     validate_condition,
+    validate_evaluation_interval,
     validate_scope,
 )
 from ..audit import log_audit
 from ..db import db
-from ..models import AlertHistory, AlertPolicy, User
+from ..models import AlertHistory, AlertPolicy, AlertRoutingReceiver, User
+
+
+def policy_show_on_dashboard(policy: AlertPolicy) -> bool:
+    channels = policy.notification_channels or []
+    return any(
+        str(item.get("channel") if isinstance(item, dict) else item).strip().lower() == "dashboard"
+        for item in channels
+    )
+
+
+def _dashboard_channels_from_payload(payload: Dict[str, Any], *, default: bool = True) -> List[Dict[str, str]]:
+    if "showOnDashboard" in payload:
+        return [{"channel": "dashboard"}] if bool(payload.get("showOnDashboard")) else []
+    channels = payload.get("notificationChannels")
+    if channels is None:
+        return [{"channel": "dashboard"}] if default else []
+    if not isinstance(channels, list):
+        return [{"channel": "dashboard"}] if default else []
+    return (
+        [{"channel": "dashboard"}]
+        if any(
+            str(item.get("channel") if isinstance(item, dict) else item).strip().lower() == "dashboard"
+            for item in channels
+        )
+        else []
+    )
+
+
+def _receiver_destination(receiver: AlertRoutingReceiver) -> str:
+    if receiver.receiver_type == "email":
+        return receiver.email_address or ""
+    return receiver.url or ""
+
+
+def list_receivers_for_policy_catalog() -> List[Dict[str, Any]]:
+    rows = (
+        AlertRoutingReceiver.query.filter_by(enabled=True)
+        .order_by(AlertRoutingReceiver.name.asc())
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "name": row.name,
+            "type": row.receiver_type,
+            "destination": _receiver_destination(row),
+        }
+        for row in rows
+    ]
+
+
+def _normalize_receiver_ids(payload: Dict[str, Any], *, existing: Optional[AlertPolicy] = None) -> List[int]:
+    if "receiverIds" in payload:
+        raw = payload.get("receiverIds") or []
+    elif existing is not None:
+        return [receiver.id for receiver in existing.notification_receivers]
+    else:
+        raw = []
+    if not isinstance(raw, list):
+        return []
+    result: List[int] = []
+    seen: set[int] = set()
+    for item in raw:
+        receiver_id = int(item)
+        if receiver_id in seen:
+            continue
+        seen.add(receiver_id)
+        result.append(receiver_id)
+    return result
+
+
+def _sync_policy_receivers(policy: AlertPolicy, receiver_ids: List[int]) -> None:
+    if not receiver_ids:
+        policy.notification_receivers = []
+        return
+    receivers = (
+        AlertRoutingReceiver.query.filter(
+            AlertRoutingReceiver.id.in_(receiver_ids),
+            AlertRoutingReceiver.enabled.is_(True),
+        )
+        .order_by(AlertRoutingReceiver.name.asc())
+        .all()
+    )
+    policy.notification_receivers = receivers
 
 
 def _policy_dict(policy: AlertPolicy) -> Dict[str, Any]:
+    receivers = list(policy.notification_receivers or [])
     return {
         "id": policy.id,
         "name": policy.name,
@@ -30,7 +118,14 @@ def _policy_dict(policy: AlertPolicy) -> Dict[str, Any]:
         "conditionLogic": policy.condition_logic,
         "conditions": policy.conditions or [],
         "scope": policy.scope or {},
-        "notificationChannels": policy.notification_channels or [],
+        "showOnDashboard": policy_show_on_dashboard(policy),
+        "receiverIds": [receiver.id for receiver in receivers],
+        "receiverNames": [receiver.name for receiver in receivers],
+        "evaluationIntervalSeconds": int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS),
+        "evaluationIntervalLabel": evaluation_interval_display(
+            int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS)
+        ),
+        "lastEvaluatedAt": policy.last_evaluated_at.isoformat() if policy.last_evaluated_at else None,
         "createdByUserId": policy.created_by_user_id,
         "createdAt": policy.created_at.isoformat() if policy.created_at else None,
         "updatedAt": policy.updated_at.isoformat() if policy.updated_at else None,
@@ -64,14 +159,27 @@ def _validate_payload(payload: Dict[str, Any], *, partial: bool = False) -> Opti
         error = validate_scope(payload.get("scope") or {})
         if error:
             return error
-    if "notificationChannels" in payload or not partial:
-        channels = payload.get("notificationChannels") or []
-        if not isinstance(channels, list) or not channels:
-            return "At least one notification channel is required"
-        for channel in channels:
-            channel_type = channel.get("channel") if isinstance(channel, dict) else channel
-            if channel_type not in NOTIFICATION_CHANNELS:
-                return f"Invalid notification channel: {channel_type}"
+    if "receiverIds" in payload:
+        receiver_ids = _normalize_receiver_ids(payload)
+        if receiver_ids:
+            found = {
+                row.id
+                for row in AlertRoutingReceiver.query.filter(
+                    AlertRoutingReceiver.id.in_(receiver_ids),
+                    AlertRoutingReceiver.enabled.is_(True),
+                ).all()
+            }
+            missing = [rid for rid in receiver_ids if rid not in found]
+            if missing:
+                return "One or more selected receivers are invalid or disabled."
+    if "evaluationIntervalSeconds" in payload:
+        try:
+            interval = int(payload.get("evaluationIntervalSeconds"))
+        except (TypeError, ValueError):
+            return "Invalid evaluation interval"
+        error = validate_evaluation_interval(interval)
+        if error:
+            return error
     return None
 
 
@@ -112,12 +220,17 @@ def create_policy(user: Optional[User], payload: Dict[str, Any]) -> Tuple[Option
         condition_logic=str(payload.get("conditionLogic") or "any").lower(),
         conditions=payload.get("conditions") or [],
         scope=payload.get("scope") or {"type": "cluster"},
-        notification_channels=payload.get("notificationChannels") or [{"channel": "dashboard"}],
+        notification_channels=_dashboard_channels_from_payload(payload),
+        evaluation_interval_seconds=normalize_evaluation_interval_seconds(
+            payload.get("evaluationIntervalSeconds", DEFAULT_EVALUATION_INTERVAL_SECONDS)
+        ),
         created_by_user_id=user.id if user else None,
         created_at=now,
         updated_at=now,
     )
     db.session.add(policy)
+    db.session.flush()
+    _sync_policy_receivers(policy, _normalize_receiver_ids(payload))
     db.session.commit()
     log_audit("alert_policy_created", actor=user, target_type="alert_policy", target_id=str(policy.id))
     return _policy_dict(policy), None, 201
@@ -157,8 +270,18 @@ def update_policy(
         policy.conditions = payload.get("conditions") or []
     if "scope" in payload:
         policy.scope = payload.get("scope") or {}
-    if "notificationChannels" in payload:
-        policy.notification_channels = payload.get("notificationChannels") or []
+    if "showOnDashboard" in payload or "notificationChannels" in payload:
+        policy.notification_channels = _dashboard_channels_from_payload(
+            payload,
+            default=policy_show_on_dashboard(policy),
+        )
+    if "receiverIds" in payload:
+        _sync_policy_receivers(policy, _normalize_receiver_ids(payload))
+    if "evaluationIntervalSeconds" in payload:
+        interval = normalize_evaluation_interval_seconds(payload.get("evaluationIntervalSeconds"))
+        if policy.evaluation_interval_seconds != interval:
+            policy.last_evaluated_at = None
+        policy.evaluation_interval_seconds = interval
 
     policy.updated_at = datetime.now(timezone.utc)
     db.session.commit()
@@ -239,4 +362,4 @@ def policy_stats(cluster_id: Optional[str] = None) -> Dict[str, Any]:
 
 
 def get_catalog() -> Dict[str, Any]:
-    return catalog_payload()
+    return catalog_payload(receivers=list_receivers_for_policy_catalog())

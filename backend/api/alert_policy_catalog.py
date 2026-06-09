@@ -91,17 +91,58 @@ SEVERITY_LEVELS = ("info", "warning", "critical")
 
 CONDITION_LOGIC = ("any", "all")
 
-NOTIFICATION_CHANNELS = ("dashboard", "email", "slack", "webhook")
+DEFAULT_EVALUATION_INTERVAL_SECONDS = 300
+
+EVALUATION_INTERVALS: List[Dict[str, Any]] = [
+    {"seconds": 60, "label": "1 minute"},
+    {"seconds": 300, "label": "5 minutes"},
+    {"seconds": 600, "label": "10 minutes"},
+    {"seconds": 900, "label": "15 minutes"},
+    {"seconds": 1800, "label": "30 minutes"},
+    {"seconds": 3600, "label": "1 hour"},
+]
+
+ALLOWED_EVALUATION_INTERVAL_SECONDS = {item["seconds"] for item in EVALUATION_INTERVALS}
 
 
-def catalog_payload() -> Dict[str, Any]:
+def normalize_evaluation_interval_seconds(raw: Any) -> int:
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_EVALUATION_INTERVAL_SECONDS
+    if seconds in ALLOWED_EVALUATION_INTERVAL_SECONDS:
+        return seconds
+    return DEFAULT_EVALUATION_INTERVAL_SECONDS
+
+
+def validate_evaluation_interval(seconds: int) -> Optional[str]:
+    if seconds not in ALLOWED_EVALUATION_INTERVAL_SECONDS:
+        return "Invalid evaluation interval"
+    return None
+
+
+def evaluation_interval_display(seconds: int) -> str:
+    mapping = {
+        60: "Every 1 min",
+        300: "Every 5 min",
+        600: "Every 10 min",
+        900: "Every 15 min",
+        1800: "Every 30 min",
+        3600: "Every 1 hour",
+    }
+    return mapping.get(seconds, f"Every {seconds}s")
+
+
+def catalog_payload(*, receivers: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     return {
         "metrics": METRIC_DEFINITIONS,
         "operators": OPERATORS,
         "scopeTypes": list(SCOPE_TYPES),
         "severityLevels": list(SEVERITY_LEVELS),
         "conditionLogic": list(CONDITION_LOGIC),
-        "notificationChannels": list(NOTIFICATION_CHANNELS),
+        "evaluationIntervals": EVALUATION_INTERVALS,
+        "defaultEvaluationIntervalSeconds": DEFAULT_EVALUATION_INTERVAL_SECONDS,
+        "receivers": receivers or [],
     }
 
 

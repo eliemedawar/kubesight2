@@ -24,6 +24,27 @@ def require_auth(fn: Callable):
     return wrapper
 
 
+def require_admin(fn: Callable):
+    @wraps(fn)
+    @require_auth
+    def wrapper(*args, **kwargs):
+        if not auth_required_enabled():
+            return fn(*args, **kwargs)
+        user = get_current_user()
+        if not user or not is_admin(user):
+            log_audit(
+                "forbidden_access_attempt",
+                actor=user,
+                target_type="admin",
+                target_id="admin_only",
+                details={"path": request.path, "method": request.method},
+            )
+            return error_response("Forbidden", 403)
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def require_permission(permission_key: str):
     def decorator(fn: Callable):
         @wraps(fn)

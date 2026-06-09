@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
@@ -7,7 +7,6 @@ import LoadingState from "../components/common/LoadingState.jsx";
 import { isNamespaceScopeLoading, SCOPE_LOADING_HINT } from "../utils/accessViewState.js";
 import DataTable from "../components/common/DataTable.jsx";
 import InfoCard from "../components/common/InfoCard.jsx";
-import AlertRoutingModal from "../components/alerts/AlertRoutingModal.jsx";
 import {
   buildAlertsScopeSummary,
   formatAlertTime,
@@ -58,13 +57,8 @@ export default function AlertsPage({
   allowedClusters,
   allowedNamespaces,
   allowedResources,
-  settings,
-  onSaveAlertRouting,
-  onTestAlertEmail,
-  savingRouting,
-  routingError,
-  testingEmail,
-  testEmailMessage,
+  canManageRouting,
+  onNavigateToAlertRouting,
   canManageAlerts,
   hasClusters,
   authUser,
@@ -73,7 +67,6 @@ export default function AlertsPage({
   accessError = "",
   onNavigateToAlertPolicies,
 }) {
-  const [routingOpen, setRoutingOpen] = useState(false);
   const alerts = data.alerts || [];
   const hasAlerts = alerts.length > 0;
   const hasScope = hasAlertMonitoringScope({
@@ -190,40 +183,16 @@ export default function AlertsPage({
         </section>
       ) : null}
 
-      {showAlertsContent && canManageAlerts ? (
+      {showAlertsContent && canManageRouting ? (
         <InfoCard
           title="Notification Channels"
-          actionLabel="Edit Routing"
-          onAction={() => setRoutingOpen(true)}
+          actionLabel="Configure routing"
+          onAction={onNavigateToAlertRouting}
         >
-          <DataTable
-            columns={[
-              { key: "channel", label: "Channel" },
-              { key: "type", label: "Type" },
-              { key: "state", label: "State" },
-            ]}
-            rows={data.notificationChannels || []}
-          />
+          <p className="muted">
+            Manage SMTP and notification receivers in Administration → Alert Routing. Assign receivers on each Alert Policy.
+          </p>
         </InfoCard>
-      ) : null}
-
-      {showAlertsContent && canManageAlerts ? (
-        <AlertRoutingModal
-          open={routingOpen}
-          routing={settings?.notifications?.routing}
-          onClose={() => setRoutingOpen(false)}
-          onSave={async (routing) => {
-            const saved = await onSaveAlertRouting(routing);
-            if (saved) {
-              setRoutingOpen(false);
-            }
-          }}
-          onTestEmail={onTestAlertEmail}
-          saving={savingRouting}
-          error={routingError}
-          testingEmail={testingEmail}
-          testMessage={testEmailMessage}
-        />
       ) : null}
     </div>
   );

@@ -128,6 +128,13 @@ def _migrate_clusters_table() -> None:
         _add_column_if_missing("clusters", col, sql_type)
 
 
+def _migrate_alert_policy_evaluation_columns() -> None:
+    if "alert_policies" not in inspect(db.engine).get_table_names():
+        return
+    _add_column_if_missing("alert_policies", "evaluation_interval_seconds", "INTEGER DEFAULT 300")
+    _add_column_if_missing("alert_policies", "last_evaluated_at", "DATETIME")
+
+
 def _migrate_app_catalog_helm_columns() -> None:
     if "app_catalog_entries" not in inspect(db.engine).get_table_names():
         return
@@ -145,7 +152,10 @@ def run_migrations() -> None:
     db.create_all()
     _migrate_clusters_table()
     _migrate_app_catalog_helm_columns()
+    _migrate_alert_policy_evaluation_columns()
     _migrate_legacy_users()
     from .access_rules import migrate_all_users_legacy_rules
+    from .migrate_alert_routing import run_alert_routing_migrations
 
     migrate_all_users_legacy_rules()
+    run_alert_routing_migrations()

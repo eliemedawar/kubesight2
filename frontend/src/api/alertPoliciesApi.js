@@ -12,10 +12,10 @@ export const listAlertPolicies = (params = {}) => {
 export const getAlertPolicy = (policyId) => request(`/api/alert-policies/${policyId}`);
 
 export const createAlertPolicy = (payload) =>
-  request("/api/alert-policies", { method: "POST", body: JSON.stringify(payload) });
+  request("/api/alert-policies", { method: "POST", body: payload });
 
 export const updateAlertPolicy = (policyId, payload) =>
-  request(`/api/alert-policies/${policyId}`, { method: "PUT", body: JSON.stringify(payload) });
+  request(`/api/alert-policies/${policyId}`, { method: "PUT", body: payload });
 
 export const deleteAlertPolicy = (policyId) =>
   request(`/api/alert-policies/${policyId}`, { method: "DELETE" });
@@ -23,7 +23,7 @@ export const deleteAlertPolicy = (policyId) =>
 export const setAlertPolicyEnabled = (policyId, enabled) =>
   request(`/api/alert-policies/${policyId}/status`, {
     method: "PATCH",
-    body: JSON.stringify({ enabled }),
+    body: { enabled },
   });
 
 export const listAlertHistory = (params = {}) => {
@@ -45,5 +45,5 @@ export const getAlertPolicyStats = (params = {}) => {
 export const evaluateAlertPolicies = (clusterId) =>
   request("/api/alert-policies/evaluate", {
     method: "POST",
-    body: JSON.stringify({ clusterId }),
+    body: { clusterId },
   });

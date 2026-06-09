@@ -281,6 +281,123 @@ class AlertNotificationSent(db.Model):
     sent_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class AlertRoutingSmtp(db.Model):
+    __tablename__ = "alert_routing_smtp"
+
+    id = db.Column(db.Integer, primary_key=True)
+    host = db.Column(db.String(255), nullable=False, default="")
+    port = db.Column(db.Integer, nullable=False, default=587)
+    username = db.Column(db.String(255), nullable=False, default="")
+    password_encrypted = db.Column(db.Text, nullable=True)
+    from_email = db.Column(db.String(255), nullable=False, default="")
+    from_name = db.Column(db.String(255), nullable=False, default="KubeSight")
+    use_tls = db.Column(db.Boolean, nullable=False, default=True)
+    use_ssl = db.Column(db.Boolean, nullable=False, default=False)
+    last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_test_status = db.Column(db.String(16), nullable=True)
+    last_test_message = db.Column(db.Text, nullable=True)
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+alert_policy_receivers = db.Table(
+    "alert_policy_receivers",
+    db.Column(
+        "policy_id",
+        db.Integer,
+        db.ForeignKey("alert_policies.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    db.Column(
+        "receiver_id",
+        db.Integer,
+        db.ForeignKey("alert_routing_receivers.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+)
+
+
+class AlertRoutingReceiver(db.Model):
+    __tablename__ = "alert_routing_receivers"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    receiver_type = db.Column(db.String(32), nullable=False, index=True)
+    email_address = db.Column(db.String(255), nullable=True)
+    url = db.Column(db.String(1024), nullable=True)
+    http_method = db.Column(db.String(16), nullable=False, default="POST")
+    headers = db.Column(db.JSON, nullable=True, default=dict)
+    secret_encrypted = db.Column(db.Text, nullable=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True, index=True)
+    severity_filter = db.Column(db.JSON, nullable=False, default=list)
+    namespace_filter = db.Column(db.String(253), nullable=True)
+    cluster_filter = db.Column(db.String(120), nullable=True)
+    last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_test_status = db.Column(db.String(16), nullable=True)
+    last_test_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    policies = db.relationship(
+        "AlertPolicy",
+        secondary=alert_policy_receivers,
+        lazy="dynamic",
+        back_populates="notification_receivers",
+    )
+
+
+class AlertRoutingDeliverySent(db.Model):
+    __tablename__ = "alert_routing_delivery_sent"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "alert_id",
+            "receiver_id",
+            "alert_status",
+            name="uq_alert_routing_delivery",
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    alert_id = db.Column(db.String(255), nullable=False, index=True)
+    receiver_id = db.Column(db.Integer, nullable=False, index=True)
+    alert_status = db.Column(db.String(16), nullable=False, default="firing")
+    sent_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class AlertDeliveryLog(db.Model):
+    __tablename__ = "alert_delivery_logs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    alert_id = db.Column(db.String(255), nullable=False, index=True)
+    alert_name = db.Column(db.String(255), nullable=False, default="")
+    policy_id = db.Column(db.Integer, nullable=True, index=True)
+    policy_name = db.Column(db.String(120), nullable=False, default="")
+    receiver_id = db.Column(db.Integer, nullable=True, index=True)
+    receiver_name = db.Column(db.String(120), nullable=False, default="")
+    receiver_type = db.Column(db.String(32), nullable=False, default="")
+    status = db.Column(db.String(16), nullable=False, index=True)
+    error_message = db.Column(db.Text, nullable=True)
+    delivered_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+
+
 class AlertPolicy(db.Model):
     __tablename__ = "alert_policies"
 
@@ -294,6 +411,8 @@ class AlertPolicy(db.Model):
     conditions = db.Column(db.JSON, nullable=False, default=list)
     scope = db.Column(db.JSON, nullable=False, default=dict)
     notification_channels = db.Column(db.JSON, nullable=False, default=list)
+    evaluation_interval_seconds = db.Column(db.Integer, nullable=False, default=300)
+    last_evaluated_at = db.Column(db.DateTime(timezone=True), nullable=True)
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
     created_at = db.Column(
         db.DateTime(timezone=True),
@@ -308,6 +427,12 @@ class AlertPolicy(db.Model):
     )
 
     created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+    notification_receivers = db.relationship(
+        "AlertRoutingReceiver",
+        secondary=alert_policy_receivers,
+        lazy="joined",
+        back_populates="policies",
+    )
     history_entries = db.relationship(
         "AlertHistory",
         back_populates="policy",

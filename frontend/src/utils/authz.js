@@ -83,6 +83,12 @@ export const NAV_PAGES = [
   { key: "auditLogs", label: "Audit Logs", permission: "audit:view", section: "Administration" },
   { key: "settings", label: "Settings", permission: "settings:view", section: "Administration" },
   {
+    key: "alertRouting",
+    label: "Alert Routing",
+    adminOnly: true,
+    section: "Administration",
+  },
+  {
     key: "upgrade",
     label: "Upgrade Center",
     anyPermissions: ["upgrades:precheck", "upgrades:start"],
@@ -611,6 +617,9 @@ export function getLogVisiblePods(user, clusterId, namespace, pods = []) {
 }
 
 function pageNavPermissionAllowed(user, page) {
+  if (page.adminOnly) {
+    return isAdminUser(user);
+  }
   if (page.anyPermissions?.length) {
     return hasAnyPermission(user, page.anyPermissions);
   }
@@ -823,6 +832,8 @@ export function pageAllowed(user, pageKey) {
       );
     case "settings":
       return hasPermission(user, "settings:view");
+    case "alertRouting":
+      return isAdminUser(user);
     case "userManagement":
       return hasPermission(user, "users:view");
     case "auditLogs":

@@ -332,6 +332,18 @@ def _history_to_alert_dict(row: AlertHistory) -> Dict[str, Any]:
     }
 
 
+def _policy_due_for_evaluation(policy: AlertPolicy, now: datetime) -> bool:
+    from ..alert_policy_catalog import DEFAULT_EVALUATION_INTERVAL_SECONDS
+
+    interval = int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS)
+    if policy.last_evaluated_at is None:
+        return True
+    last_evaluated = policy.last_evaluated_at
+    if last_evaluated.tzinfo is None:
+        last_evaluated = last_evaluated.replace(tzinfo=timezone.utc)
+    return (now - last_evaluated).total_seconds() >= interval
+
+
 def evaluate_policies_for_cluster(
     cluster_id: str,
     user: Optional[User] = None,
@@ -351,12 +363,18 @@ def evaluate_policies_for_cluster(
 
     access = resolve_cluster_access(cluster_id) if should_use_real_k8s(cluster_id) else None
     updated_rows: List[AlertHistory] = []
+    policies_evaluated = False
     now = datetime.now(timezone.utc)
 
     for policy in policies:
+        if not _policy_due_for_evaluation(policy, now):
+            continue
+
         conditions = policy.conditions or []
         if not conditions:
             continue
+
+        policies_evaluated = True
         metric_keys = [c.get("metricKey") for c in conditions if c.get("metricKey") in METRIC_BY_KEY]
         logic = policy.condition_logic or "any"
 
@@ -407,11 +425,9 @@ def evaluate_policies_for_cluster(
                         db.session.flush()
                         from ..alert_notifier import dispatch_policy_alert_notifications
 
-                        dispatch_policy_alert_notifications(
-                            policy.notification_channels or [],
-                            _history_to_alert_dict(row),
-                        )
+                        dispatch_policy_alert_notifications(_history_to_alert_dict(row))
                 else:
+                    was_inactive = row.status != "active"
                     row.status = "active"
                     row.resolved_at = None
                     row.title = title
@@ -420,13 +436,19 @@ def evaluate_policies_for_cluster(
                     row.metric_snapshot = {"observations": observations}
                     row.severity = policy.severity
                     row.fired_at = row.fired_at or now
+                    if persist and was_inactive:
+                        from ..alert_notifier import dispatch_policy_alert_notifications
+
+                        dispatch_policy_alert_notifications(_history_to_alert_dict(row))
                 updated_rows.append(row)
             elif row and row.status == "active":
                 row.status = "resolved"
                 row.resolved_at = now
                 updated_rows.append(row)
 
-    if persist and updated_rows:
+        policy.last_evaluated_at = now
+
+    if persist and (updated_rows or policies_evaluated):
         db.session.commit()
     return [r for r in updated_rows if r.status == "active"]
 
@@ -442,8 +464,14 @@ def list_active_policy_alerts(
     if cluster_id:
         query = query.filter_by(cluster_id=cluster_id)
 
+    from .alert_policy_service import policy_show_on_dashboard
+
     items: List[Dict[str, Any]] = []
     for row in query.order_by(AlertHistory.fired_at.desc()).all():
+        if row.policy_id:
+            policy = AlertPolicy.query.get(row.policy_id)
+            if policy and not policy_show_on_dashboard(policy):
+                continue
         if user and not is_admin(user):
             if not can_view_alert(user, row.cluster_id, row.namespace, row.resource_name or ""):
                 continue

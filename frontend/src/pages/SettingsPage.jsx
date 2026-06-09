@@ -1,7 +1,17 @@
 import PageTitle from "../components/common/PageTitle.jsx";
 import InfoCard from "../components/common/InfoCard.jsx";
 
-export default function SettingsPage({ data, clusters, settingsDraft, onSettingsChange, onSave, saving, canManage }) {
+export default function SettingsPage({
+  data,
+  clusters,
+  settingsDraft,
+  onSettingsChange,
+  onSave,
+  saving,
+  canManage,
+  onNavigateToAlertRouting,
+  canManageAlertRouting,
+}) {
   const clusterOptions = clusters || [];
   const readOnly = !canManage;
   return (
@@ -58,9 +68,19 @@ export default function SettingsPage({ data, clusters, settingsDraft, onSettings
                 {!clusterOptions.length ? <option value="">No clusters available</option> : null}
               </select>
             </label>
-            <p className="muted settings-hint">
-              Configure email, Slack, and webhook delivery on the Alerts page via Edit Routing.
-            </p>
+            {canManageAlertRouting ? (
+              <p className="muted settings-hint">
+                Configure SMTP and notification receivers in{" "}
+                <button type="button" className="link-button" onClick={onNavigateToAlertRouting}>
+                  Alert Routing
+                </button>
+                .
+              </p>
+            ) : (
+              <p className="muted settings-hint">
+                Alert routing and notification channels are managed by administrators.
+              </p>
+            )}
             <label className="checkbox-label settings-checkbox">
               <input
                 type="checkbox"

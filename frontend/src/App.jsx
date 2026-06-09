@@ -32,6 +32,7 @@ import EditCatalogModal from "./components/inventory/EditCatalogModal.jsx";
 import ResourcesPage from "./pages/ResourcesPage.jsx";
 import AlertPoliciesPage from "./pages/AlertPoliciesPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
+import AlertRoutingPage from "./pages/AlertRoutingPage.jsx";
 import UpgradeSafeModePage from "./pages/UpgradeSafeModePage.jsx";
 import UserManagementPage from "./pages/UserManagementPage";
 import { emptyNamespaceResources, listKeyForTab } from "./lib/resourceTypes.js";
@@ -1132,13 +1133,8 @@ export default function App() {
             allowedClusters={allowedClusters}
             allowedNamespaces={allowedNamespaces}
             allowedResources={allowedResources}
-            settings={data.settings}
-            onSaveAlertRouting={saveAlertRouting}
-            onTestAlertEmail={testAlertEmailDelivery}
-            savingRouting={savingRouting}
-            routingError={routingError}
-            testingEmail={testingEmail}
-            testEmailMessage={testEmailMessage}
+            canManageRouting={isAdmin}
+            onNavigateToAlertRouting={() => handleNavigate("alertRouting")}
             canManageAlerts={hasPermission("alerts:manage")}
             hasClusters={hasClusters}
             authUser={authUser}
@@ -1148,6 +1144,8 @@ export default function App() {
             accessError={pageAccessError}
           />
         );
+      case "alertRouting":
+        return <AlertRoutingPage />;
       case "upgrade":
         return (
           <UpgradeSafeModePage
@@ -1185,6 +1183,8 @@ export default function App() {
             onSave={saveSettings}
             saving={loadingState.page}
             canManage={hasPermission("settings:manage")}
+            canManageAlertRouting={isAdmin}
+            onNavigateToAlertRouting={() => handleNavigate("alertRouting")}
           />
         );
       default:
@@ -1251,7 +1251,8 @@ export default function App() {
     !hasClusters &&
     activePage !== "userManagement" &&
     activePage !== "auditLogs" &&
-    activePage !== "settings"
+    activePage !== "settings" &&
+    activePage !== "alertRouting"
       ? EMPTY_MESSAGES.noClusters
       : "";
 

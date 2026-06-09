@@ -1,3 +1,9 @@
+from datetime import datetime, timezone
+from unittest.mock import patch
+
+from api.db import db
+from api.models import AlertPolicy
+from api.services.alert_policy_evaluator import evaluate_policies_for_cluster
 from tests.conftest import auth_headers
 
 SAMPLE_POLICY = {
@@ -9,8 +15,38 @@ SAMPLE_POLICY = {
     "conditionLogic": "any",
     "conditions": [{"metricKey": "cpu_usage_percent", "operator": ">", "threshold": 70}],
     "scope": {"type": "cluster"},
-    "notificationChannels": [{"channel": "dashboard"}],
+    "showOnDashboard": True,
 }
+
+
+def test_policy_strips_legacy_outbound_notification_channels(client, admin_token):
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Legacy Channels",
+            "notificationChannels": [
+                {"channel": "dashboard"},
+                {"channel": "email"},
+                {"channel": "slack"},
+            ],
+        },
+    )
+    assert create.status_code in (200, 201)
+    created = create.get_json()["data"]
+    assert created["showOnDashboard"] is True
+    assert "notificationChannels" not in created
+
+    update = client.put(
+        f"/api/alert-policies/{created['id']}",
+        headers=auth_headers(admin_token),
+        json={"showOnDashboard": False},
+    )
+    assert update.status_code == 200
+    assert update.get_json()["data"]["showOnDashboard"] is False
+
+    client.delete(f"/api/alert-policies/{created['id']}", headers=auth_headers(admin_token))
 
 
 def test_viewer_can_list_alert_policy_catalog(client, viewer_token):
@@ -123,6 +159,144 @@ def test_evaluate_policy_creates_history_and_merges_into_alerts(client, admin_to
     stats_data = stats.get_json()["data"]
     assert "activeTotal" in stats_data
     assert "topTriggeredPolicies" in stats_data
+
+    client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
+
+
+def test_policy_receiver_assignment_and_dispatch(client, admin_token):
+    email_resp = client.post(
+        "/api/alert-routing/receivers",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "DevOps Team Email",
+            "type": "email",
+            "emailAddress": "devops@company.com",
+            "enabled": True,
+        },
+    )
+    assert email_resp.status_code == 201
+    email_id = email_resp.get_json()["data"]["id"]
+
+    slack_resp = client.post(
+        "/api/alert-routing/receivers",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "Production Slack",
+            "type": "slack",
+            "url": "https://hooks.slack.com/services/T00/B00/XXX",
+            "enabled": True,
+        },
+    )
+    assert slack_resp.status_code == 201
+    slack_id = slack_resp.get_json()["data"]["id"]
+
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "High CPU",
+            "receiverIds": [email_id, slack_id],
+        },
+    )
+    assert create.status_code in (200, 201)
+    policy = create.get_json()["data"]
+    assert set(policy["receiverIds"]) == {email_id, slack_id}
+    assert "DevOps Team Email" in policy["receiverNames"]
+    assert "Production Slack" in policy["receiverNames"]
+
+    catalog = client.get("/api/alert-policies/catalog", headers=auth_headers(admin_token))
+    assert catalog.status_code == 200
+    catalog_receivers = catalog.get_json()["data"]["receivers"]
+    assert any(item["id"] == email_id for item in catalog_receivers)
+
+    receivers = client.get("/api/alert-routing/receivers", headers=auth_headers(admin_token))
+    receiver_items = receivers.get_json()["data"]["items"]
+    email_row = next(item for item in receiver_items if item["id"] == email_id)
+    assert "High CPU" in email_row["assignedPolicyNames"]
+
+    with patch("api.services.alert_routing_service.smtp_is_configured", return_value=True), patch(
+        "api.services.alert_routing_service.send_alert_email"
+    ) as send_email, patch("api.services.alert_routing_service._post_webhook") as post_webhook:
+        from api.services.alert_routing_service import dispatch_policy_alert_notifications
+
+        alert = {
+            "id": "history-99",
+            "policyId": policy["id"],
+            "severity": "warning",
+            "status": "firing",
+            "clusterId": "prod-us-east",
+            "namespace": "default",
+            "title": "High CPU",
+        }
+        summary = dispatch_policy_alert_notifications(alert)
+        assert summary["sent"] == 2
+        send_email.assert_called_once()
+        assert post_webhook.call_count == 1
+
+    client.delete(f"/api/alert-policies/{policy['id']}", headers=auth_headers(admin_token))
+    client.delete(f"/api/alert-routing/receivers/{email_id}", headers=auth_headers(admin_token))
+    client.delete(f"/api/alert-routing/receivers/{slack_id}", headers=auth_headers(admin_token))
+
+
+def test_policy_evaluation_interval_defaults_and_validation(client, admin_token):
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json=SAMPLE_POLICY,
+    )
+    assert create.status_code in (200, 201)
+    created = create.get_json()["data"]
+    assert created["evaluationIntervalSeconds"] == 300
+    assert created["evaluationIntervalLabel"] == "Every 5 min"
+
+    catalog = client.get("/api/alert-policies/catalog", headers=auth_headers(admin_token))
+    assert catalog.status_code == 200
+    assert len(catalog.get_json()["data"]["evaluationIntervals"]) == 6
+
+    bad = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={**SAMPLE_POLICY, "name": "Bad Interval", "evaluationIntervalSeconds": 120},
+    )
+    assert bad.status_code == 400
+
+    update = client.put(
+        f"/api/alert-policies/{created['id']}",
+        headers=auth_headers(admin_token),
+        json={"evaluationIntervalSeconds": 3600},
+    )
+    assert update.status_code == 200
+    assert update.get_json()["data"]["evaluationIntervalSeconds"] == 3600
+    assert update.get_json()["data"]["evaluationIntervalLabel"] == "Every 1 hour"
+
+    client.delete(f"/api/alert-policies/{created['id']}", headers=auth_headers(admin_token))
+
+
+def test_policy_evaluation_skips_until_interval_elapsed(client, admin_token):
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Interval Policy",
+            "conditions": [{"metricKey": "cpu_usage_percent", "operator": ">", "threshold": 1}],
+            "evaluationIntervalSeconds": 3600,
+        },
+    )
+    assert create.status_code in (200, 201)
+    policy_id = create.get_json()["data"]["id"]
+
+    first = evaluate_policies_for_cluster("prod-us-east", persist=True)
+    assert len(first) >= 1
+
+    policy = AlertPolicy.query.get(policy_id)
+    assert policy.last_evaluated_at is not None
+    policy.last_evaluated_at = datetime.now(timezone.utc)
+    db.session.commit()
+
+    second = evaluate_policies_for_cluster("prod-us-east", persist=True)
+    assert second == []
 
     client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
 
