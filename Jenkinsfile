@@ -1,29 +1,42 @@
 // KubeSight CI/CD — https://github.com/eliemedawar/Kubesight
 //
-// Jenkins job setup (one-time):
-//   1. New Item → Pipeline
-//   2. Pipeline → Definition: "Pipeline script from SCM"
-//   3. SCM: Git → https://github.com/eliemedawar/Kubesight.git
-//      Branch: */master  |  Script Path: Jenkinsfile
-//   4. Build Triggers → GitHub hook trigger for GITScm polling (optional)
-//   5. Agent needs: Docker CLI (docker run / docker build)
+// === Jenkins plugins (Manage Jenkins → Plugins) ===
+//   Required:
+//     - Pipeline
+//     - Git
+//     - Docker Pipeline          (docker { } agent blocks)
+//     - JUnit                    (junit test reports)
+//   Recommended:
+//     - Timestamper              (timestamps in console)
+//     - GitHub / GitHub Integration (webhook auto-build)
 //
-// Optional plugins (not required): Timestamper, Docker Pipeline, JUnit
+// === Jenkins agent ===
+//   Docker must be available on the agent. If Jenkins runs in Docker, start it with:
+//     -v /var/run/docker.sock:/var/run/docker.sock
+//   and add the jenkins user to the docker group inside the container.
+//
+// === Job config ===
+//   SCM: https://github.com/eliemedawar/Kubesight.git  branch */master
+//   Credentials ID: github-creds
+//   Script Path: Jenkinsfile
+//   Build trigger: GitHub hook trigger for GITScm polling (optional)
 
 pipeline {
-    agent any
+    agent none
 
     options {
+        timestamps()
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '25'))
         timeout(time: 45, unit: 'MINUTES')
+        githubProjectProperty(projectUrlStr: 'https://github.com/eliemedawar/Kubesight')
     }
 
     parameters {
         booleanParam(
             name: 'RUN_POSTGRES_TESTS',
             defaultValue: false,
-            description: 'Run backend tests against PostgreSQL (starts docker-compose.test.yml service).'
+            description: 'Run backend tests against PostgreSQL (requires Docker + docker-compose.test.yml).'
         )
         booleanParam(
             name: 'BUILD_DOCKER',
@@ -58,8 +71,6 @@ pipeline {
     }
 
     environment {
-        GIT_REPO = 'https://github.com/eliemedawar/Kubesight.git'
-        GIT_BRANCH = 'master'
         BACKEND_IMAGE_NAME = 'kubesight-backend'
         FRONTEND_IMAGE_NAME = 'kubesight-frontend'
         K8S_REAL_MODE = 'false'
@@ -67,7 +78,8 @@ pipeline {
     }
 
     stages {
-        stage('Checkout') {
+        stage('Prepare') {
+            agent any
             steps {
                 checkout scm
                 sh 'mkdir -p test-results'
@@ -84,18 +96,24 @@ pipeline {
             parallel {
                 stage('Backend (SQLite)') {
                     when {
+                        beforeAgent true
                         expression { !params.RUN_POSTGRES_TESTS }
                     }
+                    agent {
+                        docker {
+                            image 'python:3.12-slim'
+                            reuseNode true
+                        }
+                    }
                     steps {
-                        sh '''
-                            docker run --rm \
-                                -v "$WORKSPACE:/workspace" \
-                                -w /workspace/backend \
-                                -e K8S_REAL_MODE=false \
-                                -e JWT_SECRET_KEY=ci-test-secret-do-not-use-in-production \
-                                python:3.12-slim \
-                                sh -c 'pip install --no-cache-dir -r requirements.txt && python -m pytest tests --junitxml=/workspace/test-results/backend-junit.xml -q'
-                        '''
+                        dir('backend') {
+                            sh '''
+                                pip install --no-cache-dir -r requirements.txt
+                                python -m pytest tests \
+                                    --junitxml=../test-results/backend-junit.xml \
+                                    -q
+                            '''
+                        }
                     }
                     post {
                         always {
@@ -106,12 +124,15 @@ pipeline {
 
                 stage('Backend (PostgreSQL)') {
                     when {
+                        beforeAgent true
                         expression { params.RUN_POSTGRES_TESTS }
                     }
+                    agent any
                     steps {
                         sh '''
+                            set -e
                             if [ ! -f docker-compose.test.yml ]; then
-                                echo "docker-compose.test.yml not found — falling back to SQLite tests."
+                                echo "docker-compose.test.yml not found — falling back to SQLite."
                                 docker run --rm \
                                     -v "$WORKSPACE:/workspace" \
                                     -w /workspace/backend \
@@ -137,24 +158,26 @@ pipeline {
                     post {
                         always {
                             junit allowEmptyResults: true, testResults: 'test-results/backend-junit.xml'
-                            sh '''
-                                if [ -f docker-compose.test.yml ]; then
-                                    docker compose -f docker-compose.test.yml down -v || true
-                                fi
-                            '''
+                            sh 'docker compose -f docker-compose.test.yml down -v || true'
                         }
                     }
                 }
 
                 stage('Frontend') {
+                    agent {
+                        docker {
+                            image 'node:20-alpine'
+                            reuseNode true
+                        }
+                    }
                     steps {
-                        sh '''
-                            docker run --rm \
-                                -v "$WORKSPACE:/workspace" \
-                                -w /workspace/frontend \
-                                node:20-alpine \
-                                sh -c 'npm ci && npm test && npm run build'
-                        '''
+                        dir('frontend') {
+                            sh '''
+                                npm ci
+                                npm test
+                                npm run build
+                            '''
+                        }
                     }
                     post {
                         success {
@@ -169,6 +192,7 @@ pipeline {
             when {
                 expression { params.BUILD_DOCKER }
             }
+            agent any
             parallel {
                 stage('Backend Image') {
                     steps {
@@ -206,9 +230,10 @@ pipeline {
                     expression { params.DOCKER_REGISTRY?.trim() }
                 }
             }
+            agent any
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: 'github-kubesight-credentials',
+                    credentialsId: 'github-creds',
                     usernameVariable: 'REGISTRY_USER',
                     passwordVariable: 'REGISTRY_PASS'
                 )]) {
@@ -230,6 +255,7 @@ pipeline {
                     expression { params.DEPLOY_TO_K8S }
                 }
             }
+            agent any
             steps {
                 sh """
                     kubectl apply -f k8s/namespace.yaml
@@ -257,7 +283,7 @@ pipeline {
 
     post {
         success {
-            echo "KubeSight pipeline succeeded — ${env.GIT_REPO} @ ${env.EFFECTIVE_TAG}"
+            echo "KubeSight pipeline succeeded (tag: ${env.EFFECTIVE_TAG})."
         }
         failure {
             echo 'KubeSight pipeline failed — inspect stage logs above.'
