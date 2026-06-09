@@ -1,42 +1,29 @@
 // KubeSight CI/CD — https://github.com/eliemedawar/Kubesight
 //
-// === Jenkins plugins (Manage Jenkins → Plugins) ===
-//   Required:
-//     - Pipeline
-//     - Git
-//     - Docker Pipeline          (docker { } agent blocks)
-//     - JUnit                    (junit test reports)
-//   Recommended:
-//     - Timestamper              (timestamps in console)
-//     - GitHub / GitHub Integration (webhook auto-build)
+// Plugins needed: Pipeline, Git  (no Docker Pipeline or JUnit required)
 //
-// === Jenkins agent ===
-//   Docker must be available on the agent. If Jenkins runs in Docker, start it with:
-//     -v /var/run/docker.sock:/var/run/docker.sock
-//   and add the jenkins user to the docker group inside the container.
+// Agent needs Docker CLI + daemon access. If Jenkins runs in Docker:
+//   volumes: [/var/run/docker.sock:/var/run/docker.sock]
+//   then: docker exec -u root <jenkins> apt-get install -y docker.io
+//         docker exec -u root <jenkins> usermod -aG docker jenkins
 //
-// === Job config ===
-//   SCM: https://github.com/eliemedawar/Kubesight.git  branch */master
-//   Credentials ID: github-creds
-//   Script Path: Jenkinsfile
-//   Build trigger: GitHub hook trigger for GITScm polling (optional)
+// Job: SCM https://github.com/eliemedawar/Kubesight.git  branch */master
+//      Credentials: github-creds  |  Script Path: Jenkinsfile
 
 pipeline {
-    agent none
+    agent any
 
     options {
-        timestamps()
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '25'))
         timeout(time: 45, unit: 'MINUTES')
-        githubProjectProperty(projectUrlStr: 'https://github.com/eliemedawar/Kubesight')
     }
 
     parameters {
         booleanParam(
             name: 'RUN_POSTGRES_TESTS',
             defaultValue: false,
-            description: 'Run backend tests against PostgreSQL (requires Docker + docker-compose.test.yml).'
+            description: 'Run backend tests against PostgreSQL (docker-compose.test.yml).'
         )
         booleanParam(
             name: 'BUILD_DOCKER',
@@ -79,10 +66,21 @@ pipeline {
 
     stages {
         stage('Prepare') {
-            agent any
             steps {
                 checkout scm
-                sh 'mkdir -p test-results'
+                sh '''
+                    mkdir -p test-results
+                    if ! command -v docker >/dev/null 2>&1; then
+                        echo "ERROR: docker CLI not found on Jenkins agent."
+                        echo "Mount /var/run/docker.sock and install docker.io inside the Jenkins container."
+                        exit 1
+                    fi
+                    docker info >/dev/null 2>&1 || {
+                        echo "ERROR: Docker daemon not reachable from Jenkins."
+                        echo "Mount /var/run/docker.sock:/var/run/docker.sock when starting Jenkins."
+                        exit 1
+                    }
+                '''
                 script {
                     env.EFFECTIVE_TAG = params.IMAGE_TAG?.trim() ?: env.BUILD_NUMBER
                     String registry = params.DOCKER_REGISTRY?.trim()
@@ -96,38 +94,25 @@ pipeline {
             parallel {
                 stage('Backend (SQLite)') {
                     when {
-                        beforeAgent true
                         expression { !params.RUN_POSTGRES_TESTS }
                     }
-                    agent {
-                        docker {
-                            image 'python:3.12-slim'
-                            reuseNode true
-                        }
-                    }
                     steps {
-                        dir('backend') {
-                            sh '''
-                                pip install --no-cache-dir -r requirements.txt
-                                python -m pytest tests \
-                                    --junitxml=../test-results/backend-junit.xml \
-                                    -q
-                            '''
-                        }
-                    }
-                    post {
-                        always {
-                            junit allowEmptyResults: true, testResults: 'test-results/backend-junit.xml'
-                        }
+                        sh '''
+                            docker run --rm \
+                                -v "$WORKSPACE:/workspace" \
+                                -w /workspace/backend \
+                                -e K8S_REAL_MODE=false \
+                                -e JWT_SECRET_KEY=ci-test-secret-do-not-use-in-production \
+                                python:3.12-slim \
+                                sh -c 'pip install --no-cache-dir -r requirements.txt && python -m pytest tests --junitxml=/workspace/test-results/backend-junit.xml -q'
+                        '''
                     }
                 }
 
                 stage('Backend (PostgreSQL)') {
                     when {
-                        beforeAgent true
                         expression { params.RUN_POSTGRES_TESTS }
                     }
-                    agent any
                     steps {
                         sh '''
                             set -e
@@ -157,33 +142,27 @@ pipeline {
                     }
                     post {
                         always {
-                            junit allowEmptyResults: true, testResults: 'test-results/backend-junit.xml'
                             sh 'docker compose -f docker-compose.test.yml down -v || true'
                         }
                     }
                 }
 
                 stage('Frontend') {
-                    agent {
-                        docker {
-                            image 'node:20-alpine'
-                            reuseNode true
-                        }
-                    }
                     steps {
-                        dir('frontend') {
-                            sh '''
-                                npm ci
-                                npm test
-                                npm run build
-                            '''
-                        }
+                        sh '''
+                            docker run --rm \
+                                -v "$WORKSPACE:/workspace" \
+                                -w /workspace/frontend \
+                                node:20-alpine \
+                                sh -c 'npm ci && npm test && npm run build'
+                        '''
                     }
-                    post {
-                        success {
-                            archiveArtifacts artifacts: 'frontend/dist/**', fingerprint: true, allowEmptyArchive: true
-                        }
-                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'test-results/*.xml', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'frontend/dist/**', allowEmptyArchive: true
                 }
             }
         }
@@ -192,7 +171,6 @@ pipeline {
             when {
                 expression { params.BUILD_DOCKER }
             }
-            agent any
             parallel {
                 stage('Backend Image') {
                     steps {
@@ -230,7 +208,6 @@ pipeline {
                     expression { params.DOCKER_REGISTRY?.trim() }
                 }
             }
-            agent any
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'github-creds',
@@ -255,7 +232,6 @@ pipeline {
                     expression { params.DEPLOY_TO_K8S }
                 }
             }
-            agent any
             steps {
                 sh """
                     kubectl apply -f k8s/namespace.yaml
