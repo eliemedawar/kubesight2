@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesight-backend
+  namespace: kubesight
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubesight-backend
+  template:
+    metadata:
+      labels:
+        app: kubesight-backend
+    spec:
+      serviceAccountName: kubesight-backend
+      containers:
+        - name: backend
+
+          image: kubesight-backend:v4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - configMapRef:
+                name: kubesight-config
+            - secretRef:
+                name: kubesight-secret
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: kubeconfig-data
+              mountPath: /data/kubeconfigs
+            # Optional: create with
+            # kubectl create secret generic host-kubeconfig -n kubesight --from-file=config=$env:USERPROFILE\.kube\config
+            # then set K8S_KUBECONFIG=/etc/kubeconfig/config in the ConfigMap
+            - name: host-kubeconfig
+              mountPath: /etc/kubeconfig
+              readOnly: true
+      volumes:
+        - name: kubeconfig-data
+          persistentVolumeClaim:
+            claimName: kubeconfig-pvc
+        - name: host-kubeconfig
+          secret:
+            secretName: host-kubeconfig
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: kubesight
+spec:
+  type: ClusterIP
+  selector:
+    app: kubesight-backend
+  ports:
+    - port: 5000
+      targetPort: 5000
