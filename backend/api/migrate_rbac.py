@@ -133,6 +133,10 @@ def _migrate_alert_policy_evaluation_columns() -> None:
         return
     _add_column_if_missing("alert_policies", "evaluation_interval_seconds", "INTEGER DEFAULT 300")
     _add_column_if_missing("alert_policies", "last_evaluated_at", "DATETIME")
+    _add_column_if_missing("alert_policies", "last_evaluation_result", "VARCHAR(16)")
+    _add_column_if_missing("alert_policies", "last_measured_value", "VARCHAR(255)")
+    _add_column_if_missing("alert_policies", "last_threshold", "VARCHAR(64)")
+    _add_column_if_missing("alert_policies", "last_evaluation_error", "TEXT")
 
 
 def _migrate_alert_delivery_log_group_column() -> None:
@@ -154,12 +158,26 @@ def _migrate_app_catalog_helm_columns() -> None:
         _add_column_if_missing("app_catalog_entries", col, sql_type)
 
 
+def _migrate_log_alert_columns() -> None:
+    if "alert_policies" in inspect(db.engine).get_table_names():
+        _add_column_if_missing("alert_policies", "alert_type", "VARCHAR(16) DEFAULT 'metric'")
+        _add_column_if_missing("alert_policies", "log_config", "JSON")
+    if "alert_history" in inspect(db.engine).get_table_names():
+        _add_column_if_missing("alert_history", "alert_type", "VARCHAR(16) DEFAULT 'metric'")
+        _add_column_if_missing("alert_history", "log_snapshot", "JSON")
+    if "alert_delivery_logs" in inspect(db.engine).get_table_names():
+        _add_column_if_missing("alert_delivery_logs", "matched_pattern", "VARCHAR(512)")
+        _add_column_if_missing("alert_delivery_logs", "pod_name", "VARCHAR(253)")
+        _add_column_if_missing("alert_delivery_logs", "log_snippet", "TEXT")
+
+
 def run_migrations() -> None:
     db.create_all()
     _migrate_clusters_table()
     _migrate_app_catalog_helm_columns()
     _migrate_alert_policy_evaluation_columns()
     _migrate_alert_delivery_log_group_column()
+    _migrate_log_alert_columns()
     _migrate_legacy_users()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations

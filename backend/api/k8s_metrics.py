@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from .cluster_access import ClusterAccess
 from .k8s_provider import K8sCommandError, _cpu_to_cores, _run_kubectl
@@ -126,10 +126,104 @@ def pod_total_memory_limit_mib(pod: dict) -> float:
     return total
 
 
+def pod_total_cpu_request_cores(pod: dict) -> float:
+    total = 0.0
+    spec = pod.get("spec", {})
+    containers = (spec.get("containers") or []) + (spec.get("initContainers") or [])
+    for container in containers:
+        requests = (container.get("resources") or {}).get("requests") or {}
+        cpu_request = requests.get("cpu")
+        if cpu_request:
+            total += _cpu_to_cores(str(cpu_request))
+    return total
+
+
+def pod_total_memory_request_mib(pod: dict) -> float:
+    total = 0.0
+    spec = pod.get("spec", {})
+    containers = (spec.get("containers") or []) + (spec.get("initContainers") or [])
+    for container in containers:
+        requests = (container.get("resources") or {}).get("requests") or {}
+        memory_request = requests.get("memory")
+        if memory_request:
+            total += _memory_to_mib(str(memory_request))
+    return total
+
+
 def cpu_usage_percent(usage_cores: float, limit_cores: float) -> float:
     if limit_cores <= 0:
         return 0.0
     return round((usage_cores / limit_cores) * 100, 1)
+
+
+def memory_usage_percent(usage_mib: float, limit_mib: float) -> float:
+    if limit_mib <= 0:
+        return 0.0
+    return round((usage_mib / limit_mib) * 100, 1)
+
+
+def aggregate_pod_usage_percents(
+    pods: List[dict],
+    top_by_pod: PodTopMetrics,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Sum pod usage and capacity to produce deployment-level CPU/memory percentages."""
+    total_cpu_usage = 0.0
+    total_cpu_capacity = 0.0
+    total_mem_usage = 0.0
+    total_mem_capacity = 0.0
+    has_cpu = False
+    has_mem = False
+
+    for pod in pods:
+        meta = pod.get("metadata", {})
+        pod_name = meta.get("name")
+        pod_ns = meta.get("namespace")
+        top_metrics = top_by_pod.get((pod_ns, pod_name), {})
+        usage_cores = top_metrics.get("cpu")
+        usage_mib = top_metrics.get("memory")
+        limit_cores = pod_total_cpu_limit_cores(pod)
+        limit_mib = pod_total_memory_limit_mib(pod)
+        if limit_cores <= 0:
+            limit_cores = pod_total_cpu_request_cores(pod)
+        if limit_mib <= 0:
+            limit_mib = pod_total_memory_request_mib(pod)
+
+        if usage_cores is not None and limit_cores > 0:
+            total_cpu_usage += usage_cores
+            total_cpu_capacity += limit_cores
+            has_cpu = True
+        if usage_mib is not None and limit_mib > 0:
+            total_mem_usage += usage_mib
+            total_mem_capacity += limit_mib
+            has_mem = True
+
+    cpu_pct: Optional[float] = None
+    mem_pct: Optional[float] = None
+    if has_cpu and total_cpu_capacity > 0:
+        cpu_pct = cpu_usage_percent(total_cpu_usage, total_cpu_capacity)
+    if has_mem and total_mem_capacity > 0:
+        mem_pct = memory_usage_percent(total_mem_usage, total_mem_capacity)
+    return cpu_pct, mem_pct
+
+
+def pod_usage_percents(pod: dict, top_metrics: Dict[str, float]) -> Tuple[Optional[float], Optional[float]]:
+    """Return CPU and memory usage percent for a pod using limits, falling back to requests."""
+    usage_cores = top_metrics.get("cpu")
+    usage_mib = top_metrics.get("memory")
+    limit_cores = pod_total_cpu_limit_cores(pod)
+    limit_mib = pod_total_memory_limit_mib(pod)
+    if limit_cores <= 0:
+        limit_cores = pod_total_cpu_request_cores(pod)
+    if limit_mib <= 0:
+        limit_mib = pod_total_memory_request_mib(pod)
+
+    cpu_pct: Optional[float] = None
+    mem_pct: Optional[float] = None
+    if usage_cores is not None and limit_cores > 0:
+        cpu_pct = cpu_usage_percent(usage_cores, limit_cores)
+    if usage_mib is not None and limit_mib > 0:
+        mem_pct = memory_usage_percent(usage_mib, limit_mib)
+    return cpu_pct, mem_pct
 
 
 def _sum_pod_top_usage(access: Union[ClusterAccess, str]) -> Tuple[float, float]:
@@ -277,11 +371,14 @@ def cluster_resource_usage(
     Uses kubectl top nodes, falling back to summed pod metrics.
     """
     used_cpu, used_mib = fetch_node_top_usage(access)
-    pod_cpu, pod_mib = _sum_pod_top_usage(access)
-    if used_cpu <= 0.0 and pod_cpu > 0.0:
-        used_cpu = pod_cpu
-    if used_mib <= 0.0 and pod_mib > 0.0:
-        used_mib = pod_mib
+    if used_cpu <= 0.0 or used_mib <= 0.0:
+        pod_top = fetch_pod_top_metrics(access)
+        pod_cpu = sum(metrics.get("cpu", 0.0) for metrics in pod_top.values())
+        pod_mib = sum(metrics.get("memory", 0.0) for metrics in pod_top.values())
+        if used_cpu <= 0.0 and pod_cpu > 0.0:
+            used_cpu = pod_cpu
+        if used_mib <= 0.0 and pod_mib > 0.0:
+            used_mib = pod_mib
 
     used_gib = round(used_mib / 1024, 2)
     cpu_percent: Optional[float] = None

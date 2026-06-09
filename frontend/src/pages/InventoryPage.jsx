@@ -1,14 +1,17 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
-import AddAppModal from "../components/inventory/AddAppModal.jsx";
 import TemplateMarketplace from "../components/inventory/TemplateMarketplace.jsx";
-import ApplicationBuilderWizard from "../components/inventory/wizard/ApplicationBuilderWizard.jsx";
 import { getWizardTemplate } from "../api/inventoryApi.js";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
 import { normalizeClusterOptions } from "../utils/clusterOptions.js";
 import { applyTemplate, createEmptyWizardState } from "../components/inventory/wizard/wizardDefaults.js";
+
+const AddAppModal = lazy(() => import("../components/inventory/AddAppModal.jsx"));
+const ApplicationBuilderWizard = lazy(() =>
+  import("../components/inventory/wizard/ApplicationBuilderWizard.jsx")
+);
 
 export default function InventoryPage({
   coreLoading = false,
@@ -102,30 +105,38 @@ export default function InventoryPage({
         onSelectTemplate={openWizardFromTemplate}
       />
 
-      <AddAppModal
-        open={addModalOpen}
-        onClose={() => setAddModalOpen(false)}
-        onSuccess={() => onRefresh?.()}
-        onOpenWizard={openWizardFromScratch}
-        clusterOptions={clusterSelectOptions}
-        defaultClusterId={resolvedDefaultClusterId}
-        canRegister={canRegister}
-        canDeploy={canDeploy}
-        canHelmInstall={canHelmInstall}
-      />
+      {addModalOpen ? (
+        <Suspense fallback={null}>
+          <AddAppModal
+            open={addModalOpen}
+            onClose={() => setAddModalOpen(false)}
+            onSuccess={() => onRefresh?.()}
+            onOpenWizard={openWizardFromScratch}
+            clusterOptions={clusterSelectOptions}
+            defaultClusterId={resolvedDefaultClusterId}
+            canRegister={canRegister}
+            canDeploy={canDeploy}
+            canHelmInstall={canHelmInstall}
+          />
+        </Suspense>
+      ) : null}
 
-      <ApplicationBuilderWizard
-        open={wizardOpen}
-        onClose={() => {
-          setWizardOpen(false);
-          setWizardInitialState(null);
-        }}
-        onSuccess={() => onRefresh?.()}
-        clusterOptions={clusterSelectOptions}
-        defaultClusterId={resolvedDefaultClusterId}
-        initialState={wizardInitialState}
-        showTemplatePicker={false}
-      />
+      {wizardOpen ? (
+        <Suspense fallback={null}>
+          <ApplicationBuilderWizard
+            open={wizardOpen}
+            onClose={() => {
+              setWizardOpen(false);
+              setWizardInitialState(null);
+            }}
+            onSuccess={() => onRefresh?.()}
+            clusterOptions={clusterSelectOptions}
+            defaultClusterId={resolvedDefaultClusterId}
+            initialState={wizardInitialState}
+            showTemplatePicker={false}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

@@ -7,7 +7,7 @@ export default function PageTitle({ title, subtitle, actionLabel, onAction }) {
           <p>{subtitle}</p>
         </div>
         {actionLabel ? (
-          <button type="button" className="btn-outline page-title-action" onClick={onAction}>
+          <button type="button" className="primary page-title-action" onClick={onAction}>
             {actionLabel}
           </button>
         ) : null}

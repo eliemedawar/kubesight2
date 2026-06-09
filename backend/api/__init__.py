@@ -18,6 +18,7 @@ from .frontend_static import frontend_dist_available, register_frontend_static
 from .response import success_response
 from .migrate_rbac import run_migrations
 from .seed import seed_defaults
+from .services.alert_policy_scheduler import start_alert_policy_scheduler
 
 
 def _is_production_env() -> bool:
@@ -172,5 +173,8 @@ def create_app(config_object=None) -> Flask:
                     "ui": "Build frontend (cd frontend && npm run build) then open this URL in the browser.",
                 }
             )
+
+    if not is_testing:
+        start_alert_policy_scheduler(app)
 
     return app

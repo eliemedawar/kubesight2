@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 from ..db import db
 from ..email_delivery import EmailDeliveryError, send_alert_email, smtp_is_configured
@@ -20,7 +20,8 @@ from ..models import (
 from ..secret_encryption import decrypt_secret, encrypt_secret
 
 VALID_RECEIVER_TYPES = {"email", "webhook", "slack"}
-ALLOWED_HTTP_METHODS = {"POST", "PUT", "PATCH"}
+ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+METHODS_WITHOUT_BODY = {"GET", "HEAD", "OPTIONS"}
 WEBHOOK_TIMEOUT_SECONDS = 10
 
 
@@ -176,7 +177,9 @@ def _validate_receiver_payload(payload: Dict[str, Any], *, existing: Optional[Al
     if receiver_type == "webhook":
         method = str(payload.get("httpMethod", existing.http_method if existing else "POST")).strip().upper()
         if method not in ALLOWED_HTTP_METHODS:
-            raise ValueError("HTTP method must be POST, PUT, or PATCH for webhook receivers.")
+            raise ValueError(
+                "HTTP method must be one of GET, POST, PUT, PATCH, DELETE, HEAD, or OPTIONS for webhook receivers."
+            )
 
 
 def create_receiver(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -428,6 +431,9 @@ def list_delivery_logs(*, limit: int = 100) -> List[Dict[str, Any]]:
             "receiverType": row.receiver_type,
             "status": row.status,
             "errorMessage": row.error_message,
+            "matchedPattern": row.matched_pattern or "",
+            "podName": row.pod_name or "",
+            "logSnippet": row.log_snippet or "",
             "deliveredAt": _iso(row.delivered_at),
         }
         for row in rows
@@ -456,6 +462,9 @@ def _record_delivery_log(
             receiver_type=receiver.receiver_type,
             status=status,
             error_message=error_message,
+            matched_pattern=str(alert_payload.get("matchedPattern") or "") or None,
+            pod_name=str(alert_payload.get("pod") or "") or None,
+            log_snippet=str(alert_payload.get("logSnippet") or "") or None,
         )
     )
 
@@ -535,6 +544,20 @@ def _build_webhook_headers(receiver: AlertRoutingReceiver) -> Dict[str, str]:
     return headers
 
 
+def _webhook_url_with_query(url: str, payload: Dict[str, Any]) -> str:
+    flat = {
+        str(key): str(value)
+        for key, value in payload.items()
+        if value is not None and not isinstance(value, (dict, list))
+    }
+    if not flat:
+        return url
+    parsed = urlparse(url)
+    separator = "&" if parsed.query else "?"
+    query = f"{parsed.query}{separator}{urlencode(flat)}" if parsed.query else urlencode(flat)
+    return urlunparse(parsed._replace(query=query))
+
+
 def _post_webhook(receiver: AlertRoutingReceiver, payload: Dict[str, Any]) -> None:
     url = (receiver.url or "").strip()
     if not url:
@@ -543,10 +566,18 @@ def _post_webhook(receiver: AlertRoutingReceiver, payload: Dict[str, Any]) -> No
     if err:
         raise EmailDeliveryError(err)
 
-    body = json.dumps(payload).encode("utf-8")
     headers = _build_webhook_headers(receiver)
     method = "POST" if receiver.receiver_type == "slack" else (receiver.http_method or "POST").upper()
-    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+
+    if method in METHODS_WITHOUT_BODY:
+        if method == "GET":
+            url = _webhook_url_with_query(url, payload)
+        for header in ("Content-Type", "Content-Length"):
+            headers.pop(header, None)
+        request = urllib.request.Request(url, headers=headers, method=method)
+    else:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=WEBHOOK_TIMEOUT_SECONDS) as response:
             if response.status >= 400:
@@ -615,29 +646,97 @@ def _destinations_for_policy(policy_id: int) -> List[Tuple[AlertRoutingReceiver,
 
 
 def _slack_alert_payload(alert: Dict[str, Any]) -> Dict[str, Any]:
+    if alert.get("alertType") == "log":
+        namespace = alert.get("namespace") or "default"
+        resource = alert.get("deployment") or alert.get("resourceName") or alert.get("pod") or "workload"
+        severity = str(alert.get("severity", "warning")).upper()
+        log_lines = alert.get("logLines") or []
+        snippet = "\n".join(log_lines[:10]) if log_lines else (alert.get("logSnippet") or "")
+        text = (
+            f"*{severity}* log alert in `{alert.get('clusterId', '-')}` / `{namespace}`\n"
+            f"Resource: `{resource}` | Pod: `{alert.get('pod', '-')}`\n"
+            f"Pattern: `{alert.get('matchedPattern', '-')}`\n"
+            f"```\n{snippet}\n```"
+        )
+        return {"text": text}
+
     namespace = alert.get("namespace") or "default"
     title = alert.get("title") or "Alert"
     text = f"KubeSight Alert: {title} in namespace {namespace}"
     return {"text": text}
 
 
-def _already_delivered(alert_id: str, receiver_id: int, alert_status: str) -> bool:
-    return (
-        AlertRoutingDeliverySent.query.filter_by(
+def _webhook_log_payload(alert: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "alert_type": "log",
+        "policy": alert.get("policyName") or "",
+        "severity": alert.get("severity") or "warning",
+        "cluster": alert.get("clusterId") or "",
+        "namespace": alert.get("namespace") or "",
+        "deployment": alert.get("deployment") or "",
+        "pod": alert.get("pod") or "",
+        "matched_pattern": alert.get("matchedPattern") or "",
+        "timestamp": alert.get("detectedAt") or alert.get("firedAt") or "",
+        "log_lines": alert.get("logLines") or [],
+    }
+
+
+def _policy_repeat_interval_seconds(policy_id: Optional[int]) -> int:
+    from ..alert_policy_catalog import DEFAULT_EVALUATION_INTERVAL_SECONDS
+
+    if not policy_id:
+        return DEFAULT_EVALUATION_INTERVAL_SECONDS
+    policy = AlertPolicy.query.get(policy_id)
+    if not policy:
+        return DEFAULT_EVALUATION_INTERVAL_SECONDS
+    return int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS)
+
+
+def _due_for_repeat_delivery(
+    alert_id: str,
+    receiver_id: int,
+    alert_status: str,
+    interval_seconds: int,
+) -> bool:
+    """Return True when enough time elapsed since the last successful delivery."""
+    if alert_status not in {"firing", "active"}:
+        return False
+
+    last = (
+        AlertDeliveryLog.query.filter_by(
             alert_id=alert_id,
             receiver_id=receiver_id,
-            alert_status=alert_status,
-        ).first()
-        is not None
+            status="success",
+        )
+        .order_by(AlertDeliveryLog.delivered_at.desc())
+        .first()
     )
+    if not last or not last.delivered_at:
+        return True
+
+    last_at = last.delivered_at
+    if last_at.tzinfo is None:
+        last_at = last_at.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - last_at).total_seconds()
+    return elapsed >= max(1, int(interval_seconds))
 
 
 def _mark_delivered(alert_id: str, receiver_id: int, alert_status: str) -> None:
+    now = datetime.now(timezone.utc)
+    row = AlertRoutingDeliverySent.query.filter_by(
+        alert_id=alert_id,
+        receiver_id=receiver_id,
+        alert_status=alert_status,
+    ).first()
+    if row:
+        row.sent_at = now
+        return
     db.session.add(
         AlertRoutingDeliverySent(
             alert_id=alert_id,
             receiver_id=receiver_id,
             alert_status=alert_status,
+            sent_at=now,
         )
     )
 
@@ -656,12 +755,15 @@ def _deliver_to_receiver(receiver: AlertRoutingReceiver, alert: Dict[str, Any]) 
         _post_webhook(receiver, _slack_alert_payload(alert))
         return
 
-    _post_webhook(receiver, alert)
+    payload = _webhook_log_payload(alert) if alert.get("alertType") == "log" else alert
+    _post_webhook(receiver, payload)
 
 
 def _dispatch_to_destinations(
     alert: Dict[str, Any],
     destinations: List[Tuple[AlertRoutingReceiver, str]],
+    *,
+    repeat_interval_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     alert_id = str(alert.get("id") or "").strip()
     alert_status = str(alert.get("status") or "firing").strip().lower()
@@ -671,9 +773,15 @@ def _dispatch_to_destinations(
     if alert_status not in {"firing", "active"}:
         return {"sent": 0, "skipped": 0, "errors": []}
 
+    interval_seconds = _policy_repeat_interval_seconds(
+        int(alert["policyId"]) if alert.get("policyId") else None
+    )
+    if repeat_interval_seconds is not None:
+        interval_seconds = max(1, int(repeat_interval_seconds))
+
     summary: Dict[str, Any] = {"sent": 0, "skipped": 0, "errors": []}
     for receiver, group_name in destinations:
-        if _already_delivered(alert_id, receiver.id, alert_status):
+        if not _due_for_repeat_delivery(alert_id, receiver.id, alert_status, interval_seconds):
             summary["skipped"] += 1
             continue
         try:
@@ -712,7 +820,12 @@ def dispatch_policy_alert_notifications(alert: Dict[str, Any]) -> Dict[str, Any]
     policy_id = alert.get("policyId")
     if not policy_id:
         return {"sent": 0, "skipped": 0, "errors": ["Policy alert missing policyId"]}
-    return _dispatch_to_destinations(alert, _destinations_for_policy(int(policy_id)))
+    interval_seconds = _policy_repeat_interval_seconds(int(policy_id))
+    return _dispatch_to_destinations(
+        alert,
+        _destinations_for_policy(int(policy_id)),
+        repeat_interval_seconds=interval_seconds,
+    )
 
 
 def dispatch_firing_alerts(alerts: List[Dict[str, Any]]) -> Dict[str, Any]:

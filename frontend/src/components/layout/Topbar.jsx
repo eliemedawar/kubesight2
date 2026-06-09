@@ -30,6 +30,8 @@ export default function Topbar({
   displayUser,
   userInitials,
   onLogout,
+  onMenuToggle = () => {},
+  sidebarOpen = false,
 }) {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const notificationsRef = useRef(null);
@@ -75,7 +77,19 @@ export default function Topbar({
 
   return (
     <header className="topbar">
-      <div className="topbar-selectors">
+      <div className="topbar-leading">
+        <button
+          type="button"
+          className="icon-button topbar-menu-button"
+          aria-label={sidebarOpen ? "Close navigation menu" : "Open navigation menu"}
+          aria-expanded={sidebarOpen}
+          onClick={onMenuToggle}
+        >
+          <span className="topbar-menu-icon" aria-hidden="true">
+            {sidebarOpen ? "✕" : "☰"}
+          </span>
+        </button>
+        <div className="topbar-selectors">
         {showClusterSelector ? (
           <div className="topbar-field">
             <p className="eyebrow">Active Cluster</p>
@@ -110,6 +124,7 @@ export default function Topbar({
             </select>
           </div>
         ) : null}
+        </div>
       </div>
       <div className="topbar-actions">
         <div className="notifications-anchor" ref={notificationsRef}>
@@ -134,10 +149,10 @@ export default function Topbar({
             onClose={() => setNotificationsOpen(false)}
           />
         </div>
-        <button type="button" className="icon-button btn-ghost" aria-label="Help">
+        <button type="button" className="icon-button btn-ghost topbar-help-button" aria-label="Help">
           <span aria-hidden="true">?</span>
         </button>
-        <button type="button" className="btn-outline" onClick={onLogout}>
+        <button type="button" className="btn-outline topbar-logout" onClick={onLogout}>
           Logout
         </button>
         <div className="topbar-user">

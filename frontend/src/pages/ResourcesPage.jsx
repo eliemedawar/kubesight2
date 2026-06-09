@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import DataTable from "../components/common/DataTable.jsx";
 import ResourceRowActions from "../components/resources/ResourceRowActions.jsx";
-import ResourceInspectModal from "../components/resources/ResourceInspectModal.jsx";
 import {
   getDeploymentRolloutHistory,
   getResourceDescribe,
@@ -13,6 +12,8 @@ import {
 } from "../api/clustersApi.js";
 import { RESOURCE_TAB_DEFINITIONS, listKeyForTab } from "../lib/resourceTypes.js";
 import { EMPTY_MESSAGES, formatAccessError } from "../utils/authz.js";
+
+const ResourceInspectModal = lazy(() => import("../components/resources/ResourceInspectModal.jsx"));
 
 const POD_FILTER_WORKLOAD_KINDS = new Set([
   "deployment",
@@ -596,16 +597,20 @@ export default function ResourcesPage({
           ) : null}
         </>
       )}
-      <ResourceInspectModal
-        open={inspectModal.open}
-        title={inspectModal.title}
-        loading={inspectModal.loading}
-        error={inspectModal.error}
-        mode={inspectModal.mode}
-        content={inspectModal.content}
-        rolloutRows={inspectModal.rolloutRows}
-        onClose={closeInspectModal}
-      />
+      {inspectModal.open ? (
+        <Suspense fallback={null}>
+          <ResourceInspectModal
+            open={inspectModal.open}
+            title={inspectModal.title}
+            loading={inspectModal.loading}
+            error={inspectModal.error}
+            mode={inspectModal.mode}
+            content={inspectModal.content}
+            rolloutRows={inspectModal.rolloutRows}
+            onClose={closeInspectModal}
+          />
+        </Suspense>
+      ) : null}
       </AccessScopeView>
     </div>
   );

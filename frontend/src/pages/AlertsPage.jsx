@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
@@ -13,9 +13,13 @@ import {
   formatTriggeredConditions,
   getAlertPolicyLabel,
   getAlertResourceName,
+  getAlertTypeLabel,
   hasAlertMonitoringScope,
+  isLogAlert,
 } from "../lib/alertDisplay.js";
 import { EMPTY_MESSAGES, isAccessDeniedError } from "../utils/authz.js";
+
+const AlertLogContextModal = lazy(() => import("../components/alerts/AlertLogContextModal.jsx"));
 
 function AlertScopeCard({ scope }) {
   if (!scope.clusterId) {
@@ -69,6 +73,9 @@ export default function AlertsPage({
 }) {
   const alerts = data.alerts || [];
   const hasAlerts = alerts.length > 0;
+  const [selectedAlert, setSelectedAlert] = useState(null);
+  const [logModalOpen, setLogModalOpen] = useState(false);
+
   const hasScope = hasAlertMonitoringScope({
     hasClusters,
     namespaces: allowedNamespaces,
@@ -94,13 +101,21 @@ export default function AlertsPage({
     return `Monitoring ${scope.clusterLabel}`;
   }, [hasClusters, scope.clusterLabel]);
 
+  const openLogContext = (alert) => {
+    setSelectedAlert(alert);
+    setLogModalOpen(true);
+  };
+
   const alertRows = useMemo(
     () =>
       alerts.map((alert) => ({
         id: alert.id,
+        alertType: getAlertTypeLabel(alert),
         severity: alert.severity || "—",
         policy: getAlertPolicyLabel(alert),
         resource: getAlertResourceName(alert),
+        pod: isLogAlert(alert) ? alert.pod || "—" : "—",
+        pattern: isLogAlert(alert) ? alert.matchedPattern || "—" : "—",
         cluster: scope.clusterLabel,
         namespace: alert.namespace || "—",
         firedAt: formatAlertTime(alert.firedAt),
@@ -108,19 +123,31 @@ export default function AlertsPage({
         summary: alert.title || formatTriggeredConditions(alert) || alert.description || "—",
         source: alert.source,
         policyId: alert.policyId,
+        rawAlert: alert,
+        actions: isLogAlert(alert) ? (
+          <button type="button" className="btn-text" onClick={() => openLogContext(alert)}>
+            View Log Context
+          </button>
+        ) : (
+          "—"
+        ),
       })),
     [alerts, scope.clusterLabel]
   );
 
   const alertColumns = [
     { key: "severity", label: "Severity" },
+    { key: "alertType", label: "Type" },
     { key: "summary", label: "Alert" },
     { key: "policy", label: "Policy" },
-    { key: "resource", label: "Source resource" },
+    { key: "resource", label: "Resource" },
+    { key: "pod", label: "Pod" },
+    { key: "pattern", label: "Pattern" },
     { key: "namespace", label: "Namespace" },
     { key: "cluster", label: "Cluster" },
     { key: "firedAt", label: "Time" },
     { key: "status", label: "Status" },
+    { key: "actions", label: "Details" },
   ];
 
   const scopeLoading = isNamespaceScopeLoading({
@@ -193,6 +220,19 @@ export default function AlertsPage({
             Manage SMTP and notification receivers in Administration → Alert Routing. Assign receivers on each Alert Policy.
           </p>
         </InfoCard>
+      ) : null}
+
+      {logModalOpen ? (
+        <Suspense fallback={null}>
+          <AlertLogContextModal
+            open={logModalOpen}
+            alert={selectedAlert}
+            onClose={() => {
+              setLogModalOpen(false);
+              setSelectedAlert(null);
+            }}
+          />
+        </Suspense>
       ) : null}
     </div>
   );

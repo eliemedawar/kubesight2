@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import ErrorBanner from "../common/ErrorBanner";
 import LoadingState from "../common/LoadingState";
 import Sidebar from "./Sidebar";
@@ -35,9 +36,58 @@ export default function AppShell({
   onLogout,
   children,
 }) {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+  const toggleSidebar = useCallback(() => setSidebarOpen((open) => !open), []);
+
+  const handleNavigate = useCallback(
+    (pageKey) => {
+      onNavigate(pageKey);
+      closeSidebar();
+    },
+    [closeSidebar, onNavigate]
+  );
+
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 1024px)");
+    const handleChange = () => {
+      if (media.matches) {
+        closeSidebar();
+      }
+    };
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, [closeSidebar]);
+
+  useEffect(() => {
+    document.body.classList.toggle("sidebar-drawer-open", sidebarOpen);
+    return () => document.body.classList.remove("sidebar-drawer-open");
+  }, [sidebarOpen]);
+
+  useEffect(() => {
+    if (!sidebarOpen) {
+      return undefined;
+    }
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        closeSidebar();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [closeSidebar, sidebarOpen]);
+
   return (
-    <div className="shell">
-      <Sidebar pages={visiblePages} activePage={activePage} onNavigate={onNavigate} />
+    <div className={`shell${sidebarOpen ? " shell--sidebar-open" : ""}`}>
+      <button
+        type="button"
+        className="sidebar-backdrop"
+        aria-label="Close navigation"
+        onClick={closeSidebar}
+        tabIndex={sidebarOpen ? 0 : -1}
+      />
+      <Sidebar pages={visiblePages} activePage={activePage} onNavigate={handleNavigate} open={sidebarOpen} />
       <section className="workspace">
         <Topbar
           allowedClusters={allowedClusters}
@@ -61,6 +111,8 @@ export default function AppShell({
           displayUser={displayUser}
           userInitials={userInitials}
           onLogout={onLogout}
+          onMenuToggle={toggleSidebar}
+          sidebarOpen={sidebarOpen}
         />
         {loadingOverlay ? (
           <LoadingState label={loadingOverlayLabel} hint={loadingOverlayHint} />

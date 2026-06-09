@@ -72,7 +72,9 @@ def merge_notifications(existing: Any, incoming: Dict[str, Any]) -> Tuple[Dict[s
         merged["upgrades"] = bool(incoming["upgrades"])
     if "routing" in incoming:
         merged["routing"] = normalize_alert_routing(incoming["routing"])
-        merged["alerts"] = any(cfg.get("enabled") for cfg in merged["routing"].values())
+        # Legacy per-channel routing must not disable policy-based Alert Routing receivers.
+        if any(cfg.get("enabled") for cfg in merged["routing"].values()):
+            merged["alerts"] = True
 
     errors = []
     if "routing" in incoming:

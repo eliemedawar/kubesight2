@@ -190,6 +190,168 @@ def test_evaluate_policy_creates_history_and_merges_into_alerts(client, admin_to
     assert "activeTotal" in stats_data
     assert "topTriggeredPolicies" in stats_data
 
+    listing = client.get("/api/alert-policies", headers=auth_headers(admin_token))
+    evaluated_policy = next(item for item in listing.get_json()["data"]["items"] if item["id"] == policy_id)
+    assert evaluated_policy["lastEvaluatedAt"] is not None
+    assert evaluated_policy["lastResult"] == "met"
+    assert evaluated_policy["lastMeasuredValue"] is not None
+    assert evaluated_policy["lastThreshold"] is not None
+
+    client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
+
+
+def test_deployment_scope_cpu_evaluation_records_debug_fields(client, admin_token):
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Deployment CPU",
+            "clusterId": "docker-desktop",
+            "scope": {"type": "deployment", "namespace": "kubesight", "resourceName": "kubesight-backend"},
+            "conditions": [{"metricKey": "cpu_usage_percent", "operator": "<", "threshold": 100}],
+        },
+    )
+    assert create.status_code in (200, 201)
+    created = create.get_json()["data"]
+    assert created["lastEvaluatedAt"] is not None
+    assert created["lastResult"] == "met"
+    assert created["lastMeasuredValue"] is not None
+    assert "CPU" in (created["lastMeasuredValue"] or "")
+
+    client.delete(f"/api/alert-policies/{created['id']}", headers=auth_headers(admin_token))
+
+
+def test_policy_save_runs_immediate_evaluation(client, admin_token):
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Immediate Eval",
+            "conditions": [{"metricKey": "cpu_usage_percent", "operator": "<", "threshold": 100}],
+            "scope": {"type": "pod", "namespace": "default", "resourceName": "payments-api-84b5d5"},
+        },
+    )
+    assert create.status_code in (200, 201)
+    created = create.get_json()["data"]
+    assert created["lastEvaluatedAt"] is not None
+    assert created["lastResult"] in {"met", "not_met", "error"}
+    assert created["lastMeasuredValue"] is not None
+
+    update = client.put(
+        f"/api/alert-policies/{created['id']}",
+        headers=auth_headers(admin_token),
+        json={
+            "conditions": [{"metricKey": "memory_usage_percent", "operator": "<", "threshold": 100}],
+        },
+    )
+    assert update.status_code == 200
+    updated = update.get_json()["data"]
+    assert updated["lastEvaluatedAt"] is not None
+    assert "Memory" in (updated["lastMeasuredValue"] or "")
+
+    client.delete(f"/api/alert-policies/{created['id']}", headers=auth_headers(admin_token))
+
+
+def test_pod_scope_memory_evaluation_records_debug_fields(client, admin_token):
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Pod Memory",
+            "scope": {"type": "pod", "namespace": "default", "resourceName": "payments-api-84b5d5"},
+            "conditions": [{"metricKey": "memory_usage_percent", "operator": ">", "threshold": 1}],
+        },
+    )
+    assert create.status_code in (200, 201)
+    policy_id = create.get_json()["data"]["id"]
+
+    evaluate = client.post(
+        "/api/alert-policies/evaluate",
+        headers=auth_headers(admin_token),
+        json={"clusterId": "prod-us-east"},
+    )
+    assert evaluate.status_code == 200
+
+    listing = client.get("/api/alert-policies", headers=auth_headers(admin_token))
+    evaluated_policy = next(item for item in listing.get_json()["data"]["items"] if item["id"] == policy_id)
+    assert evaluated_policy["lastEvaluatedAt"] is not None
+    assert evaluated_policy["lastResult"] == "met"
+    assert evaluated_policy["lastMeasuredValue"] is not None
+
+    client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
+
+
+def test_policy_evaluation_debug_fields_not_met(client, admin_token):
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Never Fires",
+            "conditions": [{"metricKey": "cpu_usage_percent", "operator": ">", "threshold": 999}],
+        },
+    )
+    assert create.status_code in (200, 201)
+    policy_id = create.get_json()["data"]["id"]
+
+    evaluate = client.post(
+        "/api/alert-policies/evaluate",
+        headers=auth_headers(admin_token),
+        json={"clusterId": "prod-us-east"},
+    )
+    assert evaluate.status_code == 200
+
+    listing = client.get("/api/alert-policies", headers=auth_headers(admin_token))
+    evaluated_policy = next(item for item in listing.get_json()["data"]["items"] if item["id"] == policy_id)
+    assert evaluated_policy["lastEvaluatedAt"] is not None
+    assert evaluated_policy["lastResult"] == "not_met"
+    assert "CPU" in (evaluated_policy["lastMeasuredValue"] or "")
+    assert evaluated_policy["lastThreshold"] == "> 999"
+
+    client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
+
+
+def test_active_alert_dispatches_after_receiver_added(client, admin_token):
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Late Receiver",
+            "conditions": [{"metricKey": "cpu_usage_percent", "operator": "<", "threshold": 100}],
+        },
+    )
+    assert create.status_code in (200, 201)
+    policy_id = create.get_json()["data"]["id"]
+
+    email_resp = client.post(
+        "/api/alert-routing/receivers",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "Late Email",
+            "type": "email",
+            "emailAddress": "late@company.com",
+            "enabled": True,
+        },
+    )
+    assert email_resp.status_code == 201
+    email_id = email_resp.get_json()["data"]["id"]
+
+    with patch("api.services.alert_routing_service.smtp_is_configured", return_value=True), patch(
+        "api.services.alert_routing_service.send_alert_email"
+    ) as send_email:
+        update = client.put(
+            f"/api/alert-policies/{policy_id}",
+            headers=auth_headers(admin_token),
+            json={"receiverIds": [email_id]},
+        )
+        assert update.status_code == 200
+        assert send_email.call_count >= 1
+
+    client.delete(f"/api/alert-routing/receivers/{email_id}", headers=auth_headers(admin_token))
     client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
 
 
@@ -303,6 +465,38 @@ def test_policy_evaluation_interval_defaults_and_validation(client, admin_token)
     client.delete(f"/api/alert-policies/{created['id']}", headers=auth_headers(admin_token))
 
 
+def test_scheduler_evaluates_due_policies_without_user(client, admin_token):
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            **SAMPLE_POLICY,
+            "name": "Scheduler Policy",
+            "conditions": [{"metricKey": "cpu_usage_percent", "operator": "<", "threshold": 100}],
+            "evaluationIntervalSeconds": 60,
+        },
+    )
+    assert create.status_code in (200, 201)
+    policy_id = create.get_json()["data"]["id"]
+
+    from datetime import datetime, timedelta, timezone
+
+    from api.models import AlertPolicy
+    from api.services.alert_policy_evaluator import evaluate_all_enabled_policies
+
+    policy = AlertPolicy.query.get(policy_id)
+    policy.last_evaluated_at = datetime.now(timezone.utc) - timedelta(seconds=61)
+    db.session.commit()
+
+    evaluate_all_enabled_policies(persist=True)
+
+    policy = AlertPolicy.query.get(policy_id)
+    assert policy.last_evaluated_at is not None
+    assert policy.last_evaluation_result == "met"
+
+    client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
+
+
 def test_policy_evaluation_skips_until_interval_elapsed(client, admin_token):
     create = client.post(
         "/api/alert-policies",
@@ -315,10 +509,12 @@ def test_policy_evaluation_skips_until_interval_elapsed(client, admin_token):
         },
     )
     assert create.status_code in (200, 201)
-    policy_id = create.get_json()["data"]["id"]
+    created = create.get_json()["data"]
+    policy_id = created["id"]
+    assert created["lastEvaluatedAt"] is not None
 
     first = evaluate_policies_for_cluster("prod-us-east", persist=True)
-    assert len(first) >= 1
+    assert first == []
 
     policy = AlertPolicy.query.get(policy_id)
     assert policy.last_evaluated_at is not None

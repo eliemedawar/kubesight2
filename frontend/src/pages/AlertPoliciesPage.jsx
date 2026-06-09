@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
@@ -18,6 +18,13 @@ import PolicyScopeFields, {
   normalizeScope,
 } from "../components/alerts/PolicyScopeFields.jsx";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
+import {
+  applyLogPolicyDefaults,
+  LOG_DEFAULT_PATTERN,
+  LOG_TOUCH_KEYS,
+  logWindowSecondsForEvaluationInterval,
+  shouldShowLogReceiverWarning,
+} from "../lib/logPolicyDefaults.js";
 
 const RECEIVER_TYPE_LABELS = {
   email: "Email",
@@ -62,14 +69,99 @@ function formatEvaluationInterval(policy) {
   return policy?.evaluationIntervalLabel || "Every 5 min";
 }
 
+function formatEvaluationIntervalShort(policy) {
+  return formatEvaluationInterval(policy).replace(/^Every\s+/i, "");
+}
+
+function PolicyLastEvalCell({ policy }) {
+  const checked = formatLastChecked(policy);
+  const value = formatLastValue(policy);
+  return (
+    <div className="policy-last-eval-cell">
+      <span className="policy-last-eval-time">{checked}</span>
+      {value !== "—" ? <span className="policy-last-eval-value muted">{value}</span> : null}
+      <PolicyLastResult policy={policy} />
+    </div>
+  );
+}
+
+function PolicyRowActions({ policy, onEdit, onToggle, onDelete }) {
+  return (
+    <div className="inventory-actions-cell policy-table-actions" onClick={(e) => e.stopPropagation()}>
+      <button type="button" className="btn-text" onClick={() => onEdit(policy)}>
+        Edit
+      </button>
+      <button type="button" className="btn-text" onClick={() => onToggle(policy)}>
+        {policy.enabled ? "Disable" : "Enable"}
+      </button>
+      <button type="button" className="btn-text danger-text" onClick={() => onDelete(policy)}>
+        Delete
+      </button>
+    </div>
+  );
+}
+
+function formatLastChecked(policy) {
+  if (!policy?.lastEvaluatedAt) {
+    return "—";
+  }
+  const raw = policy.lastEvaluatedAt;
+  const normalized = /[Zz]|[+-]\d{2}:\d{2}$/.test(raw) ? raw : `${raw}Z`;
+  return new Date(normalized).toLocaleString();
+}
+
+function formatLastValue(policy) {
+  const measured = policy?.lastMeasuredValue;
+  const threshold = policy?.lastThreshold;
+  if (!measured && !threshold) {
+    return "—";
+  }
+  if (measured && threshold) {
+    return `${measured} (${threshold})`;
+  }
+  return measured || threshold || "—";
+}
+
+const LAST_RESULT_LABELS = {
+  met: "Met",
+  not_met: "Not met",
+  error: "Error",
+};
+
+function PolicyLastResult({ policy }) {
+  const result = policy?.lastResult;
+  if (!result) {
+    return <span className="muted">—</span>;
+  }
+  const label = LAST_RESULT_LABELS[result] || result;
+  const title = result === "error" ? policy?.lastEvaluationError || undefined : undefined;
+  return (
+    <span className={`policy-eval-result policy-eval-result-${result}`} title={title}>
+      {label}
+    </span>
+  );
+}
+
+const DEFAULT_LOG_CONFIG = {
+  matchType: "contains",
+  pattern: LOG_DEFAULT_PATTERN,
+  caseSensitive: false,
+  logWindowSeconds: 60,
+  contextLinesBefore: 5,
+  contextLinesAfter: 5,
+  maxLines: 20,
+};
+
 const EMPTY_POLICY = {
   name: "",
   clusterId: "",
   description: "",
   enabled: true,
+  alertType: "metric",
   severity: "warning",
   conditionLogic: "any",
   conditions: [{ metricKey: "cpu_usage_percent", operator: ">", threshold: 70 }],
+  logConfig: { ...DEFAULT_LOG_CONFIG },
   scope: { type: "deployment", namespace: "", resourceName: ALL_RESOURCES_VALUE },
   showOnDashboard: true,
   receiverIds: [],
@@ -83,24 +175,84 @@ function PolicyFormModal({
   initial,
   catalog,
   clusterOptions,
+  activeNamespace,
+  namespaceOptions,
   onClose,
   onSave,
   saving,
   error,
 }) {
   const [form, setForm] = useState(initial);
+  const touchedRef = useRef(new Set());
+
+  const touch = (key) => {
+    touchedRef.current.add(key);
+  };
+
+  const logDefaultsContext = useMemo(
+    () => ({
+      activeNamespace,
+      namespaceOptions,
+      receiverGroups: catalog?.receiverGroups || [],
+      defaultEvaluationIntervalSeconds: DEFAULT_EVALUATION_INTERVAL_SECONDS,
+    }),
+    [activeNamespace, catalog?.receiverGroups, namespaceOptions]
+  );
 
   useEffect(() => {
     if (open) {
       setForm(initial);
+      touchedRef.current = new Set();
     }
   }, [open, initial]);
+
+  const applyLogDefaults = (previous) =>
+    applyLogPolicyDefaults(previous, logDefaultsContext, touchedRef.current);
+
+  const handleAlertTypeChange = (nextType) => {
+    if (nextType === "log" && mode === "create") {
+      setForm((previous) => applyLogDefaults({ ...previous, alertType: "log" }));
+      return;
+    }
+    setForm((previous) => ({
+      ...previous,
+      alertType: nextType,
+      logConfig: previous.logConfig || { ...DEFAULT_LOG_CONFIG },
+    }));
+  };
+
+  const handleEvaluationIntervalChange = (seconds) => {
+    touch(LOG_TOUCH_KEYS.evaluationInterval);
+    setForm((previous) => {
+      const next = { ...previous, evaluationIntervalSeconds: seconds };
+      if (
+        previous.alertType === "log" &&
+        mode === "create" &&
+        !touchedRef.current.has(LOG_TOUCH_KEYS.logWindow) &&
+        !touchedRef.current.has(LOG_TOUCH_KEYS.logConfig)
+      ) {
+        next.logConfig = {
+          ...(previous.logConfig || {}),
+          logWindowSeconds: logWindowSecondsForEvaluationInterval(seconds),
+        };
+      }
+      return next;
+    });
+  };
 
   if (!open) {
     return null;
   }
 
   const metrics = catalog?.metrics || [];
+  const isLogPolicy = form.alertType === "log";
+  const logConfig = form.logConfig || catalog?.defaultLogConfig || DEFAULT_LOG_CONFIG;
+  const logWindowOptions = catalog?.logWindowOptions || [
+    { seconds: 60, label: "Last 1 minute" },
+    { seconds: 300, label: "Last 5 minutes" },
+    { seconds: 900, label: "Last 15 minutes" },
+    { seconds: 1800, label: "Last 30 minutes" },
+  ];
   const operatorsFor = (metricKey) => {
     const metric = metrics.find((m) => m.key === metricKey);
     return catalog?.operators?.[metric?.type] || [">"];
@@ -138,8 +290,10 @@ function PolicyFormModal({
 
   const receivers = catalog?.receivers || [];
   const receiverGroups = catalog?.receiverGroups || [];
+  const showReceiverWarning = mode === "create" && shouldShowLogReceiverWarning(form);
 
   const toggleReceiver = (receiverId) => {
+    touch(LOG_TOUCH_KEYS.receivers);
     setForm((prev) => {
       const current = prev.receiverIds || [];
       const next = current.includes(receiverId)
@@ -150,6 +304,7 @@ function PolicyFormModal({
   };
 
   const toggleReceiverGroup = (groupId) => {
+    touch(LOG_TOUCH_KEYS.receivers);
     setForm((prev) => {
       const current = prev.receiverGroupIds || [];
       const next = current.includes(groupId)
@@ -168,7 +323,7 @@ function PolicyFormModal({
       >
         <header className="modal-header">
           <h2>{mode === "edit" ? "Edit Alert Policy" : "Create Alert Policy"}</h2>
-          <p className="muted">Define when alerts should fire based on metrics and workload health.</p>
+          <p className="muted">Define when alerts should fire based on metrics or pod log patterns.</p>
         </header>
 
         {error ? <ErrorBanner message={error} /> : null}
@@ -186,7 +341,8 @@ function PolicyFormModal({
             Cluster
             <select
               value={form.clusterId}
-              onChange={(e) =>
+              onChange={(e) => {
+                touch(LOG_TOUCH_KEYS.scope);
                 setForm((p) => ({
                   ...p,
                   clusterId: e.target.value,
@@ -195,8 +351,8 @@ function PolicyFormModal({
                     namespace: "",
                     resourceName: ALL_RESOURCES_VALUE,
                   },
-                }))
-              }
+                }));
+              }}
               required
             >
               <option value="">Select cluster</option>
@@ -214,6 +370,16 @@ function PolicyFormModal({
               value={form.description || ""}
               onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))}
             />
+          </label>
+          <label>
+            Alert Type
+            <select
+              value={form.alertType || "metric"}
+              onChange={(e) => handleAlertTypeChange(e.target.value)}
+            >
+              <option value="metric">Metric</option>
+              <option value="log">Log</option>
+            </select>
           </label>
           <label>
             Severity
@@ -240,9 +406,7 @@ function PolicyFormModal({
             Evaluation Interval
             <select
               value={form.evaluationIntervalSeconds ?? DEFAULT_EVALUATION_INTERVAL_SECONDS}
-              onChange={(e) =>
-                setForm((p) => ({ ...p, evaluationIntervalSeconds: Number(e.target.value) }))
-              }
+              onChange={(e) => handleEvaluationIntervalChange(Number(e.target.value))}
             >
               {(catalog?.evaluationIntervals || EVALUATION_INTERVAL_OPTIONS).map((option) => (
                 <option key={option.seconds} value={option.seconds}>
@@ -262,10 +426,14 @@ function PolicyFormModal({
           <PolicyScopeFields
             clusterId={form.clusterId}
             scope={form.scope}
-            onChange={(scope) => setForm((p) => ({ ...p, scope }))}
+            onChange={(scope) => {
+              touch(LOG_TOUCH_KEYS.scope);
+              setForm((p) => ({ ...p, scope }));
+            }}
           />
         </section>
 
+        {!isLogPolicy ? (
         <section className="alert-policy-section">
           <div className="alert-policy-section-header">
             <h3>Conditions</h3>
@@ -345,6 +513,131 @@ function PolicyFormModal({
             </select>
           </label>
         </section>
+        ) : (
+        <section className="alert-policy-section">
+          <h3>Pattern Matching</h3>
+          <div className="alert-policy-form-grid">
+            <label>
+              Match Type
+              <select
+                value={logConfig.matchType || "contains"}
+                onChange={(e) => {
+                  touch(LOG_TOUCH_KEYS.logMatchType);
+                  setForm((p) => ({
+                    ...p,
+                    logConfig: { ...(p.logConfig || logConfig), matchType: e.target.value },
+                  }));
+                }}
+              >
+                <option value="contains">Contains</option>
+                <option value="regex">Regex</option>
+              </select>
+            </label>
+            <label>
+              Pattern
+              <input
+                value={logConfig.pattern || ""}
+                onChange={(e) => {
+                  touch(LOG_TOUCH_KEYS.logPattern);
+                  setForm((p) => ({
+                    ...p,
+                    logConfig: { ...(p.logConfig || logConfig), pattern: e.target.value },
+                  }));
+                }}
+                placeholder="ERROR, Exception, failed, timeout"
+                required
+              />
+            </label>
+            <label className="full-width checkbox-label settings-checkbox">
+              <input
+                type="checkbox"
+                checked={Boolean(logConfig.caseSensitive)}
+                onChange={(e) => {
+                  touch(LOG_TOUCH_KEYS.logCaseSensitive);
+                  setForm((p) => ({
+                    ...p,
+                    logConfig: { ...(p.logConfig || logConfig), caseSensitive: e.target.checked },
+                  }));
+                }}
+              />
+              Case Sensitive
+            </label>
+          </div>
+
+          <h3 className="alert-policy-subheading">Log Window</h3>
+          <label>
+            Scan Logs From
+            <select
+              value={logConfig.logWindowSeconds ?? 60}
+              onChange={(e) => {
+                touch(LOG_TOUCH_KEYS.logWindow);
+                setForm((p) => ({
+                  ...p,
+                  logConfig: { ...(p.logConfig || logConfig), logWindowSeconds: Number(e.target.value) },
+                }));
+              }}
+            >
+              {logWindowOptions.map((option) => (
+                <option key={option.seconds} value={option.seconds}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <h3 className="alert-policy-subheading">Context Lines</h3>
+          <div className="alert-policy-form-grid">
+            <label>
+              Lines before match
+              <input
+                type="number"
+                min={0}
+                max={50}
+                value={logConfig.contextLinesBefore ?? 5}
+                onChange={(e) => {
+                  touch(LOG_TOUCH_KEYS.logContext);
+                  setForm((p) => ({
+                    ...p,
+                    logConfig: { ...(p.logConfig || logConfig), contextLinesBefore: Number(e.target.value) },
+                  }));
+                }}
+              />
+            </label>
+            <label>
+              Lines after match
+              <input
+                type="number"
+                min={0}
+                max={50}
+                value={logConfig.contextLinesAfter ?? 5}
+                onChange={(e) => {
+                  touch(LOG_TOUCH_KEYS.logContext);
+                  setForm((p) => ({
+                    ...p,
+                    logConfig: { ...(p.logConfig || logConfig), contextLinesAfter: Number(e.target.value) },
+                  }));
+                }}
+              />
+            </label>
+            <label>
+              Max lines in notification
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={logConfig.maxLines ?? 20}
+                onChange={(e) => {
+                  touch(LOG_TOUCH_KEYS.logContext);
+                  setForm((p) => ({
+                    ...p,
+                    logConfig: { ...(p.logConfig || logConfig), maxLines: Number(e.target.value) },
+                  }));
+                }}
+              />
+            </label>
+          </div>
+        </section>
+        )}
 
         <section className="alert-policy-section">
           <h3>Notification Receivers</h3>
@@ -352,6 +645,11 @@ function PolicyFormModal({
             Choose where to send notifications when this policy fires. Configure receivers under
             Administration → Alert Routing.
           </p>
+          {showReceiverWarning ? (
+            <p className="alert-policy-receiver-warning" role="status">
+              Select at least one receiver or receiver group.
+            </p>
+          ) : null}
           {receiverGroups.length ? (
             <>
               <h4 className="alert-policy-subheading">Receiver Groups</h4>
@@ -430,6 +728,8 @@ function PolicyFormModal({
 export default function AlertPoliciesPage({
   clusterId,
   clusterOptions = [],
+  selectedNamespace = "",
+  allowedNamespaces = [],
   hasClusters,
   canManage = false,
   coreLoading = false,
@@ -472,6 +772,16 @@ export default function AlertPoliciesPage({
     loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    if (activeTab !== "policies" || !clusterId) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      loadData();
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [activeTab, clusterId, loadData]);
+
   const openCreate = () => {
     setModalMode("create");
     setEditing({
@@ -486,6 +796,8 @@ export default function AlertPoliciesPage({
     setModalMode("edit");
     setEditing({
       ...policy,
+      alertType: policy.alertType || "metric",
+      logConfig: policy.logConfig || { ...DEFAULT_LOG_CONFIG },
       scope: normalizeScope(policy.scope),
       showOnDashboard: policy.showOnDashboard !== false,
       receiverIds: policy.receiverIds || [],
@@ -542,17 +854,39 @@ export default function AlertPoliciesPage({
         id: policy.id,
         name: policy.name,
         cluster: policy.clusterId,
+        alertType: policy.alertType === "log" ? "Log" : "Metric",
         severity: policy.severity,
         status: policy.enabled ? "Enabled" : "Disabled",
-        logic: policy.conditionLogic === "all" ? "ALL" : "ANY",
-        conditions: `${(policy.conditions || []).length} rule(s)`,
+        logic: policy.alertType === "log" ? "—" : policy.conditionLogic === "all" ? "ALL" : "ANY",
+        conditions:
+          policy.alertType === "log"
+            ? policy.logConfig?.pattern || "—"
+            : `${(policy.conditions || []).length} rule(s)`,
         receivers: formatNotificationDestinations(policy),
-        evaluationInterval: formatEvaluationInterval(policy),
-        dashboard: policy.showOnDashboard !== false ? "Yes" : "No",
+        evaluationInterval: formatEvaluationIntervalShort(policy),
+        lastEval: <PolicyLastEvalCell policy={policy} />,
         actions: policy,
       })),
     [policies]
   );
+
+  const policyTableColumns = useMemo(() => {
+    const columns = [
+      { key: "name", label: "Policy" },
+      ...(clusterId ? [] : [{ key: "cluster", label: "Cluster" }]),
+      { key: "alertType", label: "Type" },
+      { key: "severity", label: "Severity" },
+      { key: "status", label: "Status" },
+      { key: "conditions", label: "Conditions" },
+      { key: "receivers", label: "Receivers" },
+      { key: "evaluationInterval", label: "Interval" },
+      { key: "lastEval", label: "Last evaluation" },
+    ];
+    if (canManage) {
+      columns.push({ key: "actions", label: "Actions" });
+    }
+    return columns;
+  }, [canManage, clusterId]);
 
   const historyRows = useMemo(
     () =>
@@ -565,10 +899,12 @@ export default function AlertPoliciesPage({
         policy: row.policyName || "—",
         severity: row.severity,
         status: row.status === "active" ? "Active" : "Resolved",
-        conditions: (row.triggeredConditions || [])
-          .filter((c) => c.matched)
-          .map((c) => `${c.metricLabel || c.metricKey} ${c.operator} ${c.threshold}`)
-          .join("; ") || "—",
+        conditions: row.alertType === "log"
+          ? row.matchedPattern || "—"
+          : (row.triggeredConditions || [])
+              .filter((c) => c.matched)
+              .map((c) => `${c.metricLabel || c.metricKey} ${c.operator} ${c.threshold}`)
+              .join("; ") || "—",
       })),
     [history]
   );
@@ -618,39 +954,17 @@ export default function AlertPoliciesPage({
           policyRows.length ? (
             <DataTable
               tableClassName="alert-policies-table"
-              columns={[
-                { key: "name", label: "Policy" },
-                { key: "cluster", label: "Cluster" },
-                { key: "severity", label: "Severity" },
-                { key: "status", label: "Status" },
-                { key: "logic", label: "Logic" },
-                { key: "conditions", label: "Conditions" },
-                { key: "receivers", label: "Receivers" },
-                { key: "evaluationInterval", label: "Evaluation Interval" },
-                { key: "dashboard", label: "Dashboard" },
-                { key: "actions", label: "Actions" },
-              ]}
+              columns={policyTableColumns}
               rows={policyRows.map((row) => ({
                 ...row,
                 actions: canManage ? (
-                  <div className="inventory-actions-cell">
-                    <button type="button" className="btn-text" onClick={() => openEdit(row.actions)}>
-                      Edit
-                    </button>
-                    <button type="button" className="btn-text" onClick={() => handleToggle(row.actions)}>
-                      {row.actions.enabled ? "Disable" : "Enable"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-text danger-text"
-                      onClick={() => handleDelete(row.actions)}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                ) : (
-                  <span className="muted">—</span>
-                ),
+                  <PolicyRowActions
+                    policy={row.actions}
+                    onEdit={openEdit}
+                    onToggle={handleToggle}
+                    onDelete={handleDelete}
+                  />
+                ) : null,
               }))}
             />
           ) : (
@@ -685,6 +999,8 @@ export default function AlertPoliciesPage({
         initial={editing || EMPTY_POLICY}
         catalog={catalog}
         clusterOptions={clusterOptions}
+        activeNamespace={selectedNamespace}
+        namespaceOptions={allowedNamespaces}
         onClose={() => setModalOpen(false)}
         onSave={handleSave}
         saving={saving}

@@ -47,6 +47,25 @@ def dispatch_policy_alert_notifications(alert: Dict[str, Any]) -> Dict[str, Any]
     return route_policy_alert_notifications(alert)
 
 
+def dispatch_pending_policy_notifications(policy_id: int) -> Dict[str, Any]:
+    """Deliver any outstanding notifications for active alerts on a policy."""
+    from .models import AlertHistory
+    from .services.alert_policy_evaluator import _history_to_alert_dict
+
+    notifications = _get_notification_settings()
+    if not notifications.get("alerts"):
+        return {"sent": 0, "skipped": 0, "errors": []}
+
+    summary: Dict[str, Any] = {"sent": 0, "skipped": 0, "errors": []}
+    rows = AlertHistory.query.filter_by(policy_id=int(policy_id), status="active").all()
+    for row in rows:
+        result = dispatch_policy_alert_notifications(_history_to_alert_dict(row))
+        summary["sent"] += int(result.get("sent") or 0)
+        summary["skipped"] += int(result.get("skipped") or 0)
+        summary["errors"].extend(result.get("errors") or [])
+    return summary
+
+
 def send_test_alert_email(recipient: str | None = None) -> Dict[str, Any]:
     return send_smtp_test(recipient)
 

@@ -94,6 +94,24 @@ CONDITION_LOGIC = ("any", "all")
 
 DEFAULT_EVALUATION_INTERVAL_SECONDS = 300
 
+ALERT_TYPES = ("metric", "log")
+DEFAULT_ALERT_TYPE = "metric"
+
+LOG_MATCH_TYPES = ("contains", "regex")
+DEFAULT_LOG_MATCH_TYPE = "contains"
+
+LOG_WINDOW_SECONDS_OPTIONS: List[Dict[str, Any]] = [
+    {"seconds": 60, "label": "Last 1 minute"},
+    {"seconds": 300, "label": "Last 5 minutes"},
+    {"seconds": 900, "label": "Last 15 minutes"},
+    {"seconds": 1800, "label": "Last 30 minutes"},
+]
+ALLOWED_LOG_WINDOW_SECONDS = {item["seconds"] for item in LOG_WINDOW_SECONDS_OPTIONS}
+DEFAULT_LOG_WINDOW_SECONDS = 60
+DEFAULT_CONTEXT_LINES_BEFORE = 5
+DEFAULT_CONTEXT_LINES_AFTER = 5
+DEFAULT_MAX_LOG_LINES = 20
+
 EVALUATION_INTERVALS: List[Dict[str, Any]] = [
     {"seconds": 60, "label": "1 minute"},
     {"seconds": 300, "label": "5 minutes"},
@@ -145,11 +163,83 @@ def catalog_payload(
         "scopeTypes": list(SCOPE_TYPES),
         "severityLevels": list(SEVERITY_LEVELS),
         "conditionLogic": list(CONDITION_LOGIC),
+        "alertTypes": list(ALERT_TYPES),
+        "defaultAlertType": DEFAULT_ALERT_TYPE,
+        "logMatchTypes": list(LOG_MATCH_TYPES),
+        "logWindowOptions": LOG_WINDOW_SECONDS_OPTIONS,
+        "defaultLogConfig": default_log_config(),
         "evaluationIntervals": EVALUATION_INTERVALS,
         "defaultEvaluationIntervalSeconds": DEFAULT_EVALUATION_INTERVAL_SECONDS,
         "receivers": receivers or [],
         "receiverGroups": receiver_groups or [],
     }
+
+
+def default_log_config() -> Dict[str, Any]:
+    return {
+        "matchType": DEFAULT_LOG_MATCH_TYPE,
+        "pattern": "",
+        "caseSensitive": False,
+        "logWindowSeconds": DEFAULT_LOG_WINDOW_SECONDS,
+        "contextLinesBefore": DEFAULT_CONTEXT_LINES_BEFORE,
+        "contextLinesAfter": DEFAULT_CONTEXT_LINES_AFTER,
+        "maxLines": DEFAULT_MAX_LOG_LINES,
+    }
+
+
+def normalize_alert_type(raw: Any) -> str:
+    value = str(raw or DEFAULT_ALERT_TYPE).strip().lower()
+    return value if value in ALERT_TYPES else DEFAULT_ALERT_TYPE
+
+
+def normalize_log_config(raw: Any) -> Dict[str, Any]:
+    defaults = default_log_config()
+    if not isinstance(raw, dict):
+        return defaults
+    match_type = str(raw.get("matchType") or defaults["matchType"]).strip().lower()
+    if match_type not in LOG_MATCH_TYPES:
+        match_type = defaults["matchType"]
+    try:
+        log_window = int(raw.get("logWindowSeconds", defaults["logWindowSeconds"]))
+    except (TypeError, ValueError):
+        log_window = defaults["logWindowSeconds"]
+    if log_window not in ALLOWED_LOG_WINDOW_SECONDS:
+        log_window = defaults["logWindowSeconds"]
+    try:
+        context_before = int(raw.get("contextLinesBefore", defaults["contextLinesBefore"]))
+    except (TypeError, ValueError):
+        context_before = defaults["contextLinesBefore"]
+    try:
+        context_after = int(raw.get("contextLinesAfter", defaults["contextLinesAfter"]))
+    except (TypeError, ValueError):
+        context_after = defaults["contextLinesAfter"]
+    try:
+        max_lines = int(raw.get("maxLines", defaults["maxLines"]))
+    except (TypeError, ValueError):
+        max_lines = defaults["maxLines"]
+    return {
+        "matchType": match_type,
+        "pattern": str(raw.get("pattern") or "").strip(),
+        "caseSensitive": bool(raw.get("caseSensitive", defaults["caseSensitive"])),
+        "logWindowSeconds": log_window,
+        "contextLinesBefore": max(0, min(context_before, 50)),
+        "contextLinesAfter": max(0, min(context_after, 50)),
+        "maxLines": max(1, min(max_lines, 200)),
+    }
+
+
+def validate_log_config(config: Dict[str, Any]) -> Optional[str]:
+    normalized = normalize_log_config(config)
+    if not normalized["pattern"]:
+        return "Log pattern is required"
+    if normalized["matchType"] == "regex":
+        import re
+
+        try:
+            re.compile(normalized["pattern"])
+        except re.error as exc:
+            return f"Invalid regex pattern: {exc}"
+    return None
 
 
 def validate_condition(condition: Dict[str, Any]) -> Optional[str]:

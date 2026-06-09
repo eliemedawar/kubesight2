@@ -462,11 +462,39 @@ class AlertDeliveryLog(db.Model):
     receiver_type = db.Column(db.String(32), nullable=False, default="")
     status = db.Column(db.String(16), nullable=False, index=True)
     error_message = db.Column(db.Text, nullable=True)
+    matched_pattern = db.Column(db.String(512), nullable=True)
+    pod_name = db.Column(db.String(253), nullable=True)
+    log_snippet = db.Column(db.Text, nullable=True)
     delivered_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
         index=True,
+    )
+
+
+class LogAlertSeen(db.Model):
+    __tablename__ = "log_alert_seen"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "policy_id",
+            "pod_name",
+            "container_name",
+            "log_hash",
+            name="uq_log_alert_seen",
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    policy_id = db.Column(db.Integer, db.ForeignKey("alert_policies.id", ondelete="CASCADE"), nullable=False, index=True)
+    pod_name = db.Column(db.String(253), nullable=False)
+    container_name = db.Column(db.String(253), nullable=False, default="")
+    log_timestamp = db.Column(db.String(64), nullable=False, default="")
+    log_hash = db.Column(db.String(64), nullable=False, index=True)
+    seen_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )
 
 
@@ -478,13 +506,19 @@ class AlertPolicy(db.Model):
     cluster_id = db.Column(db.String(120), nullable=False, index=True)
     description = db.Column(db.Text, nullable=True)
     enabled = db.Column(db.Boolean, nullable=False, default=True, index=True)
+    alert_type = db.Column(db.String(16), nullable=False, default="metric", index=True)
     severity = db.Column(db.String(16), nullable=False, default="warning")
     condition_logic = db.Column(db.String(8), nullable=False, default="any")
     conditions = db.Column(db.JSON, nullable=False, default=list)
+    log_config = db.Column(db.JSON, nullable=True)
     scope = db.Column(db.JSON, nullable=False, default=dict)
     notification_channels = db.Column(db.JSON, nullable=False, default=list)
     evaluation_interval_seconds = db.Column(db.Integer, nullable=False, default=300)
     last_evaluated_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_evaluation_result = db.Column(db.String(16), nullable=True)
+    last_measured_value = db.Column(db.String(255), nullable=True)
+    last_threshold = db.Column(db.String(64), nullable=True)
+    last_evaluation_error = db.Column(db.Text, nullable=True)
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
     created_at = db.Column(
         db.DateTime(timezone=True),
@@ -531,12 +565,14 @@ class AlertHistory(db.Model):
     namespace = db.Column(db.String(253), nullable=True, index=True)
     resource_type = db.Column(db.String(32), nullable=True)
     resource_name = db.Column(db.String(253), nullable=True)
+    alert_type = db.Column(db.String(16), nullable=False, default="metric", index=True)
     severity = db.Column(db.String(16), nullable=False, default="warning")
     status = db.Column(db.String(16), nullable=False, default="active", index=True)
     title = db.Column(db.String(255), nullable=False, default="")
     description = db.Column(db.Text, nullable=True)
     triggered_conditions = db.Column(db.JSON, nullable=False, default=list)
     metric_snapshot = db.Column(db.JSON, nullable=True)
+    log_snapshot = db.Column(db.JSON, nullable=True)
     fired_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,

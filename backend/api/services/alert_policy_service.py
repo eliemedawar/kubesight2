@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from ..access_engine import can_access_cluster, is_admin
 from ..alert_policy_catalog import (
@@ -12,15 +15,45 @@ from ..alert_policy_catalog import (
     SEVERITY_LEVELS,
     catalog_payload,
     evaluation_interval_display,
+    normalize_alert_type,
     normalize_evaluation_interval_seconds,
+    normalize_log_config,
     validate_condition,
     validate_evaluation_interval,
+    validate_log_config,
     normalize_scope,
     validate_scope,
 )
+from ..datetime_utils import serialize_utc_datetime
 from ..audit import log_audit
 from ..db import db
-from ..models import AlertHistory, AlertPolicy, AlertRoutingReceiver, AlertRoutingReceiverGroup, User
+from ..models import AlertHistory, AlertPolicy, AlertRoutingReceiver, AlertRoutingReceiverGroup, LogAlertSeen, User
+
+
+def _reset_policy_evaluation_state(policy: AlertPolicy) -> None:
+    policy.last_evaluated_at = None
+    policy.last_evaluation_result = None
+    policy.last_measured_value = None
+    policy.last_threshold = None
+    policy.last_evaluation_error = None
+
+
+def _trigger_policy_evaluation(policy: AlertPolicy, user: Optional[User] = None) -> None:
+    if not policy.enabled:
+        return
+    from ..alert_notifier import dispatch_pending_policy_notifications
+    from .alert_policy_evaluator import evaluate_policies_for_cluster
+
+    try:
+        evaluate_policies_for_cluster(policy.cluster_id, user=user, persist=True)
+        dispatch_pending_policy_notifications(policy.id)
+        db.session.refresh(policy)
+    except Exception:
+        logger.exception(
+            "Immediate alert policy evaluation failed: policy_id=%s cluster=%s",
+            policy.id,
+            policy.cluster_id,
+        )
 
 
 def policy_show_on_dashboard(policy: AlertPolicy) -> bool:
@@ -169,9 +202,11 @@ def _policy_dict(policy: AlertPolicy) -> Dict[str, Any]:
         "clusterId": policy.cluster_id,
         "description": policy.description,
         "enabled": policy.enabled,
+        "alertType": normalize_alert_type(getattr(policy, "alert_type", "metric")),
         "severity": policy.severity,
         "conditionLogic": policy.condition_logic,
         "conditions": policy.conditions or [],
+        "logConfig": normalize_log_config(policy.log_config),
         "scope": normalize_scope(policy.scope),
         "showOnDashboard": policy_show_on_dashboard(policy),
         "receiverIds": [receiver.id for receiver in receivers],
@@ -182,14 +217,30 @@ def _policy_dict(policy: AlertPolicy) -> Dict[str, Any]:
         "evaluationIntervalLabel": evaluation_interval_display(
             int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS)
         ),
-        "lastEvaluatedAt": policy.last_evaluated_at.isoformat() if policy.last_evaluated_at else None,
+        "lastEvaluatedAt": serialize_utc_datetime(policy.last_evaluated_at),
+        "lastResult": policy.last_evaluation_result,
+        "lastMeasuredValue": policy.last_measured_value,
+        "lastThreshold": policy.last_threshold,
+        "lastEvaluationError": policy.last_evaluation_error,
         "createdByUserId": policy.created_by_user_id,
         "createdAt": policy.created_at.isoformat() if policy.created_at else None,
         "updatedAt": policy.updated_at.isoformat() if policy.updated_at else None,
     }
 
 
-def _validate_payload(payload: Dict[str, Any], *, partial: bool = False) -> Optional[str]:
+def _validate_payload(
+    payload: Dict[str, Any],
+    *,
+    partial: bool = False,
+    existing: Optional[AlertPolicy] = None,
+) -> Optional[str]:
+    if "alertType" in payload:
+        alert_type = normalize_alert_type(payload.get("alertType"))
+    elif existing is not None:
+        alert_type = normalize_alert_type(getattr(existing, "alert_type", "metric"))
+    else:
+        alert_type = "metric" if partial else normalize_alert_type(payload.get("alertType", "metric"))
+
     if not partial or "name" in payload:
         if not str(payload.get("name") or "").strip():
             return "Policy name is required"
@@ -200,16 +251,22 @@ def _validate_payload(payload: Dict[str, Any], *, partial: bool = False) -> Opti
         severity = str(payload.get("severity") or "warning").lower()
         if severity not in SEVERITY_LEVELS:
             return "Invalid severity level"
-    if "conditionLogic" in payload or not partial:
-        logic = str(payload.get("conditionLogic") or "any").lower()
-        if logic not in CONDITION_LOGIC:
-            return "Invalid condition logic"
-    if "conditions" in payload or not partial:
-        conditions = payload.get("conditions") or []
-        if not isinstance(conditions, list) or not conditions:
-            return "At least one condition is required"
-        for condition in conditions:
-            error = validate_condition(condition)
+    if alert_type == "metric":
+        if "conditionLogic" in payload or not partial:
+            logic = str(payload.get("conditionLogic") or "any").lower()
+            if logic not in CONDITION_LOGIC:
+                return "Invalid condition logic"
+        if "conditions" in payload or not partial:
+            conditions = payload.get("conditions") or []
+            if not isinstance(conditions, list) or not conditions:
+                return "At least one condition is required"
+            for condition in conditions:
+                error = validate_condition(condition)
+                if error:
+                    return error
+    elif alert_type == "log":
+        if "logConfig" in payload or not partial:
+            error = validate_log_config(payload.get("logConfig") or {})
             if error:
                 return error
     if "scope" in payload or not partial:
@@ -254,6 +311,11 @@ def _validate_payload(payload: Dict[str, Any], *, partial: bool = False) -> Opti
 
 
 def list_policies(user: Optional[User], cluster_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    if cluster_id:
+        from .alert_policy_evaluator import evaluate_policies_for_cluster
+
+        evaluate_policies_for_cluster(cluster_id, user=user, persist=True)
+
     query = AlertPolicy.query.order_by(AlertPolicy.name.asc())
     if cluster_id:
         query = query.filter_by(cluster_id=cluster_id)
@@ -281,14 +343,17 @@ def create_policy(user: Optional[User], payload: Dict[str, Any]) -> Tuple[Option
         return None, "Forbidden", 403
 
     now = datetime.now(timezone.utc)
+    alert_type = normalize_alert_type(payload.get("alertType", "metric"))
     policy = AlertPolicy(
         name=str(payload.get("name")).strip(),
         cluster_id=cluster_id,
         description=(payload.get("description") or None),
         enabled=bool(payload.get("enabled", True)),
+        alert_type=alert_type,
         severity=str(payload.get("severity") or "warning").lower(),
         condition_logic=str(payload.get("conditionLogic") or "any").lower(),
-        conditions=payload.get("conditions") or [],
+        conditions=(payload.get("conditions") or []) if alert_type == "metric" else [],
+        log_config=normalize_log_config(payload.get("logConfig")) if alert_type == "log" else None,
         scope=normalize_scope(payload.get("scope")),
         notification_channels=_dashboard_channels_from_payload(payload),
         evaluation_interval_seconds=normalize_evaluation_interval_seconds(
@@ -302,7 +367,9 @@ def create_policy(user: Optional[User], payload: Dict[str, Any]) -> Tuple[Option
     db.session.flush()
     _sync_policy_receivers(policy, _normalize_receiver_ids(payload))
     _sync_policy_receiver_groups(policy, _normalize_receiver_group_ids(payload))
+    _reset_policy_evaluation_state(policy)
     db.session.commit()
+    _trigger_policy_evaluation(policy, user=user)
     log_audit("alert_policy_created", actor=user, target_type="alert_policy", target_id=str(policy.id))
     return _policy_dict(policy), None, 201
 
@@ -318,7 +385,7 @@ def update_policy(
     if user and not is_admin(user) and not can_access_cluster(user, policy.cluster_id):
         return None, "Forbidden", 403
 
-    error = _validate_payload(payload, partial=True)
+    error = _validate_payload(payload, partial=True, existing=policy)
     if error:
         return None, error, 400
 
@@ -333,12 +400,24 @@ def update_policy(
         policy.description = payload.get("description") or None
     if "enabled" in payload:
         policy.enabled = bool(payload.get("enabled"))
+    if "alertType" in payload:
+        policy.alert_type = normalize_alert_type(payload.get("alertType"))
     if "severity" in payload:
         policy.severity = str(payload.get("severity")).lower()
-    if "conditionLogic" in payload:
-        policy.condition_logic = str(payload.get("conditionLogic")).lower()
-    if "conditions" in payload:
-        policy.conditions = payload.get("conditions") or []
+    if policy.alert_type == "metric":
+        if "conditionLogic" in payload:
+            policy.condition_logic = str(payload.get("conditionLogic")).lower()
+        if "conditions" in payload:
+            policy.conditions = payload.get("conditions") or []
+        if "alertType" in payload:
+            policy.log_config = None
+    else:
+        if "logConfig" in payload:
+            policy.log_config = normalize_log_config(payload.get("logConfig"))
+        elif "alertType" in payload and not policy.log_config:
+            policy.log_config = normalize_log_config({})
+        if "alertType" in payload:
+            policy.conditions = []
     if "scope" in payload:
         policy.scope = normalize_scope(payload.get("scope"))
     if "showOnDashboard" in payload or "notificationChannels" in payload:
@@ -352,12 +431,12 @@ def update_policy(
         _sync_policy_receiver_groups(policy, _normalize_receiver_group_ids(payload))
     if "evaluationIntervalSeconds" in payload:
         interval = normalize_evaluation_interval_seconds(payload.get("evaluationIntervalSeconds"))
-        if policy.evaluation_interval_seconds != interval:
-            policy.last_evaluated_at = None
         policy.evaluation_interval_seconds = interval
 
+    _reset_policy_evaluation_state(policy)
     policy.updated_at = datetime.now(timezone.utc)
     db.session.commit()
+    _trigger_policy_evaluation(policy, user=user)
     log_audit("alert_policy_updated", actor=user, target_type="alert_policy", target_id=str(policy.id))
     return _policy_dict(policy), None, 200
 
@@ -392,6 +471,7 @@ def delete_policy(user: Optional[User], policy_id: int) -> Tuple[Optional[Dict[s
     if user and not is_admin(user) and not can_access_cluster(user, policy.cluster_id):
         return None, "Forbidden", 403
     AlertHistory.query.filter_by(policy_id=policy.id).delete()
+    LogAlertSeen.query.filter_by(policy_id=policy.id).delete()
     db.session.delete(policy)
     db.session.commit()
     log_audit("alert_policy_deleted", actor=user, target_type="alert_policy", target_id=str(policy_id))

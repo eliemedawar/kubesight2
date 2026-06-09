@@ -63,12 +63,42 @@ def _smtp_settings() -> Dict[str, Any]:
 
 
 def _build_alert_subject(alert: Dict[str, Any]) -> str:
+    if alert.get("alertType") == "log":
+        severity = str(alert.get("severity", "alert")).upper()
+        return f"[KubeSight][{severity}] Error detected in logs"
     severity = str(alert.get("severity", "alert")).upper()
     title = alert.get("title") or "KubeSight alert"
     return f"[KubeSight][{severity}] {title}"
 
 
+def _build_log_alert_body(alert: Dict[str, Any]) -> str:
+    lines = [
+        f"Cluster: {alert.get('clusterId', '-')}",
+        f"Namespace: {alert.get('namespace', '-')}",
+    ]
+    if alert.get("deployment"):
+        lines.append(f"Deployment: {alert.get('deployment')}")
+    lines.extend(
+        [
+            f"Pod: {alert.get('pod', '-')}",
+            "",
+            f"Matched Pattern:",
+            str(alert.get("matchedPattern") or "-"),
+            "",
+            f"Detected At:",
+            str(alert.get("detectedAt") or alert.get("firedAt") or "-"),
+            "",
+            "Log Snippet:",
+            "",
+            str(alert.get("logSnippet") or "-"),
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _build_alert_body(alert: Dict[str, Any]) -> str:
+    if alert.get("alertType") == "log":
+        return _build_log_alert_body(alert)
     lines = [
         "KubeSight alert notification",
         "",

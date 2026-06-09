@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
   createUser,
   disableUser,
@@ -13,7 +13,8 @@ import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
 import RolesPanel from "../components/user-management/RolesPanel";
-import UserFormModal from "../components/user-management/UserFormModal";
+
+const UserFormModal = lazy(() => import("../components/user-management/UserFormModal.jsx"));
 
 export default function UserManagementPage() {
   const { user: currentUser, hasPermission } = useAuth();
@@ -364,19 +365,23 @@ export default function UserManagementPage() {
         )}
       </section>
 
-      <UserFormModal
-        open={modalOpen}
-        editingUser={editingUser}
-        roles={roles}
-        clusters={clusters}
-        currentUser={currentUser}
-        onClose={() => {
-          setModalOpen(false);
-          setEditingUser(null);
-        }}
-        onSave={handleSave}
-        saving={saving}
-      />
+      {modalOpen ? (
+        <Suspense fallback={null}>
+          <UserFormModal
+            open={modalOpen}
+            editingUser={editingUser}
+            roles={roles}
+            clusters={clusters}
+            currentUser={currentUser}
+            onClose={() => {
+              setModalOpen(false);
+              setEditingUser(null);
+            }}
+            onSave={handleSave}
+            saving={saving}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

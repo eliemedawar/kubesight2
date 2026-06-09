@@ -59,7 +59,7 @@ export const NAV_PAGES = [
   },
   {
     key: "clusterManagement",
-    label: "Clusters",
+    label: "Cluster Management",
     anyPermissions: ["clusters:add", "clusters:update", "clusters:remove", "clusters:test"],
     section: "Infrastructure",
   },

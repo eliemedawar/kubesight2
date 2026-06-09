@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+import { useMediaQuery } from "../../hooks/useMediaQuery.js";
 import {
   IconCode,
   IconCube,
@@ -46,15 +48,90 @@ function stopRowClick(event) {
   event.stopPropagation();
 }
 
+function resolveActionConfig(id) {
+  return (
+    ACTION_CONFIG[id] || {
+      label: id.replace(/-/g, " "),
+      Icon: IconDocument,
+    }
+  );
+}
+
 export default function ResourceRowActions({ actions, fallback = null, onAction }) {
+  const isCompact = useMediaQuery("(max-width: 768px)");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+
   let ids = parseActions(actions);
 
   if (!ids.length && fallback) {
     ids = [normalizeActionId(fallback)];
   }
 
+  useEffect(() => {
+    if (!menuOpen) {
+      return undefined;
+    }
+    const handlePointerDown = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [menuOpen]);
+
   if (!ids.length) {
     return <span className="muted">—</span>;
+  }
+
+  const handleAction = (id, event) => {
+    stopRowClick(event);
+    setMenuOpen(false);
+    onAction?.(id, event);
+  };
+
+  if (isCompact) {
+    return (
+      <div
+        className="resource-actions-compact"
+        ref={menuRef}
+        onClick={stopRowClick}
+        onKeyDown={stopRowClick}
+        role="presentation"
+      >
+        <button
+          type="button"
+          className="btn-sm btn-outline resource-actions-toggle"
+          aria-expanded={menuOpen}
+          aria-haspopup="menu"
+          onClick={(event) => {
+            stopRowClick(event);
+            setMenuOpen((open) => !open);
+          }}
+        >
+          Actions
+        </button>
+        {menuOpen ? (
+          <div className="resource-actions-menu" role="menu">
+            {ids.map((id) => {
+              const { label } = resolveActionConfig(id);
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="menuitem"
+                  className="resource-actions-menu-item"
+                  onClick={(event) => handleAction(id, event)}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   return (
@@ -65,19 +142,12 @@ export default function ResourceRowActions({ actions, fallback = null, onAction 
       role="presentation"
     >
       {ids.map((id) => {
-        const config = ACTION_CONFIG[id] || {
-          label: id.replace(/-/g, " "),
-          Icon: IconDocument,
-        };
-        const { label, Icon } = config;
+        const { label, Icon } = resolveActionConfig(id);
         return (
           <InventoryIconButton
             key={id}
             label={label}
-            onClick={(event) => {
-              stopRowClick(event);
-              onAction?.(id, event);
-            }}
+            onClick={(event) => handleAction(id, event)}
           >
             <Icon />
           </InventoryIconButton>

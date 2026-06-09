@@ -40,11 +40,6 @@ def _seed_roles(permissions_by_key: dict) -> dict:
             role.permissions = default_permissions
         elif not role.permissions:
             role.permissions = default_permissions
-        elif role.is_system_role:
-            current_keys = {perm.key for perm in role.permissions}
-            for key in definition["permissions"]:
-                if key not in current_keys and key in permissions_by_key:
-                    role.permissions.append(permissions_by_key[key])
         roles_by_name[name] = role
     db.session.flush()
     return roles_by_name

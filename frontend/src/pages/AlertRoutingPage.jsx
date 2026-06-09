@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import PageTitle from "../components/common/PageTitle.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import DataTable from "../components/common/DataTable.jsx";
@@ -17,6 +17,8 @@ import {
   updateReceiver,
 } from "../api/alertRoutingApi.js";
 
+const AlertLogContextModal = lazy(() => import("../components/alerts/AlertLogContextModal.jsx"));
+
 const TABS = [
   { key: "smtp", label: "SMTP Settings" },
   { key: "receivers", label: "Receivers" },
@@ -33,6 +35,8 @@ const EMPTY_SMTP = {
   useTls: true,
   useSsl: false,
 };
+
+const WEBHOOK_HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
 const EMPTY_RECEIVER = {
   name: "",
@@ -363,9 +367,11 @@ function ReceiverModal({ open, mode, initial, onClose, onSave, saving, error }) 
                   value={form.httpMethod || "POST"}
                   onChange={(e) => setForm((p) => ({ ...p, httpMethod: e.target.value }))}
                 >
-                  <option value="POST">POST</option>
-                  <option value="PUT">PUT</option>
-                  <option value="PATCH">PATCH</option>
+                  {WEBHOOK_HTTP_METHODS.map((method) => (
+                    <option key={method} value={method}>
+                      {method}
+                    </option>
+                  ))}
                 </select>
               </label>
               <label className="full-width">
@@ -697,9 +703,13 @@ function ReceiversTab({ receivers, groups, onChanged }) {
 }
 
 function LogsTab({ logs, onRefresh, loading }) {
+  const [selectedLog, setSelectedLog] = useState(null);
+
   const logRows = logs.map((log) => ({
     ...log,
     groupName: log.groupName || "—",
+    matchedPattern: log.matchedPattern || "—",
+    podName: log.podName || "—",
     deliveredAtDisplay: log.deliveredAt ? new Date(log.deliveredAt).toLocaleString() : "—",
     typeDisplay: <ReceiverTypeBadge type={log.receiverType} />,
     statusDisplay: (
@@ -709,16 +719,26 @@ function LogsTab({ logs, onRefresh, loading }) {
       />
     ),
     errorDisplay: log.errorMessage || "—",
+    snippetAction: log.logSnippet ? (
+      <button type="button" className="btn-text" onClick={() => setSelectedLog(log)}>
+        View Log Context
+      </button>
+    ) : (
+      "—"
+    ),
   }));
 
   const columns = [
     { key: "alertName", label: "Alert" },
     { key: "policyName", label: "Policy" },
+    { key: "matchedPattern", label: "Pattern" },
+    { key: "podName", label: "Pod" },
     { key: "groupName", label: "Group" },
     { key: "receiverName", label: "Receiver" },
     { key: "typeDisplay", label: "Type" },
     { key: "statusDisplay", label: "Status" },
     { key: "deliveredAtDisplay", label: "Timestamp" },
+    { key: "snippetAction", label: "Log" },
     { key: "errorDisplay", label: "Error" },
   ];
 
@@ -739,6 +759,16 @@ function LogsTab({ logs, onRefresh, loading }) {
       ) : (
         <EmptyState message="Logs appear when policy alerts are delivered to receivers." />
       )}
+
+      {selectedLog ? (
+        <Suspense fallback={null}>
+          <AlertLogContextModal
+            open={Boolean(selectedLog)}
+            deliveryLog={selectedLog}
+            onClose={() => setSelectedLog(null)}
+          />
+        </Suspense>
+      ) : null}
     </section>
   );
 }
@@ -802,7 +832,7 @@ export default function AlertRoutingPage() {
   };
 
   return (
-    <>
+    <div className="ops-page">
       <PageTitle
         title="Alert Routing"
         subtitle="Configure SMTP, notification receivers, and review delivery logs."
@@ -829,6 +859,6 @@ export default function AlertRoutingPage() {
         <ReceiversTab receivers={receivers} groups={receiverGroups} onChanged={refreshPartial} />
       ) : null}
       {activeTab === "logs" ? <LogsTab logs={logs} onRefresh={refreshLogs} loading={loading} /> : null}
-    </>
+    </div>
   );
 }

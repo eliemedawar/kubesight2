@@ -412,12 +412,17 @@ def resolve_context_for_cluster(cluster_id: str) -> Optional[str]:
 
 
 def cluster_overview_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
-    nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
-    nodes_data = json.loads(nodes_output)
-    node_items = nodes_data.get("items", [])
+    from concurrent.futures import ThreadPoolExecutor
 
-    pods_output = _run_for_access(access, ["get", "pods", "--all-namespaces", "-o", "json"])
-    pods_data = json.loads(pods_output)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        nodes_future = pool.submit(_run_for_access, access, ["get", "nodes", "-o", "json"])
+        pods_future = pool.submit(
+            _run_for_access, access, ["get", "pods", "--all-namespaces", "-o", "json"]
+        )
+        nodes_data = json.loads(nodes_future.result())
+        pods_data = json.loads(pods_future.result())
+
+    node_items = nodes_data.get("items", [])
     pod_items = pods_data.get("items", [])
 
     running = sum(1 for pod in pod_items if pod.get("status", {}).get("phase") == "Running")
@@ -444,23 +449,42 @@ def cluster_overview_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
 
 
 def _resource_counts_by_namespace(access: ClusterAccess) -> Dict[str, Dict[str, int]]:
-    counts: Dict[str, Dict[str, int]] = {}
-    for resource, key in (
-        ("pods", "pods"),
-        ("deployments", "deployments"),
-        ("services", "services"),
-    ):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _count_resource(resource: str, key: str) -> Dict[str, Dict[str, int]]:
+        partial: Dict[str, Dict[str, int]] = {}
         try:
             output = _run_for_access(access, ["get", resource, "-A", "-o", "json"])
             for item in json.loads(output).get("items", []):
                 namespace = item.get("metadata", {}).get("namespace", "default")
-                bucket = counts.setdefault(
+                bucket = partial.setdefault(
                     namespace,
                     {"pods": 0, "deployments": 0, "services": 0},
                 )
                 bucket[key] += 1
         except K8sCommandError:
-            continue
+            pass
+        return partial
+
+    counts: Dict[str, Dict[str, int]] = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [
+            pool.submit(_count_resource, resource, key)
+            for resource, key in (
+                ("pods", "pods"),
+                ("deployments", "deployments"),
+                ("services", "services"),
+            )
+        ]
+        for future in as_completed(futures):
+            for namespace, bucket in future.result().items():
+                merged = counts.setdefault(
+                    namespace,
+                    {"pods": 0, "deployments": 0, "services": 0},
+                )
+                for metric_key, value in bucket.items():
+                    merged[metric_key] += value
+
     return counts
 
 

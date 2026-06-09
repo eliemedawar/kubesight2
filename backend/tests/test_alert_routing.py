@@ -45,6 +45,27 @@ def test_admin_can_read_and_save_smtp(client, admin_token):
     assert row.password_encrypted != "secret-pass"
 
 
+def test_webhook_receiver_accepts_get_and_other_http_methods(client, admin_token):
+    for method in ("GET", "DELETE", "HEAD", "OPTIONS"):
+        response = client.post(
+            "/api/alert-routing/receivers",
+            headers=auth_headers(admin_token),
+            json={
+                "name": f"Webhook {method}",
+                "type": "webhook",
+                "url": "https://webhook.site/test-endpoint",
+                "httpMethod": method,
+                "enabled": True,
+            },
+        )
+        assert response.status_code == 201, method
+        assert response.get_json()["data"]["httpMethod"] == method
+        client.delete(
+            f"/api/alert-routing/receivers/{response.get_json()['data']['id']}",
+            headers=auth_headers(admin_token),
+        )
+
+
 def test_receiver_crud_and_policy_dispatch(client, admin_token):
     email_resp = client.post(
         "/api/alert-routing/receivers",
@@ -239,6 +260,78 @@ def test_receiver_group_crud_and_policy_dispatch(client, admin_token):
 
     client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
     client.delete(f"/api/alert-routing/receiver-groups/{group['id']}", headers=auth_headers(admin_token))
+    client.delete(f"/api/alert-routing/receivers/{email_id}", headers=auth_headers(admin_token))
+
+
+def test_repeat_delivery_respects_policy_evaluation_interval(client, admin_token):
+    from datetime import datetime, timedelta, timezone
+
+    from api.models import AlertDeliveryLog
+    from api.services.alert_routing_service import dispatch_policy_alert_notifications
+
+    email_resp = client.post(
+        "/api/alert-routing/receivers",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "Repeat Email",
+            "type": "email",
+            "emailAddress": "repeat@company.com",
+            "enabled": True,
+        },
+    )
+    assert email_resp.status_code == 201
+    email_id = email_resp.get_json()["data"]["id"]
+
+    policy_resp = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "Repeat Policy",
+            "clusterId": "prod-us-east",
+            "severity": "warning",
+            "conditionLogic": "any",
+            "conditions": [{"metricKey": "cpu_usage_percent", "operator": ">", "threshold": 1}],
+            "scope": {"type": "deployment", "namespace": "default", "resourceName": "*"},
+            "showOnDashboard": True,
+            "evaluationIntervalSeconds": 60,
+            "receiverIds": [email_id],
+        },
+    )
+    assert policy_resp.status_code in (200, 201)
+    policy_id = policy_resp.get_json()["data"]["id"]
+
+    alert = {
+        "id": "history-repeat-1",
+        "policyId": policy_id,
+        "policyName": "Repeat Policy",
+        "severity": "warning",
+        "status": "firing",
+        "clusterId": "prod-us-east",
+        "title": "Repeat Policy triggered",
+    }
+
+    with patch("api.services.alert_routing_service.smtp_is_configured", return_value=True), patch(
+        "api.services.alert_routing_service.send_alert_email"
+    ) as send_email:
+        first = dispatch_policy_alert_notifications(alert)
+        assert first["sent"] == 1
+        assert send_email.call_count == 1
+
+        second = dispatch_policy_alert_notifications(alert)
+        assert second["sent"] == 0
+        assert second["skipped"] == 1
+        assert send_email.call_count == 1
+
+        log = AlertDeliveryLog.query.filter_by(alert_id=alert["id"], status="success").first()
+        assert log is not None
+        log.delivered_at = datetime.now(timezone.utc) - timedelta(seconds=61)
+        db.session.commit()
+
+        third = dispatch_policy_alert_notifications(alert)
+        assert third["sent"] == 1
+        assert send_email.call_count == 2
+
+    client.delete(f"/api/alert-policies/{policy_id}", headers=auth_headers(admin_token))
     client.delete(f"/api/alert-routing/receivers/{email_id}", headers=auth_headers(admin_token))
 
 

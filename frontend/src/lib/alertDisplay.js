@@ -46,7 +46,19 @@ export function getAlertPolicyLabel(alert) {
   return alert?.policyName || "—";
 }
 
+export function getAlertTypeLabel(alert) {
+  const type = alert?.alertType || "metric";
+  return type === "log" ? "Log" : "Metric";
+}
+
+export function isLogAlert(alert) {
+  return alert?.alertType === "log";
+}
+
 export function formatTriggeredConditions(alert) {
+  if (isLogAlert(alert)) {
+    return alert?.matchedPattern ? `Pattern: ${alert.matchedPattern}` : alert?.description || "—";
+  }
   const conditions = alert?.triggeredConditions;
   if (!Array.isArray(conditions) || !conditions.length) {
     return alert?.description || "—";

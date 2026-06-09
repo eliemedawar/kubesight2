@@ -56,10 +56,11 @@ export default function DataTable({ columns, rows, onRowClick, tableClassName = 
     return <span className={`status-pill ${tone}`}>{text}</span>;
   };
 
-  const truncateCells = tableClassName.includes("resources-table");
+  const truncateCells =
+    tableClassName.includes("resources-table") || tableClassName.includes("alert-policies-table");
 
   return (
-    <div className="table-shell">
+    <div className="table-shell table-scroll-region" role="region" aria-label="Scrollable table" tabIndex={0}>
       <table className={tableClassName || undefined}>
         <thead>
           <tr>

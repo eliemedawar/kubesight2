@@ -1,4 +1,4 @@
-export default function Sidebar({ pages, activePage, onNavigate }) {
+export default function Sidebar({ pages, activePage, onNavigate, open = false }) {
   const sections = [];
   const sectionIndex = new Map();
 
@@ -12,12 +12,12 @@ export default function Sidebar({ pages, activePage, onNavigate }) {
   });
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${open ? " sidebar--open" : ""}`}>
       <div className="sidebar-brand">
         <h1>KubeSight</h1>
         <p className="brand-subtitle">Control Plane</p>
       </div>
-      <nav>
+      <nav aria-label="Main navigation">
         {sections.map((section) => (
           <div key={section.label || "main"} className="sidebar-section">
             {section.label ? <p className="sidebar-section-label">{section.label}</p> : null}

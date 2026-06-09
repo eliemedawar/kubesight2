@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   getClusterOverview,
   getDashboardSummary,
@@ -16,25 +16,7 @@ import {
 } from "./api";
 import { useAuth } from "./context/AuthContext";
 import AppShell from "./components/layout/AppShell.jsx";
-import { NoFeaturesPage } from "./pages/AccessDeniedPage";
-import AlertsPage from "./pages/AlertsPage.jsx";
-import AuditLogsPage from "./pages/AuditLogsPage";
-import ClusterManagementPage from "./pages/ClusterManagementPage.jsx";
-import ClusterOverviewPage from "./pages/ClusterOverviewPage.jsx";
-import ClustersPage from "./pages/ClustersPage.jsx";
-import DashboardPage from "./pages/DashboardPage.jsx";
-import LoginPage from "./pages/LoginPage";
-import LogsPage from "./pages/LogsPage.jsx";
-import NamespacesPage from "./pages/NamespacesPage.jsx";
-import InventoryPage from "./pages/InventoryPage.jsx";
-import ApplicationDetailsPage from "./pages/ApplicationDetailsPage.jsx";
-import EditCatalogModal from "./components/inventory/EditCatalogModal.jsx";
-import ResourcesPage from "./pages/ResourcesPage.jsx";
-import AlertPoliciesPage from "./pages/AlertPoliciesPage.jsx";
-import SettingsPage from "./pages/SettingsPage.jsx";
-import AlertRoutingPage from "./pages/AlertRoutingPage.jsx";
-import UpgradeSafeModePage from "./pages/UpgradeSafeModePage.jsx";
-import UserManagementPage from "./pages/UserManagementPage";
+import RouteLoadingFallback from "./components/common/RouteLoadingFallback.jsx";
 import { emptyNamespaceResources, listKeyForTab } from "./lib/resourceTypes.js";
 import { useNamespaceResourceCache } from "./hooks/useNamespaceResourceCache.js";
 import { resourceCache } from "./services/resourceCacheService.js";
@@ -63,6 +45,28 @@ import {
   resolveDisplayUser,
   getUserInitials,
 } from "./utils/formatters.js";
+
+const LoginPage = lazy(() => import("./pages/LoginPage"));
+const NoFeaturesPage = lazy(() =>
+  import("./pages/AccessDeniedPage.jsx").then((module) => ({ default: module.NoFeaturesPage }))
+);
+const DashboardPage = lazy(() => import("./pages/DashboardPage.jsx"));
+const ClustersPage = lazy(() => import("./pages/ClustersPage.jsx"));
+const ClusterManagementPage = lazy(() => import("./pages/ClusterManagementPage.jsx"));
+const ClusterOverviewPage = lazy(() => import("./pages/ClusterOverviewPage.jsx"));
+const InventoryPage = lazy(() => import("./pages/InventoryPage.jsx"));
+const ApplicationDetailsPage = lazy(() => import("./pages/ApplicationDetailsPage.jsx"));
+const NamespacesPage = lazy(() => import("./pages/NamespacesPage.jsx"));
+const ResourcesPage = lazy(() => import("./pages/ResourcesPage.jsx"));
+const LogsPage = lazy(() => import("./pages/LogsPage.jsx"));
+const AlertsPage = lazy(() => import("./pages/AlertsPage.jsx"));
+const AlertPoliciesPage = lazy(() => import("./pages/AlertPoliciesPage.jsx"));
+const AlertRoutingPage = lazy(() => import("./pages/AlertRoutingPage.jsx"));
+const UpgradeSafeModePage = lazy(() => import("./pages/UpgradeSafeModePage.jsx"));
+const UserManagementPage = lazy(() => import("./pages/UserManagementPage.jsx"));
+const AuditLogsPage = lazy(() => import("./pages/AuditLogsPage.jsx"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
+const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 
 export default function App() {
   const {
@@ -391,10 +395,9 @@ export default function App() {
       return undefined;
     }
 
-    const clusterChanged = clusterContextClusterRef.current !== selectedClusterId;
+    const contextReady = clusterContextClusterRef.current === selectedClusterId;
 
-    // Same cluster, different page (e.g. resources → logs): keep namespaces/resources.
-    if (!clusterChanged) {
+    if (contextReady) {
       if (resolvedActivePage === "clusterOverview") {
         let cancelled = false;
         const loadOverview = async () => {
@@ -421,38 +424,52 @@ export default function App() {
 
     let cancelled = false;
     const loadClusterContext = async () => {
-      clusterContextClusterRef.current = selectedClusterId;
-      resourceCache.clearAll();
+      const clusterChanged = clusterContextClusterRef.current !== selectedClusterId;
+      if (clusterChanged) {
+        resourceCache.clearAll();
+        setData((prev) => ({
+          ...prev,
+          namespaces: [],
+          resources: emptyNamespaceResources(),
+        }));
+      }
+
       setLoadingState((prev) => ({ ...prev, namespaces: true, resources: false }));
       setErrorState((prev) => ({ ...prev, page: "" }));
-      setData((prev) => ({
-        ...prev,
-        namespaces: [],
-        resources: emptyNamespaceResources(),
-      }));
 
       let defaultNamespace = "";
       let namespaces = [];
       try {
-        const namespacesRes = await listNamespacesByCluster(selectedClusterId);
+        const needsOverview = resolvedActivePage === "clusterOverview";
+        const [namespacesResult, overviewResult] = await Promise.allSettled([
+          listNamespacesByCluster(selectedClusterId),
+          needsOverview ? getClusterOverview(selectedClusterId) : Promise.resolve(null),
+        ]);
+
         if (cancelled) {
           return;
         }
 
-        if (resolvedActivePage === "clusterOverview") {
-          const overview = await getClusterOverview(selectedClusterId);
-          if (cancelled) {
-            return;
-          }
-          setClusterOverview(overview);
+        if (namespacesResult.status === "rejected") {
+          throw namespacesResult.reason;
+        }
+
+        if (overviewResult.status === "fulfilled" && overviewResult.value) {
+          setClusterOverview(overviewResult.value);
+        } else if (overviewResult.status === "rejected" && needsOverview) {
+          applyPageError(
+            overviewResult.reason?.message || "Failed to load cluster overview.",
+            { expectedDenied: !canAccessCluster(selectedClusterId) }
+          );
         }
 
         namespaces = getAllowedNamespaces(
           selectedClusterId,
-          namespacesRes.items || []
+          namespacesResult.value.items || []
         );
         defaultNamespace = namespaces[0]?.name || "";
         setData((prev) => ({ ...prev, namespaces }));
+        clusterContextClusterRef.current = selectedClusterId;
       } catch (loadError) {
         if (!cancelled) {
           clusterContextClusterRef.current = "";
@@ -464,9 +481,12 @@ export default function App() {
             namespaces: [],
             resources: emptyNamespaceResources(),
           }));
-          setLoadingState((prev) => ({ ...prev, namespaces: false, resources: false }));
         }
         return;
+      } finally {
+        if (!cancelled) {
+          setLoadingState((prev) => ({ ...prev, namespaces: false, resources: false }));
+        }
       }
 
       if (cancelled) {
@@ -477,11 +497,6 @@ export default function App() {
         selectedNamespace && namespaces.some((ns) => ns.name === selectedNamespace);
       const activeNamespace = namespaceStillValid ? selectedNamespace : defaultNamespace;
 
-      setLoadingState((prev) => ({
-        ...prev,
-        namespaces: false,
-        resources: false,
-      }));
       if (!namespaceStillValid) {
         setSelectedNamespace(activeNamespace);
       }
@@ -490,8 +505,9 @@ export default function App() {
     loadClusterContext();
     return () => {
       cancelled = true;
+      setLoadingState((prev) => ({ ...prev, namespaces: false, resources: false }));
     };
-  }, [selectedClusterId, resolvedActivePage]);
+  }, [selectedClusterId, resolvedActivePage, isAuthenticated]);
 
   useEffect(() => {
     if (!selectedClusterId) {
@@ -1042,14 +1058,18 @@ export default function App() {
                 loadInventory();
               }}
             />
-            <EditCatalogModal
-              open={editCatalogOpen}
-              catalog={applicationDetail?.catalog || {}}
-              onClose={() => setEditCatalogOpen(false)}
-              onSave={handleSaveCatalogEdit}
-              saving={editCatalogSaving}
-              error={editCatalogError}
-            />
+            {editCatalogOpen ? (
+              <Suspense fallback={null}>
+                <EditCatalogModal
+                  open={editCatalogOpen}
+                  catalog={applicationDetail?.catalog || {}}
+                  onClose={() => setEditCatalogOpen(false)}
+                  onSave={handleSaveCatalogEdit}
+                  saving={editCatalogSaving}
+                  error={editCatalogError}
+                />
+              </Suspense>
+            ) : null}
           </>
         );
       case "namespaces":
@@ -1119,6 +1139,8 @@ export default function App() {
           <AlertPoliciesPage
             clusterId={selectedClusterId}
             clusterOptions={allowedClusters}
+            selectedNamespace={selectedNamespace}
+            allowedNamespaces={allowedNamespaces}
             hasClusters={hasClusters}
             canManage={hasPermission("alerts:manage")}
             coreLoading={loadingState.core}
@@ -1209,11 +1231,23 @@ export default function App() {
 
   let pageNode = null;
   if (!visiblePages.length) {
-    pageNode = <NoFeaturesPage />;
+    pageNode = (
+      <Suspense fallback={<RouteLoadingFallback label="Loading..." />}>
+        <NoFeaturesPage />
+      </Suspense>
+    );
   } else if (!resolvedActivePage) {
-    pageNode = <NoFeaturesPage />;
+    pageNode = (
+      <Suspense fallback={<RouteLoadingFallback label="Loading..." />}>
+        <NoFeaturesPage />
+      </Suspense>
+    );
   } else {
-    pageNode = renderPage(resolvedActivePage);
+    pageNode = (
+      <Suspense fallback={<RouteLoadingFallback pageKey={resolvedActivePage} />}>
+        {renderPage(resolvedActivePage)}
+      </Suspense>
+    );
   }
 
   const alertBadgeCount = isDashboardPage
@@ -1233,7 +1267,11 @@ export default function App() {
   }
 
   if (!isAuthenticated) {
-    return <LoginPage />;
+    return (
+      <Suspense fallback={<RouteLoadingFallback label="Loading sign in..." />}>
+        <LoginPage />
+      </Suspense>
+    );
   }
 
   const userInitials = getUserInitials(displayUser.name);
