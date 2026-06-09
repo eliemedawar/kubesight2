@@ -25,6 +25,12 @@ export const getClusterOverview = (clusterId) =>
 export const listNamespacesByCluster = (clusterId) =>
   request(`/api/clusters/${encodeURIComponent(clusterId)}/namespaces`);
 
+export const listStorageClasses = (clusterId) =>
+  request(`/api/clusters/${encodeURIComponent(clusterId)}/storageclasses`);
+
+export const listClusterNodes = (clusterId) =>
+  request(`/api/clusters/${encodeURIComponent(clusterId)}/nodes`);
+
 export const getResourcesByClusterNamespace = (clusterId, namespace) =>
   request(
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources`

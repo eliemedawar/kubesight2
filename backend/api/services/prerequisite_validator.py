@@ -130,9 +130,19 @@ def validate_prerequisites(
             checks.append(_check("passed", "Storage", f"PVC '{pvc_name}' exists"))
         elif pvc_name:
             checks.append(_check("failed", "Storage", f"PVC '{pvc_name}' not found"))
-    elif storage.get("pvcMode") == "new":
-        sc = (storage.get("newPvc") or {}).get("storageClass") or ""
-        if sc:
+    elif storage.get("pvcMode") == "new" or workload_type == "PersistentVolumeClaim":
+        advanced = storage.get("advanced") or {}
+        manual_pv = bool(advanced.get("createManualPv"))
+        new_pvc = storage.get("newPvc") or {}
+        sc = new_pvc.get("storageClass") or ""
+        if manual_pv:
+            pv_name = (advanced.get("pvName") or "").strip()
+            if pv_name:
+                checks.append(_check("passed", "Storage", f"Manual PV '{pv_name}' will be created with the claim"))
+            else:
+                checks.append(_check("warning", "Storage", "Manual PV name not set", "A generated PV name will be used"))
+            checks.append(_check("passed", "Storage", "Manual PV mode will create a matching PV and PVC without a StorageClass"))
+        elif sc:
             if _storage_class_exists(access, sc):
                 checks.append(_check("passed", "Storage", f"StorageClass '{sc}' exists"))
             else:

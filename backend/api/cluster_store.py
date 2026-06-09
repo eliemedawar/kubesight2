@@ -217,17 +217,9 @@ def get_active_cluster_by_public_id(public_id: str) -> Optional[Cluster]:
 
 
 def _node_summary(nodes_json: Dict[str, Any]) -> List[Dict[str, str]]:
-    items: List[Dict[str, str]] = []
-    for node in nodes_json.get("items", []):
-        metadata = node.get("metadata", {})
-        name = metadata.get("name", "unknown")
-        ready = False
-        for condition in node.get("status", {}).get("conditions", []):
-            if condition.get("type") == "Ready" and condition.get("status") == "True":
-                ready = True
-                break
-        items.append({"name": name, "status": "Ready" if ready else "NotReady"})
-    return items
+    from .k8s_provider import summarize_node_items
+
+    return summarize_node_items(nodes_json.get("items", []))
 
 
 def test_cluster_connection(cluster: Cluster) -> Dict[str, Any]:

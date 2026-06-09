@@ -70,6 +70,30 @@ CLUSTER_OVERVIEWS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+CLUSTER_NODES: Dict[str, List[Dict[str, str]]] = {
+    "prod-us-east": [
+        {"name": "ip-10-0-1-12.ec2.internal", "status": "Ready"},
+        {"name": "ip-10-0-1-15.ec2.internal", "status": "Ready"},
+        {"name": "ip-10-0-1-18.ec2.internal", "status": "NotReady"},
+    ],
+    "staging-eu-west": [
+        {"name": "kind-worker", "status": "Ready"},
+        {"name": "kind-worker2", "status": "Ready"},
+    ],
+}
+
+STORAGE_CLASSES: Dict[str, List[Dict[str, Any]]] = {
+    "prod-us-east": [
+        {"name": "gp3", "default": True, "provisioner": "kubernetes.io/aws-ebs"},
+        {"name": "efs", "default": False, "provisioner": "efs.csi.aws.com"},
+    ],
+    "staging-eu-west": [
+        {"name": "local-path", "default": True, "provisioner": "rancher.io/local-path"},
+        {"name": "longhorn", "default": False, "provisioner": "driver.longhorn.io"},
+        {"name": "nfs-client", "default": False, "provisioner": "k8s-sigs.io/nfs-subdir-external-provisioner"},
+    ],
+}
+
 NAMESPACES: Dict[str, List[Dict[str, Any]]] = {
     "prod-us-east": [
         {

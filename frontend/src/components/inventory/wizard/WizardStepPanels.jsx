@@ -1,3 +1,4 @@
+import { useState } from "react";
 import NamespaceSelect from "../NamespaceSelect.jsx";
 import {
   Field,
@@ -7,11 +8,15 @@ import {
   VolumeMountsEditor,
   WizardSectionHeader,
 } from "./WizardShared.jsx";
+import { STORAGE_TOOLTIPS } from "../../../lib/storageValidation.js";
 import {
+  applyNewPvcStorageDefaults,
+  EMPTY_ADVANCED_STORAGE,
   EMPTY_CONFIGMAP_REF,
   EMPTY_ENV_VAR,
   EMPTY_SECRET_REF,
   POD_WORKLOAD_TYPES,
+  STORAGE_DEFAULTS,
   WORKLOAD_TYPES,
 } from "./wizardDefaults.js";
 
@@ -19,7 +24,268 @@ const CRITICALITY_OPTIONS = ["Low", "Medium", "High", "Critical"];
 const ENVIRONMENT_OPTIONS = ["Development", "Staging", "Production", "DR"];
 const SERVICE_TYPES = ["ClusterIP", "NodePort", "LoadBalancer"];
 const ACCESS_MODES = ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany"];
+const ACCESS_MODE_LABELS = {
+  ReadWriteOnce: "ReadWriteOnce (RWO)",
+  ReadOnlyMany: "ReadOnlyMany (ROX)",
+  ReadWriteMany: "ReadWriteMany (RWX)",
+};
 const PULL_POLICIES = ["IfNotPresent", "Always", "Never"];
+const PV_STORAGE_TYPES = [
+  { value: "hostPath", label: "hostPath" },
+  { value: "nfs", label: "NFS" },
+  { value: "local", label: "Local" },
+];
+const RECLAIM_POLICIES = ["Retain", "Delete"];
+
+function formatStorageClassLabel(sc) {
+  return sc.default ? `${sc.name} (Default)` : sc.name;
+}
+
+function StorageClassSelect({ value, onChange, storageClasses, loading, disabled }) {
+  if (loading) {
+    return <p className="muted">Loading storage classes…</p>;
+  }
+  if (!storageClasses.length) {
+    return (
+      <select value="" onChange={() => {}} disabled>
+        <option value="">No StorageClasses available</option>
+      </select>
+    );
+  }
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
+      <option value="">Select StorageClass</option>
+      {storageClasses.map((sc) => (
+        <option key={sc.name} value={sc.name}>
+          {formatStorageClassLabel(sc)}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function NodeSelect({ value, onChange, nodes, loading }) {
+  if (loading) {
+    return <p className="muted">Loading nodes…</p>;
+  }
+
+  const readyNodes = nodes.filter((node) => node.status === "Ready");
+  if (!readyNodes.length) {
+    return <p className="wizard-storage-warning">No schedulable nodes found.</p>;
+  }
+
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">Select node</option>
+      {nodes.map((node) => (
+        <option key={node.name} value={node.name} disabled={node.status !== "Ready"}>
+          {node.name} ({node.status})
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function AdvancedStorageOptions({
+  advanced,
+  setAdvanced,
+  clusterNodes = [],
+  clusterNodesLoading = false,
+  onMarkStorageEdit,
+}) {
+  const [open, setOpen] = useState(false);
+  const update = (patch) => setAdvanced({ ...advanced, ...patch });
+  const storageType = advanced.storageType || "hostPath";
+
+  return (
+    <div className="wizard-advanced-storage">
+      <button
+        type="button"
+        className="wizard-advanced-storage__toggle btn-outline btn-sm"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        {open ? "▾" : "▸"} Advanced Storage Options
+      </button>
+      {open ? (
+        <div className="wizard-advanced-storage__panel card">
+          <label className="wizard-checkbox">
+            <input
+              type="checkbox"
+              checked={Boolean(advanced.createManualPv)}
+              onChange={(e) => update({ createManualPv: e.target.checked })}
+            />
+            Create PersistentVolume manually
+          </label>
+          {advanced.createManualPv ? (
+            <div className="wizard-form-grid">
+              <Field label="PV Name" tooltip={STORAGE_TOOLTIPS.pv}>
+                <input
+                  value={advanced.pvName}
+                  onChange={(e) => {
+                    onMarkStorageEdit?.("pvName");
+                    update({ pvName: e.target.value });
+                  }}
+                  placeholder={STORAGE_DEFAULTS.pvName}
+                />
+              </Field>
+              <Field label="Capacity" hint="e.g. 1Gi">
+                <input value={advanced.capacity} onChange={(e) => update({ capacity: e.target.value })} />
+              </Field>
+              <Field label="Storage Type">
+                <select value={storageType} onChange={(e) => update({ storageType: e.target.value })}>
+                  {PV_STORAGE_TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Reclaim Policy">
+                <select value={advanced.reclaimPolicy} onChange={(e) => update({ reclaimPolicy: e.target.value })}>
+                  {RECLAIM_POLICIES.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {storageType === "hostPath" ? (
+                <Field label="Host Path">
+                  <input value={advanced.hostPath} onChange={(e) => update({ hostPath: e.target.value })} placeholder="/mnt/data" />
+                </Field>
+              ) : null}
+              {storageType === "nfs" ? (
+                <>
+                  <Field label="NFS Server">
+                    <input value={advanced.nfsServer} onChange={(e) => update({ nfsServer: e.target.value })} placeholder="nfs.example.com" />
+                  </Field>
+                  <Field label="NFS Path">
+                    <input value={advanced.nfsPath} onChange={(e) => update({ nfsPath: e.target.value })} placeholder="/exports/data" />
+                  </Field>
+                </>
+              ) : null}
+              {storageType === "local" ? (
+                <>
+                  <Field label="Local Path">
+                    <input value={advanced.localPath} onChange={(e) => update({ localPath: e.target.value })} placeholder="/mnt/disks/ssd1" />
+                  </Field>
+                  <Field label="Node" hint="Local volumes must be scheduled on a specific node">
+                    <NodeSelect
+                      value={advanced.nodeName}
+                      onChange={(nodeName) => update({ nodeName })}
+                      nodes={clusterNodes}
+                      loading={clusterNodesLoading}
+                    />
+                  </Field>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PvcFields({
+  pvc,
+  setPvc,
+  storageClasses,
+  storageClassesLoading,
+  storageWarnings = [],
+  advanced,
+  setAdvanced,
+  clusterNodes = [],
+  clusterNodesLoading = false,
+  storageEdits,
+  onMarkStorageEdit,
+}) {
+  const manualPv = Boolean(advanced?.createManualPv);
+
+  const handleAdvancedChange = (nextAdvanced) => {
+    if (nextAdvanced.createManualPv && !manualPv) {
+      setPvc({ storageClass: "" });
+      if (!storageEdits?.pvName && !String(nextAdvanced.pvName || "").trim()) {
+        nextAdvanced = { ...nextAdvanced, pvName: STORAGE_DEFAULTS.pvName };
+      }
+    }
+    setAdvanced(nextAdvanced);
+  };
+
+  return (
+    <>
+      {manualPv ? (
+        <p className="wizard-storage-helper muted">
+          Manual PV mode does not use dynamic provisioning. KubeSight will create a matching PV and PVC directly.
+        </p>
+      ) : (
+        <p className="wizard-storage-helper muted">
+          Recommended: Use a StorageClass and let Kubernetes dynamically create the PersistentVolume for you.
+        </p>
+      )}
+      <div className="wizard-form-grid">
+        <Field label="PVC Name" tooltip={STORAGE_TOOLTIPS.pvc}>
+          <input
+            value={pvc.name}
+            onChange={(e) => {
+              onMarkStorageEdit?.("pvcName");
+              setPvc({ name: e.target.value });
+            }}
+            placeholder={STORAGE_DEFAULTS.pvcName}
+          />
+        </Field>
+        <Field label="Size" hint="e.g. 1Gi">
+          <input value={pvc.size} onChange={(e) => setPvc({ size: e.target.value })} />
+        </Field>
+        {!manualPv ? (
+          <Field label="Storage Class" tooltip={STORAGE_TOOLTIPS.storageClass}>
+            <StorageClassSelect
+              value={pvc.storageClass}
+              onChange={(val) => setPvc({ storageClass: val })}
+              storageClasses={storageClasses}
+              loading={storageClassesLoading}
+            />
+          </Field>
+        ) : null}
+        <Field
+          label="Access Mode"
+          tooltip={
+            pvc.accessMode === "ReadWriteMany"
+              ? STORAGE_TOOLTIPS.readWriteMany
+              : pvc.accessMode === "ReadWriteOnce"
+                ? STORAGE_TOOLTIPS.readWriteOnce
+                : undefined
+          }
+        >
+          <select value={pvc.accessMode} onChange={(e) => setPvc({ accessMode: e.target.value })}>
+            {ACCESS_MODES.map((m) => (
+              <option key={m} value={m}>
+                {ACCESS_MODE_LABELS[m] || m}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      {storageWarnings.length ? (
+        <ul className="wizard-storage-warnings">
+          {storageWarnings.map((warning, index) => (
+            <li key={index} className="wizard-storage-warning">
+              {warning}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <AdvancedStorageOptions
+        advanced={advanced}
+        setAdvanced={handleAdvancedChange}
+        clusterNodes={clusterNodes}
+        clusterNodesLoading={clusterNodesLoading}
+        onMarkStorageEdit={onMarkStorageEdit}
+      />
+    </>
+  );
+}
 
 export function StepBasics({ state, setState, clusterOptions, nameValidation }) {
   const basics = state.basics;
@@ -339,24 +605,70 @@ export function StepResources({ state, setState }) {
   );
 }
 
-export function StepStorage({ state, setState }) {
+export function StorageReadinessBanner({ readiness }) {
+  if (!readiness) return null;
+  const icons = { green: "✅", yellow: "⚠", red: "❌" };
+  return (
+    <div className={`wizard-storage-readiness wizard-storage-readiness--${readiness.level}`}>
+      <span className="wizard-storage-readiness__icon" aria-hidden>
+        {icons[readiness.level] || "•"}
+      </span>
+      <span>{readiness.message}</span>
+    </div>
+  );
+}
+
+export function StepStorage({
+  state,
+  setState,
+  storageClasses = [],
+  storageClassesLoading = false,
+  storageWarnings = [],
+  clusterNodes = [],
+  clusterNodesLoading = false,
+}) {
   const storage = state.storage;
+  const advanced = storage.advanced || { ...EMPTY_ADVANCED_STORAGE };
   const setStorage = (patch) => setState((s) => ({ ...s, storage: { ...s.storage, ...patch } }));
+  const setPvc = (patch) => setStorage({ newPvc: { ...storage.newPvc, ...patch } });
+  const setAdvanced = (nextAdvanced) => setStorage({ advanced: nextAdvanced });
+  const markStorageEdit = (field) => {
+    setStorage({
+      storageEdits: { ...(storage.storageEdits || {}), [field]: true },
+    });
+  };
+  const handlePvcModeChange = (pvcMode) => {
+    if (pvcMode === "new") {
+      setState((s) => ({
+        ...s,
+        storage: applyNewPvcStorageDefaults({ ...s.storage, pvcMode }),
+      }));
+      return;
+    }
+    setStorage({ pvcMode });
+  };
 
   if (state.workloadType === "PersistentVolumeClaim") {
     const pvc = storage.newPvc;
     return (
       <div className="wizard-step-panel">
-        <WizardSectionHeader title="Persistent Volume Claim" />
-        <div className="wizard-form-grid">
-          <Field label="Size"><input value={pvc.size} onChange={(e) => setStorage({ newPvc: { ...pvc, size: e.target.value } })} /></Field>
-          <Field label="Storage Class"><input value={pvc.storageClass} onChange={(e) => setStorage({ newPvc: { ...pvc, storageClass: e.target.value } })} /></Field>
-          <Field label="Access Mode">
-            <select value={pvc.accessMode} onChange={(e) => setStorage({ newPvc: { ...pvc, accessMode: e.target.value } })}>
-              {ACCESS_MODES.map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </Field>
-        </div>
+        <WizardSectionHeader
+          title="Persistent Volume Claim"
+          subtitle="Configure storage for a standalone PVC resource."
+        />
+        <PvcFields
+          pvc={pvc}
+          setPvc={setPvc}
+          storageClasses={storageClasses}
+          storageClassesLoading={storageClassesLoading}
+          storageWarnings={storageWarnings}
+          advanced={advanced}
+          setAdvanced={setAdvanced}
+          clusterNodes={clusterNodes}
+          clusterNodesLoading={clusterNodesLoading}
+          storageEdits={storage.storageEdits}
+          onMarkStorageEdit={markStorageEdit}
+        />
       </div>
     );
   }
@@ -364,34 +676,42 @@ export function StepStorage({ state, setState }) {
   return (
     <div className="wizard-step-panel">
       <WizardSectionHeader title="Storage" subtitle="Persistent volumes and mount paths for your workload." />
-      <Field label="PVC Mode">
-        <select value={storage.pvcMode} onChange={(e) => setStorage({ pvcMode: e.target.value })}>
+      <Field label="PVC Mode" tooltip={STORAGE_TOOLTIPS.pvc}>
+        <select value={storage.pvcMode} onChange={(e) => handlePvcModeChange(e.target.value)}>
           <option value="none">No persistent storage</option>
           <option value="existing">Use existing PVC</option>
           <option value="new">Create new PVC</option>
         </select>
       </Field>
       {storage.pvcMode === "existing" ? (
-        <Field label="Existing PVC Name">
+        <Field label="Existing PVC Name" tooltip={STORAGE_TOOLTIPS.pvc}>
           <input value={storage.existingPvc} onChange={(e) => setStorage({ existingPvc: e.target.value })} />
         </Field>
       ) : null}
       {storage.pvcMode === "new" ? (
-        <div className="wizard-form-grid">
-          <Field label="PVC Name"><input value={storage.newPvc.name} onChange={(e) => setStorage({ newPvc: { ...storage.newPvc, name: e.target.value } })} /></Field>
-          <Field label="Size"><input value={storage.newPvc.size} onChange={(e) => setStorage({ newPvc: { ...storage.newPvc, size: e.target.value } })} /></Field>
-          <Field label="Storage Class"><input value={storage.newPvc.storageClass} onChange={(e) => setStorage({ newPvc: { ...storage.newPvc, storageClass: e.target.value } })} /></Field>
-          <Field label="Access Mode">
-            <select value={storage.newPvc.accessMode} onChange={(e) => setStorage({ newPvc: { ...storage.newPvc, accessMode: e.target.value } })}>
-              {ACCESS_MODES.map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </Field>
-        </div>
+        <PvcFields
+          pvc={storage.newPvc}
+          setPvc={setPvc}
+          storageClasses={storageClasses}
+          storageClassesLoading={storageClassesLoading}
+          storageWarnings={storageWarnings}
+          advanced={advanced}
+          setAdvanced={setAdvanced}
+          clusterNodes={clusterNodes}
+          clusterNodesLoading={clusterNodesLoading}
+          storageEdits={storage.storageEdits}
+          onMarkStorageEdit={markStorageEdit}
+        />
       ) : null}
       <Field label="Volume Mounts">
         <VolumeMountsEditor
           items={storage.volumeMounts}
-          onChange={(rows) => setStorage({ volumeMounts: rows })}
+          onChange={(rows) =>
+            setStorage({
+              volumeMounts: rows,
+              storageEdits: { ...(storage.storageEdits || {}), volumeMount: true },
+            })
+          }
         />
       </Field>
     </div>

@@ -499,6 +499,47 @@ def list_namespaces_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
     return {"items": items, "count": len(items)}
 
 
+def summarize_node_items(node_items: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+    for node in node_items:
+        name = node.get("metadata", {}).get("name", "unknown")
+        ready = any(
+            condition.get("type") == "Ready" and condition.get("status") == "True"
+            for condition in node.get("status", {}).get("conditions", [])
+        )
+        items.append({"name": name, "status": "Ready" if ready else "NotReady"})
+    return items
+
+
+def list_nodes_from_k8s(access: ClusterAccess) -> List[Dict[str, str]]:
+    output = _run_for_access(access, ["get", "nodes", "-o", "json"])
+    items = summarize_node_items(json.loads(output).get("items", []))
+    items.sort(key=lambda item: (item["status"] != "Ready", item["name"]))
+    return items
+
+
+def list_storage_classes_from_k8s(access: ClusterAccess) -> List[Dict[str, Any]]:
+    output = _run_for_access(access, ["get", "storageclass", "-o", "json"])
+    data = json.loads(output)
+    items: List[Dict[str, Any]] = []
+    for sc in data.get("items", []):
+        meta = sc.get("metadata", {}) or {}
+        annotations = meta.get("annotations") or {}
+        is_default = (
+            annotations.get("storageclass.kubernetes.io/is-default-class") == "true"
+            or annotations.get("storageclass.beta.kubernetes.io/is-default-class") == "true"
+        )
+        items.append(
+            {
+                "name": meta.get("name", ""),
+                "default": is_default,
+                "provisioner": sc.get("provisioner") or "",
+            }
+        )
+    items.sort(key=lambda item: (not item.get("default"), item.get("name", "")))
+    return items
+
+
 def _node_ips_from_items(node_items: List[Dict[str, Any]]) -> List[str]:
     ips: List[str] = []
     for node in node_items:

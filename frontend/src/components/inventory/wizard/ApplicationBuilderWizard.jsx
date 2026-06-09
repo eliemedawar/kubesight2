@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { listClusterNodes, listStorageClasses } from "../../../api/clustersApi.js";
 import {
   applyWizardDeploy,
   diffWizardDeploy,
@@ -9,6 +10,11 @@ import {
   validateWizardName,
   validateWizardPrerequisites,
 } from "../../../api/inventoryApi.js";
+import {
+  getStorageReadiness,
+  isCreatingPvc,
+  validateStorageConfig,
+} from "../../../lib/storageValidation.js";
 import { useAuth } from "../../../context/AuthContext.jsx";
 import { formatAccessError, isAccessDeniedError } from "../../../utils/authz.js";
 import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
@@ -32,6 +38,7 @@ import {
   StepTemplates,
   StepValidation,
   StepWorkload,
+  StorageReadinessBanner,
 } from "./WizardStepPanels.jsx";
 
 export default function ApplicationBuilderWizard({
@@ -64,6 +71,11 @@ export default function ApplicationBuilderWizard({
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [storageClasses, setStorageClasses] = useState([]);
+  const [storageClassesLoading, setStorageClassesLoading] = useState(false);
+  const [clusterNodes, setClusterNodes] = useState([]);
+  const [clusterNodesLoading, setClusterNodesLoading] = useState(false);
+  const [storageWarnings, setStorageWarnings] = useState([]);
 
   const currentStep = stepIndex >= 0 ? WIZARD_STEPS[stepIndex] : null;
   const payload = useMemo(() => buildWizardPayload(state), [state]);
@@ -80,6 +92,9 @@ export default function ApplicationBuilderWizard({
     setDeployDiff(null);
     setConfirmation("");
     setError("");
+    setStorageClasses([]);
+    setClusterNodes([]);
+    setStorageWarnings([]);
   }, [initialState, resolvedDefaultClusterId, showTemplatePicker]);
 
   useEffect(() => {
@@ -95,6 +110,109 @@ export default function ApplicationBuilderWizard({
       .catch(() => setTemplates([]))
       .finally(() => setTemplatesLoading(false));
   }, [open, showTemplatePicker]);
+
+  useEffect(() => {
+    const clusterId = state.basics.clusterId;
+    if (!open || !clusterId) {
+      setStorageClasses([]);
+      return;
+    }
+    let cancelled = false;
+    setStorageClassesLoading(true);
+    listStorageClasses(clusterId)
+      .then((items) => {
+        if (!cancelled) setStorageClasses(Array.isArray(items) ? items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setStorageClasses([]);
+      })
+      .finally(() => {
+        if (!cancelled) setStorageClassesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, state.basics.clusterId]);
+
+  useEffect(() => {
+    const clusterId = state.basics.clusterId;
+    if (!open || !clusterId) {
+      setClusterNodes([]);
+      return;
+    }
+    let cancelled = false;
+    setClusterNodesLoading(true);
+    listClusterNodes(clusterId)
+      .then((items) => {
+        if (!cancelled) setClusterNodes(Array.isArray(items) ? items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setClusterNodes([]);
+      })
+      .finally(() => {
+        if (!cancelled) setClusterNodesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, state.basics.clusterId]);
+
+  useEffect(() => {
+    if (!clusterNodes.length) return;
+    const advanced = state.storage?.advanced;
+    const usesLocalPv =
+      advanced?.createManualPv && (advanced.storageType || "hostPath") === "local";
+    if (!usesLocalPv) return;
+
+    const readyNodes = clusterNodes.filter((node) => node.status === "Ready");
+    const firstReady = readyNodes[0];
+    if (!firstReady) return;
+
+    setState((current) => {
+      const currentAdvanced = current.storage?.advanced || {};
+      const selected = currentAdvanced.nodeName;
+      const selectedStillValid = readyNodes.some((node) => node.name === selected);
+      if (selectedStillValid) return current;
+      return {
+        ...current,
+        storage: {
+          ...current.storage,
+          advanced: { ...currentAdvanced, nodeName: firstReady.name },
+        },
+      };
+    });
+  }, [
+    clusterNodes,
+    state.storage?.advanced?.createManualPv,
+    state.storage?.advanced?.storageType,
+    state.basics.clusterId,
+  ]);
+
+  useEffect(() => {
+    if (!storageClasses.length || !isCreatingPvc(state) || state.storage?.advanced?.createManualPv) return;
+    const defaultSc = storageClasses.find((sc) => sc.default);
+    if (!defaultSc) return;
+    setState((current) => {
+      const pvc = current.storage?.newPvc;
+      if (pvc?.storageClass) return current;
+      return {
+        ...current,
+        storage: {
+          ...current.storage,
+          newPvc: { ...pvc, storageClass: defaultSc.name },
+        },
+      };
+    });
+  }, [storageClasses, state.workloadType, state.storage?.pvcMode]);
+
+  const storageValidation = useMemo(
+    () => validateStorageConfig(state, storageClasses),
+    [state, storageClasses],
+  );
+  const storageReadiness = useMemo(
+    () => getStorageReadiness(state, storageClasses),
+    [state, storageClasses],
+  );
 
   useEffect(() => {
     if (!open || stepIndex < 0) return;
@@ -180,7 +298,18 @@ export default function ApplicationBuilderWizard({
     }
   };
 
+  const runStorageValidation = () => {
+    const result = validateStorageConfig(state, storageClasses);
+    setStorageWarnings(result.warnings);
+    if (result.errors.length) {
+      setError(result.errors[0]);
+      return false;
+    }
+    return true;
+  };
+
   const applyDeploy = async () => {
+    if (!runStorageValidation()) return;
     setBusy(true);
     setError("");
     try {
@@ -212,6 +341,9 @@ export default function ApplicationBuilderWizard({
 
   const goNext = async () => {
     setError("");
+    if (currentStep?.key === "storage" && !runStorageValidation()) {
+      return;
+    }
     if (currentStep?.key === "review") {
       await runPreview();
       return;
@@ -227,6 +359,9 @@ export default function ApplicationBuilderWizard({
         }
       }
       const nextIndex = stepIndex + 1;
+      if (WIZARD_STEPS[nextIndex]?.key === "review" && !runStorageValidation()) {
+        return;
+      }
       if (WIZARD_STEPS[nextIndex]?.key === "review") {
         try {
           await generateYaml();
@@ -275,7 +410,17 @@ export default function ApplicationBuilderWizard({
       case "resources":
         return <StepResources state={state} setState={setState} />;
       case "storage":
-        return <StepStorage state={state} setState={setState} />;
+        return (
+          <StepStorage
+            state={state}
+            setState={setState}
+            storageClasses={storageClasses}
+            storageClassesLoading={storageClassesLoading}
+            storageWarnings={storageWarnings.length ? storageWarnings : storageValidation.warnings}
+            clusterNodes={clusterNodes}
+            clusterNodesLoading={clusterNodesLoading}
+          />
+        );
       case "networking":
         return <StepNetworking state={state} setState={setState} />;
       case "health":
@@ -288,6 +433,7 @@ export default function ApplicationBuilderWizard({
         return (
           <div className="wizard-step-panel">
             <h4>Review & Deploy</h4>
+            <StorageReadinessBanner readiness={storageReadiness} />
             <Field label="Change Summary">
               <input
                 value={state.changeSummary}

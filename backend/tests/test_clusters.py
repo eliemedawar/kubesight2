@@ -11,6 +11,33 @@ def test_list_clusters_mock_mode(client, admin_token):
     assert len(payload["data"]["items"]) > 0
 
 
+def test_list_cluster_nodes_mock_mode(client, admin_token):
+    response = client.get(
+        "/api/clusters/staging-eu-west/nodes",
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    items = payload["data"]
+    assert isinstance(items, list)
+    assert any(item["name"] == "kind-worker" and item["status"] == "Ready" for item in items)
+
+
+def test_list_storage_classes_mock_mode(client, admin_token):
+    response = client.get(
+        "/api/clusters/staging-eu-west/storageclasses",
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    items = payload["data"]
+    assert isinstance(items, list)
+    assert any(item["name"] == "local-path" and item["default"] for item in items)
+    assert any(item["name"] == "longhorn" and not item["default"] for item in items)
+
+
 def test_custom_cluster_crud(client, admin_token):
     kubeconfig = """
 apiVersion: v1

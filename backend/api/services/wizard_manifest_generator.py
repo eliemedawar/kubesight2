@@ -52,7 +52,17 @@ def _annotations(basics: Dict[str, Any]) -> Dict[str, str]:
     return {str(k): str(v) for k, v in (basics.get("annotations") or {}).items() if k}
 
 
-def _container_spec(container: Dict[str, Any], resources: Dict[str, Any], environment: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+def _volume_mount_name(vm: Dict[str, Any]) -> str:
+    return str(vm.get("name") or vm.get("volumeName") or "").strip()
+
+
+def _container_spec(
+    container: Dict[str, Any],
+    resources: Dict[str, Any],
+    environment: Dict[str, Any],
+    storage: Dict[str, Any],
+    probes: Dict[str, Any],
+) -> Dict[str, Any]:
     image = (container.get("image") or "").strip()
     tag = (container.get("tag") or "latest").strip()
     if image and ":" not in image.rsplit("/", 1)[-1]:
@@ -122,12 +132,24 @@ def _container_spec(container: Dict[str, Any], resources: Dict[str, Any], enviro
                 **({"subPath": mount["subPath"]} if mount.get("subPath") else {}),
             })
     for vm in environment.get("volumeMounts") or []:
-        if vm.get("mountPath") and vm.get("volumeName"):
+        vol_name = _volume_mount_name(vm)
+        if vm.get("mountPath") and vol_name:
             volume_mounts.append({
-                "name": vm["volumeName"],
+                "name": vol_name,
                 "mountPath": vm["mountPath"],
                 **({"subPath": vm["subPath"]} if vm.get("subPath") else {}),
             })
+    for vm in storage.get("volumeMounts") or []:
+        vol_name = _volume_mount_name(vm)
+        if vm.get("mountPath") and vol_name:
+            mount = {
+                "name": vol_name,
+                "mountPath": vm["mountPath"],
+                **({"subPath": vm["subPath"]} if vm.get("subPath") else {}),
+            }
+            if vm.get("readOnly"):
+                mount["readOnly"] = True
+            volume_mounts.append(mount)
     if volume_mounts:
         spec["volumeMounts"] = volume_mounts
 
@@ -140,6 +162,116 @@ def _container_spec(container: Dict[str, Any], resources: Dict[str, Any], enviro
             spec[probe_field] = built
 
     return spec
+
+
+def _pvc_spec(
+    pvc_cfg: Dict[str, Any],
+    *,
+    pvc_name: Optional[str] = None,
+    volume_name: Optional[str] = None,
+    storage_class: Optional[str] = None,
+    force_storage_class: bool = False,
+) -> Dict[str, Any]:
+    spec: Dict[str, Any] = {
+        "accessModes": [pvc_cfg.get("accessMode") or "ReadWriteOnce"],
+        "resources": {"requests": {"storage": pvc_cfg.get("size") or "1Gi"}},
+    }
+    sc = storage_class if storage_class is not None else pvc_cfg.get("storageClass")
+    if force_storage_class:
+        spec["storageClassName"] = sc or ""
+    elif sc:
+        spec["storageClassName"] = sc
+    if volume_name:
+        spec["volumeName"] = volume_name
+    return spec
+
+
+def _build_persistent_volume(
+    advanced: Dict[str, Any],
+    pvc_cfg: Dict[str, Any],
+    labels: Dict[str, str],
+) -> Dict[str, Any]:
+    pv_name = _sanitize_name(advanced.get("pvName") or f"{pvc_cfg.get('name') or 'data'}-pv")
+    capacity = advanced.get("capacity") or pvc_cfg.get("size") or "1Gi"
+    access_mode = pvc_cfg.get("accessMode") or "ReadWriteOnce"
+    storage_class = ""
+    reclaim = advanced.get("reclaimPolicy") or "Retain"
+    storage_type = (advanced.get("storageType") or "hostPath").lower()
+
+    spec: Dict[str, Any] = {
+        "capacity": {"storage": capacity},
+        "accessModes": [access_mode],
+        "persistentVolumeReclaimPolicy": reclaim,
+        "storageClassName": storage_class,
+    }
+
+    if storage_type == "hostpath":
+        spec["hostPath"] = {"path": advanced.get("hostPath") or "/data", "type": ""}
+    elif storage_type == "nfs":
+        spec["nfs"] = {
+            "server": advanced.get("nfsServer") or "",
+            "path": advanced.get("nfsPath") or "/",
+        }
+    elif storage_type == "local":
+        spec["local"] = {"path": advanced.get("localPath") or "/mnt/data"}
+        node_name = (advanced.get("nodeName") or "").strip()
+        if node_name:
+            spec["nodeAffinity"] = {
+                "required": {
+                    "nodeSelectorTerms": [
+                        {
+                            "matchExpressions": [
+                                {
+                                    "key": "kubernetes.io/hostname",
+                                    "operator": "In",
+                                    "values": [node_name],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolume",
+        "metadata": {"name": pv_name, "labels": labels},
+        "spec": spec,
+    }
+
+
+def _append_pvc_documents(
+    documents: List[Dict[str, Any]],
+    storage: Dict[str, Any],
+    namespace: str,
+    labels: Dict[str, str],
+    *,
+    default_name: str,
+) -> None:
+    advanced = storage.get("advanced") or {}
+    manual_pv = bool(advanced.get("createManualPv"))
+    new_pvc = storage.get("newPvc") or {}
+    pvc_name = _sanitize_name(new_pvc.get("name") or default_name)
+    if any(d.get("kind") == "PersistentVolumeClaim" and d["metadata"]["name"] == pvc_name for d in documents):
+        return
+
+    pv_name = None
+    if manual_pv:
+        pv_doc = _build_persistent_volume(advanced, new_pvc, labels)
+        pv_name = pv_doc["metadata"]["name"]
+        documents.append(pv_doc)
+
+    documents.append({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": pvc_name, "namespace": namespace, "labels": labels},
+        "spec": _pvc_spec(
+            new_pvc,
+            volume_name=pv_name,
+            storage_class="" if manual_pv else None,
+            force_storage_class=manual_pv,
+        ),
+    })
 
 
 def _build_probe(probe: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -176,7 +308,7 @@ def _pod_template(
     probes: Dict[str, Any],
 ) -> Dict[str, Any]:
     container_specs = [
-        _container_spec(c, resources, environment, probes) for c in containers
+        _container_spec(c, resources, environment, storage, probes) for c in containers
     ]
     volumes = []
     for mount in environment.get("mountedFiles") or []:
@@ -192,9 +324,9 @@ def _pod_template(
                 "secret": {"secretName": mount["secret"]},
             })
     for vm in storage.get("volumeMounts") or []:
-        vol_name = vm.get("volumeName") or "data"
+        vol_name = _volume_mount_name(vm) or "data"
         pvc_name = vm.get("pvcName") or storage.get("existingPvc") or (storage.get("newPvc") or {}).get("name")
-        if pvc_name and not any(v["name"] == vol_name for v in volumes):
+        if pvc_name and vol_name and not any(v["name"] == vol_name for v in volumes):
             volumes.append({"name": vol_name, "persistentVolumeClaim": {"claimName": pvc_name}})
 
     pod_spec: Dict[str, Any] = {"containers": container_specs}
@@ -349,17 +481,8 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
             "stringData": {str(k): str(v) for k, v in data.items()},
         })
     elif workload_type == "PersistentVolumeClaim":
-        new_pvc = storage.get("newPvc") or {}
-        documents.append({
-            "apiVersion": "v1",
-            "kind": "PersistentVolumeClaim",
-            "metadata": {"name": app_name, "namespace": namespace, "labels": labels},
-            "spec": {
-                "accessModes": [new_pvc.get("accessMode") or "ReadWriteOnce"],
-                "resources": {"requests": {"storage": new_pvc.get("size") or "1Gi"}},
-                **({"storageClassName": new_pvc["storageClass"]} if new_pvc.get("storageClass") else {}),
-            },
-        })
+        pvc_storage = {**storage, "newPvc": {**(storage.get("newPvc") or {}), "name": app_name}}
+        _append_pvc_documents(documents, pvc_storage, namespace, labels, default_name=app_name)
     elif workload_type == "Service":
         svc = networking.get("service") or {}
         documents.append({
@@ -379,19 +502,7 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
 
     pvc_mode = storage.get("pvcMode") or "none"
     if pvc_mode == "new":
-        new_pvc = storage.get("newPvc") or {}
-        pvc_name = _sanitize_name(new_pvc.get("name") or f"{app_name}-pvc")
-        if not any(d.get("kind") == "PersistentVolumeClaim" and d["metadata"]["name"] == pvc_name for d in documents):
-            documents.append({
-                "apiVersion": "v1",
-                "kind": "PersistentVolumeClaim",
-                "metadata": {"name": pvc_name, "namespace": namespace, "labels": labels},
-                "spec": {
-                    "accessModes": [new_pvc.get("accessMode") or "ReadWriteOnce"],
-                    "resources": {"requests": {"storage": new_pvc.get("size") or "1Gi"}},
-                    **({"storageClassName": new_pvc["storageClass"]} if new_pvc.get("storageClass") else {}),
-                },
-            })
+        _append_pvc_documents(documents, storage, namespace, labels, default_name=f"{app_name}-pvc")
 
     svc_cfg = networking.get("service") or {}
     if svc_cfg.get("enabled") and workload_type in WORKLOAD_KINDS:

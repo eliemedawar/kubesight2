@@ -29,6 +29,8 @@ from ..k8s_provider import (
     invalidate_cluster_list_cache,
     list_clusters_from_k8s,
     list_namespaces_from_k8s,
+    list_nodes_from_k8s,
+    list_storage_classes_from_k8s,
     namespace_events_from_k8s,
     namespace_resource_list_from_k8s,
     namespace_resources_from_k8s,
@@ -47,7 +49,15 @@ from ..access_engine import (
 )
 from ..auth_utils import auth_required_enabled, get_current_user
 from ..decorators import require_cluster_access, require_namespace_access, require_permission
-from ..mock_data import CLUSTERS, CLUSTER_OVERVIEWS, NAMESPACES, NAMESPACE_EVENTS, NAMESPACE_RESOURCES
+from ..mock_data import (
+    CLUSTERS,
+    CLUSTER_NODES,
+    CLUSTER_OVERVIEWS,
+    NAMESPACES,
+    NAMESPACE_EVENTS,
+    NAMESPACE_RESOURCES,
+    STORAGE_CLASSES,
+)
 from ..models import Cluster
 from ..response import error_response, success_response
 from ..services.logs_service import fetch_pod_logs, parse_logs_query
@@ -297,6 +307,44 @@ def cluster_overview(cluster_id: str):
     if not overview:
         return error_response("Cluster not found", 404)
     return success_response(overview)
+
+
+@clusters_bp.route("/<cluster_id>/nodes", methods=["GET"])
+@require_permission("clusters:view")
+@require_cluster_access
+def cluster_nodes(cluster_id: str):
+    access, err = _resolve_cluster_access_or_error(cluster_id)
+    if err:
+        return err
+    if access:
+        try:
+            return success_response(list_nodes_from_k8s(access))
+        except K8sCommandError as exc:
+            return error_response(f"Failed to load nodes: {exc}", 503)
+
+    items = CLUSTER_NODES.get(cluster_id)
+    if items is None:
+        return error_response("Cluster not found", 404)
+    return success_response(items)
+
+
+@clusters_bp.route("/<cluster_id>/storageclasses", methods=["GET"])
+@require_permission("clusters:view")
+@require_cluster_access
+def cluster_storage_classes(cluster_id: str):
+    access, err = _resolve_cluster_access_or_error(cluster_id)
+    if err:
+        return err
+    if access:
+        try:
+            return success_response(list_storage_classes_from_k8s(access))
+        except K8sCommandError as exc:
+            return error_response(f"Failed to load storage classes: {exc}", 503)
+
+    items = STORAGE_CLASSES.get(cluster_id)
+    if items is None:
+        return error_response("Cluster not found", 404)
+    return success_response(items)
 
 
 @clusters_bp.route("/<cluster_id>/namespaces", methods=["GET"])

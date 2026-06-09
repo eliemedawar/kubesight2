@@ -9,10 +9,17 @@ export function WizardSectionHeader({ title, subtitle }) {
   );
 }
 
-export function Field({ label, children, hint }) {
+export function Field({ label, children, hint, tooltip }) {
   return (
     <label className="wizard-field">
-      <span className="wizard-field__label">{label}</span>
+      <span className="wizard-field__label">
+        {label}
+        {tooltip ? (
+          <span className="wizard-field__tooltip" title={tooltip} aria-label={tooltip}>
+            ⓘ
+          </span>
+        ) : null}
+      </span>
       {children}
       {hint ? <span className="wizard-field__hint muted">{hint}</span> : null}
     </label>

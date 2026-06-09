@@ -48,6 +48,64 @@ export const EMPTY_SECRET_REF = { name: NAMED_REF_PLACEHOLDER, keys: [] };
 export const EMPTY_MOUNTED_FILE = { name: "", mountPath: "", configMap: "", subPath: "" };
 export const EMPTY_VOLUME_MOUNT = { name: "", mountPath: "", readOnly: false };
 
+export const STORAGE_DEFAULTS = {
+  pvcName: "data-pvc",
+  pvName: "data-pv",
+  volumeMount: { name: "data", mountPath: "/data", readOnly: false },
+};
+
+export const EMPTY_STORAGE_EDITS = {
+  pvcName: false,
+  pvName: false,
+  volumeMount: false,
+};
+
+function isEmptyVolumeMountRow(row) {
+  return !String(row?.name || "").trim() && !String(row?.mountPath || "").trim();
+}
+
+export function hasOnlyEmptyVolumeMounts(mounts = []) {
+  return !mounts.length || (mounts.length === 1 && isEmptyVolumeMountRow(mounts[0]));
+}
+
+export function applyNewPvcStorageDefaults(storage, { enableManualPv = false } = {}) {
+  const edits = { ...EMPTY_STORAGE_EDITS, ...(storage.storageEdits || {}) };
+  const next = {
+    ...storage,
+    storageEdits: edits,
+    newPvc: { ...(storage.newPvc || {}) },
+    advanced: { ...EMPTY_ADVANCED_STORAGE, ...(storage.advanced || {}) },
+    volumeMounts: storage.volumeMounts?.length ? [...storage.volumeMounts] : [],
+  };
+
+  if (!edits.pvcName && !String(next.newPvc.name || "").trim()) {
+    next.newPvc = { ...next.newPvc, name: STORAGE_DEFAULTS.pvcName };
+  }
+
+  if (enableManualPv && !edits.pvName && !String(next.advanced.pvName || "").trim()) {
+    next.advanced = { ...next.advanced, pvName: STORAGE_DEFAULTS.pvName };
+  }
+
+  if (!edits.volumeMount && hasOnlyEmptyVolumeMounts(next.volumeMounts)) {
+    next.volumeMounts = [{ ...STORAGE_DEFAULTS.volumeMount }];
+  }
+
+  return next;
+}
+
+export const EMPTY_ADVANCED_STORAGE = {
+  createManualPv: false,
+  pvName: "",
+  capacity: "1Gi",
+  storageType: "hostPath",
+  reclaimPolicy: "Retain",
+  hostPath: "",
+  nfsServer: "",
+  nfsPath: "",
+  localPath: "",
+  nodeName: "",
+};
+
 /** Frontend fallback env defaults per template (used when API omits environment). */
 export const TEMPLATE_ENVIRONMENT_DEFAULTS = {
   nginx: {
@@ -206,6 +264,8 @@ export function ensureRepeatableRows(state) {
     },
     storage: {
       ...storage,
+      advanced: { ...EMPTY_ADVANCED_STORAGE, ...(storage.advanced || {}) },
+      storageEdits: { ...EMPTY_STORAGE_EDITS, ...(storage.storageEdits || {}) },
       volumeMounts: storage.volumeMounts?.length ? [...storage.volumeMounts] : [{ ...EMPTY_VOLUME_MOUNT }],
     },
     containers: (state.containers?.length ? state.containers : [{ ...EMPTY_CONTAINER }]).map((container) => ({
@@ -255,6 +315,8 @@ export function createEmptyWizardState(defaultClusterId = "") {
       existingPvc: "",
       newPvc: { name: "", storageClass: "", accessMode: "ReadWriteOnce", size: "1Gi" },
       volumeMounts: [],
+      advanced: { ...EMPTY_ADVANCED_STORAGE },
+      storageEdits: { ...EMPTY_STORAGE_EDITS },
     },
     networking: {
       service: { enabled: true, name: "", type: "ClusterIP", port: 80, targetPort: 80, protocol: "TCP" },
@@ -410,10 +472,19 @@ export function buildWizardPayload(state) {
       mountedFiles: sanitizeMountedFiles(state.environment.mountedFiles),
     },
     resources: state.resources,
-    storage: {
-      ...state.storage,
-      volumeMounts: sanitizeVolumeMounts(state.storage.volumeMounts),
-    },
+    storage: (() => {
+      const { storageEdits, ...storagePayload } = state.storage || {};
+      return {
+        ...storagePayload,
+        newPvc: {
+          ...(state.storage.newPvc || {}),
+          storageClass: state.storage.advanced?.createManualPv
+            ? ""
+            : (state.storage.newPvc?.storageClass || ""),
+        },
+        volumeMounts: sanitizeVolumeMounts(state.storage.volumeMounts),
+      };
+    })(),
     networking: state.networking,
     healthChecks: state.healthChecks,
     scaling: state.scaling,
