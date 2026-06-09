@@ -1,33 +1,19 @@
 // KubeSight CI/CD — https://github.com/eliemedawar/Kubesight
 //
 // Jenkins job setup (one-time):
-//   1. New Item → Pipeline (or Multibranch Pipeline)
+//   1. New Item → Pipeline
 //   2. Pipeline → Definition: "Pipeline script from SCM"
-//   3. SCM: Git
-//      Repository URL: https://github.com/eliemedawar/Kubesight.git
-//      Credentials: GitHub PAT or SSH key (ID: github-kubesight-credentials)
-//      Branch: */master
-//   4. Script Path: Jenkinsfile
-//   5. In GitHub repo → Settings → Webhooks → Add:
-//      Payload URL: https://<your-jenkins>/github-webhook/
-//      Content type: application/json
-//      Events: Just the push event (and Pull requests for multibranch)
+//   3. SCM: Git → https://github.com/eliemedawar/Kubesight.git
+//      Branch: */master  |  Script Path: Jenkinsfile
+//   4. Build Triggers → GitHub hook trigger for GITScm polling (optional)
+//   5. Agent needs: Docker CLI (docker run / docker build)
+//
+// Optional plugins (not required): Timestamper, Docker Pipeline, JUnit
 
 pipeline {
     agent any
 
-    properties([
-        githubProjectProperty(
-            displayName: '',
-            projectUrlStr: 'https://github.com/eliemedawar/Kubesight'
-        ),
-        pipelineTriggers([
-            githubPush()
-        ])
-    ])
-
     options {
-        timestamps()
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '25'))
         timeout(time: 45, unit: 'MINUTES')
@@ -83,27 +69,7 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                script {
-                    if (env.BRANCH_NAME) {
-                        checkout scm
-                    } else {
-                        checkout([
-                            $class: 'GitSCM',
-                            branches: [[name: "refs/heads/${env.GIT_BRANCH}"]],
-                            extensions: [[
-                                $class: 'CloneOption',
-                                depth: 1,
-                                shallow: true,
-                                noTags: false,
-                                honorRefspec: true
-                            ]],
-                            userRemoteConfigs: [[
-                                credentialsId: 'github-kubesight-credentials',
-                                url: "${env.GIT_REPO}"
-                            ]]
-                        ])
-                    }
-                }
+                checkout scm
                 sh 'mkdir -p test-results'
                 script {
                     env.EFFECTIVE_TAG = params.IMAGE_TAG?.trim() ?: env.BUILD_NUMBER
@@ -120,21 +86,16 @@ pipeline {
                     when {
                         expression { !params.RUN_POSTGRES_TESTS }
                     }
-                    agent {
-                        docker {
-                            image 'python:3.12-slim'
-                            reuseNode true
-                        }
-                    }
                     steps {
-                        dir('backend') {
-                            sh '''
-                                pip install --no-cache-dir -r requirements.txt
-                                python -m pytest tests \
-                                    --junitxml=../test-results/backend-junit.xml \
-                                    -q
-                            '''
-                        }
+                        sh '''
+                            docker run --rm \
+                                -v "$WORKSPACE:/workspace" \
+                                -w /workspace/backend \
+                                -e K8S_REAL_MODE=false \
+                                -e JWT_SECRET_KEY=ci-test-secret-do-not-use-in-production \
+                                python:3.12-slim \
+                                sh -c 'pip install --no-cache-dir -r requirements.txt && python -m pytest tests --junitxml=/workspace/test-results/backend-junit.xml -q'
+                        '''
                     }
                     post {
                         always {
@@ -147,31 +108,30 @@ pipeline {
                     when {
                         expression { params.RUN_POSTGRES_TESTS }
                     }
-                    agent {
-                        docker {
-                            image 'python:3.12-slim'
-                            reuseNode true
-                        }
-                    }
                     steps {
                         sh '''
                             if [ ! -f docker-compose.test.yml ]; then
                                 echo "docker-compose.test.yml not found — falling back to SQLite tests."
-                                cd backend
-                                pip install --no-cache-dir -r requirements.txt
-                                python -m pytest tests \
-                                    --junitxml=../test-results/backend-junit.xml \
-                                    -q
+                                docker run --rm \
+                                    -v "$WORKSPACE:/workspace" \
+                                    -w /workspace/backend \
+                                    -e K8S_REAL_MODE=false \
+                                    -e JWT_SECRET_KEY=ci-test-secret-do-not-use-in-production \
+                                    python:3.12-slim \
+                                    sh -c 'pip install --no-cache-dir -r requirements.txt && python -m pytest tests --junitxml=/workspace/test-results/backend-junit.xml -q'
                                 exit 0
                             fi
 
                             docker compose -f docker-compose.test.yml up -d --wait postgres-test
-                            export TEST_DATABASE_URL="postgresql://kubesight_test:kubesight_test@localhost:5433/kubesight_test"
-                            cd backend
-                            pip install --no-cache-dir -r requirements.txt
-                            python -m pytest tests \
-                                --junitxml=../test-results/backend-junit.xml \
-                                -q
+                            docker run --rm \
+                                --network host \
+                                -v "$WORKSPACE:/workspace" \
+                                -w /workspace/backend \
+                                -e K8S_REAL_MODE=false \
+                                -e JWT_SECRET_KEY=ci-test-secret-do-not-use-in-production \
+                                -e TEST_DATABASE_URL=postgresql://kubesight_test:kubesight_test@localhost:5433/kubesight_test \
+                                python:3.12-slim \
+                                sh -c 'pip install --no-cache-dir -r requirements.txt && python -m pytest tests --junitxml=/workspace/test-results/backend-junit.xml -q'
                         '''
                     }
                     post {
@@ -187,20 +147,14 @@ pipeline {
                 }
 
                 stage('Frontend') {
-                    agent {
-                        docker {
-                            image 'node:20-alpine'
-                            reuseNode true
-                        }
-                    }
                     steps {
-                        dir('frontend') {
-                            sh '''
-                                npm ci
-                                npm test
-                                npm run build
-                            '''
-                        }
+                        sh '''
+                            docker run --rm \
+                                -v "$WORKSPACE:/workspace" \
+                                -w /workspace/frontend \
+                                node:20-alpine \
+                                sh -c 'npm ci && npm test && npm run build'
+                        '''
                     }
                     post {
                         success {
@@ -306,7 +260,7 @@ pipeline {
             echo "KubeSight pipeline succeeded — ${env.GIT_REPO} @ ${env.EFFECTIVE_TAG}"
         }
         failure {
-            echo "KubeSight pipeline failed — see ${env.GIT_REPO}/actions or Jenkins logs."
+            echo 'KubeSight pipeline failed — inspect stage logs above.'
         }
     }
 }
