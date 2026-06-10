@@ -1,11 +1,16 @@
 // KubeSight CI/CD — https://github.com/eliemedawar/Kubesight
 //
-// Plugins needed: Pipeline, Git  (no Docker Pipeline or JUnit required)
+// Plugins needed: Pipeline, Git
 //
-// Agent needs Docker CLI + daemon access. If Jenkins runs in Docker:
-//   volumes: [/var/run/docker.sock:/var/run/docker.sock]
-//   then: docker exec -u root <jenkins> apt-get install -y docker.io
-//         docker exec -u root <jenkins> usermod -aG docker jenkins
+// One-time agent setup (Jenkins in Docker):
+//   docker exec -u root jenkins bash -c "apt-get update && apt-get install -y python3 python3-pip python3-venv nodejs npm docker.io"
+//   docker exec -u root jenkins usermod -aG docker jenkins
+//   docker exec -u root jenkins chmod 666 /var/run/docker.sock
+//   docker restart jenkins
+//
+// Tests run directly on the Jenkins agent (not docker run) because nested
+// volume mounts from Jenkins-in-Docker do not expose the workspace to child containers.
+// Docker is only required when BUILD_DOCKER / PUSH_IMAGES / DEPLOY_TO_K8S is enabled.
 //
 // Job: SCM https://github.com/eliemedawar/Kubesight.git  branch */master
 //      Credentials: github-creds  |  Script Path: Jenkinsfile
@@ -70,22 +75,30 @@ pipeline {
                 checkout scm
                 sh '''
                     mkdir -p test-results
-                    if ! command -v docker >/dev/null 2>&1; then
-                        echo "ERROR: docker CLI not found on Jenkins agent."
-                        echo "Mount /var/run/docker.sock and install docker.io inside the Jenkins container."
+
+                    if ! command -v python3 >/dev/null 2>&1; then
+                        echo "ERROR: python3 not found on Jenkins agent."
+                        echo "Run: docker exec -u root jenkins apt-get install -y python3 python3-pip python3-venv"
                         exit 1
                     fi
-                    docker info >/dev/null 2>&1 || {
-                        echo "ERROR: Docker daemon not reachable from Jenkins."
-                        echo "Mount /var/run/docker.sock:/var/run/docker.sock when starting Jenkins."
+                    if ! command -v npm >/dev/null 2>&1; then
+                        echo "ERROR: npm not found on Jenkins agent."
+                        echo "Run: docker exec -u root jenkins apt-get install -y nodejs npm"
                         exit 1
-                    }
+                    fi
                 '''
                 script {
                     env.EFFECTIVE_TAG = params.IMAGE_TAG?.trim() ?: env.BUILD_NUMBER
                     String registry = params.DOCKER_REGISTRY?.trim()
                     env.BACKEND_IMAGE = registry ? "${registry}/${env.BACKEND_IMAGE_NAME}" : env.BACKEND_IMAGE_NAME
                     env.FRONTEND_IMAGE = registry ? "${registry}/${env.FRONTEND_IMAGE_NAME}" : env.FRONTEND_IMAGE_NAME
+
+                    if (params.BUILD_DOCKER || params.PUSH_IMAGES || params.DEPLOY_TO_K8S) {
+                        sh '''
+                            command -v docker >/dev/null 2>&1 || { echo "ERROR: docker required for image build/deploy stages."; exit 1; }
+                            docker info >/dev/null 2>&1 || { echo "ERROR: Docker daemon not reachable."; exit 1; }
+                        '''
+                    }
                 }
             }
         }
@@ -97,15 +110,16 @@ pipeline {
                         expression { !params.RUN_POSTGRES_TESTS }
                     }
                     steps {
-                        sh '''
-                            docker run --rm \
-                                -v "$WORKSPACE:/workspace" \
-                                -w /workspace/backend \
-                                -e K8S_REAL_MODE=false \
-                                -e JWT_SECRET_KEY=ci-test-secret-do-not-use-in-production \
-                                python:3.12-slim \
-                                sh -c 'pip install --no-cache-dir -r requirements.txt && python -m pytest tests --junitxml=/workspace/test-results/backend-junit.xml -q'
-                        '''
+                        dir('backend') {
+                            sh '''
+                                python3 -m venv .ci-venv
+                                . .ci-venv/bin/activate
+                                pip install --no-cache-dir -r requirements.txt
+                                python -m pytest tests \
+                                    --junitxml=../test-results/backend-junit.xml \
+                                    -q
+                            '''
+                        }
                     }
                 }
 
@@ -118,26 +132,22 @@ pipeline {
                             set -e
                             if [ ! -f docker-compose.test.yml ]; then
                                 echo "docker-compose.test.yml not found — falling back to SQLite."
-                                docker run --rm \
-                                    -v "$WORKSPACE:/workspace" \
-                                    -w /workspace/backend \
-                                    -e K8S_REAL_MODE=false \
-                                    -e JWT_SECRET_KEY=ci-test-secret-do-not-use-in-production \
-                                    python:3.12-slim \
-                                    sh -c 'pip install --no-cache-dir -r requirements.txt && python -m pytest tests --junitxml=/workspace/test-results/backend-junit.xml -q'
+                                cd backend
+                                python3 -m venv .ci-venv
+                                . .ci-venv/bin/activate
+                                pip install --no-cache-dir -r requirements.txt
+                                python -m pytest tests --junitxml=../test-results/backend-junit.xml -q
                                 exit 0
                             fi
 
+                            command -v docker >/dev/null 2>&1 || { echo "ERROR: docker required for PostgreSQL tests."; exit 1; }
                             docker compose -f docker-compose.test.yml up -d --wait postgres-test
-                            docker run --rm \
-                                --network host \
-                                -v "$WORKSPACE:/workspace" \
-                                -w /workspace/backend \
-                                -e K8S_REAL_MODE=false \
-                                -e JWT_SECRET_KEY=ci-test-secret-do-not-use-in-production \
-                                -e TEST_DATABASE_URL=postgresql://kubesight_test:kubesight_test@localhost:5433/kubesight_test \
-                                python:3.12-slim \
-                                sh -c 'pip install --no-cache-dir -r requirements.txt && python -m pytest tests --junitxml=/workspace/test-results/backend-junit.xml -q'
+                            cd backend
+                            python3 -m venv .ci-venv
+                            . .ci-venv/bin/activate
+                            pip install --no-cache-dir -r requirements.txt
+                            export TEST_DATABASE_URL="postgresql://kubesight_test:kubesight_test@host.docker.internal:5433/kubesight_test"
+                            python -m pytest tests --junitxml=../test-results/backend-junit.xml -q
                         '''
                     }
                     post {
@@ -149,13 +159,17 @@ pipeline {
 
                 stage('Frontend') {
                     steps {
-                        sh '''
-                            docker run --rm \
-                                -v "$WORKSPACE:/workspace" \
-                                -w /workspace/frontend \
-                                node:20-alpine \
-                                sh -c 'npm ci && npm test && npm run build'
-                        '''
+                        dir('frontend') {
+                            sh '''
+                                if [ -f package-lock.json ]; then
+                                    npm ci
+                                else
+                                    npm install
+                                fi
+                                npm test
+                                npm run build
+                            '''
+                        }
                     }
                 }
             }
