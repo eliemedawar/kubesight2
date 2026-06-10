@@ -11,6 +11,7 @@
 // Tests run directly on the Jenkins agent (not docker run) because nested
 // volume mounts from Jenkins-in-Docker do not expose the workspace to child containers.
 // Docker is only required when BUILD_DOCKER / PUSH_IMAGES / DEPLOY_TO_K8S is enabled.
+// kubectl is auto-installed to .ci-tools/bin when missing (no root required).
 //
 // Job: SCM https://github.com/eliemedawar/Kubesight.git  branch */master
 //      Credentials: github-creds  |  Script Path: Jenkinsfile
@@ -65,6 +66,7 @@ pipeline {
     environment {
         BACKEND_IMAGE_NAME = 'kubesight-backend'
         FRONTEND_IMAGE_NAME = 'kubesight-frontend'
+        KUBECTL_VERSION = 'v1.33.0'
         K8S_REAL_MODE = 'false'
         JWT_SECRET_KEY = 'ci-test-secret-do-not-use-in-production'
     }
@@ -86,8 +88,36 @@ pipeline {
                         echo "Run: docker exec -u root jenkins apt-get install -y nodejs npm"
                         exit 1
                     fi
+
+                    CI_TOOLS_BIN="${WORKSPACE}/.ci-tools/bin"
+                    mkdir -p "${CI_TOOLS_BIN}"
+
+                    if ! command -v kubectl >/dev/null 2>&1; then
+                        if [ ! -x "${CI_TOOLS_BIN}/kubectl" ]; then
+                            echo "Installing kubectl ${KUBECTL_VERSION} to ${CI_TOOLS_BIN}"
+                            ARCH="$(uname -m)"
+                            case "${ARCH}" in
+                                x86_64) KUBE_ARCH=amd64 ;;
+                                aarch64|arm64) KUBE_ARCH=arm64 ;;
+                                *)
+                                    echo "ERROR: unsupported architecture for kubectl: ${ARCH}"
+                                    exit 1
+                                    ;;
+                            esac
+                            curl -fsSL \
+                                "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBE_ARCH}/kubectl" \
+                                -o "${CI_TOOLS_BIN}/kubectl"
+                            chmod +x "${CI_TOOLS_BIN}/kubectl"
+                        fi
+                        export PATH="${CI_TOOLS_BIN}:${PATH}"
+                    fi
+
+                    kubectl version --client
                 '''
                 script {
+                    if (fileExists('.ci-tools/bin/kubectl')) {
+                        env.PATH = "${env.WORKSPACE}/.ci-tools/bin:" + env.PATH
+                    }
                     env.EFFECTIVE_TAG = params.IMAGE_TAG?.trim() ?: env.BUILD_NUMBER
                     String registry = params.DOCKER_REGISTRY?.trim()
                     env.BACKEND_IMAGE = registry ? "${registry}/${env.BACKEND_IMAGE_NAME}" : env.BACKEND_IMAGE_NAME
