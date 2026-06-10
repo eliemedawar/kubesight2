@@ -13,6 +13,7 @@ import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
 import RolesPanel from "../components/user-management/RolesPanel";
+import { isFullAccessRole } from "../lib/rolePresets";
 
 const UserFormModal = lazy(() => import("../components/user-management/UserFormModal.jsx"));
 
@@ -108,7 +109,7 @@ export default function UserManagementPage() {
       if (clusterFilter !== "all") {
         const access = user.clusterAccess || [];
         const role = rolesByName[user.role];
-        if (role?.hasFullAccess || user.isAdmin) {
+        if (isFullAccessRole(role) || user.isAdmin) {
           return true;
         }
         if (!access.includes(clusterFilter)) {

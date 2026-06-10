@@ -3,6 +3,8 @@
  * UI never shows raw permission keys to admins.
  */
 
+import { isFullAccessRole } from "./rolePresets";
+
 export const ALLOWED_ACTIONS = [
   {
     id: "view_resources",
@@ -136,7 +138,7 @@ export function actionAllowedForRole(action, rolePermissions = []) {
 
 export function selectableActionsForRole(role) {
   const perms = role?.permissions || [];
-  if (role?.hasFullAccess) {
+  if (isFullAccessRole(role)) {
     return ALLOWED_ACTIONS;
   }
   return ALLOWED_ACTIONS.filter((action) => actionAllowedForRole(action, perms));

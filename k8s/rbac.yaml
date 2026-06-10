@@ -18,6 +18,25 @@ rules:
       - endpoints
       - namespaces
       - events
+      - persistentvolumeclaims
+      - configmaps
+    verbs: [get, list, watch]
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+    verbs: [get, list, watch]
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: [get, list, watch]
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources:
+      - apiservices
+    verbs: [get, list, watch]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - ingressclasses
     verbs: [get, list, watch]
   - apiGroups: ["apps"]
     resources:

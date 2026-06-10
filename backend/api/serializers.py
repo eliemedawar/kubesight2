@@ -9,6 +9,8 @@ from .rbac_data import ALL_PERMISSION_KEYS
 
 
 def role_has_full_access(role: Role) -> bool:
+    if role.name == "admin":
+        return True
     granted = {perm.key for perm in role.permissions}
     return set(ALL_PERMISSION_KEYS).issubset(granted)
 

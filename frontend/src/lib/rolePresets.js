@@ -46,3 +46,11 @@ export function roleDisplayLabel(roleName) {
   }
   return roleName;
 }
+
+/** Match backend is_admin() / role_has_full_access() for role picker UI. */
+export function isFullAccessRole(role) {
+  if (!role) {
+    return false;
+  }
+  return role.hasFullAccess === true || role.name === "admin";
+}

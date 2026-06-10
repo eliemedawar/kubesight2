@@ -16,7 +16,7 @@ spec:
       containers:
         - name: frontend
           # Build: docker build -t kubesight-frontend:v2 ./frontend
-          image: kubesight-frontend:v2
+          image: kubesight-frontend:v3
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80

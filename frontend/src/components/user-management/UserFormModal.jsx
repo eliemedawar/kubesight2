@@ -12,7 +12,7 @@ import {
   emptyClusterGrant,
   sanitizeClusterGrantsForRole,
 } from "../../lib/accessRulesForm";
-import { roleDescription } from "../../lib/rolePresets";
+import { isFullAccessRole, roleDescription } from "../../lib/rolePresets";
 
 export default function UserFormModal({
   open,
@@ -43,7 +43,7 @@ export default function UserFormModal({
   );
 
   const isEditingSelf = editingUser && currentUser && editingUser.id === currentUser.id;
-  const isAdminRole = Boolean(selectedRole?.hasFullAccess);
+  const isAdminRole = isFullAccessRole(selectedRole);
 
   const clustersById = useMemo(
     () => Object.fromEntries(clusters.map((c) => [c.id, c])),
@@ -157,7 +157,7 @@ export default function UserFormModal({
 
   const handleRoleChange = (roleId) => {
     const role = roles.find((r) => String(r.id) === String(roleId));
-    if (isEditingSelf && selectedRole?.hasFullAccess && !role?.hasFullAccess) {
+    if (isEditingSelf && isFullAccessRole(selectedRole) && !isFullAccessRole(role)) {
       setFormError("You cannot remove your own admin access.");
       return;
     }
