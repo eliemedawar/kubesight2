@@ -1,6 +1,9 @@
 import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from api.services.deployment_service import (
     friendly_kubectl_diff_error,
@@ -22,6 +25,7 @@ def test_resolve_kubectl_external_diff_honors_env_override():
         assert resolve_kubectl_external_diff() == r"C:\tools\diff.exe"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Git diff path discovery")
 def test_resolve_kubectl_external_diff_finds_user_local_git_install():
     expected = str(
         Path(r"C:\Users\Example")
