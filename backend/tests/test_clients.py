@@ -1,7 +1,7 @@
 """Tests for Clients CRUD, service assignment, status calculation, and RBAC."""
 
 import pytest
-from conftest import auth_headers
+from tests.conftest import auth_headers
 
 
 # ---------------------------------------------------------------------------

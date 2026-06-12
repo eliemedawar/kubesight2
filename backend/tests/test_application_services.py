@@ -1,7 +1,7 @@
 """Tests for Application Services CRUD, health, RBAC, and deployment management."""
 
 import pytest
-from conftest import auth_headers
+from tests.conftest import auth_headers
 
 
 # ---------------------------------------------------------------------------
