@@ -4,9 +4,9 @@ import InfoCard from "../components/common/InfoCard.jsx";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
 import { mapPrecheckClass, mapPrecheckState } from "../utils/formatters.js";
 
-function DetailRow({ label, value, children }) {
+function DetailRow({ label, value, children, stacked = false }) {
   return (
-    <div className="upgrade-detail-row">
+    <div className={`upgrade-detail-row${stacked ? " upgrade-detail-row--control" : ""}`}>
       <span className="upgrade-detail-label">{label}</span>
       <span className="upgrade-detail-value">{children ?? value ?? "—"}</span>
     </div>
@@ -40,10 +40,6 @@ export default function UpgradeSafeModePage({
   accessError = "",
   canPrecheck,
   canStart,
-  showConfirmation,
-  confirmationText,
-  onConfirmationChange,
-  requiredConfirmation,
 }) {
   const clusterInfo = upgradeData?.clusterInfo;
   const provider = upgradeData?.provider;
@@ -54,28 +50,36 @@ export default function UpgradeSafeModePage({
   const instructions = upgradeData?.instructions || provider?.instructions;
   const showsInstructionsOnly =
     provider?.executionMode === "instructions" ||
-    (!provider?.upgradeSupported && provider?.executionMode !== "plan-only");
+    (!provider?.upgradeSupported &&
+      provider?.executionMode !== "plan-only" &&
+      provider?.executionMode !== "execute-with-cli");
   const manualRequired = upgradePlan?.manualUpgradeRequired ?? showsInstructionsOnly;
-  const executionSupported = upgradeData?.executionSupported === true;
+  const executionSupported =
+    upgradeData?.executionSupported === true || provider?.executionMode === "execute-with-cli";
+  const upgradeRunning = upgradeData?.status === "running";
+  const upgradeFailed = upgradeData?.status === "failed";
+  const upgradeCompleted = upgradeData?.status === "completed";
+  const stepsToRender =
+    (upgradeData?.upgradeSteps?.length ? upgradeData.upgradeSteps : upgradePlan?.steps) || [];
 
   const latestDisplay =
     versionInfo?.latestAvailable && versionInfo.latestAvailable !== "unknown"
       ? versionInfo.latestAvailable
       : "Unknown";
 
+  const planGenerated =
+    upgradeData?.status === "manual_required" && Boolean(upgradeData?.upgradeId);
   const actionLabel = showsInstructionsOnly
     ? "View Upgrade Instructions"
-    : showConfirmation
-      ? "Confirm Upgrade Plan"
-      : "Start Upgrade Plan";
+    : executionSupported && !manualRequired
+      ? "Start Automatic Upgrade"
+      : manualRequired || !executionSupported
+        ? "Generate Upgrade Plan"
+        : "Start Upgrade Plan";
 
   const handlePrimaryAction = () => {
     if (showsInstructionsOnly) {
       onViewInstructions?.();
-      return;
-    }
-    if (showConfirmation) {
-      onStartUpgrade?.();
       return;
     }
     onStartUpgrade?.();
@@ -109,8 +113,33 @@ export default function UpgradeSafeModePage({
       {upgradeData?.canUpgrade === true && !upgradeData?.status ? (
         <p className="banner-message">Precheck passed — cluster is ready for upgrade planning.</p>
       ) : null}
-      {upgradeData?.status === "manual_required" ? (
-        <p className="banner-message warning-banner">
+      {upgradeData?.status === "confirmation_required" ? (
+        <div className="banner-message warning-banner upgrade-result-banner" role="status">
+          <strong>Confirmation required.</strong>{" "}
+          {upgradeData.message || "Type the confirmation phrase below to generate the upgrade plan."}
+        </div>
+      ) : null}
+      {planGenerated ? (
+        <div className="banner-message upgrade-result-banner" role="status">
+          <strong>Upgrade plan generated.</strong> Reference ID:{" "}
+          <code>{upgradeData.upgradeId}</code>. KubeSight does not run cluster upgrades
+          automatically — complete the manual steps in the upgrade plan and instructions below.
+        </div>
+      ) : upgradeRunning ? (
+        <div className="banner-message warning-banner upgrade-result-banner" role="status">
+          <strong>Automatic upgrade in progress…</strong>{" "}
+          {upgradeData.message || "KubeSight is running kubeadm upgrade steps on the cluster."}
+        </div>
+      ) : upgradeCompleted ? (
+        <div className="banner-message upgrade-result-banner" role="status">
+          <strong>Upgrade completed.</strong> {upgradeData.message}
+        </div>
+      ) : upgradeFailed ? (
+        <p className="banner-message error upgrade-result-banner" role="status">
+          <strong>Upgrade failed.</strong> {upgradeData.error || upgradeData.message}
+        </p>
+      ) : upgradeData?.status === "manual_required" ? (
+        <p className="banner-message warning-banner upgrade-result-banner" role="status">
           Manual upgrade required — KubeSight does not execute provider upgrades automatically.
         </p>
       ) : null}
@@ -119,6 +148,7 @@ export default function UpgradeSafeModePage({
         <InfoCard title="Cluster Information">
           {clusterInfo ? (
             <div className="upgrade-details">
+              <DetailRow label="Cluster" value={clusterInfo.contextName || clusterInfo.clusterId} />
               <DetailRow label="Provider" value={clusterInfo.providerDisplay} />
               <DetailRow label="Control Plane" value={clusterInfo.controlPlaneVersion} />
               <DetailRow label="kubectl Client" value={clusterInfo.kubectlClientVersion} />
@@ -158,22 +188,33 @@ export default function UpgradeSafeModePage({
             <div className="upgrade-details">
               <DetailRow label="Current Version" value={versionInfo.currentVersion} />
               <DetailRow label="Latest Available" value={latestDisplay} />
-              <DetailRow label="Target Version">
-                <select
+              <DetailRow label="Target Version" stacked>
+                <input
+                  list="upgrade-version-options"
                   className="upgrade-version-select"
                   value={targetVersion}
                   onChange={(event) => onTargetVersionChange?.(event.target.value)}
                   disabled={loading}
-                >
-                  <option value={targetVersion}>{targetVersion}</option>
-                  {latestDisplay !== "Unknown" && latestDisplay !== targetVersion ? (
-                    <option value={latestDisplay}>{latestDisplay}</option>
-                  ) : null}
-                  {versionInfo.currentVersion && versionInfo.currentVersion !== targetVersion ? (
-                    <option value={versionInfo.currentVersion}>{versionInfo.currentVersion}</option>
-                  ) : null}
-                </select>
+                  placeholder="e.g. v1.33.0"
+                />
+                <datalist id="upgrade-version-options">
+                  {(versionInfo.targetOptions || []).length > 0
+                    ? versionInfo.targetOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))
+                    : [
+                        latestDisplay !== "Unknown" ? latestDisplay : null,
+                        versionInfo.currentVersion || null,
+                      ]
+                        .filter(Boolean)
+                        .map((v) => <option key={v} value={v} />)}
+                </datalist>
               </DetailRow>
+              {versionInfo.recommendedTarget && targetVersion !== versionInfo.recommendedTarget ? (
+                <DetailRow label="Recommended" value={versionInfo.recommendedTarget} />
+              ) : null}
               <DetailRow label="Upgrade Supported">
                 <SupportBadge supported={versionInfo.upgradeSupported} />
               </DetailRow>
@@ -265,9 +306,9 @@ export default function UpgradeSafeModePage({
           {manualRequired ? (
             <p className="upgrade-manual-badge">Manual Upgrade Required</p>
           ) : null}
-          <ol className="stepper upgrade-plan-stepper">
-            {(upgradePlan?.steps || upgradeData?.upgradeSteps || []).length ? (
-              (upgradePlan?.steps || upgradeData?.upgradeSteps || []).map((step, index) => {
+          <ol className="stepper upgrade-plan-stepper upgrade-plan-result">
+            {stepsToRender.length ? (
+              stepsToRender.map((step, index) => {
                 const name = typeof step === "string" ? step : step.name;
                 const stepStatus = step.status;
                 const isActive = index <= (upgradeData?.activeStep ?? -1);
@@ -310,21 +351,6 @@ export default function UpgradeSafeModePage({
         </section>
       ) : null}
 
-      {showConfirmation ? (
-        <section className="card upgrade-confirmation">
-          <p>
-            Type <code>{requiredConfirmation}</code> to confirm the upgrade plan:
-          </p>
-          <input
-            type="text"
-            className="upgrade-confirmation-input"
-            value={confirmationText}
-            onChange={(event) => onConfirmationChange?.(event.target.value)}
-            placeholder={requiredConfirmation}
-          />
-        </section>
-      ) : null}
-
       <section className="card upgrade-actions">
         {canPrecheck ? (
           <button type="button" className="btn-outline" onClick={onRunPrecheck} disabled={loading}>
@@ -337,9 +363,7 @@ export default function UpgradeSafeModePage({
             className="primary"
             onClick={handlePrimaryAction}
             disabled={
-              loading ||
-              (!showsInstructionsOnly && upgradeData?.canUpgrade === false) ||
-              (showConfirmation && confirmationText !== requiredConfirmation)
+              loading || upgradeRunning || (!showsInstructionsOnly && upgradeData?.canUpgrade === false)
             }
           >
             {actionLabel}

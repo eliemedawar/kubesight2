@@ -1,12 +1,10 @@
 from flask import Blueprint, g, request
 
-
-
+from ..access_engine import can_access_cluster
+from ..auth_utils import auth_required_enabled, get_current_user
 from ..decorators import require_cluster_access, require_permission
-
 from ..response import error_response, success_response
-
-from ..services.upgrade_service import get_upgrade_info, run_precheck, run_start
+from ..services.upgrade_service import get_upgrade_info, get_upgrade_job, run_precheck, run_start
 
 
 
@@ -119,4 +117,22 @@ def start_upgrade():
         return error_response(error, status)
 
     return success_response(data, status_code=status)
+
+
+@upgrades_bp.route("/jobs/<job_id>", methods=["GET"])
+@require_permission("upgrades:precheck")
+def upgrade_job_status(job_id: str):
+    data, error, status = get_upgrade_job(job_id)
+    if error:
+        return error_response(error, status)
+
+    # Validate that the requesting user has access to the cluster this job belongs to.
+    # Without this check any user with upgrades:precheck could poll any job ID.
+    if auth_required_enabled():
+        user = get_current_user()
+        cluster_id = data.get("clusterId")
+        if user and cluster_id and not can_access_cluster(user, cluster_id):
+            return error_response("Forbidden", 403)
+
+    return success_response(data)
 

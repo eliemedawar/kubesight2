@@ -10,6 +10,7 @@ import {
   testAlertEmail,
   listNamespacesByCluster,
   getUpgradeInfo,
+  getUpgradeJob,
   runUpgradePrecheck,
   startUpgrade,
   updateSettings,
@@ -67,6 +68,8 @@ const UserManagementPage = lazy(() => import("./pages/UserManagementPage.jsx"));
 const AuditLogsPage = lazy(() => import("./pages/AuditLogsPage.jsx"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
 const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
+const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
+const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
 
 export default function App() {
   const {
@@ -120,6 +123,11 @@ export default function App() {
   const [resourceActiveTab, setResourceActiveTab] = useState("pods");
   const applicationDetailRequestRef = useRef(0);
   const clusterContextClusterRef = useRef("");
+  const upgradeLoadClusterRef = useRef("");
+  const dashboardLoadClusterRef = useRef("");
+  const dashboardRequestSeqRef = useRef(0);
+  const dashboardSummaryClusterRef = useRef("");
+  const [dashboardRefreshing, setDashboardRefreshing] = useState(false);
 
   const allowedClusters = useMemo(
     () => getAllowedClusters(data.clusters),
@@ -311,27 +319,24 @@ export default function App() {
     }));
   };
 
+  // Pick initial cluster only from clusters the user can actually reach (API list ∩ RBAC).
+  // Do not restore legacy profile IDs like prod-us-east when the live cluster is docker-desktop.
   useEffect(() => {
-    if (!isAuthenticated || !authUser || selectedClusterId) {
+    if (!isAuthenticated || !authUser || selectedClusterId || loadingState.core) {
+      return;
+    }
+    if (!allowedClusters.length) {
       return;
     }
     const preferred = settingsDraft?.defaultCluster;
-    const userClusterIds = authUser.clusterAccess || [];
-    if (!isAdmin && userClusterIds.length) {
-      setSelectedClusterId(
-        preferred && userClusterIds.includes(preferred) ? preferred : userClusterIds[0]
-      );
-      return;
-    }
-    if (preferred) {
-      setSelectedClusterId(preferred);
-    }
+    setSelectedClusterId(resolveDefaultClusterId(allowedClusters, preferred));
   }, [
     isAuthenticated,
     authUser,
     selectedClusterId,
+    allowedClusters,
     settingsDraft.defaultCluster,
-    isAdmin,
+    loadingState.core,
   ]);
 
   useEffect(() => {
@@ -591,26 +596,42 @@ export default function App() {
     activeStep: payload.activeStep ?? -1,
   });
 
-  const loadUpgradeInfo = async (clusterId, version = targetVersion) => {
+  const loadUpgradeInfo = async (clusterId, version = targetVersion, { resetTarget = false } = {}) => {
     if (!clusterId || !canAccessCluster(clusterId)) {
       return;
     }
+    upgradeLoadClusterRef.current = clusterId;
+    const requestClusterId = clusterId;
+    setLoadingState((prev) => ({ ...prev, page: true }));
+    setErrorState((prev) => ({ ...prev, page: "" }));
     try {
       const result = await getUpgradeInfo(clusterId, version);
-      setUpgradeResult((prev) => ({
+      if (upgradeLoadClusterRef.current !== requestClusterId) {
+        return;
+      }
+      setUpgradeResult({
         ...normalizeUpgradePayload(result),
-        upgradeChecks: prev?.upgradeChecks?.length ? prev.upgradeChecks : [],
-        canUpgrade: prev?.canUpgrade,
-        status: prev?.status,
-        message: prev?.message,
-      }));
-      if (result.versionInfo?.latestAvailable && result.versionInfo.latestAvailable !== "unknown") {
-        setTargetVersion((current) =>
-          current === "v1.31.0" ? result.versionInfo.latestAvailable : current
-        );
+        clusterId: requestClusterId,
+      });
+      if (resetTarget) {
+        const recommended = result.versionInfo?.recommendedTarget;
+        const latest = result.versionInfo?.latestAvailable;
+        if (recommended) {
+          setTargetVersion(recommended);
+        } else if (latest && latest !== "unknown") {
+          setTargetVersion(latest);
+        } else {
+          setTargetVersion(version);
+        }
       }
     } catch (infoError) {
-      applyPageError(infoError.message);
+      if (upgradeLoadClusterRef.current === requestClusterId) {
+        applyPageError(infoError.message);
+      }
+    } finally {
+      if (upgradeLoadClusterRef.current === requestClusterId) {
+        setLoadingState((prev) => ({ ...prev, page: false }));
+      }
     }
   };
 
@@ -618,42 +639,116 @@ export default function App() {
     if (activePage !== "upgrade" || !selectedClusterId) {
       return;
     }
-    loadUpgradeInfo(selectedClusterId, targetVersion);
+    setUpgradeResult(null);
+    setTargetVersion("v1.31.0");
+    loadUpgradeInfo(selectedClusterId, "v1.31.0", { resetTarget: true });
   }, [activePage, selectedClusterId]);
 
-  const loadDashboardSummary = async (clusterId) => {
-    if (!clusterId || !hasPermission("overview:view")) {
+  useEffect(() => {
+    const jobId = upgradeResult?.upgradeId || upgradeResult?.jobId;
+    if (activePage !== "upgrade" || upgradeResult?.status !== "running" || !jobId) {
+      return undefined;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const job = await getUpgradeJob(jobId);
+        if (cancelled) {
+          return;
+        }
+        setUpgradeResult((prev) => ({
+          ...prev,
+          status: job.status,
+          message: job.message,
+          error: job.error,
+          upgradeId: job.jobId || prev?.upgradeId,
+          upgradeSteps: job.steps || prev?.upgradeSteps,
+          activeStep: job.activeStep ?? prev?.activeStep ?? -1,
+          executionSupported: job.executionSupported ?? prev?.executionSupported,
+        }));
+      } catch {
+        // Keep polling until the job completes or the user leaves the page.
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activePage, upgradeResult?.status, upgradeResult?.upgradeId, upgradeResult?.jobId]);
+
+  const loadDashboardSummary = async (clusterId, { background = false } = {}) => {
+    if (!clusterId || !hasPermission("overview:view") || !canAccessCluster(clusterId)) {
+      dashboardLoadClusterRef.current = "";
       setDashboardSummary(null);
+      setDashboardRefreshedAt(null);
+      setDashboardRefreshing(false);
       setLoadingState((prev) => ({ ...prev, page: false }));
       return;
     }
-    setLoadingState((prev) => ({ ...prev, page: true }));
+    const requestSeq = ++dashboardRequestSeqRef.current;
+    const isLatestRequest = () => requestSeq === dashboardRequestSeqRef.current;
+    dashboardLoadClusterRef.current = clusterId;
+    if (background) {
+      setDashboardRefreshing(true);
+    } else {
+      setLoadingState((prev) => ({ ...prev, page: true }));
+    }
     setErrorState((prev) => ({ ...prev, page: "" }));
     try {
       const summary = await getDashboardSummary(clusterId);
+      if (!isLatestRequest() || dashboardLoadClusterRef.current !== clusterId) {
+        return;
+      }
       setDashboardSummary(summary);
       setDashboardRefreshedAt(new Date().toISOString());
     } catch (dashboardError) {
+      if (!isLatestRequest() || dashboardLoadClusterRef.current !== clusterId) {
+        return;
+      }
       applyPageError(dashboardError.message, {
         expectedDenied: !canAccessCluster(clusterId),
       });
     } finally {
-      setLoadingState((prev) => ({ ...prev, page: false }));
+      if (!isLatestRequest()) {
+        return;
+      }
+      if (background) {
+        setDashboardRefreshing(false);
+      } else {
+        setLoadingState((prev) => ({ ...prev, page: false }));
+      }
     }
   };
 
+  const selectedClusterIsAllowed = useMemo(
+    () => Boolean(selectedClusterId && allowedClusters.some((cluster) => cluster.id === selectedClusterId)),
+    [selectedClusterId, allowedClusters]
+  );
+
   useEffect(() => {
-    if (resolvedActivePage !== "dashboard" || !selectedClusterId) {
+    if (resolvedActivePage !== "dashboard" || !selectedClusterIsAllowed) {
       return undefined;
     }
+    const clusterChanged =
+      Boolean(dashboardSummaryClusterRef.current) &&
+      dashboardSummaryClusterRef.current !== selectedClusterId;
+    if (clusterChanged || !dashboardSummaryClusterRef.current) {
+      setDashboardSummary(null);
+      setDashboardRefreshedAt(null);
+    }
+    dashboardSummaryClusterRef.current = selectedClusterId;
     loadDashboardSummary(selectedClusterId);
     const intervalSeconds = Number(settingsDraft.refreshIntervalSeconds) || 30;
     const intervalMs = Math.min(Math.max(intervalSeconds, 30), 60) * 1000;
     const timer = window.setInterval(() => {
-      loadDashboardSummary(selectedClusterId);
+      loadDashboardSummary(selectedClusterId, { background: true });
     }, intervalMs);
-    return () => window.clearInterval(timer);
-  }, [resolvedActivePage, selectedClusterId, settingsDraft.refreshIntervalSeconds]);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [resolvedActivePage, selectedClusterId, selectedClusterIsAllowed, settingsDraft.refreshIntervalSeconds]);
 
   const loadInventory = async () => {
     if (!hasPermission("inventory:view") && !hasPermission("resources:view")) {
@@ -796,8 +891,9 @@ export default function App() {
       });
       setUpgradeResult({
         ...normalizeUpgradePayload(result),
+        clusterId: selectedClusterId,
         canUpgrade: Boolean(result.canUpgrade),
-        status: result.canUpgrade ? "ready" : "blocked",
+        status: result.canUpgrade ? null : "blocked",
         message: result.canUpgrade
           ? `Precheck passed. Current version: ${result.currentVersion || "unknown"}`
           : "Precheck failed. Fix failed checks before upgrading.",
@@ -816,7 +912,8 @@ export default function App() {
     const showsInstructionsOnly =
       upgradeResult?.provider?.executionMode === "instructions" ||
       (!upgradeResult?.provider?.upgradeSupported &&
-        upgradeResult?.provider?.executionMode !== "plan-only");
+        upgradeResult?.provider?.executionMode !== "plan-only" &&
+        upgradeResult?.provider?.executionMode !== "execute-with-cli");
 
     if (showsInstructionsOnly) {
       document.querySelector(".upgrade-instructions")?.scrollIntoView({ behavior: "smooth" });
@@ -828,13 +925,21 @@ export default function App() {
       return;
     }
 
+    const willRunAutomatically = upgradeResult?.provider?.executionMode === "execute-with-cli";
+    if (willRunAutomatically) {
+      const clusterLabel = allowedClusters.find((c) => c.id === selectedClusterId)?.name || selectedClusterId;
+      const confirmed = window.confirm(
+        `Start automatic upgrade of cluster "${clusterLabel}" to ${targetVersion}?\n\nKubeSight will drain nodes, run kubeadm upgrade steps, and restart kubelet on each node.\n\nThis operation modifies your cluster. Continue?`
+      );
+      if (!confirmed) return;
+    }
+
     setLoadingState((prev) => ({ ...prev, page: true }));
     setErrorState((prev) => ({ ...prev, page: "" }));
     try {
       const result = await startUpgrade({
         clusterId: selectedClusterId,
         targetVersion,
-        confirmation: confirmationText || undefined,
       });
       const normalized = normalizeUpgradePayload(result);
       const completedIndex = (normalized.upgradeSteps || []).reduce(
@@ -843,15 +948,28 @@ export default function App() {
       );
       setUpgradeResult({
         ...normalized,
+        clusterId: selectedClusterId,
         canUpgrade: upgradeResult?.canUpgrade ?? true,
         status: result.status,
         message: result.message,
         activeStep: result.activeStep ?? completedIndex,
-        requiredConfirmation: result.requiredConfirmation,
+        upgradeSteps: result.steps || normalized.upgradeSteps,
+        executionSupported: result.executionSupported ?? normalized.executionSupported,
+        jobId: result.jobId || result.upgradeId,
       });
-      if (result.status === "confirmation_required") {
-        setConfirmationText("");
-      }
+      requestAnimationFrame(() => {
+        if (result.status === "manual_required") {
+          document.querySelector(".upgrade-result-banner")?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+          return;
+        }
+        document.querySelector(".upgrade-plan-result")?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      });
     } catch (startError) {
       applyPageError(startError.message);
     } finally {
@@ -971,11 +1089,16 @@ export default function App() {
           <DashboardPage
             summary={dashboardSummary}
             loading={loadingState.page}
+            refreshing={dashboardRefreshing}
             coreLoading={loadingState.core}
             accessError={errorState.page}
             hasClusters={hasClusters}
             selectedCluster={selectedCluster}
-            onRefresh={() => loadDashboardSummary(selectedClusterId)}
+            onRefresh={() =>
+              loadDashboardSummary(selectedClusterId, {
+                background: Boolean(dashboardSummary?.clusterId === selectedClusterId),
+              })
+            }
             lastRefreshedAt={dashboardRefreshedAt}
             onNavigateToUpgrade={() => handleNavigate("upgrade")}
             onNavigateToInventory={() => handleNavigate("inventory")}
@@ -1185,12 +1308,12 @@ export default function App() {
             accessError={pageAccessError}
             canPrecheck={hasPermission("upgrades:precheck") && canAccessCluster(selectedClusterId)}
             canStart={hasPermission("upgrades:start") && canAccessCluster(selectedClusterId)}
-            showConfirmation={upgradeResult?.status === "confirmation_required"}
-            confirmationText={confirmationText}
-            onConfirmationChange={setConfirmationText}
-            requiredConfirmation={upgradeResult?.requiredConfirmation}
           />
         );
+      case "applicationServices":
+        return <ApplicationServicesPage />;
+      case "clients":
+        return <ClientsPage />;
       case "userManagement":
         return <UserManagementPage />;
       case "auditLogs":
@@ -1214,11 +1337,16 @@ export default function App() {
           <DashboardPage
             summary={dashboardSummary}
             loading={loadingState.page}
+            refreshing={dashboardRefreshing}
             coreLoading={loadingState.core}
             accessError={errorState.page}
             hasClusters={hasClusters}
             selectedCluster={selectedCluster}
-            onRefresh={() => loadDashboardSummary(selectedClusterId)}
+            onRefresh={() =>
+              loadDashboardSummary(selectedClusterId, {
+                background: Boolean(dashboardSummary?.clusterId === selectedClusterId),
+              })
+            }
             lastRefreshedAt={dashboardRefreshedAt}
             onNavigateToUpgrade={() => handleNavigate("upgrade")}
             onNavigateToInventory={() => handleNavigate("inventory")}

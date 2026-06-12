@@ -22,3 +22,9 @@ export const startUpgrade = (payload) =>
 
   request("/api/upgrades/start", { method: "POST", body: payload });
 
+
+
+export const getUpgradeJob = (jobId) =>
+
+  request(`/api/upgrades/jobs/${encodeURIComponent(jobId)}`);
+

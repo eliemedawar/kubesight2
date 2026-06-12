@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .cluster_access import ClusterAccess
 from .k8s_provider import K8sCommandError, _cpu_to_cores, _run_kubectl
 
 CPU_ALERT_THRESHOLD_PERCENT = float(os.getenv("ALERT_CPU_THRESHOLD_PERCENT", "80"))
+
+_POD_TOP_CACHE_TTL = int(os.getenv("POD_TOP_CACHE_TTL_SECONDS", "15"))
+_pod_top_cache: Dict[str, Tuple[float, "PodTopMetrics"]] = {}
+_pod_top_cache_lock = threading.Lock()
 
 PodTopKey = Tuple[str, str]
 PodTopMetrics = Dict[PodTopKey, Dict[str, float]]
@@ -69,9 +75,21 @@ def format_k8s_age(creation_timestamp: Optional[str]) -> str:
     return f"{days // 365}y"
 
 
-def fetch_pod_top_metrics(access: Union[ClusterAccess, str]) -> PodTopMetrics:
-    """Return {(namespace, pod_name): {cpu: cores, memory: mib}} from kubectl top."""
+def fetch_pod_top_metrics(access: Union[ClusterAccess, str], _bypass_cache: bool = False) -> PodTopMetrics:
+    """Return {(namespace, pod_name): {cpu: cores, memory: mib}} from kubectl top.
+
+    Results are cached per cluster context for _POD_TOP_CACHE_TTL seconds so that
+    multiple callers within the same dashboard request share one kubectl top invocation.
+    """
     context_name, kubeconfig_path = _access_kwargs(access)
+    cache_key = f"{context_name}:{kubeconfig_path}"
+
+    if not _bypass_cache:
+        with _pod_top_cache_lock:
+            entry = _pod_top_cache.get(cache_key)
+        if entry and entry[0] > time.time():
+            return entry[1]
+
     try:
         output = _run_kubectl(
             ["top", "pods", "-A", "--no-headers"],
@@ -91,6 +109,9 @@ def fetch_pod_top_metrics(access: Union[ClusterAccess, str]) -> PodTopMetrics:
         if len(parts) >= 4:
             metrics["memory"] = _memory_to_mib(parts[3])
         usage[(namespace, pod_name)] = metrics
+
+    with _pod_top_cache_lock:
+        _pod_top_cache[cache_key] = (time.time() + _POD_TOP_CACHE_TTL, usage)
     return usage
 
 
@@ -283,6 +304,17 @@ def _memory_to_gib(value: str) -> float:
     return round(_memory_to_mib(value) / 1024, 2)
 
 
+def node_allocatable_totals(node_items: List[dict]) -> Tuple[float, float]:
+    """Return (cpu_allocatable_cores, memory_allocatable_gib) from node objects."""
+    cpu_total = 0.0
+    mem_gib = 0.0
+    for node in node_items:
+        allocatable = node.get("status", {}).get("allocatable", {})
+        cpu_total += _cpu_to_cores(str(allocatable.get("cpu", "0")))
+        mem_gib += _memory_to_gib(str(allocatable.get("memory", "0Gi")))
+    return cpu_total, mem_gib
+
+
 def fetch_node_allocatable(access: Union[ClusterAccess, str]) -> Tuple[float, float]:
     """Return (cpu_allocatable_cores, memory_allocatable_gib) from node status."""
     import json
@@ -293,13 +325,67 @@ def fetch_node_allocatable(access: Union[ClusterAccess, str]) -> Tuple[float, fl
         access = ClusterAccess(cluster_id="", context_name=access)
     output = _run_for_access(access, ["get", "nodes", "-o", "json"])
     node_items = json.loads(output).get("items", [])
-    cpu_total = 0.0
-    mem_gib = 0.0
-    for node in node_items:
-        allocatable = node.get("status", {}).get("allocatable", {})
-        cpu_total += _cpu_to_cores(str(allocatable.get("cpu", "0")))
-        mem_gib += _memory_to_gib(str(allocatable.get("memory", "0Gi")))
-    return cpu_total, mem_gib
+    return node_allocatable_totals(node_items)
+
+
+def cluster_utilization_metrics_from_nodes(
+    node_items: List[dict],
+    node_top_cpu: float,
+    node_top_mib: float,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Build utilization payloads from pre-fetched node data and kubectl top output."""
+    from .dashboard_intelligence import build_utilization_metric, format_cpu_display, format_memory_gib
+
+    unavailable = {
+        "available": False,
+        "title": "Metrics unavailable",
+        "reason": "Metrics Server is not installed or accessible.",
+        "helpText": "Install Metrics Server to enable utilization monitoring.",
+    }
+
+    if node_top_cpu <= 0.0 and node_top_mib <= 0.0:
+        return unavailable, unavailable
+
+    alloc_cpu, alloc_mem_gib = node_allocatable_totals(node_items)
+    used_cpu = node_top_cpu
+    used_mem_gib = round(node_top_mib / 1024, 2)
+
+    if alloc_cpu <= 0 and alloc_mem_gib <= 0:
+        no_capacity = {
+            **unavailable,
+            "reason": "Node allocatable capacity could not be determined.",
+        }
+        return no_capacity, no_capacity
+
+    cpu_percent = round((used_cpu / alloc_cpu) * 100, 1) if alloc_cpu > 0 else None
+    mem_percent = round((used_mem_gib / alloc_mem_gib) * 100, 1) if alloc_mem_gib > 0 else None
+
+    cpu = build_utilization_metric(
+        available=cpu_percent is not None and alloc_cpu > 0,
+        used=round(used_cpu, 3),
+        allocatable=round(alloc_cpu, 3),
+        percent=cpu_percent,
+        used_display=format_cpu_display(used_cpu),
+        allocatable_display=format_cpu_display(alloc_cpu),
+        unit="cores",
+        reason="CPU allocatable capacity is not available.",
+    )
+    memory = build_utilization_metric(
+        available=mem_percent is not None and alloc_mem_gib > 0,
+        used=used_mem_gib,
+        allocatable=alloc_mem_gib,
+        percent=mem_percent,
+        used_display=format_memory_gib(used_mem_gib),
+        allocatable_display=format_memory_gib(alloc_mem_gib),
+        unit="Gi",
+        reason="Memory allocatable capacity is not available.",
+    )
+
+    if not cpu.get("available"):
+        cpu = {**unavailable, "reason": cpu.get("reason", unavailable["reason"])}
+    if not memory.get("available"):
+        memory = {**unavailable, "reason": memory.get("reason", unavailable["reason"])}
+    return cpu, memory
 
 
 def cluster_utilization_metrics(access: Union[ClusterAccess, str]) -> Tuple[Dict[str, Any], Dict[str, Any]]:

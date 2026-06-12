@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
+import os
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,7 +19,6 @@ from ..access_engine import (
 )
 from ..k8s_provider import (
     K8sCommandError,
-    cluster_overview_from_k8s,
     resolve_cluster_access,
     should_use_real_k8s,
 )
@@ -33,7 +33,9 @@ HEALTH_ORDER = {"critical": 0, "warning": 1, "healthy": 2, "unknown": 3}
 
 logger = logging.getLogger(__name__)
 
-_DASHBOARD_SUMMARY_CACHE_TTL_SECONDS = 30
+_DASHBOARD_CACHE_TTL_HEALTHY = int(os.getenv("DASHBOARD_CACHE_TTL_SECONDS", "60"))
+_DASHBOARD_CACHE_TTL_INCIDENT = int(os.getenv("DASHBOARD_CACHE_TTL_INCIDENT_SECONDS", "20"))
+_DASHBOARD_CACHE_TTL_PENDING = int(os.getenv("DASHBOARD_CACHE_TTL_PENDING_SECONDS", "40"))
 _dashboard_summary_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _dashboard_summary_cache_lock = threading.Lock()
 
@@ -87,6 +89,23 @@ USER_ACTIVITY_ACTIONS = {
     "user_disabled",
     "permissions_changed",
 }
+
+def _cache_ttl_for_payload(payload: Dict[str, Any]) -> int:
+    """Choose cache TTL based on cluster health — shorten it during active incidents."""
+    pods = payload.get("pods") or {}
+    alerts = payload.get("alerts") or {}
+    health = (payload.get("clusterHealth") or payload.get("health") or {}).get("status", "healthy")
+
+    failed = int(pods.get("failed") or 0)
+    critical = int(alerts.get("critical") or 0)
+    pending = int(pods.get("pending") or 0)
+
+    if failed > 0 or critical > 0 or health == "critical":
+        return _DASHBOARD_CACHE_TTL_INCIDENT   # 20s — rapid refresh during incident
+    if pending > 0 or health == "warning":
+        return _DASHBOARD_CACHE_TTL_PENDING    # 40s — moderate refresh while pods stabilise
+    return _DASHBOARD_CACHE_TTL_HEALTHY        # 60s — conservative refresh when all clear
+
 
 def _dashboard_cache_disabled() -> bool:
     """Disable cache during pytest runs to avoid stale results with patches/mutations."""
@@ -479,10 +498,28 @@ def _run_with_app_context(app, fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
-def _fetch_upgrade_info_for_dashboard(user: User, cluster_id: str, target_version: str = "v1.31.0"):
-    from ..services.upgrade_service import get_upgrade_info
+def _lightweight_upgrade_info_for_dashboard(
+    cluster_info: Dict[str, Any],
+    target_version: str = "v1.31.0",
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Version/provider snapshot for dashboard without extra kubectl or audit writes."""
+    from ..upgrade_provider import build_version_info, get_provider_support
 
-    return get_upgrade_info(cluster_id, target_version, actor_user_id=user.id)
+    provider_support = get_provider_support(cluster_info.get("provider", "unknown"))
+    version_info = build_version_info(
+        cluster_info.get("controlPlaneVersion") or "unknown",
+        target_version,
+        provider_support,
+    )
+    return (
+        {
+            "clusterInfo": cluster_info,
+            "provider": provider_support,
+            "versionInfo": version_info,
+        },
+        None,
+        200,
+    )
 
 
 def _cluster_record_from_access(
@@ -520,59 +557,54 @@ def _load_real_k8s_dashboard_data(
     Optional[Tuple[Optional[Dict[str, Any]], Optional[str], int]],
     Optional[Dict[str, int]],
 ]:
-    """Fetch independent Kubernetes/DB inputs concurrently for dashboard summary."""
+    """Fetch Kubernetes inputs once, then derive dashboard sections in memory."""
     from flask import current_app
 
-    from ..k8s_metrics import cluster_utilization_metrics
-    from ..k8s_provider import _run_for_access, list_alerts_for_access, list_namespaces_from_k8s
+    from ..dashboard_k8s_snapshot import (
+        alerts_from_snapshot,
+        cluster_info_from_snapshot,
+        fetch_dashboard_k8s_snapshot,
+        overview_from_snapshot,
+        utilization_from_snapshot,
+    )
     from ..services.inventory_service import get_dashboard_inventory_summary
-    from ..upgrade_provider import build_cluster_info
 
     app = current_app._get_current_object()
-    futures: Dict[str, Any] = {}
+    needs_inventory = bool(user and user_has_permission(user, "resources:view"))
 
-    with ThreadPoolExecutor(max_workers=7) as pool:
-        futures["overview"] = pool.submit(cluster_overview_from_k8s, access)
-        futures["namespaces"] = pool.submit(
-            lambda: list_namespaces_from_k8s(access).get("items", [])
-        )
-        futures["cluster_info"] = pool.submit(build_cluster_info, access, _run_for_access)
-        futures["alerts"] = pool.submit(
-            lambda: list_alerts_for_access(access, cluster_id).get("items", [])
-        )
-        futures["metrics"] = pool.submit(cluster_utilization_metrics, access)
-
-        if user and user_has_permission(user, "upgrades:precheck"):
-            futures["upgrade"] = pool.submit(
-                _run_with_app_context,
-                app,
-                _fetch_upgrade_info_for_dashboard,
-                user,
-                cluster_id,
-            )
-        if user and user_has_permission(user, "resources:view"):
-            futures["inventory"] = pool.submit(
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        snapshot_future = pool.submit(fetch_dashboard_k8s_snapshot, access)
+        inventory_future = (
+            pool.submit(
                 _run_with_app_context,
                 app,
                 get_dashboard_inventory_summary,
                 user,
                 cluster_id,
             )
+            if needs_inventory
+            else None
+        )
+        snapshot = snapshot_future.result()
+        inventory_summary = inventory_future.result() if inventory_future else None
 
-        overview = futures["overview"].result()
-        namespaces = futures["namespaces"].result()
-        try:
-            cluster_info = futures["cluster_info"].result()
-        except Exception:
-            cluster_info = {}
-        alerts = futures["alerts"].result()
-        cpu_usage, memory_usage = futures["metrics"].result()
-        upgrade_result = futures["upgrade"].result() if "upgrade" in futures else None
-        inventory_summary = futures["inventory"].result() if "inventory" in futures else None
+    try:
+        cluster_info = cluster_info_from_snapshot(access, snapshot)
+    except Exception:
+        cluster_info = {}
+
+    overview = overview_from_snapshot(access, snapshot)
+    alerts = alerts_from_snapshot(access, cluster_id, snapshot)
+    cpu_usage, memory_usage = utilization_from_snapshot(snapshot)
+
+    upgrade_result = None
+    if user and user_has_permission(user, "upgrades:precheck") and cluster_info:
+        target = cluster_info.get("controlPlaneVersion") or "v1.31.0"
+        upgrade_result = _lightweight_upgrade_info_for_dashboard(cluster_info, target or "v1.31.0")
 
     return (
         overview,
-        namespaces,
+        snapshot.namespaces,
         cluster_info,
         alerts,
         cpu_usage,
@@ -609,6 +641,7 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
     recompute_started = time.time()
     now = datetime.now(timezone.utc).isoformat()
     cluster: Optional[Dict[str, Any]] = None
+    cluster_info: Dict[str, Any] = {}
     overview: Optional[Dict[str, Any]] = None
     namespaces: List[Dict[str, Any]] = []
     alerts: List[Dict[str, Any]] = []
@@ -664,7 +697,11 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         from ..services.alert_policy_evaluator import list_active_policy_alerts
         from ..services.alert_policy_service import policy_stats
 
-        policy_alerts = list_active_policy_alerts(cluster_id=cluster_id, user=user)
+        policy_alerts = list_active_policy_alerts(
+            cluster_id=cluster_id,
+            user=user,
+            evaluate=False,
+        )
         existing_ids = {a.get("id") for a in alerts}
         for policy_alert in policy_alerts:
             if policy_alert.get("id") not in existing_ids:
@@ -724,9 +761,12 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
             upgrade_data, _, upgrade_code = parallel_upgrade_result
         else:
             target = cluster.get("k8sVersion") if cluster else "v1.31.0"
-            upgrade_data, _, upgrade_code = _fetch_upgrade_info_for_dashboard(
-                user,
-                cluster_id,
+            fallback_cluster_info = cluster_info if cluster_info else {
+                "controlPlaneVersion": target,
+                "provider": provider_key,
+            }
+            upgrade_data, _, upgrade_code = _lightweight_upgrade_info_for_dashboard(
+                fallback_cluster_info,
                 target or "v1.31.0",
             )
         if upgrade_data and upgrade_code == 200:
@@ -841,11 +881,19 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
     }
 
     if cache_key:
+        ttl = _cache_ttl_for_payload(payload)
         with _dashboard_summary_cache_lock:
             _dashboard_summary_cache[cache_key] = (
-                time.time() + _DASHBOARD_SUMMARY_CACHE_TTL_SECONDS,
+                time.time() + ttl,
                 payload,
             )
+        logger.debug(
+            "dashboard_summary cache TTL=%ds (clusterId=%s health=%s failed=%s)",
+            ttl,
+            cluster_id,
+            (payload.get("clusterHealth") or {}).get("status"),
+            (payload.get("pods") or {}).get("failed"),
+        )
 
     logger.info(
         "dashboard_summary recomputed in %.2fs (clusterId=%s userId=%s)",

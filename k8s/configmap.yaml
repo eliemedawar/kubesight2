@@ -17,3 +17,5 @@ data:
   ALERT_CPU_THRESHOLD_PERCENT: "80"
   CORS_ORIGINS: "http://kubesight.local"
   PUBLIC_API_URL: ""
+  # Set to "true" to enable automated kubeadm/minikube upgrades (not Docker Desktop).
+  KUBESIGHT_AUTO_UPGRADE: "true"

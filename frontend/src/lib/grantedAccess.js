@@ -66,6 +66,32 @@ function actionIdsFromGrants(grants, user) {
   return [...actionIds];
 }
 
+const RULE_PERMISSION_TO_ACTION = {
+  "resources:view": "view_resources",
+  "pods:view": "view_resources",
+  "deployments:view": "view_resources",
+  "namespaces:view": "view_resources",
+  "logs:view": "view_logs",
+  "overview:view": "view_metrics",
+  "alerts:view": "view_alerts",
+  "services:ports:view": "view_service_ports",
+  "upgrades:precheck": "upgrade_precheck",
+};
+
+function actionIdsFromAccessRules(rules = []) {
+  const actionIds = new Set();
+  rules.forEach((rule) => {
+    if (rule.effect === "deny") {
+      return;
+    }
+    const actionId = RULE_PERMISSION_TO_ACTION[rule.permissionKey];
+    if (actionId) {
+      actionIds.add(actionId);
+    }
+  });
+  return [...actionIds];
+}
+
 /** Allowed action IDs granted by admin (not just role capabilities). */
 export function getGrantedActionIds(user) {
   if (!user) {
@@ -76,10 +102,12 @@ export function getGrantedActionIds(user) {
   }
 
   const rules = user.accessRules || [];
+  const fromRules = actionIdsFromAccessRules(rules);
   if (rules.length) {
     const clusterIds = [...new Set(rules.map((rule) => rule.clusterId).filter(Boolean))];
     const grants = accessRulesToGrants(rules, clusterIds);
-    return actionIdsFromGrants(grants, user);
+    const fromGrants = actionIdsFromGrants(grants, user);
+    return [...new Set([...fromGrants, ...fromRules])];
   }
 
   return actionIdsFromGrants(legacyGrantsFromUser(user), user);

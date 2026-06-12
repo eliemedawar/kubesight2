@@ -817,8 +817,10 @@ def evaluate_all_enabled_policies(*, persist: bool = True) -> None:
 def list_active_policy_alerts(
     cluster_id: Optional[str] = None,
     user: Optional[User] = None,
+    *,
+    evaluate: bool = True,
 ) -> List[Dict[str, Any]]:
-    if cluster_id:
+    if cluster_id and evaluate:
         evaluate_policies_for_cluster(cluster_id, user=user, persist=True)
 
     query = AlertHistory.query.filter_by(status="active")

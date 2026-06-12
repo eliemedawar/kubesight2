@@ -1,9 +1,10 @@
 import logging
 import os
 import time
+import traceback
 
 from dotenv import load_dotenv
-from flask import Flask, request
+from flask import Flask, jsonify, request
 
 load_dotenv()
 from flask_cors import CORS
@@ -92,6 +93,29 @@ def _configure_api_request_logging(app: Flask) -> None:
         request.start_time = time.perf_counter()
 
 
+_app_logger = logging.getLogger("kubesight.app")
+
+
+def _register_error_handlers(app: Flask) -> None:
+    @app.errorhandler(404)
+    def not_found(exc):
+        return jsonify({"error": "Not found", "status": 404}), 404
+
+    @app.errorhandler(405)
+    def method_not_allowed(exc):
+        return jsonify({"error": "Method not allowed", "status": 405}), 405
+
+    @app.errorhandler(Exception)
+    def unhandled_exception(exc):
+        _app_logger.error(
+            "Unhandled exception on %s %s\n%s",
+            request.method,
+            request.path,
+            traceback.format_exc(),
+        )
+        return jsonify({"error": "Internal server error", "status": 500}), 500
+
+
 def _configure_cors(app: Flask) -> None:
     raw = os.getenv("CORS_ORIGINS", "*").strip()
     if not raw or raw == "*":
@@ -144,6 +168,8 @@ def create_app(config_object=None) -> Flask:
 
     register_blueprints(app)
     register_frontend_static(app)
+
+    _register_error_handlers(app)
 
     with app.app_context():
         if not is_testing:

@@ -1,5 +1,8 @@
 import { useMemo, useState } from "react";
 import { createRole, deleteRole, updateRole } from "../../api";
+import AccessDeniedPage from "../auth/AccessDenied.jsx";
+import LoadingState from "../common/LoadingState.jsx";
+import { isAccessDeniedError } from "../../utils/authz.js";
 import { permissionSummary } from "../../lib/permissionCatalog";
 import RoleFormModal from "./RoleFormModal";
 
@@ -104,24 +107,26 @@ export default function RolesPanel({
         ) : null}
       </div>
 
-      {error ? <p className="banner-message error">{error}</p> : null}
-
-      <div className="user-filters">
-        <label className="user-filters__search">
-          Search
-          <input
-            type="search"
-            placeholder="Role name, description, or permission"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </label>
-      </div>
-
       {loading ? (
-        <p className="muted">Loading roles…</p>
+        <LoadingState label="Loading roles…" />
+      ) : isAccessDeniedError(error) ? (
+        <AccessDeniedPage message={error} />
       ) : (
         <>
+          {error ? <p className="banner-message error">{error}</p> : null}
+
+          <div className="user-filters">
+            <label className="user-filters__search">
+              Search
+              <input
+                type="search"
+                placeholder="Role name, description, or permission"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </label>
+          </div>
+
           <p className="muted user-table-meta">
             Showing {filteredRoles.length} of {roles.length} roles
           </p>

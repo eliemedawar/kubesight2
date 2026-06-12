@@ -48,4 +48,19 @@ export {
 export { getSettings, updateSettings } from "./api/settingsApi";
 export { getDashboardSummary } from "./api/dashboardApi";
 export { listInventory, getInventoryDetail } from "./api/inventoryApi";
-export { getUpgradeInfo, runUpgradePrecheck, startUpgrade } from "./api/upgradesApi";
+export { getUpgradeInfo, getUpgradeJob, runUpgradePrecheck, startUpgrade } from "./api/upgradesApi";
+export {
+  listApplicationServices,
+  getApplicationService,
+  createApplicationService,
+  updateApplicationService,
+  deleteApplicationService,
+  listPickerDeployments,
+} from "./api/applicationServicesApi";
+export {
+  listClients,
+  getClient,
+  createClient,
+  updateClient,
+  deleteClient,
+} from "./api/clientsApi";

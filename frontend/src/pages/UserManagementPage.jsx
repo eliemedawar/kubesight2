@@ -11,6 +11,7 @@ import {
 import { useAuth } from "../context/AuthContext";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
+import LoadingState from "../components/common/LoadingState.jsx";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
 import RolesPanel from "../components/user-management/RolesPanel";
 import { isFullAccessRole } from "../lib/rolePresets";
@@ -19,9 +20,11 @@ const UserFormModal = lazy(() => import("../components/user-management/UserFormM
 
 export default function UserManagementPage() {
   const { user: currentUser, hasPermission } = useAuth();
-  const canCreate = hasPermission("users:create");
-  const canUpdate = hasPermission("users:update");
-  const canDisable = hasPermission("users:disable");
+  const canCreate = hasPermission("users:create") || hasPermission("users:manage");
+  const canUpdate = hasPermission("users:update") || hasPermission("users:manage");
+  const canDisable = hasPermission("users:disable") || hasPermission("users:manage");
+  const readOnlyUsers =
+    hasPermission("users:view") && !canCreate && !canUpdate && !canDisable;
   const canViewRoles = hasPermission("roles:view");
   const canManageRoles = hasPermission("roles:manage") || hasPermission("users:manage");
   const [activeTab, setActiveTab] = useState("users");
@@ -227,8 +230,12 @@ export default function UserManagementPage() {
 
         {activeTab === "users" ? (
           <>
+            {readOnlyUsers ? (
+              <p className="banner-message">You have read-only access to user accounts.</p>
+            ) : null}
+
             {loading ? (
-              <p className="muted">Loading users…</p>
+              <LoadingState label="Loading users…" />
             ) : isAccessDeniedError(error) ? (
               <AccessDeniedPage message={error} />
             ) : formatAccessError(error) ? (
@@ -358,7 +365,7 @@ export default function UserManagementPage() {
           <RolesPanel
             roles={roles}
             loading={rolesLoading}
-            error={formatAccessError(rolesError)}
+            error={rolesError}
             canManage={canManageRoles}
             onRolesChanged={loadRoles}
             onError={setRolesError}

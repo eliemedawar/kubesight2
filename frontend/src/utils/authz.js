@@ -10,7 +10,17 @@ import {
   RESOURCE_TAB_DEFINITIONS,
 } from "../lib/resourceTypes.js";
 
+const PERMISSION_MANAGED_BY = {
+  "users:view": ["users:manage"],
+  "users:create": ["users:manage"],
+  "users:update": ["users:manage"],
+  "users:disable": ["users:manage"],
+  "roles:view": ["roles:manage", "users:manage"],
+  "roles:manage": ["users:manage"],
+};
+
 const PERMISSION_ALIASES = {
+  "namespaces:view": ["namespaces:view", "resources:view"],
   "pods:view": ["pods:view", "resources:view"],
   "deployments:view": ["deployments:view", "resources:view"],
   "replicasets:view": ["replicasets:view", "deployments:view", "resources:view"],
@@ -94,6 +104,18 @@ export const NAV_PAGES = [
     anyPermissions: ["upgrades:precheck", "upgrades:start"],
     section: "Operations",
   },
+  {
+    key: "applicationServices",
+    label: "App Services",
+    permission: "app_services:view",
+    section: "Services",
+  },
+  {
+    key: "clients",
+    label: "Clients",
+    permission: "clients:view",
+    section: "Services",
+  },
 ];
 
 export const EMPTY_MESSAGES = {
@@ -148,6 +170,10 @@ export function hasPermission(user, permissionKey) {
   if (keys.includes(permissionKey)) {
     return true;
   }
+  const managers = PERMISSION_MANAGED_BY[permissionKey] || [];
+  if (managers.some((manager) => keys.includes(manager))) {
+    return true;
+  }
   const aliases = PERMISSION_ALIASES[permissionKey] || [];
   return aliases.some((alias) => keys.includes(alias));
 }
@@ -174,6 +200,13 @@ function ruleSpecificity(rule) {
   return score;
 }
 
+function rulePermissionMatches(ruleKey, requestedKey) {
+  if (ruleKey === requestedKey) {
+    return true;
+  }
+  return (PERMISSION_ALIASES[requestedKey] || []).includes(ruleKey);
+}
+
 function ruleMatches(
   rule,
   { clusterId, namespace, resourceType, resourceName, containerName, port, permissionKey }
@@ -181,7 +214,7 @@ function ruleMatches(
   if (rule.clusterId !== clusterId) {
     return false;
   }
-  if (rule.permissionKey !== permissionKey) {
+  if (!rulePermissionMatches(rule.permissionKey, permissionKey)) {
     return false;
   }
 
@@ -282,6 +315,26 @@ function legacyEvaluate(user, { clusterId, permissionKey, namespace, resourceTyp
   return true;
 }
 
+function rulesForEvaluation(rules, { clusterId, namespace, resourceType }) {
+  if (!namespace || !resourceType) {
+    return rules;
+  }
+  const hasNamed = rules.some(
+    (rule) =>
+      rule.clusterId === clusterId &&
+      (rule.namespace || "") === namespace &&
+      (rule.resourceType || "") === resourceType &&
+      (rule.resourceName || "").trim() &&
+      rule.effect === "allow"
+  );
+  if (!hasNamed) {
+    return rules;
+  }
+  return rules.filter(
+    (rule) => (rule.resourceType || "cluster") !== "cluster" || (rule.resourceName || "").trim()
+  );
+}
+
 export function evaluateAccess(
   user,
   {
@@ -315,7 +368,8 @@ export function evaluateAccess(
     });
   }
 
-  const matching = rules.filter((rule) =>
+  const scopedRules = rulesForEvaluation(rules, { clusterId, namespace, resourceType });
+  const matching = scopedRules.filter((rule) =>
     ruleMatches(rule, {
       clusterId,
       namespace,
@@ -357,6 +411,16 @@ export function canAccessNamespace(user, clusterId, namespace) {
   });
 }
 
+function podMatchesDeploymentName(podName, deploymentName) {
+  if (!podName || !deploymentName) {
+    return false;
+  }
+  if (podName === deploymentName) {
+    return true;
+  }
+  return podName.startsWith(`${deploymentName}-`);
+}
+
 export function canAccessResource(user, clusterId, namespace, resourceType, resourceName) {
   const permMap = {
     pod: "pods:view",
@@ -369,12 +433,40 @@ export function canAccessResource(user, clusterId, namespace, resourceType, reso
     service: "services:view",
   };
   const permissionKey = permMap[resourceType] || "resources:view";
-  return evaluateAccess(user, {
-    clusterId,
-    namespace,
-    permissionKey,
-    resourceType,
-    resourceName,
+  if (
+    evaluateAccess(user, {
+      clusterId,
+      namespace,
+      permissionKey,
+      resourceType,
+      resourceName,
+    })
+  ) {
+    return true;
+  }
+  if (resourceType !== "pod") {
+    return false;
+  }
+  return loadRules(user).some((rule) => {
+    if (rule.effect !== "allow") {
+      return false;
+    }
+    if (rule.clusterId !== clusterId || (rule.namespace || "") !== namespace) {
+      return false;
+    }
+    if ((rule.resourceType || "") !== "deployment" || !(rule.resourceName || "").trim()) {
+      return false;
+    }
+    if (!podMatchesDeploymentName(resourceName, rule.resourceName.trim())) {
+      return false;
+    }
+    return evaluateAccess(user, {
+      clusterId,
+      namespace,
+      permissionKey: "deployments:view",
+      resourceType: "deployment",
+      resourceName: rule.resourceName.trim(),
+    });
   });
 }
 
@@ -695,8 +787,19 @@ export function hasAnyNamespaceAccess(user) {
     }
     return legacyNamespacePairs(user).size > 0;
   }
-  return loadRules(user).some(
-    (rule) => rule.effect === "allow" && rule.permissionKey === "namespaces:view"
+  const rules = loadRules(user);
+  if (
+    rules.some((rule) => rule.effect === "allow" && rule.permissionKey === "namespaces:view")
+  ) {
+    return true;
+  }
+  // Full-cluster grants use cluster-level resources:view without a namespace field.
+  return rules.some(
+    (rule) =>
+      rule.effect === "allow" &&
+      !rule.namespace &&
+      (rule.resourceType || "cluster") === "cluster" &&
+      (rule.permissionKey === "resources:view" || rule.permissionKey === "namespaces:view")
   );
 }
 
@@ -730,7 +833,13 @@ export function canAccessResourcesPage(user) {
   if (isAdminUser(user)) {
     return true;
   }
-  return hasGrantedAction(user, "view_resources") && hasAnyClusterAccess(user);
+  if (!hasAnyClusterAccess(user)) {
+    return false;
+  }
+  if (hasGrantedAction(user, "view_resources")) {
+    return true;
+  }
+  return hasAllowRuleForPermissions(user, ["resources:view", "pods:view", "deployments:view"]);
 }
 
 export function canAccessLogsPage(user) {
@@ -744,12 +853,17 @@ export function canAccessLogsPage(user) {
 }
 
 export function canViewResourceTab(user, tabKey) {
-  if (!isAdminUser(user) && !hasGrantedAction(user, "view_resources")) {
-    return false;
-  }
   const tabDef = RESOURCE_TAB_DEFINITIONS.find((def) => def.tabKey === tabKey);
   if (!tabDef) {
     return false;
+  }
+  if (!isAdminUser(user)) {
+    const hasResourceGrant =
+      hasGrantedAction(user, "view_resources") ||
+      hasAllowRuleForPermissions(user, [tabDef.permission, "resources:view"]);
+    if (!hasResourceGrant) {
+      return false;
+    }
   }
   return hasPermission(user, tabDef.permission) || hasPermission(user, "resources:view");
 }

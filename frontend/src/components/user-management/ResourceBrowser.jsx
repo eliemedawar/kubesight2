@@ -63,26 +63,47 @@ export default function ResourceBrowser({
 
   const availableItems = useMemo(() => {
     if (!loadedResources) return [];
-    const items = loadedResources[listKey] || [];
-    return items.map((item) => (typeof item === "string" ? item : item.name)).filter(Boolean);
+    return (loadedResources[listKey] || []).filter((item) => {
+      const name = typeof item === "string" ? item : item?.name;
+      return Boolean(name);
+    });
   }, [loadedResources, listKey]);
 
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return availableItems;
-    return availableItems.filter((name) => name.toLowerCase().includes(q));
+    return availableItems.filter((item) => {
+      const name = typeof item === "string" ? item : item?.name;
+      return name && name.toLowerCase().includes(q);
+    });
   }, [availableItems, search]);
 
-  const toggleResource = (name) => {
+  const toggleResource = (item) => {
+    const name = typeof item === "string" ? item : item?.name;
+    if (!name) return;
+    const owner = typeof item === "object" ? item.owner : "";
     const ns = pickerNs;
     const next = { ...resourceAccess, namespaces: { ...resourceAccess.namespaces } };
     const b = { ...emptyNamespaceResourceBucket(), ...(next.namespaces[ns] || {}) };
     const list = [...(b[listKey] || [])];
     const idx = list.indexOf(name);
+    const adding = idx < 0;
     if (idx >= 0) list.splice(idx, 1);
     else list.push(name);
     b[listKey] = list;
+    if (adding && pickerType === "pod" && owner && owner !== "-") {
+      const deployments = [...(b.deployments || [])];
+      if (!deployments.includes(owner)) {
+        deployments.push(owner);
+      }
+      b.deployments = deployments;
+    }
     next.namespaces[ns] = b;
+    const allowedActions = new Set(next.allowedActions || []);
+    if (adding && list.length > 0) {
+      allowedActions.add("view_resources");
+    }
+    next.allowedActions = [...allowedActions];
     onResourceAccessChange(next);
   };
 
@@ -191,17 +212,20 @@ export default function ResourceBrowser({
           {!loadingResources && !resourceError ? (
             <div className="resource-browser__list">
               {filteredItems.length ? (
-                filteredItems.map((name) => (
+                filteredItems.map((item) => {
+                  const name = typeof item === "string" ? item : item.name;
+                  return (
                   <label key={name} className="resource-browser__item">
                     <input
                       type="checkbox"
                       checked={selectedList.includes(name)}
                       disabled={disabled}
-                      onChange={() => toggleResource(name)}
+                      onChange={() => toggleResource(item)}
                     />
                     {name}
                   </label>
-                ))
+                  );
+                })
               ) : (
                 <p className="muted">No {pickerType}s found in this namespace.</p>
               )}

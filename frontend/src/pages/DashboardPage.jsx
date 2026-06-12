@@ -11,6 +11,7 @@ import { getVisibleWidgets, groupWidgetsBySection } from "../dashboard/widgetVis
 export default function DashboardPage({
   summary,
   loading,
+  refreshing = false,
   coreLoading = false,
   accessError = "",
   hasClusters = true,
@@ -24,6 +25,7 @@ export default function DashboardPage({
 }) {
   const auth = useAuth();
   const clusterId = selectedCluster?.id;
+  const summaryReady = Boolean(summary && clusterId && summary.clusterId === clusterId);
   const isAdmin = auth.isAdmin;
 
   const widgetRegistry = getDashboardWidgetRegistry(isAdmin);
@@ -65,13 +67,36 @@ export default function DashboardPage({
     sections.activity?.length ||
     sections.full?.length;
 
-  if (coreLoading || (loading && !summary)) {
+  if (coreLoading) {
     return (
       <>
         <PageTitle title={pageTitle} subtitle={pageSubtitle} />
-        <p className="muted dashboard-loading">
-          {coreLoading ? "Loading clusters..." : "Loading dashboard data..."}
-        </p>
+        <p className="muted dashboard-loading">Loading clusters...</p>
+      </>
+    );
+  }
+
+  if (!summaryReady) {
+    if (isAccessDeniedError(accessError)) {
+      return (
+        <>
+          <PageTitle title={pageTitle} subtitle={pageSubtitle} />
+          <AccessDeniedPage message={accessError} />
+        </>
+      );
+    }
+    if (accessError) {
+      return (
+        <>
+          <PageTitle title={pageTitle} subtitle={pageSubtitle} />
+          <ErrorBanner message={accessError} suppressAccessDenied={false} />
+        </>
+      );
+    }
+    return (
+      <>
+        <PageTitle title={pageTitle} subtitle={pageSubtitle} />
+        <p className="muted dashboard-loading">Loading dashboard data...</p>
       </>
     );
   }
@@ -146,6 +171,7 @@ export default function DashboardPage({
         <span className="muted">
           Last Updated: {formatDashboardTime(lastRefreshedAt || summary?.lastUpdated)}
         </span>
+        {refreshing ? <span className="dashboard-refreshing muted">Refreshing…</span> : null}
       </div>
 
       {!hasVisibleContent ? (

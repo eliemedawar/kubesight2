@@ -346,7 +346,11 @@ def run_start(
 
                 return result, None, 200
 
-            action = "upgrade_plan_generated" if status == "manual_required" else "upgrade_start_run"
+            action = "upgrade_plan_generated"
+            if status == "running":
+                action = "upgrade_start_run"
+            elif status != "manual_required":
+                action = "upgrade_start_run"
 
             log_audit(
 
@@ -362,7 +366,7 @@ def run_start(
 
                     "targetVersion": normalized_target,
 
-                    "upgradeId": result.get("upgradeId"),
+                    "upgradeId": result.get("upgradeId") or result.get("jobId"),
 
                     "status": status,
 
@@ -375,6 +379,9 @@ def run_start(
             )
 
             return result, None, 200
+
+        except ValueError as exc:
+            return None, str(exc), 400
 
         except K8sCommandError as exc:
 
@@ -459,4 +466,13 @@ def run_start(
     )
 
     return result, None, 200
+
+
+def get_upgrade_job(job_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    from ..upgrade_jobs import get_job
+
+    job = get_job((job_id or "").strip())
+    if not job:
+        return None, "Upgrade job not found", 404
+    return job, None, 200
 

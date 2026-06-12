@@ -48,6 +48,14 @@ PERMISSIONS = [
     ("helm:uninstall", "Uninstall Helm releases"),
     ("helm:values:view", "View Helm release values"),
     ("helm:values:update", "Update Helm release values"),
+    ("app_services:view", "View application services"),
+    ("app_services:create", "Create application services"),
+    ("app_services:update", "Update application services"),
+    ("app_services:delete", "Delete application services"),
+    ("clients:view", "View clients"),
+    ("clients:create", "Create clients"),
+    ("clients:update", "Update clients"),
+    ("clients:delete", "Delete clients"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -76,6 +84,8 @@ VIEWER_PERMISSIONS = [
     "services:view",
     "services:ports:view",
     "helm:view",
+    "app_services:view",
+    "clients:view",
 ]
 
 OPERATOR_PERMISSIONS = [
@@ -97,6 +107,12 @@ OPERATOR_PERMISSIONS = [
     "upgrades:precheck",
     "services:view",
     "services:ports:view",
+    "app_services:view",
+    "app_services:create",
+    "app_services:update",
+    "clients:view",
+    "clients:create",
+    "clients:update",
 ]
 
 CLUSTER_ADMIN_PERMISSIONS = [
@@ -126,6 +142,14 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "upgrades:precheck",
     "services:view",
     "services:ports:view",
+    "app_services:view",
+    "app_services:create",
+    "app_services:update",
+    "app_services:delete",
+    "clients:view",
+    "clients:create",
+    "clients:update",
+    "clients:delete",
 ]
 
 ROLE_DEFINITIONS = {

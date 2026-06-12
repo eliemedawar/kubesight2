@@ -127,11 +127,31 @@ export const NAMESPACE_DEFAULT_ACTION_IDS = [
   "view_service_ports",
 ];
 
-/** True when every permission required by the action is granted on the role. */
+const VIEW_RESOURCES_CORE_PERMISSIONS = ["resources:view", "namespaces:view", "pods:view"];
+
+/** True when the role can use this allowed-action checkbox in User Management. */
 export function actionAllowedForRole(action, rolePermissions = []) {
   const granted = new Set(rolePermissions || []);
   if (!granted.size) {
     return false;
+  }
+  if (action.id === "view_resources") {
+    return VIEW_RESOURCES_CORE_PERMISSIONS.every((perm) => granted.has(perm));
+  }
+  if (action.id === "view_metrics") {
+    return granted.has("overview:view");
+  }
+  if (action.id === "view_alerts") {
+    return granted.has("alerts:view");
+  }
+  if (action.id === "view_logs") {
+    return granted.has("logs:view");
+  }
+  if (action.id === "view_service_ports") {
+    return granted.has("services:ports:view") || granted.has("services:view");
+  }
+  if (action.id === "upgrade_precheck") {
+    return granted.has("upgrades:precheck");
   }
   return action.permissions.every((perm) => granted.has(perm));
 }

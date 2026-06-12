@@ -112,10 +112,12 @@ export default function UserFormModal({
 
     (async () => {
       let profile = editingUser;
-      try {
-        profile = await getUser(editingUser.id);
-      } catch {
-        // Fall back to the list row snapshot if the detail request fails.
+      if (!Array.isArray(editingUser.accessRules)) {
+        try {
+          profile = await getUser(editingUser.id);
+        } catch {
+          // Fall back to the list row snapshot if the detail request fails.
+        }
       }
       if (cancelled) {
         return;
@@ -277,7 +279,7 @@ export default function UserFormModal({
                 onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
               />
             </label>
-            <label className="role-select-label">
+            <label className="role-select-label form-grid__full">
               Role
               <select
                 value={form.roleId}
@@ -297,7 +299,7 @@ export default function UserFormModal({
                 </span>
               ) : null}
             </label>
-            <label className="checkbox-row">
+            <label className="checkbox-row form-grid__full">
               <input
                 type="checkbox"
                 checked={form.isActive}

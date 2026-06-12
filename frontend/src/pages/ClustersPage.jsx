@@ -20,15 +20,17 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
     { key: "memoryUsage", label: "Memory Usage" },
     { key: "action", label: "Action" },
   ];
-  const rows = data.clusters.map((cluster) => ({
-    name: cluster.name,
-    status: cluster.status || "unknown",
-    version: cluster.k8sVersion || cluster.version || "-",
-    nodes: cluster.nodes ?? "-",
-    cpuUsage: cluster.cpuUsage != null ? `${cluster.cpuUsage}%` : "-",
-    memoryUsage: cluster.memoryUsage != null ? `${cluster.memoryUsage}%` : "-",
-    action: "Connect",
-  }));
+  const rows = (data?.clusters || [])
+    .filter((cluster) => cluster?.name || cluster?.id)
+    .map((cluster) => ({
+      name: cluster.name || cluster.id,
+      status: cluster.status || "unknown",
+      version: cluster.k8sVersion || cluster.version || "-",
+      nodes: cluster.nodes ?? "-",
+      cpuUsage: cluster.cpuUsage != null ? `${cluster.cpuUsage}%` : "-",
+      memoryUsage: cluster.memoryUsage != null ? `${cluster.memoryUsage}%` : "-",
+      action: "Connect",
+    }));
 
   return (
     <AccessScopeView

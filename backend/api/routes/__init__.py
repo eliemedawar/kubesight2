@@ -15,6 +15,8 @@ from .users import users_bp
 from .inventory import inventory_bp
 from .helm import helm_bp
 from .alert_routing import alert_routing_bp
+from .application_services import app_services_bp
+from .clients import clients_bp
 
 
 def register_blueprints(app: Flask) -> None:
@@ -33,3 +35,5 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(inventory_bp)
     app.register_blueprint(helm_bp)
     app.register_blueprint(alert_routing_bp)
+    app.register_blueprint(app_services_bp)
+    app.register_blueprint(clients_bp)

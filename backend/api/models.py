@@ -76,6 +76,10 @@ class User(db.Model):
 
 class AccessRule(db.Model):
     __tablename__ = "access_rules"
+    __table_args__ = (
+        db.Index("ix_access_rule_user_cluster", "user_id", "cluster_id"),
+        db.Index("ix_access_rule_user_cluster_perm", "user_id", "cluster_id", "permission_key"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
@@ -131,6 +135,10 @@ class UserNamespaceAccess(db.Model):
 
 class AuditLog(db.Model):
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        db.Index("ix_audit_log_actor_created", "actor_user_id", "created_at"),
+        db.Index("ix_audit_log_action_created", "action", "created_at"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     actor_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
@@ -583,3 +591,179 @@ class AlertHistory(db.Model):
     last_notified_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
     policy = db.relationship("AlertPolicy", back_populates="history_entries")
+
+
+# ---------------------------------------------------------------------------
+# Application Services & Clients
+# ---------------------------------------------------------------------------
+
+class ApplicationService(db.Model):
+    __tablename__ = "application_services"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    deployments = db.relationship(
+        "ApplicationServiceDeployment",
+        back_populates="service",
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+    topology_nodes = db.relationship(
+        "ApplicationServiceTopologyNode",
+        back_populates="service",
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+    topology_edges = db.relationship(
+        "ApplicationServiceTopologyEdge",
+        back_populates="service",
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+    client_links = db.relationship(
+        "ClientApplicationService",
+        back_populates="service",
+        cascade="all, delete-orphan",
+        lazy="dynamic",
+    )
+
+
+class ApplicationServiceDeployment(db.Model):
+    __tablename__ = "application_service_deployments"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "service_id", "cluster_id", "namespace", "deployment_name",
+            name="uq_app_service_deployment",
+        ),
+        db.Index("ix_asd_service_id", "service_id"),
+        db.Index("ix_asd_cluster_ns", "cluster_id", "namespace"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey("application_services.id"), nullable=False)
+    cluster_id = db.Column(db.String(120), nullable=False)
+    namespace = db.Column(db.String(253), nullable=False)
+    deployment_name = db.Column(db.String(253), nullable=False)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    service = db.relationship("ApplicationService", back_populates="deployments")
+
+
+class ApplicationServiceTopologyNode(db.Model):
+    __tablename__ = "application_service_topology_nodes"
+    __table_args__ = (
+        db.Index("ix_astn_service_id", "service_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey("application_services.id"), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    type = db.Column(db.String(80), nullable=True)
+    description = db.Column(db.Text, nullable=True)
+    linked_cluster_id = db.Column(db.String(120), nullable=True)
+    linked_namespace = db.Column(db.String(253), nullable=True)
+    linked_deployment = db.Column(db.String(253), nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    service = db.relationship("ApplicationService", back_populates="topology_nodes")
+
+
+class ApplicationServiceTopologyEdge(db.Model):
+    __tablename__ = "application_service_topology_edges"
+    __table_args__ = (
+        db.UniqueConstraint("service_id", "source_node_id", "target_node_id", name="uq_topology_edge"),
+        db.Index("ix_aste_service_id", "service_id"),
+        db.Index("ix_aste_source", "source_node_id"),
+        db.Index("ix_aste_target", "target_node_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey("application_services.id"), nullable=False)
+    source_node_id = db.Column(db.Integer, db.ForeignKey("application_service_topology_nodes.id"), nullable=False)
+    target_node_id = db.Column(db.Integer, db.ForeignKey("application_service_topology_nodes.id"), nullable=False)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    service = db.relationship("ApplicationService", back_populates="topology_edges")
+    source_node = db.relationship("ApplicationServiceTopologyNode", foreign_keys=[source_node_id])
+    target_node = db.relationship("ApplicationServiceTopologyNode", foreign_keys=[target_node_id])
+
+
+class Client(db.Model):
+    __tablename__ = "clients"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    contact_person = db.Column(db.String(255), nullable=True)
+    email = db.Column(db.String(255), nullable=True)
+    phone = db.Column(db.String(64), nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    service_links = db.relationship(
+        "ClientApplicationService",
+        back_populates="client",
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+
+
+class ClientApplicationService(db.Model):
+    __tablename__ = "client_application_services"
+    __table_args__ = (
+        db.UniqueConstraint("client_id", "service_id", name="uq_client_service"),
+        db.Index("ix_cas_client_id", "client_id"),
+        db.Index("ix_cas_service_id", "service_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False)
+    service_id = db.Column(db.Integer, db.ForeignKey("application_services.id"), nullable=False)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    client = db.relationship("Client", back_populates="service_links")
+    service = db.relationship("ApplicationService", back_populates="client_links")

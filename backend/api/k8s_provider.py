@@ -56,10 +56,15 @@ def should_use_real_k8s(cluster_id: Optional[str] = None) -> bool:
     return is_real_mode_enabled()
 
 
+_KUBECTL_DEFAULT_TIMEOUT = int(os.getenv("KUBECTL_TIMEOUT_SECONDS", "30"))
+_KUBECTL_LONG_TIMEOUT = int(os.getenv("KUBECTL_LONG_TIMEOUT_SECONDS", "120"))
+
+
 def _run_kubectl(
     args: List[str],
     context: Optional[str] = None,
     kubeconfig_path: Optional[str] = None,
+    timeout: Optional[int] = None,
 ) -> str:
     command = ["kubectl"]
     if kubeconfig_path:
@@ -74,21 +79,33 @@ def _run_kubectl(
     elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
         env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
 
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
+    effective_timeout = timeout if timeout is not None else _KUBECTL_DEFAULT_TIMEOUT
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            timeout=effective_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise K8sCommandError(
+            f"kubectl command timed out after {effective_timeout}s: {' '.join(args[:3])}"
+        )
     if completed.returncode != 0:
         stderr = (completed.stderr or "").strip()
         raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
     return completed.stdout
 
 
-def _run_for_access(access: ClusterAccess, args: List[str]) -> str:
-    return _run_kubectl(args, context=access.context_name, kubeconfig_path=access.kubeconfig_path)
+def _run_for_access(access: ClusterAccess, args: List[str], timeout: Optional[int] = None) -> str:
+    return _run_kubectl(
+        args,
+        context=access.context_name,
+        kubeconfig_path=access.kubeconfig_path,
+        timeout=timeout,
+    )
 
 
 def _context_to_cluster_id(context_name: str) -> str:
@@ -488,39 +505,91 @@ def _resource_counts_by_namespace(access: ClusterAccess) -> Dict[str, Dict[str, 
     return counts
 
 
-def list_namespaces_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
-    from .k8s_metrics import aggregate_pod_top_by_namespace
+def build_namespaces_from_data(
+    namespaces_raw: List[Dict[str, Any]],
+    pod_items: List[Dict[str, Any]],
+    deployments_raw: List[Dict[str, Any]],
+    services_raw: List[Dict[str, Any]],
+    pod_top: Dict[Any, Any],
+) -> Dict[str, Any]:
+    """Build namespace list purely from pre-fetched data — no kubectl calls."""
+    pod_counts: Dict[str, int] = {}
+    for pod in pod_items:
+        ns = pod.get("metadata", {}).get("namespace", "default")
+        pod_counts[ns] = pod_counts.get(ns, 0) + 1
 
-    output = _run_for_access(access, ["get", "namespaces", "-o", "json"])
-    data = json.loads(output)
-    resource_counts = _resource_counts_by_namespace(access)
-    usage_by_namespace = aggregate_pod_top_by_namespace(access)
+    dep_counts: Dict[str, int] = {}
+    for dep in deployments_raw:
+        ns = dep.get("metadata", {}).get("namespace", "default")
+        dep_counts[ns] = dep_counts.get(ns, 0) + 1
+
+    svc_counts: Dict[str, int] = {}
+    for svc in services_raw:
+        ns = svc.get("metadata", {}).get("namespace", "default")
+        svc_counts[ns] = svc_counts.get(ns, 0) + 1
+
+    usage_by_namespace: Dict[str, Dict[str, float]] = {}
+    for (namespace, _), metrics in pod_top.items():
+        entry = usage_by_namespace.setdefault(namespace, {"cpu": 0.0, "memory_mib": 0.0})
+        entry["cpu"] += metrics.get("cpu", 0.0)
+        entry["memory_mib"] += metrics.get("memory", 0.0)
+
     items: List[Dict[str, Any]] = []
-
-    for ns in data.get("items", []):
+    for ns in namespaces_raw:
         name = ns.get("metadata", {}).get("name", "unknown")
-        counts = resource_counts.get(name, {"pods": 0, "deployments": 0, "services": 0})
-        pods_count = counts["pods"]
+        pods_count = pod_counts.get(name, 0)
         ns_usage = usage_by_namespace.get(name, {"cpu": 0.0, "memory_mib": 0.0})
         cpu_cores = round(ns_usage["cpu"], 3)
         memory_gib = round(ns_usage["memory_mib"] / 1024, 2)
         has_metrics = cpu_cores > 0 or memory_gib > 0
-
-        items.append(
-            {
-                "name": name,
-                "pods": pods_count,
-                "deployments": counts["deployments"],
-                "services": counts["services"],
-                "cpuUsageCores": cpu_cores if has_metrics or pods_count == 0 else None,
-                "memoryUsageGiB": memory_gib if has_metrics or pods_count == 0 else None,
-                "cpuUsage": f"{cpu_cores:.3f} cores" if has_metrics or pods_count == 0 else "-",
-                "memoryUsage": f"{memory_gib:.2f} GiB" if has_metrics or pods_count == 0 else "-",
-                "alerts": 0,
-                "status": "active",
-            }
-        )
+        items.append({
+            "name": name,
+            "pods": pods_count,
+            "deployments": dep_counts.get(name, 0),
+            "services": svc_counts.get(name, 0),
+            "cpuUsageCores": cpu_cores if has_metrics or pods_count == 0 else None,
+            "memoryUsageGiB": memory_gib if has_metrics or pods_count == 0 else None,
+            "cpuUsage": f"{cpu_cores:.3f} cores" if has_metrics or pods_count == 0 else "-",
+            "memoryUsage": f"{memory_gib:.2f} GiB" if has_metrics or pods_count == 0 else "-",
+            "alerts": 0,
+            "status": "active",
+        })
     return {"items": items, "count": len(items)}
+
+
+def list_namespaces_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
+    from .k8s_metrics import fetch_pod_top_metrics
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        ns_future = pool.submit(_run_for_access, access, ["get", "namespaces", "-o", "json"])
+        pods_future = pool.submit(_run_for_access, access, ["get", "pods", "-A", "-o", "json"])
+        dep_future = pool.submit(_run_for_access, access, ["get", "deployments", "-A", "-o", "json"])
+        svc_future = pool.submit(_run_for_access, access, ["get", "services", "-A", "-o", "json"])
+        pod_top_future = pool.submit(fetch_pod_top_metrics, access)
+
+        try:
+            namespaces_raw = json.loads(ns_future.result()).get("items", [])
+        except Exception:
+            namespaces_raw = []
+        try:
+            pod_items = json.loads(pods_future.result()).get("items", [])
+        except Exception:
+            pod_items = []
+        try:
+            deployments_raw = json.loads(dep_future.result()).get("items", [])
+        except Exception:
+            deployments_raw = []
+        try:
+            services_raw = json.loads(svc_future.result()).get("items", [])
+        except Exception:
+            services_raw = []
+        try:
+            pod_top = pod_top_future.result()
+        except Exception:
+            pod_top = {}
+
+    return build_namespaces_from_data(namespaces_raw, pod_items, deployments_raw, services_raw, pod_top)
 
 
 def summarize_node_items(node_items: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -760,10 +829,12 @@ def _build_namespace_pods(
         limit_cores = pod_total_cpu_limit_cores(pod)
         limit_mib = pod_total_memory_limit_mib(pod)
         cpu_percent = cpu_usage_percent(usage_cores, limit_cores) if usage_cores is not None else None
+        owner = _owner_deployment_name(meta) or "-"
         pods.append(
             {
                 "name": pod_name,
                 "namespace": namespace,
+                "owner": owner,
                 "labels": meta.get("labels") or {},
                 "status": status.get("phase", "Unknown"),
                 "ready": f"{ready_count}/{len(container_statuses) if container_statuses else 0}",
@@ -1071,22 +1142,50 @@ def _build_namespace_cronjobs(namespace: str, cj_items: List[Dict[str, Any]]) ->
 
 
 def namespace_resources_from_k8s(access: ClusterAccess, namespace: str) -> Dict[str, Any]:
-    pod_items = _get_namespace_items(access, "pods", namespace)
-    dep_items = _get_namespace_items(access, "deployments", namespace)
-    svc_items = _get_namespace_items(access, "services", namespace)
-    rs_items = _get_namespace_items(access, "replicasets", namespace)
-    sts_items = _get_namespace_items(access, "statefulsets", namespace)
-    ds_items = _get_namespace_items(access, "daemonsets", namespace)
-    job_items = _get_namespace_items(access, "jobs", namespace)
-    cj_items = _get_namespace_items(access, "cronjobs", namespace)
-    cm_items = _get_namespace_items(access, "configmaps", namespace)
-    secret_items = _get_namespace_items(access, "secrets", namespace)
-    ing_items = _get_namespace_items(access, "ingress", namespace)
-    endpoints_by_name = _namespace_endpoints_by_name(access, namespace)
-
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from .k8s_metrics import fetch_pod_top_metrics
 
-    top_by_pod = fetch_pod_top_metrics(access)
+    _RESOURCE_KINDS = [
+        "pods", "deployments", "services", "replicasets", "statefulsets",
+        "daemonsets", "jobs", "cronjobs", "configmaps", "secrets", "ingress",
+    ]
+
+    def _fetch(kind: str) -> tuple:
+        return kind, _get_namespace_items(access, kind, namespace)
+
+    def _fetch_endpoints() -> tuple:
+        return "endpoints", _namespace_endpoints_by_name(access, namespace)
+
+    def _fetch_top() -> tuple:
+        return "top", fetch_pod_top_metrics(access)
+
+    fetchers = [lambda k=k: _fetch(k) for k in _RESOURCE_KINDS]
+    fetchers.append(_fetch_endpoints)
+    fetchers.append(_fetch_top)
+
+    results: Dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=min(len(fetchers), 8)) as pool:
+        futures = {pool.submit(fn): fn for fn in fetchers}
+        for fut in as_completed(futures):
+            try:
+                key, value = fut.result()
+                results[key] = value
+            except Exception:
+                pass
+
+    pod_items = results.get("pods", [])
+    dep_items = results.get("deployments", [])
+    svc_items = results.get("services", [])
+    rs_items = results.get("replicasets", [])
+    sts_items = results.get("statefulsets", [])
+    ds_items = results.get("daemonsets", [])
+    job_items = results.get("jobs", [])
+    cj_items = results.get("cronjobs", [])
+    cm_items = results.get("configmaps", [])
+    secret_items = results.get("secrets", [])
+    ing_items = results.get("ingress", [])
+    endpoints_by_name = results.get("endpoints", {})
+    top_by_pod = results.get("top", {})
     node_ips = _node_ips_for_services(access, svc_items)
 
     return {
@@ -1380,31 +1479,41 @@ def run_upgrade_start_k8s(access: ClusterAccess, target_version: str) -> Dict[st
     return run_upgrade_workflow(access, target_version, _run_for_access)
 
 
-def list_alerts_for_access(access: ClusterAccess, cluster_id: Optional[str] = None) -> Dict[str, Any]:
-    """CPU-threshold alerts for a single cluster without listing every kube context."""
-    from .k8s_metrics import (
-        CPU_ALERT_THRESHOLD_PERCENT,
-        cpu_usage_percent,
-        fetch_pod_cpu_usage_cores,
-        pod_total_cpu_limit_cores,
-    )
+def _pod_cpu_usage_cores(
+    usage_by_pod: Dict[Any, Any],
+    namespace: str,
+    pod_name: str,
+) -> Optional[float]:
+    entry = usage_by_pod.get((namespace, pod_name))
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        cpu = entry.get("cpu")
+        return float(cpu) if cpu is not None else None
+    try:
+        return float(entry)
+    except (TypeError, ValueError):
+        return None
+
+
+def list_cpu_alerts_from_pod_data(
+    access: ClusterAccess,
+    cluster_id: str,
+    pod_items: List[Dict[str, Any]],
+    usage_by_pod: Dict[Any, Any],
+) -> List[Dict[str, Any]]:
+    """CPU-threshold alerts from pre-fetched pod list and top metrics."""
+    from .k8s_metrics import CPU_ALERT_THRESHOLD_PERCENT, cpu_usage_percent, pod_total_cpu_limit_cores
 
     current_cluster_id = cluster_id or access.cluster_id
     generated_at = datetime.now(timezone.utc).isoformat()
     items: List[Dict[str, Any]] = []
-    metrics_unavailable = False
 
-    usage_by_pod = fetch_pod_cpu_usage_cores(access)
-    if not usage_by_pod:
-        metrics_unavailable = True
-
-    pods_output = _run_for_access(access, ["get", "pods", "--all-namespaces", "-o", "json"])
-    pod_items = json.loads(pods_output).get("items", [])
     for pod in pod_items:
         metadata = pod.get("metadata", {})
         namespace = metadata.get("namespace", "default")
         pod_name = metadata.get("name", "unknown")
-        usage_cores = usage_by_pod.get((namespace, pod_name))
+        usage_cores = _pod_cpu_usage_cores(usage_by_pod, namespace, pod_name)
         limit_cores = pod_total_cpu_limit_cores(pod)
 
         if usage_cores is None or limit_cores <= 0:
@@ -1433,6 +1542,25 @@ def list_alerts_for_access(access: ClusterAccess, cluster_id: Optional[str] = No
                 "status": "firing",
             }
         )
+
+    return items
+
+
+def list_alerts_for_access(access: ClusterAccess, cluster_id: Optional[str] = None) -> Dict[str, Any]:
+    """CPU-threshold alerts for a single cluster without listing every kube context."""
+    from .k8s_metrics import CPU_ALERT_THRESHOLD_PERCENT, fetch_pod_cpu_usage_cores
+
+    current_cluster_id = cluster_id or access.cluster_id
+    generated_at = datetime.now(timezone.utc).isoformat()
+    metrics_unavailable = False
+
+    usage_by_pod = fetch_pod_cpu_usage_cores(access)
+    if not usage_by_pod:
+        metrics_unavailable = True
+
+    pods_output = _run_for_access(access, ["get", "pods", "--all-namespaces", "-o", "json"])
+    pod_items = json.loads(pods_output).get("items", [])
+    items = list_cpu_alerts_from_pod_data(access, current_cluster_id, pod_items, usage_by_pod)
 
     metadata = {
         "mode": "real",

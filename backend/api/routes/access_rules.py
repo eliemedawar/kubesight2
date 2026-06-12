@@ -34,21 +34,6 @@ def replace_user_access_rules(user_id: int):
     if not isinstance(rules, list):
         return error_response("accessRules must be a list", 400)
 
-    actor = get_current_user()
-    if actor and actor.id == user.id:
-        admin_role = user.role and user.role.name == "admin"
-        if admin_role:
-            still_admin = any(
-                r.get("permissionKey") == "users:update" and r.get("effect") == "allow"
-                for r in rules
-                if isinstance(r, dict)
-            )
-            if not still_admin and not any(
-                isinstance(r, dict) and r.get("effect") == "allow" and r.get("resourceType") == "cluster"
-                for r in rules
-            ):
-                pass
-
     try:
         parsed = [parse_access_rule_payload(r) for r in rules if isinstance(r, dict)]
     except ValueError as exc:
@@ -56,9 +41,10 @@ def replace_user_access_rules(user_id: int):
 
     apply_access_rules(user, rules)
     db.session.commit()
+    invalidate_access_rules_cache(user.id)
     log_audit(
         "access_rules_changed",
-        actor=actor,
+        actor=get_current_user(),
         target_type="user",
         target_id=str(user.id),
         details={"count": len(parsed)},

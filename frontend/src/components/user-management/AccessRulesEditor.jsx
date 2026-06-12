@@ -124,10 +124,23 @@ export default function AccessRulesEditor({
     onClusterGrantsChange((prev) => {
       const grant = prev[clusterId] || emptyClusterGrant(clusterId);
       const list = grant.namespaces || [];
-      const next = list.includes(ns) ? list.filter((n) => n !== ns) : [...list, ns];
+      const adding = !list.includes(ns);
+      const next = adding ? [...list, ns] : list.filter((n) => n !== ns);
+      const allowedActions = new Set(grant.resourceAccess?.allowedActions || []);
+      if (adding && grant.mode === "namespaces" && !allowedActions.has("view_resources")) {
+        allowedActions.add("view_resources");
+      }
       return {
         ...prev,
-        [clusterId]: { ...grant, namespaces: next, clusterId },
+        [clusterId]: {
+          ...grant,
+          namespaces: next,
+          clusterId,
+          resourceAccess: {
+            ...grant.resourceAccess,
+            allowedActions: [...allowedActions],
+          },
+        },
       };
     });
   };

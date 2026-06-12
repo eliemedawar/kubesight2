@@ -17,7 +17,7 @@ spec:
       containers:
         - name: backend
 
-          image: kubesight-backend:v6
+          image: kubesight-backend:v22
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000

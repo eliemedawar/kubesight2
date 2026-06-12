@@ -5,12 +5,16 @@ import pytest
 from api.cluster_access import ClusterAccess
 from api.upgrade_provider import (
     analyze_version_skew,
+    build_target_version_options,
+    build_version_info,
     detect_cluster_provider,
     generate_upgrade_plan,
     get_provider_support,
+    kubeadm_minor_jump_blocked,
     mock_precheck,
     normalize_version,
     parse_k8s_version,
+    recommended_kubeadm_target,
     required_confirmation_text,
     run_extended_prechecks,
     run_upgrade_workflow,
@@ -59,6 +63,35 @@ def test_validate_target_version_rejects_invalid():
     assert ok
 
 
+@patch("api.upgrade_provider._fetch_latest_patch_for_minor", return_value="v1.33.4")
+def test_recommended_kubeadm_target(mock_fetch):
+    assert recommended_kubeadm_target("v1.32.13") == "v1.33.4"
+    mock_fetch.assert_called_once_with(1, 33)
+
+
+def test_kubeadm_minor_jump_blocked():
+    message = kubeadm_minor_jump_blocked("v1.32.13", "v1.36.1")
+    assert message is not None
+    assert "one minor version" in message
+    assert kubeadm_minor_jump_blocked("v1.32.13", "v1.33.0") is None
+
+
+@patch("api.upgrade_provider._fetch_latest_patch_for_minor", return_value="v1.33.4")
+def test_build_target_version_options_for_kubeadm(mock_fetch):
+    options = build_target_version_options("v1.32.13", "v1.36.1", "kubeadm")
+    assert options[0]["value"] == "v1.33.4"
+    assert options[0]["recommended"] is True
+    assert any(option["value"] == "v1.36.1" for option in options)
+
+
+@patch("api.upgrade_provider.recommended_kubeadm_target", return_value="v1.33.4")
+@patch("api.upgrade_provider._fetch_latest_k8s_version", return_value="v1.36.1")
+def test_build_version_info_includes_recommended_target(mock_latest, mock_recommended):
+    info = build_version_info("v1.32.13", "v1.36.1", get_provider_support("kubeadm"))
+    assert info["recommendedTarget"] == "v1.33.4"
+    assert info["targetOptions"][0]["value"] == "v1.33.4"
+
+
 # --- Provider detection ---
 
 
@@ -71,6 +104,119 @@ def test_detect_docker_desktop_from_context():
         }
     )
     assert detect_cluster_provider(access, run, version_data={}, node_items=[]) == "docker-desktop"
+
+
+def test_detect_kind_from_provider_id():
+    access = _access("docker-desktop")
+    nodes = [
+        {
+            "metadata": {"name": "desktop-control-plane", "labels": {}},
+            "spec": {"providerID": "kind://docker/desktop/desktop-control-plane"},
+            "status": {"conditions": []},
+        }
+    ]
+    run = MagicMock(return_value="{}")
+    assert detect_cluster_provider(access, run, version_data={}, node_items=nodes) == "kind"
+
+
+def test_run_upgrade_kubectl_forces_default_namespace():
+    from api.upgrade_executor import _run_upgrade_kubectl
+
+    access = _access()
+    captured = []
+
+    def run_kubectl(_access, args):
+        captured.append(args)
+        return "ok"
+
+    _run_upgrade_kubectl(access, run_kubectl, ["cordon", "worker-1"])
+    assert captured[0][:2] == ["--namespace", "default"]
+
+
+def test_verify_server_version_rejects_unchanged_version():
+    from api.upgrade_executor import _verify_server_version
+
+    access = _access("kubeadm-cluster", "kubeadm-cluster")
+    run = _mock_kubectl_responses(
+        {
+            "--namespace default version -o json": '{"serverVersion": {"gitVersion": "v1.32.13"}}',
+        }
+    )
+    with pytest.raises(RuntimeError, match="Post-upgrade verification failed"):
+        _verify_server_version(
+            access,
+            run,
+            "v1.33.4",
+            previous_version="v1.32.13",
+        )
+
+
+def test_kubeadm_package_install_scripts_include_target_version():
+    from api.upgrade_executor import (
+        _shell_script_control_plane_upgrade,
+        _shell_script_install_kubeadm_only,
+        _shell_script_install_kubelet_kubectl,
+        _shell_script_upgrade_worker_node,
+    )
+
+    kubeadm_script = _shell_script_install_kubeadm_only("v1.33.0")
+    kubelet_script = _shell_script_install_kubelet_kubectl("v1.33.0")
+    worker_script = _shell_script_upgrade_worker_node("v1.33.0")
+    assert 'K8S_VER="1.33.0"' in kubeadm_script
+    assert "_apt install" in kubeadm_script
+    assert "kubeadm upgrade node" in worker_script
+    assert "systemctl restart kubelet" in kubelet_script
+
+    cp_script = _shell_script_control_plane_upgrade("v1.33.0")
+    assert "kubeadm upgrade apply" in cp_script
+    assert "_wait_for_apt" in cp_script
+    assert "DPkg::Lock::Timeout=600" in cp_script
+
+
+def test_fetch_latest_patch_for_minor_skips_prerelease(monkeypatch):
+    from api.upgrade_provider import _fetch_latest_patch_for_minor
+
+    monkeypatch.setattr(
+        "api.upgrade_provider._fetch_release_text",
+        lambda url: "v1.33.0-rc.1" if "latest-1.33" in url else None,
+    )
+    monkeypatch.setattr("api.upgrade_provider._release_binary_exists", lambda version: version == "v1.33.0")
+    assert _fetch_latest_patch_for_minor(1, 33) == "v1.33.0"
+
+
+def test_control_plane_nodes_with_empty_label_value():
+    from api.upgrade_executor import _control_plane_nodes
+
+    nodes = [
+        {
+            "metadata": {
+                "name": "desktop-control-plane",
+                "labels": {"node-role.kubernetes.io/control-plane": ""},
+            }
+        }
+    ]
+    assert _control_plane_nodes(nodes) == ["desktop-control-plane"]
+
+
+def test_detect_docker_desktop_from_api_server_url():
+    access = _access("docker-desktop")
+    nodes = [
+        {
+            "metadata": {"name": "desktop-control-plane", "labels": {}},
+            "status": {
+                "nodeInfo": {"kubeletVersion": "v1.34.3"},
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }
+    ]
+    run = _mock_kubectl_responses(
+        {
+            "config view --minify -o json": (
+                '{"clusters": [{"cluster": {"server": "https://kubernetes.docker.internal:6443"}}]}'
+            ),
+        }
+    )
+    assert detect_cluster_provider(access, run, version_data={}, node_items=nodes) == "docker-desktop"
 
 
 def test_detect_kind_from_context():
@@ -202,7 +348,37 @@ def test_upgrade_workflow_docker_desktop_manual_only():
     assert "Docker Desktop" in result["message"] or "Manual" in result.get("provider", {}).get("reason", "")
 
 
-def test_kubeadm_requires_confirmation():
+def test_kubeadm_auto_upgrade_starts_job(monkeypatch):
+    monkeypatch.setenv("KUBESIGHT_AUTO_UPGRADE", "true")
+    access = _access("kubeadm-cluster", "kubeadm-cluster")
+    version_json = '{"serverVersion": {"gitVersion": "v1.30.0"}}'
+    nodes_json = (
+        '{"items": [{"metadata": {"name": "cp", "labels": {"node-role.kubernetes.io/control-plane": ""}}, '
+        '"status": {"nodeInfo": {"kubeletVersion": "v1.30.0"}, "conditions": [{"type": "Ready", "status": "True"}]}}]}'
+    )
+    run = _mock_kubectl_responses(
+        {
+            "version -o json": version_json,
+            "get nodes -o json": nodes_json,
+            "get pods -n kube-system -o json": '{"items": []}',
+            "top nodes --no-headers": "ok",
+            "get pvc --all-namespaces -o json": '{"items": []}',
+            "get storageclass -o json": '{"items": []}',
+            "get pods --all-namespaces -o json": '{"items": []}',
+            "get pdb --all-namespaces -o json": '{"items": []}',
+            "get apiservices -o json": '{"items": []}',
+            "config view --minify -o json": '{"clusters": []}',
+        }
+    )
+    expected = required_confirmation_text("kubeadm", "kubeadm-cluster", "v1.31.0")
+    confirmed = run_upgrade_workflow(access, "v1.31.0", run, confirmation=expected)
+    assert confirmed["status"] == "running"
+    assert confirmed["executionSupported"] is True
+    assert confirmed.get("jobId") or confirmed.get("upgradeId")
+
+
+def test_kubeadm_without_auto_upgrade_returns_manual_plan(monkeypatch):
+    monkeypatch.delenv("KUBESIGHT_AUTO_UPGRADE", raising=False)
     access = _access("kubeadm-cluster", "kubeadm-cluster")
     version_json = '{"serverVersion": {"gitVersion": "v1.30.0"}}'
     nodes_json = (
@@ -224,11 +400,8 @@ def test_kubeadm_requires_confirmation():
         }
     )
     result = run_upgrade_workflow(access, "v1.31.0", run)
-    assert result["status"] == "confirmation_required"
-    expected = required_confirmation_text("kubeadm", "kubeadm-cluster", "v1.31.0")
-    confirmed = run_upgrade_workflow(access, "v1.31.0", run, confirmation=expected)
-    assert confirmed["status"] == "manual_required"
-    assert confirmed["executionSupported"] is False
+    assert result["status"] == "manual_required"
+    assert result["executionSupported"] is False
 
 
 def test_required_confirmation_text_format():

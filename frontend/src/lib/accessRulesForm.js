@@ -108,6 +108,12 @@ function parseClusterGrant(clusterId, allowRules) {
       grant.mode = "namespaces";
       grant.namespaces = namespaces;
       syncAllowedActionsFromRules(grant, clusterRules);
+      grant.resourceAccess = {
+        ...grant.resourceAccess,
+        allowedActions: ensureNamespaceResourceActions(
+          grant.resourceAccess?.allowedActions || NAMESPACE_DEFAULT_ACTION_IDS
+        ),
+      };
       return grant;
     }
   }
@@ -151,6 +157,37 @@ function roleCanEmit(permissionKey, rolePermissions) {
   return rolePermissions.includes(permissionKey);
 }
 
+function ensureNamespaceResourceActions(actionIds) {
+  const ids = [...actionIds];
+  const onlyLogs = ids.length === 1 && ids[0] === "view_logs";
+  if (!onlyLogs && ids.length > 0 && !ids.includes("view_resources")) {
+    ids.unshift("view_resources");
+  }
+  return ids;
+}
+
+function ensureResourceViewActions(actionIds) {
+  const ids = [...actionIds];
+  if (!ids.includes("view_resources")) {
+    ids.unshift("view_resources");
+  }
+  return ids;
+}
+
+function pushNamespaceViewResourceRules(rules, clusterId, namespace, rolePermissions) {
+  actionPermissions(["view_resources"]).forEach((permissionKey) => {
+    if (permissionKey === "namespaces:view" || !roleCanEmit(permissionKey, rolePermissions)) {
+      return;
+    }
+    pushAllow(rules, {
+      clusterId,
+      namespace,
+      resourceType: "namespace",
+      permissionKey,
+    });
+  });
+}
+
 /** Strip action checkboxes that the role cannot use. */
 export function sanitizeClusterGrantsForRole(clusterGrants, role) {
   const selectableIds = new Set(selectableActionsForRole(role).map((action) => action.id));
@@ -180,8 +217,9 @@ export function grantsToAccessRules(clusterGrants, rolePermissions = null) {
 
     if (grant.mode === "full") {
       const actionIds = filterActionIdsForRole(FULL_CLUSTER_ACTION_IDS, rolePermissions);
-      const perms = actionPermissions(actionIds);
-      perms.forEach((perm) => {
+      const permSet = new Set(actionPermissions(actionIds));
+      (rolePermissions || []).forEach((perm) => permSet.add(perm));
+      permSet.forEach((perm) => {
         if (!roleCanEmit(perm, rolePermissions)) {
           return;
         }
@@ -206,9 +244,11 @@ export function grantsToAccessRules(clusterGrants, rolePermissions = null) {
     }
 
     if (grant.mode === "namespaces") {
-      const nsActions = filterActionIdsForRole(
-        grant.resourceAccess?.allowedActions || NAMESPACE_DEFAULT_ACTION_IDS,
-        rolePermissions
+      const nsActions = ensureNamespaceResourceActions(
+        filterActionIdsForRole(
+          grant.resourceAccess?.allowedActions || NAMESPACE_DEFAULT_ACTION_IDS,
+          rolePermissions
+        )
       );
       (grant.namespaces || []).forEach((ns) => {
         pushAllow(rules, {
@@ -217,21 +257,8 @@ export function grantsToAccessRules(clusterGrants, rolePermissions = null) {
           resourceType: "namespace",
           permissionKey: "namespaces:view",
         });
-        if (nsActions.includes("view_resources") && roleCanEmit("resources:view", rolePermissions)) {
-          pushAllow(rules, {
-            clusterId: cid,
-            namespace: ns,
-            resourceType: "namespace",
-            permissionKey: "resources:view",
-          });
-          if (roleCanEmit("pods:view", rolePermissions)) {
-            pushAllow(rules, {
-              clusterId: cid,
-              namespace: ns,
-              resourceType: "namespace",
-              permissionKey: "pods:view",
-            });
-          }
+        if (nsActions.includes("view_resources")) {
+          pushNamespaceViewResourceRules(rules, cid, ns, rolePermissions);
         }
         if (nsActions.includes("view_logs") && roleCanEmit("logs:view", rolePermissions)) {
           pushAllow(rules, {
@@ -283,11 +310,17 @@ export function grantsToAccessRules(clusterGrants, rolePermissions = null) {
     }
 
     if (grant.mode === "resources") {
-      const actions = filterActionIdsForRole(
+      const nsMap = grant.resourceAccess?.namespaces || {};
+      const hasSelectedResources = Object.values(nsMap).some((bucket) =>
+        BROWSER_RESOURCE_TYPES.some((type) => (bucket[type.listKey] || []).length > 0)
+      );
+      let actions = filterActionIdsForRole(
         grant.resourceAccess?.allowedActions || DEFAULT_ALLOWED_ACTIONS,
         rolePermissions
       );
-      const nsMap = grant.resourceAccess?.namespaces || {};
+      if (hasSelectedResources) {
+        actions = ensureResourceViewActions(actions);
+      }
       Object.entries(nsMap).forEach(([ns, bucket]) => {
         const hasAny = BROWSER_RESOURCE_TYPES.some((type) => (bucket[type.listKey] || []).length > 0);
         if (!hasAny) return;
@@ -435,9 +468,11 @@ export function effectiveActionIdsForGrant(grant, role) {
     if (!counts.total) {
       return [];
     }
-    return filterActionIdsForRole(
-      grant.resourceAccess?.allowedActions || DEFAULT_ALLOWED_ACTIONS,
-      rolePerms
+    return ensureResourceViewActions(
+      filterActionIdsForRole(
+        grant.resourceAccess?.allowedActions || DEFAULT_ALLOWED_ACTIONS,
+        rolePerms
+      )
     );
   }
 

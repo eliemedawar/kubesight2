@@ -171,6 +171,30 @@ def _migrate_log_alert_columns() -> None:
         _add_column_if_missing("alert_delivery_logs", "log_snippet", "TEXT")
 
 
+def _sync_role_permissions() -> None:
+    """Ensure every role has all permissions defined for it in ROLE_DEFINITIONS.
+
+    This is idempotent: it only ever adds missing permissions, never removes existing ones.
+    Called on every startup so that new permissions added to rbac_data.py automatically
+    propagate to existing deployments without manual DB surgery.
+    """
+    from .models import Role, Permission
+    from .rbac_data import ROLE_DEFINITIONS
+
+    for role_name, defn in ROLE_DEFINITIONS.items():
+        role = Role.query.filter_by(name=role_name).first()
+        if not role:
+            continue
+        current_keys = {p.key for p in role.permissions}
+        needed_keys = set(defn["permissions"]) - current_keys
+        if not needed_keys:
+            continue
+        new_perms = Permission.query.filter(Permission.key.in_(needed_keys)).all()
+        for perm in new_perms:
+            role.permissions.append(perm)
+    db.session.commit()
+
+
 def run_migrations() -> None:
     db.create_all()
     _migrate_clusters_table()
@@ -184,3 +208,4 @@ def run_migrations() -> None:
 
     migrate_all_users_legacy_rules()
     run_alert_routing_migrations()
+    _sync_role_permissions()

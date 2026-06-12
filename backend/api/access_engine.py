@@ -24,7 +24,18 @@ RESOURCE_SPECIFICITY = {
     "service_port": 45,
 }
 
+# Broad management keys imply granular user/role permissions.
+PERMISSION_MANAGED_BY = {
+    "users:view": ("users:manage",),
+    "users:create": ("users:manage",),
+    "users:update": ("users:manage",),
+    "users:disable": ("users:manage",),
+    "roles:view": ("roles:manage", "users:manage"),
+    "roles:manage": ("users:manage",),
+}
+
 PERMISSION_ALIASES = {
+    "namespaces:view": ("namespaces:view", "resources:view"),
     "pods:view": ("pods:view", "resources:view"),
     "deployments:view": ("deployments:view", "resources:view"),
     "replicasets:view": ("replicasets:view", "deployments:view", "resources:view"),
@@ -82,6 +93,9 @@ def user_has_permission(user: User, permission_key: str) -> bool:
     keys = get_user_permission_keys(user)
     if permission_key in keys:
         return True
+    for manager in PERMISSION_MANAGED_BY.get(permission_key, ()):
+        if manager in keys:
+            return True
     for alias in PERMISSION_ALIASES.get(permission_key, ()):
         if alias in keys:
             return True
@@ -159,6 +173,12 @@ def rule_specificity(rule: AccessRule) -> int:
     return base
 
 
+def _rule_permission_matches(rule_key: str, requested_key: str) -> bool:
+    if rule_key == requested_key:
+        return True
+    return rule_key in PERMISSION_ALIASES.get(requested_key, ())
+
+
 def _rule_matches(
     rule: AccessRule,
     *,
@@ -172,7 +192,7 @@ def _rule_matches(
 ) -> bool:
     if rule.cluster_id != cluster_id:
         return False
-    if rule.permission_key != permission_key:
+    if not _rule_permission_matches(rule.permission_key, permission_key):
         return False
 
     rule_ns = (rule.namespace or "").strip() or None
@@ -218,6 +238,33 @@ def _rule_matches(
     return True
 
 
+def _rules_for_evaluation(
+    rules: List[AccessRule],
+    *,
+    cluster_id: str,
+    namespace: Optional[str],
+    resource_type: Optional[str],
+) -> List[AccessRule]:
+    """When a namespace has named resource grants, ignore broad cluster-level rules there."""
+    if not namespace or not resource_type:
+        return rules
+    has_named = any(
+        rule.cluster_id == cluster_id
+        and (rule.namespace or "") == namespace
+        and (rule.resource_type or "") == resource_type
+        and (rule.resource_name or "").strip()
+        and rule.effect == "allow"
+        for rule in rules
+    )
+    if not has_named:
+        return rules
+    return [
+        rule
+        for rule in rules
+        if (rule.resource_type or "cluster") != "cluster" or (rule.resource_name or "").strip()
+    ]
+
+
 def evaluate_access(
     user: User,
     *,
@@ -245,9 +292,15 @@ def evaluate_access(
             resource_name=resource_name,
         )
 
+    scoped_rules = _rules_for_evaluation(
+        rules,
+        cluster_id=cluster_id,
+        namespace=namespace,
+        resource_type=resource_type,
+    )
     matching = [
         r
-        for r in rules
+        for r in scoped_rules
         if _rule_matches(
             r,
             cluster_id=cluster_id,
@@ -324,6 +377,14 @@ def can_access_namespace(user: User, cluster_id: str, namespace: str) -> bool:
     )
 
 
+def _pod_matches_deployment_name(pod_name: str, deployment_name: str) -> bool:
+    if not pod_name or not deployment_name:
+        return False
+    if pod_name == deployment_name:
+        return True
+    return pod_name.startswith(f"{deployment_name}-")
+
+
 def can_access_resource(
     user: User,
     cluster_id: str,
@@ -342,14 +403,38 @@ def can_access_resource(
         "service": "services:view",
     }
     permission_key = perm_map.get(resource_type, "resources:view")
-    return evaluate_access(
+    if evaluate_access(
         user,
         cluster_id=cluster_id,
         namespace=namespace,
         permission_key=permission_key,
         resource_type=resource_type,
         resource_name=resource_name,
-    )
+    ):
+        return True
+
+    if resource_type != "pod":
+        return False
+
+    for rule in _load_rules(user):
+        if rule.effect != "allow":
+            continue
+        if rule.cluster_id != cluster_id or (rule.namespace or "") != namespace:
+            continue
+        if (rule.resource_type or "") != "deployment" or not (rule.resource_name or "").strip():
+            continue
+        if not _pod_matches_deployment_name(resource_name, rule.resource_name.strip()):
+            continue
+        if evaluate_access(
+            user,
+            cluster_id=cluster_id,
+            namespace=namespace,
+            permission_key="deployments:view",
+            resource_type="deployment",
+            resource_name=rule.resource_name.strip(),
+        ):
+            return True
+    return False
 
 
 def can_view_logs(

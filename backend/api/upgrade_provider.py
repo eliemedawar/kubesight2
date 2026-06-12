@@ -3,12 +3,23 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+# ---------------------------------------------------------------------------
+# Simple time-based cache for external K8s version lookups.
+# These hit dl.k8s.io on every page load without caching — very slow.
+# ---------------------------------------------------------------------------
+_version_cache: Dict[str, Any] = {}
+_version_cache_lock = threading.Lock()
+_VERSION_CACHE_TTL = 300  # seconds — stable.txt changes at most a few times a year
+
 from .cluster_access import ClusterAccess
+from .upgrade_config import auto_upgrade_enabled
 
 # Re-use kubectl helpers from k8s_provider without circular imports at module level.
 RunKubectlFn = Callable[[ClusterAccess, List[str]], str]
@@ -89,15 +100,120 @@ def _node_version(node: Dict[str, Any]) -> str:
     )
 
 
-def _fetch_latest_k8s_version() -> str:
+def _fetch_release_text(url: str) -> Optional[str]:
     try:
-        with urllib.request.urlopen("https://dl.k8s.io/release/stable.txt", timeout=5) as response:
+        with urllib.request.urlopen(url, timeout=5) as response:
             value = response.read().decode("utf-8").strip()
             if value:
                 return normalize_version(value)
     except (urllib.error.URLError, TimeoutError, OSError):
         pass
-    return "unknown"
+    return None
+
+
+def _fetch_latest_k8s_version() -> str:
+    key = "latest_k8s_stable"
+    with _version_cache_lock:
+        entry = _version_cache.get(key)
+        if entry and time.monotonic() - entry["ts"] < _VERSION_CACHE_TTL:
+            return entry["value"]
+    result = _fetch_release_text("https://dl.k8s.io/release/stable.txt") or "unknown"
+    with _version_cache_lock:
+        _version_cache[key] = {"value": result, "ts": time.monotonic()}
+    return result
+
+
+def _is_prerelease_version(version: str) -> bool:
+    lowered = version.lower()
+    return any(marker in lowered for marker in ("-rc", "-beta", "-alpha", "-preview"))
+
+
+def _release_binary_exists(version: str) -> bool:
+    normalized = normalize_version(version).lstrip("v")
+    url = f"https://dl.k8s.io/release/{normalized}/bin/linux/amd64/kubeadm"
+    try:
+        request = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def _fetch_latest_patch_for_minor(major: int, minor: int) -> str:
+    fetched = _fetch_release_text(f"https://dl.k8s.io/release/latest-{major}.{minor}.txt")
+    if fetched and not _is_prerelease_version(fetched):
+        return fetched
+    for patch in range(30, -1, -1):
+        candidate = f"v{major}.{minor}.{patch}"
+        if _release_binary_exists(candidate):
+            return candidate
+    return f"v{major}.{minor}.0"
+
+
+def recommended_kubeadm_target(current_version: str) -> Optional[str]:
+    current_tuple = parse_k8s_version(current_version)
+    if current_tuple == (0, 0, 0):
+        return None
+    key = f"kubeadm_target_{current_tuple[0]}_{current_tuple[1] + 1}"
+    with _version_cache_lock:
+        entry = _version_cache.get(key)
+        if entry and time.monotonic() - entry["ts"] < _VERSION_CACHE_TTL:
+            return entry["value"]
+    result = _fetch_latest_patch_for_minor(current_tuple[0], current_tuple[1] + 1)
+    with _version_cache_lock:
+        _version_cache[key] = {"value": result, "ts": time.monotonic()}
+    return result
+
+
+def kubeadm_minor_jump_blocked(current_version: str, target_version: str) -> Optional[str]:
+    current_tuple = parse_k8s_version(current_version)
+    target_tuple = parse_k8s_version(target_version)
+    if current_tuple == (0, 0, 0) or target_tuple == (0, 0, 0):
+        return None
+    if target_tuple[1] - current_tuple[1] <= 1:
+        return None
+    recommended = recommended_kubeadm_target(current_version)
+    return (
+        f"kubeadm supports upgrading one minor version at a time. "
+        f"Upgrade {current_version} to {recommended or f'v{current_tuple[0]}.{current_tuple[1] + 1}.x'} first, "
+        f"not directly to {normalize_version(target_version)}."
+    )
+
+
+def build_target_version_options(
+    current_version: str,
+    latest_available: str,
+    provider: str,
+) -> List[Dict[str, Any]]:
+    options: List[Dict[str, Any]] = []
+    current = normalize_version(current_version)
+    latest = normalize_version(latest_available) if latest_available not in {"", "unknown"} else None
+
+    if provider == "kubeadm" and current != "unknown":
+        recommended = recommended_kubeadm_target(current_version)
+        if recommended:
+            options.append(
+                {
+                    "value": recommended,
+                    "label": f"{recommended} (recommended)",
+                    "recommended": True,
+                }
+            )
+        if latest and latest != recommended:
+            options.append(
+                {
+                    "value": latest,
+                    "label": f"{latest} (latest stable)",
+                    "recommended": False,
+                }
+            )
+        return options
+
+    if latest:
+        options.append({"value": latest, "label": latest, "recommended": True})
+    if current != "unknown" and current != latest:
+        options.append({"value": current, "label": f"{current} (current)", "recommended": False})
+    return options
 
 
 def _cli_available(name: str) -> bool:
@@ -149,13 +265,20 @@ def detect_cluster_provider(
         (node.get("spec", {}).get("providerID") or "") for node in node_items
     ).lower()
 
+    if "kind://" in provider_ids:
+        return "kind"
+
+    if context.startswith("kind-") or "node.kubernetes.io/kind-cluster" in label_keys:
+        return "kind"
+
     if "docker-desktop" in context or "docker-for-desktop" in context:
         return "docker-desktop"
     if any("docker-desktop" in name for name in node_names):
         return "docker-desktop"
-
-    if context.startswith("kind-") or "node.kubernetes.io/kind-cluster" in label_keys:
-        return "kind"
+    if "kubernetes.docker.internal" in server_url or "docker.internal" in server_url:
+        return "docker-desktop"
+    if "docker://" in provider_ids:
+        return "docker-desktop"
 
     if context == "minikube" or "minikube.k8s.io" in label_keys:
         return "minikube"
@@ -249,20 +372,31 @@ def get_provider_support(provider: str) -> Dict[str, Any]:
         }
 
     if provider == "kubeadm":
+        automated = auto_upgrade_enabled()
         return {
             "provider": provider,
             "providerDisplay": display,
             "upgradeSupported": True,
-            "executionMode": "plan-only",
-            "reason": "kubeadm upgrades require manual execution with confirmation.",
+            "executionMode": "execute-with-cli" if automated else "plan-only",
+            "reason": (
+                "KubeSight runs kubeadm upgrade steps automatically."
+                if automated
+                else "kubeadm upgrades require manual execution with confirmation."
+            ),
             "instructions": {
                 "title": "kubeadm Upgrade",
-                "summary": "Plan the upgrade with KubeSight; execute kubeadm commands manually.",
+                "summary": (
+                    "KubeSight installs kubeadm/kubelet/kubectl packages and runs kubeadm upgrade steps."
+                    if automated
+                    else "Plan the upgrade with KubeSight; execute kubeadm commands manually on each node."
+                ),
                 "steps": [
-                    "Upgrade kubeadm on the first control plane node",
+                    "Install kubeadm/kubelet/kubectl packages at target version (automated)"
+                    if automated
+                    else "Upgrade kubeadm on the first control plane node",
                     "kubeadm upgrade plan",
                     "kubeadm upgrade apply v<target>",
-                    "Drain and upgrade kubelet/kubeadm on worker nodes",
+                    "Upgrade kubelet/kubectl on control plane and workers",
                     "Uncordon nodes after upgrade",
                 ],
             },
@@ -405,11 +539,17 @@ def build_cluster_info(
     version_data: Optional[Dict[str, Any]] = None,
     node_items: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    if version_data is None:
+    if version_data is None and node_items is None:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            vf = pool.submit(run_kubectl, access, ["version", "-o", "json"])
+            nf = pool.submit(run_kubectl, access, ["get", "nodes", "-o", "json"])
+        version_data = json.loads(vf.result())
+        node_items = json.loads(nf.result()).get("items", [])
+    elif version_data is None:
         version_output = run_kubectl(access, ["version", "-o", "json"])
         version_data = json.loads(version_output)
-
-    if node_items is None:
+    elif node_items is None:
         nodes_output = run_kubectl(access, ["get", "nodes", "-o", "json"])
         node_items = json.loads(nodes_output).get("items", [])
 
@@ -454,10 +594,18 @@ def build_version_info(
     *,
     fetch_latest: bool = True,
 ) -> Dict[str, Any]:
+    provider = provider_support.get("provider", "unknown")
     latest = _fetch_latest_k8s_version() if fetch_latest else "unknown"
+    recommended = (
+        recommended_kubeadm_target(current_version)
+        if provider == "kubeadm"
+        else None
+    )
     return {
         "currentVersion": current_version,
         "latestAvailable": latest,
+        "recommendedTarget": recommended,
+        "targetOptions": build_target_version_options(current_version, latest, provider),
         "targetVersion": normalize_version(target_version),
         "upgradeSupported": bool(provider_support.get("upgradeSupported")),
         "reason": provider_support.get("reason", ""),
@@ -469,6 +617,8 @@ def generate_upgrade_plan(provider_support: Dict[str, Any]) -> Dict[str, Any]:
         "instructions",
         "plan-only",
     } or not provider_support.get("upgradeSupported")
+    if provider_support.get("executionMode") == "execute-with-cli" and auto_upgrade_enabled():
+        manual = False
 
     steps = [
         {
@@ -548,13 +698,22 @@ def run_extended_prechecks(
     except Exception as exc:
         checks.append(_check_status("Control plane healthy", "warning", str(exc)))
 
+    provider = detect_cluster_provider(access, run_kubectl, version_data=version_data, node_items=node_items)
+
     valid_target, target_error = validate_target_version(target_version)
     if not valid_target:
         checks.append(_check_status("Target version validation", "failed", target_error or "Invalid target version."))
     else:
         current_tuple = parse_k8s_version(current_version)
         target_tuple = parse_k8s_version(target_version)
-        if current_tuple >= target_tuple:
+        kubeadm_jump_error = (
+            kubeadm_minor_jump_blocked(current_version, target_version)
+            if provider == "kubeadm"
+            else None
+        )
+        if kubeadm_jump_error:
+            checks.append(_check_status("Target version validation", "failed", kubeadm_jump_error))
+        elif current_tuple >= target_tuple:
             checks.append(
                 _check_status(
                     "Target version validation",
@@ -818,21 +977,30 @@ def build_upgrade_info(
     target_version: str,
     run_kubectl: RunKubectlFn,
 ) -> Dict[str, Any]:
-    cluster_info = build_cluster_info(access, run_kubectl)
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Fetch version info, node list, AND warm the external version cache — all in parallel.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        vf = pool.submit(run_kubectl, access, ["version", "-o", "json"])
+        nf = pool.submit(run_kubectl, access, ["get", "nodes", "-o", "json"])
+        pool.submit(_fetch_latest_k8s_version)  # warms cache; result used below via cache hit
+
+    version_data = json.loads(vf.result())
+    try:
+        node_items = json.loads(nf.result()).get("items", [])
+    except Exception:
+        node_items = []
+
+    # Pass already-fetched data so build_cluster_info makes zero additional kubectl calls.
+    cluster_info = build_cluster_info(access, run_kubectl, version_data=version_data, node_items=node_items)
     provider_support = get_provider_support(cluster_info["provider"])
     version_info = build_version_info(
         cluster_info["controlPlaneVersion"],
         target_version,
         provider_support,
     )
-    version_skew = analyze_version_skew(cluster_info["controlPlaneVersion"], cluster_info.get("nodes", []))
-    # Re-fetch nodes as full items for skew if needed
-    try:
-        nodes_output = run_kubectl(access, ["get", "nodes", "-o", "json"])
-        node_items = json.loads(nodes_output).get("items", [])
-        version_skew = analyze_version_skew(cluster_info["controlPlaneVersion"], node_items)
-    except Exception:
-        node_items = []
+    # Reuse the already-fetched node_items — no second kubectl get nodes.
+    version_skew = analyze_version_skew(cluster_info["controlPlaneVersion"], node_items)
 
     return {
         "clusterInfo": cluster_info,
@@ -906,24 +1074,36 @@ def run_upgrade_workflow(
         }
 
     if provider == "kubeadm" and provider_support.get("upgradeSupported"):
-        expected = required_confirmation_text(provider, access.cluster_id, target_version)
-        if confirmation != expected:
-            return {
-                "upgradeId": None,
-                "clusterId": access.cluster_id,
-                "targetVersion": normalize_version(target_version),
-                "currentVersion": precheck.get("currentVersion"),
-                "status": "confirmation_required",
-                "message": f"Confirmation required. Type exactly: {expected}",
-                "requiredConfirmation": expected,
-                "steps": [],
-                "checks": precheck.get("checks", []),
-                "provider": provider_support,
-                "upgradePlan": plan,
-                "executionSupported": False,
-            }
+        if auto_upgrade_enabled():
+            from .upgrade_executor import start_automated_upgrade
+
+            return start_automated_upgrade(
+                access,
+                provider=provider,
+                target_version=target_version,
+                current_version=precheck.get("currentVersion") or "unknown",
+                run_kubectl=run_kubectl,
+                precheck=precheck,
+            )
         return _manual_plan_response(
-            "Confirmation accepted. Execute kubeadm upgrade steps manually — KubeSight does not run kubeadm."
+            "Execute kubeadm upgrade steps manually on the control plane and worker nodes."
+        )
+
+    if (
+        auto_upgrade_enabled()
+        and execution_mode == "execute-with-cli"
+        and provider_support.get("upgradeSupported")
+        and provider in {"minikube", "eks", "aks", "gke"}
+    ):
+        from .upgrade_executor import start_automated_upgrade
+
+        return start_automated_upgrade(
+            access,
+            provider=provider,
+            target_version=target_version,
+            current_version=precheck.get("currentVersion") or "unknown",
+            run_kubectl=run_kubectl,
+            precheck=precheck,
         )
 
     if execution_mode == "instructions" or not provider_support.get("upgradeSupported"):
