@@ -53,13 +53,11 @@ export default function RolesPanel({
 
   const handleDelete = async (role) => {
     const userCount = role.userCount || 0;
-    if (userCount > 0) {
-      onError(`Cannot delete "${role.name}" while ${userCount} user(s) are assigned.`);
-      return;
-    }
-    const confirmed = window.confirm(
-      `Delete role "${role.name}"?\n\nThis cannot be undone.`
-    );
+    const warning =
+      userCount > 0
+        ? `Delete role "${role.name}"?\n\n⚠️ ${userCount} user(s) are assigned to this role and will have their role unassigned.\n\nThis cannot be undone.`
+        : `Delete role "${role.name}"?\n\nThis cannot be undone.`;
+    const confirmed = window.confirm(warning);
     if (!confirmed) {
       return;
     }
@@ -169,12 +167,12 @@ export default function RolesPanel({
                               type="button"
                               className="btn-outline btn-compact danger"
                               onClick={() => handleDelete(role)}
-                              disabled={role.isSystemRole || (role.userCount || 0) > 0}
+                              disabled={role.isSystemRole}
                               title={
                                 role.isSystemRole
                                   ? "System roles cannot be deleted"
                                   : (role.userCount || 0) > 0
-                                    ? "Reassign users before deleting this role"
+                                    ? `Deletes role and unassigns ${role.userCount} user(s)`
                                     : undefined
                               }
                             >

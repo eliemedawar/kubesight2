@@ -56,6 +56,7 @@ PERMISSIONS = [
     ("clients:create", "Create clients"),
     ("clients:update", "Update clients"),
     ("clients:delete", "Delete clients"),
+    ("api_tokens:manage", "Create and revoke API tokens"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -152,6 +153,18 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "clients:delete",
 ]
 
+HERMES_AGENT_PERMISSIONS = [
+    "clusters:view",
+    "overview:view",
+    "namespaces:view",
+    "pods:view",
+    "deployments:view",
+    "services:view",
+    "alerts:view",
+    "app_services:view",
+    "clients:view",
+]
+
 ROLE_DEFINITIONS = {
     "admin": {
         "description": "Full access to everything",
@@ -172,6 +185,11 @@ ROLE_DEFINITIONS = {
         "description": "Read-only access to allowed clusters and namespaces",
         "is_system_role": True,
         "permissions": VIEWER_PERMISSIONS,
+    },
+    "hermes-agent": {
+        "description": "Read-only service account for the Hermes AI Operations Agent",
+        "is_system_role": True,
+        "permissions": HERMES_AGENT_PERMISSIONS,
     },
 }
 
@@ -196,5 +214,12 @@ DEFAULT_USERS = [
         "email": "operator@kubesight.local",
         "full_name": "Platform Operator",
         "role": "operator",
+    },
+    {
+        "username": "hermes-agent",
+        "password": "hermes-agent-disabled",
+        "email": "hermes@kubesight.local",
+        "full_name": "Hermes AI Agent",
+        "role": "hermes-agent",
     },
 ]

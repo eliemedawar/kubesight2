@@ -17,6 +17,8 @@ from .helm import helm_bp
 from .alert_routing import alert_routing_bp
 from .application_services import app_services_bp
 from .clients import clients_bp
+from .ai import ai_bp
+from .api_tokens import api_tokens_bp
 
 
 def register_blueprints(app: Flask) -> None:
@@ -37,3 +39,5 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(alert_routing_bp)
     app.register_blueprint(app_services_bp)
     app.register_blueprint(clients_bp)
+    app.register_blueprint(ai_bp)
+    app.register_blueprint(api_tokens_bp)

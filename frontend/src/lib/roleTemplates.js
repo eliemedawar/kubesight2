@@ -26,6 +26,8 @@ const VIEWER_PERMISSIONS = [
   "services:view",
   "services:ports:view",
   "helm:view",
+  "app_services:view",
+  "clients:view",
 ];
 
 const OPERATOR_PERMISSIONS = [

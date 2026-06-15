@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from .db import db
 from .mock_data import SETTINGS
-from .models import AccessRule, AppSettings, Permission, Role, User, UserClusterAccess
+from .models import AccessRule, AppSettings, Permission, Role, User, UserClusterAccess, role_permissions as rp_table
 from .passwords import hash_password
 from .rbac_data import (
     DEFAULT_USERS,
+    HERMES_AGENT_PERMISSIONS,
     OPERATOR_PERMISSIONS,
     PERMISSIONS,
     ROLE_DEFINITIONS,
@@ -16,6 +17,7 @@ MOCK_CLUSTER_IDS = frozenset({"prod-us-east", "staging-eu-west"})
 DEMO_USER_SYNC = {
     "viewer": VIEWER_PERMISSIONS,
     "operator": OPERATOR_PERMISSIONS,
+    "hermes-agent": HERMES_AGENT_PERMISSIONS,
 }
 
 
@@ -50,6 +52,20 @@ def _seed_roles(permissions_by_key: dict) -> dict:
             )
             db.session.add(role)
             role.permissions = default_permissions
+        elif definition.get("is_system_role", False):
+            # For system roles, add any missing permissions directly via the table
+            rows = db.session.execute(
+                db.text("SELECT permission_id FROM role_permissions WHERE role_id = :rid"),
+                {"rid": role.id},
+            ).fetchall()
+            existing_perm_ids = {r[0] for r in rows}
+            for key in definition["permissions"]:
+                perm = permissions_by_key.get(key)
+                if perm and perm.id not in existing_perm_ids:
+                    db.session.execute(
+                        rp_table.insert().values(role_id=role.id, permission_id=perm.id)
+                    )
+                    existing_perm_ids.add(perm.id)
         elif not role.permissions:
             role.permissions = default_permissions
         roles_by_name[name] = role
@@ -415,6 +431,7 @@ def seed_defaults() -> None:
     cluster_ids = ("prod-us-east", "staging-eu-west")
     _seed_role_cluster_access("viewer", cluster_ids)
     _seed_role_cluster_access("operator", cluster_ids)
+    _seed_role_cluster_access("hermes-agent", cluster_ids)
     _sync_demo_users_to_discovered_clusters()
     _repair_incomplete_namespace_resource_grants()
     _repair_full_cluster_view_permissions()

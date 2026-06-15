@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from typing import Any, Dict, Optional
 
 import jwt
 from flask import g
 
-from .models import User
+from .models import ApiToken, User
 from .serializers import user_to_dict
 
 
@@ -70,20 +71,47 @@ def load_user_from_token(token: str) -> Optional[User]:
     return user
 
 
+def _load_user_from_api_token(raw_token: str) -> Optional[User]:
+    from .db import db
+
+    token_hash = sha256(raw_token.encode()).hexdigest()
+    api_token = ApiToken.query.filter_by(token_hash=token_hash, is_active=True).first()
+    if not api_token:
+        return None
+    now = datetime.now(timezone.utc)
+    if api_token.expires_at and api_token.expires_at.replace(tzinfo=timezone.utc) < now:
+        return None
+    user = User.query.get(api_token.user_id)
+    if not user or not user.is_active:
+        return None
+    try:
+        api_token.last_used_at = now
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    return user
+
+
 def get_current_user() -> Optional[User]:
     token = get_bearer_token()
-    if token:
-        cached_token = getattr(g, "auth_token", None)
-        if hasattr(g, "current_user") and cached_token == token:
+    if not token:
+        if hasattr(g, "current_user"):
             return g.current_user
-        user = load_user_from_token(token)
-        g.current_user = user
-        g.auth_token = token
-        return user
-    if hasattr(g, "current_user"):
+        g.current_user = None
+        return None
+
+    cached_token = getattr(g, "auth_token", None)
+    if hasattr(g, "current_user") and cached_token == token:
         return g.current_user
-    g.current_user = None
-    return None
+
+    if token.startswith("ksa_"):
+        user = _load_user_from_api_token(token)
+    else:
+        user = load_user_from_token(token)
+
+    g.current_user = user
+    g.auth_token = token
+    return user
 
 
 def auth_required_enabled() -> bool:

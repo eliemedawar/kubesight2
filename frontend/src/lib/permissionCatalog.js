@@ -87,12 +87,33 @@ export const PERMISSION_GROUPS = [
       "roles:manage",
       "settings:view",
       "settings:manage",
+      "api_tokens:manage",
     ],
   },
   {
     id: "audit",
     label: "Audit Logs",
     keys: ["audit:view"],
+  },
+  {
+    id: "appServices",
+    label: "Application Services",
+    keys: [
+      "app_services:view",
+      "app_services:create",
+      "app_services:update",
+      "app_services:delete",
+    ],
+  },
+  {
+    id: "clients",
+    label: "Clients",
+    keys: [
+      "clients:view",
+      "clients:create",
+      "clients:update",
+      "clients:delete",
+    ],
   },
 ];
 
@@ -144,6 +165,15 @@ export const PERMISSION_CATALOG = [
   { key: "helm:uninstall", label: "Uninstall Helm releases", dangerous: true },
   { key: "helm:values:view", label: "View Helm release values", dangerous: false },
   { key: "helm:values:update", label: "Update Helm release values", dangerous: true },
+  { key: "app_services:view", label: "View application services", dangerous: false },
+  { key: "app_services:create", label: "Create application services", dangerous: false },
+  { key: "app_services:update", label: "Update application services", dangerous: false },
+  { key: "app_services:delete", label: "Delete application services", dangerous: true },
+  { key: "clients:view", label: "View clients", dangerous: false },
+  { key: "clients:create", label: "Create clients", dangerous: false },
+  { key: "clients:update", label: "Update clients", dangerous: false },
+  { key: "clients:delete", label: "Delete clients", dangerous: true },
+  { key: "api_tokens:manage", label: "Manage API tokens", dangerous: true },
 ];
 
 const BLOCKED_HIGHLIGHT_KEYS = new Set([

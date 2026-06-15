@@ -205,14 +205,15 @@ def delete_role(
     if role.is_system_role:
         return None, "System roles cannot be deleted", 400
 
-    user_count = User.query.filter_by(role_id=role.id).count()
-    if user_count > 0:
-        return None, f"Cannot delete role assigned to {user_count} user(s)", 400
+    affected_users = User.query.filter_by(role_id=role.id).all()
+    for u in affected_users:
+        u.role_id = None
 
     details = {
         "name": role.name,
         "description": role.description,
         "permissions": [perm.key for perm in role.permissions],
+        "users_unassigned": len(affected_users),
     }
     db.session.delete(role)
     db.session.commit()
