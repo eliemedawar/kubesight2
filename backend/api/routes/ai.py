@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, request
 
-from ..access_engine import filter_clusters_for_user
+from ..access_engine import filter_clusters_for_user, filter_namespaces_for_user
 from ..audit import log_audit
 from ..auth_utils import get_current_user
 from ..decorators import require_permission
@@ -321,7 +321,7 @@ def _unhealthy_pods_mock(visible_clusters: List[Dict[str, Any]]) -> List[Dict[st
     return pods
 
 
-def _unhealthy_pods_real(visible_clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _unhealthy_pods_real(visible_clusters: List[Dict[str, Any]], user) -> List[Dict[str, Any]]:
     pods: List[Dict[str, Any]] = []
     for cl in visible_clusters:
         cid = cl.get("id", "")
@@ -330,7 +330,8 @@ def _unhealthy_pods_real(visible_clusters: List[Dict[str, Any]]) -> List[Dict[st
             if not access:
                 continue
             ns_data = list_namespaces_from_k8s(access)
-            namespaces = ns_data.get("items", []) if isinstance(ns_data, dict) else []
+            all_namespaces = ns_data.get("items", []) if isinstance(ns_data, dict) else []
+            namespaces = filter_namespaces_for_user(user, cid, all_namespaces)
             for ns_item in namespaces[:30]:  # cap at 30 namespaces
                 ns = ns_item.get("name", "")
                 if not ns:
@@ -368,7 +369,7 @@ def unhealthy_pods():
         visible_clusters = [c for c in visible_clusters if c.get("id") == cluster_id_filter]
 
     if should_use_real_k8s():
-        pods = _unhealthy_pods_real(visible_clusters)
+        pods = _unhealthy_pods_real(visible_clusters, user)
     else:
         pods = _unhealthy_pods_mock(visible_clusters)
 
@@ -418,7 +419,7 @@ def _deployments_health_mock(visible_clusters: List[Dict[str, Any]]) -> Dict[str
     }
 
 
-def _deployments_health_real(visible_clusters: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _deployments_health_real(visible_clusters: List[Dict[str, Any]], user) -> Dict[str, Any]:
     total = 0
     healthy_count = 0
     degraded_count = 0
@@ -431,7 +432,8 @@ def _deployments_health_real(visible_clusters: List[Dict[str, Any]]) -> Dict[str
             if not access:
                 continue
             ns_data = list_namespaces_from_k8s(access)
-            namespaces = ns_data.get("items", []) if isinstance(ns_data, dict) else []
+            all_namespaces = ns_data.get("items", []) if isinstance(ns_data, dict) else []
+            namespaces = filter_namespaces_for_user(user, cid, all_namespaces)
             for ns_item in namespaces[:30]:
                 ns = ns_item.get("name", "")
                 if not ns:
@@ -481,7 +483,7 @@ def deployments_health():
         visible_clusters = [c for c in visible_clusters if c.get("id") == cluster_id_filter]
 
     if should_use_real_k8s():
-        result = _deployments_health_real(visible_clusters)
+        result = _deployments_health_real(visible_clusters, user)
     else:
         result = _deployments_health_mock(visible_clusters)
 
