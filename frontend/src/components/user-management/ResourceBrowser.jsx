@@ -111,8 +111,22 @@ export default function ResourceBrowser({
     const ns = pickerNs;
     const next = { ...resourceAccess, namespaces: { ...resourceAccess.namespaces } };
     const b = { ...emptyNamespaceResourceBucket(), ...(next.namespaces[ns] || {}) };
-    b[listKey] = [...new Set([...(b[listKey] || []), ...filteredItems])];
+    const names = filteredItems
+      .map((item) => (typeof item === "string" ? item : item?.name))
+      .filter(Boolean);
+    b[listKey] = [...new Set([...(b[listKey] || []), ...names])];
+    if (pickerType === "pod") {
+      const deployments = new Set(b.deployments || []);
+      filteredItems.forEach((item) => {
+        const owner = typeof item === "object" ? item?.owner : "";
+        if (owner && owner !== "-") deployments.add(owner);
+      });
+      b.deployments = [...deployments];
+    }
     next.namespaces[ns] = b;
+    const allowedActions = new Set(next.allowedActions || []);
+    if (names.length > 0) allowedActions.add("view_resources");
+    next.allowedActions = [...allowedActions];
     onResourceAccessChange(next);
   };
 
