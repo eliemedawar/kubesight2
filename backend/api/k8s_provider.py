@@ -89,6 +89,10 @@ def _run_kubectl(
             env=env,
             timeout=effective_timeout,
         )
+    except FileNotFoundError:
+        raise K8sCommandError(
+            "kubectl not found. Please install kubectl and ensure it is on your PATH."
+        )
     except subprocess.TimeoutExpired:
         raise K8sCommandError(
             f"kubectl command timed out after {effective_timeout}s: {' '.join(args[:3])}"

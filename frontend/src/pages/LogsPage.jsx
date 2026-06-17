@@ -56,6 +56,8 @@ export default function LogsPage({
       ...prev,
       cluster: selectedClusterId || "",
       namespace: selectedNamespace || "",
+      pod: "",
+      container: "",
     }));
   }, [selectedClusterId, selectedNamespace]);
 

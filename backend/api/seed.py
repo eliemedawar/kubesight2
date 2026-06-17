@@ -432,7 +432,17 @@ def seed_defaults() -> None:
     _seed_role_cluster_access("viewer", cluster_ids)
     _seed_role_cluster_access("operator", cluster_ids)
     _seed_role_cluster_access("hermes-agent", cluster_ids)
-    _sync_demo_users_to_discovered_clusters()
+
+    import threading
+    from flask import current_app as _cur_app
+    _flask_app = _cur_app._get_current_object()
+
+    def _bg_k8s_sync() -> None:
+        with _flask_app.app_context():
+            _sync_demo_users_to_discovered_clusters()
+
+    threading.Thread(target=_bg_k8s_sync, daemon=True, name="seed-k8s-sync").start()
+
     _repair_incomplete_namespace_resource_grants()
     _repair_full_cluster_view_permissions()
     _repair_named_resource_view_permissions()

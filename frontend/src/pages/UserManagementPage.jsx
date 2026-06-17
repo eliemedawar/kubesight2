@@ -3,7 +3,6 @@ import {
   createUser,
   disableUser,
   getUser,
-  listClusters,
   listRoles,
   listUsers,
   updateUser,
@@ -18,7 +17,7 @@ import { isFullAccessRole } from "../lib/rolePresets";
 
 const UserFormModal = lazy(() => import("../components/user-management/UserFormModal.jsx"));
 
-export default function UserManagementPage() {
+export default function UserManagementPage({ clusters = [] }) {
   const { user: currentUser, hasPermission } = useAuth();
   const canCreate = hasPermission("users:create") || hasPermission("users:manage");
   const canUpdate = hasPermission("users:update") || hasPermission("users:manage");
@@ -30,7 +29,6 @@ export default function UserManagementPage() {
   const [activeTab, setActiveTab] = useState("users");
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);
-  const [clusters, setClusters] = useState([]);
   const [loading, setLoading] = useState(true);
   const [rolesLoading, setRolesLoading] = useState(true);
   const [error, setError] = useState("");
@@ -50,8 +48,6 @@ export default function UserManagementPage() {
     try {
       const usersRes = await listUsers();
       setUsers(usersRes.items || []);
-      const clustersRes = await listClusters();
-      setClusters(clustersRes.items || []);
     } catch (err) {
       setError(err.message);
     } finally {

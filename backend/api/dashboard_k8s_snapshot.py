@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import logging
+import os
 from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,9 @@ from .k8s_provider import (
 from .upgrade_provider import build_cluster_info
 
 
+_DASHBOARD_KUBECTL_TIMEOUT = int(os.getenv("DASHBOARD_KUBECTL_TIMEOUT_SECONDS", "10"))
+
+
 @dataclass(frozen=True)
 class DashboardK8sSnapshot:
     node_items: List[Dict[str, Any]]
@@ -31,22 +35,24 @@ class DashboardK8sSnapshot:
     node_top_cpu: float
     node_top_mib: float
     pod_top: PodTopMetrics
+    reachable: bool = True
 
 
-def _safe_json_items(future, label: str) -> List[Dict[str, Any]]:
+def _safe_json_items(future, label: str) -> Tuple[List[Dict[str, Any]], bool]:
     try:
-        return json.loads(future.result()).get("items", [])
+        result = json.loads(future.result()).get("items", [])
+        return result, True
     except Exception:
         logger.warning("dashboard snapshot: failed to load %s for cluster", label, exc_info=True)
-        return []
+        return [], False
 
 
-def _safe_json_object(future) -> Dict[str, Any]:
+def _safe_json_object(future) -> Tuple[Dict[str, Any], bool]:
     try:
         payload = json.loads(future.result())
-        return payload if isinstance(payload, dict) else {}
+        return (payload if isinstance(payload, dict) else {}), True
     except Exception:
-        return {}
+        return {}, False
 
 
 def _strip_pod(pod: Dict[str, Any]) -> Dict[str, Any]:
@@ -64,25 +70,28 @@ def fetch_dashboard_k8s_snapshot(access: ClusterAccess) -> DashboardK8sSnapshot:
     the namespace summary can be built purely from in-memory data — no second
     kubectl get pods or kubectl top pods invocation.
     """
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        nodes_future = pool.submit(_run_for_access, access, ["get", "nodes", "-o", "json"])
-        pods_future = pool.submit(
-            _run_for_access, access, ["get", "pods", "--all-namespaces", "-o", "json"]
-        )
-        version_future = pool.submit(_run_for_access, access, ["version", "-o", "json"])
-        ns_raw_future = pool.submit(_run_for_access, access, ["get", "namespaces", "-o", "json"])
-        dep_future = pool.submit(_run_for_access, access, ["get", "deployments", "-A", "-o", "json"])
-        svc_future = pool.submit(_run_for_access, access, ["get", "services", "-A", "-o", "json"])
-        node_top_future = pool.submit(fetch_node_top_usage, access)
-        # fetch_pod_top_metrics is cached (15s TTL) — safe to call from multiple futures
-        pod_top_future = pool.submit(fetch_pod_top_metrics, access)
+    _TOP_TIMEOUT = int(os.getenv("KUBECTL_TOP_TIMEOUT_SECONDS", "8"))
+    _kt = _DASHBOARD_KUBECTL_TIMEOUT
 
-        node_items = _safe_json_items(nodes_future, "nodes")
-        pod_items = [_strip_pod(p) for p in _safe_json_items(pods_future, "pods")]
-        version_data = _safe_json_object(version_future)
-        namespaces_raw = _safe_json_items(ns_raw_future, "namespaces")
-        deployments_raw = _safe_json_items(dep_future, "deployments")
-        services_raw = _safe_json_items(svc_future, "services")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        nodes_future = pool.submit(_run_for_access, access, ["get", "nodes", "-o", "json"], _kt)
+        pods_future = pool.submit(
+            _run_for_access, access, ["get", "pods", "--all-namespaces", "-o", "json"], _kt
+        )
+        version_future = pool.submit(_run_for_access, access, ["version", "-o", "json"], _kt)
+        ns_raw_future = pool.submit(_run_for_access, access, ["get", "namespaces", "-o", "json"], _kt)
+        dep_future = pool.submit(_run_for_access, access, ["get", "deployments", "-A", "-o", "json"], _kt)
+        svc_future = pool.submit(_run_for_access, access, ["get", "services", "-A", "-o", "json"], _kt)
+        node_top_future = pool.submit(fetch_node_top_usage, access, _TOP_TIMEOUT)
+        pod_top_future = pool.submit(fetch_pod_top_metrics, access, False, _TOP_TIMEOUT)
+
+        node_items, nodes_ok = _safe_json_items(nodes_future, "nodes")
+        pod_items_raw, pods_ok = _safe_json_items(pods_future, "pods")
+        pod_items = [_strip_pod(p) for p in pod_items_raw]
+        version_data, version_ok = _safe_json_object(version_future)
+        namespaces_raw, _ = _safe_json_items(ns_raw_future, "namespaces")
+        deployments_raw, _ = _safe_json_items(dep_future, "deployments")
+        services_raw, _ = _safe_json_items(svc_future, "services")
 
         try:
             node_top_cpu, node_top_mib = node_top_future.result()
@@ -92,6 +101,8 @@ def fetch_dashboard_k8s_snapshot(access: ClusterAccess) -> DashboardK8sSnapshot:
             pod_top = pod_top_future.result()
         except Exception:
             pod_top = {}
+
+    reachable = nodes_ok or pods_ok or version_ok
 
     # Build namespace summary in memory — zero additional kubectl calls
     namespaces = build_namespaces_from_data(
@@ -106,6 +117,7 @@ def fetch_dashboard_k8s_snapshot(access: ClusterAccess) -> DashboardK8sSnapshot:
         node_top_cpu=node_top_cpu,
         node_top_mib=node_top_mib,
         pod_top=pod_top,
+        reachable=reachable,
     )
 
 

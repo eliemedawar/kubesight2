@@ -3,7 +3,6 @@ import {
   createApplicationService,
   deleteApplicationService,
   listApplicationServices,
-  listClusters,
   listNamespacesByCluster,
   listPickerDeployments,
   updateApplicationService,
@@ -151,8 +150,7 @@ function DeploymentRow({ dep, clusterName, onRemove }) {
   );
 }
 
-function DeploymentPicker({ deployments, onChange, canEdit }) {
-  const [clusters, setClusters] = useState([]);
+function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
   const [namespaces, setNamespaces] = useState([]);
   const [pickerDeployments, setPickerDeployments] = useState([]);
   const [pickerCluster, setPickerCluster] = useState("");
@@ -160,10 +158,6 @@ function DeploymentPicker({ deployments, onChange, canEdit }) {
   const [nsLoading, setNsLoading] = useState(false);
   const [depLoading, setDepLoading] = useState(false);
   const [pickerError, setPickerError] = useState("");
-
-  useEffect(() => {
-    listClusters().then((res) => setClusters(res.items || [])).catch(() => {});
-  }, []);
 
   const handleClusterChange = async (val) => {
     setPickerCluster(val);
@@ -581,7 +575,7 @@ function initTopologyFromService(service) {
   return { nodes, edges };
 }
 
-function ServiceModal({ service, onClose, onSave, saving, error }) {
+function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }) {
   const isEdit = Boolean(service?.id);
   const [name, setName] = useState(service?.name || "");
   const [description, setDescription] = useState(service?.description || "");
@@ -650,7 +644,7 @@ function ServiceModal({ service, onClose, onSave, saving, error }) {
 
         <section className="form-section">
           <h4>Linked deployments</h4>
-          <DeploymentPicker deployments={deployments} onChange={setDeployments} canEdit />
+          <DeploymentPicker deployments={deployments} onChange={setDeployments} canEdit clusters={clusters} />
         </section>
 
         <div className="modal-actions">
@@ -717,7 +711,7 @@ function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdi
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
-export default function ApplicationServicesPage() {
+export default function ApplicationServicesPage({ clusters: clustersProp = [] }) {
   const { hasPermission } = useAuth();
   const canView = hasPermission("app_services:view");
   const canCreate = hasPermission("app_services:create");
@@ -725,7 +719,7 @@ export default function ApplicationServicesPage() {
   const canDelete = hasPermission("app_services:delete");
 
   const [services, setServices] = useState([]);
-  const [clusters, setClusters] = useState([]);
+  const clusters = clustersProp;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -743,9 +737,8 @@ export default function ApplicationServicesPage() {
     setLoading(true);
     setError("");
     try {
-      const [svcRes, clusterRes] = await Promise.all([listApplicationServices(), listClusters()]);
+      const svcRes = await listApplicationServices();
       setServices(svcRes.items || []);
-      setClusters(clusterRes.items || []);
     } catch (err) {
       setError(err.message || "Failed to load application services.");
     } finally { setLoading(false); }
@@ -893,6 +886,7 @@ export default function ApplicationServicesPage() {
           onSave={handleSave}
           saving={saving}
           error={saveError}
+          clusters={clusters}
         />
       )}
     </div>

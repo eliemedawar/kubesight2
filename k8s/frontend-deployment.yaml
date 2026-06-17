@@ -4,7 +4,7 @@ metadata:
   name: kubesight-frontend
   namespace: kubesight
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: kubesight-frontend
@@ -13,10 +13,12 @@ spec:
       labels:
         app: kubesight-frontend
     spec:
+      nodeSelector:
+        role: frontend
       containers:
         - name: frontend
           # Build: docker build -t kubesight-frontend:vx ./frontend
-          image: kubesight-frontend:v17
+          image: kubesight-frontend:v18
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80

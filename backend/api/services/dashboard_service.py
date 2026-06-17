@@ -502,15 +502,20 @@ def _lightweight_upgrade_info_for_dashboard(
     cluster_info: Dict[str, Any],
     target_version: str = "v1.31.0",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
-    """Version/provider snapshot for dashboard without extra kubectl or audit writes."""
-    from ..upgrade_provider import build_version_info, get_provider_support
+    """Version/provider snapshot for dashboard — no external HTTP calls.
+
+    latestAvailable is intentionally left "unknown" here; it is filled in
+    separately by the pre-fetched version that runs in parallel with kubectl.
+    """
+    from ..upgrade_provider import get_provider_support
 
     provider_support = get_provider_support(cluster_info.get("provider", "unknown"))
-    version_info = build_version_info(
-        cluster_info.get("controlPlaneVersion") or "unknown",
-        target_version,
-        provider_support,
-    )
+    version_info = {
+        "currentVersion": cluster_info.get("controlPlaneVersion") or "unknown",
+        "latestAvailable": "unknown",
+        "upgradeSupported": bool(provider_support.get("upgradeSupported")),
+        "reason": provider_support.get("reason", ""),
+    }
     return (
         {
             "clusterInfo": cluster_info,
@@ -556,6 +561,8 @@ def _load_real_k8s_dashboard_data(
     Dict[str, Any],
     Optional[Tuple[Optional[Dict[str, Any]], Optional[str], int]],
     Optional[Dict[str, int]],
+    str,
+    bool,
 ]:
     """Fetch Kubernetes inputs once, then derive dashboard sections in memory."""
     from flask import current_app
@@ -572,8 +579,11 @@ def _load_real_k8s_dashboard_data(
     app = current_app._get_current_object()
     needs_inventory = bool(user and user_has_permission(user, "resources:view"))
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         snapshot_future = pool.submit(fetch_dashboard_k8s_snapshot, access)
+        # Fetch the latest k8s version in parallel with kubectl — it hits dl.k8s.io
+        # (5 s timeout) and would otherwise block serially after the snapshot.
+        version_latest_future = pool.submit(_fetch_latest_k8s_version)
         inventory_future = (
             pool.submit(
                 _run_with_app_context,
@@ -586,6 +596,10 @@ def _load_real_k8s_dashboard_data(
             else None
         )
         snapshot = snapshot_future.result()
+        try:
+            prefetched_latest_version: str = version_latest_future.result()
+        except Exception:
+            prefetched_latest_version = "unknown"
         inventory_summary = inventory_future.result() if inventory_future else None
 
     try:
@@ -611,6 +625,8 @@ def _load_real_k8s_dashboard_data(
         memory_usage,
         upgrade_result,
         inventory_summary,
+        prefetched_latest_version,
+        not snapshot.reachable,
     )
 
 
@@ -651,7 +667,9 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
     memory_usage: Dict[str, Any] = {}
     parallel_upgrade_result: Optional[Tuple[Optional[Dict[str, Any]], Optional[str], int]] = None
     parallel_inventory_summary: Optional[Dict[str, int]] = None
+    parallel_latest_version: str = "unknown"
 
+    cluster_unreachable = False
     if should_use_real_k8s(cluster_id):
         access = resolve_cluster_access(cluster_id)
         if not access:
@@ -666,6 +684,8 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
                 memory_usage,
                 parallel_upgrade_result,
                 parallel_inventory_summary,
+                parallel_latest_version,
+                cluster_unreachable,
             ) = _load_real_k8s_dashboard_data(cluster_id, access, user)
             cluster, ready_nodes, total_nodes = _cluster_record_from_access(
                 cluster_id,
@@ -736,6 +756,8 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         ready_nodes=ready_nodes,
         total_nodes=total_nodes,
     )
+    if cluster_unreachable:
+        health = {"status": "unreachable", "reasons": ["Cluster is offline or unreachable"]}
 
     node_status = "healthy"
     if total_nodes > 0 and ready_nodes < total_nodes:
@@ -791,9 +813,15 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
     version_current = upgrade_status.get("currentVersion") or cluster.get("k8sVersion") if cluster else "unknown"
     version_latest = upgrade_status.get("latestAvailable") or "unknown"
     if version_latest == "unknown":
-        fetched_latest = _fetch_latest_k8s_version()
-        if fetched_latest != "unknown":
-            version_latest = fetched_latest
+        # Use the version pre-fetched in parallel with kubectl; fall back to a
+        # synchronous call only for mock clusters where parallel_latest_version
+        # was never populated.
+        if parallel_latest_version and parallel_latest_version != "unknown":
+            version_latest = parallel_latest_version
+        else:
+            fetched_latest = _fetch_latest_k8s_version()
+            if fetched_latest != "unknown":
+                version_latest = fetched_latest
 
     version_evaluation = evaluate_version_status(version_current, version_latest)
 

@@ -75,7 +75,7 @@ def format_k8s_age(creation_timestamp: Optional[str]) -> str:
     return f"{days // 365}y"
 
 
-def fetch_pod_top_metrics(access: Union[ClusterAccess, str], _bypass_cache: bool = False) -> PodTopMetrics:
+def fetch_pod_top_metrics(access: Union[ClusterAccess, str], _bypass_cache: bool = False, timeout: Optional[int] = None) -> PodTopMetrics:
     """Return {(namespace, pod_name): {cpu: cores, memory: mib}} from kubectl top.
 
     Results are cached per cluster context for _POD_TOP_CACHE_TTL seconds so that
@@ -95,6 +95,7 @@ def fetch_pod_top_metrics(access: Union[ClusterAccess, str], _bypass_cache: bool
             ["top", "pods", "-A", "--no-headers"],
             context=context_name,
             kubeconfig_path=kubeconfig_path,
+            timeout=timeout,
         )
     except K8sCommandError:
         return {}
@@ -264,7 +265,7 @@ def aggregate_pod_top_by_namespace(access: Union[ClusterAccess, str]) -> Dict[st
     return totals
 
 
-def fetch_node_top_usage(access: Union[ClusterAccess, str]) -> Tuple[float, float]:
+def fetch_node_top_usage(access: Union[ClusterAccess, str], timeout: Optional[int] = None) -> Tuple[float, float]:
     """Return (cpu_cores, memory_mib) summed across nodes from kubectl top nodes."""
     context_name, kubeconfig_path = _access_kwargs(access)
     try:
@@ -272,6 +273,7 @@ def fetch_node_top_usage(access: Union[ClusterAccess, str]) -> Tuple[float, floa
             ["top", "nodes", "--no-headers"],
             context=context_name,
             kubeconfig_path=kubeconfig_path,
+            timeout=timeout,
         )
     except K8sCommandError:
         return 0.0, 0.0

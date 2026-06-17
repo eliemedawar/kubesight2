@@ -14,10 +14,12 @@ spec:
         app: kubesight-backend
     spec:
       serviceAccountName: kubesight-backend
+      nodeSelector:
+        role: backend
       containers:
         - name: backend
 
-          image: kubesight-backend:v22
+          image: kubesight-backend:v23
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000

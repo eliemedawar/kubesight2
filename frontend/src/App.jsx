@@ -1311,11 +1311,11 @@ export default function App() {
           />
         );
       case "applicationServices":
-        return <ApplicationServicesPage />;
+        return <ApplicationServicesPage clusters={allowedClusters} />;
       case "clients":
         return <ClientsPage />;
       case "userManagement":
-        return <UserManagementPage />;
+        return <UserManagementPage clusters={allowedClusters} />;
       case "auditLogs":
         return <AuditLogsPage />;
       case "settings":
