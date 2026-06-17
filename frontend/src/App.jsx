@@ -81,8 +81,6 @@ export default function App() {
     pageAllowed: isPageAllowed,
     getVisiblePages,
     getFirstAllowedPage,
-    getAllowedClusters,
-    getAllowedNamespaces,
     getAllowedResources,
     canAccessCluster,
     getVisibleResourceTabs,
@@ -130,12 +128,12 @@ export default function App() {
   const [dashboardRefreshing, setDashboardRefreshing] = useState(false);
 
   const allowedClusters = useMemo(
-    () => getAllowedClusters(data.clusters),
-    [data.clusters, getAllowedClusters]
+    () => data.clusters,
+    [data.clusters]
   );
   const allowedNamespaces = useMemo(
-    () => getAllowedNamespaces(selectedClusterId, data.namespaces),
-    [selectedClusterId, data.namespaces, getAllowedNamespaces]
+    () => data.namespaces,
+    [data.namespaces]
   );
   const selectedCluster = allowedClusters.find((cluster) => cluster.id === selectedClusterId);
   const hasClusters = allowedClusters.length > 0;
@@ -300,7 +298,7 @@ export default function App() {
   }, [selectedClusterId, allowedNamespaces, selectedNamespace]);
 
   const applyClusterList = (clusters, preferredId) => {
-    const filtered = getAllowedClusters(clusters);
+    const filtered = clusters;
     const firstCluster = resolveDefaultClusterId(filtered, preferredId);
     setData((prev) => ({ ...prev, clusters: filtered }));
     setSelectedClusterId((current) =>
@@ -468,10 +466,7 @@ export default function App() {
           );
         }
 
-        namespaces = getAllowedNamespaces(
-          selectedClusterId,
-          namespacesResult.value.items || []
-        );
+        namespaces = namespacesResult.value.items || [];
         defaultNamespace = namespaces[0]?.name || "";
         setData((prev) => ({ ...prev, namespaces }));
         clusterContextClusterRef.current = selectedClusterId;
