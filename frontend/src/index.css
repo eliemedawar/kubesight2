@@ -5137,6 +5137,18 @@ kbd {
 .dep-picker-cluster { font-weight: 500; }
 .dep-picker-remove { padding: 0 0.25rem; line-height: 1; font-size: 0.75rem; margin-left: auto; opacity: 0.6; }
 .dep-picker-remove:hover { opacity: 1; }
+.dep-picker-kind {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.dep-picker-kind--deployment { background: #dbeafe; color: #1d4ed8; }
+.dep-picker-kind--pod { background: #d1fae5; color: #065f46; }
+.dep-picker-kind-active { background: var(--color-primary, #4f46e5) !important; color: #fff !important; border-color: var(--color-primary, #4f46e5) !important; }
 .dep-picker-add { display: flex; flex-direction: column; gap: 0.5rem; }
 .dep-picker-controls { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .dep-picker-ns-form { display: flex; gap: 0.4rem; align-items: center; }

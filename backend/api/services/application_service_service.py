@@ -267,6 +267,7 @@ def _live_deployment_detail(dep_row, k8s_map: Dict[str, Dict[str, Any]]) -> Dict
         "clusterId": dep_row.cluster_id,
         "namespace": dep_row.namespace,
         "deploymentName": dep_row.deployment_name,
+        "kind": getattr(dep_row, "resource_kind", None) or "deployment",
         "desiredReplicas": desired,
         "availableReplicas": available,
         "readyReplicas": ready,
@@ -307,6 +308,7 @@ def _dep_to_dict(dep: ApplicationServiceDeployment) -> Dict[str, Any]:
         "clusterId": dep.cluster_id,
         "namespace": dep.namespace,
         "deploymentName": dep.deployment_name,
+        "kind": getattr(dep, "resource_kind", None) or "deployment",
         "createdAt": dep.created_at.isoformat() if dep.created_at else None,
     }
 
@@ -526,9 +528,12 @@ def create_service(
         cluster_id = (dep.get("clusterId") or "").strip()
         namespace = (dep.get("namespace") or "").strip()
         deployment_name = (dep.get("deploymentName") or "").strip()
+        resource_kind = dep.get("kind", "deployment") or "deployment"
+        if resource_kind not in ("deployment", "pod"):
+            resource_kind = "deployment"
         if not (cluster_id and namespace and deployment_name):
             continue
-        key = (cluster_id, namespace, deployment_name)
+        key = (cluster_id, namespace, deployment_name, resource_kind)
         if key in seen:
             continue
         seen.add(key)
@@ -537,6 +542,7 @@ def create_service(
             cluster_id=cluster_id,
             namespace=namespace,
             deployment_name=deployment_name,
+            resource_kind=resource_kind,
         ))
 
     topology_payload = payload.get("topology") or {}
@@ -588,9 +594,12 @@ def update_service(
         cluster_id = (dep.get("clusterId") or "").strip()
         namespace = (dep.get("namespace") or "").strip()
         deployment_name = (dep.get("deploymentName") or "").strip()
+        resource_kind = dep.get("kind", "deployment") or "deployment"
+        if resource_kind not in ("deployment", "pod"):
+            resource_kind = "deployment"
         if not (cluster_id and namespace and deployment_name):
             continue
-        key = (cluster_id, namespace, deployment_name)
+        key = (cluster_id, namespace, deployment_name, resource_kind)
         if key in seen:
             continue
         seen.add(key)
@@ -599,6 +608,7 @@ def update_service(
             cluster_id=cluster_id,
             namespace=namespace,
             deployment_name=deployment_name,
+            resource_kind=resource_kind,
         ))
 
     topology_payload = payload.get("topology") or {}
@@ -683,3 +693,45 @@ def list_picker_deployments(
         return {"items": names, "count": len(names)}, None, 200
     except K8sCommandError as exc:
         return None, f"Failed to list deployments: {exc}", 503
+
+
+# ---------------------------------------------------------------------------
+# Pod picker — list pods available in a namespace (respecting RBAC)
+# ---------------------------------------------------------------------------
+
+def list_picker_pods(
+    cluster_id: str,
+    namespace: str,
+    user=None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    from ..k8s_provider import K8sCommandError, _run_for_access, resolve_cluster_access, should_use_real_k8s
+    from ..access_engine import can_access_cluster, can_access_namespace
+
+    if not cluster_id or not namespace:
+        return None, "clusterId and namespace are required.", 400
+
+    if user:
+        from ..access_engine import can_access_cluster as cac, can_access_namespace as can
+        if not cac(user, cluster_id):
+            return None, "Forbidden", 403
+        if not can(user, cluster_id, namespace):
+            return None, "Forbidden", 403
+
+    if not should_use_real_k8s(cluster_id):
+        return {"items": [], "count": 0}, None, 200
+
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return None, "Cluster not found", 404
+
+    try:
+        output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
+        items = json.loads(output).get("items", [])
+        names = sorted(
+            item.get("metadata", {}).get("name", "")
+            for item in items
+            if item.get("metadata", {}).get("name")
+        )
+        return {"items": names, "count": len(names)}, None, 200
+    except K8sCommandError as exc:
+        return None, f"Failed to list pods: {exc}", 503

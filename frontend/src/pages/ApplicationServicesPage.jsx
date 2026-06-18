@@ -5,6 +5,7 @@ import {
   listApplicationServices,
   listNamespacesByCluster,
   listPickerDeployments,
+  listPickerPods,
   updateApplicationService,
 } from "../api";
 import { useAuth } from "../context/AuthContext";
@@ -98,7 +99,7 @@ function HealthBadge({ health }) {
 
 // ─── Deployment picker components ────────────────────────────────────────────
 
-function DeploymentPickerList({ deployments: items, linked, clusterId, namespace, onAdd }) {
+function DeploymentPickerList({ deployments: items, linked, clusterId, namespace, kind, onAdd }) {
   const [search, setSearch] = useState("");
   const filtered = items.filter((dep) => {
     const name = typeof dep === "string" ? dep : dep.name;
@@ -107,7 +108,7 @@ function DeploymentPickerList({ deployments: items, linked, clusterId, namespace
   return (
     <div className="dep-pick-list-wrap">
       {items.length > 5 && (
-        <input className="ss-search dep-pick-search" placeholder="Search deployments…"
+        <input className="ss-search dep-pick-search" placeholder={`Search ${kind}s…`}
           value={search} onChange={(e) => setSearch(e.target.value)} />
       )}
       <div className="dep-pick-scroll">
@@ -117,7 +118,7 @@ function DeploymentPickerList({ deployments: items, linked, clusterId, namespace
           filtered.map((dep) => {
             const depName = typeof dep === "string" ? dep : dep.name;
             const alreadyAdded = linked.some(
-              (d) => d.clusterId === clusterId && d.namespace === namespace && d.deploymentName === depName
+              (d) => d.clusterId === clusterId && d.namespace === namespace && d.deploymentName === depName && (d.kind || "deployment") === kind
             );
             return (
               <div key={depName} className="dep-picker-option">
@@ -136,8 +137,10 @@ function DeploymentPickerList({ deployments: items, linked, clusterId, namespace
 }
 
 function DeploymentRow({ dep, clusterName, onRemove }) {
+  const kind = dep.kind || "deployment";
   return (
     <div className="dep-picker-row">
+      <span className={`dep-picker-kind dep-picker-kind--${kind}`}>{kind}</span>
       <span className="dep-picker-cluster">{clusterName || dep.clusterId}</span>
       <span className="dep-picker-sep">/</span>
       <span className="dep-picker-ns">{dep.namespace}</span>
@@ -152,18 +155,32 @@ function DeploymentRow({ dep, clusterName, onRemove }) {
 
 function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
   const [namespaces, setNamespaces] = useState([]);
-  const [pickerDeployments, setPickerDeployments] = useState([]);
+  const [pickerItems, setPickerItems] = useState([]);
   const [pickerCluster, setPickerCluster] = useState("");
   const [pickerNamespace, setPickerNamespace] = useState("");
+  const [pickerKind, setPickerKind] = useState("deployment");
   const [nsLoading, setNsLoading] = useState(false);
-  const [depLoading, setDepLoading] = useState(false);
+  const [itemsLoading, setItemsLoading] = useState(false);
   const [pickerError, setPickerError] = useState("");
+
+  const fetchItems = async (cluster, namespace, kind) => {
+    if (!cluster || !namespace) return;
+    setItemsLoading(true);
+    setPickerError("");
+    try {
+      const fn = kind === "pod" ? listPickerPods : listPickerDeployments;
+      const res = await fn(cluster, namespace);
+      setPickerItems(res.items || []);
+    } catch (err) {
+      setPickerError(err.message || `Failed to load ${kind}s`);
+    } finally { setItemsLoading(false); }
+  };
 
   const handleClusterChange = async (val) => {
     setPickerCluster(val);
     setPickerNamespace("");
     setNamespaces([]);
-    setPickerDeployments([]);
+    setPickerItems([]);
     setPickerError("");
     if (!val) return;
     setNsLoading(true);
@@ -175,29 +192,29 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
     } finally { setNsLoading(false); }
   };
 
-  const handleNamespaceChange = async (val) => {
+  const handleNamespaceChange = (val) => {
     setPickerNamespace(val);
-    setPickerDeployments([]);
+    setPickerItems([]);
     setPickerError("");
-    if (!val || !pickerCluster) return;
-    setDepLoading(true);
-    try {
-      const res = await listPickerDeployments(pickerCluster, val);
-      setPickerDeployments(res.items || []);
-    } catch (err) {
-      setPickerError(err.message || "Failed to load deployments");
-    } finally { setDepLoading(false); }
+    fetchItems(pickerCluster, val, pickerKind);
+  };
+
+  const handleKindChange = (kind) => {
+    setPickerKind(kind);
+    setPickerItems([]);
+    setPickerError("");
+    if (pickerCluster && pickerNamespace) fetchItems(pickerCluster, pickerNamespace, kind);
   };
 
   const addDeployment = (depName) => {
-    const entry = { clusterId: pickerCluster, namespace: pickerNamespace, deploymentName: depName };
-    if (!deployments.some((d) => d.clusterId === entry.clusterId && d.namespace === entry.namespace && d.deploymentName === entry.deploymentName)) {
+    const entry = { clusterId: pickerCluster, namespace: pickerNamespace, deploymentName: depName, kind: pickerKind };
+    if (!deployments.some((d) => d.clusterId === entry.clusterId && d.namespace === entry.namespace && d.deploymentName === entry.deploymentName && (d.kind || "deployment") === entry.kind)) {
       onChange([...deployments, entry]);
     }
   };
 
   const clusterNameById = Object.fromEntries(clusters.map((c) => [c.id, c.name || c.id]));
-  const nsOptions = (namespaces.map((n) => (typeof n === "string" ? n : n.name)));
+  const nsOptions = namespaces.map((n) => (typeof n === "string" ? n : n.name));
 
   return (
     <div className="dep-picker">
@@ -207,7 +224,7 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
         ) : (
           deployments.map((dep, idx) => (
             <DeploymentRow
-              key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}
+              key={`${dep.kind || "deployment"}/${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}
               dep={dep}
               clusterName={clusterNameById[dep.clusterId]}
               onRemove={canEdit ? () => onChange(deployments.filter((_, i) => i !== idx)) : null}
@@ -217,7 +234,17 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
       </div>
       {canEdit && (
         <div className="dep-picker-add">
-          <p className="muted" style={{ fontSize: "0.8125rem", fontWeight: 500, marginBottom: "0.4rem" }}>Add deployment</p>
+          <p className="muted" style={{ fontSize: "0.8125rem", fontWeight: 500, marginBottom: "0.4rem" }}>Add resource</p>
+          <div className="dep-picker-kind-toggle" style={{ display: "flex", gap: "0.375rem", marginBottom: "0.5rem" }}>
+            {["deployment", "pod"].map((k) => (
+              <button key={k} type="button"
+                className={`btn-outline btn-compact${pickerKind === k ? " dep-picker-kind-active" : ""}`}
+                onClick={() => handleKindChange(k)}
+                style={{ textTransform: "capitalize" }}>
+                {k}
+              </button>
+            ))}
+          </div>
           <div className="dep-picker-controls">
             <SearchableSelect
               options={clusters.map((c) => ({ value: c.id, label: c.name || c.id }))}
@@ -234,13 +261,13 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
             />
           </div>
           {pickerError && <p className="banner-message error" style={{ marginTop: "0.5rem" }}>{pickerError}</p>}
-          {depLoading && <p className="muted" style={{ fontSize: "0.85rem" }}>Loading deployments…</p>}
-          {pickerDeployments.length > 0 && (
-            <DeploymentPickerList deployments={pickerDeployments} linked={deployments}
-              clusterId={pickerCluster} namespace={pickerNamespace} onAdd={addDeployment} />
+          {itemsLoading && <p className="muted" style={{ fontSize: "0.85rem" }}>Loading {pickerKind}s…</p>}
+          {pickerItems.length > 0 && (
+            <DeploymentPickerList deployments={pickerItems} linked={deployments}
+              clusterId={pickerCluster} namespace={pickerNamespace} kind={pickerKind} onAdd={addDeployment} />
           )}
-          {pickerNamespace && !depLoading && pickerDeployments.length === 0 && (
-            <p className="muted" style={{ fontSize: "0.85rem" }}>No deployments found in this namespace.</p>
+          {pickerNamespace && !itemsLoading && pickerItems.length === 0 && (
+            <p className="muted" style={{ fontSize: "0.85rem" }}>No {pickerKind}s found in this namespace.</p>
           )}
         </div>
       )}
@@ -643,7 +670,7 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
         </section>
 
         <section className="form-section">
-          <h4>Linked deployments</h4>
+          <h4>Linked resources</h4>
           <DeploymentPicker deployments={deployments} onChange={setDeployments} canEdit clusters={clusters} />
         </section>
 
@@ -690,7 +717,7 @@ function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdi
 
       {(service.deployments || []).length > 0 && (
         <div style={{ marginBottom: "1.25rem" }}>
-          <p className="form-label" style={{ marginBottom: "0.5rem" }}>Linked deployments</p>
+          <p className="form-label" style={{ marginBottom: "0.5rem" }}>Linked resources</p>
           {service.deployments.map((dep) => (
             <DeploymentRow
               key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}

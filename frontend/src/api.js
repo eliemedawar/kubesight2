@@ -56,6 +56,7 @@ export {
   updateApplicationService,
   deleteApplicationService,
   listPickerDeployments,
+  listPickerPods,
 } from "./api/applicationServicesApi";
 export {
   listClients,

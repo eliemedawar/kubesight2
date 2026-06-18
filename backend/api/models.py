@@ -645,8 +645,8 @@ class ApplicationServiceDeployment(db.Model):
     __tablename__ = "application_service_deployments"
     __table_args__ = (
         db.UniqueConstraint(
-            "service_id", "cluster_id", "namespace", "deployment_name",
-            name="uq_app_service_deployment",
+            "service_id", "cluster_id", "namespace", "deployment_name", "resource_kind",
+            name="uq_app_service_deployment_v2",
         ),
         db.Index("ix_asd_service_id", "service_id"),
         db.Index("ix_asd_cluster_ns", "cluster_id", "namespace"),
@@ -657,6 +657,7 @@ class ApplicationServiceDeployment(db.Model):
     cluster_id = db.Column(db.String(120), nullable=False)
     namespace = db.Column(db.String(253), nullable=False)
     deployment_name = db.Column(db.String(253), nullable=False)
+    resource_kind = db.Column(db.String(20), nullable=False, default="deployment")
     created_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,

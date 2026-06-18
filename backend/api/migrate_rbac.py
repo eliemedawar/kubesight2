@@ -195,6 +195,14 @@ def _sync_role_permissions() -> None:
     db.session.commit()
 
 
+def _migrate_app_service_deployments() -> None:
+    _add_column_if_missing(
+        "application_service_deployments",
+        "resource_kind",
+        "VARCHAR(20) NOT NULL DEFAULT 'deployment'",
+    )
+
+
 def run_migrations() -> None:
     db.create_all()
     _migrate_clusters_table()
@@ -203,6 +211,7 @@ def run_migrations() -> None:
     _migrate_alert_delivery_log_group_column()
     _migrate_log_alert_columns()
     _migrate_legacy_users()
+    _migrate_app_service_deployments()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations
 

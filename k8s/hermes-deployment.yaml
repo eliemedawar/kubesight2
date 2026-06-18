@@ -1,0 +1,147 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-config
+  namespace: kubesight
+data:
+  TELEGRAM_ALLOWED_USERS: "8831815740"
+  TELEGRAM_HOME_CHANNEL: "8831815740"
+  # In-cluster: same namespace as the KubeSight backend service
+  KUBESIGHT_BASE_URL: "http://backend-service:5000"
+  TERMINAL_TIMEOUT: "60"
+  TERMINAL_LIFETIME_SECONDS: "300"
+  TERMINAL_MODAL_IMAGE: "nikolaik/python-nodejs:python3.11-nodejs20"
+  BROWSERBASE_PROXIES: "true"
+  BROWSERBASE_ADVANCED_STEALTH: "false"
+  WEB_TOOLS_DEBUG: "false"
+  VISION_TOOLS_DEBUG: "false"
+  MOA_TOOLS_DEBUG: "false"
+  IMAGE_TOOLS_DEBUG: "false"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hermes-data
+  namespace: kubesight
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hermes
+  namespace: kubesight
+  labels:
+    app: hermes
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hermes
+  template:
+    metadata:
+      labels:
+        app: hermes
+    spec:
+      # Required so Hermes can remap the internal UID/GID to match the volume owner.
+      initContainers:
+        - name: chown-data
+          image: busybox
+          command: ["sh", "-c", "chown -R 10000:10000 /opt/data"]
+          volumeMounts:
+            - name: hermes-data
+              mountPath: /opt/data
+          securityContext:
+            runAsUser: 0
+
+      containers:
+        # ── Gateway (Telegram bot + agent loop) ──────────────────────────────
+        - name: gateway
+          # Build from github.com/NousResearch/hermes-agent and push to your registry:
+          #   docker build -t YOUR_REGISTRY/hermes-agent:latest .
+          #   docker push YOUR_REGISTRY/hermes-agent:latest
+          image: YOUR_REGISTRY/hermes-agent:latest
+          args: ["gateway", "run"]
+          env:
+            - name: HERMES_HOME
+              value: /opt/data
+            - name: HERMES_UID
+              value: "10000"
+            - name: HERMES_GID
+              value: "10000"
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-secrets
+                  key: TELEGRAM_BOT_TOKEN
+            - name: KUBESIGHT_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-secrets
+                  key: KUBESIGHT_API_TOKEN
+          envFrom:
+            - configMapRef:
+                name: hermes-config
+          volumeMounts:
+            - name: hermes-data
+              mountPath: /opt/data
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+
+        # ── Dashboard (web UI on port 9119) ──────────────────────────────────
+        - name: dashboard
+          image: YOUR_REGISTRY/hermes-agent:latest
+          args: ["dashboard", "--host", "0.0.0.0", "--no-open"]
+          env:
+            - name: HERMES_HOME
+              value: /opt/data
+            - name: HERMES_UID
+              value: "10000"
+            - name: HERMES_GID
+              value: "10000"
+          volumeMounts:
+            - name: hermes-data
+              mountPath: /opt/data
+          ports:
+            - containerPort: 9119
+              name: dashboard
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+      volumes:
+        - name: hermes-data
+          persistentVolumeClaim:
+            claimName: hermes-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hermes-dashboard
+  namespace: kubesight
+spec:
+  selector:
+    app: hermes
+  ports:
+    - name: dashboard
+      port: 9119
+      targetPort: 9119
+  # ClusterIP — access via kubectl port-forward or an Ingress.
+  # Do NOT expose this as NodePort/LoadBalancer without adding auth in front.
+  type: ClusterIP
