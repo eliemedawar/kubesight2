@@ -25,6 +25,7 @@ metadata:
   name: hermes-data
   namespace: kubesight
 spec:
+  storageClassName: manual
   accessModes:
     - ReadWriteOnce
   resources:
