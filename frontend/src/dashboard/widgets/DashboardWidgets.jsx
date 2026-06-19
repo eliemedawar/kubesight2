@@ -1,5 +1,67 @@
 import StatCard from "../../components/common/StatCard.jsx";
 import InfoCard from "../../components/common/InfoCard.jsx";
+import Sparkline from "../charts/Sparkline.jsx";
+
+const IconServer = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm14 1a1 1 0 11-2 0 1 1 0 012 0zM2 13a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 01-2 2H4a2 2 0 01-2-2v-2zm14 1a1 1 0 11-2 0 1 1 0 012 0z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconHexagon = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path d="M10 1.5l7.794 4.5v9L10 19.5 2.206 15v-9L10 1.5z" fillOpacity="0.8" />
+    <path d="M10 3.732L3.5 7.5v5l6.5 3.768L16.5 12.5v-5L10 3.732z" fill="none" stroke="currentColor" strokeWidth="1.2" />
+  </svg>
+);
+
+const IconCpu = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path fillRule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2H6zm1 2a1 1 0 000 2h6a1 1 0 100-2H7zm6 7a1 1 0 011 1v3a1 1 0 11-2 0v-3a1 1 0 011-1zm-3 3a1 1 0 100 2h.01a1 1 0 100-2H10zm-4-1a1 1 0 011 1v3a1 1 0 11-2 0v-3a1 1 0 011-1z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconMemory = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path d="M3 4a1 1 0 000 2h14a1 1 0 100-2H3zM3 9a1 1 0 000 2h14a1 1 0 100-2H3zM3 14a1 1 0 000 2h14a1 1 0 100-2H3z" />
+  </svg>
+);
+
+const IconNodes = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v1h8v-1zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-1a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v1h-3zM4.75 14.094A5.973 5.973 0 004 17v1H1v-1a3 3 0 013.75-2.906z" />
+  </svg>
+);
+
+const IconPods = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" />
+  </svg>
+);
+
+const IconApps = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM11 13a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+  </svg>
+);
+
+const IconAlertCircle = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconShieldExclaim = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path fillRule="evenodd" d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm5.834 4.001a1 1 0 00-1 1v2a1 1 0 002 0v-2a1 1 0 00-1-1zm0 6a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconChartBar = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+    <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
+  </svg>
+);
 import {
   formatDashboardTime,
   formatLatestVersion,
@@ -31,7 +93,7 @@ function AlertSeverityRow({ label, count, tone }) {
   );
 }
 
-function UtilizationStatCard({ title, metric }) {
+function UtilizationStatCard({ title, metric, statIcon, sparkData, sparkColor }) {
   if (!metric?.available) {
     return (
       <StatCard
@@ -40,7 +102,7 @@ function UtilizationStatCard({ title, metric }) {
         detail={metric?.reason || "Metrics Server is not installed or accessible."}
         tone="default"
         unavailable
-        icon="⚪"
+        icon={statIcon || <IconChartBar />}
       >
         {metric?.helpText ? (
           <p className="dashboard-metrics-help muted">{metric.helpText}</p>
@@ -61,8 +123,11 @@ function UtilizationStatCard({ title, metric }) {
       title={title}
       value={formatUtilizationValue(metric)}
       tone={tone}
-      icon={utilizationIcon(metric)}
+      icon={statIcon || <IconChartBar />}
     >
+      {sparkData && sparkData.length > 1 ? (
+        <Sparkline data={sparkData} color={sparkColor || "--accent"} />
+      ) : null}
       <div className="dashboard-utilization-details">
         <div className="upgrade-detail-row">
           <span className="upgrade-detail-label">Used</span>
@@ -108,7 +173,7 @@ export function ClusterHealthWidget({ summary }) {
           : "All core signals within normal range"
       }
       tone={healthTone}
-      icon={HEALTH_ICONS[healthStatus] || "◉"}
+      icon={<IconServer />}
     />
   );
 }
@@ -134,9 +199,9 @@ export function KubernetesVersionWidget({ summary, canOpenUpgrade, onNavigateToU
     <StatCard
       title="Kubernetes Version"
       value={version.current || clusterInfo.version || "unknown"}
-      detail={`${versionDisplay.icon} ${versionDisplay.message}`}
+      detail={versionDisplay.message}
       tone={versionTone}
-      icon="⬡"
+      icon={<IconHexagon />}
       onClick={canOpenUpgrade ? handleVersionClick : undefined}
       className={canOpenUpgrade ? "stat-card-link" : ""}
     >
@@ -152,12 +217,28 @@ export function KubernetesVersionWidget({ summary, canOpenUpgrade, onNavigateToU
   );
 }
 
-export function CpuUsageWidget({ summary }) {
-  return <UtilizationStatCard title="CPU Usage" metric={summary?.cpuUsage} />;
+export function CpuUsageWidget({ summary, series }) {
+  return (
+    <UtilizationStatCard
+      title="CPU Usage"
+      metric={summary?.cpuUsage}
+      statIcon={<IconCpu />}
+      sparkData={series?.cpu}
+      sparkColor="--accent"
+    />
+  );
 }
 
-export function MemoryUsageWidget({ summary }) {
-  return <UtilizationStatCard title="Memory Usage" metric={summary?.memoryUsage} />;
+export function MemoryUsageWidget({ summary, series }) {
+  return (
+    <UtilizationStatCard
+      title="Memory Usage"
+      metric={summary?.memoryUsage}
+      statIcon={<IconMemory />}
+      sparkData={series?.mem}
+      sparkColor="#8b7ff0"
+    />
+  );
 }
 
 export function NodesWidget({ summary }) {
@@ -174,7 +255,7 @@ export function NodesWidget({ summary }) {
             ? "warn"
             : "default"
       }
-      icon="▦"
+      icon={<IconNodes />}
     />
   );
 }
@@ -187,7 +268,7 @@ export function RunningPodsWidget({ summary }) {
       value={pods.running}
       detail={`Pending: ${pods.pending} · Failed: ${pods.failed}`}
       tone={pods.failed > 0 ? "danger" : pods.pending > 0 ? "warn" : "default"}
-      icon="◫"
+      icon={<IconPods />}
     />
   );
 }
@@ -208,7 +289,7 @@ export function InventorySummaryWidget({ summary, canOpenInventory, onNavigateTo
       value={inventory.applications}
       detail={`Healthy: ${inventory.healthy} · Warning: ${inventory.warning} · Critical: ${inventory.critical}`}
       tone={tone}
-      icon="▣"
+      icon={<IconApps />}
       onClick={canOpenInventory && onNavigateToInventory ? onNavigateToInventory : undefined}
       className={canOpenInventory ? "stat-card-link" : ""}
     />
@@ -225,7 +306,7 @@ export function ActiveAlertsWidget({ summary }) {
       value={total}
       detail={`Critical ${alerts.critical} · Warning ${alerts.warning} · Info ${alerts.info}`}
       tone={alerts.critical > 0 ? "danger" : alerts.warning > 0 ? "warn" : "default"}
-      icon="!"
+      icon={<IconAlertCircle />}
     />
   );
 }
@@ -240,7 +321,7 @@ export function CriticalAlertsWidget({ summary }) {
       value={critical}
       detail={critical > 0 ? "Immediate attention required" : "No critical alerts active"}
       tone={critical > 0 ? "danger" : "default"}
-      icon="!!"
+      icon={<IconShieldExclaim />}
     />
   );
 }
@@ -340,7 +421,7 @@ export function VersionStatusWidget({ summary, canOpenUpgrade, onNavigateToUpgra
           <span className="upgrade-detail-value">
             <StatusBadge
               status={version.status === "up_to_date" ? "healthy" : version.status === "unknown" ? "unknown" : "warning"}
-              label={`${versionDisplay.icon} ${versionDisplay.message}`}
+              label={versionDisplay.message}
             />
           </span>
         </div>
@@ -508,7 +589,10 @@ export function MyAccessWidget({ summary }) {
           {permissions.length ? (
             <ul className="dashboard-my-access-permissions">
               {permissions.map((perm) => (
-                <li key={perm.id}>✓ {perm.label}</li>
+                <li key={perm.id} style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                  <svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12" aria-hidden="true" style={{ color: "var(--ok)", flexShrink: 0 }}><path fillRule="evenodd" d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" clipRule="evenodd" /></svg>
+                  {perm.label}
+                </li>
               ))}
             </ul>
           ) : (

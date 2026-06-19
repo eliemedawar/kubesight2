@@ -1,12 +1,14 @@
+import { useState } from "react";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { EMPTY_MESSAGES, isAccessDeniedError } from "../utils/authz.js";
 import { useAuth } from "../context/AuthContext.jsx";
-import { formatDashboardTime } from "../utils/dashboardStatus.js";
 import { getDashboardWidgetRegistry, sortWidgetsForUser } from "../dashboard/widgetRegistry.js";
 import { getVisibleWidgets, groupWidgetsBySection } from "../dashboard/widgetVisibility.js";
+import { useDashboardSeries } from "../dashboard/useDashboardSeries.js";
+import OpsDashboard from "../dashboard/OpsDashboard.jsx";
 
 export default function DashboardPage({
   summary,
@@ -24,9 +26,11 @@ export default function DashboardPage({
   canOpenInventory,
 }) {
   const auth = useAuth();
+  const [timeRange, setTimeRange] = useState("6h");
   const clusterId = selectedCluster?.id;
   const summaryReady = Boolean(summary && clusterId && summary.clusterId === clusterId);
   const isAdmin = auth.isAdmin;
+  const series = useDashboardSeries(summaryReady ? summary : null, timeRange);
 
   const widgetRegistry = getDashboardWidgetRegistry(isAdmin);
   const visibleWidgets = sortWidgetsForUser(
@@ -46,6 +50,7 @@ export default function DashboardPage({
 
   const widgetProps = {
     summary,
+    series,
     selectedCluster,
     canOpenUpgrade,
     onNavigateToUpgrade,
@@ -151,77 +156,26 @@ export default function DashboardPage({
     );
   }
 
-  const clusterInfo = summary?.clusterInfo || {};
   const MyAccessPanel = myAccessWidget?.component;
 
   return (
     <>
-      <PageTitle
-        title={pageTitle}
-        subtitle={
-          isAdmin
-            ? `${clusterInfo.name || selectedCluster.name} — live operational view`
-            : `${clusterInfo.name || selectedCluster.name} — your operational workspace`
-        }
-        actionLabel="Refresh"
-        onAction={onRefresh}
-      />
-
-      <div className="dashboard-meta">
-        <span className="muted">
-          Last Updated: {formatDashboardTime(lastRefreshedAt || summary?.lastUpdated)}
-        </span>
-        {refreshing ? <span className="dashboard-refreshing muted">Refreshing…</span> : null}
-      </div>
-
-      {!hasVisibleContent ? (
-        <EmptyState
-          message="No dashboard panels are available for your role and granted actions."
-          hint="Ask an administrator to grant cluster access and overview permissions."
-        />
-      ) : null}
-
       {MyAccessPanel ? (
         <section className="dashboard-row dashboard-row-single dashboard-my-access-first">
           <MyAccessPanel key={myAccessWidget.id} {...widgetProps} />
         </section>
       ) : null}
 
-      {sections.stats?.length ? (
-        <section className="stat-grid dashboard-stat-grid">
-          {sections.stats.map((widget) => {
-            const Widget = widget.component;
-            return <Widget key={widget.id} {...widgetProps} />;
-          })}
-        </section>
-      ) : null}
-
-      {sections.details?.length ? (
-        <section className="content-grid dashboard-row">
-          {sections.details.map((widget) => {
-            const Widget = widget.component;
-            return <Widget key={widget.id} {...widgetProps} />;
-          })}
-        </section>
-      ) : null}
-
-      {sections.activity?.length ? (
-        <section className="content-grid dashboard-row">
-          {sections.activity.map((widget) => {
-            const Widget = widget.component;
-            return <Widget key={widget.id} {...widgetProps} />;
-          })}
-        </section>
-      ) : null}
-
-      {sections.full?.length ? (
-        <section className="content-grid dashboard-row dashboard-row-single">
-          {sections.full.map((widget) => {
-            const Widget = widget.component;
-            return <Widget key={widget.id} {...widgetProps} />;
-          })}
-        </section>
-      ) : null}
+      <OpsDashboard
+        summary={summary}
+        series={series}
+        timeRange={timeRange}
+        onTimeRangeChange={setTimeRange}
+        lastRefreshedAt={lastRefreshedAt}
+        onRefresh={onRefresh}
+        canOpenUpgrade={canOpenUpgrade}
+        onNavigateToUpgrade={onNavigateToUpgrade}
+      />
     </>
   );
 }

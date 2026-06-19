@@ -1,6 +1,36 @@
 import { useEffect, useRef, useState } from "react";
 import NotificationsDropdown from "./NotificationsDropdown.jsx";
 
+const IconBell = () => (
+  <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z" />
+  </svg>
+);
+
+const IconQuestion = () => (
+  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconMenu = () => (
+  <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconClose = () => (
+  <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+  </svg>
+);
+
+const IconLogout = () => (
+  <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clipRule="evenodd" />
+  </svg>
+);
+
 function formatBadgeCount(count) {
   if (count <= 0) {
     return null;
@@ -85,9 +115,7 @@ export default function Topbar({
           aria-expanded={sidebarOpen}
           onClick={onMenuToggle}
         >
-          <span className="topbar-menu-icon" aria-hidden="true">
-            {sidebarOpen ? "✕" : "☰"}
-          </span>
+          {sidebarOpen ? <IconClose /> : <IconMenu />}
         </button>
         <div className="topbar-selectors">
         {showClusterSelector ? (
@@ -136,8 +164,8 @@ export default function Topbar({
             aria-haspopup="dialog"
             onClick={toggleNotifications}
           >
-            <span aria-hidden="true">🔔</span>
-            {badgeLabel ? <span className="notification-badge">{badgeLabel}</span> : null}
+            <IconBell />
+            {badgeLabel ? <span className="notification-badge" aria-label={`${badgeLabel} notifications`}>{badgeLabel}</span> : null}
           </button>
           <NotificationsDropdown
             open={notificationsOpen}
@@ -149,11 +177,12 @@ export default function Topbar({
             onClose={() => setNotificationsOpen(false)}
           />
         </div>
-        <button type="button" className="icon-button btn-ghost topbar-help-button" aria-label="Help">
-          <span aria-hidden="true">?</span>
+        <button type="button" className="icon-button btn-ghost topbar-help-button" aria-label="Help & documentation">
+          <IconQuestion />
         </button>
-        <button type="button" className="btn-outline topbar-logout" onClick={onLogout}>
-          Logout
+        <button type="button" className="btn-outline topbar-logout" onClick={onLogout} aria-label="Sign out">
+          <IconLogout />
+          <span>Sign out</span>
         </button>
         <div className="topbar-user">
           <div className="user-avatar">{userInitials || "U"}</div>

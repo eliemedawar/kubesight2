@@ -6,10 +6,10 @@ export const HEALTH_LABELS = {
 };
 
 export const HEALTH_ICONS = {
-  healthy: "🟢",
-  warning: "🟡",
-  critical: "🔴",
-  unknown: "⚪",
+  healthy: "",
+  warning: "",
+  critical: "",
+  unknown: "",
 };
 
 export const statusTone = (status) => {
@@ -56,24 +56,15 @@ export const utilizationTone = (metric) => {
 };
 
 export const utilizationIcon = (metric) => {
-  if (!metric?.available) {
-    return "⚪";
-  }
-  const tone = utilizationTone(metric);
-  if (tone === "fail") {
-    return "🔴";
-  }
-  if (tone === "warning") {
-    return "🟡";
-  }
-  return "🟢";
+  if (!metric?.available) return null;
+  return null;
 };
 
 export const formatUtilizationValue = (metric) => {
   if (!metric?.available || metric.percent == null) {
     return "Metrics unavailable";
   }
-  return `${utilizationIcon(metric)} ${metric.percent}%`;
+  return `${metric.percent}%`;
 };
 
 export const versionStatusTone = (status) => {
@@ -88,10 +79,10 @@ export const versionStatusTone = (status) => {
 
 export const versionStatusDisplay = (version) => {
   if (!version) {
-    return { icon: "⚪", message: "Unknown" };
+    return { icon: "", message: "Unknown" };
   }
   return {
-    icon: version.statusIcon || "⚪",
+    icon: "",
     message: version.statusMessage || version.statusLabel || "Unknown",
   };
 };
