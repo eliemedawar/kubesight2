@@ -50,10 +50,13 @@ spec:
       labels:
         app: hermes
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: kubesight-worker1
       # Required so Hermes can remap the internal UID/GID to match the volume owner.
       initContainers:
         - name: chown-data
-          image: busybox
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
           command: ["sh", "-c", "chown -R 10000:10000 /opt/data"]
           volumeMounts:
             - name: hermes-data
@@ -67,7 +70,8 @@ spec:
           # Build from github.com/NousResearch/hermes-agent and push to your registry:
           #   docker build -t YOUR_REGISTRY/hermes-agent:latest .
           #   docker push YOUR_REGISTRY/hermes-agent:latest
-          image: YOUR_REGISTRY/hermes-agent:latest
+          image: nousresearch/hermes-agent:latest
+          imagePullPolicy: IfNotPresent
           args: ["gateway", "run"]
           env:
             - name: HERMES_HOME
@@ -102,8 +106,9 @@ spec:
 
         # ── Dashboard (web UI on port 9119) ──────────────────────────────────
         - name: dashboard
-          image: YOUR_REGISTRY/hermes-agent:latest
-          args: ["dashboard", "--host", "0.0.0.0", "--no-open"]
+          image: nousresearch/hermes-agent:latest
+          imagePullPolicy: IfNotPresent
+          args: ["dashboard", "--host", "0.0.0.0", "--no-open", "--insecure"]
           env:
             - name: HERMES_HOME
               value: /opt/data

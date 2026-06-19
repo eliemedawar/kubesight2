@@ -4,6 +4,7 @@ metadata:
   name: postgres-pvc
   namespace: kubesight
 spec:
+  storageClassName: manual
   accessModes:
     - ReadWriteOnce
   resources:

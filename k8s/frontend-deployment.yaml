@@ -17,8 +17,8 @@ spec:
         role: frontend
       containers:
         - name: frontend
-          # Build: docker build -t kubesight-frontend:vx ./frontend
-          image: kubesight-frontend:v1
+          # Build: docker build -t kubaesight-frontend:vx ./frontend
+          image: kubesight-frontend:v2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
