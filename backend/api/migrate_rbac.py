@@ -203,6 +203,11 @@ def _migrate_app_service_deployments() -> None:
     )
 
 
+def _migrate_app_service_topology_positions() -> None:
+    _add_column_if_missing("application_service_topology_nodes", "position_x", "FLOAT")
+    _add_column_if_missing("application_service_topology_nodes", "position_y", "FLOAT")
+
+
 def run_migrations() -> None:
     db.create_all()
     _migrate_clusters_table()
@@ -212,6 +217,7 @@ def run_migrations() -> None:
     _migrate_log_alert_columns()
     _migrate_legacy_users()
     _migrate_app_service_deployments()
+    _migrate_app_service_topology_positions()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations
 

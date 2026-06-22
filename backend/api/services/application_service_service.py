@@ -326,6 +326,8 @@ def _topology_to_dict(svc: ApplicationService) -> Dict[str, Any]:
                 "linkedClusterId": n.linked_cluster_id,
                 "linkedNamespace": n.linked_namespace,
                 "linkedDeployment": n.linked_deployment,
+                "positionX": n.position_x,
+                "positionY": n.position_y,
             }
             for n in nodes
         ],
@@ -389,6 +391,12 @@ def _save_topology(service_id: int, topology_payload: Dict[str, Any]) -> None:
     nodes_raw = topology_payload.get("nodes") or []
     edges_raw = topology_payload.get("edges") or []
 
+    def _coerce_pos(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     temp_to_id: Dict[str, int] = {}
     for node_data in nodes_raw:
         name = (node_data.get("name") or "").strip()
@@ -402,6 +410,8 @@ def _save_topology(service_id: int, topology_payload: Dict[str, Any]) -> None:
             linked_cluster_id=(node_data.get("linkedClusterId") or "").strip() or None,
             linked_namespace=(node_data.get("linkedNamespace") or "").strip() or None,
             linked_deployment=(node_data.get("linkedDeployment") or "").strip() or None,
+            position_x=_coerce_pos(node_data.get("positionX")),
+            position_y=_coerce_pos(node_data.get("positionY")),
         )
         db.session.add(node)
         db.session.flush()

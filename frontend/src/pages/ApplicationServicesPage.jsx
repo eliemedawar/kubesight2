@@ -277,69 +277,130 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
 
 // ─── Topology layout ─────────────────────────────────────────────────────────
 
-const NODE_W = 144;
-const NODE_H = 52;
-const H_GAP = 56;
-const V_GAP = 64;
-const PAD = 24;
+const NODE_W = 160;
+const NODE_H = 48;
+const PAD = 40;
+
+// Point where the ray from (cx,cy) toward (nx,ny) exits a rectangle of (w,h)
+function rectExitPoint(cx, cy, nx, ny, w = NODE_W, h = NODE_H) {
+  const tx = Math.abs(nx) < 1e-9 ? Infinity : (w / 2) / Math.abs(nx);
+  const ty = Math.abs(ny) < 1e-9 ? Infinity : (h / 2) / Math.abs(ny);
+  const t = Math.min(tx, ty);
+  return { x: cx + nx * t, y: cy + ny * t };
+}
+function nodeExitPoint(cx, cy, nx, ny) {
+  return rectExitPoint(cx, cy, nx, ny, NODE_W, NODE_H);
+}
+
+// A node's manually-saved position, if it has one.
+function savedNodePos(n) {
+  const x = typeof n.x === "number" ? n.x : n.positionX;
+  const y = typeof n.y === "number" ? n.y : n.positionY;
+  return typeof x === "number" && typeof y === "number" ? { x, y } : null;
+}
 
 function computeLayout(nodes, edges) {
-  if (!nodes.length) return { positions: {}, svgW: NODE_W + PAD * 2, svgH: NODE_H + PAD * 2 };
+  const n = nodes.length;
+  if (!n) return { positions: {}, svgW: NODE_W + PAD * 2, svgH: NODE_H + PAD * 2 };
 
-  const ids = nodes.map((n) => String(n.id));
-  const out = Object.fromEntries(ids.map((id) => [id, []]));
-  const inCount = Object.fromEntries(ids.map((id) => [id, 0]));
+  // If every node has a saved position, honor the user's manual layout.
+  if (nodes.every((nd) => savedNodePos(nd))) {
+    const raw = {};
+    nodes.forEach((nd) => { raw[String(nd.id)] = savedNodePos(nd); });
+    const xs = nodes.map((nd) => raw[String(nd.id)].x);
+    const ys = nodes.map((nd) => raw[String(nd.id)].y);
+    const minX = Math.min(...xs), minY = Math.min(...ys);
+    const maxX = Math.max(...xs), maxY = Math.max(...ys);
+    const positions = {};
+    nodes.forEach((nd) => {
+      positions[String(nd.id)] = { x: raw[String(nd.id)].x - minX, y: raw[String(nd.id)].y - minY };
+    });
+    return {
+      positions,
+      svgW: (maxX - minX) + NODE_W + PAD * 2,
+      svgH: (maxY - minY) + NODE_H + PAD * 2,
+    };
+  }
+  if (n === 1) {
+    return {
+      positions: { [String(nodes[0].id)]: { x: 0, y: 0 } },
+      svgW: NODE_W + PAD * 2,
+      svgH: NODE_H + PAD * 2,
+    };
+  }
 
-  edges.forEach((e) => {
-    const s = String(e.sourceNodeId);
-    const t = String(e.targetNodeId);
-    if (s in out && t in inCount) {
-      out[s].push(t);
-      inCount[t]++;
-    }
+  const ids = nodes.map((nd) => String(nd.id));
+
+  // Place nodes initially on a circle so no two start at the same point
+  const initR = Math.max(160, (n * (NODE_W + 50)) / (2 * Math.PI));
+  const pos = {}, vel = {};
+  ids.forEach((id, i) => {
+    const angle = (2 * Math.PI * i / n) - Math.PI / 2;
+    pos[id] = { x: initR * Math.cos(angle), y: initR * Math.sin(angle) };
+    vel[id] = { x: 0, y: 0 };
   });
 
-  // Longest-path level assignment (cycle-safe via visited set per DFS path)
-  const levels = Object.fromEntries(ids.map((id) => [id, 0]));
-  const roots = ids.filter((id) => inCount[id] === 0);
-  const starts = roots.length ? roots : [ids[0]];
+  const REPEL = 22000;
+  const SPRING_K = 0.07;
+  const SPRING_LEN = Math.max(NODE_W * 2.4, 300);
 
-  const assign = (id, lv, path) => {
-    if (path.has(id)) return; // cycle guard
-    if (levels[id] >= lv && lv > 0) {
-      // re-enter only if we can push deeper
-      if (levels[id] >= lv) return;
+  for (let iter = 0; iter < 200; iter++) {
+    const cool = Math.pow(1 - iter / 200, 2);
+
+    // Repulsion between every node pair
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = pos[ids[i]], b = pos[ids[j]];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d2 = dx * dx + dy * dy || 0.01;
+        const d = Math.sqrt(d2);
+        const f = REPEL / d2;
+        const fx = (dx / d) * f, fy = (dy / d) * f;
+        vel[ids[i]].x -= fx; vel[ids[i]].y -= fy;
+        vel[ids[j]].x += fx; vel[ids[j]].y += fy;
+      }
     }
-    levels[id] = Math.max(levels[id], lv);
-    const next = new Set([...path, id]);
-    out[id].forEach((nid) => assign(nid, lv + 1, next));
-  };
-  starts.forEach((id) => assign(id, 0, new Set()));
 
-  // Group by level
-  const byLevel = {};
-  ids.forEach((id) => {
-    const lv = levels[id];
-    (byLevel[lv] = byLevel[lv] || []).push(id);
-  });
+    // Spring attraction along edges (count bidi pairs once)
+    const seen = new Set();
+    edges.forEach((e) => {
+      const s = String(e.sourceNodeId), t = String(e.targetNodeId);
+      if (s === t || !pos[s] || !pos[t]) return;
+      const key = s < t ? `${s}|${t}` : `${t}|${s}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const dx = pos[t].x - pos[s].x, dy = pos[t].y - pos[s].y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const f = SPRING_K * (d - SPRING_LEN);
+      const fx = (dx / d) * f, fy = (dy / d) * f;
+      vel[s].x += fx; vel[s].y += fy;
+      vel[t].x -= fx; vel[t].y -= fy;
+    });
 
-  const maxLv = Math.max(...Object.keys(byLevel).map(Number));
-  const maxCount = Math.max(...Object.values(byLevel).map((a) => a.length));
+    // Integrate with cooling
+    ids.forEach((id) => {
+      pos[id].x += vel[id].x * cool;
+      pos[id].y += vel[id].y * cool;
+      vel[id].x *= 0.65;
+      vel[id].y *= 0.65;
+    });
+  }
 
-  const totalW = maxCount * NODE_W + Math.max(0, maxCount - 1) * H_GAP;
-  const totalH = (maxLv + 1) * NODE_H + maxLv * V_GAP;
+  // Shift to (0,0) origin
+  const xs = ids.map((id) => pos[id].x), ys = ids.map((id) => pos[id].y);
+  const minX = Math.min(...xs), minY = Math.min(...ys);
+  const maxX = Math.max(...xs), maxY = Math.max(...ys);
 
   const positions = {};
-  Object.entries(byLevel).forEach(([lv, lvIds]) => {
-    const n = lvIds.length;
-    const lvW = n * NODE_W + Math.max(0, n - 1) * H_GAP;
-    const x0 = (totalW - lvW) / 2;
-    lvIds.forEach((id, i) => {
-      positions[id] = { x: x0 + i * (NODE_W + H_GAP), y: +lv * (NODE_H + V_GAP) };
-    });
+  ids.forEach((id) => {
+    positions[id] = { x: pos[id].x - minX, y: pos[id].y - minY };
   });
 
-  return { positions, svgW: totalW + PAD * 2, svgH: totalH + PAD * 2 };
+  return {
+    positions,
+    svgW: (maxX - minX) + NODE_W + PAD * 2,
+    svgH: (maxY - minY) + NODE_H + PAD * 2,
+  };
 }
 
 // ─── Topology Viewer ─────────────────────────────────────────────────────────
@@ -356,14 +417,14 @@ function TopologyViewer({ nodes, edges, compact = false }) {
 
   return (
     <div className={`topo-viewer${compact ? " topo-viewer--compact" : ""}`}>
-      <svg width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`}
-        style={{ display: "block", minWidth: svgW }}>
+      <svg viewBox={`0 0 ${svgW} ${svgH}`}
+        style={{ display: "block", width: "100%", height: "auto" }}>
         <defs>
-          <filter id="topo-shadow" x="-20%" y="-20%" width="140%" height="140%">
-            <feDropShadow dx="0" dy="1" stdDeviation="2" floodColor="rgba(0,0,0,0.07)" />
+          <filter id="topo-shadow" x="-30%" y="-30%" width="160%" height="160%">
+            <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="rgba(0,0,0,0.5)" />
           </filter>
           <marker id="topo-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="#94a3b8" />
+            <polygon points="0 0, 8 3, 0 6" fill="#64748b" />
           </marker>
         </defs>
 
@@ -373,18 +434,36 @@ function TopologyViewer({ nodes, edges, compact = false }) {
             const src = positions[String(edge.sourceNodeId)];
             const tgt = positions[String(edge.targetNodeId)];
             if (!src || !tgt) return null;
+            if (String(edge.sourceNodeId) === String(edge.targetNodeId)) return null;
 
-            const x1 = src.x + NODE_W / 2;
-            const y1 = src.y + NODE_H;
-            const x2 = tgt.x + NODE_W / 2;
-            const y2 = tgt.y;
-            const dy = Math.abs(y2 - y1);
-            const ctrl = Math.max(dy * 0.45, 20);
-            const d = `M ${x1},${y1} C ${x1},${y1 + ctrl} ${x2},${y2 - ctrl} ${x2},${y2}`;
+            const srcCX = src.x + NODE_W / 2, srcCY = src.y + NODE_H / 2;
+            const tgtCX = tgt.x + NODE_W / 2, tgtCY = tgt.y + NODE_H / 2;
+            const dx = tgtCX - srcCX, dy = tgtCY - srcCY;
+            const len = Math.sqrt(dx * dx + dy * dy) || 1;
+            const nx = dx / len, ny = dy / len;
+
+            const hasBidi = (edges || []).some(
+              (e2) =>
+                String(e2.sourceNodeId) === String(edge.targetNodeId) &&
+                String(e2.targetNodeId) === String(edge.sourceNodeId)
+            );
+
+            const p1 = nodeExitPoint(srcCX, srcCY, nx, ny);
+            const p2 = nodeExitPoint(tgtCX, tgtCY, -nx, -ny);
+
+            let d;
+            if (hasBidi) {
+              const sign = String(edge.sourceNodeId) < String(edge.targetNodeId) ? 1 : -1;
+              const px = -ny * 16 * sign, py = nx * 16 * sign;
+              const mx = (p1.x + p2.x) / 2 + px, my = (p1.y + p2.y) / 2 + py;
+              d = `M ${p1.x},${p1.y} Q ${mx},${my} ${p2.x},${p2.y}`;
+            } else {
+              d = `M ${p1.x},${p1.y} L ${p2.x},${p2.y}`;
+            }
 
             return (
               <path key={edge.id ?? `e${idx}`} d={d}
-                fill="none" stroke="#cbd5e1" strokeWidth={1.5}
+                fill="none" stroke="#475569" strokeWidth={1.5}
                 markerEnd="url(#topo-arrow)" />
             );
           })}
@@ -394,32 +473,27 @@ function TopologyViewer({ nodes, edges, compact = false }) {
             const pos = positions[String(node.id)];
             if (!pos) return null;
             const hasType = Boolean(node.type);
-            const nameY = hasType ? pos.y + 32 : pos.y + NODE_H / 2 + 5;
-            const typeY = pos.y + 16;
-            const maxNameChars = 17;
-            const label = node.name.length > maxNameChars
-              ? node.name.slice(0, maxNameChars - 1) + "…"
-              : node.name;
-            const typeLabel = node.type && node.type.length > 16
-              ? node.type.slice(0, 15) + "…"
-              : node.type;
+            const nameY = hasType ? pos.y + 31 : pos.y + NODE_H / 2 + 1;
+            const typeY = pos.y + 14;
+            const label = node.name.length > 17 ? node.name.slice(0, 16) + "…" : node.name;
+            const typeLabel = node.type && node.type.length > 16 ? node.type.slice(0, 15) + "…" : node.type;
 
             return (
               <g key={node.id} title={node.description || node.name}>
                 <rect x={pos.x} y={pos.y} width={NODE_W} height={NODE_H}
-                  rx={6} ry={6}
-                  fill="white" stroke="#e2e8f0" strokeWidth={1.5}
+                  rx={8} ry={8}
+                  fill="#1e293b" stroke="#334155" strokeWidth={1.5}
                   filter="url(#topo-shadow)" />
                 {hasType && (
                   <text x={pos.x + NODE_W / 2} y={typeY}
                     textAnchor="middle" dominantBaseline="middle"
-                    fill="#94a3b8" fontSize={10} fontWeight={500}>
-                    {typeLabel}
+                    fill="#64748b" fontSize={10} fontWeight={500} letterSpacing="0.06em">
+                    {typeLabel?.toUpperCase()}
                   </text>
                 )}
                 <text x={pos.x + NODE_W / 2} y={nameY}
                   textAnchor="middle" dominantBaseline="middle"
-                  fill="#0f172a" fontSize={13} fontWeight={600}>
+                  fill="#e2e8f0" fontSize={13} fontWeight={600}>
                   {label}
                 </text>
               </g>
@@ -431,25 +505,67 @@ function TopologyViewer({ nodes, edges, compact = false }) {
   );
 }
 
-// ─── Topology Editor ─────────────────────────────────────────────────────────
+// ─── Topology Editor (interactive canvas) ────────────────────────────────────
 
 let _topoIdCounter = 1;
 function newTempId() { return `node-new-${_topoIdCounter++}`; }
 
+// Editor node box dimensions (must match .topo-canvas-node CSS).
+const E_NODE_W = 184;
+const E_NODE_H = 104;
+const TOPO_CANVAS_MIN_H = 440;
+
 function TopologyEditor({ topology, onChange }) {
   const { nodes, edges } = topology;
+  const canvasRef = useRef(null);
+  const dragRef = useRef(null);          // { tempId, dx, dy } while dragging a node
+  const [linking, setLinking] = useState(null); // { fromTempId, x, y } while drawing an edge
+  const linkTargetRef = useRef(null);    // tempId currently hovered while linking
 
-  const namedNodes = nodes.filter((n) => n.name.trim());
-  const nodeOptions = namedNodes.map((n) => ({ value: n.tempId, label: n.name }));
+  const nodeById = useMemo(() => {
+    const m = {};
+    nodes.forEach((n) => { m[n.tempId] = n; });
+    return m;
+  }, [nodes]);
+
+  // Auto-place any node that lacks a position (legacy/AI topologies, or first load).
+  useEffect(() => {
+    if (!nodes.length) return;
+    if (nodes.every((n) => typeof n.x === "number" && typeof n.y === "number")) return;
+    const layoutNodes = nodes.map((n) => ({ id: n.tempId, x: n.x, y: n.y }));
+    const layoutEdges = edges.map((e) => ({ sourceNodeId: e.sourceTempId, targetNodeId: e.targetTempId }));
+    const { positions } = computeLayout(layoutNodes, layoutEdges);
+    const placed = nodes.map((n) => {
+      if (typeof n.x === "number" && typeof n.y === "number") return n;
+      const p = positions[n.tempId];
+      return p ? { ...n, x: p.x, y: p.y } : { ...n, x: 40, y: 40 };
+    });
+    onChange({ nodes: placed, edges });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, edges]);
+
+  const canvasPoint = (evt) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return {
+      x: evt.clientX - rect.left + canvasRef.current.scrollLeft,
+      y: evt.clientY - rect.top + canvasRef.current.scrollTop,
+    };
+  };
 
   const addNode = () => {
-    onChange({ nodes: [...nodes, { tempId: newTempId(), name: "", type: "", description: "" }], edges });
+    // Drop the new box into a free area near the top-left, staggered by count.
+    const i = nodes.length;
+    const x = 40 + (i % 4) * (E_NODE_W + 40);
+    const y = 40 + Math.floor(i / 4) * (E_NODE_H + 48);
+    onChange({
+      nodes: [...nodes, { tempId: newTempId(), name: "", type: "", description: "", x, y }],
+      edges,
+    });
   };
 
   const updateNode = (tempId, field, value) => {
-    const updatedNodes = nodes.map((n) => n.tempId === tempId ? { ...n, [field]: value } : n);
-    // If node name changed, edges remain valid (they use tempId, not name)
-    onChange({ nodes: updatedNodes, edges });
+    onChange({ nodes: nodes.map((n) => (n.tempId === tempId ? { ...n, [field]: value } : n)), edges });
   };
 
   const removeNode = (tempId) => {
@@ -459,128 +575,181 @@ function TopologyEditor({ topology, onChange }) {
     });
   };
 
-  const addEdge = () => {
-    if (namedNodes.length < 2) return;
-    const src = namedNodes[0].tempId;
-    const tgt = namedNodes[1].tempId;
-    const isDup = edges.some((e) => e.sourceTempId === src && e.targetTempId === tgt);
-    if (!isDup) onChange({ nodes, edges: [...edges, { sourceTempId: src, targetTempId: tgt }] });
-    else onChange({ nodes, edges: [...edges, { sourceTempId: src, targetTempId: tgt }] });
-  };
-
-  const updateEdge = (idx, field, value) => {
-    onChange({ nodes, edges: edges.map((e, i) => i === idx ? { ...e, [field]: value } : e) });
-  };
-
   const removeEdge = (idx) => {
     onChange({ nodes, edges: edges.filter((_, i) => i !== idx) });
   };
 
-  // Live preview — map editor nodes/edges to viewer format
-  const previewNodes = namedNodes.map((n) => ({ id: n.tempId, name: n.name, type: n.type }));
-  const previewEdges = edges
-    .filter((e) => e.sourceTempId && e.targetTempId && e.sourceTempId !== e.targetTempId)
-    .map((e, i) => ({ id: `pe${i}`, sourceNodeId: e.sourceTempId, targetNodeId: e.targetTempId }));
+  // ── Node dragging ──
+  const onNodePointerDown = (evt, node) => {
+    if (evt.button !== 0) return;
+    evt.stopPropagation();
+    const p = canvasPoint(evt);
+    dragRef.current = { tempId: node.tempId, dx: p.x - node.x, dy: p.y - node.y, moved: false };
+  };
+
+  // ── Edge linking ──
+  const onHandlePointerDown = (evt, node) => {
+    if (evt.button !== 0) return;
+    evt.stopPropagation();
+    const p = canvasPoint(evt);
+    setLinking({ fromTempId: node.tempId, x: p.x, y: p.y });
+    linkTargetRef.current = null;
+  };
+
+  const onCanvasPointerMove = (evt) => {
+    const p = canvasPoint(evt);
+    if (dragRef.current) {
+      const { tempId, dx, dy } = dragRef.current;
+      dragRef.current.moved = true;
+      const nx = Math.max(0, p.x - dx);
+      const ny = Math.max(0, p.y - dy);
+      onChange({ nodes: nodes.map((n) => (n.tempId === tempId ? { ...n, x: nx, y: ny } : n)), edges });
+    } else if (linking) {
+      setLinking((l) => (l ? { ...l, x: p.x, y: p.y } : l));
+    }
+  };
+
+  const finishLinking = () => {
+    const from = linking?.fromTempId;
+    const to = linkTargetRef.current;
+    if (from && to && from !== to) {
+      const dup = edges.some((e) => e.sourceTempId === from && e.targetTempId === to);
+      if (!dup) onChange({ nodes, edges: [...edges, { sourceTempId: from, targetTempId: to }] });
+    }
+    setLinking(null);
+    linkTargetRef.current = null;
+  };
+
+  const onCanvasPointerUp = () => {
+    dragRef.current = null;
+    if (linking) finishLinking();
+  };
+
+  // Geometry for rendering edges between editor boxes.
+  const centerOf = (n) => ({ x: n.x + E_NODE_W / 2, y: n.y + E_NODE_H / 2 });
+  const handlePos = (n) => ({ x: n.x + E_NODE_W, y: n.y + E_NODE_H / 2 });
+
+  const placedNodes = nodes.filter((n) => typeof n.x === "number" && typeof n.y === "number");
+  const contentW = placedNodes.reduce((m, n) => Math.max(m, n.x + E_NODE_W), 0) + 60;
+  const contentH = placedNodes.reduce((m, n) => Math.max(m, n.y + E_NODE_H), 0) + 60;
 
   return (
     <div className="topo-editor">
-      {/* ── Components ── */}
-      <div className="topo-editor-block">
-        <div className="topo-editor-block-header">
-          <span className="topo-editor-block-title">Components</span>
-          <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Add component</button>
-        </div>
+      <div className="topo-editor-block-header">
+        <span className="topo-editor-block-title">Topology canvas</span>
+        <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Add component</button>
+      </div>
+      <p className="muted topo-canvas-hint">
+        Drag a box by its header to move it. Drag from the <span className="topo-handle-legend">●</span> handle on the right
+        of a box to another box to connect them. Click a connection to remove it.
+      </p>
 
+      <div
+        ref={canvasRef}
+        className="topo-canvas"
+        style={{ height: nodes.length ? Math.max(TOPO_CANVAS_MIN_H, contentH) : TOPO_CANVAS_MIN_H }}
+        onPointerMove={onCanvasPointerMove}
+        onPointerUp={onCanvasPointerUp}
+        onPointerLeave={onCanvasPointerUp}
+      >
         {nodes.length === 0 ? (
-          <p className="muted" style={{ fontSize: "0.875rem" }}>No components yet. Add the first one to start building the topology.</p>
+          <div className="topo-canvas-empty">
+            <p>No components yet.</p>
+            <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Add your first component</button>
+          </div>
         ) : (
-          <div className="topo-node-list">
-            <div className="topo-node-header">
-              <span>Name *</span>
-              <span>Type</span>
-              <span />
-            </div>
-            {nodes.map((node) => (
-              <div key={node.tempId} className="topo-node-row">
-                <input
-                  className="topo-input"
-                  value={node.name}
-                  onChange={(e) => updateNode(node.tempId, "name", e.target.value)}
-                  placeholder="e.g. WAF"
-                  maxLength={120}
+          <div className="topo-canvas-surface" style={{ width: contentW, height: contentH }}>
+            {/* Edges + the in-progress link line */}
+            <svg className="topo-canvas-edges" width={contentW} height={contentH}>
+              <defs>
+                <marker id="topo-edit-arrow" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+                  <polygon points="0 0, 9 3.5, 0 7" fill="#64748b" />
+                </marker>
+              </defs>
+              {edges.map((edge, idx) => {
+                const s = nodeById[edge.sourceTempId];
+                const t = nodeById[edge.targetTempId];
+                if (!s || !t || typeof s.x !== "number" || typeof t.x !== "number") return null;
+                const sc = centerOf(s), tc = centerOf(t);
+                const dx = tc.x - sc.x, dy = tc.y - sc.y;
+                const len = Math.hypot(dx, dy) || 1;
+                const nx = dx / len, ny = dy / len;
+                const p1 = rectExitPoint(sc.x, sc.y, nx, ny, E_NODE_W, E_NODE_H);
+                const p2 = rectExitPoint(tc.x, tc.y, -nx, -ny, E_NODE_W, E_NODE_H);
+                const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+                return (
+                  <g key={idx} className="topo-canvas-edge" onPointerDown={(e) => e.stopPropagation()}>
+                    <path
+                      d={`M ${p1.x},${p1.y} L ${p2.x},${p2.y}`}
+                      fill="none" stroke="#475569" strokeWidth={2}
+                      markerEnd="url(#topo-edit-arrow)"
+                    />
+                    {/* fat invisible hit-line + delete badge */}
+                    <path d={`M ${p1.x},${p1.y} L ${p2.x},${p2.y}`}
+                      fill="none" stroke="transparent" strokeWidth={14}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => removeEdge(idx)}>
+                      <title>Remove connection</title>
+                    </path>
+                    <g className="topo-edge-delete" onClick={() => removeEdge(idx)} style={{ cursor: "pointer" }}>
+                      <circle cx={mx} cy={my} r={9} />
+                      <text x={mx} y={my + 0.5} textAnchor="middle" dominantBaseline="middle">✕</text>
+                    </g>
+                  </g>
+                );
+              })}
+              {linking && nodeById[linking.fromTempId] && (
+                <path
+                  d={`M ${handlePos(nodeById[linking.fromTempId]).x},${handlePos(nodeById[linking.fromTempId]).y} L ${linking.x},${linking.y}`}
+                  fill="none" stroke="#38bdf8" strokeWidth={2} strokeDasharray="5 4"
                 />
-                <input
-                  className="topo-input"
-                  value={node.type || ""}
-                  onChange={(e) => updateNode(node.tempId, "type", e.target.value)}
-                  placeholder="e.g. API Gateway"
-                  maxLength={80}
-                />
-                <button type="button" className="topo-remove-btn" onClick={() => removeNode(node.tempId)} title="Remove component">✕</button>
-              </div>
-            ))}
+              )}
+            </svg>
+
+            {/* Node boxes */}
+            {nodes.map((node) => {
+              if (typeof node.x !== "number") return null;
+              const isLinkTarget = linking && linking.fromTempId !== node.tempId;
+              return (
+                <div
+                  key={node.tempId}
+                  className={`topo-canvas-node${linking ? " is-linkable" : ""}`}
+                  style={{ left: node.x, top: node.y, width: E_NODE_W, height: E_NODE_H }}
+                  onPointerEnter={() => { if (isLinkTarget) linkTargetRef.current = node.tempId; }}
+                  onPointerLeave={() => { if (linkTargetRef.current === node.tempId) linkTargetRef.current = null; }}
+                  onPointerUp={() => { if (linking && isLinkTarget) { linkTargetRef.current = node.tempId; } }}
+                >
+                  <div className="topo-canvas-node-header" onPointerDown={(e) => onNodePointerDown(e, node)}>
+                    <span className="topo-grip">⠿</span>
+                    <button type="button" className="topo-node-del" onClick={() => removeNode(node.tempId)} title="Remove component">✕</button>
+                  </div>
+                  <input
+                    className="topo-canvas-input topo-canvas-input--name"
+                    value={node.name}
+                    onChange={(e) => updateNode(node.tempId, "name", e.target.value)}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    placeholder="Name *"
+                    maxLength={120}
+                  />
+                  <input
+                    className="topo-canvas-input"
+                    value={node.type || ""}
+                    onChange={(e) => updateNode(node.tempId, "type", e.target.value)}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    placeholder="Type (optional)"
+                    maxLength={80}
+                  />
+                  <div
+                    className="topo-canvas-handle"
+                    title="Drag to connect"
+                    onPointerDown={(e) => onHandlePointerDown(e, node)}
+                  />
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
-
-      {/* ── Connections ── */}
-      <div className="topo-editor-block">
-        <div className="topo-editor-block-header">
-          <span className="topo-editor-block-title">Connections</span>
-          <button
-            type="button"
-            className="btn-outline btn-compact"
-            onClick={addEdge}
-            disabled={namedNodes.length < 2}
-            title={namedNodes.length < 2 ? "Add at least 2 named components first" : undefined}
-          >
-            + Add connection
-          </button>
-        </div>
-
-        {edges.length === 0 ? (
-          <p className="muted" style={{ fontSize: "0.875rem" }}>
-            {namedNodes.length < 2 ? "Add at least 2 components first." : "No connections yet."}
-          </p>
-        ) : (
-          <div className="topo-edge-list">
-            {edges.map((edge, idx) => (
-              <div key={idx} className="topo-edge-row">
-                <div className="topo-edge-select-wrap">
-                  <select
-                    className="topo-select"
-                    value={edge.sourceTempId}
-                    onChange={(e) => updateEdge(idx, "sourceTempId", e.target.value)}
-                  >
-                    {nodeOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </div>
-                <span className="topo-edge-arrow">→</span>
-                <div className="topo-edge-select-wrap">
-                  <select
-                    className="topo-select"
-                    value={edge.targetTempId}
-                    onChange={(e) => updateEdge(idx, "targetTempId", e.target.value)}
-                  >
-                    {nodeOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </div>
-                <button type="button" className="topo-remove-btn" onClick={() => removeEdge(idx)} title="Remove connection">✕</button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ── Live preview ── */}
-      {previewNodes.length > 0 && (
-        <div className="topo-preview-block">
-          <span className="topo-editor-block-title">Preview</span>
-          <div style={{ marginTop: "0.5rem" }}>
-            <TopologyViewer nodes={previewNodes} edges={previewEdges} compact />
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -594,6 +763,8 @@ function initTopologyFromService(service) {
     name: n.name,
     type: n.type || "",
     description: n.description || "",
+    x: typeof n.positionX === "number" ? n.positionX : null,
+    y: typeof n.positionY === "number" ? n.positionY : null,
   }));
   const edges = (service.topology.edges || []).map((e) => ({
     sourceTempId: `node-${e.sourceNodeId}`,
@@ -623,6 +794,8 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
             name: n.name.trim(),
             type: n.type.trim() || undefined,
             description: n.description.trim() || undefined,
+            positionX: typeof n.x === "number" ? Math.round(n.x) : undefined,
+            positionY: typeof n.y === "number" ? Math.round(n.y) : undefined,
           })),
         edges: topology.edges
           .filter((e) => e.sourceTempId && e.targetTempId && e.sourceTempId !== e.targetTempId)

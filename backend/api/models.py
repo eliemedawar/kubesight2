@@ -681,6 +681,8 @@ class ApplicationServiceTopologyNode(db.Model):
     linked_cluster_id = db.Column(db.String(120), nullable=True)
     linked_namespace = db.Column(db.String(253), nullable=True)
     linked_deployment = db.Column(db.String(253), nullable=True)
+    position_x = db.Column(db.Float, nullable=True)
+    position_y = db.Column(db.Float, nullable=True)
     created_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
