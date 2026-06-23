@@ -12,6 +12,21 @@ const AddAppModal = lazy(() => import("../components/inventory/AddAppModal.jsx")
 const ApplicationBuilderWizard = lazy(() =>
   import("../components/inventory/wizard/ApplicationBuilderWizard.jsx")
 );
+const SchemaDeployWizard = lazy(() =>
+  import("../components/inventory/wizard/SchemaDeployWizard.jsx")
+);
+
+/** A template drives the streamlined schema wizard once it declares any schema. */
+function hasDeploymentSchema(template) {
+  const schema = template?.schema;
+  if (!schema) return false;
+  return Boolean(
+    schema.env?.length ||
+      schema.dependencies?.length ||
+      schema.ingress?.supported ||
+      (schema.overrides && Object.keys(schema.overrides).length),
+  );
+}
 
 export default function InventoryPage({
   coreLoading = false,
@@ -22,11 +37,13 @@ export default function InventoryPage({
   canRegister = false,
   canDeploy = false,
   canHelmInstall = false,
+  canManageTemplates = false,
   onRefresh,
 }) {
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardInitialState, setWizardInitialState] = useState(null);
+  const [schemaTemplate, setSchemaTemplate] = useState(null);
   const [templateBusy, setTemplateBusy] = useState(false);
   const [templateError, setTemplateError] = useState("");
 
@@ -39,6 +56,7 @@ export default function InventoryPage({
 
   const openWizardFromScratch = () => {
     setTemplateError("");
+    setSchemaTemplate(null);
     setWizardInitialState(createEmptyWizardState(resolvedDefaultClusterId));
     setWizardOpen(true);
   };
@@ -48,8 +66,15 @@ export default function InventoryPage({
     setTemplateError("");
     try {
       const template = await getWizardTemplate(templateId);
-      setWizardInitialState(applyTemplate(createEmptyWizardState(resolvedDefaultClusterId), template));
-      setWizardOpen(true);
+      if (hasDeploymentSchema(template)) {
+        // Schema-bearing templates use the streamlined wizard that only asks for
+        // what the template leaves open.
+        setSchemaTemplate(template);
+      } else {
+        setSchemaTemplate(null);
+        setWizardInitialState(applyTemplate(createEmptyWizardState(resolvedDefaultClusterId), template));
+        setWizardOpen(true);
+      }
     } catch (err) {
       setTemplateError(err.message || "Failed to load template");
     } finally {
@@ -59,7 +84,7 @@ export default function InventoryPage({
 
   const marketplaceHeader = (
     <PageTitle
-      title="Application Templates"
+      title="Inventory Templates"
       subtitle="Deployment hub for launching workloads. View running applications in Resources."
     />
   );
@@ -84,7 +109,7 @@ export default function InventoryPage({
   return (
     <div className="ops-page inventory-page template-marketplace-page">
       <PageTitle
-        title="Application Templates"
+        title="Inventory Templates"
         subtitle="Choose a template or start from scratch to deploy workloads to your clusters. View deployed applications in Resources."
         actionLabel={canDeploy ? "Start From Scratch" : canAddApp ? "Add Application" : undefined}
         onAction={
@@ -100,6 +125,9 @@ export default function InventoryPage({
 
       <TemplateMarketplace
         canDeploy={canDeploy}
+        canManageTemplates={canManageTemplates}
+        clusterOptions={clusterSelectOptions}
+        defaultClusterId={resolvedDefaultClusterId}
         busy={templateBusy}
         onStartFromScratch={openWizardFromScratch}
         onSelectTemplate={openWizardFromTemplate}
@@ -134,6 +162,19 @@ export default function InventoryPage({
             defaultClusterId={resolvedDefaultClusterId}
             initialState={wizardInitialState}
             showTemplatePicker={false}
+          />
+        </Suspense>
+      ) : null}
+
+      {schemaTemplate ? (
+        <Suspense fallback={null}>
+          <SchemaDeployWizard
+            open={Boolean(schemaTemplate)}
+            template={schemaTemplate}
+            onClose={() => setSchemaTemplate(null)}
+            onSuccess={() => onRefresh?.()}
+            clusterOptions={clusterSelectOptions}
+            defaultClusterId={resolvedDefaultClusterId}
           />
         </Suspense>
       ) : null}

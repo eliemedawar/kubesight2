@@ -33,6 +33,13 @@ from ..services.manifest_generator import generate_manifests
 from ..services.wizard_manifest_generator import generate_wizard_manifests, validate_k8s_name
 from ..services.prerequisite_validator import validate_prerequisites
 from ..services.wizard_templates import list_templates, get_template
+from ..services.template_resolver import resolve_template
+from ..services.user_template_service import (
+    create_user_template,
+    delete_user_template,
+    get_user_template_detail,
+    list_user_template_summaries,
+)
 from ..services.application_version_service import (
     create_deployment_version,
     list_versions_for_inventory,
@@ -41,7 +48,7 @@ from ..services.application_version_service import (
     rollback_to_version,
 )
 from ..k8s_provider import K8sCommandError, resolve_cluster_access, _run_for_access
-from ..access_engine import can_access_namespace
+from ..access_engine import can_access_namespace, is_admin
 
 inventory_bp = Blueprint("inventory", __name__, url_prefix="/api/inventory")
 
@@ -408,19 +415,82 @@ def deploy_image_apply():
     return success_response({**data, "yaml": yaml_content, "summary": summary})
 
 
+def _can_manage_templates() -> bool:
+    """Admin-authored templates are visible to and managed by admins only."""
+    from ..auth_utils import auth_required_enabled
+
+    if not auth_required_enabled():
+        return True
+    user = get_current_user()
+    return bool(user and is_admin(user))
+
+
 @inventory_bp.route("/deploy/wizard/templates", methods=["GET"])
 @require_permission("inventory:view")
 def deploy_wizard_templates():
-    return success_response(list_templates())
+    templates = list_templates()
+    if _can_manage_templates():
+        templates = templates + list_user_template_summaries()
+    return success_response(templates)
 
 
 @inventory_bp.route("/deploy/wizard/templates/<template_id>", methods=["GET"])
 @require_permission("inventory:view")
 def deploy_wizard_template_detail(template_id: str):
     template = get_template(template_id)
+    if not template and _can_manage_templates():
+        template = get_user_template_detail(template_id)
     if not template:
         return error_response("Template not found", 404)
     return success_response(template)
+
+
+@inventory_bp.route("/deploy/wizard/templates", methods=["POST"])
+@require_permission("inventory:view")
+def deploy_wizard_template_create():
+    if not _can_manage_templates():
+        return error_response("Forbidden", 403)
+    user = get_current_user()
+    data, error, status = create_user_template(_body(), actor_user_id=user.id if user else None)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status_code=status)
+
+
+@inventory_bp.route("/deploy/wizard/templates/<template_id>", methods=["DELETE"])
+@require_permission("inventory:view")
+def deploy_wizard_template_delete(template_id: str):
+    if not _can_manage_templates():
+        return error_response("Forbidden", 403)
+    if get_template(template_id) is not None:
+        return error_response("Built-in templates cannot be deleted.", 400)
+    user = get_current_user()
+    data, error, status = delete_user_template(template_id, actor_user_id=user.id if user else None)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status_code=status)
+
+
+@inventory_bp.route("/deploy/wizard/templates/<template_id>/resolve", methods=["POST"])
+@require_permission("apps:dryrun")
+def deploy_wizard_template_resolve(template_id: str):
+    """Merge a template's schema with deployment answers into a deploy payload.
+
+    The returned payload has the exact shape the wizard generate/dry-run/apply
+    routes consume, so the deployer never re-enters anything the template locks.
+    """
+    template = get_template(template_id)
+    if not template and _can_manage_templates():
+        template = get_user_template_detail(template_id)
+    if not template:
+        return error_response("Template not found", 404)
+    payload, error = resolve_template(template, _body())
+    if error:
+        return error_response(error, 400)
+    yaml_content, summary, gen_error = generate_wizard_manifests(payload)
+    if gen_error:
+        return error_response(gen_error, 400)
+    return success_response({"payload": payload, "yaml": yaml_content, "summary": summary})
 
 
 @inventory_bp.route("/deploy/wizard/validate-name", methods=["POST"])

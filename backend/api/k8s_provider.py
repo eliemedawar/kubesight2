@@ -637,6 +637,34 @@ def list_storage_classes_from_k8s(access: ClusterAccess) -> List[Dict[str, Any]]
     return items
 
 
+def list_configmaps_secrets_from_k8s(access: ClusterAccess, namespace: str) -> Dict[str, Any]:
+    """Return ConfigMap and Secret names plus their data keys for a namespace.
+
+    Only key names are returned — never the underlying values — so the data is
+    safe to surface in the deployment wizard for picking references.
+    """
+    cm_output = _run_for_access(access, ["get", "configmaps", "-n", namespace, "-o", "json"])
+    secret_output = _run_for_access(access, ["get", "secrets", "-n", namespace, "-o", "json"])
+
+    config_maps: List[Dict[str, Any]] = []
+    for cm in json.loads(cm_output).get("items", []):
+        meta = cm.get("metadata", {}) or {}
+        keys = sorted(set((cm.get("data") or {}).keys()) | set((cm.get("binaryData") or {}).keys()))
+        config_maps.append({"name": meta.get("name", ""), "keys": keys})
+
+    secrets: List[Dict[str, Any]] = []
+    for secret in json.loads(secret_output).get("items", []):
+        meta = secret.get("metadata", {}) or {}
+        keys = sorted((secret.get("data") or {}).keys())
+        secrets.append(
+            {"name": meta.get("name", ""), "type": secret.get("type") or "Opaque", "keys": keys}
+        )
+
+    config_maps.sort(key=lambda item: item["name"])
+    secrets.sort(key=lambda item: item["name"])
+    return {"configMaps": config_maps, "secrets": secrets}
+
+
 def _node_ips_from_items(node_items: List[Dict[str, Any]]) -> List[str]:
     ips: List[str] = []
     for node in node_items:

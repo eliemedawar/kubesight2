@@ -37,7 +37,6 @@ import {
   StepStorage,
   StepTemplates,
   StepValidation,
-  StepWorkload,
   StorageReadinessBanner,
 } from "./WizardStepPanels.jsx";
 
@@ -401,8 +400,6 @@ export default function ApplicationBuilderWizard({
     switch (currentStep.key) {
       case "basics":
         return <StepBasics state={state} setState={setState} clusterOptions={clusterSelectOptions} nameValidation={nameValidation} />;
-      case "workload":
-        return <StepWorkload state={state} setState={setState} />;
       case "containers":
         return <StepContainers state={state} setState={setState} />;
       case "environment":

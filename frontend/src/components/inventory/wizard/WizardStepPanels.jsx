@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import NamespaceSelect from "../NamespaceSelect.jsx";
+import KeyMultiSelect from "../KeyMultiSelect.jsx";
+import { listNamespaceConfigResources } from "../../../api/clustersApi.js";
 import {
   Field,
   KeyValueEditor,
@@ -493,9 +495,259 @@ export function StepContainers({ state, setState }) {
   );
 }
 
+function useNamespaceConfigResources(clusterId, namespace) {
+  const [data, setData] = useState({ configMaps: [], secrets: [] });
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!clusterId || !namespace) {
+      setData({ configMaps: [], secrets: [] });
+      return undefined;
+    }
+    let cancelled = false;
+    setLoading(true);
+    listNamespaceConfigResources(clusterId, namespace)
+      .then((result) => {
+        if (!cancelled) {
+          setData({
+            configMaps: Array.isArray(result?.configMaps) ? result.configMaps : [],
+            secrets: Array.isArray(result?.secrets) ? result.secrets : [],
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setData({ configMaps: [], secrets: [] });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clusterId, namespace]);
+
+  return { ...data, loading };
+}
+
+/** Text input backed by a datalist — a dropdown of suggestions that still allows free text. */
+function ComboInput({ value, onChange, options = [], placeholder, listId, ariaLabel }) {
+  return (
+    <>
+      <input
+        list={listId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-label={ariaLabel}
+      />
+      <datalist id={listId}>
+        {options.map((opt) => (
+          <option key={opt} value={opt} />
+        ))}
+      </datalist>
+    </>
+  );
+}
+
+const ENV_SOURCE_OPTIONS = [
+  { value: "value", label: "Plain value" },
+  { value: "configMap", label: "From ConfigMap" },
+  { value: "secret", label: "From Secret" },
+];
+
+function EnvVarsEditor({ rows, onChange, configMaps, secrets }) {
+  const cmNames = useMemo(() => configMaps.map((c) => c.name).filter(Boolean), [configMaps]);
+  const secretNames = useMemo(() => secrets.map((s) => s.name).filter(Boolean), [secrets]);
+  const keysFor = (list, name) => list.find((item) => item.name === name)?.keys || [];
+
+  const ensureRows = rows.length ? rows : [{ ...EMPTY_ENV_VAR }];
+
+  const update = (index, next) => onChange(ensureRows.map((row, i) => (i === index ? next : row)));
+  const add = () => onChange([...ensureRows, { ...EMPTY_ENV_VAR }]);
+  const remove = (index) => {
+    const next = ensureRows.filter((_, i) => i !== index);
+    onChange(next.length ? next : [{ ...EMPTY_ENV_VAR }]);
+  };
+
+  const sourceOf = (row) => row.valueFrom?.kind || "value";
+
+  const changeSource = (index, row, source) => {
+    if (source === "value") {
+      update(index, { name: row.name || "", value: "" });
+    } else {
+      update(index, { name: row.name || "", valueFrom: { kind: source, name: "", key: "" } });
+    }
+  };
+
+  return (
+    <div className="env-editor">
+      {ensureRows.map((row, index) => {
+        const source = sourceOf(row);
+        const refList = source === "configMap" ? configMaps : secrets;
+        const refNames = source === "configMap" ? cmNames : secretNames;
+        const availableKeys = keysFor(refList, row.valueFrom?.name);
+        return (
+          <div key={index} className="env-editor__row">
+            <input
+              className="env-editor__name"
+              value={row.name || ""}
+              onChange={(e) => update(index, { ...row, name: e.target.value })}
+              placeholder="VAR_NAME"
+              aria-label={`Variable ${index + 1} name`}
+            />
+            <select
+              className="env-editor__source"
+              value={source}
+              onChange={(e) => changeSource(index, row, e.target.value)}
+              aria-label={`Variable ${index + 1} source`}
+            >
+              {ENV_SOURCE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            {source === "value" ? (
+              <input
+                className="env-editor__value"
+                value={row.value ?? ""}
+                onChange={(e) => update(index, { ...row, value: e.target.value })}
+                placeholder="value"
+                aria-label={`Variable ${index + 1} value`}
+              />
+            ) : (
+              <div className="env-editor__ref">
+                <ComboInput
+                  listId={`envref-${source}-${index}`}
+                  value={row.valueFrom?.name || ""}
+                  onChange={(name) => {
+                    const keys = keysFor(refList, name);
+                    const currentKey = row.valueFrom?.key;
+                    const nextKey = keys.includes(currentKey) ? currentKey : keys[0] || "";
+                    update(index, { ...row, valueFrom: { ...row.valueFrom, kind: source, name, key: nextKey } });
+                  }}
+                  options={refNames}
+                  placeholder={source === "configMap" ? "configmap name" : "secret name"}
+                  ariaLabel={`Variable ${index + 1} source name`}
+                />
+                {availableKeys.length ? (
+                  <select
+                    value={row.valueFrom?.key || ""}
+                    onChange={(e) =>
+                      update(index, { ...row, valueFrom: { ...row.valueFrom, kind: source, key: e.target.value } })
+                    }
+                    aria-label={`Variable ${index + 1} source key`}
+                  >
+                    <option value="">— key —</option>
+                    {availableKeys.map((k) => (
+                      <option key={k} value={k}>
+                        {k}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <ComboInput
+                    listId={`envkey-${source}-${index}`}
+                    value={row.valueFrom?.key || ""}
+                    onChange={(key) =>
+                      update(index, { ...row, valueFrom: { ...row.valueFrom, kind: source, key } })
+                    }
+                    options={availableKeys}
+                    placeholder="key"
+                    ariaLabel={`Variable ${index + 1} source key`}
+                  />
+                )}
+              </div>
+            )}
+            <button type="button" className="btn-outline env-editor__remove" onClick={() => remove(index)}>
+              Remove
+            </button>
+          </div>
+        );
+      })}
+      <button type="button" className="btn-outline" onClick={add}>
+        + Add
+      </button>
+    </div>
+  );
+}
+
+function RefEditor({ rows, onChange, emptyName, resources, namePlaceholder, listPrefix }) {
+  const names = useMemo(() => resources.map((r) => r.name).filter(Boolean), [resources]);
+  const keysFor = (name) => resources.find((item) => item.name === name)?.keys || [];
+  const ensureRows = rows.length ? rows : [{ name: emptyName, keys: [] }];
+
+  const update = (index, next) => onChange(ensureRows.map((row, i) => (i === index ? next : row)));
+  const add = () => onChange([...ensureRows, { name: emptyName, keys: [] }]);
+  const remove = (index) => {
+    const next = ensureRows.filter((_, i) => i !== index);
+    onChange(next.length ? next : [{ name: emptyName, keys: [] }]);
+  };
+
+  return (
+    <div className="env-editor">
+      {ensureRows.map((row, index) => {
+        const available = keysFor(row.name);
+        return (
+          <div key={index} className="env-editor__row env-editor__row--ref">
+            <ComboInput
+              listId={`${listPrefix}-name-${index}`}
+              value={row.name || ""}
+              onChange={(name) => update(index, { ...row, name })}
+              options={names}
+              placeholder={namePlaceholder}
+              ariaLabel={`Reference ${index + 1} name`}
+            />
+            {available.length ? (
+              <KeyMultiSelect
+                selected={row.keys || []}
+                available={available}
+                onToggle={(k) =>
+                  update(index, {
+                    ...row,
+                    keys: (row.keys || []).includes(k)
+                      ? (row.keys || []).filter((x) => x !== k)
+                      : [...(row.keys || []), k],
+                  })
+                }
+                ariaLabel={`Reference ${index + 1} keys`}
+              />
+            ) : (
+              <input
+                className="env-editor__value"
+                value={(row.keys || []).join(",")}
+                onChange={(e) =>
+                  update(index, {
+                    ...row,
+                    keys: e.target.value
+                      ? e.target.value.split(",").map((k) => k.trim()).filter(Boolean)
+                      : [],
+                  })
+                }
+                placeholder="keys (comma-separated)"
+                aria-label={`Reference ${index + 1} keys`}
+              />
+            )}
+            <button type="button" className="btn-outline env-editor__remove" onClick={() => remove(index)}>
+              Remove
+            </button>
+          </div>
+        );
+      })}
+      <button type="button" className="btn-outline" onClick={add}>
+        + Add
+      </button>
+    </div>
+  );
+}
+
 export function StepEnvironment({ state, setState }) {
   const env = state.environment;
   const setEnv = (patch) => setState((s) => ({ ...s, environment: { ...s.environment, ...patch } }));
+  const { configMaps, secrets, loading } = useNamespaceConfigResources(
+    state.basics.clusterId,
+    state.basics.namespace,
+  );
 
   if (state.workloadType === "ConfigMap") {
     return (
@@ -525,46 +777,38 @@ export function StepEnvironment({ state, setState }) {
     <div className="wizard-step-panel">
       <WizardSectionHeader
         title="Environment Configuration"
-        subtitle="Optional configuration references. Empty rows are ready for your input."
+        subtitle={
+          state.basics.namespace
+            ? `Optional configuration. Dropdowns list ConfigMaps and Secrets found in ${state.basics.namespace}${loading ? " (loading…)" : ""}.`
+            : "Optional configuration references. Empty rows are ready for your input."
+        }
       />
       <Field label="Environment Variables">
-        <KeyValueEditor
-          items={env.envVars.map((r) => ({ name: r.name, value: r.value }))}
-          onChange={(rows) => setEnv({ envVars: rows.map((r) => ({ name: r.name ?? r.key ?? "", value: r.value ?? "" })) })}
-          emptyRow={{ ...EMPTY_ENV_VAR }}
-          keyPlaceholder="VAR_NAME"
+        <EnvVarsEditor
+          rows={env.envVars}
+          onChange={(rows) => setEnv({ envVars: rows })}
+          configMaps={configMaps}
+          secrets={secrets}
         />
       </Field>
       <Field label="ConfigMap References (name)">
-        <KeyValueEditor
-          items={env.configMapRefs.map((r) => ({ name: r.name, value: (r.keys || []).join(",") }))}
-          onChange={(rows) =>
-            setEnv({
-              configMapRefs: rows.map((r) => ({
-                name: r.name ?? r.key ?? "",
-                keys: r.value ? r.value.split(",").map((k) => k.trim()).filter(Boolean) : [],
-              })),
-            })
-          }
-          emptyRow={{ name: EMPTY_CONFIGMAP_REF.name, value: "" }}
-          keyPlaceholder="configmap-name"
-          valuePlaceholder="keys (optional, comma-separated)"
+        <RefEditor
+          rows={env.configMapRefs}
+          onChange={(rows) => setEnv({ configMapRefs: rows })}
+          emptyName={EMPTY_CONFIGMAP_REF.name}
+          resources={configMaps}
+          namePlaceholder="configmap-name"
+          listPrefix="cmref"
         />
       </Field>
       <Field label="Secret References (name)">
-        <KeyValueEditor
-          items={env.secretRefs.map((r) => ({ name: r.name, value: (r.keys || []).join(",") }))}
-          onChange={(rows) =>
-            setEnv({
-              secretRefs: rows.map((r) => ({
-                name: r.name ?? r.key ?? "",
-                keys: r.value ? r.value.split(",").map((k) => k.trim()).filter(Boolean) : [],
-              })),
-            })
-          }
-          emptyRow={{ name: EMPTY_SECRET_REF.name, value: "" }}
-          keyPlaceholder="secret-name"
-          valuePlaceholder="keys (optional)"
+        <RefEditor
+          rows={env.secretRefs}
+          onChange={(rows) => setEnv({ secretRefs: rows })}
+          emptyName={EMPTY_SECRET_REF.name}
+          resources={secrets}
+          namePlaceholder="secret-name"
+          listPrefix="secref"
         />
       </Field>
       <Field label="Mounted Configuration Files">

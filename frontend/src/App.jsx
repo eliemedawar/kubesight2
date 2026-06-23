@@ -46,6 +46,7 @@ import {
   resolveDisplayUser,
   getUserInitials,
 } from "./utils/formatters.js";
+import { applyTheme, storeThemePreference } from "./utils/theme.js";
 
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const NoFeaturesPage = lazy(() =>
@@ -119,6 +120,21 @@ export default function App() {
   const [testEmailMessage, setTestEmailMessage] = useState("");
   const [preferredLogPod, setPreferredLogPod] = useState("");
   const [resourceActiveTab, setResourceActiveTab] = useState("pods");
+  // Apply the selected theme (light/dark/system) to the document. Re-runs on
+  // change so the UI updates immediately, and follows the OS when "system".
+  useEffect(() => {
+    const preference = settingsDraft.theme || "system";
+    applyTheme(preference);
+    storeThemePreference(preference);
+    if (preference === "system" && typeof window !== "undefined" && window.matchMedia) {
+      const media = window.matchMedia("(prefers-color-scheme: light)");
+      const handler = () => applyTheme("system");
+      media.addEventListener("change", handler);
+      return () => media.removeEventListener("change", handler);
+    }
+    return undefined;
+  }, [settingsDraft.theme]);
+
   const applicationDetailRequestRef = useRef(0);
   const clusterContextClusterRef = useRef("");
   const upgradeLoadClusterRef = useRef("");
@@ -1143,6 +1159,7 @@ export default function App() {
             canRegister={hasPermission("inventory:register")}
             canDeploy={hasPermission("apps:deploy")}
             canHelmInstall={hasPermission("helm:install")}
+            canManageTemplates={isAdmin}
             onRefresh={loadInventory}
           />
         );

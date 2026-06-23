@@ -1,15 +1,14 @@
 export const WIZARD_STEPS = [
   { key: "basics", label: "Basics", number: 1 },
-  { key: "workload", label: "Workload", number: 2 },
-  { key: "containers", label: "Containers", number: 3 },
-  { key: "environment", label: "Environment", number: 4 },
-  { key: "resources", label: "Resources", number: 5 },
-  { key: "storage", label: "Storage", number: 6 },
-  { key: "networking", label: "Networking", number: 7 },
-  { key: "health", label: "Health", number: 8 },
-  { key: "scaling", label: "Scaling", number: 9 },
-  { key: "validation", label: "Validation", number: 10 },
-  { key: "review", label: "Review & Deploy", number: 11 },
+  { key: "containers", label: "Containers", number: 2 },
+  { key: "environment", label: "Environment", number: 3 },
+  { key: "resources", label: "Resources", number: 4 },
+  { key: "storage", label: "Storage", number: 5 },
+  { key: "networking", label: "Networking", number: 6 },
+  { key: "health", label: "Health", number: 7 },
+  { key: "scaling", label: "Scaling", number: 8 },
+  { key: "validation", label: "Validation", number: 9 },
+  { key: "review", label: "Review & Deploy", number: 10 },
 ];
 
 export const WORKLOAD_TYPES = [
@@ -361,7 +360,11 @@ export function applyTemplate(state, template) {
     next.environment = {
       ...next.environment,
       ...resolvedEnvironment,
-      envVars: (resolvedEnvironment.envVars || []).map((v) => ({ name: v.name || "", value: v.value ?? "" })),
+      envVars: (resolvedEnvironment.envVars || []).map((v) =>
+        v.valueFrom
+          ? { name: v.name || "", valueFrom: v.valueFrom }
+          : { name: v.name || "", value: v.value ?? "" },
+      ),
       configMapRefs: resolvedEnvironment.configMapRefs || [],
       secretRefs: resolvedEnvironment.secretRefs || [],
       mountedFiles: resolvedEnvironment.mountedFiles?.length
@@ -425,13 +428,21 @@ export function applyTemplate(state, template) {
 }
 
 function sanitizeEnvVars(envVars = []) {
-  return envVars.filter((v) => {
-    const name = String(v.name || "").trim();
-    const value = String(v.value ?? "").trim();
-    if (!name || name === ENV_VAR_NAME_PLACEHOLDER) return false;
-    if (!value) return false;
-    return true;
-  });
+  return envVars
+    .map((v) => {
+      const name = String(v.name || "").trim();
+      const vf = v.valueFrom || {};
+      // A reference-sourced var keeps its valueFrom and drops the plain value.
+      if (vf.kind && vf.name && vf.key) {
+        return { name, valueFrom: { kind: vf.kind, name: vf.name, key: vf.key } };
+      }
+      return { name, value: v.value ?? "" };
+    })
+    .filter((v) => {
+      if (!v.name || v.name === ENV_VAR_NAME_PLACEHOLDER) return false;
+      if (v.valueFrom) return true;
+      return Boolean(String(v.value ?? "").trim());
+    });
 }
 
 function sanitizeNamedRefs(refs = []) {

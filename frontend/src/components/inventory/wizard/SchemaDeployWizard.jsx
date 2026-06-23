@@ -1,0 +1,897 @@
+import { useEffect, useMemo, useState } from "react";
+
+import { applyWizardDeploy, resolveWizardTemplate } from "../../../api/inventoryApi.js";
+import {
+  listNamespaceConfigResources,
+  listNamespacesByCluster,
+  listStorageClasses,
+} from "../../../api/clustersApi.js";
+import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
+import YamlPreviewPanel from "./YamlPreviewPanel.jsx";
+
+const POD_KINDS = new Set(["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"]);
+const ACCESS_MODES = ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany"];
+const PV_TYPES = ["hostPath", "nfs", "local"];
+const RECLAIM_POLICIES = ["Retain", "Delete", "Recycle"];
+
+const SOURCE_LABELS = {
+  value: "Plain value",
+  existingConfigMap: "Existing ConfigMap",
+  createConfigMap: "Create ConfigMap",
+  existingSecret: "Existing Secret",
+  createSecret: "Create Secret",
+};
+
+/** A field forces the deployer's attention only when it's required and has no
+ * default. Everything else is auto-resolved (or optional) and collapsed. */
+function envNeedsInput(field) {
+  return Boolean(field.required && !field.default);
+}
+
+/** Build the initial answers from the template schema's defaults. */
+function initAnswers(template, defaultClusterId) {
+  const schema = template.schema || {};
+  const env = {};
+  for (const field of schema.env || []) {
+    const sources = field.allowedSources || ["value"];
+    env[field.key] = { source: sources[0], value: "", configMapName: "", secretName: "", key: field.key };
+  }
+  const ips = schema.imagePullSecret;
+  const ts = template.storage || {};
+  return {
+    basics: { appName: template.id || "", namespace: "", clusterId: defaultClusterId || "" },
+    overrides: {},
+    imagePullSecret: { mode: ips?.mode || "none", name: ips?.name || "", registry: "", username: "", password: "", email: "" },
+    env,
+    extraEnv: [],
+    storage: {
+      enabled: Boolean(ts.pvcMode && ts.pvcMode !== "none"),
+      mode: ts.pvcMode === "existing" ? "existing" : "new",
+      existingPvc: ts.existingPvc || "",
+      mountPath: ts.volumeMounts?.[0]?.mountPath || "/data",
+      newPvc: {
+        name: ts.newPvc?.name || `${template.id || "app"}-data`,
+        size: ts.newPvc?.size || "1Gi",
+        accessMode: ts.newPvc?.accessMode || "ReadWriteOnce",
+        storageClass: ts.newPvc?.storageClass || "",
+      },
+      pv: {
+        enabled: false, name: "", capacity: "", storageType: "hostPath", reclaimPolicy: "Retain",
+        hostPath: "", nfsServer: "", nfsPath: "", localPath: "", nodeName: "",
+      },
+    },
+    ingress: schema.ingress?.supported
+      ? { host: "", path: "/", tls: { mode: "none", secret: "", cert: "", key: "" } }
+      : null,
+    changeSummary: "",
+  };
+}
+
+/** Steps are derived from the schema — empty sections are skipped entirely. The
+ * Environment step appears whenever the template declares any variable; required
+ * ones are shown up front and optional/defaulted ones are collapsed. */
+function buildSteps(template) {
+  const schema = template.schema || {};
+  const steps = [{ key: "basics", label: "Basics" }];
+  // Environment is always available so deployers can add ad-hoc variables, even
+  // when the template declares none.
+  steps.push({ key: "environment", label: "Environment" });
+  if ((schema.dependencies || []).length) steps.push({ key: "dependencies", label: "Dependencies" });
+  // Storage is available for any pod workload so the deployer can attach a PVC/PV.
+  if (POD_KINDS.has(template.workloadType || "Deployment")) steps.push({ key: "storage", label: "Storage" });
+  if (schema.ingress?.supported) steps.push({ key: "ingress", label: "Ingress" });
+  steps.push({ key: "review", label: "Review & Deploy" });
+  return steps;
+}
+
+export default function SchemaDeployWizard({
+  open,
+  template,
+  onClose,
+  onSuccess,
+  clusterOptions = [],
+  defaultClusterId = "",
+}) {
+  const clusterSelectOptions = normalizeClusterOptions(clusterOptions);
+  const schema = template?.schema || {};
+  const overrides = schema.overrides || {};
+
+  const steps = useMemo(() => (template ? buildSteps(template) : []), [template]);
+  const [stepIndex, setStepIndex] = useState(0);
+  const [answers, setAnswers] = useState(() => initAnswers(template || {}, defaultClusterId));
+  const [resolved, setResolved] = useState(null);
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [namespaces, setNamespaces] = useState([]);
+  const [namespacesLoading, setNamespacesLoading] = useState(false);
+  const [configResources, setConfigResources] = useState({ configMaps: [], secrets: [] });
+  const [storageClasses, setStorageClasses] = useState([]);
+
+  const clusterId = answers.basics.clusterId;
+  const namespace = answers.basics.namespace;
+
+  useEffect(() => {
+    if (!open || !template) return;
+    setStepIndex(0);
+    setAnswers(initAnswers(template, defaultClusterId));
+    setResolved(null);
+    setConfirmation("");
+    setError("");
+  }, [open, template, defaultClusterId]);
+
+  // Load namespaces for the chosen cluster so the deployer picks from a list.
+  useEffect(() => {
+    if (!open || !clusterId) {
+      setNamespaces([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setNamespacesLoading(true);
+    listNamespacesByCluster(clusterId)
+      .then((res) => {
+        if (!cancelled) setNamespaces(Array.isArray(res?.items) ? res.items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setNamespaces([]);
+      })
+      .finally(() => {
+        if (!cancelled) setNamespacesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, clusterId]);
+
+  // Load the namespace's ConfigMaps/Secrets so "existing" sources offer real
+  // names and keys instead of free text.
+  useEffect(() => {
+    if (!open || !clusterId || !namespace) {
+      setConfigResources({ configMaps: [], secrets: [] });
+      return undefined;
+    }
+    let cancelled = false;
+    listNamespaceConfigResources(clusterId, namespace)
+      .then((res) => {
+        if (cancelled) return;
+        setConfigResources({
+          configMaps: Array.isArray(res?.configMaps) ? res.configMaps : [],
+          secrets: Array.isArray(res?.secrets) ? res.secrets : [],
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setConfigResources({ configMaps: [], secrets: [] });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, clusterId, namespace]);
+
+  // Storage classes for the chosen cluster (new-PVC picker).
+  useEffect(() => {
+    if (!open || !clusterId) {
+      setStorageClasses([]);
+      return undefined;
+    }
+    let cancelled = false;
+    listStorageClasses(clusterId)
+      .then((items) => {
+        if (!cancelled) setStorageClasses(Array.isArray(items) ? items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setStorageClasses([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, clusterId]);
+
+  if (!open || !template) return null;
+
+  const step = steps[stepIndex];
+  const confirmationPhrase = answers.basics.namespace ? `APPLY ${answers.basics.namespace}` : "";
+
+  const setBasics = (key, value) =>
+    setAnswers((a) => ({ ...a, basics: { ...a.basics, [key]: value } }));
+  const setOverride = (key, value) =>
+    setAnswers((a) => ({ ...a, overrides: { ...a.overrides, [key]: value } }));
+  const setEnv = (envKey, patch) =>
+    setAnswers((a) => ({ ...a, env: { ...a.env, [envKey]: { ...a.env[envKey], ...patch } } }));
+  const addExtraEnv = () =>
+    setAnswers((a) => ({
+      ...a,
+      extraEnv: [...a.extraEnv, { name: "", source: "value", value: "", configMapName: "", secretName: "", key: "" }],
+    }));
+  const updateExtraEnv = (index, patch) =>
+    setAnswers((a) => ({ ...a, extraEnv: a.extraEnv.map((row, i) => (i === index ? { ...row, ...patch } : row)) }));
+  const removeExtraEnv = (index) =>
+    setAnswers((a) => ({ ...a, extraEnv: a.extraEnv.filter((_, i) => i !== index) }));
+
+  // When a deployer picks "Create ConfigMap/Secret", default the resource name from
+  // the application name so related vars land in one resource (and stay editable).
+  const refDefaultName = (source) => {
+    const base = (answers.basics.appName || "app").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "app";
+    if (source === "createConfigMap") return `${base}-config`;
+    if (source === "createSecret") return `${base}-secret`;
+    return "";
+  };
+  const sourcePatch = (current, source) => {
+    const patch = { source };
+    if (source === "createConfigMap" && !current.configMapName) patch.configMapName = refDefaultName(source);
+    if (source === "createSecret" && !current.secretName) patch.secretName = refDefaultName(source);
+    return patch;
+  };
+  const changeEnvSource = (key, source) => setEnv(key, sourcePatch(answers.env[key] || {}, source));
+  const changeExtraSource = (index, source) => updateExtraEnv(index, sourcePatch(answers.extraEnv[index] || {}, source));
+  const setStorage = (patch) =>
+    setAnswers((a) => ({ ...a, storage: { ...a.storage, ...patch } }));
+  const setNewPvc = (patch) =>
+    setAnswers((a) => ({ ...a, storage: { ...a.storage, newPvc: { ...a.storage.newPvc, ...patch } } }));
+  const setPv = (patch) =>
+    setAnswers((a) => ({ ...a, storage: { ...a.storage, pv: { ...a.storage.pv, ...patch } } }));
+  const setIngress = (patch) =>
+    setAnswers((a) => ({ ...a, ingress: { ...a.ingress, ...patch } }));
+  const setTls = (patch) =>
+    setAnswers((a) => ({ ...a, ingress: { ...a.ingress, tls: { ...a.ingress.tls, ...patch } } }));
+  const setIps = (patch) =>
+    setAnswers((a) => ({ ...a, imagePullSecret: { ...a.imagePullSecret, ...patch } }));
+
+  const resolve = async () => {
+    const result = await resolveWizardTemplate(template.id, answers);
+    setResolved(result);
+    return result;
+  };
+
+  const basicsValid = answers.basics.appName.trim() && answers.basics.namespace.trim() && answers.basics.clusterId;
+
+  const goNext = async () => {
+    setError("");
+    const nextIndex = stepIndex + 1;
+    if (steps[nextIndex]?.key === "review") {
+      setBusy(true);
+      try {
+        await resolve();
+      } catch (err) {
+        setError(err.message || "Could not assemble the deployment.");
+        setBusy(false);
+        return;
+      }
+      setBusy(false);
+    }
+    setStepIndex(nextIndex);
+  };
+
+  const goBack = () => {
+    setError("");
+    if (stepIndex > 0) setStepIndex((i) => i - 1);
+  };
+
+  const deploy = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const payload = resolved?.payload || (await resolve()).payload;
+      const result = await applyWizardDeploy({ ...payload, confirmation });
+      onSuccess?.(result);
+      onClose();
+    } catch (err) {
+      setError(err.message || "Deploy failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const canProceed = step.key === "basics" ? basicsValid : true;
+
+  return (
+    <div className="modal-overlay wizard-overlay" role="presentation" onClick={onClose}>
+      <section
+        className="card modal-panel wizard-modal"
+        role="dialog"
+        aria-labelledby="schema-wizard-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="wizard-modal__header">
+          <div>
+            <h3 id="schema-wizard-title">Deploy {template.name}</h3>
+            <p className="muted">{template.description || "Fill in only what this template leaves open."}</p>
+          </div>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </header>
+
+        <nav className="wizard-stepper" aria-label="Deployment steps">
+          {steps.map((s, index) => (
+            <button
+              key={s.key}
+              type="button"
+              className={`wizard-stepper__item${index === stepIndex ? " is-active" : ""}${index < stepIndex ? " is-complete" : ""}`}
+              onClick={() => index < stepIndex && setStepIndex(index)}
+              disabled={index > stepIndex}
+            >
+              <span className="wizard-stepper__number">{index + 1}</span>
+              <span className="wizard-stepper__label">{s.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="wizard-modal__body">
+          {error ? <p className="error-banner">{error}</p> : null}
+
+          {step.key === "basics" ? (
+            <div className="wizard-step-panel">
+              <h4>Basics</h4>
+              <Field label="Application name">
+                <input value={answers.basics.appName} onChange={(e) => setBasics("appName", e.target.value)} placeholder="orders" />
+              </Field>
+              <Field label="Cluster">
+                <select value={answers.basics.clusterId} onChange={(e) => setBasics("clusterId", e.target.value)}>
+                  <option value="">— select cluster —</option>
+                  {clusterSelectOptions.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name || c.id}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Namespace">
+                <select
+                  value={answers.basics.namespace}
+                  onChange={(e) => setBasics("namespace", e.target.value)}
+                  disabled={!clusterId || namespacesLoading}
+                >
+                  <option value="">
+                    {!clusterId
+                      ? "select a cluster first"
+                      : namespacesLoading
+                        ? "loading namespaces…"
+                        : namespaces.length
+                          ? "— select namespace —"
+                          : "no namespaces found"}
+                  </option>
+                  {namespaces.map((ns) => {
+                    const nsName = ns.name || ns;
+                    return (
+                      <option key={nsName} value={nsName}>
+                        {nsName}
+                      </option>
+                    );
+                  })}
+                </select>
+              </Field>
+
+              {overrides.tag ? (
+                <Field label="Image tag">
+                  <input value={answers.overrides.tag || ""} onChange={(e) => setOverride("tag", e.target.value)} placeholder={template.containers?.[0]?.tag || "latest"} />
+                </Field>
+              ) : null}
+              {overrides.replicas ? (
+                <Field label="Replicas">
+                  <input
+                    type="number"
+                    min="0"
+                    value={answers.overrides.replicas ?? ""}
+                    onChange={(e) => setOverride("replicas", e.target.value)}
+                    placeholder={String(template.scaling?.replicas ?? 1)}
+                  />
+                </Field>
+              ) : null}
+              {overrides.storageSize ? (
+                <Field label="Storage size">
+                  <input value={answers.overrides.storageSize || ""} onChange={(e) => setOverride("storageSize", e.target.value)} placeholder={template.storage?.newPvc?.size || "1Gi"} />
+                </Field>
+              ) : null}
+              {Array.isArray(overrides.serviceType) && overrides.serviceType.length ? (
+                <Field label="Service type">
+                  <select value={answers.overrides.serviceType || ""} onChange={(e) => setOverride("serviceType", e.target.value)}>
+                    <option value="">{template.networking?.service?.type || "ClusterIP"} (default)</option>
+                    {overrides.serviceType.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                </Field>
+              ) : null}
+              {overrides.image ? (
+                <Field label="Image">
+                  <input value={answers.overrides.image || ""} onChange={(e) => setOverride("image", e.target.value)} placeholder={template.containers?.[0]?.image || ""} />
+                </Field>
+              ) : null}
+              {overrides.resources ? (
+                <div className="schema-override-grid">
+                  {["cpuRequest", "cpuLimit", "memoryRequest", "memoryLimit"].map((rk) => (
+                    <Field key={rk} label={rk}>
+                      <input
+                        value={answers.overrides.resources?.[rk] || ""}
+                        onChange={(e) => setOverride("resources", { ...answers.overrides.resources, [rk]: e.target.value })}
+                        placeholder={template.resources?.[rk] || ""}
+                      />
+                    </Field>
+                  ))}
+                </div>
+              ) : null}
+
+              {(() => {
+                const ipsSchema = schema.imagePullSecret;
+                const locked = Boolean(ipsSchema?.mode && !ipsSchema.overridable);
+                return (
+                <div className="schema-ips-block">
+                  <span className="wizard-field__label">Image pull secret</span>
+                  {locked ? (
+                    <p className="muted" style={{ margin: 0 }}>Mode: {answers.imagePullSecret?.mode}</p>
+                  ) : (
+                    <select value={answers.imagePullSecret?.mode || "none"} onChange={(e) => setIps({ mode: e.target.value })}>
+                      <option value="none">None</option>
+                      <option value="existing">Existing secret</option>
+                      <option value="create">Create secret</option>
+                    </select>
+                  )}
+                  {answers.imagePullSecret?.mode === "existing" ? (
+                    <Field label="Secret name">
+                      <input value={answers.imagePullSecret?.name || ""} onChange={(e) => setIps({ name: e.target.value })} placeholder="regcred" />
+                    </Field>
+                  ) : null}
+                  {answers.imagePullSecret?.mode === "create" ? (
+                    <>
+                      <Field label="Registry">
+                        <input value={answers.imagePullSecret?.registry || ""} onChange={(e) => setIps({ registry: e.target.value })} placeholder="https://index.docker.io/v1/" />
+                      </Field>
+                      <Field label="Username">
+                        <input value={answers.imagePullSecret?.username || ""} onChange={(e) => setIps({ username: e.target.value })} placeholder="robot$pull" />
+                      </Field>
+                      <Field label="Password / token">
+                        <input type="password" value={answers.imagePullSecret?.password || ""} onChange={(e) => setIps({ password: e.target.value })} />
+                      </Field>
+                    </>
+                  ) : null}
+                </div>
+                );
+              })()}
+            </div>
+          ) : null}
+
+          {step.key === "environment" ? (
+            <div className="wizard-step-panel">
+              <h4>Environment variables</h4>
+              {(() => {
+                const fields = schema.env || [];
+                const required = fields.filter(envNeedsInput);
+                const optional = fields.filter((f) => !envNeedsInput(f));
+                const renderField = (field) => {
+                  const ans = answers.env[field.key] || {};
+                  const allowed = field.allowedSources || ["value"];
+                  const source = ans.source || allowed[0];
+                  return (
+                    <div key={field.key} className="schema-env-card">
+                      <div className="schema-env-card__top">
+                        <strong>{field.key}</strong>
+                        {field.required ? <span className="schema-pill schema-pill--req">required</span> : <span className="schema-pill">optional</span>}
+                        {field.sensitive ? <span className="schema-pill schema-pill--sensitive">sensitive</span> : null}
+                      </div>
+                      {field.description ? <p className="muted" style={{ margin: 0 }}>{field.description}</p> : null}
+                      {/* Single allowed source → no dropdown, just the input. */}
+                      {allowed.length > 1 ? (
+                        <select value={source} onChange={(e) => changeEnvSource(field.key, e.target.value)} aria-label={`${field.key} source`}>
+                          {allowed.map((s) => (
+                            <option key={s} value={s}>{SOURCE_LABELS[s] || s}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <p className="muted" style={{ margin: 0 }}>Source: {SOURCE_LABELS[source] || source}</p>
+                      )}
+                      <EnvSourceInputs
+                        field={field}
+                        source={source}
+                        ans={ans}
+                        setEnv={(patch) => setEnv(field.key, patch)}
+                        configMaps={configResources.configMaps}
+                        secrets={configResources.secrets}
+                      />
+                    </div>
+                  );
+                };
+                return (
+                  <>
+                    {required.map(renderField)}
+                    {/* When nothing is strictly required, show the optional vars
+                        directly so they're never hidden; otherwise collapse them. */}
+                    {optional.length && required.length ? (
+                      <details className="schema-optional-env">
+                        <summary>{optional.length} optional variable{optional.length > 1 ? "s" : ""} (using defaults)</summary>
+                        <div className="schema-env-list" style={{ marginTop: "var(--space-3)" }}>
+                          {optional.map(renderField)}
+                        </div>
+                      </details>
+                    ) : (
+                      optional.map(renderField)
+                    )}
+                  </>
+                );
+              })()}
+
+              <div className="schema-extra-env">
+                <h5>Additional variables</h5>
+                <p className="muted" style={{ marginTop: 0 }}>
+                  Add variables beyond the template — each with any source.
+                </p>
+                {answers.extraEnv.length ? (
+                  <div className="schema-env-list">
+                    {answers.extraEnv.map((row, index) => {
+                      const pseudoField = { key: row.name || `variable ${index + 1}`, sensitive: false };
+                      return (
+                        <div key={index} className="schema-env-card">
+                          <div className="schema-env-card__top">
+                            <input
+                              value={row.name}
+                              onChange={(e) => updateExtraEnv(index, { name: e.target.value })}
+                              placeholder="VAR_NAME"
+                              aria-label={`Custom variable ${index + 1} name`}
+                              className="schema-env-card__key"
+                            />
+                            <select
+                              value={row.source}
+                              onChange={(e) => changeExtraSource(index, e.target.value)}
+                              aria-label={`Custom variable ${index + 1} source`}
+                            >
+                              {Object.entries(SOURCE_LABELS).map(([value, label]) => (
+                                <option key={value} value={value}>{label}</option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              className="btn-outline template-env-row__remove"
+                              onClick={() => removeExtraEnv(index)}
+                              aria-label={`Remove custom variable ${index + 1}`}
+                            >
+                              ×
+                            </button>
+                          </div>
+                          <EnvSourceInputs
+                            field={pseudoField}
+                            source={row.source}
+                            ans={row}
+                            setEnv={(patch) => updateExtraEnv(index, patch)}
+                            configMaps={configResources.configMaps}
+                            secrets={configResources.secrets}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                <button type="button" className="btn-outline" onClick={addExtraEnv}>
+                  + Add variable
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {step.key === "dependencies" ? (
+            <div className="wizard-step-panel">
+              <h4>Dependencies</h4>
+              <p className="muted" style={{ marginTop: 0 }}>
+                This application expects the following backing services to be available. Provision them separately.
+              </p>
+              {(schema.dependencies || []).map((dep) => (
+                <div key={dep.name} className="schema-dep-card">
+                  <div className="schema-dep-card__top">
+                    <strong>{dep.name}</strong>
+                    <span className="schema-pill">{dep.kind}</span>
+                    {dep.required ? (
+                      <span className="schema-pill schema-pill--req">required</span>
+                    ) : (
+                      <span className="schema-pill">optional</span>
+                    )}
+                  </div>
+                  {dep.note ? <p className="muted" style={{ margin: 0 }}>{dep.note}</p> : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {step.key === "storage" ? (
+            <div className="wizard-step-panel">
+              <h4>Storage</h4>
+              <label className="wizard-checkbox">
+                <input type="checkbox" checked={answers.storage.enabled} onChange={(e) => setStorage({ enabled: e.target.checked })} />
+                Attach persistent storage (PVC)
+              </label>
+              {answers.storage.enabled ? (
+                <>
+                  <Field label="PVC">
+                    <select value={answers.storage.mode} onChange={(e) => setStorage({ mode: e.target.value })}>
+                      <option value="new">Create new PVC</option>
+                      <option value="existing">Use existing PVC</option>
+                    </select>
+                  </Field>
+                  <Field label="Mount path">
+                    <input value={answers.storage.mountPath} onChange={(e) => setStorage({ mountPath: e.target.value })} placeholder="/data" />
+                  </Field>
+
+                  {answers.storage.mode === "existing" ? (
+                    <Field label="Existing PVC name">
+                      <input value={answers.storage.existingPvc} onChange={(e) => setStorage({ existingPvc: e.target.value })} placeholder="shared-data" />
+                    </Field>
+                  ) : (
+                    <>
+                      <div className="schema-override-grid">
+                        <Field label="PVC name">
+                          <input value={answers.storage.newPvc.name} onChange={(e) => setNewPvc({ name: e.target.value })} placeholder="data" />
+                        </Field>
+                        <Field label="Size">
+                          <input value={answers.storage.newPvc.size} onChange={(e) => setNewPvc({ size: e.target.value })} placeholder="1Gi" />
+                        </Field>
+                        <Field label="Access mode">
+                          <select value={answers.storage.newPvc.accessMode} onChange={(e) => setNewPvc({ accessMode: e.target.value })}>
+                            {ACCESS_MODES.map((m) => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                        </Field>
+                        <Field label="Storage class">
+                          {storageClasses.length ? (
+                            <select
+                              value={answers.storage.newPvc.storageClass}
+                              onChange={(e) => setNewPvc({ storageClass: e.target.value })}
+                              disabled={answers.storage.pv.enabled}
+                            >
+                              <option value="">(cluster default)</option>
+                              {storageClasses.map((sc) => (
+                                <option key={sc.name} value={sc.name}>{sc.default ? `${sc.name} (default)` : sc.name}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              value={answers.storage.newPvc.storageClass}
+                              onChange={(e) => setNewPvc({ storageClass: e.target.value })}
+                              placeholder="(cluster default)"
+                              disabled={answers.storage.pv.enabled}
+                            />
+                          )}
+                        </Field>
+                      </div>
+
+                      <details className="schema-optional-env">
+                        <summary>Advanced: manually create a PersistentVolume</summary>
+                        <label className="wizard-checkbox" style={{ marginTop: "var(--space-3)" }}>
+                          <input type="checkbox" checked={answers.storage.pv.enabled} onChange={(e) => setPv({ enabled: e.target.checked })} />
+                          Create a PersistentVolume and bind it to this PVC
+                        </label>
+                        {answers.storage.pv.enabled ? (
+                          <div className="schema-override-grid" style={{ marginTop: "var(--space-3)" }}>
+                            <Field label="PV name">
+                              <input value={answers.storage.pv.name} onChange={(e) => setPv({ name: e.target.value })} placeholder="(auto from PVC)" />
+                            </Field>
+                            <Field label="Capacity">
+                              <input value={answers.storage.pv.capacity} onChange={(e) => setPv({ capacity: e.target.value })} placeholder={answers.storage.newPvc.size} />
+                            </Field>
+                            <Field label="Volume type">
+                              <select value={answers.storage.pv.storageType} onChange={(e) => setPv({ storageType: e.target.value })}>
+                                {PV_TYPES.map((t) => (
+                                  <option key={t} value={t}>{t}</option>
+                                ))}
+                              </select>
+                            </Field>
+                            <Field label="Reclaim policy">
+                              <select value={answers.storage.pv.reclaimPolicy} onChange={(e) => setPv({ reclaimPolicy: e.target.value })}>
+                                {RECLAIM_POLICIES.map((p) => (
+                                  <option key={p} value={p}>{p}</option>
+                                ))}
+                              </select>
+                            </Field>
+                            {answers.storage.pv.storageType === "hostPath" ? (
+                              <Field label="Host path">
+                                <input value={answers.storage.pv.hostPath} onChange={(e) => setPv({ hostPath: e.target.value })} placeholder="/data" />
+                              </Field>
+                            ) : null}
+                            {answers.storage.pv.storageType === "nfs" ? (
+                              <>
+                                <Field label="NFS server">
+                                  <input value={answers.storage.pv.nfsServer} onChange={(e) => setPv({ nfsServer: e.target.value })} placeholder="10.0.0.10" />
+                                </Field>
+                                <Field label="NFS path">
+                                  <input value={answers.storage.pv.nfsPath} onChange={(e) => setPv({ nfsPath: e.target.value })} placeholder="/exports/data" />
+                                </Field>
+                              </>
+                            ) : null}
+                            {answers.storage.pv.storageType === "local" ? (
+                              <>
+                                <Field label="Local path">
+                                  <input value={answers.storage.pv.localPath} onChange={(e) => setPv({ localPath: e.target.value })} placeholder="/mnt/data" />
+                                </Field>
+                                <Field label="Node name">
+                                  <input value={answers.storage.pv.nodeName} onChange={(e) => setPv({ nodeName: e.target.value })} placeholder="worker-1" />
+                                </Field>
+                              </>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </details>
+                    </>
+                  )}
+                </>
+              ) : null}
+            </div>
+          ) : null}
+
+          {step.key === "ingress" ? (
+            <div className="wizard-step-panel">
+              <h4>Ingress</h4>
+              <Field label="Host">
+                <input value={answers.ingress?.host || ""} onChange={(e) => setIngress({ host: e.target.value })} placeholder="orders.example.com" />
+              </Field>
+              <Field label="Path">
+                <input value={answers.ingress?.path || ""} onChange={(e) => setIngress({ path: e.target.value })} placeholder="/" />
+              </Field>
+              {schema.ingress?.tls ? (
+                <>
+                  <Field label="TLS">
+                    <select value={answers.ingress?.tls?.mode || "none"} onChange={(e) => setTls({ mode: e.target.value })}>
+                      <option value="none">No TLS</option>
+                      <option value="existing">Existing certificate secret</option>
+                      <option value="create">Create new certificate secret</option>
+                    </select>
+                  </Field>
+                  {answers.ingress?.tls?.mode === "existing" ? (
+                    (() => {
+                      const tlsSecrets = configResources.secrets.filter((s) => s.type === "kubernetes.io/tls");
+                      return (
+                        <Field label="TLS secret">
+                          {tlsSecrets.length ? (
+                            <select value={answers.ingress?.tls?.secret || ""} onChange={(e) => setTls({ secret: e.target.value })}>
+                              <option value="">— select TLS secret —</option>
+                              {tlsSecrets.map((s) => (
+                                <option key={s.name} value={s.name}>{s.name}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input value={answers.ingress?.tls?.secret || ""} onChange={(e) => setTls({ secret: e.target.value })} placeholder="no TLS secrets — type a name" />
+                          )}
+                        </Field>
+                      );
+                    })()
+                  ) : null}
+                  {answers.ingress?.tls?.mode === "create" ? (
+                    <>
+                      <Field label="New secret name">
+                        <input value={answers.ingress?.tls?.secret || ""} onChange={(e) => setTls({ secret: e.target.value })} placeholder="orders-tls" />
+                      </Field>
+                      <Field label="Certificate (tls.crt)">
+                        <textarea rows={4} value={answers.ingress?.tls?.cert || ""} onChange={(e) => setTls({ cert: e.target.value })} placeholder="-----BEGIN CERTIFICATE-----" />
+                      </Field>
+                      <Field label="Private key (tls.key)">
+                        <textarea rows={4} value={answers.ingress?.tls?.key || ""} onChange={(e) => setTls({ key: e.target.value })} placeholder="-----BEGIN PRIVATE KEY-----" />
+                      </Field>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          ) : null}
+
+          {step.key === "review" ? (
+            <div className="wizard-step-panel">
+              <h4>Review &amp; Deploy</h4>
+              {resolved?.summary ? (
+                <ul className="schema-review-summary">
+                  <li><span>Application</span><strong>{resolved.summary.appName}</strong></li>
+                  <li><span>Namespace</span><strong>{resolved.summary.namespace}</strong></li>
+                  <li><span>Workload</span><strong>{resolved.summary.workloadType}</strong></li>
+                  <li><span>Resources</span><strong>{(resolved.summary.resources || []).map((r) => r.kind).join(", ")}</strong></li>
+                </ul>
+              ) : null}
+              <Field label="Change summary">
+                <input value={answers.changeSummary} onChange={(e) => setAnswers((a) => ({ ...a, changeSummary: e.target.value }))} placeholder="Initial deploy" />
+              </Field>
+              <details className="schema-yaml-disclosure">
+                <summary>View generated manifests</summary>
+                <YamlPreviewPanel yaml={resolved?.yaml || ""} readOnly />
+              </details>
+              <Field label={`Confirmation — type "${confirmationPhrase}"`}>
+                <input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder={confirmationPhrase} />
+              </Field>
+            </div>
+          ) : null}
+        </div>
+
+        <footer className="wizard-modal__footer modal-actions">
+          <button type="button" className="btn-outline" onClick={stepIndex === 0 ? onClose : goBack} disabled={busy}>
+            {stepIndex === 0 ? "Cancel" : "Back"}
+          </button>
+          {step.key === "review" ? (
+            <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase}>
+              {busy ? "Deploying…" : "Deploy Application"}
+            </button>
+          ) : (
+            <button type="button" className="btn-primary" onClick={goNext} disabled={busy || !canProceed}>
+              {busy ? "Working…" : "Next"}
+            </button>
+          )}
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+/** Name + key picker for an "existing ConfigMap/Secret" source. Renders dropdowns
+ * populated from the namespace's resources, falling back to free text when the
+ * list is empty (e.g. namespace not yet selected or RBAC blocks the listing). */
+function ExistingRefPicker({ resources, nameKey, ans, setEnv, nameLabel }) {
+  const name = ans[nameKey] || "";
+  const selected = resources.find((r) => r.name === name);
+  const keys = selected?.keys || [];
+  // Choosing a resource pre-selects its first key when the current one is invalid.
+  const onNameChange = (value) => {
+    const match = resources.find((r) => r.name === value);
+    const matchKeys = match?.keys || [];
+    const nextKey = matchKeys.includes(ans.key) ? ans.key : matchKeys[0] || "";
+    setEnv({ [nameKey]: value, key: nextKey });
+  };
+  return (
+    <div className="schema-ref-inputs">
+      {resources.length ? (
+        <select value={name} onChange={(e) => onNameChange(e.target.value)} aria-label={nameLabel}>
+          <option value="">— select {nameLabel} —</option>
+          {resources.map((r) => (
+            <option key={r.name} value={r.name}>{r.name}</option>
+          ))}
+        </select>
+      ) : (
+        <input value={name} onChange={(e) => setEnv({ [nameKey]: e.target.value })} placeholder={nameLabel} />
+      )}
+      {keys.length ? (
+        <select value={ans.key || ""} onChange={(e) => setEnv({ key: e.target.value })} aria-label="key">
+          <option value="">— select key —</option>
+          {keys.map((k) => (
+            <option key={k} value={k}>{k}</option>
+          ))}
+        </select>
+      ) : (
+        <input value={ans.key || ""} onChange={(e) => setEnv({ key: e.target.value })} placeholder="key" />
+      )}
+    </div>
+  );
+}
+
+function EnvSourceInputs({ field, source, ans, setEnv, configMaps = [], secrets = [] }) {
+  const valueType = field.sensitive ? "password" : "text";
+  if (source === "value") {
+    return (
+      <input
+        type={valueType}
+        value={ans.value || ""}
+        onChange={(e) => setEnv({ value: e.target.value })}
+        placeholder="value"
+        aria-label={`${field.key} value`}
+      />
+    );
+  }
+  if (source === "existingConfigMap") {
+    return <ExistingRefPicker resources={configMaps} nameKey="configMapName" ans={ans} setEnv={setEnv} nameLabel="configmap name" />;
+  }
+  if (source === "createConfigMap") {
+    return (
+      <div className="schema-ref-inputs">
+        <input value={ans.configMapName || ""} onChange={(e) => setEnv({ configMapName: e.target.value })} placeholder="configmap name" />
+        <input value={ans.key || ""} onChange={(e) => setEnv({ key: e.target.value })} placeholder="key" />
+        <input value={ans.value || ""} onChange={(e) => setEnv({ value: e.target.value })} placeholder="value" />
+      </div>
+    );
+  }
+  if (source === "existingSecret") {
+    return <ExistingRefPicker resources={secrets} nameKey="secretName" ans={ans} setEnv={setEnv} nameLabel="secret name" />;
+  }
+  // createSecret
+  return (
+    <div className="schema-ref-inputs">
+      <input value={ans.secretName || ""} onChange={(e) => setEnv({ secretName: e.target.value })} placeholder="secret name" />
+      <input value={ans.key || ""} onChange={(e) => setEnv({ key: e.target.value })} placeholder="key" />
+      <input type="password" value={ans.value || ""} onChange={(e) => setEnv({ value: e.target.value })} placeholder="value" />
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <label className="wizard-field">
+      <span className="wizard-field__label">{label}</span>
+      {children}
+    </label>
+  );
+}

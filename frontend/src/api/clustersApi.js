@@ -31,6 +31,11 @@ export const listStorageClasses = (clusterId) =>
 export const listClusterNodes = (clusterId) =>
   request(`/api/clusters/${encodeURIComponent(clusterId)}/nodes`);
 
+export const listNamespaceConfigResources = (clusterId, namespace) =>
+  request(
+    `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/config-resources`
+  );
+
 export const getResourcesByClusterNamespace = (clusterId, namespace) =>
   request(
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources`

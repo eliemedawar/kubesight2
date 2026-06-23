@@ -81,6 +81,21 @@ export function getWizardTemplate(templateId) {
   return request(`/api/inventory/deploy/wizard/templates/${templateId}`);
 }
 
+export function resolveWizardTemplate(templateId, answers) {
+  return request(`/api/inventory/deploy/wizard/templates/${templateId}/resolve`, {
+    method: "POST",
+    body: answers,
+  });
+}
+
+export function createWizardTemplate(payload) {
+  return request("/api/inventory/deploy/wizard/templates", { method: "POST", body: payload });
+}
+
+export function deleteWizardTemplate(templateId) {
+  return request(`/api/inventory/deploy/wizard/templates/${templateId}`, { method: "DELETE" });
+}
+
 export function validateWizardName(payload) {
   return request("/api/inventory/deploy/wizard/validate-name", { method: "POST", body: payload });
 }

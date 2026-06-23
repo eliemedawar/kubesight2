@@ -74,7 +74,7 @@ export const NAV_PAGES = [
     section: "Infrastructure",
   },
   { key: "namespaces", label: "Namespaces", permission: "namespaces:view", section: "Infrastructure" },
-  { key: "inventory", label: "Applications", permission: "inventory:view", section: "Workloads" },
+  { key: "inventory", label: "Inventory", permission: "inventory:view", section: "Workloads" },
   { key: "resources", label: "Resources", permission: "resources:view", section: "Workloads" },
   { key: "logs", label: "Logs", permission: "logs:view", section: "Monitoring" },
   { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Monitoring" },

@@ -772,6 +772,39 @@ class ClientApplicationService(db.Model):
     service = db.relationship("ApplicationService", back_populates="client_links")
 
 
+class UserTemplate(db.Model):
+    """Admin-authored application templates for the Application Builder marketplace.
+
+    Stored alongside the built-in templates in wizard_templates.py. The full
+    builder spec (containers, resources, networking, etc.) lives in `spec`; the
+    top-level columns mirror the summary fields the marketplace lists by.
+    """
+
+    __tablename__ = "user_templates"
+
+    id = db.Column(db.Integer, primary_key=True)
+    slug = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    name = db.Column(db.String(120), nullable=False)
+    description = db.Column(db.String(500), nullable=True)
+    category = db.Column(db.String(80), nullable=False, default="Custom")
+    workload_type = db.Column(db.String(40), nullable=False, default="Deployment")
+    spec = db.Column(db.JSON, nullable=False, default=dict)
+    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    creator = db.relationship("User", foreign_keys=[created_by])
+
+
 class ApiToken(db.Model):
     __tablename__ = "api_tokens"
 

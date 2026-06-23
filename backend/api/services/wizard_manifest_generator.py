@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -100,8 +101,21 @@ def _container_spec(
 
     env_list: List[Dict[str, Any]] = []
     for item in environment.get("envVars") or []:
-        if item.get("name"):
-            env_list.append({"name": item["name"], "value": str(item.get("value") or "")})
+        name = item.get("name")
+        if not name:
+            continue
+        value_from = item.get("valueFrom") or {}
+        kind = value_from.get("kind")
+        ref_name = value_from.get("name")
+        ref_key = value_from.get("key")
+        if kind in ("configMap", "secret") and ref_name and ref_key:
+            ref_field = "configMapKeyRef" if kind == "configMap" else "secretKeyRef"
+            env_list.append({
+                "name": name,
+                "valueFrom": {ref_field: {"name": ref_name, "key": ref_key}},
+            })
+        else:
+            env_list.append({"name": name, "value": str(item.get("value") or "")})
     for ref in environment.get("configMapRefs") or []:
         cm_name = ref.get("name")
         if not cm_name:
@@ -274,6 +288,75 @@ def _append_pvc_documents(
     })
 
 
+def _provisioned_config_documents(
+    environment: Dict[str, Any],
+    namespace: str,
+    labels: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """Build ConfigMap/Secret documents the resolver asked us to create.
+
+    These come from "Create ConfigMap"/"Create Secret" env sources (and dependency
+    wiring). The matching env entries already reference them via ``valueFrom``.
+    """
+    docs: List[Dict[str, Any]] = []
+    for cm in environment.get("provisionedConfigMaps") or []:
+        name = _sanitize_name(cm.get("name") or "config")
+        data = {str(k): str(v) for k, v in (cm.get("data") or {}).items() if k}
+        if not data:
+            continue
+        docs.append({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": name, "namespace": namespace, "labels": labels},
+            "data": data,
+        })
+    for sec in environment.get("provisionedSecrets") or []:
+        name = _sanitize_name(sec.get("name") or "secret")
+        data = {str(k): str(v) for k, v in (sec.get("stringData") or {}).items() if k}
+        if not data:
+            continue
+        docs.append({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": namespace, "labels": labels},
+            "type": "Opaque",
+            "stringData": data,
+        })
+    for sec in environment.get("provisionedDockerSecrets") or []:
+        name = _sanitize_name(sec.get("name") or "registry")
+        registry = (sec.get("registry") or "https://index.docker.io/v1/").strip()
+        username = sec.get("username") or ""
+        password = sec.get("password") or ""
+        if not username and not password:
+            continue
+        auth = base64.b64encode(f"{username}:{password}".encode()).decode()
+        entry: Dict[str, Any] = {"username": username, "password": password, "auth": auth}
+        if sec.get("email"):
+            entry["email"] = sec["email"]
+        dockercfg = json.dumps({"auths": {registry: entry}})
+        docs.append({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": namespace, "labels": labels},
+            "type": "kubernetes.io/dockerconfigjson",
+            "stringData": {".dockerconfigjson": dockercfg},
+        })
+    for sec in environment.get("provisionedTlsSecrets") or []:
+        name = _sanitize_name(sec.get("name") or "tls")
+        cert = sec.get("cert") or ""
+        key = sec.get("key") or ""
+        if not cert or not key:
+            continue
+        docs.append({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": namespace, "labels": labels},
+            "type": "kubernetes.io/tls",
+            "stringData": {"tls.crt": cert, "tls.key": key},
+        })
+    return docs
+
+
 def _build_probe(probe: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     probe_type = probe.get("type") or "http"
     initial_delay = int(probe.get("initialDelaySeconds") or 5)
@@ -332,6 +415,15 @@ def _pod_template(
     pod_spec: Dict[str, Any] = {"containers": container_specs}
     if volumes:
         pod_spec["volumes"] = volumes
+
+    # Pull secrets are pod-level; collect the distinct names referenced by containers.
+    pull_secrets: List[str] = []
+    for container in containers:
+        name = (container.get("imagePullSecret") or "").strip()
+        if name and name not in pull_secrets:
+            pull_secrets.append(name)
+    if pull_secrets:
+        pod_spec["imagePullSecrets"] = [{"name": _sanitize_name(n)} for n in pull_secrets]
 
     meta: Dict[str, Any] = {"labels": labels}
     if annotations:
@@ -453,6 +545,10 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
     scaling = payload.get("scaling") or {}
 
     documents: List[Dict[str, Any]] = []
+
+    # ConfigMaps/Secrets created from "Create ConfigMap/Secret" sources and
+    # dependency wiring are emitted first so the workload can reference them.
+    documents.extend(_provisioned_config_documents(environment, namespace, labels))
 
     if workload_type in WORKLOAD_KINDS:
         pod_template = _pod_template(

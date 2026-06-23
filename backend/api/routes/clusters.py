@@ -29,6 +29,7 @@ from ..k8s_provider import (
     invalidate_cluster_list_cache,
     list_clusters_from_k8s,
     list_namespaces_from_k8s,
+    list_configmaps_secrets_from_k8s,
     list_nodes_from_k8s,
     list_storage_classes_from_k8s,
     namespace_events_from_k8s,
@@ -345,6 +346,37 @@ def cluster_storage_classes(cluster_id: str):
     if items is None:
         return error_response("Cluster not found", 404)
     return success_response(items)
+
+
+@clusters_bp.route("/<cluster_id>/namespaces/<namespace>/config-resources", methods=["GET"])
+@require_permission("resources:view")
+@require_cluster_access
+@require_namespace_access
+def namespace_config_resources(cluster_id: str, namespace: str):
+    """ConfigMap and Secret names (and their keys) for the deployment wizard."""
+    access, err = _resolve_cluster_access_or_error(cluster_id)
+    if err:
+        return err
+    if access:
+        try:
+            return success_response(list_configmaps_secrets_from_k8s(access, namespace))
+        except K8sCommandError as exc:
+            return error_response(f"Failed to load config resources: {exc}", 503)
+
+    # Mock mode: surface names from the canned namespace resources (no real keys).
+    cluster_resources = NAMESPACE_RESOURCES.get(cluster_id) or {}
+    ns_resources = cluster_resources.get(namespace) or {}
+    config_maps = [
+        {"name": cm.get("name", ""), "keys": []}
+        for cm in ns_resources.get("configMaps", [])
+        if cm.get("name")
+    ]
+    secrets = [
+        {"name": sec.get("name", ""), "type": sec.get("type") or "Opaque", "keys": []}
+        for sec in ns_resources.get("secrets", [])
+        if sec.get("name")
+    ]
+    return success_response({"configMaps": config_maps, "secrets": secrets})
 
 
 @clusters_bp.route("/<cluster_id>/namespaces", methods=["GET"])
