@@ -423,9 +423,30 @@ export default function SchemaDeployWizard({
                     </select>
                   )}
                   {answers.imagePullSecret?.mode === "existing" ? (
-                    <Field label="Secret name">
-                      <input value={answers.imagePullSecret?.name || ""} onChange={(e) => setIps({ name: e.target.value })} placeholder="regcred" />
-                    </Field>
+                    (() => {
+                      // Image pull secrets are docker-registry secrets; surface those
+                      // first, falling back to all secrets, then to free text.
+                      const dockerSecrets = configResources.secrets.filter(
+                        (s) => s.type === "kubernetes.io/dockerconfigjson" || s.type === "kubernetes.io/dockercfg",
+                      );
+                      const pickable = dockerSecrets.length ? dockerSecrets : configResources.secrets;
+                      return (
+                        <Field label="Secret name">
+                          <select
+                            value={answers.imagePullSecret?.name || ""}
+                            onChange={(e) => setIps({ name: e.target.value })}
+                            disabled={!pickable.length}
+                          >
+                            <option value="">
+                              {pickable.length ? "— select secret —" : "no existing secrets"}
+                            </option>
+                            {pickable.map((s) => (
+                              <option key={s.name} value={s.name}>{s.name}</option>
+                            ))}
+                          </select>
+                        </Field>
+                      );
+                    })()
                   ) : null}
                   {answers.imagePullSecret?.mode === "create" ? (
                     <>
