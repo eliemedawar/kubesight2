@@ -207,6 +207,8 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  // Which button is mid-flight, so we can label just that one "Saving…".
+  const [pendingAction, setPendingAction] = useState("");
   const isEditing = Boolean(template);
 
   const categoryOptions = useMemo(() => {
@@ -227,6 +229,7 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
       setForm(template ? formFromTemplate(template) : freshForm(categoryOptions[0] || NEW_CATEGORY));
       setError("");
       setSaving(false);
+      setPendingAction("");
     }
   }, [open, template, categoryOptions]);
 
@@ -331,7 +334,9 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
 
   const slug = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-  const handleSubmit = async () => {
+  // `asNewVersion` forks the edited template into a fresh "vN" copy instead of
+  // overwriting the original — the parent decides the new name and calls create.
+  const handleSubmit = async (asNewVersion = false) => {
     setError("");
     const name = form.name.trim();
     if (!name) {
@@ -454,11 +459,18 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
     if (Object.keys(schema).length) payload.schema = schema;
 
     setSaving(true);
+    setPendingAction(asNewVersion ? "version" : "save");
     try {
-      await onSubmit(payload);
+      await onSubmit(payload, { asNewVersion });
     } catch (err) {
-      setError(err.message || (isEditing ? "Failed to update template." : "Failed to create template."));
+      const fallback = asNewVersion
+        ? "Failed to create new version."
+        : isEditing
+          ? "Failed to update template."
+          : "Failed to create template.";
+      setError(err.message || fallback);
       setSaving(false);
+      setPendingAction("");
     }
   };
 
@@ -877,8 +889,19 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
           <button type="button" className="btn-outline" onClick={onClose} disabled={saving}>
             Cancel
           </button>
-          <button type="button" className="primary" onClick={handleSubmit} disabled={saving}>
-            {saving ? "Saving…" : isEditing ? "Save Changes" : "Create Template"}
+          {isEditing ? (
+            <button
+              type="button"
+              className="btn-outline"
+              onClick={() => handleSubmit(true)}
+              disabled={saving}
+              title="Save these changes as a new version, leaving the original untouched"
+            >
+              {pendingAction === "version" ? "Saving…" : "Save as New Version"}
+            </button>
+          ) : null}
+          <button type="button" className="primary" onClick={() => handleSubmit(false)} disabled={saving}>
+            {pendingAction === "save" ? "Saving…" : isEditing ? "Save Changes" : "Create Template"}
           </button>
         </div>
       </div>

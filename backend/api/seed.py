@@ -441,7 +441,11 @@ def seed_defaults() -> None:
         with _flask_app.app_context():
             _sync_demo_users_to_discovered_clusters()
 
-    threading.Thread(target=_bg_k8s_sync, daemon=True, name="seed-k8s-sync").start()
+    # Skip the background sync under tests: it is a no-op in mock mode and its
+    # app-context teardown races with the in-memory SQLite connection, rolling
+    # back the just-seeded rows before this function commits.
+    if not _flask_app.config.get("TESTING"):
+        threading.Thread(target=_bg_k8s_sync, daemon=True, name="seed-k8s-sync").start()
 
     _repair_incomplete_namespace_resource_grants()
     _repair_full_cluster_view_permissions()

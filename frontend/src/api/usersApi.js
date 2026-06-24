@@ -6,6 +6,8 @@ export const createUser = (payload) => request("/api/users", { method: "POST", b
 export const updateUser = (id, payload) =>
   request(`/api/users/${id}`, { method: "PUT", body: payload });
 export const disableUser = (id) => request(`/api/users/${id}`, { method: "DELETE" });
+export const deleteUser = (id) =>
+  request(`/api/users/${id}/permanent`, { method: "DELETE" });
 
 export const listUserAccessRules = (userId) =>
   request(`/api/users/${userId}/access-rules`);

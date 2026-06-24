@@ -19,6 +19,7 @@ from .application_services import app_services_bp
 from .clients import clients_bp
 from .ai import ai_bp
 from .api_tokens import api_tokens_bp
+from .deployment_requests import deployment_requests_bp
 
 
 def register_blueprints(app: Flask) -> None:
@@ -41,3 +42,4 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(clients_bp)
     app.register_blueprint(ai_bp)
     app.register_blueprint(api_tokens_bp)
+    app.register_blueprint(deployment_requests_bp)

@@ -104,3 +104,73 @@ def disable_user(user_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str],
         details={"username": user.username},
     )
     return {"id": user.id, "isActive": False}, None, 200
+
+
+def delete_user(user_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Permanently remove a user.
+
+    Cascades the user's own access entries/rules, deletes their API tokens, and
+    nulls out references that merely attribute past activity (audit logs, created
+    catalog entries, deployment requests, alert receivers) so history is kept.
+    """
+    from ..access import is_admin
+    from ..models import (
+        AlertPolicy,
+        AlertRoutingReceiver,
+        ApiToken,
+        AppCatalogEntry,
+        ApplicationDeploymentVersion,
+        AuditLog,
+        DeploymentRequest,
+        UserTemplate,
+    )
+
+    user = User.query.get(user_id)
+    if not user:
+        return None, "User not found", 404
+    if is_admin(user) and active_admin_count() <= 1:
+        return None, "Cannot delete the last active admin", 400
+
+    username = user.username
+
+    # Detach references that only record who did something (preserve the history).
+    AuditLog.query.filter_by(actor_user_id=user_id).update(
+        {"actor_user_id": None}, synchronize_session=False
+    )
+    AppCatalogEntry.query.filter_by(created_by_user_id=user_id).update(
+        {"created_by_user_id": None}, synchronize_session=False
+    )
+    ApplicationDeploymentVersion.query.filter_by(created_by_user_id=user_id).update(
+        {"created_by_user_id": None}, synchronize_session=False
+    )
+    AlertPolicy.query.filter_by(created_by_user_id=user_id).update(
+        {"created_by_user_id": None}, synchronize_session=False
+    )
+    UserTemplate.query.filter_by(created_by=user_id).update(
+        {"created_by": None}, synchronize_session=False
+    )
+    DeploymentRequest.query.filter_by(requester_id=user_id).update(
+        {"requester_id": None}, synchronize_session=False
+    )
+    DeploymentRequest.query.filter_by(decided_by_user_id=user_id).update(
+        {"decided_by_user_id": None}, synchronize_session=False
+    )
+    # Alert receivers linked to this user no longer resolve to anyone.
+    AlertRoutingReceiver.query.filter_by(user_id=user_id).update(
+        {"user_id": None}, synchronize_session=False
+    )
+    # API tokens have a non-null user_id — remove them outright.
+    ApiToken.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+
+    # User-owned access entries/rules cascade via the relationships.
+    db.session.delete(user)
+    db.session.commit()
+
+    log_audit(
+        "user_deleted",
+        actor=get_current_user(),
+        target_type="user",
+        target_id=str(user_id),
+        details={"username": username},
+    )
+    return {"id": user_id, "deleted": True}, None, 200

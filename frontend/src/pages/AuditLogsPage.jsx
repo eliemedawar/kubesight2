@@ -1,8 +1,25 @@
 import { useEffect, useMemo, useState } from "react";
-import { listAuditLogs } from "../api";
+import { listAuditLogs, listClusters } from "../api";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
+
+// Audit entries reference a cluster in a few ways depending on the action:
+// deployment requests store it in details.clusterId; cluster/namespace/resource
+// targets encode it in targetId (e.g. "cluster" or "cluster/namespace/name").
+const CLUSTER_PREFIXED_TARGETS = ["namespace", "pod", "deployment", "service", "resource"];
+
+function clusterOf(entry) {
+  const details = entry.details || {};
+  if (details.clusterId) return String(details.clusterId);
+  if (details.cluster) return String(details.cluster);
+  const targetId = entry.targetId || "";
+  if (entry.targetType === "cluster" && targetId) return targetId;
+  if (CLUSTER_PREFIXED_TARGETS.includes(entry.targetType) && targetId.includes("/")) {
+    return targetId.split("/")[0];
+  }
+  return null;
+}
 
 export default function AuditLogsPage() {
   const [entries, setEntries] = useState([]);
@@ -10,6 +27,8 @@ export default function AuditLogsPage() {
   const [error, setError] = useState("");
   const [actorFilter, setActorFilter] = useState("");
   const [actionFilter, setActionFilter] = useState("");
+  const [clusterFilter, setClusterFilter] = useState("");
+  const [clusterNameById, setClusterNameById] = useState({});
 
   useEffect(() => {
     const load = async () => {
@@ -21,6 +40,17 @@ export default function AuditLogsPage() {
         setError(err.message);
       } finally {
         setLoading(false);
+      }
+      // Resolve cluster IDs to names (best-effort; auditors may lack cluster view).
+      try {
+        const clustersRes = await listClusters();
+        const map = {};
+        (clustersRes.items || []).forEach((c) => {
+          if (c.id) map[c.id] = c.name || c.id;
+        });
+        setClusterNameById(map);
+      } catch {
+        // Ignore — fall back to IDs (and any names found in audit details).
       }
     };
     load();
@@ -35,15 +65,41 @@ export default function AuditLogsPage() {
     return [...seen].sort();
   }, [entries]);
 
+  // Merge names from the cluster list with any clusterName captured in audit
+  // details (covers clusters that were since deleted).
+  const clusterLabels = useMemo(() => {
+    const map = {};
+    entries.forEach((e) => {
+      const id = clusterOf(e);
+      const name = e.details?.clusterName || e.details?.cluster_name;
+      if (id && name) map[id] = String(name);
+    });
+    return { ...map, ...clusterNameById };
+  }, [entries, clusterNameById]);
+
+  const clusterLabel = (id) => clusterLabels[id] || id;
+
+  const uniqueClusters = useMemo(() => {
+    const seen = new Set();
+    entries.forEach((e) => {
+      const cluster = clusterOf(e);
+      if (cluster) seen.add(cluster);
+    });
+    return [...seen].sort((a, b) =>
+      clusterLabel(a).localeCompare(clusterLabel(b))
+    );
+  }, [entries, clusterLabels]);
+
   const filtered = useMemo(() => {
     return entries.filter((e) => {
       const actor = (e.actorUsername || e.actorUserId || "").toLowerCase();
       const action = (e.action || "").toLowerCase();
       if (actorFilter && actor !== actorFilter.toLowerCase()) return false;
       if (actionFilter && !action.includes(actionFilter.toLowerCase())) return false;
+      if (clusterFilter && clusterOf(e) !== clusterFilter) return false;
       return true;
     });
-  }, [entries, actorFilter, actionFilter]);
+  }, [entries, actorFilter, actionFilter, clusterFilter]);
 
   return (
     <div className="ops-page">
@@ -74,12 +130,24 @@ export default function AuditLogsPage() {
                 onChange={(e) => setActionFilter(e.target.value)}
               />
             </label>
-            {(actorFilter || actionFilter) && (
+            <label className="user-filters__search">
+              Cluster
+              <select
+                value={clusterFilter}
+                onChange={(e) => setClusterFilter(e.target.value)}
+              >
+                <option value="">All clusters</option>
+                {uniqueClusters.map((c) => (
+                  <option key={c} value={c}>{clusterLabel(c)}</option>
+                ))}
+              </select>
+            </label>
+            {(actorFilter || actionFilter || clusterFilter) && (
               <button
                 type="button"
                 className="btn-outline btn-compact"
                 style={{ alignSelf: "flex-end" }}
-                onClick={() => { setActorFilter(""); setActionFilter(""); }}
+                onClick={() => { setActorFilter(""); setActionFilter(""); setClusterFilter(""); }}
               >
                 Clear
               </button>

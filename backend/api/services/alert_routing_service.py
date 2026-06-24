@@ -16,10 +16,48 @@ from ..models import (
     AlertRoutingReceiver,
     AlertRoutingReceiverGroup,
     AlertRoutingSmtp,
+    Role,
+    User,
 )
 from ..secret_encryption import decrypt_secret, encrypt_secret
 
-VALID_RECEIVER_TYPES = {"email", "webhook", "slack"}
+VALID_RECEIVER_TYPES = {"email", "webhook", "slack", "user", "role"}
+# Receiver types whose recipients are email addresses (delivered over SMTP).
+EMAIL_CHANNEL_TYPES = {"email", "user", "role"}
+
+
+def resolve_receiver_emails(receiver: AlertRoutingReceiver) -> List[str]:
+    """Effective recipient email addresses for an email-channel receiver.
+
+    user  -> the linked user's email (only if the user is active)
+    role  -> emails of all active users holding that role
+    email -> the legacy static address
+    Disabled/missing users are excluded. Webhook/Slack receivers return [].
+    """
+    seen: set = set()
+    out: List[str] = []
+
+    def _add(addr: Optional[str]) -> None:
+        address = (addr or "").strip()
+        if "@" in address and address.lower() not in seen:
+            seen.add(address.lower())
+            out.append(address)
+
+    if receiver.receiver_type == "user":
+        user = receiver.user
+        if user and user.is_active:
+            _add(user.email)
+    elif receiver.receiver_type == "role":
+        if receiver.role_id:
+            users = User.query.filter(
+                User.role_id == receiver.role_id,
+                User.is_active.is_(True),
+            ).all()
+            for user in users:
+                _add(user.email)
+    elif receiver.receiver_type == "email":
+        _add(receiver.email_address)
+    return out
 ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 METHODS_WITHOUT_BODY = {"GET", "HEAD", "OPTIONS"}
 WEBHOOK_TIMEOUT_SECONDS = 10
@@ -129,11 +167,21 @@ def _group_assigned_policies(row: AlertRoutingReceiverGroup) -> List[Dict[str, A
 def _serialize_receiver(row: AlertRoutingReceiver) -> Dict[str, Any]:
     assigned = _receiver_assigned_policies(row)
     group_names = _receiver_group_names(row)
+    resolved_emails = resolve_receiver_emails(row)
+    user = row.user if row.receiver_type == "user" else None
+    role = row.role if row.receiver_type == "role" else None
     return {
         "id": row.id,
         "name": row.name,
         "type": row.receiver_type,
         "emailAddress": row.email_address or "",
+        "userId": row.user_id,
+        "userName": (user.full_name or user.username) if user else None,
+        "userActive": bool(user.is_active) if user else None,
+        "roleId": row.role_id,
+        "roleName": role.name if role else None,
+        "recipientEmails": resolved_emails,
+        "recipientCount": len(resolved_emails),
         "url": row.url or "",
         "httpMethod": row.http_method or "POST",
         "headers": row.headers if isinstance(row.headers, dict) else {},
@@ -162,9 +210,24 @@ def _validate_receiver_payload(payload: Dict[str, Any], *, existing: Optional[Al
 
     receiver_type = str(payload.get("type", existing.receiver_type if existing else "")).strip().lower()
     if receiver_type not in VALID_RECEIVER_TYPES:
-        raise ValueError("Receiver type must be email, webhook, or slack.")
+        raise ValueError("Receiver type must be user, role, email, webhook, or slack.")
 
-    if receiver_type == "email":
+    if receiver_type == "user":
+        user_id = payload.get("userId", existing.user_id if existing else None)
+        if not user_id:
+            raise ValueError("Select a user for user receivers.")
+        user = User.query.get(int(user_id))
+        if not user:
+            raise ValueError("Selected user was not found.")
+        if not (user.email or "").strip():
+            raise ValueError("The selected user has no email address on file.")
+    elif receiver_type == "role":
+        role_id = payload.get("roleId", existing.role_id if existing else None)
+        if not role_id:
+            raise ValueError("Select a role for role receivers.")
+        if not Role.query.get(int(role_id)):
+            raise ValueError("Selected role was not found.")
+    elif receiver_type == "email":
         email = str(payload.get("emailAddress", existing.email_address if existing else "")).strip()
         if "@" not in email:
             raise ValueError("A valid email address is required for email receivers.")
@@ -193,6 +256,8 @@ def create_receiver(payload: Dict[str, Any]) -> Dict[str, Any]:
         name=str(payload.get("name")).strip(),
         receiver_type=receiver_type,
         email_address=str(payload.get("emailAddress", "")).strip() or None,
+        user_id=int(payload["userId"]) if receiver_type == "user" and payload.get("userId") else None,
+        role_id=int(payload["roleId"]) if receiver_type == "role" and payload.get("roleId") else None,
         url=str(payload.get("url", "")).strip() or None,
         http_method=http_method,
         headers=payload.get("headers") if isinstance(payload.get("headers"), dict) else {},
@@ -218,6 +283,18 @@ def update_receiver(receiver_id: int, payload: Dict[str, Any]) -> Dict[str, Any]
         row.receiver_type = str(payload["type"]).strip().lower()
     if "emailAddress" in payload:
         row.email_address = str(payload["emailAddress"]).strip() or None
+    if "userId" in payload:
+        row.user_id = int(payload["userId"]) if payload["userId"] else None
+    if "roleId" in payload:
+        row.role_id = int(payload["roleId"]) if payload["roleId"] else None
+    # Keep linkage consistent with the resulting type.
+    if row.receiver_type == "user":
+        row.role_id = None
+    elif row.receiver_type == "role":
+        row.user_id = None
+    else:
+        row.user_id = None
+        row.role_id = None
     if "url" in payload:
         row.url = str(payload["url"]).strip() or None
     if "httpMethod" in payload and row.receiver_type == "webhook":
@@ -594,14 +671,17 @@ def send_receiver_test(receiver_id: int) -> Dict[str, Any]:
         raise LookupError("Receiver not found.")
 
     try:
-        if receiver.receiver_type == "email":
+        if receiver.receiver_type in EMAIL_CHANNEL_TYPES:
             if not smtp_is_configured():
                 raise EmailDeliveryError("SMTP is not configured.")
-            address = (receiver.email_address or "").strip()
-            if "@" not in address:
-                raise EmailDeliveryError("Receiver email address is invalid.")
-            send_alert_email(address, _webhook_test_payload(), test=True)
-            message = f"Test email sent to {address}."
+            addresses = resolve_receiver_emails(receiver)
+            if not addresses:
+                raise EmailDeliveryError(
+                    "No active recipients for this receiver (user disabled or no email)."
+                )
+            for address in addresses:
+                send_alert_email(address, _webhook_test_payload(), test=True)
+            message = f"Test email sent to {', '.join(addresses)}."
         elif receiver.receiver_type == "slack":
             _post_webhook(receiver, _slack_test_payload())
             message = "Test Slack webhook delivered."
@@ -742,13 +822,22 @@ def _mark_delivered(alert_id: str, receiver_id: int, alert_status: str) -> None:
 
 
 def _deliver_to_receiver(receiver: AlertRoutingReceiver, alert: Dict[str, Any]) -> None:
-    if receiver.receiver_type == "email":
+    if receiver.receiver_type in EMAIL_CHANNEL_TYPES:
         if not smtp_is_configured():
             raise EmailDeliveryError("SMTP is not configured.")
-        address = (receiver.email_address or "").strip()
-        if "@" not in address:
-            raise EmailDeliveryError("Invalid email receiver address.")
-        send_alert_email(address, alert)
+        addresses = resolve_receiver_emails(receiver)
+        if not addresses:
+            raise EmailDeliveryError(
+                "No active recipients for this receiver (user disabled or no email)."
+            )
+        errors: List[str] = []
+        for address in addresses:
+            try:
+                send_alert_email(address, alert)
+            except EmailDeliveryError as exc:
+                errors.append(f"{address}: {exc}")
+        if errors and len(errors) == len(addresses):
+            raise EmailDeliveryError("; ".join(errors))
         return
 
     if receiver.receiver_type == "slack":

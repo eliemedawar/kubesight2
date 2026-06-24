@@ -86,8 +86,30 @@ export default function TemplateMarketplace({
     onStartFromScratch?.();
   };
 
-  const handleSubmitTemplate = async (payload) => {
-    if (editTemplate) {
+  // Strip a trailing " vN" suffix; a name with no suffix is treated as version 1.
+  const splitVersion = (name) => {
+    const match = /^(.*?)\s+v(\d+)$/i.exec((name || "").trim());
+    return match ? { base: match[1].trim(), version: Number.parseInt(match[2], 10) } : { base: (name || "").trim(), version: 1 };
+  };
+
+  // The next "vN" name for a template family, scanning existing names so we never
+  // collide with a version that already exists.
+  const nextVersionName = (name) => {
+    const { base } = splitVersion(name);
+    let max = 1;
+    for (const t of templates) {
+      const parsed = splitVersion(t.name);
+      if (parsed.base.toLowerCase() === base.toLowerCase() && parsed.version > max) max = parsed.version;
+    }
+    return `${base} v${max + 1}`;
+  };
+
+  const handleSubmitTemplate = async (payload, { asNewVersion = false } = {}) => {
+    if (editTemplate && asNewVersion) {
+      // Fork into a fresh template with a bumped version name; the backend assigns
+      // a new id, so the original template is left untouched.
+      await createWizardTemplate({ ...payload, name: nextVersionName(payload.name) });
+    } else if (editTemplate) {
       await updateWizardTemplate(editTemplate.id, payload);
     } else {
       await createWizardTemplate(payload);

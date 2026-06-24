@@ -7,6 +7,7 @@ export {
   createUser,
   updateUser,
   disableUser,
+  deleteUser,
   listUserAccessRules,
   replaceUserAccessRules,
   listRoles,
@@ -65,3 +66,11 @@ export {
   updateClient,
   deleteClient,
 } from "./api/clientsApi";
+export {
+  createDeploymentRequest,
+  listDeploymentRequests,
+  approveDeploymentRequest,
+  declineDeploymentRequest,
+  getDeploymentRequestRecipients,
+  updateDeploymentRequestRecipients,
+} from "./api/deploymentRequestsApi";

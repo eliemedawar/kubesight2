@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
   createUser,
+  deleteUser,
   disableUser,
   getUser,
   listRoles,
@@ -22,8 +23,9 @@ export default function UserManagementPage({ clusters = [] }) {
   const canCreate = hasPermission("users:create") || hasPermission("users:manage");
   const canUpdate = hasPermission("users:update") || hasPermission("users:manage");
   const canDisable = hasPermission("users:disable") || hasPermission("users:manage");
+  const canDelete = hasPermission("users:delete") || hasPermission("users:manage");
   const readOnlyUsers =
-    hasPermission("users:view") && !canCreate && !canUpdate && !canDisable;
+    hasPermission("users:view") && !canCreate && !canUpdate && !canDisable && !canDelete;
   const canViewRoles = hasPermission("roles:view");
   const canManageRoles = hasPermission("roles:manage") || hasPermission("users:manage");
   const [activeTab, setActiveTab] = useState("users");
@@ -173,6 +175,29 @@ export default function UserManagementPage({ clusters = [] }) {
     setError("");
     try {
       await disableUser(user.id);
+      await loadData();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleDelete = async (user) => {
+    if (currentUser?.id === user.id) {
+      setError("You cannot delete your own account.");
+      return;
+    }
+    const label = user.fullName || user.username;
+    const confirmed = window.confirm(
+      `Permanently delete user "${label}" (${user.username})?\n\n` +
+        "This cannot be undone. Their access grants and API tokens are removed; " +
+        "past audit/history entries are kept but no longer linked to an account."
+    );
+    if (!confirmed) {
+      return;
+    }
+    setError("");
+    try {
+      await deleteUser(user.id);
       await loadData();
     } catch (err) {
       setError(err.message);
@@ -338,7 +363,22 @@ export default function UserManagementPage({ clusters = [] }) {
                                 Disable User
                               </button>
                             ) : null}
-                            {!canUpdate && !canDisable ? (
+                            {canDelete ? (
+                              <button
+                                type="button"
+                                className="btn-outline danger"
+                                onClick={() => handleDelete(user)}
+                                disabled={currentUser?.id === user.id}
+                                title={
+                                  currentUser?.id === user.id
+                                    ? "You cannot delete your own account"
+                                    : "Permanently delete this user"
+                                }
+                              >
+                                Delete
+                              </button>
+                            ) : null}
+                            {!canUpdate && !canDisable && !canDelete ? (
                               <span className="muted">—</span>
                             ) : null}
                           </td>

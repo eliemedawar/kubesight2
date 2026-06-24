@@ -117,6 +117,53 @@ def _build_alert_body(alert: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def send_email(to_address: str, subject: str, body: str, *, html_body: Optional[str] = None) -> None:
+    """Send an email using the configured SMTP settings.
+
+    Shares the same DB/env SMTP configuration as alert routing so any feature
+    can reuse the management mail relay without re-implementing transport. When
+    ``html_body`` is supplied it is attached as an HTML alternative (the plain
+    ``body`` remains the fallback for text-only clients).
+    """
+    if not to_address or "@" not in to_address:
+        raise EmailDeliveryError("Recipient email address is not configured.")
+
+    if not smtp_is_configured():
+        raise EmailDeliveryError(
+            "SMTP is not configured. Configure SMTP in Settings → Alert Routing or set SMTP_HOST and SMTP_FROM."
+        )
+
+    settings = _smtp_settings()
+    message = EmailMessage()
+    message["From"] = settings["from_addr"]
+    message["To"] = to_address
+    message["Subject"] = subject
+    message.set_content(body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
+
+    try:
+        if settings["use_ssl"]:
+            with smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=30) as client:
+                if settings["user"]:
+                    client.login(settings["user"], settings["password"])
+                client.send_message(message)
+            return
+
+        with smtplib.SMTP(settings["host"], settings["port"], timeout=30) as client:
+            client.ehlo()
+            if settings["use_tls"]:
+                client.starttls(context=ssl.create_default_context())
+                client.ehlo()
+            if settings["user"]:
+                client.login(settings["user"], settings["password"])
+            client.send_message(message)
+    except OSError as exc:
+        raise EmailDeliveryError(f"Could not reach SMTP server: {exc}") from exc
+    except smtplib.SMTPException as exc:
+        raise EmailDeliveryError(f"SMTP send failed: {exc}") from exc
+
+
 def send_alert_email(to_address: str, alert: Dict[str, Any], *, test: bool = False) -> None:
     if not to_address or "@" not in to_address:
         raise EmailDeliveryError("Recipient email address is not configured.")

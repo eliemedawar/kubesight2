@@ -50,7 +50,7 @@ from ..services.application_version_service import (
     rollback_to_version,
 )
 from ..k8s_provider import K8sCommandError, resolve_cluster_access, _run_for_access
-from ..access_engine import can_access_namespace, is_admin
+from ..access_engine import can_access_namespace, user_has_permission
 
 inventory_bp = Blueprint("inventory", __name__, url_prefix="/api/inventory")
 
@@ -418,13 +418,13 @@ def deploy_image_apply():
 
 
 def _can_manage_templates() -> bool:
-    """Admin-authored templates are visible to and managed by admins only."""
+    """Authoring catalog templates requires the inventory catalog update permission."""
     from ..auth_utils import auth_required_enabled
 
     if not auth_required_enabled():
         return True
     user = get_current_user()
-    return bool(user and is_admin(user))
+    return bool(user and user_has_permission(user, "inventory:update"))
 
 
 @inventory_bp.route("/deploy/wizard/templates", methods=["GET"])

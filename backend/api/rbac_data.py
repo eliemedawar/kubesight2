@@ -6,6 +6,7 @@ PERMISSIONS = [
     ("users:create", "Create users"),
     ("users:update", "Update users"),
     ("users:disable", "Disable users"),
+    ("users:delete", "Permanently delete users"),
     ("roles:view", "View roles and permissions"),
     ("roles:manage", "Manage role permissions"),
     ("clusters:view", "View clusters"),
@@ -57,6 +58,9 @@ PERMISSIONS = [
     ("clients:update", "Update clients"),
     ("clients:delete", "Delete clients"),
     ("api_tokens:manage", "Create and revoke API tokens"),
+    ("deployment_requests:request", "Request a cluster deployment or change"),
+    ("deployment_requests:view", "View deployment requests"),
+    ("deployment_requests:manage", "Approve or decline deployment requests"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -87,6 +91,7 @@ VIEWER_PERMISSIONS = [
     "helm:view",
     "app_services:view",
     "clients:view",
+    "deployment_requests:request",
 ]
 
 OPERATOR_PERMISSIONS = [
@@ -114,6 +119,8 @@ OPERATOR_PERMISSIONS = [
     "clients:view",
     "clients:create",
     "clients:update",
+    "deployment_requests:request",
+    "deployment_requests:view",
 ]
 
 CLUSTER_ADMIN_PERMISSIONS = [
@@ -151,6 +158,8 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "clients:create",
     "clients:update",
     "clients:delete",
+    "deployment_requests:request",
+    "deployment_requests:view",
 ]
 
 HERMES_AGENT_PERMISSIONS = [

@@ -67,6 +67,7 @@ const AlertRoutingPage = lazy(() => import("./pages/AlertRoutingPage.jsx"));
 const UpgradeSafeModePage = lazy(() => import("./pages/UpgradeSafeModePage.jsx"));
 const UserManagementPage = lazy(() => import("./pages/UserManagementPage.jsx"));
 const AuditLogsPage = lazy(() => import("./pages/AuditLogsPage.jsx"));
+const DeploymentRequestsPage = lazy(() => import("./pages/DeploymentRequestsPage.jsx"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
 const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
@@ -1168,7 +1169,7 @@ export default function App() {
             canRegister={hasPermission("inventory:register")}
             canDeploy={hasPermission("apps:deploy")}
             canHelmInstall={hasPermission("helm:install")}
-            canManageTemplates={isAdmin}
+            canManageTemplates={hasPermission("inventory:update")}
             onRefresh={loadInventory}
           />
         );
@@ -1339,6 +1340,8 @@ export default function App() {
         return <UserManagementPage clusters={allowedClusters} />;
       case "auditLogs":
         return <AuditLogsPage />;
+      case "deploymentRequests":
+        return <DeploymentRequestsPage />;
       case "settings":
         return (
           <SettingsPage

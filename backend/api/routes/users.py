@@ -6,7 +6,7 @@ from ..access import is_admin
 from ..audit import log_audit
 from ..db import db
 from ..auth_utils import get_current_user
-from ..decorators import require_permission
+from ..decorators import require_any_permission, require_permission
 from ..models import Role, User
 from ..passwords import hash_password
 from ..response import error_response, success_response
@@ -133,3 +133,15 @@ def disable_user(user_id: int):
     if error:
         return error_response(error, status)
     return success_response({"id": data["id"], "isActive": data.get("isActive", False)})
+
+
+@users_bp.route("/<int:user_id>/permanent", methods=["DELETE"])
+@require_any_permission("users:delete", "users:manage")
+def delete_user(user_id: int):
+    actor = get_current_user()
+    if actor and actor.id == user_id:
+        return error_response("You cannot delete your own account", 400)
+    data, error, status = user_service.delete_user(user_id)
+    if error:
+        return error_response(error, status)
+    return success_response(data)

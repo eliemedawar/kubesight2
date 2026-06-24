@@ -208,8 +208,52 @@ def _migrate_app_service_topology_positions() -> None:
     _add_column_if_missing("application_service_topology_nodes", "position_y", "FLOAT")
 
 
+def _migrate_deployment_request_columns() -> None:
+    table_names = inspect(db.engine).get_table_names()
+    if "deployment_requests" in table_names:
+        _add_column_if_missing("deployment_requests", "required_approvals", "INTEGER DEFAULT 1")
+        _add_column_if_missing("deployment_requests", "total_recipients", "INTEGER DEFAULT 1")
+    if "deployment_request_settings" in table_names:
+        _add_column_if_missing("deployment_request_settings", "group_ids", "JSON")
+        _add_column_if_missing("deployment_request_settings", "required_approvals", "INTEGER DEFAULT 1")
+
+
+def _migrate_alert_routing_user_receivers() -> None:
+    """Add user/role linkage to receivers and migrate static emails to users."""
+    if "alert_routing_receivers" not in inspect(db.engine).get_table_names():
+        return
+    _add_column_if_missing("alert_routing_receivers", "user_id", "INTEGER")
+    _add_column_if_missing("alert_routing_receivers", "role_id", "INTEGER")
+
+    # Backfill: link existing static-email receivers to a matching active user by
+    # email and promote them to 'user' receivers. Unmatched ones stay as legacy.
+    from .models import AlertRoutingReceiver, User
+
+    pending = (
+        AlertRoutingReceiver.query.filter(
+            AlertRoutingReceiver.receiver_type == "email",
+            AlertRoutingReceiver.user_id.is_(None),
+            AlertRoutingReceiver.email_address.isnot(None),
+        ).all()
+    )
+    changed = False
+    for receiver in pending:
+        address = (receiver.email_address or "").strip().lower()
+        if not address:
+            continue
+        user = User.query.filter(db.func.lower(User.email) == address).first()
+        if user:
+            receiver.user_id = user.id
+            receiver.receiver_type = "user"
+            changed = True
+    if changed:
+        db.session.commit()
+
+
 def run_migrations() -> None:
     db.create_all()
+    _migrate_deployment_request_columns()
+    _migrate_alert_routing_user_receivers()
     _migrate_clusters_table()
     _migrate_app_catalog_helm_columns()
     _migrate_alert_policy_evaluation_columns()

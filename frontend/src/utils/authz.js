@@ -59,14 +59,11 @@ const RESOURCE_SPECIFICITY = {
 };
 
 export const NAV_PAGES = [
+  // Dashboard
   { key: "dashboard", label: "Dashboard", permission: "overview:view", section: "Dashboard" },
+
+  // Infrastructure
   { key: "clusters", label: "Clusters", permission: "clusters:view", section: "Infrastructure" },
-  {
-    key: "clusterOverview",
-    label: "Cluster Overview",
-    permission: "overview:view",
-    section: "Infrastructure",
-  },
   {
     key: "clusterManagement",
     label: "Cluster Management",
@@ -74,36 +71,15 @@ export const NAV_PAGES = [
     section: "Infrastructure",
   },
   { key: "namespaces", label: "Namespaces", permission: "namespaces:view", section: "Infrastructure" },
-  { key: "inventory", label: "Inventory", permission: "inventory:view", section: "Workloads" },
-  { key: "resources", label: "Resources", permission: "resources:view", section: "Workloads" },
+  { key: "resources", label: "Resources", permission: "resources:view", section: "Infrastructure" },
+
+  // Inventory
+  { key: "inventory", label: "Inventory", permission: "inventory:view", section: "Inventory" },
+
+  // Monitoring
   { key: "logs", label: "Logs", permission: "logs:view", section: "Monitoring" },
-  { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Monitoring" },
-  {
-    key: "alertPolicies",
-    label: "Alert Policies",
-    permission: "alerts:view",
-    section: "Monitoring",
-  },
-  {
-    key: "userManagement",
-    label: "User Management",
-    permission: "users:view",
-    section: "Administration",
-  },
-  { key: "auditLogs", label: "Audit Logs", permission: "audit:view", section: "Administration" },
-  { key: "settings", label: "Settings", permission: "settings:view", section: "Administration" },
-  {
-    key: "alertRouting",
-    label: "Alert Routing",
-    adminOnly: true,
-    section: "Administration",
-  },
-  {
-    key: "upgrade",
-    label: "Upgrade Center",
-    anyPermissions: ["upgrades:precheck", "upgrades:start"],
-    section: "Operations",
-  },
+
+  // Services
   {
     key: "applicationServices",
     label: "App Services",
@@ -115,6 +91,43 @@ export const NAV_PAGES = [
     label: "Clients",
     permission: "clients:view",
     section: "Services",
+  },
+
+  // Administration
+  {
+    key: "userManagement",
+    label: "User Management",
+    permission: "users:view",
+    section: "Administration",
+  },
+  { key: "auditLogs", label: "Audit Logs", permission: "audit:view", section: "Administration" },
+  {
+    key: "deploymentRequests",
+    label: "Deployment Requests",
+    permission: "deployment_requests:view",
+    section: "Administration",
+  },
+  { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Administration" },
+  {
+    key: "alertPolicies",
+    label: "Alert Policies",
+    permission: "alerts:view",
+    section: "Administration",
+  },
+  {
+    key: "alertRouting",
+    label: "Alert Routing",
+    adminOnly: true,
+    section: "Administration",
+  },
+  { key: "settings", label: "Settings", permission: "settings:view", section: "Administration" },
+
+  // Operations
+  {
+    key: "upgrade",
+    label: "Upgrade Center",
+    anyPermissions: ["upgrades:precheck", "upgrades:start"],
+    section: "Operations",
   },
 ];
 
@@ -883,13 +896,22 @@ export function pageNeedsNamespaceContext(pageKey) {
 }
 
 /** Routes reachable from nav but not listed in NAV_PAGES (sidebar). */
-const DRILL_DOWN_PAGES = new Set(["applicationDetails"]);
+const DRILL_DOWN_PAGES = new Set(["applicationDetails", "clusterOverview"]);
 
 export function pageAllowed(user, pageKey) {
   if (DRILL_DOWN_PAGES.has(pageKey)) {
     switch (pageKey) {
       case "applicationDetails":
-        return isAdminUser(user) && canAccessResourcesPage(user);
+        return (
+          hasPermission(user, "inventory:view") &&
+          (isAdminUser(user) ||
+            (pageGrantedByAdmin(user, "inventory") && hasAnyClusterAccess(user)))
+        );
+      case "clusterOverview":
+        return (
+          hasPermission(user, "overview:view") &&
+          (isAdminUser(user) || hasAnyClusterAccess(user))
+        );
       default:
         return false;
     }
@@ -905,7 +927,6 @@ export function pageAllowed(user, pageKey) {
 
   switch (pageKey) {
     case "dashboard":
-    case "clusterOverview":
       return (
         hasPermission(user, "overview:view") &&
         (isAdminUser(user) || hasAnyClusterAccess(user))
@@ -926,7 +947,12 @@ export function pageAllowed(user, pageKey) {
           (pageGrantedByAdmin(user, "namespaces") && hasAnyNamespaceAccess(user)))
       );
     case "inventory":
-      return isAdminUser(user) && canAccessResourcesPage(user);
+      // inventory:view is already verified by pageNavPermissionAllowed above;
+      // non-admins additionally need cluster access + the admin-granted action.
+      return (
+        isAdminUser(user) ||
+        (pageGrantedByAdmin(user, "inventory") && hasAnyClusterAccess(user))
+      );
     case "resources":
       return canAccessResourcesPage(user);
     case "logs":
@@ -952,21 +978,15 @@ export function pageAllowed(user, pageKey) {
       return hasPermission(user, "users:view");
     case "auditLogs":
       return hasPermission(user, "audit:view");
+    case "deploymentRequests":
+      return hasPermission(user, "deployment_requests:view");
     default:
       return pageNavPermissionAllowed(user, page);
   }
 }
 
 export function getVisiblePages(user) {
-  let pages = NAV_PAGES.filter((page) => pageAllowed(user, page.key));
-  if (
-    !isAdminUser(user) &&
-    pages.some((page) => page.key === "dashboard") &&
-    pages.some((page) => page.key === "clusterOverview")
-  ) {
-    pages = pages.filter((page) => page.key !== "clusterOverview");
-  }
-  return pages;
+  return NAV_PAGES.filter((page) => pageAllowed(user, page.key));
 }
 
 export function getFirstAllowedPage(user) {

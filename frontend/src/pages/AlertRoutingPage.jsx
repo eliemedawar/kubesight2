@@ -16,6 +16,7 @@ import {
   testSmtpSettings,
   updateReceiver,
 } from "../api/alertRoutingApi.js";
+import { listRoles, listUsers } from "../api/usersApi.js";
 
 const AlertLogContextModal = lazy(() => import("../components/alerts/AlertLogContextModal.jsx"));
 
@@ -40,8 +41,10 @@ const WEBHOOK_HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "
 
 const EMPTY_RECEIVER = {
   name: "",
-  type: "email",
+  type: "user",
   emailAddress: "",
+  userId: "",
+  roleId: "",
   url: "",
   httpMethod: "POST",
   headers: {},
@@ -50,6 +53,8 @@ const EMPTY_RECEIVER = {
 };
 
 const RECEIVER_TYPE_LABELS = {
+  user: "User",
+  role: "Role",
   email: "Email",
   slack: "Slack",
   webhook: "Webhook",
@@ -58,6 +63,14 @@ const RECEIVER_TYPE_LABELS = {
 function receiverDestination(receiver) {
   if (!receiver) {
     return "—";
+  }
+  if (receiver.type === "user") {
+    const emails = receiver.recipientEmails || [];
+    const label = receiver.userName || emails[0] || "—";
+    return receiver.userActive === false ? `${label} (disabled)` : label;
+  }
+  if (receiver.type === "role") {
+    return `${receiver.roleName || "role"} — ${receiver.recipientCount || 0} active user(s)`;
   }
   if (receiver.type === "email") {
     return receiver.emailAddress || "—";
@@ -258,22 +271,51 @@ function SmtpTab({ smtp, onSaved }) {
   );
 }
 
-function ReceiverModal({ open, mode, initial, onClose, onSave, saving, error }) {
+function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, saving, error }) {
   const [form, setForm] = useState(initial);
   const [headersText, setHeadersText] = useState("{}");
   const [localError, setLocalError] = useState("");
+  // When true, the Name field auto-follows the selected user/role until the
+  // admin types their own name.
+  const [nameAuto, setNameAuto] = useState(true);
+
+  const activeUsers = (users || []).filter((u) => u.isActive !== false);
+  // When editing a legacy static-email receiver, keep the Email option visible.
+  const showLegacyEmail = mode === "edit" && initial?.type === "email";
+
+  const userDisplay = (u) => (u ? u.fullName || u.username : "");
 
   useEffect(() => {
     if (open) {
       setForm(initial);
       setHeadersText(JSON.stringify(initial.headers || {}, null, 2));
       setLocalError("");
+      // Auto-follow only for brand-new receivers without a name yet.
+      setNameAuto(mode !== "edit" && !initial?.name);
     }
-  }, [open, initial]);
+  }, [open, initial, mode]);
 
   if (!open) {
     return null;
   }
+
+  const selectUser = (userId) => {
+    const picked = activeUsers.find((u) => String(u.id) === String(userId));
+    setForm((p) => ({
+      ...p,
+      userId,
+      name: nameAuto && picked ? userDisplay(picked) : p.name,
+    }));
+  };
+
+  const selectRole = (roleId) => {
+    const picked = (roles || []).find((r) => String(r.id) === String(roleId));
+    setForm((p) => ({
+      ...p,
+      roleId,
+      name: nameAuto && picked ? picked.name : p.name,
+    }));
+  };
 
   const handleSave = () => {
     setLocalError("");
@@ -311,7 +353,13 @@ function ReceiverModal({ open, mode, initial, onClose, onSave, saving, error }) 
         <div className="settings-form alert-routing-form receiver-modal-form">
           <label>
             Name
-            <input value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} />
+            <input
+              value={form.name}
+              onChange={(e) => {
+                setNameAuto(false);
+                setForm((p) => ({ ...p, name: e.target.value }));
+              }}
+            />
           </label>
           <label>
             Receiver type
@@ -320,11 +368,53 @@ function ReceiverModal({ open, mode, initial, onClose, onSave, saving, error }) 
               onChange={(e) => setForm((p) => ({ ...p, type: e.target.value }))}
               disabled={mode === "edit"}
             >
-              <option value="email">Email</option>
+              <option value="user">User</option>
+              <option value="role">Role</option>
               <option value="slack">Slack</option>
               <option value="webhook">Webhook</option>
+              {showLegacyEmail ? <option value="email">Email (legacy)</option> : null}
             </select>
           </label>
+
+          {form.type === "user" ? (
+            <label className="full-width">
+              User
+              <select
+                value={form.userId || ""}
+                onChange={(e) => selectUser(e.target.value)}
+              >
+                <option value="">Select a user…</option>
+                {activeUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {(u.fullName || u.username)}{u.email ? ` — ${u.email}` : " (no email)"}
+                  </option>
+                ))}
+              </select>
+              <span className="muted" style={{ fontSize: "var(--font-size-sm)" }}>
+                Notifications go to this user's email. Disabled users are skipped.
+              </span>
+            </label>
+          ) : null}
+
+          {form.type === "role" ? (
+            <label className="full-width">
+              Role
+              <select
+                value={form.roleId || ""}
+                onChange={(e) => selectRole(e.target.value)}
+              >
+                <option value="">Select a role…</option>
+                {(roles || []).map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+              <span className="muted" style={{ fontSize: "var(--font-size-sm)" }}>
+                Notifications go to every active user with this role.
+              </span>
+            </label>
+          ) : null}
 
           {form.type === "email" ? (
             <label className="full-width">
@@ -509,7 +599,7 @@ function ReceiverDetailsModal({ open, receiver, onClose }) {
   );
 }
 
-function ReceiversTab({ receivers, groups, onChanged }) {
+function ReceiversTab({ receivers, groups, users, roles, onChanged }) {
   const [receiverView, setReceiverView] = useState("individual");
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState("create");
@@ -555,6 +645,12 @@ function ReceiversTab({ receivers, groups, onChanged }) {
       delete payload.updatedAt;
       delete payload.assignedPolicies;
       delete payload.assignedPolicyNames;
+      delete payload.userName;
+      delete payload.userActive;
+      delete payload.roleName;
+      delete payload.recipientEmails;
+      delete payload.recipientCount;
+      delete payload.groupNames;
 
       if (modalMode === "edit" && editing?.id) {
         await updateReceiver(editing.id, payload);
@@ -685,6 +781,8 @@ function ReceiversTab({ receivers, groups, onChanged }) {
             open={modalOpen}
             mode={modalMode}
             initial={editing || EMPTY_RECEIVER}
+            users={users}
+            roles={roles}
             onClose={() => setModalOpen(false)}
             onSave={save}
             saving={saving}
@@ -781,21 +879,27 @@ export default function AlertRoutingPage() {
   const [receivers, setReceivers] = useState([]);
   const [receiverGroups, setReceiverGroups] = useState([]);
   const [logs, setLogs] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [roles, setRoles] = useState([]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const [smtpRes, receiversRes, groupsRes, logsRes] = await Promise.all([
+      const [smtpRes, receiversRes, groupsRes, logsRes, usersRes, rolesRes] = await Promise.all([
         getSmtpSettings(),
         listReceivers(),
         listReceiverGroups(),
         listDeliveryLogs(),
+        listUsers(),
+        listRoles(),
       ]);
       setSmtp(smtpRes);
       setReceivers(receiversRes.items || []);
       setReceiverGroups(groupsRes.items || []);
       setLogs(logsRes.items || []);
+      setUsers(usersRes.items || []);
+      setRoles(rolesRes.items || []);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -856,7 +960,13 @@ export default function AlertRoutingPage() {
 
       {activeTab === "smtp" ? <SmtpTab smtp={smtp} onSaved={refreshPartial} /> : null}
       {activeTab === "receivers" ? (
-        <ReceiversTab receivers={receivers} groups={receiverGroups} onChanged={refreshPartial} />
+        <ReceiversTab
+          receivers={receivers}
+          groups={receiverGroups}
+          users={users}
+          roles={roles}
+          onChanged={refreshPartial}
+        />
       ) : null}
       {activeTab === "logs" ? <LogsTab logs={logs} onRefresh={refreshLogs} loading={loading} /> : null}
     </div>

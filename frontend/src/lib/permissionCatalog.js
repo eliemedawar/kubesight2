@@ -115,6 +115,15 @@ export const PERMISSION_GROUPS = [
       "clients:delete",
     ],
   },
+  {
+    id: "deploymentRequests",
+    label: "Deployment Requests",
+    keys: [
+      "deployment_requests:request",
+      "deployment_requests:view",
+      "deployment_requests:manage",
+    ],
+  },
 ];
 
 export const PERMISSION_CATALOG = [
@@ -174,6 +183,9 @@ export const PERMISSION_CATALOG = [
   { key: "clients:update", label: "Update clients", dangerous: false },
   { key: "clients:delete", label: "Delete clients", dangerous: true },
   { key: "api_tokens:manage", label: "Manage API tokens", dangerous: true },
+  { key: "deployment_requests:request", label: "Request a cluster deployment or change", dangerous: false },
+  { key: "deployment_requests:view", label: "View deployment requests", dangerous: false },
+  { key: "deployment_requests:manage", label: "Approve or decline deployment requests", dangerous: true },
 ];
 
 const BLOCKED_HIGHLIGHT_KEYS = new Set([

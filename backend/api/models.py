@@ -399,8 +399,14 @@ class AlertRoutingReceiver(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
+    # email (legacy static) | user (linked to a User) | role (all active users of
+    # a Role) | webhook | slack
     receiver_type = db.Column(db.String(32), nullable=False, index=True)
     email_address = db.Column(db.String(255), nullable=True)
+    # For user/role receivers the recipient email(s) are resolved dynamically
+    # from the linked user(s); disabled users are excluded at send time.
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    role_id = db.Column(db.Integer, db.ForeignKey("roles.id"), nullable=True, index=True)
     url = db.Column(db.String(1024), nullable=True)
     http_method = db.Column(db.String(16), nullable=False, default="POST")
     headers = db.Column(db.JSON, nullable=True, default=dict)
@@ -424,6 +430,8 @@ class AlertRoutingReceiver(db.Model):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
+    user = db.relationship("User", foreign_keys=[user_id])
+    role = db.relationship("Role", foreign_keys=[role_id])
     policies = db.relationship(
         "AlertPolicy",
         secondary=alert_policy_receivers,
@@ -803,6 +811,96 @@ class UserTemplate(db.Model):
     )
 
     creator = db.relationship("User", foreign_keys=[created_by])
+
+
+class DeploymentRequest(db.Model):
+    """A user request to deploy or change something in a cluster.
+
+    Created from the Clusters tab; routed to the management team by email with
+    signed approve/decline links. Approval/decline is recorded back here.
+    """
+
+    __tablename__ = "deployment_requests"
+    __table_args__ = (
+        db.Index("ix_deployment_request_status_created", "status", "created_at"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    requester_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    cluster_id = db.Column(db.String(120), nullable=False, index=True)
+    cluster_name = db.Column(db.String(255), nullable=False, default="")
+    message = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(16), nullable=False, default="pending", index=True)
+    # Quorum snapshot taken at creation time so later config changes don't alter
+    # in-flight requests.
+    required_approvals = db.Column(db.Integer, nullable=False, default=1)
+    total_recipients = db.Column(db.Integer, nullable=False, default=1)
+    decided_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    decided_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+
+    requester = db.relationship("User", foreign_keys=[requester_id])
+    decided_by = db.relationship("User", foreign_keys=[decided_by_user_id])
+    votes = db.relationship(
+        "DeploymentRequestVote",
+        back_populates="request",
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+
+
+class DeploymentRequestVote(db.Model):
+    """An individual approver's approve/decline vote on a request (quorum)."""
+
+    __tablename__ = "deployment_request_votes"
+    __table_args__ = (
+        db.UniqueConstraint("request_id", "voter_email", name="uq_deployment_request_voter"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    request_id = db.Column(
+        db.Integer,
+        db.ForeignKey("deployment_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    voter_email = db.Column(db.String(255), nullable=False)
+    decision = db.Column(db.String(16), nullable=False)  # approve | decline
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    request = db.relationship("DeploymentRequest", back_populates="votes")
+
+
+class DeploymentRequestSetting(db.Model):
+    """Singleton config for the deployment-request workflow.
+
+    Holds the admin-configured list of management recipients that deployment
+    requests are emailed to. Empty means "fall back to env / alert-routing".
+    """
+
+    __tablename__ = "deployment_request_settings"
+
+    id = db.Column(db.Integer, primary_key=True)
+    recipients = db.Column(db.JSON, nullable=False, default=list)
+    # IDs of AlertRoutingReceiverGroup whose email members are approvers.
+    group_ids = db.Column(db.JSON, nullable=False, default=list)
+    # How many approvals are required before a request is approved.
+    required_approvals = db.Column(db.Integer, nullable=False, default=1)
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class ApiToken(db.Model):
