@@ -37,8 +37,10 @@ from ..services.template_resolver import resolve_template
 from ..services.user_template_service import (
     create_user_template,
     delete_user_template,
+    delete_user_template_category,
     get_user_template_detail,
     list_user_template_summaries,
+    update_user_template,
 )
 from ..services.application_version_service import (
     create_deployment_version,
@@ -457,6 +459,20 @@ def deploy_wizard_template_create():
     return success_response(data, status_code=status)
 
 
+@inventory_bp.route("/deploy/wizard/templates/<template_id>", methods=["PUT"])
+@require_permission("inventory:view")
+def deploy_wizard_template_update(template_id: str):
+    if not _can_manage_templates():
+        return error_response("Forbidden", 403)
+    if get_template(template_id) is not None:
+        return error_response("Built-in templates cannot be edited.", 400)
+    user = get_current_user()
+    data, error, status = update_user_template(template_id, _body(), actor_user_id=user.id if user else None)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status_code=status)
+
+
 @inventory_bp.route("/deploy/wizard/templates/<template_id>", methods=["DELETE"])
 @require_permission("inventory:view")
 def deploy_wizard_template_delete(template_id: str):
@@ -466,6 +482,18 @@ def deploy_wizard_template_delete(template_id: str):
         return error_response("Built-in templates cannot be deleted.", 400)
     user = get_current_user()
     data, error, status = delete_user_template(template_id, actor_user_id=user.id if user else None)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status_code=status)
+
+
+@inventory_bp.route("/deploy/wizard/templates/categories/<path:category>", methods=["DELETE"])
+@require_permission("inventory:view")
+def deploy_wizard_template_category_delete(category: str):
+    if not _can_manage_templates():
+        return error_response("Forbidden", 403)
+    user = get_current_user()
+    data, error, status = delete_user_template_category(category, actor_user_id=user.id if user else None)
     if error:
         return error_response(error, status)
     return success_response(data, status_code=status)

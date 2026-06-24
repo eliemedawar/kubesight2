@@ -718,6 +718,15 @@ export default function App() {
       if (!isLatestRequest() || dashboardLoadClusterRef.current !== clusterId) {
         return;
       }
+      // The cluster no longer exists (e.g. deleted in another tab) — stop polling
+      // it by refreshing the list, which drops it and re-selects a valid cluster.
+      if (dashboardError.status === 404) {
+        dashboardLoadClusterRef.current = "";
+        setDashboardSummary(null);
+        setDashboardRefreshedAt(null);
+        reloadClusters().catch(() => {});
+        return;
+      }
       applyPageError(dashboardError.message, {
         expectedDenied: !canAccessCluster(clusterId),
       });

@@ -17,6 +17,17 @@ const KIND_SOURCES = {
   secret: ["existingSecret", "createSecret"],
 };
 
+// A volume mount sources a whole ConfigMap or Secret as files on disk. The author
+// picks the kind; the deployer later chooses existing-vs-create at deploy time.
+const VOLUME_KINDS = [
+  { value: "configMap", label: "ConfigMap" },
+  { value: "secret", label: "Secret" },
+];
+const VOLUME_KIND_SOURCES = {
+  configMap: ["existingConfigMap", "createConfigMap"],
+  secret: ["existingSecret", "createSecret"],
+};
+
 const DEPENDENCY_KINDS = ["postgresql", "redis", "kafka", "rabbitmq", "minio", "service"];
 const SERVICE_TYPES = ["ClusterIP", "NodePort", "LoadBalancer"];
 const PROBE_TYPES = [
@@ -37,6 +48,10 @@ const EMPTY_ENV = { key: "", required: false, sensitive: false, kind: "value", d
 // Dependencies are informational only — they document the backing services an
 // app needs; they don't wire anything automatically.
 const EMPTY_DEPENDENCY = { kind: "postgresql", name: "", required: true, note: "" };
+
+// A volume-mount schema row: the deployer supplies the actual ConfigMap/Secret
+// (existing or freshly created) at deploy time.
+const EMPTY_VOLUME = { mountPath: "", kind: "configMap", readOnly: false };
 
 // Every override the deployer may be granted lives here — the single home for the
 // lock-vs-override decision.
@@ -86,6 +101,7 @@ const EMPTY_FORM = {
   envVars: [{ ...EMPTY_ENV }],
   overrides: { ...DEFAULT_OVERRIDES },
   dependencies: [],
+  volumeMounts: [],
   ingressTls: false,
   // Storage (simplified — advanced PVC/PV details are no longer authored here)
   storageEnabled: false,
@@ -101,14 +117,97 @@ function freshForm(category) {
     envVars: [{ ...EMPTY_ENV }],
     overrides: { ...DEFAULT_OVERRIDES, serviceTypes: [] },
     dependencies: [],
+    volumeMounts: [],
     probes: freshProbes(),
   };
 }
 
-export default function CreateTemplateModal({ open, existingCategories = [], onClose, onSubmit }) {
+// Rebuild the editable form from a saved template detail — the inverse of the
+// payload `handleSubmit` assembles, so an existing template round-trips cleanly.
+function formFromTemplate(detail) {
+  const container = detail.containers?.[0] || {};
+  const res = detail.resources || {};
+  const schema = detail.schema || {};
+  const overrides = schema.overrides || {};
+  const storage = detail.storage || {};
+  const service = detail.networking?.service;
+
+  const envVars = (schema.env || []).map((f) => ({
+    key: f.key || "",
+    required: Boolean(f.required),
+    sensitive: Boolean(f.sensitive),
+    kind: f.sensitive ? "secret" : f.kind || "value",
+    default: f.default || "",
+  }));
+  const dependencies = (schema.dependencies || []).map((d) => ({
+    kind: d.kind || "postgresql",
+    name: d.name || "",
+    required: Boolean(d.required),
+    note: d.note || "",
+  }));
+  const volumeMounts = (schema.volumeMounts || []).map((v) => ({
+    mountPath: v.mountPath || "",
+    kind: v.kind === "secret" ? "secret" : "configMap",
+    readOnly: Boolean(v.readOnly),
+  }));
+
+  const probes = freshProbes();
+  for (const { key } of PROBE_KEYS) {
+    const hc = detail.healthChecks?.[key];
+    if (!hc) continue;
+    probes[key] = {
+      enabled: true,
+      type: hc.type || "http",
+      path: hc.path || "/",
+      port: hc.port != null ? String(hc.port) : "",
+      command: hc.command || "",
+      initialDelaySeconds: String(hc.initialDelaySeconds ?? PROBE_DEFAULTS[key].initialDelaySeconds),
+      periodSeconds: String(hc.periodSeconds ?? PROBE_DEFAULTS[key].periodSeconds),
+    };
+  }
+
+  return {
+    ...EMPTY_FORM,
+    name: detail.name || "",
+    description: detail.description || "",
+    category: detail.category || "Custom",
+    newCategory: "",
+    workloadType: detail.workloadType || "Deployment",
+    image: container.image || "",
+    tag: container.tag || "latest",
+    port: container.ports?.[0] != null ? String(container.ports[0]) : "80",
+    replicas: detail.scaling?.replicas != null ? String(detail.scaling.replicas) : "1",
+    pullPolicy: container.pullPolicy || "IfNotPresent",
+    serviceEnabled: service ? Boolean(service.enabled) : false,
+    cpuRequest: res.cpuRequest || "100m",
+    cpuLimit: res.cpuLimit || "500m",
+    memoryRequest: res.memoryRequest || "128Mi",
+    memoryLimit: res.memoryLimit || "256Mi",
+    envVars: envVars.length ? envVars : [{ ...EMPTY_ENV }],
+    overrides: {
+      image: Boolean(overrides.image),
+      tag: Boolean(overrides.tag),
+      replicas: Boolean(overrides.replicas),
+      resources: Boolean(overrides.resources),
+      storageSize: Boolean(overrides.storageSize),
+      ingressHost: Boolean(schema.ingress?.supported),
+      serviceTypes: Array.isArray(overrides.serviceType) ? overrides.serviceType : [],
+    },
+    dependencies,
+    volumeMounts,
+    ingressTls: Boolean(schema.ingress?.tls),
+    storageEnabled: Boolean(storage.pvcMode && storage.pvcMode !== "none"),
+    storageSize: storage.newPvc?.size || "1Gi",
+    storageMountPath: storage.volumeMounts?.[0]?.mountPath || "/data",
+    probes,
+  };
+}
+
+export default function CreateTemplateModal({ open, existingCategories = [], template = null, onClose, onSubmit }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const isEditing = Boolean(template);
 
   const categoryOptions = useMemo(() => {
     const seen = new Set();
@@ -125,11 +224,11 @@ export default function CreateTemplateModal({ open, existingCategories = [], onC
 
   useEffect(() => {
     if (open) {
-      setForm(freshForm(categoryOptions[0] || NEW_CATEGORY));
+      setForm(template ? formFromTemplate(template) : freshForm(categoryOptions[0] || NEW_CATEGORY));
       setError("");
       setSaving(false);
     }
-  }, [open, categoryOptions]);
+  }, [open, template, categoryOptions]);
 
   // --- env schema handlers ---
   const setEnvKind = (index, kind) =>
@@ -336,6 +435,18 @@ export default function CreateTemplateModal({ open, existingCategories = [], onC
       .filter((dep) => dep.name);
     if (dependencies.length) schema.dependencies = dependencies;
 
+    // Volume mounts: each declares a ConfigMap/Secret-backed mount path. The
+    // deployer chooses existing-vs-create for the backing resource at deploy time.
+    const volumeMounts = form.volumeMounts
+      .map((row) => {
+        const mountPath = (row.mountPath || "").trim();
+        if (!mountPath) return null;
+        const kind = row.kind === "secret" ? "secret" : "configMap";
+        return { mountPath, kind, allowedSources: VOLUME_KIND_SOURCES[kind], readOnly: Boolean(row.readOnly) };
+      })
+      .filter(Boolean);
+    if (volumeMounts.length) schema.volumeMounts = volumeMounts;
+
     if (form.overrides.ingressHost) {
       schema.ingress = { supported: true, tls: Boolean(form.ingressTls) };
     }
@@ -346,7 +457,7 @@ export default function CreateTemplateModal({ open, existingCategories = [], onC
     try {
       await onSubmit(payload);
     } catch (err) {
-      setError(err.message || "Failed to create template.");
+      setError(err.message || (isEditing ? "Failed to update template." : "Failed to create template."));
       setSaving(false);
     }
   };
@@ -355,7 +466,7 @@ export default function CreateTemplateModal({ open, existingCategories = [], onC
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="modal-card__header">
-          <h3>Create Template</h3>
+          <h3>{isEditing ? "Edit Template" : "Create Template"}</h3>
           <p className="muted">
             Define a reusable <strong>schema</strong> — what a deployment requires, what it may override, and what stays
             locked. Actual values are supplied at deploy time, never stored here.
@@ -581,6 +692,60 @@ export default function CreateTemplateModal({ open, existingCategories = [], onC
         </section>
 
         <section className="form-section">
+          <h4>Volume mounts</h4>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Mount a ConfigMap or Secret as files at a path. The deployer picks an existing resource
+            or creates one at deploy time.
+          </p>
+          {form.volumeMounts.length ? (
+            <div className="schema-env-list">
+              {form.volumeMounts.map((row, index) => (
+                <div key={index} className="schema-env-card">
+                  <div className="schema-env-card__top">
+                    <input
+                      value={row.mountPath}
+                      onChange={updateRow("volumeMounts", index, "mountPath")}
+                      placeholder="/etc/config"
+                      aria-label={`Volume ${index + 1} mount path`}
+                      className="schema-env-card__key"
+                    />
+                    <label className="checkbox-row">
+                      <input type="checkbox" checked={row.readOnly} onChange={updateRow("volumeMounts", index, "readOnly")} />
+                      <span>Read-only</span>
+                    </label>
+                    <button
+                      type="button"
+                      className="btn-outline template-env-row__remove"
+                      onClick={removeRow("volumeMounts", EMPTY_VOLUME, index)}
+                      aria-label={`Remove volume ${index + 1}`}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div className="schema-env-card__sources" role="radiogroup" aria-label={`Volume ${index + 1} kind`}>
+                    {VOLUME_KINDS.map((opt) => (
+                      <label key={opt.value} className="schema-source-chip">
+                        <input
+                          type="radio"
+                          name={`volume-kind-${index}`}
+                          value={opt.value}
+                          checked={row.kind === opt.value}
+                          onChange={updateRow("volumeMounts", index, "kind")}
+                        />
+                        <span>{opt.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <button type="button" className="btn-outline" onClick={addRow("volumeMounts", EMPTY_VOLUME)}>
+            + Add volume mount
+          </button>
+        </section>
+
+        <section className="form-section">
           <h4>Deployment overrides</h4>
           <p className="muted" style={{ marginTop: 0 }}>
             Choose what a deployer may change. Anything left unchecked is locked to the template defaults.
@@ -713,7 +878,7 @@ export default function CreateTemplateModal({ open, existingCategories = [], onC
             Cancel
           </button>
           <button type="button" className="primary" onClick={handleSubmit} disabled={saving}>
-            {saving ? "Saving…" : "Create Template"}
+            {saving ? "Saving…" : isEditing ? "Save Changes" : "Create Template"}
           </button>
         </div>
       </div>

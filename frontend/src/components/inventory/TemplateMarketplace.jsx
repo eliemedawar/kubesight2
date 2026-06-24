@@ -3,7 +3,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   createWizardTemplate,
   deleteWizardTemplate,
+  deleteWizardTemplateCategory,
+  getWizardTemplate,
   listWizardTemplates,
+  updateWizardTemplate,
 } from "../../api/inventoryApi.js";
 import { groupTemplatesByCategory, resolveCategoryOrder } from "../../utils/applicationTemplates.js";
 import CreateTemplateModal from "./CreateTemplateModal.jsx";
@@ -21,8 +24,13 @@ export default function TemplateMarketplace({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [editTemplate, setEditTemplate] = useState(null);
   const [actionError, setActionError] = useState("");
   const [deletingId, setDeletingId] = useState("");
+  const [editingId, setEditingId] = useState("");
+  const [deletingCategory, setDeletingCategory] = useState("");
+  const [query, setQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
 
   const loadTemplates = useCallback(() => {
     let cancelled = false;
@@ -45,8 +53,28 @@ export default function TemplateMarketplace({
 
   useEffect(() => loadTemplates(), [loadTemplates]);
 
-  const grouped = useMemo(() => groupTemplatesByCategory(templates), [templates]);
-  const categories = useMemo(() => resolveCategoryOrder(templates), [templates]);
+  // Only categories that actually contain templates — the built-in placeholders
+  // (Web/Database/…) are no longer shipped, so they shouldn't clutter the pickers.
+  const presentCategories = useMemo(() => {
+    const present = new Set(templates.map((t) => (t.category || "Custom").trim() || "Custom"));
+    return resolveCategoryOrder(templates).filter((category) => present.has(category));
+  }, [templates]);
+
+  const filteredTemplates = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return templates.filter((t) => {
+      if (categoryFilter && (t.category || "Custom") !== categoryFilter) return false;
+      if (!needle) return true;
+      return (
+        (t.name || "").toLowerCase().includes(needle) ||
+        (t.description || "").toLowerCase().includes(needle)
+      );
+    });
+  }, [templates, query, categoryFilter]);
+
+  const grouped = useMemo(() => groupTemplatesByCategory(filteredTemplates), [filteredTemplates]);
+  const categories = useMemo(() => resolveCategoryOrder(filteredTemplates), [filteredTemplates]);
+  const hasFilter = Boolean(query.trim() || categoryFilter);
 
   const handleTemplateClick = (templateId) => {
     if (!canDeploy || busy) return;
@@ -58,10 +86,51 @@ export default function TemplateMarketplace({
     onStartFromScratch?.();
   };
 
-  const handleCreate = async (payload) => {
-    await createWizardTemplate(payload);
+  const handleSubmitTemplate = async (payload) => {
+    if (editTemplate) {
+      await updateWizardTemplate(editTemplate.id, payload);
+    } else {
+      await createWizardTemplate(payload);
+    }
     setCreateOpen(false);
+    setEditTemplate(null);
     loadTemplates();
+  };
+
+  const handleEdit = async (template) => {
+    if (editingId || busy) return;
+    setActionError("");
+    setEditingId(template.id);
+    try {
+      const detail = await getWizardTemplate(template.id);
+      setEditTemplate(detail);
+      setCreateOpen(true);
+    } catch (err) {
+      setActionError(err.message || "Failed to load template for editing");
+    } finally {
+      setEditingId("");
+    }
+  };
+
+  const handleDeleteCategory = async (category, count) => {
+    if (deletingCategory) return;
+    if (
+      !window.confirm(
+        `Delete the "${category}" category and its ${count} template${count === 1 ? "" : "s"}? This cannot be undone.`,
+      )
+    )
+      return;
+    setActionError("");
+    setDeletingCategory(category);
+    try {
+      await deleteWizardTemplateCategory(category);
+      if (categoryFilter === category) setCategoryFilter("");
+      loadTemplates();
+    } catch (err) {
+      setActionError(err.message || "Failed to delete category");
+    } finally {
+      setDeletingCategory("");
+    }
   };
 
   const handleDelete = async (template) => {
@@ -104,7 +173,10 @@ export default function TemplateMarketplace({
           <button
             type="button"
             className="template-card template-card--scratch card"
-            onClick={() => setCreateOpen(true)}
+            onClick={() => {
+              setEditTemplate(null);
+              setCreateOpen(true);
+            }}
             disabled={busy}
           >
             <span className="template-card__icon" aria-hidden="true">
@@ -121,19 +193,79 @@ export default function TemplateMarketplace({
         ) : null}
       </section>
 
+      {!loading ? (
+        <div className="template-marketplace__filters">
+          <input
+            type="search"
+            className="template-marketplace__search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search templates by name…"
+            aria-label="Search templates by name"
+          />
+          <select
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            aria-label="Filter by category"
+          >
+            <option value="">All categories</option>
+            {presentCategories.map((category) => (
+              <option key={category} value={category}>{category}</option>
+            ))}
+          </select>
+          {hasFilter ? (
+            <button
+              type="button"
+              className="btn-outline"
+              onClick={() => {
+                setQuery("");
+                setCategoryFilter("");
+              }}
+            >
+              Clear
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {error ? <p className="banner-message error">{error}</p> : null}
       {actionError ? <p className="banner-message error">{actionError}</p> : null}
       {loading ? <p className="muted">Loading application templates…</p> : null}
 
+      {!loading && hasFilter && filteredTemplates.length === 0 ? (
+        <p className="template-marketplace__empty muted">No templates match your filters.</p>
+      ) : null}
+
+      {!loading && !hasFilter && templates.length === 0 ? (
+        <p className="template-marketplace__empty muted">
+          No templates yet. Use <strong>Create Template</strong> or <strong>Start From Scratch</strong> above to add one.
+        </p>
+      ) : null}
+
       {!loading
-        ? categories.map((category) => {
-            const items = grouped[category] || [];
-            return (
-              <section key={category} className="template-marketplace__category" aria-labelledby={`category-${category}`}>
-                <h2 id={`category-${category}`} className="template-marketplace__category-title">
-                  {category}
-                </h2>
-                {items.length ? (
+        ? categories
+            .filter((category) => (grouped[category] || []).length)
+            .map((category) => {
+              const items = grouped[category] || [];
+              const customCount = items.filter((t) => t.custom).length;
+              return (
+                <section key={category} className="template-marketplace__category" aria-labelledby={`category-${category}`}>
+                  <div className="template-marketplace__category-head">
+                    <h2 id={`category-${category}`} className="template-marketplace__category-title">
+                      {category}
+                    </h2>
+                    {canManageTemplates && customCount > 0 ? (
+                      <button
+                        type="button"
+                        className="template-marketplace__category-delete"
+                        title={`Delete the "${category}" category and its templates`}
+                        onClick={() => handleDeleteCategory(category, customCount)}
+                        disabled={deletingCategory === category}
+                      >
+                        {deletingCategory === category ? "Deleting…" : "Delete category"}
+                      </button>
+                    ) : null}
+                  </div>
                   <div className="template-marketplace__grid">
                     {items.map((template) => (
                       <div key={template.id} className="template-card-slot">
@@ -150,40 +282,49 @@ export default function TemplateMarketplace({
                           <p className="template-card__description muted">{template.description}</p>
                         </button>
                         {canManageTemplates && template.custom ? (
-                          <button
-                            type="button"
-                            className="template-card__delete"
-                            title="Delete template"
-                            aria-label={`Delete ${template.name}`}
-                            onClick={() => handleDelete(template)}
-                            disabled={deletingId === template.id}
-                          >
-                            {deletingId === template.id ? "…" : "×"}
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              className="template-card__edit"
+                              title="Edit template"
+                              aria-label={`Edit ${template.name}`}
+                              onClick={() => handleEdit(template)}
+                              disabled={editingId === template.id || deletingId === template.id}
+                            >
+                              {editingId === template.id ? "…" : "✎"}
+                            </button>
+                            <button
+                              type="button"
+                              className="template-card__delete"
+                              title="Delete template"
+                              aria-label={`Delete ${template.name}`}
+                              onClick={() => handleDelete(template)}
+                              disabled={deletingId === template.id}
+                            >
+                              {deletingId === template.id ? "…" : "×"}
+                            </button>
+                          </>
                         ) : null}
                       </div>
                     ))}
                   </div>
-                ) : (
-                  <p className="template-marketplace__empty muted">
-                    {category === "Custom"
-                      ? "Use Start From Scratch above to build a custom workload tailored to your needs."
-                      : "No templates in this category yet."}
-                  </p>
-                )}
-              </section>
-            );
-          })
+                </section>
+              );
+            })
         : null}
 
       {canManageTemplates ? (
         <CreateTemplateModal
           open={createOpen}
-          existingCategories={categories}
+          template={editTemplate}
+          existingCategories={presentCategories}
           clusterOptions={clusterOptions}
           defaultClusterId={defaultClusterId}
-          onClose={() => setCreateOpen(false)}
-          onSubmit={handleCreate}
+          onClose={() => {
+            setCreateOpen(false);
+            setEditTemplate(null);
+          }}
+          onSubmit={handleSubmitTemplate}
         />
       ) : null}
     </div>

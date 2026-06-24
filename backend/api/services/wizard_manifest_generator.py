@@ -144,6 +144,7 @@ def _container_spec(
                 "name": mount.get("volumeName") or mount.get("name") or "config-vol",
                 "mountPath": mount["mountPath"],
                 **({"subPath": mount["subPath"]} if mount.get("subPath") else {}),
+                **({"readOnly": True} if mount.get("readOnly") else {}),
             })
     for vm in environment.get("volumeMounts") or []:
         vol_name = _volume_mount_name(vm)
@@ -302,26 +303,38 @@ def _provisioned_config_documents(
     for cm in environment.get("provisionedConfigMaps") or []:
         name = _sanitize_name(cm.get("name") or "config")
         data = {str(k): str(v) for k, v in (cm.get("data") or {}).items() if k}
-        if not data:
+        # Binary values arrive already base64-encoded; the kubelet decodes them.
+        binary_data = {str(k): str(v) for k, v in (cm.get("binaryData") or {}).items() if k}
+        if not data and not binary_data:
             continue
-        docs.append({
+        doc: Dict[str, Any] = {
             "apiVersion": "v1",
             "kind": "ConfigMap",
             "metadata": {"name": name, "namespace": namespace, "labels": labels},
-            "data": data,
-        })
+        }
+        if data:
+            doc["data"] = data
+        if binary_data:
+            doc["binaryData"] = binary_data
+        docs.append(doc)
     for sec in environment.get("provisionedSecrets") or []:
         name = _sanitize_name(sec.get("name") or "secret")
         data = {str(k): str(v) for k, v in (sec.get("stringData") or {}).items() if k}
-        if not data:
+        # Binary values are base64 already and go straight into the Secret's ``data``.
+        binary_data = {str(k): str(v) for k, v in (sec.get("data") or {}).items() if k}
+        if not data and not binary_data:
             continue
-        docs.append({
+        doc = {
             "apiVersion": "v1",
             "kind": "Secret",
             "metadata": {"name": name, "namespace": namespace, "labels": labels},
             "type": "Opaque",
-            "stringData": data,
-        })
+        }
+        if data:
+            doc["stringData"] = data
+        if binary_data:
+            doc["data"] = binary_data
+        docs.append(doc)
     for sec in environment.get("provisionedDockerSecrets") or []:
         name = _sanitize_name(sec.get("name") or "registry")
         registry = (sec.get("registry") or "https://index.docker.io/v1/").strip()

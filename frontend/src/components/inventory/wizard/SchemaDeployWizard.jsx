@@ -22,6 +22,48 @@ const SOURCE_LABELS = {
   createSecret: "Create Secret",
 };
 
+const VOLUME_KIND_SOURCES = {
+  configMap: ["existingConfigMap", "createConfigMap"],
+  secret: ["existingSecret", "createSecret"],
+};
+
+// ConfigMap/Secret keys must match [-._a-zA-Z0-9]+, so an uploaded filename
+// (which may contain spaces, colons, etc.) has to be sanitized first.
+function toConfigKey(name) {
+  const cleaned = (name || "")
+    .trim()
+    .replace(/[^-._a-zA-Z0-9]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  return cleaned.slice(0, 253) || "file";
+}
+
+// `kubectl apply` copies the whole object into a 256 KB annotation, and a
+// ConfigMap caps at ~1 MB total — so a single stored file has to stay small.
+// base64 inflates ~33%, so we check the *encoded* length, not the raw size.
+const MAX_DATA_BYTES = 200 * 1024;
+
+function base64FromArrayBuffer(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+// Decode an uploaded file as UTF-8 text when it is text, otherwise base64 so the
+// raw bytes survive (ConfigMap binaryData / Secret data).
+function decodeUpload(buffer) {
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    if (!text.includes("\u0000")) return { value: text, binary: false };
+  } catch {
+    /* not valid UTF-8 — fall through to base64 */
+  }
+  return { value: base64FromArrayBuffer(buffer), binary: true };
+}
+
 /** A field forces the deployer's attention only when it's required and has no
  * default. Everything else is auto-resolved (or optional) and collapsed. */
 function envNeedsInput(field) {
@@ -36,6 +78,17 @@ function initAnswers(template, defaultClusterId) {
     const sources = field.allowedSources || ["value"];
     env[field.key] = { source: sources[0], value: "", configMapName: "", secretName: "", key: field.key };
   }
+  const volumes = {};
+  for (const vm of schema.volumeMounts || []) {
+    if (!vm.mountPath) continue;
+    const sources = vm.allowedSources || VOLUME_KIND_SOURCES[vm.kind] || VOLUME_KIND_SOURCES.configMap;
+    volumes[vm.mountPath] = {
+      source: sources[0],
+      configMapName: "",
+      secretName: "",
+      items: [{ key: "", value: "", binary: false }],
+    };
+  }
   const ips = schema.imagePullSecret;
   const ts = template.storage || {};
   return {
@@ -44,6 +97,7 @@ function initAnswers(template, defaultClusterId) {
     imagePullSecret: { mode: ips?.mode || "none", name: ips?.name || "", registry: "", username: "", password: "", email: "" },
     env,
     extraEnv: [],
+    volumes,
     storage: {
       enabled: Boolean(ts.pvcMode && ts.pvcMode !== "none"),
       mode: ts.pvcMode === "existing" ? "existing" : "new",
@@ -79,6 +133,7 @@ function buildSteps(template) {
   if ((schema.dependencies || []).length) steps.push({ key: "dependencies", label: "Dependencies" });
   // Storage is available for any pod workload so the deployer can attach a PVC/PV.
   if (POD_KINDS.has(template.workloadType || "Deployment")) steps.push({ key: "storage", label: "Storage" });
+  if ((schema.volumeMounts || []).length) steps.push({ key: "volumes", label: "Volumes" });
   if (schema.ingress?.supported) steps.push({ key: "ingress", label: "Ingress" });
   steps.push({ key: "review", label: "Review & Deploy" });
   return steps;
@@ -223,6 +278,55 @@ export default function SchemaDeployWizard({
   };
   const changeEnvSource = (key, source) => setEnv(key, sourcePatch(answers.env[key] || {}, source));
   const changeExtraSource = (index, source) => updateExtraEnv(index, sourcePatch(answers.extraEnv[index] || {}, source));
+
+  // --- volume mount handlers ---
+  const setVolume = (mountPath, patch) =>
+    setAnswers((a) => ({ ...a, volumes: { ...a.volumes, [mountPath]: { ...a.volumes[mountPath], ...patch } } }));
+  const changeVolumeSource = (mountPath, source) =>
+    setVolume(mountPath, sourcePatch(answers.volumes[mountPath] || {}, source));
+  const updateVolumeItem = (mountPath, index, patch) =>
+    setAnswers((a) => {
+      const vol = a.volumes[mountPath] || {};
+      const items = (vol.items || []).map((it, i) => (i === index ? { ...it, ...patch } : it));
+      return { ...a, volumes: { ...a.volumes, [mountPath]: { ...vol, items } } };
+    });
+  const addVolumeItem = (mountPath) =>
+    setAnswers((a) => {
+      const vol = a.volumes[mountPath] || {};
+      return { ...a, volumes: { ...a.volumes, [mountPath]: { ...vol, items: [...(vol.items || []), { key: "", value: "", binary: false }] } } };
+    });
+  const removeVolumeItem = (mountPath, index) =>
+    setAnswers((a) => {
+      const vol = a.volumes[mountPath] || {};
+      const items = (vol.items || []).filter((_, i) => i !== index);
+      return { ...a, volumes: { ...a.volumes, [mountPath]: { ...vol, items: items.length ? items : [{ key: "", value: "", binary: false }] } } };
+    });
+  // Load a file into an item: text files stay readable; binary files are base64'd
+  // (kubelet decodes them on mount). The key defaults to a sanitized filename.
+  const uploadVolumeFile = (mountPath, index, file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const { value, binary } = decodeUpload(reader.result);
+      if (value.length > MAX_DATA_BYTES) {
+        setError(
+          `"${file.name}" is too large to store in a ConfigMap/Secret (max ~${Math.round(
+            MAX_DATA_BYTES / 1024,
+          )} KB${binary ? " once base64-encoded" : ""}). Use a volume or object storage for large files.`,
+        );
+        return;
+      }
+      setError("");
+      setAnswers((a) => {
+        const vol = a.volumes[mountPath] || {};
+        const items = (vol.items || []).map((it, i) =>
+          i === index ? { ...it, value, binary, key: it.key || toConfigKey(file.name) } : it,
+        );
+        return { ...a, volumes: { ...a.volumes, [mountPath]: { ...vol, items } } };
+      });
+    };
+    reader.readAsArrayBuffer(file);
+  };
   const setStorage = (patch) =>
     setAnswers((a) => ({ ...a, storage: { ...a.storage, ...patch } }));
   const setNewPvc = (patch) =>
@@ -424,12 +528,11 @@ export default function SchemaDeployWizard({
                   )}
                   {answers.imagePullSecret?.mode === "existing" ? (
                     (() => {
-                      // Image pull secrets are docker-registry secrets; surface those
-                      // first, falling back to all secrets, then to free text.
-                      const dockerSecrets = configResources.secrets.filter(
+                      // Image pull secrets must be docker-registry secrets; only those
+                      // are selectable here (other secret types can't authenticate a pull).
+                      const pickable = configResources.secrets.filter(
                         (s) => s.type === "kubernetes.io/dockerconfigjson" || s.type === "kubernetes.io/dockercfg",
                       );
-                      const pickable = dockerSecrets.length ? dockerSecrets : configResources.secrets;
                       return (
                         <Field label="Secret name">
                           <select
@@ -438,7 +541,7 @@ export default function SchemaDeployWizard({
                             disabled={!pickable.length}
                           >
                             <option value="">
-                              {pickable.length ? "— select secret —" : "no existing secrets"}
+                              {pickable.length ? "— select secret —" : "no docker-registry secrets"}
                             </option>
                             {pickable.map((s) => (
                               <option key={s.name} value={s.name}>{s.name}</option>
@@ -731,6 +834,127 @@ export default function SchemaDeployWizard({
             </div>
           ) : null}
 
+          {step.key === "volumes" ? (
+            <div className="wizard-step-panel">
+              <h4>Volumes</h4>
+              <p className="muted" style={{ marginTop: 0 }}>
+                Each mount sources a ConfigMap or Secret as files. Pick an existing resource or create one.
+              </p>
+              {(schema.volumeMounts || []).map((vm) => {
+                if (!vm.mountPath) return null;
+                const ans = answers.volumes[vm.mountPath] || {};
+                const kind = vm.kind === "secret" ? "secret" : "configMap";
+                const allowed = vm.allowedSources || VOLUME_KIND_SOURCES[kind];
+                const source = ans.source || allowed[0];
+                const isSecret = kind === "secret";
+                const isCreate = source === "createConfigMap" || source === "createSecret";
+                const resources = isSecret ? configResources.secrets : configResources.configMaps;
+                const nameKey = isSecret ? "secretName" : "configMapName";
+                return (
+                  <div key={vm.mountPath} className="schema-env-card">
+                    <div className="schema-env-card__top">
+                      <strong>{vm.mountPath}</strong>
+                      <span className="schema-pill">{isSecret ? "Secret" : "ConfigMap"}</span>
+                      {vm.readOnly ? <span className="schema-pill">read-only</span> : null}
+                    </div>
+                    <select
+                      value={source}
+                      onChange={(e) => changeVolumeSource(vm.mountPath, e.target.value)}
+                      aria-label={`${vm.mountPath} source`}
+                    >
+                      {allowed.map((s) => (
+                        <option key={s} value={s}>{SOURCE_LABELS[s] || s}</option>
+                      ))}
+                    </select>
+                    {!isCreate ? (
+                      resources.length ? (
+                        <select
+                          value={ans[nameKey] || ""}
+                          onChange={(e) => setVolume(vm.mountPath, { [nameKey]: e.target.value })}
+                          aria-label={`${vm.mountPath} ${isSecret ? "secret" : "configmap"} name`}
+                        >
+                          <option value="">— select {isSecret ? "secret" : "configmap"} —</option>
+                          {resources.map((r) => (
+                            <option key={r.name} value={r.name}>{r.name}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <>
+                          <p className="schema-ref-empty muted">
+                            No existing {isSecret ? "secret" : "configmap"}s in this namespace — switch the source to “Create” to add one.
+                          </p>
+                          <select disabled aria-label={`${vm.mountPath} ${isSecret ? "secret" : "configmap"} name`}>
+                            <option value="">no existing {isSecret ? "secret" : "configmap"}s found</option>
+                          </select>
+                        </>
+                      )
+                    ) : (
+                      <div className="schema-volume-create">
+                        <input
+                          value={ans[nameKey] || ""}
+                          onChange={(e) => setVolume(vm.mountPath, { [nameKey]: e.target.value })}
+                          placeholder={`new ${isSecret ? "secret" : "configmap"} name`}
+                        />
+                        {(ans.items || []).map((item, index) => (
+                          <div key={index} className="schema-volume-file">
+                            <div className="schema-volume-file__row">
+                              <input
+                                value={item.key || ""}
+                                onChange={(e) => updateVolumeItem(vm.mountPath, index, { key: e.target.value })}
+                                placeholder="file name (key)"
+                              />
+                              <label className="btn-outline schema-upload-btn">
+                                Upload
+                                <input
+                                  type="file"
+                                  className="schema-upload-btn__input"
+                                  onChange={(e) => {
+                                    uploadVolumeFile(vm.mountPath, index, e.target.files?.[0]);
+                                    e.target.value = "";
+                                  }}
+                                />
+                              </label>
+                              <label className="schema-volume-file__binary checkbox-row">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(item.binary)}
+                                  onChange={(e) => updateVolumeItem(vm.mountPath, index, { binary: e.target.checked })}
+                                />
+                                <span>Base64</span>
+                              </label>
+                              <button
+                                type="button"
+                                className="btn-outline template-env-row__remove"
+                                onClick={() => removeVolumeItem(vm.mountPath, index)}
+                                aria-label={`Remove file ${index + 1}`}
+                              >
+                                ×
+                              </button>
+                            </div>
+                            <textarea
+                              className="schema-volume-file__content"
+                              rows={6}
+                              value={item.value || ""}
+                              onChange={(e) => updateVolumeItem(vm.mountPath, index, { value: e.target.value })}
+                              placeholder={
+                                item.binary
+                                  ? "base64-encoded binary — uploaded files fill this automatically"
+                                  : "file content — type, paste, or upload"
+                              }
+                            />
+                          </div>
+                        ))}
+                        <button type="button" className="btn-outline" onClick={() => addVolumeItem(vm.mountPath)}>
+                          + Add file
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
           {step.key === "ingress" ? (
             <div className="wizard-step-panel">
               <h4>Ingress</h4>
@@ -844,29 +1068,43 @@ function ExistingRefPicker({ resources, nameKey, ans, setEnv, nameLabel }) {
     const nextKey = matchKeys.includes(ans.key) ? ans.key : matchKeys[0] || "";
     setEnv({ [nameKey]: value, key: nextKey });
   };
+  const kindWord = nameLabel.replace(/\s*name$/i, "") || "resource";
+  const hasSelection = Boolean(selected);
   return (
-    <div className="schema-ref-inputs">
-      {resources.length ? (
-        <select value={name} onChange={(e) => onNameChange(e.target.value)} aria-label={nameLabel}>
-          <option value="">— select {nameLabel} —</option>
-          {resources.map((r) => (
-            <option key={r.name} value={r.name}>{r.name}</option>
-          ))}
-        </select>
-      ) : (
-        <input value={name} onChange={(e) => setEnv({ [nameKey]: e.target.value })} placeholder={nameLabel} />
+    <>
+      {resources.length ? null : (
+        <p className="schema-ref-empty muted">No existing {kindWord}s in this namespace — switch the source to “Create” to add one.</p>
       )}
-      {keys.length ? (
-        <select value={ans.key || ""} onChange={(e) => setEnv({ key: e.target.value })} aria-label="key">
-          <option value="">— select key —</option>
-          {keys.map((k) => (
-            <option key={k} value={k}>{k}</option>
-          ))}
-        </select>
-      ) : (
-        <input value={ans.key || ""} onChange={(e) => setEnv({ key: e.target.value })} placeholder="key" />
-      )}
-    </div>
+      <div className="schema-ref-inputs">
+        {resources.length ? (
+          <select value={name} onChange={(e) => onNameChange(e.target.value)} aria-label={nameLabel}>
+            <option value="">— select {nameLabel} —</option>
+            {resources.map((r) => (
+              <option key={r.name} value={r.name}>{r.name}</option>
+            ))}
+          </select>
+        ) : (
+          <select disabled aria-label={nameLabel}>
+            <option value="">no existing {kindWord}s found</option>
+          </select>
+        )}
+        {keys.length ? (
+          <select value={ans.key || ""} onChange={(e) => setEnv({ key: e.target.value })} aria-label="key">
+            <option value="">— select key —</option>
+            {keys.map((k) => (
+              <option key={k} value={k}>{k}</option>
+            ))}
+          </select>
+        ) : (
+          <input
+            value={ans.key || ""}
+            onChange={(e) => setEnv({ key: e.target.value })}
+            placeholder="key"
+            disabled={!hasSelection}
+          />
+        )}
+      </div>
+    </>
   );
 }
 

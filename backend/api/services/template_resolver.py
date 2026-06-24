@@ -64,6 +64,19 @@ ENV_SOURCES = {
 # Sources that expose the value in plaintext — forbidden for sensitive variables.
 PLAINTEXT_SOURCES = {"value", "existingConfigMap", "createConfigMap"}
 
+# Volume mounts source a whole ConfigMap/Secret as files. Each kind allows an
+# existing resource or a freshly-created one.
+VOLUME_KIND_SOURCES = {
+    "configMap": ["existingConfigMap", "createConfigMap"],
+    "secret": ["existingSecret", "createSecret"],
+}
+
+
+def _slug(value: str, fallback: str) -> str:
+    cleaned = "".join(c if c.isalnum() else "-" for c in str(value).lower())
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    return cleaned or fallback
+
 ResolveResult = Tuple[Optional[Dict[str, Any]], Optional[str]]
 
 
@@ -73,23 +86,51 @@ def _spec_copy(template: Dict[str, Any], key: str, default: Any) -> Any:
 
 
 class _Provisioned:
-    """Accumulates Create ConfigMap/Secret data, grouped by resource name."""
+    """Accumulates Create ConfigMap/Secret data, grouped by resource name.
+
+    Text values land in ``data``/``stringData``; binary values (already base64
+    from the client) land in a ConfigMap's ``binaryData`` / a Secret's ``data``,
+    which the kubelet decodes back to raw bytes on mount.
+    """
 
     def __init__(self) -> None:
         self._config_maps: Dict[str, Dict[str, str]] = {}
+        self._config_maps_binary: Dict[str, Dict[str, str]] = {}
         self._secrets: Dict[str, Dict[str, str]] = {}
+        self._secrets_binary: Dict[str, Dict[str, str]] = {}
 
-    def add_config_map(self, name: str, key: str, value: str) -> None:
-        self._config_maps.setdefault(name, {})[key] = value
+    def add_config_map(self, name: str, key: str, value: str, binary: bool = False) -> None:
+        bucket = self._config_maps_binary if binary else self._config_maps
+        bucket.setdefault(name, {})[key] = value
 
-    def add_secret(self, name: str, key: str, value: str) -> None:
-        self._secrets.setdefault(name, {})[key] = value
+    def add_secret(self, name: str, key: str, value: str, binary: bool = False) -> None:
+        bucket = self._secrets_binary if binary else self._secrets
+        bucket.setdefault(name, {})[key] = value
+
+    @staticmethod
+    def _merge(
+        text: Dict[str, Dict[str, str]],
+        binary: Dict[str, Dict[str, str]],
+        text_key: str,
+        binary_key: str,
+    ) -> List[Dict[str, Any]]:
+        names: List[str] = list(text)
+        names += [n for n in binary if n not in text]
+        out: List[Dict[str, Any]] = []
+        for name in names:
+            doc: Dict[str, Any] = {"name": name}
+            if text.get(name):
+                doc[text_key] = text[name]
+            if binary.get(name):
+                doc[binary_key] = binary[name]
+            out.append(doc)
+        return out
 
     def config_maps(self) -> List[Dict[str, Any]]:
-        return [{"name": n, "data": d} for n, d in self._config_maps.items()]
+        return self._merge(self._config_maps, self._config_maps_binary, "data", "binaryData")
 
     def secrets(self) -> List[Dict[str, Any]]:
-        return [{"name": n, "stringData": d} for n, d in self._secrets.items()]
+        return self._merge(self._secrets, self._secrets_binary, "stringData", "data")
 
 
 def _resolve_storage(answer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -242,6 +283,55 @@ def _resolve_env_entry(
             return None, f"A value is required to create the secret for '{key}'."
         provisioned.add_secret(secret_name, ref_key, str(answer.get("value") or ""))
     return {"name": key, "valueFrom": {"kind": "secret", "name": secret_name, "key": ref_key}}, None
+
+
+def _resolve_volume_mounts(
+    volume_schema: List[Dict[str, Any]],
+    volume_answers: Dict[str, Any],
+    provisioned: _Provisioned,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Resolve each declared volume mount into a generator ``mountedFiles`` entry.
+
+    The deployer chooses an existing ConfigMap/Secret or asks to create one; in the
+    latter case the supplied file entries are accumulated for provisioning.
+    """
+    mounts: List[Dict[str, Any]] = []
+    for index, vm in enumerate(volume_schema):
+        mount_path = str(vm.get("mountPath") or "").strip()
+        if not mount_path:
+            continue
+        kind = "secret" if vm.get("kind") == "secret" else "configMap"
+        allowed = vm.get("allowedSources") or VOLUME_KIND_SOURCES[kind]
+        answer = volume_answers.get(mount_path) or {}
+        source = (answer.get("source") or allowed[0]).strip()
+        if source not in allowed:
+            return [], f"Source '{source}' is not allowed for the volume mounted at '{mount_path}'."
+
+        vol_name = f"vol-{_slug(mount_path, str(index))}"
+        read_only = bool(vm.get("readOnly"))
+        items = answer.get("items") or []
+
+        if kind == "configMap":
+            name = str(answer.get("configMapName") or "").strip()
+            if not name:
+                return [], f"A ConfigMap name is required for the volume mounted at '{mount_path}'."
+            if source == "createConfigMap":
+                for item in items:
+                    item_key = str(item.get("key") or "").strip()
+                    if item_key:
+                        provisioned.add_config_map(name, item_key, str(item.get("value") or ""), binary=bool(item.get("binary")))
+            mounts.append({"volumeName": vol_name, "mountPath": mount_path, "configMap": name, "readOnly": read_only})
+        else:
+            name = str(answer.get("secretName") or "").strip()
+            if not name:
+                return [], f"A Secret name is required for the volume mounted at '{mount_path}'."
+            if source == "createSecret":
+                for item in items:
+                    item_key = str(item.get("key") or "").strip()
+                    if item_key:
+                        provisioned.add_secret(name, item_key, str(item.get("value") or ""), binary=bool(item.get("binary")))
+            mounts.append({"volumeName": vol_name, "mountPath": mount_path, "secret": name, "readOnly": read_only})
+    return mounts, None
 
 
 def _apply_overrides(
@@ -415,6 +505,14 @@ def resolve_template(template: Dict[str, Any], answers: Dict[str, Any]) -> Resol
     if dep_error:
         return None, dep_error
 
+    mounted_files, vm_error = _resolve_volume_mounts(
+        schema.get("volumeMounts") or [],
+        answers.get("volumes") or {},
+        provisioned,
+    )
+    if vm_error:
+        return None, vm_error
+
     docker_secret, ips_error = _resolve_image_pull_secret(
         schema.get("imagePullSecret") or {},
         answers.get("imagePullSecret") or {},
@@ -454,6 +552,7 @@ def resolve_template(template: Dict[str, Any], answers: Dict[str, Any]) -> Resol
     environment = {
         **base_environment,
         "envVars": env_entries,
+        "mountedFiles": (base_environment.get("mountedFiles") or []) + mounted_files,
         "configMapRefs": base_environment.get("configMapRefs") or [],
         "secretRefs": base_environment.get("secretRefs") or [],
         "provisionedConfigMaps": provisioned.config_maps(),

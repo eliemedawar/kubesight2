@@ -162,6 +162,62 @@ def create_user_template(
     return _summary(tpl), None, 201
 
 
+def update_user_template(
+    slug: str,
+    payload: Dict[str, Any],
+    actor_user_id: Optional[int] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Replace an existing custom template's fields. The slug (id) is preserved so
+    existing references stay valid even when the name changes."""
+    tpl = UserTemplate.query.filter_by(slug=slug).first()
+    if not tpl:
+        return None, "Template not found", 404
+
+    error, cleaned = _validate_payload(payload)
+    if error:
+        return None, error, 400
+
+    tpl.name = cleaned["name"]
+    tpl.description = cleaned["description"]
+    tpl.category = cleaned["category"]
+    tpl.workload_type = cleaned["workload_type"]
+    tpl.spec = cleaned["spec"]
+    db.session.commit()
+    log_audit(
+        "user_template_updated",
+        actor_user_id=actor_user_id,
+        target_type="user_template",
+        target_id=slug,
+        details={"name": cleaned["name"], "category": cleaned["category"]},
+    )
+    return _summary(tpl), None, 200
+
+
+def delete_user_template_category(
+    category: str,
+    actor_user_id: Optional[int] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Delete every custom template filed under ``category``."""
+    name = (category or "").strip()
+    if not name:
+        return None, "Category is required", 400
+    rows = UserTemplate.query.filter_by(category=name).all()
+    if not rows:
+        return None, "No templates found in this category", 404
+    count = len(rows)
+    for tpl in rows:
+        db.session.delete(tpl)
+    db.session.commit()
+    log_audit(
+        "user_template_category_deleted",
+        actor_user_id=actor_user_id,
+        target_type="user_template_category",
+        target_id=name,
+        details={"category": name, "deleted": count},
+    )
+    return {"category": name, "deleted": count}, None, 200
+
+
 def delete_user_template(
     slug: str,
     actor_user_id: Optional[int] = None,

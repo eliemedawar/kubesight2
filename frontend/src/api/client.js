@@ -63,10 +63,14 @@ export async function request(path, { method = "GET", body, query, auth = true }
 
   if (!response.ok) {
     const message = payload.error || payload.message || `Request failed (${response.status})`;
-    if (response.status === 403 || message === "Forbidden") {
-      throw new Error("You do not have access to this resource.");
-    }
-    throw new Error(message);
+    const error =
+      response.status === 403 || message === "Forbidden"
+        ? new Error("You do not have access to this resource.")
+        : new Error(message);
+    // Expose the HTTP status so callers can react to specific codes (e.g. a 404
+    // for a cluster that was deleted out from under a stale tab).
+    error.status = response.status;
+    throw error;
   }
 
   if (typeof payload.success === "boolean") {

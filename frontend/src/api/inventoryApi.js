@@ -92,8 +92,18 @@ export function createWizardTemplate(payload) {
   return request("/api/inventory/deploy/wizard/templates", { method: "POST", body: payload });
 }
 
+export function updateWizardTemplate(templateId, payload) {
+  return request(`/api/inventory/deploy/wizard/templates/${templateId}`, { method: "PUT", body: payload });
+}
+
 export function deleteWizardTemplate(templateId) {
   return request(`/api/inventory/deploy/wizard/templates/${templateId}`, { method: "DELETE" });
+}
+
+export function deleteWizardTemplateCategory(category) {
+  return request(`/api/inventory/deploy/wizard/templates/categories/${encodeURIComponent(category)}`, {
+    method: "DELETE",
+  });
 }
 
 export function validateWizardName(payload) {
