@@ -171,6 +171,33 @@ def _migrate_log_alert_columns() -> None:
         _add_column_if_missing("alert_delivery_logs", "log_snippet", "TEXT")
 
 
+def _prune_obsolete_permissions() -> None:
+    """Delete permission rows whose key is no longer defined in rbac_data.
+
+    Permission keys are fully owned by ``rbac_data.PERMISSIONS`` (there is no UI to
+    invent new ones), so any DB permission not in that list is a leftover from a
+    removed feature (e.g. the old ``network:view``). Pruning keeps the Roles editor
+    catalog clean and prevents stale keys leaking into an "Other" group. Idempotent.
+    """
+    from .models import Permission, Role
+    from .rbac_data import ALL_PERMISSION_KEYS
+
+    valid = set(ALL_PERMISSION_KEYS)
+    obsolete = [perm for perm in Permission.query.all() if perm.key not in valid]
+    if not obsolete:
+        return
+
+    obsolete_ids = {perm.id for perm in obsolete}
+    # Detach the obsolete permissions from every role first (association rows).
+    for role in Role.query.all():
+        kept = [perm for perm in role.permissions if perm.id not in obsolete_ids]
+        if len(kept) != len(role.permissions):
+            role.permissions = kept
+    for perm in obsolete:
+        db.session.delete(perm)
+    db.session.commit()
+
+
 def _sync_role_permissions() -> None:
     """Ensure every role has all permissions defined for it in ROLE_DEFINITIONS.
 
@@ -288,3 +315,4 @@ def run_migrations() -> None:
     migrate_all_users_legacy_rules()
     run_alert_routing_migrations()
     _sync_role_permissions()
+    _prune_obsolete_permissions()

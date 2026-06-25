@@ -1313,6 +1313,12 @@ textarea:focus-visible {
   }
 }
 
+/* Reserve clearance under the floating "Change Bundle" button so it never
+   covers bottom-right page content (e.g. the data table pager's "Next"). */
+body.has-bundle-fab .page-content.ops-layout {
+  padding-bottom: 5.5rem;
+}
+
 /* ── Notification badge border matches dark bg ─── */
 .notification-badge {
   border-color: var(--bg-panel);
@@ -1498,7 +1504,14 @@ textarea:focus-visible {
 .ops-kpi-value--word { font-family: inherit; font-size: 24px; margin-top: 12px; }
 .ops-kpi-unit { font-size: 14px; color: var(--od-muted); margin-bottom: 3px; font-family: inherit; }
 .ops-kpi-sub { font-size: 11.5px; color: var(--od-sub); margin-top: 5px; }
+.ops-kpi-reasons { list-style: none; margin: 7px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.ops-kpi-reasons li { font-size: 11px; line-height: 1.35; color: var(--reason-color, var(--od-sub)); padding-left: 12px; position: relative; }
+.ops-kpi-reasons li::before { content: "•"; position: absolute; left: 2px; top: 0; }
 .ops-kpi .sparkline-canvas { height: 26px; margin-top: 6px; }
+
+/* ── loading skeleton (mirrors chart canvas heights) ── */
+.ops-chart-skeleton { width: 100%; height: 180px; margin-top: 14px; border-radius: 10px; }
+.ops-dash--loading .ops-panel-head { margin-bottom: 0; }
 
 /* ── legends ── */
 .ops-legend { display: flex; gap: 16px; margin: 12px 0 6px; font-size: 11.5px; color: var(--od-sub); flex-wrap: wrap; align-items: center; }

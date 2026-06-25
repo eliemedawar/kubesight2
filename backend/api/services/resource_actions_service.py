@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
-from ..access_engine import can_access_resource, user_has_permission
+from ..access_engine import can_access_namespace, can_access_resource, user_has_permission
 from ..audit import log_audit
 from ..k8s_provider import K8sCommandError, resolve_cluster_access, should_use_real_k8s
 from ..models import User
@@ -40,6 +40,13 @@ KIND_PERMISSION = {
     "cronjob": "cronjobs:view",
     "service": "services:view",
 }
+
+# Kinds that support the Resources "Restart" action. Pods are restarted by
+# deletion (the owning controller recreates them); workloads use rollout restart.
+RESTART_SUPPORTED_KINDS = {"pod", "deployment", "statefulset", "daemonset"}
+
+# Permission gating writes from the Resources page (mirrors the deployment edit action).
+RESTART_PERMISSION = "apps:deploy"
 
 
 def _normalize_kind(kind: str) -> Optional[str]:
@@ -244,4 +251,121 @@ def get_deployment_rollout_history(
         )
         return parsed, None, 200
     except K8sCommandError as exc:
+        return None, str(exc), 503
+
+
+def _check_resource_restart_access(
+    user: Optional[User],
+    cluster_id: str,
+    namespace: str,
+    normalized: str,
+    name: str,
+) -> Optional[Tuple[str, int]]:
+    if user and not user_has_permission(user, RESTART_PERMISSION):
+        log_audit(
+            "unauthorized_resource_action",
+            actor=user,
+            target_type=normalized,
+            target_id=f"{cluster_id}/{namespace}/{name}",
+            details={"action": "restart"},
+        )
+        return "Forbidden", 403
+
+    if user and not can_access_namespace(user, cluster_id, namespace):
+        log_audit(
+            "unauthorized_resource_action",
+            actor=user,
+            target_type="namespace",
+            target_id=f"{cluster_id}/{namespace}",
+            details={"action": "restart", "resource": name},
+        )
+        return "Forbidden", 403
+
+    if user and not can_access_resource(user, cluster_id, namespace, normalized, name):
+        log_audit(
+            "unauthorized_resource_action",
+            actor=user,
+            target_type=normalized,
+            target_id=f"{cluster_id}/{namespace}/{name}",
+            details={"action": "restart"},
+        )
+        return "Forbidden", 403
+
+    return None
+
+
+def restart_resource(
+    user: Optional[User],
+    cluster_id: str,
+    namespace: str,
+    kind: str,
+    name: str,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Restart a pod (delete & recreate) or a workload (rollout restart)."""
+    normalized = _normalize_kind(kind)
+    if not normalized or not name.strip():
+        return None, "Invalid resource kind or name", 400
+    if normalized not in RESTART_SUPPORTED_KINDS:
+        return None, f"Restart is not supported for {normalized}", 400
+
+    denied = _check_resource_restart_access(user, cluster_id, namespace, normalized, name)
+    if denied:
+        return None, denied[0], denied[1]
+
+    if normalized == "pod":
+        args = ["delete", "pod", name, "-n", namespace]
+        mock_output = f"pod/{name} deleted"
+    else:
+        args = ["rollout", "restart", f"{normalized}/{name}", "-n", namespace]
+        mock_output = f"{normalized}.apps/{name} restarted"
+
+    if not should_use_real_k8s(cluster_id):
+        data = {
+            "restarted": True,
+            "clusterId": cluster_id,
+            "namespace": namespace,
+            "kind": normalized,
+            "name": name,
+            "output": mock_output,
+            "mode": "mock",
+        }
+        log_audit(
+            "resource_restarted",
+            actor=user,
+            target_type=normalized,
+            target_id=f"{cluster_id}/{namespace}/{name}",
+            details={**data, "result": "success"},
+        )
+        return data, None, 200
+
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return None, "Cluster not found", 404
+
+    try:
+        output = _run_kubectl_for_cluster(cluster_id, args)
+        data = {
+            "restarted": True,
+            "clusterId": cluster_id,
+            "namespace": namespace,
+            "kind": normalized,
+            "name": name,
+            "output": output.strip(),
+        }
+        log_audit(
+            "resource_restarted",
+            actor=user,
+            target_type=normalized,
+            target_id=f"{cluster_id}/{namespace}/{name}",
+            details={**data, "result": "success"},
+        )
+        return data, None, 200
+    except K8sCommandError as exc:
+        log_audit(
+            "resource_action_failed",
+            actor=user,
+            target_type=normalized,
+            target_id=f"{cluster_id}/{namespace}/{name}",
+            details={"action": "restart", "error": str(exc), "result": "failed"},
+        )
         return None, str(exc), 503

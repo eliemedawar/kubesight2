@@ -86,6 +86,13 @@ export function getResourceYaml({ clusterId, namespace, kind, name }) {
   );
 }
 
+export function restartResource({ clusterId, namespace, kind, name }) {
+  return request(
+    `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/restart`,
+    { method: "POST" }
+  );
+}
+
 export function getDeploymentRolloutHistory({ clusterId, namespace, deploymentName }) {
   return request(
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/deployments/${encodeURIComponent(deploymentName)}/rollout-history`

@@ -9,6 +9,7 @@ import { getDashboardWidgetRegistry, sortWidgetsForUser } from "../dashboard/wid
 import { getVisibleWidgets, groupWidgetsBySection } from "../dashboard/widgetVisibility.js";
 import { useDashboardSeries } from "../dashboard/useDashboardSeries.js";
 import OpsDashboard from "../dashboard/OpsDashboard.jsx";
+import DashboardSkeleton from "../dashboard/DashboardSkeleton.jsx";
 
 export default function DashboardPage({
   summary,
@@ -73,12 +74,7 @@ export default function DashboardPage({
     sections.full?.length;
 
   if (coreLoading) {
-    return (
-      <>
-        <PageTitle title={pageTitle} subtitle={pageSubtitle} />
-        <p className="muted dashboard-loading">Loading clusters...</p>
-      </>
-    );
+    return <DashboardSkeleton />;
   }
 
   if (!summaryReady) {
@@ -98,12 +94,9 @@ export default function DashboardPage({
         </>
       );
     }
-    return (
-      <>
-        <PageTitle title={pageTitle} subtitle={pageSubtitle} />
-        <p className="muted dashboard-loading">Loading dashboard data...</p>
-      </>
-    );
+    // Paint the dashboard structure immediately (chart shells + skeleton rows)
+    // instead of a blank "Loading…" screen; it hydrates when the summary lands.
+    return <DashboardSkeleton />;
   }
 
   if (isAccessDeniedError(accessError)) {

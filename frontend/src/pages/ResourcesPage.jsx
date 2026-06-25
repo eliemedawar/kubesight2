@@ -9,6 +9,7 @@ import {
   getDeploymentRolloutHistory,
   getResourceDescribe,
   getResourceYaml,
+  restartResource,
 } from "../api/clustersApi.js";
 import { RESOURCE_TAB_DEFINITIONS, listKeyForTab } from "../lib/resourceTypes.js";
 import { EMPTY_MESSAGES, formatAccessError } from "../utils/authz.js";
@@ -40,10 +41,13 @@ function podsForWorkload(pods, workloadName) {
   return pods.filter((pod) => pod.name === workloadName || pod.name.startsWith(prefix));
 }
 
-function buildPodActionsCell(pod, onResourceAction) {
+function buildPodActionsCell(pod, onResourceAction, canRestart = false) {
   let actions = Array.isArray(pod.actions) ? [...pod.actions] : [];
   if (pod.canViewLogs === false) {
     actions = actions.filter((action) => action !== "logs" && action !== "view-logs");
+  }
+  if (canRestart && !actions.includes("restart")) {
+    actions.push("restart");
   }
   return (
     <ResourceRowActions
@@ -157,6 +161,7 @@ export default function ResourcesPage({
   const { hasPermission } = usePermission();
   const canDeploy = hasPermission("apps:deploy");
   const [workloadPodFilter, setWorkloadPodFilter] = useState({ name: "", kind: "" });
+  const [search, setSearch] = useState("");
   const [inspectModal, setInspectModal] = useState(CLOSED_MODAL);
   const [editModal, setEditModal] = useState(CLOSED_EDIT_MODAL);
 
@@ -265,6 +270,46 @@ export default function ResourcesPage({
         return;
       }
 
+      if (actionId === "restart") {
+        const verb =
+          resourceKind === "pod" ? "Restart (delete & recreate)" : "Rollout restart";
+        const confirmed = window.confirm(
+          `${verb} ${resourceKind} "${resourceName}"?`
+        );
+        if (!confirmed) {
+          return;
+        }
+        setInspectModal({
+          ...CLOSED_MODAL,
+          open: true,
+          title: `Restart — ${resourceName}`,
+          mode: "describe",
+          loading: true,
+        });
+        restartResource({
+          clusterId: resolvedCluster,
+          namespace: resolvedNamespace,
+          kind: resourceKind,
+          name: resourceName,
+        })
+          .then((payload) => {
+            setInspectModal((prev) => ({
+              ...prev,
+              loading: false,
+              content: payload.output || `${resourceKind}/${resourceName} restarted.`,
+            }));
+            onRefreshTab?.();
+          })
+          .catch((err) => {
+            setInspectModal((prev) => ({
+              ...prev,
+              loading: false,
+              error: formatAccessError(err.message) || err.message || "Restart failed",
+            }));
+          });
+        return;
+      }
+
       if (actionId === "rollout" && resourceKind === "deployment") {
         setInspectModal({
           ...CLOSED_MODAL,
@@ -299,7 +344,7 @@ export default function ResourcesPage({
           });
       }
     },
-    [clusterId, namespace, onNavigateToLogs, openTextInspect, tabKeys]
+    [clusterId, namespace, onNavigateToLogs, onRefreshTab, openTextInspect, tabKeys]
   );
 
   const header = (
@@ -347,7 +392,7 @@ export default function ResourcesPage({
           age: pod.age || "-",
           image: pod.image || "-",
           node: pod.node || "-",
-          actions: buildPodActionsCell(pod, handleResourceAction),
+          actions: buildPodActionsCell(pod, handleResourceAction, canDeploy),
         };
       }),
     },
@@ -378,7 +423,7 @@ export default function ResourcesPage({
           {
             ...dep,
             actions: canDeploy
-              ? [...(dep.actions || ["pods", "rollout", "yaml"]), "edit"]
+              ? [...(dep.actions || ["pods", "rollout", "yaml"]), "restart", "edit"]
               : dep.actions,
           },
           "deployment",
@@ -429,7 +474,14 @@ export default function ResourcesPage({
         available: sts.available ?? "-",
         updateStatus: sts.updateStatus || sts.status || "-",
         age: sts.age || "-",
-        actions: buildWorkloadActionsCell(sts, "statefulset", handleResourceAction),
+        actions: buildWorkloadActionsCell(
+          {
+            ...sts,
+            actions: canDeploy ? [...(sts.actions || ["pods"]), "restart"] : sts.actions,
+          },
+          "statefulset",
+          handleResourceAction
+        ),
       })),
     },
     daemonSets: {
@@ -453,7 +505,14 @@ export default function ResourcesPage({
         available: ds.available ?? "-",
         updateStatus: ds.updateStatus || ds.status || "-",
         age: ds.age || "-",
-        actions: buildWorkloadActionsCell(ds, "daemonset", handleResourceAction),
+        actions: buildWorkloadActionsCell(
+          {
+            ...ds,
+            actions: canDeploy ? [...(ds.actions || ["pods"]), "restart"] : ds.actions,
+          },
+          "daemonset",
+          handleResourceAction
+        ),
       })),
     },
     jobs: {
@@ -530,6 +589,28 @@ export default function ResourcesPage({
   );
   const active = visibleTableConfig[activeTab] || visibleTableConfig[tabKeys[0]];
 
+  const searchTerm = search.trim().toLowerCase();
+  const filteredRows = useMemo(() => {
+    if (!active) {
+      return [];
+    }
+    if (!searchTerm) {
+      return active.rows;
+    }
+    return active.rows.filter((row) =>
+      active.columns.some((col) => {
+        if (col.key === "actions") {
+          return false;
+        }
+        const value = row[col.key];
+        if (value == null || typeof value === "object") {
+          return false;
+        }
+        return String(value).toLowerCase().includes(searchTerm);
+      })
+    );
+  }, [active, searchTerm]);
+
   const workloadFilterLabel = workloadPodFilter.kind
     ? workloadPodFilter.kind.replace(/([A-Z])/g, " $1").trim()
     : "workload";
@@ -575,17 +656,27 @@ export default function ResourcesPage({
                 </button>
               ))}
             </nav>
-            {onRefreshTab ? (
-              <button
-                type="button"
-                className="btn-outline btn-sm resources-tab-refresh"
-                onClick={onRefreshTab}
-                disabled={tabLoading || tabRefreshing}
-                aria-busy={tabRefreshing}
-              >
-                {tabRefreshing ? "Refreshing…" : "Refresh"}
-              </button>
-            ) : null}
+            <div className="resources-tab-actions">
+              <input
+                type="search"
+                className="resource-search-input"
+                placeholder={`Search ${active?.title || "resources"}…`}
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                aria-label="Search resources"
+              />
+              {onRefreshTab ? (
+                <button
+                  type="button"
+                  className="btn-outline btn-sm resources-tab-refresh"
+                  onClick={onRefreshTab}
+                  disabled={tabLoading || tabRefreshing}
+                  aria-busy={tabRefreshing}
+                >
+                  {tabRefreshing ? "Refreshing…" : "Refresh"}
+                </button>
+              ) : null}
+            </div>
           </div>
           {activeTabError ? (
             <p className="muted empty-state-inline resource-tab-error">{activeTabError}</p>
@@ -619,8 +710,15 @@ export default function ResourcesPage({
                   filteredCount: filteredResourceList.length,
                 })}
               </p>
+            ) : filteredRows.length === 0 ? (
+              <p className="muted empty-state-inline">
+                No {(active.title || "resources").toLowerCase()} match “{search.trim()}”.{" "}
+                <button type="button" className="btn-text" onClick={() => setSearch("")}>
+                  Clear search
+                </button>
+              </p>
             ) : (
-              <DataTable columns={active.columns} rows={active.rows} tableClassName="resources-table" />
+              <DataTable columns={active.columns} rows={filteredRows} tableClassName="resources-table" />
             )
           ) : null}
           {activeTab === "services" &&

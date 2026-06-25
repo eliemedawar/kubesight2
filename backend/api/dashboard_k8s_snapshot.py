@@ -18,6 +18,8 @@ from .k8s_provider import (
     _node_capacity_totals,
     _run_for_access,
     build_namespaces_from_data,
+    compute_pod_display_status,
+    is_failed_pod_status,
     list_cpu_alerts_from_pod_data,
 )
 from .upgrade_provider import build_cluster_info
@@ -140,7 +142,23 @@ def overview_from_snapshot(access: ClusterAccess, snapshot: DashboardK8sSnapshot
     pod_items = snapshot.pod_items
     running = sum(1 for pod in pod_items if pod.get("status", {}).get("phase") == "Running")
     pending = sum(1 for pod in pod_items if pod.get("status", {}).get("phase") == "Pending")
-    failed = sum(1 for pod in pod_items if pod.get("status", {}).get("phase") == "Failed")
+
+    # Genuinely-failing pods keep phase=Running when a container is in
+    # CrashLoopBackOff / ImagePullBackOff / Error, so count them by the kubectl
+    # display status rather than phase alone.
+    problem_pods: List[Dict[str, str]] = []
+    for pod in pod_items:
+        display_status = compute_pod_display_status(pod)
+        if is_failed_pod_status(display_status):
+            meta = pod.get("metadata", {}) or {}
+            problem_pods.append(
+                {
+                    "name": meta.get("name", ""),
+                    "namespace": meta.get("namespace", ""),
+                    "status": display_status,
+                }
+            )
+    failed = len(problem_pods)
 
     cpu_capacity, mem_capacity, used_cpu, used_gib = _resolve_usage_totals(snapshot)
 
@@ -154,6 +172,7 @@ def overview_from_snapshot(access: ClusterAccess, snapshot: DashboardK8sSnapshot
             "storage": {"usedGiB": 0, "capacityGiB": 0},
         },
         "pods": {"running": running, "pending": pending, "failed": failed},
+        "problemPods": problem_pods,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
 

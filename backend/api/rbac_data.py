@@ -68,6 +68,110 @@ PERMISSIONS = [
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
 
+# ---------------------------------------------------------------------------
+# Permission catalog metadata (single source of truth for the Roles editor UI).
+#
+# Groups are ordered and drive the grouped permission checkboxes. Any permission
+# key that is NOT listed in a group is automatically surfaced under "Other" by
+# build_permission_catalog(), so a newly-added permission can never be hidden
+# from the UI even if someone forgets to slot it into a group here.
+# ---------------------------------------------------------------------------
+
+PERMISSION_GROUPS = [
+    {"id": "dashboard", "label": "Dashboard", "keys": ["overview:view"]},
+    {
+        "id": "clusters",
+        "label": "Clusters",
+        "keys": ["clusters:view", "clusters:add", "clusters:update", "clusters:remove", "clusters:test"],
+    },
+    {"id": "namespaces", "label": "Namespaces", "keys": ["namespaces:view"]},
+    {
+        "id": "resources",
+        "label": "Resources",
+        "keys": [
+            "resources:view", "pods:view", "deployments:view", "replicasets:view",
+            "statefulsets:view", "daemonsets:view", "jobs:view", "cronjobs:view",
+            "services:view", "services:ports:view",
+        ],
+    },
+    {"id": "logs", "label": "Logs", "keys": ["logs:view"]},
+    {"id": "alerts", "label": "Alerts", "keys": ["alerts:view", "alerts:manage"]},
+    {
+        "id": "inventory",
+        "label": "Inventory & Deployments",
+        "keys": [
+            "inventory:view", "inventory:register", "inventory:update", "inventory:remove",
+            "apps:deploy", "apps:dryrun", "apps:diff", "apps:delete",
+            "helm:view", "helm:install", "helm:upgrade", "helm:rollback", "helm:uninstall",
+            "helm:values:view", "helm:values:update",
+        ],
+    },
+    {
+        "id": "changeManagement",
+        "label": "Change Management",
+        "keys": [
+            "deployment_requests:request", "deployment_requests:view", "deployment_requests:manage",
+            "change_bundles:create", "change_bundles:view", "change_bundles:manage",
+        ],
+    },
+    {"id": "upgrades", "label": "Upgrade Center", "keys": ["upgrades:precheck", "upgrades:start"]},
+    {
+        "id": "appServices",
+        "label": "Application Services",
+        "keys": ["app_services:view", "app_services:create", "app_services:update", "app_services:delete"],
+    },
+    {
+        "id": "clients",
+        "label": "Clients",
+        "keys": ["clients:view", "clients:create", "clients:update", "clients:delete"],
+    },
+    {
+        "id": "administration",
+        "label": "Administration",
+        "keys": [
+            "users:view", "users:manage", "users:create", "users:update", "users:disable", "users:delete",
+            "roles:view", "roles:manage", "settings:view", "settings:manage",
+            "audit:view", "api_tokens:manage",
+        ],
+    },
+]
+
+# Permissions that grant write/destructive or privilege-escalating power. Surfaced
+# to the UI so it can flag them; not an enforcement mechanism on its own.
+DANGEROUS_PERMISSION_KEYS = {
+    "users:manage", "users:create", "users:update", "users:disable", "users:delete",
+    "roles:manage", "clusters:add", "clusters:update", "clusters:remove",
+    "settings:manage", "upgrades:start", "apps:deploy", "apps:delete", "inventory:remove",
+    "helm:install", "helm:upgrade", "helm:rollback", "helm:uninstall", "helm:values:update",
+    "app_services:delete", "clients:delete", "api_tokens:manage",
+    "deployment_requests:manage", "change_bundles:manage",
+}
+
+
+def build_permission_catalog():
+    """Grouped, labelled, risk-tagged catalog of every permission.
+
+    Returns ``{"groups": [{id,label,keys}], "items": [{key,description,dangerous}]}``.
+    Keys not assigned to any group fall into a trailing "Other" group so nothing
+    is ever hidden from the Roles editor.
+    """
+    descriptions = dict(PERMISSIONS)
+    grouped: set = set()
+    groups = []
+    for group in PERMISSION_GROUPS:
+        keys = [key for key in group["keys"] if key in descriptions]
+        grouped.update(keys)
+        if keys:
+            groups.append({"id": group["id"], "label": group["label"], "keys": keys})
+    leftover = [key for key in ALL_PERMISSION_KEYS if key not in grouped]
+    if leftover:
+        groups.append({"id": "other", "label": "Other", "keys": leftover})
+    items = [
+        {"key": key, "description": descriptions.get(key, ""), "dangerous": key in DANGEROUS_PERMISSION_KEYS}
+        for key in ALL_PERMISSION_KEYS
+    ]
+    return {"groups": groups, "items": items}
+
 INVENTORY_VIEW_ALIASES = ("inventory:view", "resources:view")
 
 WORKLOAD_VIEW_PERMISSIONS = [

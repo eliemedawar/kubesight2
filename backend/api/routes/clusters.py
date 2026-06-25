@@ -66,6 +66,7 @@ from ..services.resource_actions_service import (
     get_deployment_rollout_history,
     get_resource_describe,
     get_resource_yaml,
+    restart_resource,
 )
 
 clusters_bp = Blueprint("clusters", __name__, url_prefix="/api/clusters")
@@ -563,6 +564,23 @@ def resource_describe(cluster_id: str, namespace: str, resource_kind: str, resou
 def resource_yaml(cluster_id: str, namespace: str, resource_kind: str, resource_name: str):
     user = get_current_user()
     data, error, status = get_resource_yaml(
+        user, cluster_id, namespace, resource_kind, resource_name
+    )
+    if error:
+        return error_response(error, status)
+    return success_response(data)
+
+
+@clusters_bp.route(
+    "/<cluster_id>/namespaces/<namespace>/resources/<resource_kind>/<resource_name>/restart",
+    methods=["POST"],
+)
+@require_permission("apps:deploy")
+@require_cluster_access
+@require_namespace_access
+def resource_restart(cluster_id: str, namespace: str, resource_kind: str, resource_name: str):
+    user = get_current_user()
+    data, error, status = restart_resource(
         user, cluster_id, namespace, resource_kind, resource_name
     )
     if error:

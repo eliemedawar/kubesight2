@@ -68,6 +68,7 @@ export default function OpsDashboard({
   onViewAllEvents,
 }) {
   const health = summary?.health?.status || summary?.clusterHealth?.status || "healthy";
+  const healthReasons = summary?.health?.reasons || summary?.clusterHealth?.reasons || [];
   const cpu = summary?.cpuUsage || {};
   const mem = summary?.memoryUsage || {};
   const nodes = summary?.nodes || { ready: 0, total: 0, status: "unknown" };
@@ -150,6 +151,13 @@ export default function OpsDashboard({
           <div className="ops-kpi-sub">
             {nodes.ready}/{nodes.total} nodes · {clusterInfo.podCount ?? pods.running} pods
           </div>
+          {health !== "healthy" && healthReasons.length ? (
+            <ul className="ops-kpi-reasons" style={{ "--reason-color": healthColor }}>
+              {healthReasons.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          ) : null}
         </div>
 
         <div className="ops-kpi">

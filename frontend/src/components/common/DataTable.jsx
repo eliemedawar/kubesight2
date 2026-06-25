@@ -45,11 +45,38 @@ function renderCell(colKey, value, truncate) {
     firing: "danger",
     triggered: "danger",
     crashloopbackoff: "danger",
+    imagepullbackoff: "danger",
+    errimagepull: "danger",
+    errimagepullbackoff: "danger",
+    createcontainererror: "danger",
+    createcontainerconfigerror: "danger",
+    invalidimagename: "danger",
+    oomkilled: "danger",
+    evicted: "danger",
+    failed: "danger",
+    notready: "warn",
+    terminating: "warn",
+    containercreating: "warn",
+    podinitializing: "warn",
+    completed: "ok",
+    succeeded: "ok",
     scaling: "info",
     low: "info",
   };
 
-  const tone = toneMap[text.toLowerCase()] || "info";
+  const lower = text.toLowerCase();
+  let tone = toneMap[lower];
+  if (!tone) {
+    // Fall back to a heuristic so any kubectl reason (incl. "Init:..." and
+    // "ExitCode:N") still gets a sensible colour instead of neutral blue.
+    if (/(err|crash|backoff|oom|evicted|fail|error|exitcode|signal)/.test(lower)) {
+      tone = "danger";
+    } else if (/(init:|pending|terminating|creating|notready|podinitializing|scaling)/.test(lower)) {
+      tone = "warn";
+    } else {
+      tone = "info";
+    }
+  }
   return <span className={`status-pill ${tone}`}>{text}</span>;
 }
 

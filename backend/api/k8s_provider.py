@@ -448,7 +448,9 @@ def cluster_overview_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
 
     running = sum(1 for pod in pod_items if pod.get("status", {}).get("phase") == "Running")
     pending = sum(1 for pod in pod_items if pod.get("status", {}).get("phase") == "Pending")
-    failed = sum(1 for pod in pod_items if pod.get("status", {}).get("phase") == "Failed")
+    # Count failing pods by kubectl display status (CrashLoopBackOff / ImagePullBackOff
+    # keep phase=Running), not the raw phase, which only flags phase==Failed.
+    failed = sum(1 for pod in pod_items if is_failed_pod_status(compute_pod_display_status(pod)))
 
     cpu_capacity, mem_capacity = _node_capacity_totals(node_items)
     from .k8s_metrics import cluster_resource_usage
@@ -834,6 +836,93 @@ def _node_ips_for_services(access: ClusterAccess, svc_items: List[Dict[str, Any]
         return []
 
 
+import re as _re
+
+# kubectl status strings that indicate a genuinely failing pod (not a transient
+# Pending/ContainerCreating/Terminating state).
+_FAILED_POD_STATUS_RE = _re.compile(
+    r"(err|crash|backoff|oom|evicted|fail|error|exitcode|signal)", _re.IGNORECASE
+)
+
+
+def is_failed_pod_status(status: Optional[str]) -> bool:
+    return bool(status and _FAILED_POD_STATUS_RE.search(status))
+
+
+def _pod_has_ready_condition(status: Dict[str, Any]) -> bool:
+    for condition in status.get("conditions") or []:
+        if condition.get("type") == "Ready":
+            return condition.get("status") == "True"
+    return False
+
+
+def compute_pod_display_status(pod: Dict[str, Any]) -> str:
+    """Replicate ``kubectl get pods`` STATUS column.
+
+    The pod ``phase`` stays ``Running`` even when a container is stuck in
+    CrashLoopBackOff / ImagePullBackOff / Error, so we derive the displayed
+    status from init- and container-level waiting/terminated reasons and the
+    Ready condition, the same way kubectl's printer does.
+    """
+    status = pod.get("status", {}) or {}
+    spec = pod.get("spec", {}) or {}
+    meta = pod.get("metadata", {}) or {}
+
+    reason = status.get("reason") or status.get("phase") or "Unknown"
+
+    init_containers = spec.get("initContainers") or []
+    init_statuses = status.get("initContainerStatuses") or []
+    container_statuses = status.get("containerStatuses") or []
+
+    initializing = False
+    for index, cs in enumerate(init_statuses):
+        state = cs.get("state", {}) or {}
+        terminated = state.get("terminated")
+        waiting = state.get("waiting")
+        if terminated and terminated.get("exitCode") == 0:
+            continue
+        if terminated:
+            if terminated.get("reason"):
+                reason = f"Init:{terminated['reason']}"
+            elif terminated.get("signal"):
+                reason = f"Init:Signal:{terminated['signal']}"
+            else:
+                reason = f"Init:ExitCode:{terminated.get('exitCode')}"
+        elif waiting and waiting.get("reason") and waiting.get("reason") != "PodInitializing":
+            reason = f"Init:{waiting['reason']}"
+        else:
+            reason = f"Init:{index}/{len(init_containers)}"
+        initializing = True
+        break
+
+    if not initializing:
+        has_running = False
+        # kubectl iterates container statuses in reverse so the first container wins.
+        for cs in reversed(container_statuses):
+            state = cs.get("state", {}) or {}
+            waiting = state.get("waiting")
+            terminated = state.get("terminated")
+            if waiting and waiting.get("reason"):
+                reason = waiting["reason"]
+            elif terminated and terminated.get("reason"):
+                reason = terminated["reason"]
+            elif terminated:
+                if terminated.get("signal"):
+                    reason = f"Signal:{terminated['signal']}"
+                else:
+                    reason = f"ExitCode:{terminated.get('exitCode')}"
+            elif cs.get("ready") and state.get("running") is not None:
+                has_running = True
+
+        if reason == "Completed" and has_running:
+            reason = "Running" if _pod_has_ready_condition(status) else "NotReady"
+
+    if meta.get("deletionTimestamp"):
+        reason = "Unknown" if status.get("reason") == "NodeLost" else "Terminating"
+
+    return reason or "Unknown"
+
+
 def _build_namespace_pods(
     namespace: str,
     pod_items: List[Dict[str, Any]],
@@ -868,7 +957,7 @@ def _build_namespace_pods(
                 "namespace": namespace,
                 "owner": owner,
                 "labels": meta.get("labels") or {},
-                "status": status.get("phase", "Unknown"),
+                "status": compute_pod_display_status(pod),
                 "ready": f"{ready_count}/{len(container_statuses) if container_statuses else 0}",
                 "restarts": sum(c.get("restartCount", 0) for c in container_statuses),
                 "cpuUsage": f"{usage_cores:.3f}" if usage_cores is not None else "-",
@@ -1369,7 +1458,7 @@ def list_namespace_pods_for_logs(access: ClusterAccess, namespace: str) -> Dict[
             {
                 "name": meta.get("name"),
                 "namespace": namespace,
-                "status": status.get("phase", "Unknown"),
+                "status": compute_pod_display_status(pod),
                 "containers": container_names,
             }
         )

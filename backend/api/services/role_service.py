@@ -35,9 +35,38 @@ def list_roles() -> Dict[str, Any]:
 
 
 def list_permissions() -> Dict[str, Any]:
+    """Grouped, risk-tagged permission catalog built from the live DB permissions.
+
+    The grouping/labels/risk metadata come from rbac_data so the Roles editor is
+    fully data-driven: adding a permission key there (and seeding it) makes it
+    appear in the UI automatically — in its group, or under "Other" as a fallback.
+    """
+    from ..rbac_data import build_permission_catalog
+
     perms = Permission.query.order_by(Permission.key.asc()).all()
-    items = [{"id": p.id, "key": p.key, "description": p.description} for p in perms]
-    return {"items": items, "count": len(items)}
+    db_keys = {p.key for p in perms}
+
+    catalog = build_permission_catalog()
+    dangerous = {item["key"] for item in catalog["items"] if item["dangerous"]}
+
+    items = [
+        {"id": p.id, "key": p.key, "description": p.description, "dangerous": p.key in dangerous}
+        for p in perms
+    ]
+
+    # Keep only keys that actually exist in the DB; collect orphans into "Other".
+    groups: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for group in catalog["groups"]:
+        keys = [key for key in group["keys"] if key in db_keys]
+        seen.update(keys)
+        if keys:
+            groups.append({"id": group["id"], "label": group["label"], "keys": keys})
+    orphans = [p.key for p in perms if p.key not in seen]
+    if orphans:
+        groups.append({"id": "other", "label": "Other", "keys": orphans})
+
+    return {"items": items, "groups": groups, "count": len(items)}
 
 
 def get_role(role_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:

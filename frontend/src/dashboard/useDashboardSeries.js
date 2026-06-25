@@ -60,7 +60,7 @@ export function useDashboardSeries(summary, range = "6h") {
   const sampledAt = summary?.lastUpdated;
 
   const bufferRef = useRef({ signature: "", cpu: [], mem: [], netIn: [], netOut: [] });
-  const [, setTick] = useState(0);
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     if (!summary) return;
@@ -119,7 +119,9 @@ export function useDashboardSeries(summary, range = "6h") {
       memReal: Boolean(mem?.available),
       netReal: false,
     };
-    // Recompute the returned snapshot whenever a new sample lands.
+    // Recompute the returned snapshot whenever a new sample lands AND right
+    // after the seeding effect fills the buffer (tick), so the line shows up on
+    // first paint instead of waiting for the next poll to change sampledAt.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sampledAt, clusterId, range, points, bands, cpu?.available, mem?.available]);
+  }, [sampledAt, clusterId, range, points, bands, cpu?.available, mem?.available, tick]);
 }

@@ -201,6 +201,7 @@ export default function RolesPanel({
         open={modalOpen}
         mode={modalMode}
         role={editingRole}
+        roles={roles}
         onClose={() => {
           setModalOpen(false);
           setEditingRole(null);

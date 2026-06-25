@@ -96,6 +96,16 @@ export default function App() {
     isAdmin,
   } = useAuth();
   const changeBundle = useChangeBundle();
+
+  // The floating "Change Bundle" button is fixed to the bottom-right of the
+  // viewport, so it sits on top of bottom-right page content (e.g. the data
+  // table pager's "Next" button on list pages). Toggle a body class while the
+  // button is visible so scrollable pages reserve clearance underneath it.
+  const bundleFabVisible = changeBundle.enabled && !changeBundle.isOpen;
+  useEffect(() => {
+    document.body.classList.toggle("has-bundle-fab", bundleFabVisible);
+    return () => document.body.classList.remove("has-bundle-fab");
+  }, [bundleFabVisible]);
   const [activePage, setActivePage] = useState("dashboard");
   const [selectedClusterId, setSelectedClusterId] = useState("");
   const [selectedNamespace, setSelectedNamespace] = useState("");

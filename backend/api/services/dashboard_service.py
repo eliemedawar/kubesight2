@@ -155,21 +155,37 @@ def _count_alerts(alerts: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
+def _format_failed_pods_reason(problem_pods: List[Dict[str, Any]], limit: int = 3) -> str:
+    named = [
+        f"{pod.get('name')} ({pod.get('status')})"
+        for pod in problem_pods[:limit]
+        if pod.get("name")
+    ]
+    suffix = f" +{len(problem_pods) - limit} more" if len(problem_pods) > limit else ""
+    if not named:
+        return f"{len(problem_pods)} failed pod(s)"
+    return f"{len(problem_pods)} failed pod(s): " + ", ".join(named) + suffix
+
+
 def _compute_health(
     *,
     alert_counts: Dict[str, int],
     pods: Dict[str, int],
     ready_nodes: int,
     total_nodes: int,
+    problem_pods: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     reasons: List[str] = []
-    failed = int(pods.get("failed") or 0)
+    failed = len(problem_pods) if problem_pods is not None else int(pods.get("failed") or 0)
     pending = int(pods.get("pending") or 0)
 
     if alert_counts["critical"] > 0:
         reasons.append(f"{alert_counts['critical']} critical alert(s) active")
     if failed > 0:
-        reasons.append(f"{failed} failed pod(s)")
+        if problem_pods:
+            reasons.append(_format_failed_pods_reason(problem_pods))
+        else:
+            reasons.append(f"{failed} failed pod(s)")
     if total_nodes > 0 and ready_nodes < total_nodes:
         reasons.append(f"{total_nodes - ready_nodes} node(s) not ready")
 
@@ -184,7 +200,7 @@ def _compute_health(
     else:
         status = "healthy"
 
-    return {"status": status, "reasons": reasons}
+    return {"status": status, "reasons": reasons, "failedPods": problem_pods or []}
 
 
 def _node_readiness(cluster: Dict[str, Any]) -> Tuple[int, int]:
@@ -747,6 +763,11 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         }
 
     pods = _accessible_pod_stats(user, namespaces, overview.get("pods") or {})
+    # None in mock mode (no per-pod data) → _compute_health keeps count-based reasons.
+    problem_pods = overview.get("problemPods")
+    if problem_pods and user and not is_admin(user):
+        accessible_ns = {ns.get("name") for ns in namespaces}
+        problem_pods = [pod for pod in problem_pods if pod.get("namespace") in accessible_ns]
     alert_counts = _count_alerts(alerts)
     if ready_nodes is None or total_nodes is None:
         ready_nodes, total_nodes = _node_readiness(cluster or {})
@@ -755,6 +776,7 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         pods=pods,
         ready_nodes=ready_nodes,
         total_nodes=total_nodes,
+        problem_pods=problem_pods,
     )
     if cluster_unreachable:
         health = {"status": "unreachable", "reasons": ["Cluster is offline or unreachable"]}
