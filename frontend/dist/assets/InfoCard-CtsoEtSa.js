@@ -1,1 +1,0 @@
-import{j as n}from"./vendor-react-Bz6PKRpC.js";function o({title:r,children:e,actionLabel:s,onAction:t}){return n.jsxs("section",{className:"card info-card",children:[n.jsxs("header",{children:[n.jsx("h3",{children:r}),s?n.jsx("button",{type:"button",className:"btn-outline",onClick:t,children:s}):null]}),n.jsx("div",{children:e})]})}export{o as I};
