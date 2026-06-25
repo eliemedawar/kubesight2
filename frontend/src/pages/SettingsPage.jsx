@@ -1,5 +1,6 @@
 import PageTitle from "../components/common/PageTitle.jsx";
 import InfoCard from "../components/common/InfoCard.jsx";
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 
 export default function SettingsPage({
   data,
@@ -30,7 +31,7 @@ export default function SettingsPage({
           <div className="settings-form">
             <label>
               Theme
-              <select
+              <SearchableSelect
                 value={settingsDraft.theme}
                 disabled={readOnly}
                 onChange={(event) => onSettingsChange("theme", event.target.value)}
@@ -38,7 +39,7 @@ export default function SettingsPage({
                 <option value="system">System</option>
                 <option value="dark">Dark</option>
                 <option value="light">Light</option>
-              </select>
+              </SearchableSelect>
             </label>
             <label>
               Refresh Interval (seconds)
@@ -55,7 +56,7 @@ export default function SettingsPage({
             </label>
             <label>
               Default Cluster
-              <select
+              <SearchableSelect
                 value={settingsDraft.defaultCluster}
                 disabled={readOnly}
                 onChange={(event) => onSettingsChange("defaultCluster", event.target.value)}
@@ -66,7 +67,7 @@ export default function SettingsPage({
                   </option>
                 ))}
                 {!clusterOptions.length ? <option value="">No clusters available</option> : null}
-              </select>
+              </SearchableSelect>
             </label>
             {canManageAlertRouting ? (
               <p className="muted settings-hint">

@@ -7,6 +7,7 @@ import {
   updateCustomCluster,
 } from "../api";
 import { formatAccessError } from "../utils/authz.js";
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 
 const emptyForm = () => ({
   connectionMethod: "kubeconfig",
@@ -303,13 +304,13 @@ function ClusterModal({ open, mode, initial, onClose, onSave, saving, error }) {
                 </label>
                 <label>
                   Protocol
-                  <select
+                  <SearchableSelect
                     value={form.protocol}
                     onChange={(event) => setForm((prev) => ({ ...prev, protocol: event.target.value }))}
                   >
                     <option value="https">https</option>
                     <option value="http">http</option>
-                  </select>
+                  </SearchableSelect>
                 </label>
               </div>
 

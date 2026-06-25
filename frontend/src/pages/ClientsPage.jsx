@@ -10,6 +10,7 @@ import { useAuth } from "../context/AuthContext";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 
 const STATUS_BADGE = {
@@ -352,7 +353,7 @@ export default function ClientsPage() {
           onChange={(e) => setSearch(e.target.value)}
           style={{ maxWidth: 280 }}
         />
-        <select
+        <SearchableSelect
           className="form-select"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
@@ -362,7 +363,7 @@ export default function ClientsPage() {
           <option value="warning">Warning</option>
           <option value="critical">Critical</option>
           <option value="unknown">Unknown</option>
-        </select>
+        </SearchableSelect>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: selectedClient ? "1fr 1fr" : "1fr", gap: "1.25rem", alignItems: "start" }}>

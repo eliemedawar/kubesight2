@@ -20,11 +20,13 @@ const SOURCE_LABELS = {
  * are chosen from Alert Routing receiver groups, with an optional additional
  * email list, plus a required-approvals quorum (e.g. 3 of 5 must approve).
  */
-export default function ConfigureRecipientsModal({ open, onClose }) {
+export default function ConfigureRecipientsModal({ open, onClose, clusters = [] }) {
   const [config, setConfig] = useState(null);
   const [groupIds, setGroupIds] = useState([]);
   const [text, setText] = useState("");
   const [required, setRequired] = useState(1);
+  // Per-cluster overrides keyed by cluster id; absent keys fall back to `required`.
+  const [clusterApprovals, setClusterApprovals] = useState({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -41,6 +43,7 @@ export default function ConfigureRecipientsModal({ open, onClose }) {
         setGroupIds(data.groupIds || []);
         setText((data.recipients || []).join("\n"));
         setRequired(data.requiredApprovals ?? 1);
+        setClusterApprovals(data.clusterApprovals || {});
       })
       .catch((err) => setError(err.message || "Failed to load recipients."))
       .finally(() => setLoading(false));
@@ -72,20 +75,49 @@ export default function ConfigureRecipientsModal({ open, onClose }) {
     );
   };
 
+  // Normalize the cluster list to { id, name } pairs, de-duplicated by id.
+  const clusterList = useMemo(() => {
+    const seen = new Set();
+    return (clusters || [])
+      .map((cluster) => ({
+        id: cluster.id || cluster.name,
+        name: cluster.name || cluster.id,
+      }))
+      .filter((cluster) => {
+        if (!cluster.id || seen.has(cluster.id)) return false;
+        seen.add(cluster.id);
+        return true;
+      });
+  }, [clusters]);
+
+  const globalDefault = Math.max(0, Number.parseInt(required, 10) || 0);
+
+  const setClusterApproval = (clusterId, value) =>
+    setClusterApprovals((prev) => ({ ...prev, [clusterId]: value }));
+
   const handleSave = async () => {
     setSaving(true);
     setError("");
     setNotice("");
     try {
+      // Only persist explicit overrides; clusters left at the default are omitted
+      // so they continue to track the global "Required approvals" value.
+      const clusterApprovalsPayload = {};
+      Object.entries(clusterApprovals).forEach(([clusterId, value]) => {
+        if (value === "" || value === null || value === undefined) return;
+        clusterApprovalsPayload[clusterId] = Math.max(0, Number.parseInt(value, 10) || 0);
+      });
       const updated = await updateDeploymentRequestRecipients({
         recipients: parseEmails(text),
         groupIds,
-        requiredApprovals: Math.max(0, Number.parseInt(required, 10) || 0),
+        requiredApprovals: globalDefault,
+        clusterApprovals: clusterApprovalsPayload,
       });
       setConfig(updated);
       setGroupIds(updated.groupIds || []);
       setText((updated.recipients || []).join("\n"));
       setRequired(updated.requiredApprovals ?? 1);
+      setClusterApprovals(updated.clusterApprovals || {});
       setNotice("Recipients saved.");
     } catch (err) {
       setError(err.message || "Failed to save recipients.");
@@ -187,6 +219,49 @@ export default function ConfigureRecipientsModal({ open, onClose }) {
                       } to approve each request.`}
                 </span>
               </label>
+            </div>
+
+            <div className="form-section" style={{ marginTop: "var(--space-3)" }}>
+              <h4>Per-cluster approvals</h4>
+              <p className="muted" style={{ marginTop: 0, fontSize: "var(--font-size-sm)" }}>
+                Override the number of approvals needed before a deploy is allowed on a
+                specific cluster. Leave a cluster blank to use the global default of{" "}
+                <strong>{globalDefault}</strong>. Set <strong>0</strong> to let that cluster
+                deploy without approval.
+              </p>
+              {clusterList.length === 0 ? (
+                <p className="muted">No clusters available.</p>
+              ) : (
+                <div style={{ display: "grid", gap: "var(--space-2)" }}>
+                  {clusterList.map((cluster) => {
+                    const override = clusterApprovals[cluster.id];
+                    const hasOverride =
+                      override !== "" && override !== null && override !== undefined;
+                    return (
+                      <label
+                        key={cluster.id}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: "var(--space-2)",
+                        }}
+                      >
+                        <span>{cluster.name}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={hasOverride ? override : ""}
+                          placeholder={String(globalDefault)}
+                          onChange={(e) => setClusterApproval(cluster.id, e.target.value)}
+                          style={{ width: "96px" }}
+                          aria-label={`Approvals needed for ${cluster.name}`}
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {config ? (

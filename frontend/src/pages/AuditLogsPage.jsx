@@ -3,6 +3,7 @@ import { listAuditLogs, listClusters } from "../api";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 
 // Audit entries reference a cluster in a few ways depending on the action:
 // deployment requests store it in details.clusterId; cluster/namespace/resource
@@ -111,7 +112,7 @@ export default function AuditLogsPage() {
           <div className="user-filters" style={{ marginBottom: "1rem" }}>
             <label className="user-filters__search">
               Actor
-              <select
+              <SearchableSelect
                 value={actorFilter}
                 onChange={(e) => setActorFilter(e.target.value)}
               >
@@ -119,7 +120,7 @@ export default function AuditLogsPage() {
                 {uniqueActors.map((a) => (
                   <option key={a} value={a}>{a}</option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             <label className="user-filters__search">
               Action
@@ -132,7 +133,7 @@ export default function AuditLogsPage() {
             </label>
             <label className="user-filters__search">
               Cluster
-              <select
+              <SearchableSelect
                 value={clusterFilter}
                 onChange={(e) => setClusterFilter(e.target.value)}
               >
@@ -140,7 +141,7 @@ export default function AuditLogsPage() {
                 {uniqueClusters.map((c) => (
                   <option key={c} value={c}>{clusterLabel(c)}</option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             {(actorFilter || actionFilter || clusterFilter) && (
               <button

@@ -7,6 +7,7 @@ import {
   renderHelmTemplate,
 } from "../../api/helmApi.js";
 import NamespaceSelect from "./NamespaceSelect.jsx";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 import { clusterOptionLabel, normalizeClusterOptions } from "../../utils/clusterOptions.js";
 
 const CRITICALITY_OPTIONS = ["Low", "Medium", "High", "Critical"];
@@ -146,7 +147,7 @@ export default function HelmDeployForm({
         {error ? <p className="banner-message error">{error}</p> : null}
         <label>
           Cluster
-          <select
+          <SearchableSelect
             required
             value={form.clusterId}
             onChange={(e) => setForm((p) => ({ ...p, clusterId: e.target.value, namespace: "" }))}
@@ -157,7 +158,7 @@ export default function HelmDeployForm({
                 {clusterOptionLabel(cluster)}
               </option>
             ))}
-          </select>
+          </SearchableSelect>
         </label>
         <label>
           Namespace
@@ -180,8 +181,8 @@ export default function HelmDeployForm({
         )}
         <label>values.yaml<textarea rows={8} className="yaml-editor" value={form.valuesYaml} onChange={(e) => setForm((p) => ({ ...p, valuesYaml: e.target.value }))} placeholder="# Helm values YAML" /></label>
         <label>Owner / Team<input value={form.ownerTeam} onChange={(e) => setForm((p) => ({ ...p, ownerTeam: e.target.value }))} /></label>
-        <label>Environment<select value={form.environment} onChange={(e) => setForm((p) => ({ ...p, environment: e.target.value }))}><option value="">Not set</option>{ENVIRONMENT_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}</select></label>
-        <label>Criticality<select value={form.criticality} onChange={(e) => setForm((p) => ({ ...p, criticality: e.target.value }))}><option value="">Not set</option>{CRITICALITY_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}</select></label>
+        <label>Environment<SearchableSelect value={form.environment} onChange={(e) => setForm((p) => ({ ...p, environment: e.target.value }))}><option value="">Not set</option>{ENVIRONMENT_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}</SearchableSelect></label>
+        <label>Criticality<SearchableSelect value={form.criticality} onChange={(e) => setForm((p) => ({ ...p, criticality: e.target.value }))}><option value="">Not set</option>{CRITICALITY_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}</SearchableSelect></label>
         <label>Description<textarea rows={2} value={form.description} onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))} /></label>
         <div className="modal-actions">
           <button type="button" className="btn-text" onClick={() => setStep("source")}>Back</button>

@@ -14,8 +14,6 @@ spec:
         app: kubesight-backend
     spec:
       serviceAccountName: kubesight-backend
-      nodeSelector:
-        role: backend
       containers:
         - name: backend
 

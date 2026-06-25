@@ -356,6 +356,25 @@ def _apply_overrides(
         except (TypeError, ValueError):
             return "Replicas override must be a whole number."
 
+    # Enabling/disabling autoscaling is always a safe deploy-time choice; the
+    # resource-request guard below protects correctness regardless of the value.
+    if overrides.get("hpaEnabled") is not None:
+        scaling.setdefault("hpa", {})["enabled"] = bool(overrides["hpaEnabled"])
+
+    # HPA value overrides (min/max replicas, CPU/memory thresholds). A blank
+    # field inherits the template default; a provided value overwrites it.
+    hpa_override = overrides.get("hpa")
+    if isinstance(hpa_override, dict):
+        hpa = scaling.setdefault("hpa", {})
+        for field in ("minReplicas", "maxReplicas", "cpuThreshold", "memoryThreshold"):
+            raw = hpa_override.get(field)
+            if raw in (None, ""):
+                continue
+            try:
+                hpa[field] = max(0, int(raw))
+            except (TypeError, ValueError):
+                return f"HPA {field} override must be a whole number."
+
     if overrides.get("resources") and schema_overrides.get("resources"):
         for field in ("cpuRequest", "cpuLimit", "memoryRequest", "memoryLimit"):
             if overrides["resources"].get(field):
@@ -560,6 +579,18 @@ def resolve_template(template: Dict[str, Any], answers: Dict[str, Any]) -> Resol
         "provisionedDockerSecrets": [docker_secret] if docker_secret else [],
         "provisionedTlsSecrets": tls_secrets,
     }
+
+    # HPA needs CPU + memory requests to compute utilization. Force it off in the
+    # merged config when either is missing so the payload stays consistent with
+    # what the manifest generator will emit.
+    hpa_cfg = scaling.get("hpa")
+    if isinstance(hpa_cfg, dict) and hpa_cfg.get("enabled"):
+        has_requests = bool(
+            str(resources.get("cpuRequest") or "").strip()
+            and str(resources.get("memoryRequest") or "").strip()
+        )
+        if not has_requests:
+            hpa_cfg["enabled"] = False
 
     payload = {
         "basics": basics,

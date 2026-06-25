@@ -18,9 +18,20 @@ def create_deployment_request():
     cluster_id = payload.get("cluster_id") or payload.get("clusterId") or ""
     cluster_name = payload.get("cluster_name") or payload.get("clusterName") or ""
     message = payload.get("message") or ""
+    window_start = payload.get("window_start") or payload.get("windowStart")
+    window_end = payload.get("window_end") or payload.get("windowEnd")
+    window_timezone = payload.get("window_timezone") or payload.get("windowTimezone")
     user = get_current_user()
     try:
-        data = svc.create_request(user, cluster_id, cluster_name, message)
+        data = svc.create_request(
+            user,
+            cluster_id,
+            cluster_name,
+            message,
+            window_start=window_start,
+            window_end=window_end,
+            window_timezone=window_timezone,
+        )
         return success_response(data, status_code=201)
     except svc.DeploymentRequestError as exc:
         return error_response(str(exc), exc.status_code)
@@ -42,10 +53,18 @@ def update_deployment_request_recipients():
                 emails=payload.get("recipients"),
                 group_ids=payload.get("groupIds"),
                 required_approvals=payload.get("requiredApprovals"),
+                cluster_approvals=payload.get("clusterApprovals"),
             )
         )
     except svc.DeploymentRequestError as exc:
         return error_response(str(exc), exc.status_code)
+
+
+@deployment_requests_bp.route("/eligibility", methods=["GET"])
+@require_permission("apps:deploy")
+def deployment_request_eligibility():
+    cluster_id = request.args.get("clusterId") or request.args.get("cluster_id") or ""
+    return success_response(svc.deploy_eligibility(get_current_user(), cluster_id))
 
 
 @deployment_requests_bp.route("", methods=["GET"])
@@ -57,6 +76,18 @@ def list_deployment_requests():
     except (TypeError, ValueError):
         limit_int = 200
     return success_response({"items": svc.list_requests(limit=limit_int)})
+
+
+@deployment_requests_bp.route("/mine", methods=["GET"])
+@require_permission("deployment_requests:request")
+def list_my_deployment_requests():
+    limit = request.args.get("limit", 200)
+    try:
+        limit_int = int(limit)
+    except (TypeError, ValueError):
+        limit_int = 200
+    user = get_current_user()
+    return success_response({"items": svc.list_requests_for_user(user, limit=limit_int)})
 
 
 # ---------------------------------------------------------------------------

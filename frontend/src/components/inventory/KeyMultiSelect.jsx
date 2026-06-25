@@ -3,6 +3,8 @@
  * Chosen keys show as removable chips; remaining keys are added from a single
  * dropdown — which stays compact and type-ahead searchable even with many keys.
  */
+import SearchableSelect from "../common/SearchableSelect.jsx";
+
 export default function KeyMultiSelect({ selected = [], available = [], onToggle, ariaLabel }) {
   const remaining = available.filter((k) => !selected.includes(k));
   return (
@@ -20,12 +22,13 @@ export default function KeyMultiSelect({ selected = [], available = [], onToggle
         </div>
       ) : null}
       {remaining.length ? (
-        <select
+        <SearchableSelect
           className="key-multiselect__add"
           value=""
           onChange={(e) => {
             if (e.target.value) onToggle(e.target.value);
           }}
+          placeholder={selected.length ? "+ Add key…" : "Select keys…"}
           aria-label="Add key"
         >
           <option value="">{selected.length ? "+ Add key…" : "Select keys…"}</option>
@@ -34,7 +37,7 @@ export default function KeyMultiSelect({ selected = [], available = [], onToggle
               {k}
             </option>
           ))}
-        </select>
+        </SearchableSelect>
       ) : (
         <span className="key-multiselect__all muted">All keys selected</span>
       )}

@@ -61,6 +61,9 @@ PERMISSIONS = [
     ("deployment_requests:request", "Request a cluster deployment or change"),
     ("deployment_requests:view", "View deployment requests"),
     ("deployment_requests:manage", "Approve or decline deployment requests"),
+    ("change_bundles:create", "Create and submit change bundles"),
+    ("change_bundles:view", "View change bundles"),
+    ("change_bundles:manage", "Approve or reject change bundles"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -92,6 +95,8 @@ VIEWER_PERMISSIONS = [
     "app_services:view",
     "clients:view",
     "deployment_requests:request",
+    "change_bundles:create",
+    "change_bundles:view",
 ]
 
 OPERATOR_PERMISSIONS = [
@@ -121,6 +126,8 @@ OPERATOR_PERMISSIONS = [
     "clients:update",
     "deployment_requests:request",
     "deployment_requests:view",
+    "change_bundles:create",
+    "change_bundles:view",
 ]
 
 CLUSTER_ADMIN_PERMISSIONS = [
@@ -160,6 +167,8 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "clients:delete",
     "deployment_requests:request",
     "deployment_requests:view",
+    "change_bundles:create",
+    "change_bundles:view",
 ]
 
 HERMES_AGENT_PERMISSIONS = [

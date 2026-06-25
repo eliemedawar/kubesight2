@@ -14,11 +14,25 @@ export default function RequestDeploymentModal({
   onSubmit,
 }) {
   const [message, setMessage] = useState("");
+  const [windowStart, setWindowStart] = useState("");
+  const [windowEnd, setWindowEnd] = useState("");
   const textareaRef = useRef(null);
+
+  const timeZone =
+    Intl.DateTimeFormat().resolvedOptions().timeZone || "local time";
+
+  const pad = (n) => String(n).padStart(2, "0");
+  const toLocalInput = (d) =>
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+      d.getHours()
+    )}:${pad(d.getMinutes())}`;
+  const nowLocal = toLocalInput(new Date());
 
   useEffect(() => {
     if (open) {
       setMessage("");
+      setWindowStart("");
+      setWindowEnd("");
       // Focus the textarea once the modal is mounted.
       const id = requestAnimationFrame(() => textareaRef.current?.focus());
       return () => cancelAnimationFrame(id);
@@ -29,13 +43,29 @@ export default function RequestDeploymentModal({
   if (!open) return null;
 
   const trimmed = message.trim();
-  const canSubmit = Boolean(trimmed) && !busy;
+  const missingWindow = !windowStart || !windowEnd;
+  const startInPast = windowStart && new Date(windowStart) <= new Date();
+  const endBeforeStart =
+    windowStart && windowEnd && new Date(windowEnd) <= new Date(windowStart);
+  const windowError = startInPast
+    ? "The start time must be in the future."
+    : endBeforeStart
+      ? "The end time must be after the start time."
+      : "";
+  const canSubmit = Boolean(trimmed) && !busy && !missingWindow && !windowError;
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    if (canSubmit) {
-      onSubmit(trimmed);
-    }
+    if (!canSubmit) return;
+    // datetime-local values are wall-clock in the user's timezone; convert to
+    // UTC ISO and send the IANA zone so approvers see the original local time.
+    const payload = {
+      message: trimmed,
+      windowStart: new Date(windowStart).toISOString(),
+      windowEnd: new Date(windowEnd).toISOString(),
+      windowTimezone: timeZone,
+    };
+    onSubmit(payload);
   };
 
   return (
@@ -76,8 +106,33 @@ export default function RequestDeploymentModal({
                 required
               />
             </label>
+            <label>
+              Work window start
+              <input
+                type="datetime-local"
+                value={windowStart}
+                min={nowLocal}
+                onChange={(e) => setWindowStart(e.target.value)}
+                required
+              />
+            </label>
+            <label>
+              Work window end
+              <input
+                type="datetime-local"
+                value={windowEnd}
+                min={windowStart || nowLocal}
+                onChange={(e) => setWindowEnd(e.target.value)}
+                required
+              />
+            </label>
+            <p className="form-grid__full muted" style={{ margin: 0, fontSize: "0.8rem" }}>
+              Times are in your timezone ({timeZone}). The request must be approved
+              before the start time — otherwise it is automatically declined.
+            </p>
           </div>
 
+          {windowError ? <p className="banner-message error">{windowError}</p> : null}
           {error ? <p className="banner-message error">{error}</p> : null}
 
           <div className="modal-actions">

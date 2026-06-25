@@ -566,10 +566,80 @@ button:disabled {
   font-size: 0.75rem;
 }
 
+.notifications-section + .notifications-section {
+  border-top: 1px solid var(--border-soft);
+}
+
+.notifications-dropdown__section-label {
+  margin: 0;
+  padding: var(--space-3) var(--space-4) var(--space-1);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.notifications-dropdown__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: var(--space-3);
+}
+
+.notifications-dropdown__section-head .notifications-dropdown__section-label {
+  padding-right: 0;
+}
+
+.notifications-dropdown__clear {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.notifications-dropdown__clear:hover {
+  background: var(--accent-soft);
+}
+
+.notifications-list__meta-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.notifications-list__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 2px;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+}
+
+.notifications-list__dismiss:hover {
+  background: var(--bg-interactive);
+  color: var(--text-strong);
+}
+
 .notifications-dropdown__footer {
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border-soft);
   background: var(--bg-interactive);
+}
+
+.notifications-dropdown__footer--actions {
+  display: flex;
+  gap: var(--space-2);
 }
 
 .notifications-dropdown__view-all {
@@ -1146,8 +1216,8 @@ tr:last-child td {
 .log-filters-primary,
 .log-filters-custom-range {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-2) var(--space-3);
 }
 
 .log-filters-custom-range {
@@ -1167,21 +1237,72 @@ tr:last-child td {
 
 .log-filters label {
   display: grid;
-  gap: var(--space-1);
+  gap: 0.3rem;
   color: var(--text-muted);
-  font-size: var(--font-size-sm);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   min-width: 0;
 }
 
 .log-filters input[type="datetime-local"] {
   width: 100%;
   min-width: 0;
-  padding: var(--space-2);
+  padding: 0.4rem 0.55rem;
+  height: 2.25rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-panel);
   color: var(--text-main);
   font: inherit;
+  font-size: var(--font-size-sm);
+}
+
+/* Compact, refined controls inside the log filter bar */
+.log-filters .ss-trigger {
+  height: 2.25rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-panel);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.log-filters .ss-trigger--open {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.log-filters .ss-arrow {
+  font-size: 0.6rem;
+}
+
+/* Refined dropdown panel for the log filter bar */
+.log-filters .ss-dropdown {
+  border-radius: var(--radius-md, 0.5rem);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  padding: 0.25rem;
+}
+
+.log-filters .ss-search-wrap {
+  padding: 0.25rem 0.25rem 0.4rem;
+}
+
+.log-filters .ss-list {
+  max-height: 260px;
+}
+
+.log-filters .ss-option {
+  padding: 0.4rem 0.55rem;
+  font-size: var(--font-size-sm);
+  border-radius: var(--radius-sm);
+}
+
+.log-filters .ss-option--selected {
+  color: var(--accent);
 }
 
 .log-filters-toggles .checkbox-label {
@@ -1846,11 +1967,19 @@ button:focus-visible {
 .log-filters input[type="datetime-local"],
 .log-filters input[type="search"] {
   width: 100%;
-  padding: 0.45rem 0.55rem;
+  height: 2.25rem;
+  padding: 0.4rem 0.55rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-size: var(--font-size-sm);
   background: var(--bg-panel);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.log-filters input[type="search"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .log-viewer__toolbar {
@@ -3682,6 +3811,16 @@ button:focus-visible {
   cursor: not-allowed;
 }
 
+.schema-env-card__kind {
+  flex: 0 0 auto;
+  min-width: 10rem;
+}
+
+.schema-env-card__kind:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .schema-override-grid,
 .schema-svc-types {
   display: flex;
@@ -5070,6 +5209,25 @@ button:focus-visible {
   margin: 0.75rem 0;
 }
 
+.wizard-checkbox--disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.wizard-checkbox--disabled input {
+  cursor: not-allowed;
+}
+
+.wizard-hpa-warning {
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: #92400e;
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.35);
+}
+
 .wizard-template-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -5669,13 +5827,37 @@ kbd {
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
 
 /* ─── Searchable select ─── */
-.ss-wrap { position: relative; display: inline-block; min-width: 160px; }
+.ss-wrap { position: relative; display: block; width: 100%; min-width: 120px; }
 .ss-trigger {
   display: flex; align-items: center; justify-content: space-between; gap: 0.4rem;
   width: 100%; padding: 0.42rem 0.65rem;
   border: 1px solid var(--border); border-radius: var(--radius-sm, 4px);
   background: var(--bg-elevated); font-family: inherit; font-size: 0.875rem;
   color: var(--text-main); cursor: pointer; text-align: left;
+}
+.ss-trigger .ss-value, .ss-trigger .ss-placeholder {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ss-required-mirror {
+  position: absolute; left: 0; bottom: 0; width: 1px; height: 1px;
+  padding: 0; margin: 0; border: 0; opacity: 0; pointer-events: none;
+}
+.ss-option--disabled { opacity: 0.45; cursor: not-allowed; }
+.ss-option--disabled:hover { background: transparent; }
+/* Let the wrapper shrink inside grid/flex rows that previously sized a <select>. */
+.template-envsrc-row > .ss-wrap,
+.schema-wire-row > .ss-wrap,
+.env-editor__row .ss-wrap,
+.template-env-row .ss-wrap,
+.schema-volume-row .ss-wrap { min-width: 0; }
+/* Classes that used to paint the native <select> chrome must not double up now
+   that they sit on the wrapper — the inner .ss-trigger owns the visuals. */
+.ss-wrap.form-select,
+.ss-wrap.app-logs-pod-select__control {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
 }
 .ss-trigger:hover { border-color: #94a3b8; }
 .ss-trigger--open { border-color: var(--color-accent, #3b82f6); }
@@ -5684,18 +5866,19 @@ kbd {
 .ss-arrow { font-size: 0.7rem; color: var(--text-subtle, #94a3b8); flex-shrink: 0; }
 .ss-dropdown {
   z-index: 9999;
+  display: flex; flex-direction: column;
   background: var(--bg-elevated);
   border: 1px solid var(--border); border-radius: var(--radius-sm, 4px);
   box-shadow: 0 6px 24px rgba(0,0,0,0.5); overflow: hidden;
 }
-.ss-search-wrap { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); }
+.ss-search-wrap { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
 .ss-search {
   width: 100%; padding: 0.35rem 0.5rem; border: 1px solid var(--border);
   border-radius: var(--radius-sm, 4px); font-size: 0.8125rem; font-family: inherit;
   background: var(--bg-panel); color: var(--text-main); outline: none; box-sizing: border-box;
 }
 .ss-search:focus { border-color: var(--accent); }
-.ss-list { max-height: 220px; overflow-y: auto; }
+.ss-list { flex: 1 1 auto; min-height: 0; max-height: 220px; overflow-y: auto; }
 .ss-option {
   padding: 0.42rem 0.75rem; font-size: 0.875rem; cursor: pointer;
   color: var(--text-main); white-space: nowrap;

@@ -4,6 +4,7 @@ import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import DataTable from "../components/common/DataTable.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import {
   createAlertPolicy,
   deleteAlertPolicy,
@@ -339,7 +340,7 @@ function PolicyFormModal({
           </label>
           <label>
             Cluster
-            <select
+            <SearchableSelect
               value={form.clusterId}
               onChange={(e) => {
                 touch(LOG_TOUCH_KEYS.scope);
@@ -361,7 +362,7 @@ function PolicyFormModal({
                   {c.name}
                 </option>
               ))}
-            </select>
+            </SearchableSelect>
           </label>
           <label className="full-width">
             Description
@@ -373,38 +374,38 @@ function PolicyFormModal({
           </label>
           <label>
             Alert Type
-            <select
+            <SearchableSelect
               value={form.alertType || "metric"}
               onChange={(e) => handleAlertTypeChange(e.target.value)}
             >
               <option value="metric">Metric</option>
               <option value="log">Log</option>
-            </select>
+            </SearchableSelect>
           </label>
           <label>
             Severity
-            <select
+            <SearchableSelect
               value={form.severity}
               onChange={(e) => setForm((p) => ({ ...p, severity: e.target.value }))}
             >
               <option value="info">Info</option>
               <option value="warning">Warning</option>
               <option value="critical">Critical</option>
-            </select>
+            </SearchableSelect>
           </label>
           <label>
             Status
-            <select
+            <SearchableSelect
               value={form.enabled ? "enabled" : "disabled"}
               onChange={(e) => setForm((p) => ({ ...p, enabled: e.target.value === "enabled" }))}
             >
               <option value="enabled">Enabled</option>
               <option value="disabled">Disabled</option>
-            </select>
+            </SearchableSelect>
           </label>
           <label>
             Evaluation Interval
-            <select
+            <SearchableSelect
               value={form.evaluationIntervalSeconds ?? DEFAULT_EVALUATION_INTERVAL_SECONDS}
               onChange={(e) => handleEvaluationIntervalChange(Number(e.target.value))}
             >
@@ -413,7 +414,7 @@ function PolicyFormModal({
                   Every {option.label}
                 </option>
               ))}
-            </select>
+            </SearchableSelect>
           </label>
         </div>
 
@@ -447,7 +448,7 @@ function PolicyFormModal({
               const isBoolean = metric?.type === "boolean";
               return (
                 <div key={index} className="alert-policy-condition-row">
-                  <select
+                  <SearchableSelect
                     value={condition.metricKey}
                     onChange={(e) =>
                       updateCondition(index, {
@@ -462,8 +463,8 @@ function PolicyFormModal({
                         {m.label}
                       </option>
                     ))}
-                  </select>
-                  <select
+                  </SearchableSelect>
+                  <SearchableSelect
                     value={condition.operator}
                     onChange={(e) => updateCondition(index, { operator: e.target.value })}
                   >
@@ -472,9 +473,9 @@ function PolicyFormModal({
                         {op}
                       </option>
                     ))}
-                  </select>
+                  </SearchableSelect>
                   {isBoolean ? (
-                    <select
+                    <SearchableSelect
                       value={String(condition.threshold)}
                       onChange={(e) =>
                         updateCondition(index, { threshold: e.target.value === "true" })
@@ -482,7 +483,7 @@ function PolicyFormModal({
                     >
                       <option value="true">True</option>
                       <option value="false">False</option>
-                    </select>
+                    </SearchableSelect>
                   ) : (
                     <input
                       type="number"
@@ -504,13 +505,13 @@ function PolicyFormModal({
           </div>
           <label className="alert-policy-logic">
             Logic
-            <select
+            <SearchableSelect
               value={form.conditionLogic}
               onChange={(e) => setForm((p) => ({ ...p, conditionLogic: e.target.value }))}
             >
               <option value="any">ANY condition matches (OR)</option>
               <option value="all">ALL conditions must match (AND)</option>
-            </select>
+            </SearchableSelect>
           </label>
         </section>
         ) : (
@@ -519,7 +520,7 @@ function PolicyFormModal({
           <div className="alert-policy-form-grid">
             <label>
               Match Type
-              <select
+              <SearchableSelect
                 value={logConfig.matchType || "contains"}
                 onChange={(e) => {
                   touch(LOG_TOUCH_KEYS.logMatchType);
@@ -531,7 +532,7 @@ function PolicyFormModal({
               >
                 <option value="contains">Contains</option>
                 <option value="regex">Regex</option>
-              </select>
+              </SearchableSelect>
             </label>
             <label>
               Pattern
@@ -567,7 +568,7 @@ function PolicyFormModal({
           <h3 className="alert-policy-subheading">Log Window</h3>
           <label>
             Scan Logs From
-            <select
+            <SearchableSelect
               value={logConfig.logWindowSeconds ?? 60}
               onChange={(e) => {
                 touch(LOG_TOUCH_KEYS.logWindow);
@@ -582,7 +583,7 @@ function PolicyFormModal({
                   {option.label}
                 </option>
               ))}
-            </select>
+            </SearchableSelect>
           </label>
 
           <h3 className="alert-policy-subheading">Context Lines</h3>

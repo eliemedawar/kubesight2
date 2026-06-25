@@ -46,6 +46,66 @@ BLOCKED_CLUSTER_KINDS = {
 
 SECRET_DATA_KEYS = ("data", "stringData")
 
+# Server-managed metadata fields that must be stripped before re-applying a
+# manifest that was seeded from a live cluster object (e.g. the Edit & apply
+# modal seeds from `kubectl get -o yaml`). Leaving these in can make
+# `kubectl apply` reject the manifest. Stripping them is a no-op for freshly
+# generated manifests (inventory deploy / wizard), so it is safe everywhere.
+SERVER_MANAGED_METADATA_FIELDS = (
+    "managedFields",
+    "resourceVersion",
+    "uid",
+    "creationTimestamp",
+    "generation",
+    "selfLink",
+)
+
+_LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
+
+
+def sanitize_for_apply(yaml_content: str) -> str:
+    """Strip server-managed fields so a live object can be safely re-applied.
+
+    Removes ``status`` and server-owned ``metadata`` fields (managedFields,
+    resourceVersion, uid, creationTimestamp, generation, selfLink) plus the
+    kubectl last-applied-configuration annotation. If the content cannot be
+    parsed, the original is returned unchanged so callers still surface a clean
+    validation error.
+    """
+    documents, err = parse_yaml_documents(yaml_content)
+    if err or not documents:
+        return yaml_content
+
+    cleaned: List[Dict[str, Any]] = []
+    for doc in documents:
+        if not isinstance(doc, dict):
+            cleaned.append(doc)
+            continue
+        doc = dict(doc)
+        doc.pop("status", None)
+        meta = doc.get("metadata")
+        if isinstance(meta, dict):
+            meta = dict(meta)
+            for field in SERVER_MANAGED_METADATA_FIELDS:
+                meta.pop(field, None)
+            annotations = meta.get("annotations")
+            if isinstance(annotations, dict):
+                annotations = {
+                    key: value
+                    for key, value in annotations.items()
+                    if key != _LAST_APPLIED_ANNOTATION
+                }
+                if annotations:
+                    meta["annotations"] = annotations
+                else:
+                    meta.pop("annotations", None)
+            doc["metadata"] = meta
+        cleaned.append(doc)
+
+    return "\n---\n".join(
+        yaml.dump(d, default_flow_style=False, sort_keys=False) for d in cleaned
+    )
+
 
 def _run_kubectl_for_cluster(cluster_id: str, args: List[str]) -> str:
     from ..k8s_provider import _run_for_access
@@ -120,12 +180,21 @@ def analyze_resources(
     }
 
 
-def validate_yaml(yaml_content: str, namespace: str, user: Optional[User] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+def validate_yaml(
+    yaml_content: str,
+    namespace: str,
+    user: Optional[User] = None,
+    *,
+    preview_mode: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     documents, err = parse_yaml_documents(yaml_content)
     if err:
         return None, err, 400
 
-    analysis = analyze_resources(documents, namespace, user=user)
+    # In preview mode (e.g. staging a change bundle for approval), cluster-scoped
+    # or sensitive kinds are surfaced as warnings rather than hard-blocked: the
+    # request is going through an approval that authorizes the elevated change.
+    analysis = analyze_resources(documents, namespace, user=user, preview_mode=preview_mode)
     if analysis["blocked"]:
         return None, f"Blocked resources: {', '.join(analysis['blocked'])}", 403
 
@@ -181,7 +250,7 @@ def dry_run_yaml(
     if err:
         return None, err, code
 
-    path = _write_temp_yaml(yaml_content)
+    path = _write_temp_yaml(sanitize_for_apply(yaml_content))
     try:
         runner = run_kubectl or _run_kubectl_for_cluster
         output = runner(
@@ -241,7 +310,7 @@ def diff_yaml(
     if err:
         return None, err, code
 
-    path = _write_temp_yaml(yaml_content)
+    path = _write_temp_yaml(sanitize_for_apply(yaml_content))
     try:
         if run_kubectl:
             try:
@@ -395,15 +464,44 @@ def apply_yaml(
         )
         return None, "Forbidden", 403
 
-    expected = f"APPLY {namespace}"
-    if (confirmation or "").strip() != expected:
-        return None, f"Confirmation must be exactly: {expected}", 400
+    # Gate the deploy on an approved deployment request when the cluster requires
+    # one. Local import avoids a circular import at module load.
+    if user:
+        from .deployment_request_service import (
+            DeploymentRequestError,
+            assert_deploy_allowed,
+        )
+
+        try:
+            assert_deploy_allowed(user, cluster_id)
+        except DeploymentRequestError as exc:
+            log_audit(
+                "unauthorized_deployment_attempt",
+                actor=user,
+                target_type="namespace",
+                target_id=f"{cluster_id}/{namespace}",
+                details={"action": "apply", "reason": "approval_required"},
+            )
+            return None, str(exc), exc.status_code
+        except Exception as exc:  # noqa: BLE001 — fail closed if the gate errors
+            log_audit(
+                "deployment_failed",
+                actor=user,
+                target_type="namespace",
+                target_id=f"{cluster_id}/{namespace}",
+                details={"action": "apply", "error": str(exc), "reason": "approval_check_failed"},
+            )
+            return (
+                None,
+                "Unable to verify deployment approval. Please try again or contact an administrator.",
+                500,
+            )
 
     validation, err, code = validate_yaml(yaml_content, namespace, user=user)
     if err:
         return None, err, code
 
-    path = _write_temp_yaml(yaml_content)
+    path = _write_temp_yaml(sanitize_for_apply(yaml_content))
     try:
         runner = run_kubectl or _run_kubectl_for_cluster
         output = runner(cluster_id, ["apply", "-f", path, "-n", namespace])

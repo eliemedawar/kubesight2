@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import jwt
 from flask import has_request_context, request
@@ -100,6 +101,71 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 string into a timezone-aware UTC datetime.
+
+    Accepts a trailing ``Z`` (UTC) and naive strings (assumed UTC). Returns None
+    for empty input; raises DeploymentRequestError for unparseable values.
+    """
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise DeploymentRequestError("Invalid date/time for the requested window.", 400) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _clean_timezone(value: Any) -> Optional[str]:
+    """Return a valid IANA timezone name, or None."""
+    name = str(value or "").strip()
+    if not name:
+        return None
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+    return name
+
+
+def _format_window(req: DeploymentRequest) -> Optional[str]:
+    """Human-readable requested window in the requester's local timezone."""
+    start = req.requested_window_start
+    end = req.requested_window_end
+    if not start or not end:
+        return None
+    tz_name = req.requested_window_timezone
+    tz = None
+    if tz_name:
+        try:
+            tz = ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            tz = None
+    if tz is not None:
+        start_local = start.astimezone(tz)
+        end_local = end.astimezone(tz)
+        label = tz_name
+    else:
+        start_local = start
+        end_local = end
+        label = "UTC"
+    if start_local.date() == end_local.date():
+        span = f"{start_local.strftime('%Y-%m-%d %H:%M')}–{end_local.strftime('%H:%M')}"
+    else:
+        span = f"{start_local.strftime('%Y-%m-%d %H:%M')} – {end_local.strftime('%Y-%m-%d %H:%M')}"
+    return f"{span} ({label})"
+
+
 def _vote_tally(row: DeploymentRequest) -> Tuple[int, int]:
     """Return (approve_count, decline_count) of distinct voters."""
     approvals = sum(1 for v in row.votes if v.decision == "approve")
@@ -122,6 +188,10 @@ def serialize_request(row: DeploymentRequest) -> Dict[str, Any]:
         "requesterUsername": requester.username if requester else None,
         "requiredApprovals": row.required_approvals if row.required_approvals is not None else 1,
         "totalRecipients": row.total_recipients or 0,
+        "requestedWindowStart": _iso(row.requested_window_start),
+        "requestedWindowEnd": _iso(row.requested_window_end),
+        "requestedWindowTimezone": row.requested_window_timezone,
+        "requestedWindowLabel": _format_window(row),
         "approvals": approvals,
         "declines": declines,
         "votes": [
@@ -268,6 +338,33 @@ def _configured_group_ids() -> List[int]:
     return out
 
 
+def _configured_cluster_approvals() -> Dict[str, int]:
+    """Per-cluster approval overrides as a ``{clusterId: int}`` map."""
+    row = DeploymentRequestSetting.query.first()
+    raw = getattr(row, "cluster_required_approvals", None) if row else None
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            out[str(key)] = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def cluster_required_approvals(cluster_id: str) -> int:
+    """Required approvals for a cluster: its override, else the global default."""
+    overrides = _configured_cluster_approvals()
+    key = str(cluster_id or "")
+    if key in overrides:
+        return overrides[key]
+    row = DeploymentRequestSetting.query.first()
+    if row and row.required_approvals is not None:
+        return max(0, int(row.required_approvals))
+    return 1
+
+
 def _emails_from_configured_groups() -> List[str]:
     from ..models import AlertRoutingReceiverGroup
 
@@ -339,6 +436,7 @@ def get_recipient_config() -> Dict[str, Any]:
         "recipients": configured,
         "groupIds": _configured_group_ids(),
         "requiredApprovals": (row.required_approvals if row and row.required_approvals is not None else 1),
+        "clusterApprovals": _configured_cluster_approvals(),
         "availableGroups": _list_available_groups(),
         "resolvedRecipients": resolved,
         "poolSize": len(resolved),
@@ -352,6 +450,7 @@ def update_recipient_config(
     emails: Optional[List[str]] = None,
     group_ids: Optional[List[int]] = None,
     required_approvals: Optional[int] = None,
+    cluster_approvals: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     row = _get_or_create_setting()
 
@@ -396,6 +495,29 @@ def update_recipient_config(
         # 0 means "no approval required" — requests are auto-approved on creation.
         row.required_approvals = max(0, required)
 
+    if cluster_approvals is not None:
+        if not isinstance(cluster_approvals, dict):
+            raise DeploymentRequestError(
+                "Cluster approvals must be a map of cluster ID to a whole number.", 400
+            )
+        overrides: Dict[str, int] = {}
+        for key, value in cluster_approvals.items():
+            cluster_key = str(key or "").strip()
+            if not cluster_key:
+                continue
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                raise DeploymentRequestError(
+                    f"Invalid approval count for cluster {cluster_key}.", 400
+                )
+            if count < 0:
+                raise DeploymentRequestError(
+                    f"Approval count for cluster {cluster_key} cannot be negative.", 400
+                )
+            overrides[cluster_key] = count
+        row.cluster_required_approvals = overrides
+
     db.session.add(row)
     db.session.commit()
 
@@ -439,16 +561,24 @@ def _build_email(
         else ""
     )
 
+    window_label = _format_window(req)
+
     # ----- Plain-text part (always present, fallback for text-only clients) -----
     lines = [
         f"Requester: {requester_name}",
         f"Cluster: {cluster_name}",
-        "",
-        "Message:",
-        req.message,
-        "",
-        "Status: Pending approval",
     ]
+    if window_label:
+        lines.append(f"Requested window: {window_label}")
+    lines.extend(
+        [
+            "",
+            "Message:",
+            req.message,
+            "",
+            "Status: Pending approval",
+        ]
+    )
     if quorum_note:
         lines.append(quorum_note)
     if base_url:
@@ -468,6 +598,12 @@ def _build_email(
 
     # ----- HTML part with Approve / Decline buttons -----
     message_html = _html_escape(req.message).replace("\n", "<br />")
+    window_row_html = (
+        f'<tr><td style="color:#94a3b8;padding:2px 16px 2px 0;">Requested window</td>'
+        f'<td style="padding:2px 0;">{_html_escape(window_label)}</td></tr>'
+        if window_label
+        else ""
+    )
     quorum_html = (
         f'<p style="color:#94a3b8;font-size:13px;margin:16px 0 0;">{_html_escape(quorum_note)}</p>'
         if quorum_note
@@ -512,6 +648,7 @@ def _build_email(
       <table role="presentation" cellpadding="0" cellspacing="0" style="color:#e2e8f0;font-size:14px;">
         <tr><td style="color:#94a3b8;padding:2px 16px 2px 0;">Requester</td><td style="padding:2px 0;">{_html_escape(requester_name)}</td></tr>
         <tr><td style="color:#94a3b8;padding:2px 16px 2px 0;">Cluster</td><td style="padding:2px 0;">{_html_escape(cluster_name)}</td></tr>
+        {window_row_html}
         <tr><td style="color:#94a3b8;padding:2px 16px 2px 0;vertical-align:top;">Status</td><td style="padding:2px 0;color:#fbbf24;">Pending approval</td></tr>
       </table>
       <div style="margin-top:18px;color:#94a3b8;font-size:13px;">Message</div>
@@ -551,7 +688,15 @@ def _notify_management(req: DeploymentRequest, requester_name: str, recipients: 
 # Create / list / decide
 # ---------------------------------------------------------------------------
 
-def create_request(user: Optional[User], cluster_id: str, cluster_name: str, message: str) -> Dict[str, Any]:
+def create_request(
+    user: Optional[User],
+    cluster_id: str,
+    cluster_name: str,
+    message: str,
+    window_start: Any = None,
+    window_end: Any = None,
+    window_timezone: Any = None,
+) -> Dict[str, Any]:
     cluster_id = (cluster_id or "").strip()
     message = (message or "").strip()
     cluster_name = (cluster_name or "").strip() or cluster_id
@@ -563,10 +708,23 @@ def create_request(user: Optional[User], cluster_id: str, cluster_name: str, mes
     if len(message) > 5000:
         raise DeploymentRequestError("Request message is too long (max 5000 characters).", 400)
 
-    # Snapshot the audience and quorum at creation time.
+    start_dt = _parse_iso_datetime(window_start)
+    end_dt = _parse_iso_datetime(window_end)
+    if not start_dt or not end_dt:
+        raise DeploymentRequestError(
+            "A requested time window (start and end) is required.", 400
+        )
+    now = datetime.now(timezone.utc)
+    if start_dt <= now:
+        raise DeploymentRequestError("The window start must be in the future.", 400)
+    if end_dt <= start_dt:
+        raise DeploymentRequestError("The window end must be after the start.", 400)
+    tz_name = _clean_timezone(window_timezone)
+
+    # Snapshot the audience and quorum at creation time. Use the per-cluster
+    # override when set so a cluster configured with 0 auto-approves.
     recipients, _ = _resolve_recipients_with_source()
-    setting = DeploymentRequestSetting.query.first()
-    configured_required = setting.required_approvals if setting and setting.required_approvals is not None else 1
+    configured_required = cluster_required_approvals(cluster_id)
     total = len(recipients)
     # 0 = auto-approve (no approval needed). Otherwise clamp the quorum to the
     # available pool so it stays satisfiable.
@@ -583,6 +741,9 @@ def create_request(user: Optional[User], cluster_id: str, cluster_name: str, mes
         status="pending",
         required_approvals=required,
         total_recipients=total,
+        requested_window_start=start_dt,
+        requested_window_end=end_dt,
+        requested_window_timezone=tz_name,
     )
     db.session.add(req)
     db.session.commit()
@@ -599,6 +760,7 @@ def create_request(user: Optional[User], cluster_id: str, cluster_name: str, mes
             "requestId": req.id,
             "requiredApprovals": required,
             "totalRecipients": total,
+            "requestedWindow": _format_window(req),
         },
     )
 
@@ -617,8 +779,26 @@ def create_request(user: Optional[User], cluster_id: str, cluster_name: str, mes
 
 
 def list_requests(*, limit: int = 200) -> List[Dict[str, Any]]:
+    # Reflect any window-start expirations immediately, even if the background
+    # scheduler has not ticked yet.
+    auto_decline_overdue_requests()
     rows = (
         DeploymentRequest.query.order_by(DeploymentRequest.created_at.desc())
+        .limit(max(1, min(int(limit), 500)))
+        .all()
+    )
+    return [serialize_request(row) for row in rows]
+
+
+def list_requests_for_user(user: Optional[User], *, limit: int = 200) -> List[Dict[str, Any]]:
+    # Reflect any window-start expirations immediately, even if the background
+    # scheduler has not ticked yet.
+    auto_decline_overdue_requests()
+    if not user:
+        return []
+    rows = (
+        DeploymentRequest.query.filter(DeploymentRequest.requester_id == user.id)
+        .order_by(DeploymentRequest.created_at.desc())
         .limit(max(1, min(int(limit), 500)))
         .all()
     )
@@ -632,23 +812,65 @@ def get_request_or_error(request_id: int) -> DeploymentRequest:
     return req
 
 
-def _finalize(req: DeploymentRequest, status: str, *, actor: Optional[User] = None) -> None:
+def _finalize(
+    req: DeploymentRequest,
+    status: str,
+    *,
+    actor: Optional[User] = None,
+    reason: Optional[str] = None,
+) -> None:
     req.status = status
     req.decided_by_user_id = actor.id if actor else None
     req.decided_at = datetime.now(timezone.utc)
     db.session.commit()
+    details = {
+        "clusterId": req.cluster_id,
+        "clusterName": req.cluster_name,
+        "requestId": req.id,
+        "status": status,
+    }
+    if reason:
+        details["reason"] = reason
+        details["auto"] = True
     log_audit(
         ACTION_APPROVED if status == "approved" else ACTION_DECLINED,
         actor=actor,
         target_type="deployment_request",
         target_id=str(req.id),
-        details={
-            "clusterId": req.cluster_id,
-            "clusterName": req.cluster_name,
-            "requestId": req.id,
-            "status": status,
-        },
+        details=details,
     )
+
+
+def _window_start_passed(req: DeploymentRequest, now: Optional[datetime] = None) -> bool:
+    """True if the request has a window whose start time is now or in the past."""
+    start = req.requested_window_start
+    if start is None:
+        return False
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    return start <= (now or datetime.now(timezone.utc))
+
+
+def auto_decline_overdue_requests(now: Optional[datetime] = None) -> int:
+    """Auto-decline pending requests whose work window has already started.
+
+    A request must be approved before the requested window begins; once the start
+    time passes without the required approvals it is automatically declined.
+    Returns the number of requests declined. Safe to call repeatedly.
+    """
+    now = now or datetime.now(timezone.utc)
+    pending = (
+        DeploymentRequest.query.filter(
+            DeploymentRequest.status == "pending",
+            DeploymentRequest.requested_window_start.isnot(None),
+        ).all()
+    )
+    declined = 0
+    for req in pending:
+        if _window_start_passed(req, now):
+            _finalize(req, "declined", actor=None, reason="window_start_passed")
+            declined += 1
+    return declined
 
 
 def _evaluate_quorum(req: DeploymentRequest) -> Optional[str]:
@@ -690,6 +912,15 @@ def record_vote(
         raise DeploymentRequestError("Request does not match this cluster.", 400)
     if req.status != "pending":
         raise DeploymentRequestError(f"This request has already been {req.status}.", 409)
+
+    # A request can no longer be acted on once its work window has started; it is
+    # auto-declined instead of being approvable past the start time.
+    if _window_start_passed(req):
+        _finalize(req, "declined", actor=actor, reason="window_start_passed")
+        raise DeploymentRequestError(
+            "The requested window has already started; this request was automatically declined.",
+            409,
+        )
 
     email = (voter_email or "").strip().lower()
     if not email:
@@ -735,3 +966,116 @@ def decide_request(
 
     actor_email = (getattr(actor, "email", "") or "").strip().lower() if actor else ""
     return record_vote(request_id, action, voter_email=actor_email, actor=actor)
+
+
+# ---------------------------------------------------------------------------
+# Deploy eligibility (gate cluster deploys on an approved request)
+# ---------------------------------------------------------------------------
+
+def _user_is_admin(user: Optional[User]) -> bool:
+    """Reuse the shared admin convention so admins bypass the approval gate."""
+    if user is None:
+        return False
+    try:
+        from ..access_engine import is_admin
+    except ImportError:
+        return False
+    try:
+        return bool(is_admin(user))
+    except Exception:
+        return False
+
+
+def _active_approval(user: Optional[User], cluster_id: str) -> Optional[DeploymentRequest]:
+    """The user's approved, still-valid request for this cluster.
+
+    An approved request grants eligibility immediately (the moment it is
+    approved) and stays valid until its requested window ends. We intentionally
+    do not require the window *start* to have arrived: a request must be approved
+    before the window opens (otherwise it is auto-declined), so once approved the
+    requester should be able to deploy right away rather than waiting for the
+    planned start. The window *end* still time-boxes the approval, and one
+    approval covers multiple deploys until then.
+
+    When several approved requests qualify, the one with the latest window end is
+    returned so eligibility persists for as long as possible.
+    """
+    if not user or not getattr(user, "id", None):
+        return None
+    key = str(cluster_id or "")
+    if not key:
+        return None
+    now = datetime.now(timezone.utc)
+    candidates = (
+        DeploymentRequest.query.filter(
+            DeploymentRequest.status == "approved",
+            DeploymentRequest.requester_id == user.id,
+            DeploymentRequest.cluster_id == key,
+        )
+        .order_by(DeploymentRequest.requested_window_end.desc())
+        .all()
+    )
+    for req in candidates:
+        end = req.requested_window_end
+        if not end:
+            continue
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if now <= end:
+            return req
+    return None
+
+
+def deploy_eligibility(user: Optional[User], cluster_id: str) -> Dict[str, Any]:
+    """Whether ``user`` may deploy to ``cluster_id`` right now.
+
+    A cluster requiring approvals only lets a deploy proceed when the same user
+    has an ``approved`` request for that cluster that is still valid (its
+    requested window has not yet ended). Approval takes effect immediately, so a
+    non-admin can deploy as soon as their request is approved; one approval
+    covers multiple deploys until the window ends.
+
+    Admins are exempt: they may deploy directly without an approved request, so
+    approval is reported as not required for them.
+    """
+    required = cluster_required_approvals(cluster_id)
+    if user is not None and _user_is_admin(user):
+        return {
+            "clusterId": str(cluster_id or ""),
+            "requiredApprovals": required,
+            "approvalRequired": False,
+            "hasActiveApproval": True,
+            "eligible": True,
+            "activeRequest": None,
+        }
+    approval_required = required > 0
+    active = _active_approval(user, cluster_id) if approval_required else None
+    has_active_approval = active is not None
+    eligible = (not approval_required) or has_active_approval
+    active_request = None
+    if active is not None:
+        active_request = {
+            "id": active.id,
+            "windowLabel": _format_window(active),
+            "windowStart": _iso(active.requested_window_start),
+            "windowEnd": _iso(active.requested_window_end),
+        }
+    return {
+        "clusterId": str(cluster_id or ""),
+        "requiredApprovals": required,
+        "approvalRequired": approval_required,
+        "hasActiveApproval": has_active_approval,
+        "eligible": eligible,
+        "activeRequest": active_request,
+    }
+
+
+def assert_deploy_allowed(user: Optional[User], cluster_id: str) -> None:
+    """Raise DeploymentRequestError(403) if the user cannot deploy to a cluster."""
+    info = deploy_eligibility(user, cluster_id)
+    if info["approvalRequired"] and not info["hasActiveApproval"]:
+        raise DeploymentRequestError(
+            "This cluster requires an approved deployment request before deploying. "
+            "Request one from the Clusters tab.",
+            403,
+        )

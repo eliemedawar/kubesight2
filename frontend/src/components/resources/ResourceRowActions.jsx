@@ -4,6 +4,7 @@ import {
   IconCode,
   IconCube,
   IconDocument,
+  IconEdit,
   IconEye,
   IconHistory,
   IconInfo,
@@ -18,6 +19,7 @@ const ACTION_CONFIG = {
   rollout: { label: "Rollout history", Icon: IconHistory },
   yaml: { label: "View YAML", Icon: IconCode },
   details: { label: "Details", Icon: IconEye },
+  edit: { label: "Edit & apply", Icon: IconEdit },
 };
 
 function normalizeActionId(value) {

@@ -1,42 +1,31 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  listDeploymentRequests,
-  approveDeploymentRequest,
-  declineDeploymentRequest,
-} from "../api";
+import { listMyDeploymentRequests } from "../api";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
-import { usePermission } from "../hooks/usePermission.js";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import RequestsTable from "../components/clusters/RequestsTable.jsx";
 
 const TABS = [
-  { key: "active", label: "Active Requests" },
-  { key: "history", label: "Request History" },
+  { key: "active", label: "Active" },
+  { key: "history", label: "History" },
 ];
 
-export default function DeploymentRequestsPage() {
-  const { hasPermission } = usePermission();
-  const canManage = hasPermission("deployment_requests:manage");
-
+export default function MyRequestsPage() {
   const [activeTab, setActiveTab] = useState("active");
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [actionError, setActionError] = useState("");
-  const [busyId, setBusyId] = useState(null);
 
   // History filters
   const [statusFilter, setStatusFilter] = useState("all");
   const [clusterFilter, setClusterFilter] = useState("all");
-  const [requesterFilter, setRequesterFilter] = useState("all");
   const [search, setSearch] = useState("");
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
     try {
-      const data = await listDeploymentRequests({ limit: 200 });
+      const data = await listMyDeploymentRequests({ limit: 200 });
       setItems(data.items || []);
       setError("");
     } catch (err) {
@@ -50,45 +39,38 @@ export default function DeploymentRequestsPage() {
     load();
   }, [load]);
 
-  // Approvals can be granted elsewhere (management team email links, another
-  // manager in-app). Poll quietly so a request that reaches its quorum flips to
-  // "approved" here without needing a manual refresh.
+  // Approvals are granted elsewhere (management team email links, in-app by a
+  // manager). Poll quietly so a request that reaches its quorum flips status
+  // here without needing a manual refresh.
   useEffect(() => {
     const id = setInterval(() => load({ silent: true }), 15000);
     return () => clearInterval(id);
   }, [load]);
 
-  const decide = async (request, action) => {
-    setBusyId(request.id);
-    setActionError("");
-    try {
-      const fn = action === "approve" ? approveDeploymentRequest : declineDeploymentRequest;
-      const updated = await fn(request.id);
-      setItems((prev) => prev.map((row) => (row.id === updated.id ? updated : row)));
-    } catch (err) {
-      setActionError(err.message || `Failed to ${action} request.`);
-    } finally {
-      setBusyId(null);
+  // A request is "active" while it still needs a decision (pending) or while it
+  // is approved and its requested window has not yet ended — an approval stays
+  // usable until the window closes, so it should stay visible here until then.
+  const isActiveRequest = useCallback((row) => {
+    if (row.status === "pending") return true;
+    if (row.status === "approved" && row.requestedWindowEnd) {
+      const end = new Date(row.requestedWindowEnd).getTime();
+      return Number.isFinite(end) && Date.now() <= end;
     }
-  };
+    return false;
+  }, []);
 
   const activeRequests = useMemo(
-    () => items.filter((row) => row.status === "pending"),
-    [items]
+    () => items.filter(isActiveRequest),
+    [items, isActiveRequest]
   );
   const historyRequests = useMemo(
-    () => items.filter((row) => row.status !== "pending"),
-    [items]
+    () => items.filter((row) => !isActiveRequest(row)),
+    [items, isActiveRequest]
   );
 
   const clusterOptions = useMemo(
     () =>
       Array.from(new Set(historyRequests.map((r) => r.clusterName).filter(Boolean))).sort(),
-    [historyRequests]
-  );
-  const requesterOptions = useMemo(
-    () =>
-      Array.from(new Set(historyRequests.map((r) => r.requesterName).filter(Boolean))).sort(),
     [historyRequests]
   );
 
@@ -97,30 +79,27 @@ export default function DeploymentRequestsPage() {
     return historyRequests.filter((row) => {
       if (statusFilter !== "all" && row.status !== statusFilter) return false;
       if (clusterFilter !== "all" && row.clusterName !== clusterFilter) return false;
-      if (requesterFilter !== "all" && row.requesterName !== requesterFilter) return false;
-      if (q && !(`${row.message} ${row.clusterName} ${row.requesterName}`.toLowerCase().includes(q)))
-        return false;
+      if (q && !(`${row.message} ${row.clusterName}`.toLowerCase().includes(q))) return false;
       return true;
     });
-  }, [historyRequests, statusFilter, clusterFilter, requesterFilter, search]);
+  }, [historyRequests, statusFilter, clusterFilter, search]);
 
   const resetFilters = () => {
     setStatusFilter("all");
     setClusterFilter("all");
-    setRequesterFilter("all");
     setSearch("");
   };
   const filtersActive =
-    statusFilter !== "all" || clusterFilter !== "all" || requesterFilter !== "all" || search.trim();
+    statusFilter !== "all" || clusterFilter !== "all" || search.trim();
 
   return (
     <div className="ops-page">
       <section className="card ops-section">
         <div className="card-header-row" style={{ marginBottom: "var(--space-2)" }}>
           <div>
-            <h2>Deployment Requests</h2>
+            <h2>My Requests</h2>
             <p className="muted">
-              Requests to deploy or change clusters, routed to the management team for approval.
+              Track the status of deployment requests you've submitted.
             </p>
           </div>
           {!isAccessDeniedError(error) ? (
@@ -130,7 +109,7 @@ export default function DeploymentRequestsPage() {
           ) : null}
         </div>
 
-        <nav className="tab-bar" aria-label="Deployment request views">
+        <nav className="tab-bar" aria-label="My request views">
           {TABS.map((tab) => (
             <button
               key={tab.key}
@@ -144,10 +123,8 @@ export default function DeploymentRequestsPage() {
           ))}
         </nav>
 
-        {actionError ? <ErrorBanner message={actionError} suppressAccessDenied={false} /> : null}
-
         {loading ? (
-          <p className="muted">Loading deployment requests...</p>
+          <p className="muted">Loading your requests...</p>
         ) : isAccessDeniedError(error) ? (
           <AccessDeniedPage message={error} />
         ) : formatAccessError(error) ? (
@@ -155,9 +132,7 @@ export default function DeploymentRequestsPage() {
         ) : activeTab === "active" ? (
           <RequestsTable
             rows={activeRequests}
-            canManage={canManage}
-            decide={decide}
-            busyId={busyId}
+            canManage={false}
             emptyLabel="No active requests awaiting a decision."
           />
         ) : (
@@ -167,7 +142,7 @@ export default function DeploymentRequestsPage() {
                 Search
                 <input
                   type="search"
-                  placeholder="Message, cluster, or requester"
+                  placeholder="Message or cluster"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                 />
@@ -191,17 +166,6 @@ export default function DeploymentRequestsPage() {
                   ))}
                 </SearchableSelect>
               </label>
-              <label>
-                Requester
-                <SearchableSelect value={requesterFilter} onChange={(e) => setRequesterFilter(e.target.value)}>
-                  <option value="all">All requesters</option>
-                  {requesterOptions.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </SearchableSelect>
-              </label>
               {filtersActive ? (
                 <button
                   type="button"
@@ -220,9 +184,7 @@ export default function DeploymentRequestsPage() {
 
             <RequestsTable
               rows={filteredHistory}
-              canManage={canManage}
-              decide={decide}
-              busyId={busyId}
+              canManage={false}
               emptyLabel={
                 historyRequests.length
                   ? "No requests match the current filters."

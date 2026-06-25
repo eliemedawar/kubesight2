@@ -12,8 +12,17 @@ import {
 } from "../api/clustersApi.js";
 import { RESOURCE_TAB_DEFINITIONS, listKeyForTab } from "../lib/resourceTypes.js";
 import { EMPTY_MESSAGES, formatAccessError } from "../utils/authz.js";
+import { usePermission } from "../hooks/usePermission.js";
 
 const ResourceInspectModal = lazy(() => import("../components/resources/ResourceInspectModal.jsx"));
+const EditDeploymentModal = lazy(() => import("../components/resources/EditDeploymentModal.jsx"));
+
+const CLOSED_EDIT_MODAL = {
+  open: false,
+  clusterId: "",
+  namespace: "",
+  deploymentName: "",
+};
 
 const POD_FILTER_WORKLOAD_KINDS = new Set([
   "deployment",
@@ -145,8 +154,11 @@ export default function ResourcesPage({
   const [internalActiveTab, setInternalActiveTab] = useState(tabKeys[0] || "pods");
   const activeTab = activeTabProp || internalActiveTab;
   const setActiveTab = onActiveTabChange || setInternalActiveTab;
+  const { hasPermission } = usePermission();
+  const canDeploy = hasPermission("apps:deploy");
   const [workloadPodFilter, setWorkloadPodFilter] = useState({ name: "", kind: "" });
   const [inspectModal, setInspectModal] = useState(CLOSED_MODAL);
+  const [editModal, setEditModal] = useState(CLOSED_EDIT_MODAL);
 
   useEffect(() => {
     if (!tabKeys.includes(activeTab)) {
@@ -156,6 +168,10 @@ export default function ResourcesPage({
 
   const closeInspectModal = useCallback(() => {
     setInspectModal(CLOSED_MODAL);
+  }, []);
+
+  const closeEditModal = useCallback(() => {
+    setEditModal(CLOSED_EDIT_MODAL);
   }, []);
 
   const openTextInspect = useCallback(async ({ title, mode, fetchContent }) => {
@@ -235,6 +251,16 @@ export default function ResourcesPage({
               kind: resourceKind,
               name: resourceName,
             }),
+        });
+        return;
+      }
+
+      if (actionId === "edit" && resourceKind === "deployment") {
+        setEditModal({
+          open: true,
+          clusterId: resolvedCluster,
+          namespace: resolvedNamespace,
+          deploymentName: resourceName,
         });
         return;
       }
@@ -348,7 +374,16 @@ export default function ResourcesPage({
         updateStatus: dep.updateStatus || dep.status || "-",
         upToDate: dep.upToDate ?? "-",
         age: dep.age || "-",
-        actions: buildWorkloadActionsCell(dep, "deployment", handleResourceAction),
+        actions: buildWorkloadActionsCell(
+          {
+            ...dep,
+            actions: canDeploy
+              ? [...(dep.actions || ["pods", "rollout", "yaml"]), "edit"]
+              : dep.actions,
+          },
+          "deployment",
+          handleResourceAction
+        ),
       })),
     },
     replicaSets: {
@@ -608,6 +643,21 @@ export default function ResourcesPage({
             content={inspectModal.content}
             rolloutRows={inspectModal.rolloutRows}
             onClose={closeInspectModal}
+          />
+        </Suspense>
+      ) : null}
+      {editModal.open ? (
+        <Suspense fallback={null}>
+          <EditDeploymentModal
+            open={editModal.open}
+            clusterId={editModal.clusterId}
+            namespace={editModal.namespace}
+            deploymentName={editModal.deploymentName}
+            onClose={closeEditModal}
+            onSuccess={() => {
+              onRefreshTab?.();
+              closeEditModal();
+            }}
           />
         </Suspense>
       ) : null}

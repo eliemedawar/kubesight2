@@ -13,80 +13,7 @@ import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
-
-// ─── Utilities ──────────────────────────────────────────────────────────────
-
-function SearchableSelect({ options, value, onChange, placeholder = "Select…", disabled = false }) {
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const [dropPos, setDropPos] = useState({ top: 0, left: 0, width: 0 });
-  const triggerRef = useRef(null);
-  const dropRef = useRef(null);
-
-  useEffect(() => {
-    if (!open) { setSearch(""); return; }
-    const rect = triggerRef.current?.getBoundingClientRect();
-    if (rect) setDropPos({ top: rect.bottom + window.scrollY + 3, left: rect.left + window.scrollX, width: rect.width });
-  }, [open]);
-
-  useEffect(() => {
-    const handler = (e) => {
-      if (
-        triggerRef.current && !triggerRef.current.contains(e.target) &&
-        dropRef.current && !dropRef.current.contains(e.target)
-      ) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  const filtered = options.filter((o) =>
-    (o.label ?? o).toString().toLowerCase().includes(search.toLowerCase())
-  );
-  const selectedLabel = value
-    ? (options.find((o) => (o.value ?? o) === value)?.label ?? value)
-    : placeholder;
-
-  return (
-    <div className="ss-wrap">
-      <button
-        ref={triggerRef}
-        type="button"
-        className={`ss-trigger${open ? " ss-trigger--open" : ""}${disabled ? " ss-trigger--disabled" : ""}`}
-        onClick={() => !disabled && setOpen((v) => !v)}
-        disabled={disabled}
-      >
-        <span className={value ? "" : "ss-placeholder"}>{selectedLabel}</span>
-        <span className="ss-arrow">▾</span>
-      </button>
-      {open && (
-        <div ref={dropRef} className="ss-dropdown"
-          style={{ position: "fixed", top: dropPos.top, left: dropPos.left, minWidth: dropPos.width }}>
-          {options.length > 5 && (
-            <div className="ss-search-wrap">
-              <input className="ss-search" autoFocus placeholder="Search…" value={search}
-                onChange={(e) => setSearch(e.target.value)} onMouseDown={(e) => e.stopPropagation()} />
-            </div>
-          )}
-          <div className="ss-list">
-            {filtered.length === 0 ? <div className="ss-empty">No results</div> : (
-              filtered.map((opt) => {
-                const v = opt.value ?? opt;
-                const l = opt.label ?? opt;
-                return (
-                  <div key={v} className={`ss-option${v === value ? " ss-option--selected" : ""}`}
-                    onMouseDown={() => { onChange(v); setOpen(false); }}>
-                    {l}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 
 // ─── Health badge ────────────────────────────────────────────────────────────
 
@@ -249,13 +176,13 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
             <SearchableSelect
               options={clusters.map((c) => ({ value: c.id, label: c.name || c.id }))}
               value={pickerCluster}
-              onChange={handleClusterChange}
+              onChange={(e) => handleClusterChange(e.target.value)}
               placeholder="Select cluster…"
             />
             <SearchableSelect
               options={nsOptions.map((ns) => ({ value: ns, label: ns }))}
               value={pickerNamespace}
-              onChange={handleNamespaceChange}
+              onChange={(e) => handleNamespaceChange(e.target.value)}
               placeholder={nsLoading ? "Loading…" : "Select namespace…"}
               disabled={!pickerCluster || nsLoading}
             />
@@ -1006,13 +933,13 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
       <div className="user-filters" style={{ marginBottom: "1rem" }}>
         <input type="search" className="form-input" placeholder="Search by name or description…"
           value={search} onChange={(e) => setSearch(e.target.value)} style={{ maxWidth: 280 }} />
-        <select className="form-select" value={healthFilter} onChange={(e) => setHealthFilter(e.target.value)}>
+        <SearchableSelect className="form-select" value={healthFilter} onChange={(e) => setHealthFilter(e.target.value)}>
           <option value="all">All health states</option>
           <option value="healthy">Healthy</option>
           <option value="warning">Warning</option>
           <option value="critical">Critical</option>
           <option value="unknown">Unknown</option>
-        </select>
+        </SearchableSelect>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: selectedService ? "1fr 1fr" : "1fr", gap: "1.25rem", alignItems: "start" }}>

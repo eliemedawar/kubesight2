@@ -4,6 +4,7 @@ import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import DataTable from "../components/common/DataTable.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import ReceiverGroupsPanel from "../components/alerts/ReceiverGroupsPanel.jsx";
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import {
   createReceiver,
   deleteReceiver,
@@ -363,7 +364,7 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
           </label>
           <label>
             Receiver type
-            <select
+            <SearchableSelect
               value={form.type}
               onChange={(e) => setForm((p) => ({ ...p, type: e.target.value }))}
               disabled={mode === "edit"}
@@ -373,13 +374,13 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
               <option value="slack">Slack</option>
               <option value="webhook">Webhook</option>
               {showLegacyEmail ? <option value="email">Email (legacy)</option> : null}
-            </select>
+            </SearchableSelect>
           </label>
 
           {form.type === "user" ? (
             <label className="full-width">
               User
-              <select
+              <SearchableSelect
                 value={form.userId || ""}
                 onChange={(e) => selectUser(e.target.value)}
               >
@@ -389,7 +390,7 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
                     {(u.fullName || u.username)}{u.email ? ` — ${u.email}` : " (no email)"}
                   </option>
                 ))}
-              </select>
+              </SearchableSelect>
               <span className="muted" style={{ fontSize: "var(--font-size-sm)" }}>
                 Notifications go to this user's email. Disabled users are skipped.
               </span>
@@ -399,7 +400,7 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
           {form.type === "role" ? (
             <label className="full-width">
               Role
-              <select
+              <SearchableSelect
                 value={form.roleId || ""}
                 onChange={(e) => selectRole(e.target.value)}
               >
@@ -409,7 +410,7 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
                     {r.name}
                   </option>
                 ))}
-              </select>
+              </SearchableSelect>
               <span className="muted" style={{ fontSize: "var(--font-size-sm)" }}>
                 Notifications go to every active user with this role.
               </span>
@@ -453,7 +454,7 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
               </label>
               <label>
                 HTTP method
-                <select
+                <SearchableSelect
                   value={form.httpMethod || "POST"}
                   onChange={(e) => setForm((p) => ({ ...p, httpMethod: e.target.value }))}
                 >
@@ -462,7 +463,7 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
                       {method}
                     </option>
                   ))}
-                </select>
+                </SearchableSelect>
               </label>
               <label className="full-width">
                 Headers (optional JSON)

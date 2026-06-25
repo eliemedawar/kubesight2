@@ -9,6 +9,7 @@ import {
   updateUser,
 } from "../api";
 import { useAuth } from "../context/AuthContext";
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
@@ -276,33 +277,33 @@ export default function UserManagementPage({ clusters = [] }) {
               </label>
               <label>
                 Role
-                <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
+                <SearchableSelect value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
                   <option value="all">All roles</option>
                   {roles.map((role) => (
                     <option key={role.id} value={role.name}>
                       {role.name}
                     </option>
                   ))}
-                </select>
+                </SearchableSelect>
               </label>
               <label>
                 Status
-                <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <SearchableSelect value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                   <option value="all">All</option>
                   <option value="active">Active</option>
                   <option value="inactive">Disabled</option>
-                </select>
+                </SearchableSelect>
               </label>
               <label>
                 Cluster access
-                <select value={clusterFilter} onChange={(e) => setClusterFilter(e.target.value)}>
+                <SearchableSelect value={clusterFilter} onChange={(e) => setClusterFilter(e.target.value)}>
                   <option value="all">Any cluster</option>
                   {clusterFilterOptions.map((id) => (
                     <option key={id} value={id}>
                       {id}
                     </option>
                   ))}
-                </select>
+                </SearchableSelect>
               </label>
             </div>
             ) : null}

@@ -32,8 +32,10 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
     setModalError("");
   };
 
-  const submitRequest = async (message) => {
+  const submitRequest = async (form) => {
     if (!activeCluster) return;
+    const { message, windowStart, windowEnd, windowTimezone } =
+      typeof form === "string" ? { message: form } : form;
     setSubmitting(true);
     setModalError("");
     try {
@@ -41,6 +43,9 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
         cluster_id: activeCluster.id,
         cluster_name: activeCluster.name,
         message,
+        windowStart,
+        windowEnd,
+        windowTimezone,
       });
       setActiveCluster(null);
       const emailResult = result?.emailResult;
@@ -48,15 +53,15 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
         setNotice(
           `Request sent to the management team (${emailResult.sent} recipient${
             emailResult.sent === 1 ? "" : "s"
-          } notified).`
+          } notified). You can track it under My Requests.`
         );
       } else if (emailResult?.skipped) {
         setNotice(
           "Request submitted. It is pending review — email notification was skipped " +
-            `(${emailResult.reason || "no recipients configured"}).`
+            `(${emailResult.reason || "no recipients configured"}). You can track it under My Requests.`
         );
       } else {
-        setNotice("Request submitted and is pending review.");
+        setNotice("Request submitted and is pending review. You can track it under My Requests.");
       }
     } catch (err) {
       setModalError(err.message || "Failed to send request.");
@@ -141,6 +146,7 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
       <ConfigureRecipientsModal
         open={configureOpen}
         onClose={() => setConfigureOpen(false)}
+        clusters={data?.clusters || []}
       />
     </AccessScopeView>
   );

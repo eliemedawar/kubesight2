@@ -9,6 +9,7 @@ import ResourceInspectModal from "../components/resources/ResourceInspectModal.j
 import { getLogs, getNamespaceEvents, getResourceDescribe } from "../api/clustersApi.js";
 import { formatAccessError } from "../utils/authz.js";
 import { formatLogLinesToLocalTime } from "../utils/logFormat.js";
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import {
   compareApplicationVersions,
   getApplicationVersion,
@@ -616,7 +617,7 @@ export default function ApplicationDetailsPage({
             <>
               <label className="app-logs-pod-select">
                 <span className="app-logs-pod-select__label">Pod</span>
-                <select
+                <SearchableSelect
                   className="app-logs-pod-select__control"
                   value={logPod || ""}
                   onChange={handleLogPodSelect}
@@ -630,7 +631,7 @@ export default function ApplicationDetailsPage({
                       {pod.status ? ` · ${pod.status}` : ""}
                     </option>
                   ))}
-                </select>
+                </SearchableSelect>
               </label>
               {!loggablePods.length ? (
                 <p className="muted">No pods available for log viewing in this application.</p>
@@ -777,12 +778,12 @@ export default function ApplicationDetailsPage({
                   <>
                     <label className="wizard-field">
                       <span className="wizard-field__label">Compare with</span>
-                      <select value={compareVersionB} onChange={(e) => setCompareVersionB(e.target.value)}>
+                      <SearchableSelect value={compareVersionB} onChange={(e) => setCompareVersionB(e.target.value)}>
                         <option value="">Select version…</option>
                         {versions.filter((v) => v.id !== selectedVersion.id).map((v) => (
                           <option key={v.id} value={v.id}>{v.versionLabel}</option>
                         ))}
-                      </select>
+                      </SearchableSelect>
                     </label>
                     <button
                       type="button"

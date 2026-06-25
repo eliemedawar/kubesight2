@@ -835,6 +835,12 @@ class DeploymentRequest(db.Model):
     # in-flight requests.
     required_approvals = db.Column(db.Integer, nullable=False, default=1)
     total_recipients = db.Column(db.Integer, nullable=False, default=1)
+    # Optional preferred maintenance window the requester wants the work done in.
+    # Stored as timezone-aware UTC; the IANA zone the requester entered them in is
+    # kept so approvers see the window in the original (e.g. Beirut) local time.
+    requested_window_start = db.Column(db.DateTime(timezone=True), nullable=True)
+    requested_window_end = db.Column(db.DateTime(timezone=True), nullable=True)
+    requested_window_timezone = db.Column(db.String(64), nullable=True)
     decided_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     decided_at = db.Column(db.DateTime(timezone=True), nullable=True)
     created_at = db.Column(
@@ -895,12 +901,160 @@ class DeploymentRequestSetting(db.Model):
     group_ids = db.Column(db.JSON, nullable=False, default=list)
     # How many approvals are required before a request is approved.
     required_approvals = db.Column(db.Integer, nullable=False, default=1)
+    # Per-cluster overrides: map of clusterId -> required approvals (0 = none).
+    # Unset clusters fall back to ``required_approvals``.
+    cluster_required_approvals = db.Column(db.JSON, nullable=False, default=dict)
     updated_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class ChangeBundle(db.Model):
+    """A "shopping cart" of staged Kubernetes changes submitted for one approval.
+
+    A requester stages multiple change actions (create from template, edit YAML,
+    change image, scale, env/resource/HPA updates, delete) into a draft bundle,
+    then submits it with a requested deployment window. The bundle reuses the
+    deployment-request approval audience (quorum + signed email links). On
+    approval the background scheduler auto-executes each item when the window
+    opens, recording per-item results.
+
+    Status lifecycle:
+        draft -> pending_approval -> approved | rejected
+        approved -> scheduled -> deploying -> completed | failed | partially_failed
+        approved/scheduled -> expired (window ended before execution)
+    """
+
+    __tablename__ = "change_bundles"
+    __table_args__ = (
+        db.Index("ix_change_bundle_status_created", "status", "created_at"),
+        db.Index("ix_change_bundle_requester_status", "requester_user_id", "status"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    requester_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    status = db.Column(db.String(24), nullable=False, default="draft", index=True)
+    note = db.Column(db.Text, nullable=True)
+    # Preferred deployment window. Stored timezone-aware UTC; the IANA zone the
+    # requester entered it in is kept so approvers see the original local time.
+    requested_start_time = db.Column(db.DateTime(timezone=True), nullable=True)
+    requested_end_time = db.Column(db.DateTime(timezone=True), nullable=True)
+    requested_window_timezone = db.Column(db.String(64), nullable=True)
+    # Quorum snapshot taken at submission so later config changes don't alter
+    # an in-flight bundle. required = max per-cluster requirement across items.
+    required_approvals = db.Column(db.Integer, nullable=False, default=1)
+    total_recipients = db.Column(db.Integer, nullable=False, default=1)
+    # If true, stop executing remaining items after the first failure (default).
+    stop_on_failure = db.Column(db.Boolean, nullable=False, default=True)
+    approved_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    approved_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    rejection_reason = db.Column(db.Text, nullable=True)
+    execution_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    execution_finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    requester = db.relationship("User", foreign_keys=[requester_user_id])
+    approved_by = db.relationship("User", foreign_keys=[approved_by_user_id])
+    items = db.relationship(
+        "ChangeBundleItem",
+        back_populates="bundle",
+        cascade="all, delete-orphan",
+        order_by="ChangeBundleItem.position",
+        lazy="joined",
+    )
+    votes = db.relationship(
+        "ChangeBundleVote",
+        back_populates="bundle",
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+
+
+class ChangeBundleItem(db.Model):
+    """One staged change action within a :class:`ChangeBundle`."""
+
+    __tablename__ = "change_bundle_items"
+    __table_args__ = (
+        db.Index("ix_change_bundle_item_bundle_pos", "bundle_id", "position"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    bundle_id = db.Column(
+        db.Integer,
+        db.ForeignKey("change_bundles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    position = db.Column(db.Integer, nullable=False, default=0)
+    # create_from_template | edit_deployment | change_image | scale_replicas |
+    # update_env | update_resources | update_hpa | delete_deployment
+    action_type = db.Column(db.String(32), nullable=False)
+    cluster_id = db.Column(db.String(120), nullable=False, index=True)
+    cluster_name = db.Column(db.String(255), nullable=False, default="")
+    namespace = db.Column(db.String(253), nullable=False, default="")
+    resource_kind = db.Column(db.String(40), nullable=False, default="Deployment")
+    resource_name = db.Column(db.String(253), nullable=False, default="")
+    old_payload_json = db.Column(db.JSON, nullable=True)
+    new_payload_json = db.Column(db.JSON, nullable=True)
+    yaml_preview = db.Column(db.Text, nullable=True)
+    validation_status = db.Column(db.String(16), nullable=False, default="pending")
+    validation_message = db.Column(db.Text, nullable=True)
+    # pending | applying | succeeded | failed | skipped
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    execution_result = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    bundle = db.relationship("ChangeBundle", back_populates="items")
+
+
+class ChangeBundleVote(db.Model):
+    """An individual approver's approve/decline vote on a bundle (quorum)."""
+
+    __tablename__ = "change_bundle_votes"
+    __table_args__ = (
+        db.UniqueConstraint("bundle_id", "voter_email", name="uq_change_bundle_voter"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    bundle_id = db.Column(
+        db.Integer,
+        db.ForeignKey("change_bundles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    voter_email = db.Column(db.String(255), nullable=False)
+    decision = db.Column(db.String(16), nullable=False)  # approve | decline
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    bundle = db.relationship("ChangeBundle", back_populates="votes")
 
 
 class ApiToken(db.Model):

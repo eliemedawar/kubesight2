@@ -124,6 +124,15 @@ export const PERMISSION_GROUPS = [
       "deployment_requests:manage",
     ],
   },
+  {
+    id: "changeBundles",
+    label: "Change Bundles",
+    keys: [
+      "change_bundles:create",
+      "change_bundles:view",
+      "change_bundles:manage",
+    ],
+  },
 ];
 
 export const PERMISSION_CATALOG = [
@@ -186,6 +195,9 @@ export const PERMISSION_CATALOG = [
   { key: "deployment_requests:request", label: "Request a cluster deployment or change", dangerous: false },
   { key: "deployment_requests:view", label: "View deployment requests", dangerous: false },
   { key: "deployment_requests:manage", label: "Approve or decline deployment requests", dangerous: true },
+  { key: "change_bundles:create", label: "Create and submit change bundles", dangerous: false },
+  { key: "change_bundles:view", label: "View change bundles", dangerous: false },
+  { key: "change_bundles:manage", label: "Approve or reject change bundles", dangerous: true },
 ];
 
 const BLOCKED_HIGHLIGHT_KEYS = new Set([

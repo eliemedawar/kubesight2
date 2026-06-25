@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 
 import {
   createWizardTemplate,
@@ -225,7 +226,7 @@ export default function TemplateMarketplace({
             placeholder="Search templates by name…"
             aria-label="Search templates by name"
           />
-          <select
+          <SearchableSelect
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value)}
             aria-label="Filter by category"
@@ -234,7 +235,7 @@ export default function TemplateMarketplace({
             {presentCategories.map((category) => (
               <option key={category} value={category}>{category}</option>
             ))}
-          </select>
+          </SearchableSelect>
           {hasFilter ? (
             <button
               type="button"

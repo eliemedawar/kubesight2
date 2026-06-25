@@ -53,6 +53,20 @@ def _scheduler_loop(app: Flask) -> None:
                 evaluate_all_enabled_policies(persist=True)
         except Exception:
             logger.exception("Alert policy scheduler tick failed")
+        try:
+            with app.app_context():
+                from .deployment_request_service import auto_decline_overdue_requests
+
+                auto_decline_overdue_requests()
+        except Exception:
+            logger.exception("Deployment request auto-decline tick failed")
+        try:
+            with app.app_context():
+                from .change_bundle_executor import process_due_bundles
+
+                process_due_bundles()
+        except Exception:
+            logger.exception("Change bundle execution tick failed")
 
 
 _scheduler_started = False

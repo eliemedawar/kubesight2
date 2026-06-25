@@ -31,6 +31,13 @@ export default function AppShell({
   canViewAlerts,
   notificationsEnabled,
   onViewAllAlerts,
+  requestUpdates,
+  canViewRequests,
+  requestBadgeCount,
+  onViewAllRequests,
+  onNotificationsOpen,
+  onDismissRequestUpdate,
+  onClearRequestUpdates,
   displayUser,
   userInitials,
   onLogout,
@@ -108,6 +115,13 @@ export default function AppShell({
           canViewAlerts={canViewAlerts}
           notificationsEnabled={notificationsEnabled}
           onViewAllAlerts={onViewAllAlerts}
+          requestUpdates={requestUpdates}
+          canViewRequests={canViewRequests}
+          requestBadgeCount={requestBadgeCount}
+          onViewAllRequests={onViewAllRequests}
+          onNotificationsOpen={onNotificationsOpen}
+          onDismissRequestUpdate={onDismissRequestUpdate}
+          onClearRequestUpdates={onClearRequestUpdates}
           displayUser={displayUser}
           userInitials={userInitials}
           onLogout={onLogout}

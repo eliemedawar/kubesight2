@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App.jsx";
 import ErrorBoundary from "./components/common/ErrorBoundary.jsx";
 import { AuthProvider } from "./context/AuthContext.jsx";
+import { ChangeBundleProvider } from "./context/ChangeBundleContext.jsx";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import "./index.css";
 import "./styles/ui-polish.css";
@@ -21,7 +22,9 @@ async function bootstrap() {
     <React.StrictMode>
       <ErrorBoundary>
         <AuthProvider>
-          <App />
+          <ChangeBundleProvider>
+            <App />
+          </ChangeBundleProvider>
         </AuthProvider>
       </ErrorBoundary>
     </React.StrictMode>

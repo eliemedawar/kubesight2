@@ -6,6 +6,7 @@ import {
   listInventory,
   getSettings,
   listAlerts,
+  listMyDeploymentRequests,
   listClusters,
   testAlertEmail,
   listNamespacesByCluster,
@@ -16,6 +17,8 @@ import {
   updateSettings,
 } from "./api";
 import { useAuth } from "./context/AuthContext";
+import { useChangeBundle } from "./context/ChangeBundleContext";
+import ChangeBundleDrawer from "./components/changes/ChangeBundleDrawer.jsx";
 import AppShell from "./components/layout/AppShell.jsx";
 import RouteLoadingFallback from "./components/common/RouteLoadingFallback.jsx";
 import { emptyNamespaceResources, listKeyForTab } from "./lib/resourceTypes.js";
@@ -68,6 +71,8 @@ const UpgradeSafeModePage = lazy(() => import("./pages/UpgradeSafeModePage.jsx")
 const UserManagementPage = lazy(() => import("./pages/UserManagementPage.jsx"));
 const AuditLogsPage = lazy(() => import("./pages/AuditLogsPage.jsx"));
 const DeploymentRequestsPage = lazy(() => import("./pages/DeploymentRequestsPage.jsx"));
+const MyRequestsPage = lazy(() => import("./pages/MyRequestsPage.jsx"));
+const ChangeBundlesPage = lazy(() => import("./pages/ChangeBundlesPage.jsx"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
 const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
@@ -90,6 +95,7 @@ export default function App() {
     filterAlertsForUser,
     isAdmin,
   } = useAuth();
+  const changeBundle = useChangeBundle();
   const [activePage, setActivePage] = useState("dashboard");
   const [selectedClusterId, setSelectedClusterId] = useState("");
   const [selectedNamespace, setSelectedNamespace] = useState("");
@@ -121,6 +127,12 @@ export default function App() {
   const [testEmailMessage, setTestEmailMessage] = useState("");
   const [preferredLogPod, setPreferredLogPod] = useState("");
   const [resourceActiveTab, setResourceActiveTab] = useState("pods");
+  // Decided (approved/declined) deployment requests for the current user, shown
+  // in the notifications bell. "Seen" signatures are persisted per user so the
+  // badge only counts decisions the user has not opened yet.
+  const [requestUpdates, setRequestUpdates] = useState([]);
+  const [seenRequestSignatures, setSeenRequestSignatures] = useState(() => new Set());
+  const [dismissedRequestSignatures, setDismissedRequestSignatures] = useState(() => new Set());
   // Apply the selected theme (light/dark/system) to the document. Re-runs on
   // change so the UI updates immediately, and follows the OS when "system".
   useEffect(() => {
@@ -583,6 +595,141 @@ export default function App() {
     filterAlertsForUser,
     resolvedActivePage,
   ]);
+
+  const requestSignature = (req) => `${req.id}:${req.decidedAt || ""}`;
+  const seenRequestStorageKey = authUser?.id
+    ? `kubesight.seenRequestUpdates.${authUser.id}`
+    : null;
+  const dismissedRequestStorageKey = authUser?.id
+    ? `kubesight.dismissedRequestUpdates.${authUser.id}`
+    : null;
+
+  // Load which decisions this user has already seen so the badge starts correct.
+  useEffect(() => {
+    if (!seenRequestStorageKey) {
+      setSeenRequestSignatures(new Set());
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(seenRequestStorageKey);
+      setSeenRequestSignatures(new Set(raw ? JSON.parse(raw) : []));
+    } catch {
+      setSeenRequestSignatures(new Set());
+    }
+  }, [seenRequestStorageKey]);
+
+  // Load decisions the user explicitly cleared so they stay hidden in the bell.
+  useEffect(() => {
+    if (!dismissedRequestStorageKey) {
+      setDismissedRequestSignatures(new Set());
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(dismissedRequestStorageKey);
+      setDismissedRequestSignatures(new Set(raw ? JSON.parse(raw) : []));
+    } catch {
+      setDismissedRequestSignatures(new Set());
+    }
+  }, [dismissedRequestStorageKey]);
+
+  // Poll the current user's own requests and surface approved/declined ones in
+  // the notifications bell. Independent of the active cluster/page.
+  useEffect(() => {
+    if (!isAuthenticated || !hasPermission("deployment_requests:request")) {
+      setRequestUpdates([]);
+      return undefined;
+    }
+    let cancelled = false;
+    const loadRequestUpdates = async () => {
+      try {
+        const res = await listMyDeploymentRequests({ limit: 100 });
+        if (cancelled) {
+          return;
+        }
+        const decided = (res.items || [])
+          .filter((row) => row.status && row.status !== "pending")
+          .sort(
+            (a, b) =>
+              new Date(b.decidedAt || b.createdAt) - new Date(a.decidedAt || a.createdAt)
+          );
+        setRequestUpdates(decided);
+      } catch {
+        if (!cancelled) {
+          setRequestUpdates([]);
+        }
+      }
+    };
+    loadRequestUpdates();
+    const timer = window.setInterval(loadRequestUpdates, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isAuthenticated, authUser?.id, hasPermission]);
+
+  const visibleRequestUpdates = useMemo(
+    () =>
+      requestUpdates.filter(
+        (req) => !dismissedRequestSignatures.has(requestSignature(req))
+      ),
+    [requestUpdates, dismissedRequestSignatures]
+  );
+
+  const newRequestCount = useMemo(
+    () =>
+      visibleRequestUpdates.filter(
+        (req) => !seenRequestSignatures.has(requestSignature(req))
+      ).length,
+    [visibleRequestUpdates, seenRequestSignatures]
+  );
+
+  const markRequestUpdatesSeen = () => {
+    if (!seenRequestStorageKey || visibleRequestUpdates.length === 0) {
+      return;
+    }
+    setSeenRequestSignatures((prev) => {
+      const next = new Set(prev);
+      visibleRequestUpdates.forEach((req) => next.add(requestSignature(req)));
+      try {
+        window.localStorage.setItem(seenRequestStorageKey, JSON.stringify(Array.from(next)));
+      } catch {
+        // Ignore storage failures (e.g. private mode); badge will simply reappear.
+      }
+      return next;
+    });
+  };
+
+  const dismissRequestUpdate = (req) => {
+    if (!dismissedRequestStorageKey || !req) {
+      return;
+    }
+    setDismissedRequestSignatures((prev) => {
+      const next = new Set(prev);
+      next.add(requestSignature(req));
+      try {
+        window.localStorage.setItem(dismissedRequestStorageKey, JSON.stringify(Array.from(next)));
+      } catch {
+        // Ignore storage failures; the item will simply reappear next load.
+      }
+      return next;
+    });
+  };
+
+  const clearRequestUpdates = () => {
+    if (!dismissedRequestStorageKey || visibleRequestUpdates.length === 0) {
+      return;
+    }
+    setDismissedRequestSignatures((prev) => {
+      const next = new Set(prev);
+      visibleRequestUpdates.forEach((req) => next.add(requestSignature(req)));
+      try {
+        window.localStorage.setItem(dismissedRequestStorageKey, JSON.stringify(Array.from(next)));
+      } catch {
+        // Ignore storage failures; items will simply reappear next load.
+      }
+      return next;
+    });
+  };
 
   const normalizeUpgradePayload = (payload) => ({
     clusterInfo: payload.clusterInfo,
@@ -1342,6 +1489,10 @@ export default function App() {
         return <AuditLogsPage />;
       case "deploymentRequests":
         return <DeploymentRequestsPage />;
+      case "myRequests":
+        return <MyRequestsPage />;
+      case "changeBundles":
+        return <ChangeBundlesPage />;
       case "settings":
         return (
           <SettingsPage
@@ -1459,6 +1610,7 @@ export default function App() {
     namespacesLoading || resourcesLoading ? SCOPE_LOADING_HINT : undefined;
 
   return (
+    <>
     <AppShell
       visiblePages={visiblePages}
       activePage={activePage === "applicationDetails" ? "inventory" : activePage}
@@ -1486,11 +1638,68 @@ export default function App() {
       canViewAlerts={hasPermission("alerts:view")}
       notificationsEnabled={data.settings?.notifications?.alerts !== false}
       onViewAllAlerts={() => handleNavigate("alerts")}
+      requestUpdates={visibleRequestUpdates}
+      canViewRequests={hasPermission("deployment_requests:request")}
+      requestBadgeCount={newRequestCount}
+      onViewAllRequests={() => handleNavigate("myRequests")}
+      onNotificationsOpen={markRequestUpdatesSeen}
+      onDismissRequestUpdate={dismissRequestUpdate}
+      onClearRequestUpdates={clearRequestUpdates}
       displayUser={displayUser}
       userInitials={userInitials}
       onLogout={logout}
     >
       {pageNode}
     </AppShell>
+    {changeBundle.enabled ? (
+      <>
+        {!changeBundle.isOpen ? (
+        <button
+          type="button"
+          aria-label="Open change bundle"
+          onClick={changeBundle.openDrawer}
+          style={{
+            position: "fixed",
+            right: 20,
+            bottom: 20,
+            zIndex: 60,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "10px 16px",
+            borderRadius: 999,
+            border: "1px solid #334155",
+            background: "#38bdf8",
+            color: "#0f172a",
+            fontWeight: 600,
+            boxShadow: "0 8px 24px rgba(0,0,0,.35)",
+            cursor: "pointer",
+          }}
+        >
+          Change Bundle
+          {changeBundle.itemCount > 0 ? (
+            <span
+              style={{
+                background: "#0f172a",
+                color: "#38bdf8",
+                borderRadius: 999,
+                minWidth: 20,
+                height: 20,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: "0.75rem",
+                padding: "0 6px",
+              }}
+            >
+              {changeBundle.itemCount}
+            </span>
+          ) : null}
+        </button>
+        ) : null}
+        <ChangeBundleDrawer />
+      </>
+    ) : null}
+    </>
   );
 }

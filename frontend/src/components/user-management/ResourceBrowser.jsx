@@ -6,6 +6,7 @@ import {
   selectableActionsForRole,
 } from "../../lib/accessActions";
 import { countSelectedResources } from "../../lib/accessRulesForm";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 import { emptyNamespaceResourceBucket } from "../../lib/resourceTypes";
 
 export default function ResourceBrowser({
@@ -157,7 +158,7 @@ export default function ResourceBrowser({
       <div className="resource-browser__hierarchy form-grid">
         <label>
           Namespace
-          <select
+          <SearchableSelect
             value={pickerNs}
             disabled={disabled || namespacesLoading}
             onChange={(e) =>
@@ -176,11 +177,11 @@ export default function ResourceBrowser({
                 </option>
               );
             })}
-          </select>
+          </SearchableSelect>
         </label>
         <label>
           Resource type
-          <select
+          <SearchableSelect
             value={pickerType}
             disabled={disabled || !pickerNs}
             onChange={(e) =>
@@ -195,7 +196,7 @@ export default function ResourceBrowser({
                 {t.label}
               </option>
             ))}
-          </select>
+          </SearchableSelect>
         </label>
       </div>
 

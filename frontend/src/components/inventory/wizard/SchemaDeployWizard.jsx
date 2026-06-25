@@ -6,8 +6,11 @@ import {
   listNamespacesByCluster,
   listStorageClasses,
 } from "../../../api/clustersApi.js";
+import { getClusterDeployEligibility } from "../../../api/deploymentRequestsApi.js";
 import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
 import YamlPreviewPanel from "./YamlPreviewPanel.jsx";
+import SearchableSelect from "../../common/SearchableSelect.jsx";
+import AddToBundleButton from "../../changes/AddToBundleButton.jsx";
 
 const POD_KINDS = new Set(["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"]);
 const ACCESS_MODES = ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany"];
@@ -162,9 +165,23 @@ export default function SchemaDeployWizard({
   const [namespacesLoading, setNamespacesLoading] = useState(false);
   const [configResources, setConfigResources] = useState({ configMaps: [], secrets: [] });
   const [storageClasses, setStorageClasses] = useState([]);
+  const [eligibility, setEligibility] = useState(null);
 
   const clusterId = answers.basics.clusterId;
   const namespace = answers.basics.namespace;
+
+  // HPA at deploy time is guarded by the *merged* resource requests: the
+  // template defaults overlaid with any resource override the deployer entered.
+  const hpaSupported = ["Deployment", "StatefulSet"].includes(template?.workloadType || "Deployment");
+  const mergedHasRequests = useMemo(() => {
+    const ov = answers.overrides.resources || {};
+    const cpu = String(ov.cpuRequest || template?.resources?.cpuRequest || "").trim();
+    const mem = String(ov.memoryRequest || template?.resources?.memoryRequest || "").trim();
+    return Boolean(cpu && mem);
+  }, [answers.overrides.resources, template]);
+  const hpaChecked =
+    (answers.overrides.hpaEnabled ?? template?.scaling?.hpa?.enabled ?? false) && mergedHasRequests;
+  const templateHpa = template?.scaling?.hpa || {};
 
   useEffect(() => {
     if (!open || !template) return;
@@ -221,6 +238,30 @@ export default function SchemaDeployWizard({
       cancelled = true;
     };
   }, [open, clusterId, namespace]);
+
+  // Check whether this cluster requires an approved deployment request before a
+  // deploy is allowed, so we can gate the Deploy button up front. The backend 403
+  // remains the authoritative enforcement.
+  useEffect(() => {
+    if (!open || !clusterId) {
+      setEligibility(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setEligibility(null);
+    getClusterDeployEligibility(clusterId)
+      .then((res) => {
+        if (!cancelled) setEligibility(res || null);
+      })
+      .catch(() => {
+        // Treat an errored check as "unknown" — don't block; the backend gate
+        // still enforces approval on the actual deploy.
+        if (!cancelled) setEligibility(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, clusterId]);
 
   // Storage classes for the chosen cluster (new-PVC picker).
   useEffect(() => {
@@ -387,6 +428,14 @@ export default function SchemaDeployWizard({
 
   const canProceed = step.key === "basics" ? basicsValid : true;
 
+  // Only block when the eligibility check is definitive: approval required and the
+  // user has no active approval. In-flight or errored checks never disable Deploy —
+  // the backend 403 is the authoritative fallback surfaced in `error`.
+  const approvalBlocked = Boolean(
+    eligibility && eligibility.approvalRequired && !eligibility.hasActiveApproval,
+  );
+  const requiredApprovals = eligibility?.requiredApprovals;
+
   return (
     <div className="modal-overlay wizard-overlay" role="presentation" onClick={onClose}>
       <section
@@ -424,19 +473,39 @@ export default function SchemaDeployWizard({
           {step.key === "basics" ? (
             <div className="wizard-step-panel">
               <h4>Basics</h4>
+              {approvalBlocked ? (
+                <p
+                  className="error-banner"
+                  style={{
+                    background: "#fee2e2",
+                    border: "1px solid #dc2626",
+                    color: "#b91c1c",
+                    fontWeight: 600,
+                    padding: "0.75rem 1rem",
+                    borderRadius: "8px",
+                  }}
+                >
+                  This cluster requires an approved deployment request — request one from
+                  the Clusters tab
+                  {requiredApprovals
+                    ? ` (needs ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"})`
+                    : ""}
+                  .
+                </p>
+              ) : null}
               <Field label="Application name">
                 <input value={answers.basics.appName} onChange={(e) => setBasics("appName", e.target.value)} placeholder="orders" />
               </Field>
               <Field label="Cluster">
-                <select value={answers.basics.clusterId} onChange={(e) => setBasics("clusterId", e.target.value)}>
+                <SearchableSelect value={answers.basics.clusterId} onChange={(e) => setBasics("clusterId", e.target.value)}>
                   <option value="">— select cluster —</option>
                   {clusterSelectOptions.map((c) => (
                     <option key={c.id} value={c.id}>{c.name || c.id}</option>
                   ))}
-                </select>
+                </SearchableSelect>
               </Field>
               <Field label="Namespace">
-                <select
+                <SearchableSelect
                   value={answers.basics.namespace}
                   onChange={(e) => setBasics("namespace", e.target.value)}
                   disabled={!clusterId || namespacesLoading}
@@ -458,7 +527,7 @@ export default function SchemaDeployWizard({
                       </option>
                     );
                   })}
-                </select>
+                </SearchableSelect>
               </Field>
 
               {overrides.tag ? (
@@ -484,12 +553,12 @@ export default function SchemaDeployWizard({
               ) : null}
               {Array.isArray(overrides.serviceType) && overrides.serviceType.length ? (
                 <Field label="Service type">
-                  <select value={answers.overrides.serviceType || ""} onChange={(e) => setOverride("serviceType", e.target.value)}>
+                  <SearchableSelect value={answers.overrides.serviceType || ""} onChange={(e) => setOverride("serviceType", e.target.value)}>
                     <option value="">{template.networking?.service?.type || "ClusterIP"} (default)</option>
                     {overrides.serviceType.map((t) => (
                       <option key={t} value={t}>{t}</option>
                     ))}
-                  </select>
+                  </SearchableSelect>
                 </Field>
               ) : null}
               {overrides.image ? (
@@ -511,6 +580,52 @@ export default function SchemaDeployWizard({
                 </div>
               ) : null}
 
+              {hpaSupported ? (
+                <div className="schema-hpa-block">
+                  <label className={`wizard-checkbox${mergedHasRequests ? "" : " wizard-checkbox--disabled"}`}>
+                    <input
+                      type="checkbox"
+                      checked={hpaChecked}
+                      disabled={!mergedHasRequests}
+                      onChange={(e) => setOverride("hpaEnabled", e.target.checked)}
+                    />
+                    Enable Horizontal Pod Autoscaler
+                  </label>
+                  {!mergedHasRequests ? (
+                    <p className="wizard-hpa-warning">
+                      ⚠️ HPA requires CPU and Memory requests. Define them on the template or via the
+                      resource overrides above.
+                    </p>
+                  ) : null}
+                  {hpaChecked ? (
+                    <>
+                      <div className="schema-override-grid">
+                        {[
+                          { key: "minReplicas", label: "Min replicas", fallback: 1 },
+                          { key: "maxReplicas", label: "Max replicas", fallback: 5 },
+                          { key: "cpuThreshold", label: "CPU threshold %", fallback: "" },
+                          { key: "memoryThreshold", label: "Memory threshold %", fallback: "" },
+                        ].map(({ key, label, fallback }) => (
+                          <Field key={key} label={label}>
+                            <input
+                              type="number"
+                              value={answers.overrides.hpa?.[key] ?? ""}
+                              onChange={(e) =>
+                                setOverride("hpa", { ...answers.overrides.hpa, [key]: e.target.value })
+                              }
+                              placeholder={String(templateHpa[key] ?? fallback) || "optional"}
+                            />
+                          </Field>
+                        ))}
+                      </div>
+                      <p className="muted" style={{ margin: "0.25rem 0 0" }}>
+                        Leave a field blank to keep the template default. Scale on CPU, memory, or both.
+                      </p>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+
               {(() => {
                 const ipsSchema = schema.imagePullSecret;
                 const locked = Boolean(ipsSchema?.mode && !ipsSchema.overridable);
@@ -520,11 +635,11 @@ export default function SchemaDeployWizard({
                   {locked ? (
                     <p className="muted" style={{ margin: 0 }}>Mode: {answers.imagePullSecret?.mode}</p>
                   ) : (
-                    <select value={answers.imagePullSecret?.mode || "none"} onChange={(e) => setIps({ mode: e.target.value })}>
+                    <SearchableSelect value={answers.imagePullSecret?.mode || "none"} onChange={(e) => setIps({ mode: e.target.value })}>
                       <option value="none">None</option>
                       <option value="existing">Existing secret</option>
                       <option value="create">Create secret</option>
-                    </select>
+                    </SearchableSelect>
                   )}
                   {answers.imagePullSecret?.mode === "existing" ? (
                     (() => {
@@ -535,7 +650,7 @@ export default function SchemaDeployWizard({
                       );
                       return (
                         <Field label="Secret name">
-                          <select
+                          <SearchableSelect
                             value={answers.imagePullSecret?.name || ""}
                             onChange={(e) => setIps({ name: e.target.value })}
                             disabled={!pickable.length}
@@ -546,7 +661,7 @@ export default function SchemaDeployWizard({
                             {pickable.map((s) => (
                               <option key={s.name} value={s.name}>{s.name}</option>
                             ))}
-                          </select>
+                          </SearchableSelect>
                         </Field>
                       );
                     })()
@@ -591,11 +706,11 @@ export default function SchemaDeployWizard({
                       {field.description ? <p className="muted" style={{ margin: 0 }}>{field.description}</p> : null}
                       {/* Single allowed source → no dropdown, just the input. */}
                       {allowed.length > 1 ? (
-                        <select value={source} onChange={(e) => changeEnvSource(field.key, e.target.value)} aria-label={`${field.key} source`}>
+                        <SearchableSelect value={source} onChange={(e) => changeEnvSource(field.key, e.target.value)} aria-label={`${field.key} source`}>
                           {allowed.map((s) => (
                             <option key={s} value={s}>{SOURCE_LABELS[s] || s}</option>
                           ))}
-                        </select>
+                        </SearchableSelect>
                       ) : (
                         <p className="muted" style={{ margin: 0 }}>Source: {SOURCE_LABELS[source] || source}</p>
                       )}
@@ -648,7 +763,7 @@ export default function SchemaDeployWizard({
                               aria-label={`Custom variable ${index + 1} name`}
                               className="schema-env-card__key"
                             />
-                            <select
+                            <SearchableSelect
                               value={row.source}
                               onChange={(e) => changeExtraSource(index, e.target.value)}
                               aria-label={`Custom variable ${index + 1} source`}
@@ -656,7 +771,7 @@ export default function SchemaDeployWizard({
                               {Object.entries(SOURCE_LABELS).map(([value, label]) => (
                                 <option key={value} value={value}>{label}</option>
                               ))}
-                            </select>
+                            </SearchableSelect>
                             <button
                               type="button"
                               className="btn-outline template-env-row__remove"
@@ -719,10 +834,10 @@ export default function SchemaDeployWizard({
               {answers.storage.enabled ? (
                 <>
                   <Field label="PVC">
-                    <select value={answers.storage.mode} onChange={(e) => setStorage({ mode: e.target.value })}>
+                    <SearchableSelect value={answers.storage.mode} onChange={(e) => setStorage({ mode: e.target.value })}>
                       <option value="new">Create new PVC</option>
                       <option value="existing">Use existing PVC</option>
-                    </select>
+                    </SearchableSelect>
                   </Field>
                   <Field label="Mount path">
                     <input value={answers.storage.mountPath} onChange={(e) => setStorage({ mountPath: e.target.value })} placeholder="/data" />
@@ -742,15 +857,15 @@ export default function SchemaDeployWizard({
                           <input value={answers.storage.newPvc.size} onChange={(e) => setNewPvc({ size: e.target.value })} placeholder="1Gi" />
                         </Field>
                         <Field label="Access mode">
-                          <select value={answers.storage.newPvc.accessMode} onChange={(e) => setNewPvc({ accessMode: e.target.value })}>
+                          <SearchableSelect value={answers.storage.newPvc.accessMode} onChange={(e) => setNewPvc({ accessMode: e.target.value })}>
                             {ACCESS_MODES.map((m) => (
                               <option key={m} value={m}>{m}</option>
                             ))}
-                          </select>
+                          </SearchableSelect>
                         </Field>
                         <Field label="Storage class">
                           {storageClasses.length ? (
-                            <select
+                            <SearchableSelect
                               value={answers.storage.newPvc.storageClass}
                               onChange={(e) => setNewPvc({ storageClass: e.target.value })}
                               disabled={answers.storage.pv.enabled}
@@ -759,7 +874,7 @@ export default function SchemaDeployWizard({
                               {storageClasses.map((sc) => (
                                 <option key={sc.name} value={sc.name}>{sc.default ? `${sc.name} (default)` : sc.name}</option>
                               ))}
-                            </select>
+                            </SearchableSelect>
                           ) : (
                             <input
                               value={answers.storage.newPvc.storageClass}
@@ -786,18 +901,18 @@ export default function SchemaDeployWizard({
                               <input value={answers.storage.pv.capacity} onChange={(e) => setPv({ capacity: e.target.value })} placeholder={answers.storage.newPvc.size} />
                             </Field>
                             <Field label="Volume type">
-                              <select value={answers.storage.pv.storageType} onChange={(e) => setPv({ storageType: e.target.value })}>
+                              <SearchableSelect value={answers.storage.pv.storageType} onChange={(e) => setPv({ storageType: e.target.value })}>
                                 {PV_TYPES.map((t) => (
                                   <option key={t} value={t}>{t}</option>
                                 ))}
-                              </select>
+                              </SearchableSelect>
                             </Field>
                             <Field label="Reclaim policy">
-                              <select value={answers.storage.pv.reclaimPolicy} onChange={(e) => setPv({ reclaimPolicy: e.target.value })}>
+                              <SearchableSelect value={answers.storage.pv.reclaimPolicy} onChange={(e) => setPv({ reclaimPolicy: e.target.value })}>
                                 {RECLAIM_POLICIES.map((p) => (
                                   <option key={p} value={p}>{p}</option>
                                 ))}
-                              </select>
+                              </SearchableSelect>
                             </Field>
                             {answers.storage.pv.storageType === "hostPath" ? (
                               <Field label="Host path">
@@ -857,7 +972,7 @@ export default function SchemaDeployWizard({
                       <span className="schema-pill">{isSecret ? "Secret" : "ConfigMap"}</span>
                       {vm.readOnly ? <span className="schema-pill">read-only</span> : null}
                     </div>
-                    <select
+                    <SearchableSelect
                       value={source}
                       onChange={(e) => changeVolumeSource(vm.mountPath, e.target.value)}
                       aria-label={`${vm.mountPath} source`}
@@ -865,10 +980,10 @@ export default function SchemaDeployWizard({
                       {allowed.map((s) => (
                         <option key={s} value={s}>{SOURCE_LABELS[s] || s}</option>
                       ))}
-                    </select>
+                    </SearchableSelect>
                     {!isCreate ? (
                       resources.length ? (
-                        <select
+                        <SearchableSelect
                           value={ans[nameKey] || ""}
                           onChange={(e) => setVolume(vm.mountPath, { [nameKey]: e.target.value })}
                           aria-label={`${vm.mountPath} ${isSecret ? "secret" : "configmap"} name`}
@@ -877,15 +992,15 @@ export default function SchemaDeployWizard({
                           {resources.map((r) => (
                             <option key={r.name} value={r.name}>{r.name}</option>
                           ))}
-                        </select>
+                        </SearchableSelect>
                       ) : (
                         <>
                           <p className="schema-ref-empty muted">
                             No existing {isSecret ? "secret" : "configmap"}s in this namespace — switch the source to “Create” to add one.
                           </p>
-                          <select disabled aria-label={`${vm.mountPath} ${isSecret ? "secret" : "configmap"} name`}>
+                          <SearchableSelect disabled aria-label={`${vm.mountPath} ${isSecret ? "secret" : "configmap"} name`}>
                             <option value="">no existing {isSecret ? "secret" : "configmap"}s found</option>
-                          </select>
+                          </SearchableSelect>
                         </>
                       )
                     ) : (
@@ -967,11 +1082,11 @@ export default function SchemaDeployWizard({
               {schema.ingress?.tls ? (
                 <>
                   <Field label="TLS">
-                    <select value={answers.ingress?.tls?.mode || "none"} onChange={(e) => setTls({ mode: e.target.value })}>
+                    <SearchableSelect value={answers.ingress?.tls?.mode || "none"} onChange={(e) => setTls({ mode: e.target.value })}>
                       <option value="none">No TLS</option>
                       <option value="existing">Existing certificate secret</option>
                       <option value="create">Create new certificate secret</option>
-                    </select>
+                    </SearchableSelect>
                   </Field>
                   {answers.ingress?.tls?.mode === "existing" ? (
                     (() => {
@@ -979,12 +1094,12 @@ export default function SchemaDeployWizard({
                       return (
                         <Field label="TLS secret">
                           {tlsSecrets.length ? (
-                            <select value={answers.ingress?.tls?.secret || ""} onChange={(e) => setTls({ secret: e.target.value })}>
+                            <SearchableSelect value={answers.ingress?.tls?.secret || ""} onChange={(e) => setTls({ secret: e.target.value })}>
                               <option value="">— select TLS secret —</option>
                               {tlsSecrets.map((s) => (
                                 <option key={s.name} value={s.name}>{s.name}</option>
                               ))}
-                            </select>
+                            </SearchableSelect>
                           ) : (
                             <input value={answers.ingress?.tls?.secret || ""} onChange={(e) => setTls({ secret: e.target.value })} placeholder="no TLS secrets — type a name" />
                           )}
@@ -1013,6 +1128,26 @@ export default function SchemaDeployWizard({
           {step.key === "review" ? (
             <div className="wizard-step-panel">
               <h4>Review &amp; Deploy</h4>
+              {approvalBlocked ? (
+                <p
+                  className="error-banner"
+                  style={{
+                    background: "#fee2e2",
+                    border: "1px solid #dc2626",
+                    color: "#b91c1c",
+                    fontWeight: 600,
+                    padding: "0.75rem 1rem",
+                    borderRadius: "8px",
+                  }}
+                >
+                  This cluster requires an approved deployment request — request one from
+                  the Clusters tab
+                  {requiredApprovals
+                    ? ` (needs ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"})`
+                    : ""}
+                  .
+                </p>
+              ) : null}
               {resolved?.summary ? (
                 <ul className="schema-review-summary">
                   <li><span>Application</span><strong>{resolved.summary.appName}</strong></li>
@@ -1020,6 +1155,13 @@ export default function SchemaDeployWizard({
                   <li><span>Workload</span><strong>{resolved.summary.workloadType}</strong></li>
                   <li><span>Resources</span><strong>{(resolved.summary.resources || []).map((r) => r.kind).join(", ")}</strong></li>
                 </ul>
+              ) : null}
+              {(resolved?.summary?.warnings || []).length ? (
+                <div className="wizard-hpa-warning" role="status">
+                  {resolved.summary.warnings.map((warning) => (
+                    <p key={warning} style={{ margin: 0 }}>⚠️ {warning}</p>
+                  ))}
+                </div>
               ) : null}
               <Field label="Change summary">
                 <input value={answers.changeSummary} onChange={(e) => setAnswers((a) => ({ ...a, changeSummary: e.target.value }))} placeholder="Initial deploy" />
@@ -1040,9 +1182,25 @@ export default function SchemaDeployWizard({
             {stepIndex === 0 ? "Cancel" : "Back"}
           </button>
           {step.key === "review" ? (
-            <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase}>
-              {busy ? "Deploying…" : "Deploy Application"}
-            </button>
+            <>
+              <AddToBundleButton
+                className="btn-outline"
+                label="Add to Bundle"
+                disabled={busy || !resolved?.yaml}
+                descriptor={{
+                  actionType: "create_from_template",
+                  clusterId,
+                  namespace,
+                  resourceKind: resolved?.summary?.workloadType || "Deployment",
+                  resourceName: resolved?.summary?.appName || answers.basics.appName,
+                  yaml: resolved?.yaml,
+                }}
+                onAdded={onClose}
+              />
+              <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase || approvalBlocked}>
+                {busy ? "Deploying…" : "Deploy Application"}
+              </button>
+            </>
           ) : (
             <button type="button" className="btn-primary" onClick={goNext} disabled={busy || !canProceed}>
               {busy ? "Working…" : "Next"}
@@ -1077,24 +1235,24 @@ function ExistingRefPicker({ resources, nameKey, ans, setEnv, nameLabel }) {
       )}
       <div className="schema-ref-inputs">
         {resources.length ? (
-          <select value={name} onChange={(e) => onNameChange(e.target.value)} aria-label={nameLabel}>
+          <SearchableSelect value={name} onChange={(e) => onNameChange(e.target.value)} aria-label={nameLabel}>
             <option value="">— select {nameLabel} —</option>
             {resources.map((r) => (
               <option key={r.name} value={r.name}>{r.name}</option>
             ))}
-          </select>
+          </SearchableSelect>
         ) : (
-          <select disabled aria-label={nameLabel}>
+          <SearchableSelect disabled aria-label={nameLabel}>
             <option value="">no existing {kindWord}s found</option>
-          </select>
+          </SearchableSelect>
         )}
         {keys.length ? (
-          <select value={ans.key || ""} onChange={(e) => setEnv({ key: e.target.value })} aria-label="key">
+          <SearchableSelect value={ans.key || ""} onChange={(e) => setEnv({ key: e.target.value })} aria-label="key">
             <option value="">— select key —</option>
             {keys.map((k) => (
               <option key={k} value={k}>{k}</option>
             ))}
-          </select>
+          </SearchableSelect>
         ) : (
           <input
             value={ans.key || ""}

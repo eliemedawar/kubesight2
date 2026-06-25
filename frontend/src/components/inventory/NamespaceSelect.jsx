@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listNamespacesByCluster } from "../../api/clustersApi.js";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 
 export default function NamespaceSelect({
   clusterId,
@@ -62,7 +63,7 @@ export default function NamespaceSelect({
 
   return (
     <>
-      <select
+      <SearchableSelect
         required={required}
         value={value}
         onChange={onChange}
@@ -74,7 +75,7 @@ export default function NamespaceSelect({
             {name}
           </option>
         ))}
-      </select>
+      </SearchableSelect>
       {error ? <p className="muted namespace-select-hint">{error}</p> : null}
     </>
   );

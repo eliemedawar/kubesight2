@@ -31,6 +31,19 @@ def _sanitize_name(name: str) -> str:
     return "".join(ch for ch in cleaned if ch.isalnum() or ch == "-")[:63].strip("-") or "app"
 
 
+def has_required_resource_requests(resources: Dict[str, Any]) -> bool:
+    """HPA scales on resource utilization, so it can only work when both CPU and
+    memory requests are explicitly defined. Without them Kubernetes has no
+    reference point to compute utilization percentages.
+
+    Returns True only when both ``cpuRequest`` and ``memoryRequest`` are present.
+    """
+    resources = resources or {}
+    cpu_request = _coerce_str(resources.get("cpuRequest"))
+    memory_request = _coerce_str(resources.get("memoryRequest"))
+    return bool(cpu_request and memory_request)
+
+
 def validate_k8s_name(name: str) -> Optional[str]:
     if not name:
         return "Name is required"
@@ -661,7 +674,17 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
         documents.append(ing_doc)
 
     hpa_cfg = scaling.get("hpa") or {}
-    if hpa_cfg.get("enabled") and workload_type in ("Deployment", "StatefulSet"):
+    hpa_enabled = bool(hpa_cfg.get("enabled")) and workload_type in ("Deployment", "StatefulSet")
+    hpa_disabled_reason: Optional[str] = None
+    if hpa_enabled and not has_required_resource_requests(resources):
+        # HPA needs CPU + memory requests to compute utilization. Force it off
+        # rather than emit an HPA that can never scale correctly.
+        hpa_enabled = False
+        hpa_disabled_reason = (
+            "HPA was disabled automatically: CPU and memory requests must be "
+            "defined for autoscaling to work."
+        )
+    if hpa_enabled:
         metrics = []
         if hpa_cfg.get("cpuThreshold"):
             metrics.append({
@@ -707,4 +730,6 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
             for doc in documents
         ],
     }
+    if hpa_disabled_reason:
+        summary["warnings"] = [hpa_disabled_reason]
     return yaml_docs, summary, None

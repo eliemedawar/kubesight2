@@ -12,6 +12,9 @@ frontend/dist/
 **/kubeconfigs/
 backend/data/kubeconfigs/
 
+# Hermes (optional AI agent - kept locally, not deployed)
+k8s/hermes-*.yaml
+
 # Python
 __pycache__/
 *.pyc
@@ -29,3 +32,12 @@ venv/
 .DS_Store
 Thumbs.db
 *.tar
+# Kubernetes secret manifests (contain real credentials)
+k8s/secret.yaml
+k8s/hermes-secret.yaml
+
+# Hermes (optional AI agent - not deployed)
+k8s/hermes-*.yaml
+
+k8s/postgres-*.yaml
+

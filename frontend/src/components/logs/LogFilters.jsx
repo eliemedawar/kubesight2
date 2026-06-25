@@ -1,5 +1,6 @@
 import { TIME_RANGE_OPTIONS } from "../../utils/logTimeRange.js";
 import { LOG_LEVELS } from "../../utils/logFormat.js";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 
 export default function LogFilters({
   filters,
@@ -24,7 +25,7 @@ export default function LogFilters({
       <div className="log-filters-primary">
         <label>
           Cluster
-          <select
+          <SearchableSelect
             value={filters.cluster}
             onChange={(event) => onClusterChange(event.target.value)}
             disabled={!clusters.length}
@@ -35,11 +36,11 @@ export default function LogFilters({
               </option>
             ))}
             {!clusters.length ? <option value="">No clusters connected</option> : null}
-          </select>
+          </SearchableSelect>
         </label>
         <label>
           Namespace
-          <select
+          <SearchableSelect
             value={filters.namespace}
             onChange={(event) => onNamespaceChange(event.target.value)}
             disabled={!namespaces.length}
@@ -50,11 +51,11 @@ export default function LogFilters({
               </option>
             ))}
             {!namespaces.length ? <option value="">No namespaces available</option> : null}
-          </select>
+          </SearchableSelect>
         </label>
         <label>
           Pod
-          <select
+          <SearchableSelect
             value={filters.pod}
             onChange={(event) => onPodChange(event.target.value)}
             disabled={podsLoading || !pods.length}
@@ -68,11 +69,11 @@ export default function LogFilters({
                 ))
               : null}
             {!podsLoading && !pods.length ? <option value="">No pods in namespace</option> : null}
-          </select>
+          </SearchableSelect>
         </label>
         <label>
           Container
-          <select
+          <SearchableSelect
             value={filters.container}
             onChange={(event) => onChange({ container: event.target.value })}
             disabled={containersLoading || !containers.length || !filters.pod}
@@ -88,11 +89,11 @@ export default function LogFilters({
             {!containersLoading && !containers.length ? (
               <option value="">Select a pod first</option>
             ) : null}
-          </select>
+          </SearchableSelect>
         </label>
         <label>
           Time range
-          <select
+          <SearchableSelect
             value={filters.timeRange}
             onChange={(event) =>
               onChange({
@@ -108,7 +109,7 @@ export default function LogFilters({
                 {option.label}
               </option>
             ))}
-          </select>
+          </SearchableSelect>
         </label>
         <label>
           Search
@@ -121,7 +122,7 @@ export default function LogFilters({
         </label>
         <label>
           Log level
-          <select
+          <SearchableSelect
             value={filters.levelFilter}
             onChange={(event) => onChange({ levelFilter: event.target.value })}
           >
@@ -132,7 +133,7 @@ export default function LogFilters({
               </option>
             ))}
             <option value="OTHER">Other / no level</option>
-          </select>
+          </SearchableSelect>
         </label>
       </div>
       <div className="log-filters-toggles">

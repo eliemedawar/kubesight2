@@ -6,6 +6,7 @@ import AccessRulesEditor, {
   grantsToAccessRules,
 } from "./AccessRulesEditor";
 import EffectiveAccessPreview from "./EffectiveAccessPreview";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 import {
   allowedClusterSnapshot,
   buildEffectiveAccessPreview,
@@ -281,7 +282,7 @@ export default function UserFormModal({
             </label>
             <label className="role-select-label form-grid__full">
               Role
-              <select
+              <SearchableSelect
                 value={form.roleId}
                 onChange={(e) => handleRoleChange(e.target.value)}
                 disabled={isEditingSelf}
@@ -292,7 +293,7 @@ export default function UserFormModal({
                     {role.description ? ` — ${role.description}` : ""}
                   </option>
                 ))}
-              </select>
+              </SearchableSelect>
               {selectedRole ? (
                 <span className="muted role-preset-desc">
                   {selectedRole.description || roleDescription(selectedRole.name)}

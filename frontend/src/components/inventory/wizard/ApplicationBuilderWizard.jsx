@@ -1,5 +1,6 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from "react";
 import { listClusterNodes, listStorageClasses } from "../../../api/clustersApi.js";
+import { getClusterDeployEligibility } from "../../../api/deploymentRequestsApi.js";
 import {
   applyWizardDeploy,
   diffWizardDeploy,
@@ -19,6 +20,7 @@ import { useAuth } from "../../../context/AuthContext.jsx";
 import { formatAccessError, isAccessDeniedError } from "../../../utils/authz.js";
 import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
 import YamlPreviewPanel from "./YamlPreviewPanel.jsx";
+import AddToBundleButton from "../../changes/AddToBundleButton.jsx";
 import {
   WIZARD_STEPS,
   applyTemplate,
@@ -75,6 +77,8 @@ export default function ApplicationBuilderWizard({
   const [clusterNodes, setClusterNodes] = useState([]);
   const [clusterNodesLoading, setClusterNodesLoading] = useState(false);
   const [storageWarnings, setStorageWarnings] = useState([]);
+  const [manifestWarnings, setManifestWarnings] = useState([]);
+  const [eligibility, setEligibility] = useState(null);
 
   const currentStep = stepIndex >= 0 ? WIZARD_STEPS[stepIndex] : null;
   const payload = useMemo(() => buildWizardPayload(state), [state]);
@@ -94,6 +98,8 @@ export default function ApplicationBuilderWizard({
     setStorageClasses([]);
     setClusterNodes([]);
     setStorageWarnings([]);
+    setManifestWarnings([]);
+    setEligibility(null);
   }, [initialState, resolvedDefaultClusterId, showTemplatePicker]);
 
   useEffect(() => {
@@ -150,6 +156,29 @@ export default function ApplicationBuilderWizard({
       })
       .finally(() => {
         if (!cancelled) setClusterNodesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, state.basics.clusterId]);
+
+  // Gate the Deploy button on per-cluster approval requirements. The backend 403
+  // remains the authoritative enforcement; this is an up-front hint only.
+  useEffect(() => {
+    const clusterId = state.basics.clusterId;
+    if (!open || !clusterId) {
+      setEligibility(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setEligibility(null);
+    getClusterDeployEligibility(clusterId)
+      .then((res) => {
+        if (!cancelled) setEligibility(res || null);
+      })
+      .catch(() => {
+        // Errored/unknown check never blocks — let the backend gate enforce it.
+        if (!cancelled) setEligibility(null);
       });
     return () => {
       cancelled = true;
@@ -244,6 +273,7 @@ export default function ApplicationBuilderWizard({
   const generateYaml = async () => {
     const result = await generateWizardManifests(payload);
     setGeneratedYaml(result.yaml || "");
+    setManifestWarnings(result.summary?.warnings || []);
     return result.yaml || "";
   };
 
@@ -387,6 +417,12 @@ export default function ApplicationBuilderWizard({
 
   const displayYaml = state.advancedYamlEdit ? state.editedYaml : generatedYaml;
 
+  // Only block on a definitive result; in-flight/errored checks leave Deploy enabled.
+  const approvalBlocked = Boolean(
+    eligibility && eligibility.approvalRequired && !eligibility.hasActiveApproval,
+  );
+  const requiredApprovals = eligibility?.requiredApprovals;
+
   const renderStep = () => {
     if (stepIndex < 0) {
       return (
@@ -399,7 +435,31 @@ export default function ApplicationBuilderWizard({
     }
     switch (currentStep.key) {
       case "basics":
-        return <StepBasics state={state} setState={setState} clusterOptions={clusterSelectOptions} nameValidation={nameValidation} />;
+        return (
+          <>
+            {approvalBlocked ? (
+              <p
+                className="error-banner"
+                style={{
+                  background: "#fee2e2",
+                  border: "1px solid #dc2626",
+                  color: "#b91c1c",
+                  fontWeight: 600,
+                  padding: "0.75rem 1rem",
+                  borderRadius: "8px",
+                }}
+              >
+                This cluster requires an approved deployment request — request one from
+                the Clusters tab
+                {requiredApprovals
+                  ? ` (needs ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"})`
+                  : ""}
+                .
+              </p>
+            ) : null}
+            <StepBasics state={state} setState={setState} clusterOptions={clusterSelectOptions} nameValidation={nameValidation} />
+          </>
+        );
       case "containers":
         return <StepContainers state={state} setState={setState} />;
       case "environment":
@@ -430,7 +490,34 @@ export default function ApplicationBuilderWizard({
         return (
           <div className="wizard-step-panel">
             <h4>Review & Deploy</h4>
+            {approvalBlocked ? (
+              <p
+                className="error-banner"
+                style={{
+                  background: "#fee2e2",
+                  border: "1px solid #dc2626",
+                  color: "#b91c1c",
+                  fontWeight: 600,
+                  padding: "0.75rem 1rem",
+                  borderRadius: "8px",
+                }}
+              >
+                This cluster requires an approved deployment request — request one from
+                the Clusters tab
+                {requiredApprovals
+                  ? ` (needs ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"})`
+                  : ""}
+                .
+              </p>
+            ) : null}
             <StorageReadinessBanner readiness={storageReadiness} />
+            {manifestWarnings.length ? (
+              <div className="wizard-hpa-warning" role="status">
+                {manifestWarnings.map((warning) => (
+                  <p key={warning} style={{ margin: 0 }}>⚠️ {warning}</p>
+                ))}
+              </div>
+            ) : null}
             <Field label="Change Summary">
               <input
                 value={state.changeSummary}
@@ -533,14 +620,33 @@ export default function ApplicationBuilderWizard({
                 </button>
               ) : null}
               {currentStep?.key === "review" ? (
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={applyDeploy}
-                  disabled={busy || confirmation !== confirmationPhrase}
-                >
-                  {busy ? "Deploying…" : "Deploy Application"}
-                </button>
+                <>
+                  <AddToBundleButton
+                    className="btn-outline"
+                    label="Add to Bundle"
+                    disabled={busy}
+                    buildDescriptor={async () => {
+                      const yaml = displayYaml || generatedYaml || (await generateYaml());
+                      return {
+                        actionType: "create_from_template",
+                        clusterId: state.basics.clusterId,
+                        namespace: state.basics.namespace,
+                        resourceKind: state.workloadType || "Deployment",
+                        resourceName: state.basics.appName,
+                        yaml,
+                      };
+                    }}
+                    onAdded={onClose}
+                  />
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={applyDeploy}
+                    disabled={busy || confirmation !== confirmationPhrase || approvalBlocked}
+                  >
+                    {busy ? "Deploying…" : "Deploy Application"}
+                  </button>
+                </>
               ) : (
                 <button type="button" className="btn-primary" onClick={goNext} disabled={busy || !canProceed()}>
                   {currentStep?.key === "validation" ? "Continue to Review" : "Next"}

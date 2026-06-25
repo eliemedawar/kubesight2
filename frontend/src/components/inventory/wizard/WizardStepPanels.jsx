@@ -10,6 +10,7 @@ import {
   VolumeMountsEditor,
   WizardSectionHeader,
 } from "./WizardShared.jsx";
+import SearchableSelect from "../../common/SearchableSelect.jsx";
 import { STORAGE_TOOLTIPS } from "../../../lib/storageValidation.js";
 import {
   applyNewPvcStorageDefaults,
@@ -49,20 +50,20 @@ function StorageClassSelect({ value, onChange, storageClasses, loading, disabled
   }
   if (!storageClasses.length) {
     return (
-      <select value="" onChange={() => {}} disabled>
+      <SearchableSelect value="" onChange={() => {}} disabled>
         <option value="">No StorageClasses available</option>
-      </select>
+      </SearchableSelect>
     );
   }
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
+    <SearchableSelect value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
       <option value="">Select StorageClass</option>
       {storageClasses.map((sc) => (
         <option key={sc.name} value={sc.name}>
           {formatStorageClassLabel(sc)}
         </option>
       ))}
-    </select>
+    </SearchableSelect>
   );
 }
 
@@ -77,14 +78,14 @@ function NodeSelect({ value, onChange, nodes, loading }) {
   }
 
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)}>
+    <SearchableSelect value={value} onChange={(e) => onChange(e.target.value)}>
       <option value="">Select node</option>
       {nodes.map((node) => (
         <option key={node.name} value={node.name} disabled={node.status !== "Ready"}>
           {node.name} ({node.status})
         </option>
       ))}
-    </select>
+    </SearchableSelect>
   );
 }
 
@@ -135,22 +136,22 @@ function AdvancedStorageOptions({
                 <input value={advanced.capacity} onChange={(e) => update({ capacity: e.target.value })} />
               </Field>
               <Field label="Storage Type">
-                <select value={storageType} onChange={(e) => update({ storageType: e.target.value })}>
+                <SearchableSelect value={storageType} onChange={(e) => update({ storageType: e.target.value })}>
                   {PV_STORAGE_TYPES.map((t) => (
                     <option key={t.value} value={t.value}>
                       {t.label}
                     </option>
                   ))}
-                </select>
+                </SearchableSelect>
               </Field>
               <Field label="Reclaim Policy">
-                <select value={advanced.reclaimPolicy} onChange={(e) => update({ reclaimPolicy: e.target.value })}>
+                <SearchableSelect value={advanced.reclaimPolicy} onChange={(e) => update({ reclaimPolicy: e.target.value })}>
                   {RECLAIM_POLICIES.map((p) => (
                     <option key={p} value={p}>
                       {p}
                     </option>
                   ))}
-                </select>
+                </SearchableSelect>
               </Field>
               {storageType === "hostPath" ? (
                 <Field label="Host Path">
@@ -260,13 +261,13 @@ function PvcFields({
                 : undefined
           }
         >
-          <select value={pvc.accessMode} onChange={(e) => setPvc({ accessMode: e.target.value })}>
+          <SearchableSelect value={pvc.accessMode} onChange={(e) => setPvc({ accessMode: e.target.value })}>
             {ACCESS_MODES.map((m) => (
               <option key={m} value={m}>
                 {ACCESS_MODE_LABELS[m] || m}
               </option>
             ))}
-          </select>
+          </SearchableSelect>
         </Field>
       </div>
       {storageWarnings.length ? (
@@ -313,14 +314,14 @@ export function StepBasics({ state, setState, clusterOptions, nameValidation }) 
           <input value={basics.version} onChange={(e) => setBasics({ version: e.target.value })} placeholder="1.0.0" />
         </Field>
         <Field label="Cluster *">
-          <select value={basics.clusterId} onChange={(e) => setBasics({ clusterId: e.target.value })}>
+          <SearchableSelect value={basics.clusterId} onChange={(e) => setBasics({ clusterId: e.target.value })}>
             <option value="">Select cluster</option>
             {clusterOptions.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name || c.id}
               </option>
             ))}
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Namespace *">
           <NamespaceSelect
@@ -333,20 +334,20 @@ export function StepBasics({ state, setState, clusterOptions, nameValidation }) 
           <input value={basics.ownerTeam} onChange={(e) => setBasics({ ownerTeam: e.target.value })} placeholder="platform-team" />
         </Field>
         <Field label="Environment">
-          <select value={basics.environment} onChange={(e) => setBasics({ environment: e.target.value })}>
+          <SearchableSelect value={basics.environment} onChange={(e) => setBasics({ environment: e.target.value })}>
             <option value="">—</option>
             {ENVIRONMENT_OPTIONS.map((o) => (
               <option key={o} value={o}>{o}</option>
             ))}
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Criticality">
-          <select value={basics.criticality} onChange={(e) => setBasics({ criticality: e.target.value })}>
+          <SearchableSelect value={basics.criticality} onChange={(e) => setBasics({ criticality: e.target.value })}>
             <option value="">—</option>
             {CRITICALITY_OPTIONS.map((o) => (
               <option key={o} value={o}>{o}</option>
             ))}
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Description" hint="Shown in application metadata">
           <textarea value={basics.description} onChange={(e) => setBasics({ description: e.target.value })} rows={3} />
@@ -461,9 +462,9 @@ export function StepContainers({ state, setState }) {
               <input value={container.tag} onChange={(e) => updateContainer(index, { tag: e.target.value })} placeholder="latest" />
             </Field>
             <Field label="Pull Policy">
-              <select value={container.pullPolicy} onChange={(e) => updateContainer(index, { pullPolicy: e.target.value })}>
+              <SearchableSelect value={container.pullPolicy} onChange={(e) => updateContainer(index, { pullPolicy: e.target.value })}>
                 {PULL_POLICIES.map((p) => <option key={p} value={p}>{p}</option>)}
-              </select>
+              </SearchableSelect>
             </Field>
             <Field label="Container Ports">
               <PortListEditor
@@ -595,7 +596,7 @@ function EnvVarsEditor({ rows, onChange, configMaps, secrets }) {
               placeholder="VAR_NAME"
               aria-label={`Variable ${index + 1} name`}
             />
-            <select
+            <SearchableSelect
               className="env-editor__source"
               value={source}
               onChange={(e) => changeSource(index, row, e.target.value)}
@@ -606,7 +607,7 @@ function EnvVarsEditor({ rows, onChange, configMaps, secrets }) {
                   {opt.label}
                 </option>
               ))}
-            </select>
+            </SearchableSelect>
             {source === "value" ? (
               <input
                 className="env-editor__value"
@@ -631,7 +632,7 @@ function EnvVarsEditor({ rows, onChange, configMaps, secrets }) {
                   ariaLabel={`Variable ${index + 1} source name`}
                 />
                 {availableKeys.length ? (
-                  <select
+                  <SearchableSelect
                     value={row.valueFrom?.key || ""}
                     onChange={(e) =>
                       update(index, { ...row, valueFrom: { ...row.valueFrom, kind: source, key: e.target.value } })
@@ -644,7 +645,7 @@ function EnvVarsEditor({ rows, onChange, configMaps, secrets }) {
                         {k}
                       </option>
                     ))}
-                  </select>
+                  </SearchableSelect>
                 ) : (
                   <ComboInput
                     listId={`envkey-${source}-${index}`}
@@ -925,11 +926,11 @@ export function StepStorage({
     <div className="wizard-step-panel">
       <WizardSectionHeader title="Storage" subtitle="Persistent volumes and mount paths for your workload." />
       <Field label="PVC Mode" tooltip={STORAGE_TOOLTIPS.pvc}>
-        <select value={storage.pvcMode} onChange={(e) => handlePvcModeChange(e.target.value)}>
+        <SearchableSelect value={storage.pvcMode} onChange={(e) => handlePvcModeChange(e.target.value)}>
           <option value="none">No persistent storage</option>
           <option value="existing">Use existing PVC</option>
           <option value="new">Create new PVC</option>
-        </select>
+        </SearchableSelect>
       </Field>
       {storage.pvcMode === "existing" ? (
         <Field label="Existing PVC Name" tooltip={STORAGE_TOOLTIPS.pvc}>
@@ -984,9 +985,9 @@ export function StepNetworking({ state, setState }) {
           {svc.enabled ? (
             <div className="wizard-form-grid">
               <Field label="Service Type">
-                <select value={svc.type} onChange={(e) => setNet({ service: { ...svc, type: e.target.value } })}>
+                <SearchableSelect value={svc.type} onChange={(e) => setNet({ service: { ...svc, type: e.target.value } })}>
                   {SERVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
+                </SearchableSelect>
               </Field>
               <Field label="Port"><input type="number" value={svc.port} onChange={(e) => setNet({ service: { ...svc, port: Number(e.target.value) } })} /></Field>
               <Field label="Target Port"><input type="number" value={svc.targetPort} onChange={(e) => setNet({ service: { ...svc, targetPort: Number(e.target.value) } })} /></Field>
@@ -1046,11 +1047,11 @@ export function StepHealth({ state, setState }) {
         {probe.enabled ? (
           <div className="wizard-form-grid">
             <Field label="Type">
-              <select value={probe.type} onChange={(e) => setProbe({ type: e.target.value })}>
+              <SearchableSelect value={probe.type} onChange={(e) => setProbe({ type: e.target.value })}>
                 <option value="http">HTTP</option>
                 <option value="tcp">TCP</option>
                 <option value="command">Command</option>
-              </select>
+              </SearchableSelect>
             </Field>
             {probe.type === "http" ? (
               <>
@@ -1090,6 +1091,21 @@ export function StepScaling({ state, setState }) {
   const setScaling = (patch) => setState((s) => ({ ...s, scaling: { ...s.scaling, ...patch } }));
   const hpa = scaling.hpa;
 
+  // HPA scales on resource utilization, so it requires both CPU and memory
+  // requests. Without them Kubernetes cannot compute utilization percentages.
+  const hasResourceRequests = useMemo(
+    () => Boolean(state.resources?.cpuRequest?.trim?.() && state.resources?.memoryRequest?.trim?.()),
+    [state.resources?.cpuRequest, state.resources?.memoryRequest],
+  );
+
+  // Auto-disable HPA if the resource requests it depends on are removed.
+  useEffect(() => {
+    if (!hasResourceRequests && hpa.enabled) {
+      setScaling({ hpa: { ...hpa, enabled: false } });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasResourceRequests, hpa.enabled]);
+
   return (
     <div className="wizard-step-panel">
       <WizardSectionHeader title="Scaling" subtitle="Replica count and optional autoscaling." />
@@ -1101,15 +1117,25 @@ export function StepScaling({ state, setState }) {
           <Field label="Replica Count">
             <input type="number" min={0} max={50} value={scaling.replicas} onChange={(e) => setScaling({ replicas: Number(e.target.value) })} />
           </Field>
-          <label className="wizard-checkbox">
-            <input type="checkbox" checked={hpa.enabled} onChange={(e) => setScaling({ hpa: { ...hpa, enabled: e.target.checked } })} />
+          <label className={`wizard-checkbox${hasResourceRequests ? "" : " wizard-checkbox--disabled"}`}>
+            <input
+              type="checkbox"
+              checked={hpa.enabled && hasResourceRequests}
+              disabled={!hasResourceRequests}
+              onChange={(e) => setScaling({ hpa: { ...hpa, enabled: e.target.checked } })}
+            />
             Enable Horizontal Pod Autoscaler
           </label>
-          {hpa.enabled ? (
+          {!hasResourceRequests ? (
+            <p className="wizard-hpa-warning">
+              ⚠️ HPA requires CPU and Memory requests to be defined in the Resources step.
+            </p>
+          ) : null}
+          {hpa.enabled && hasResourceRequests ? (
             <div className="wizard-form-grid">
               <Field label="Min Replicas"><input type="number" value={hpa.minReplicas} onChange={(e) => setScaling({ hpa: { ...hpa, minReplicas: Number(e.target.value) } })} /></Field>
               <Field label="Max Replicas"><input type="number" value={hpa.maxReplicas} onChange={(e) => setScaling({ hpa: { ...hpa, maxReplicas: Number(e.target.value) } })} /></Field>
-              <Field label="CPU Threshold %"><input type="number" value={hpa.cpuThreshold} onChange={(e) => setScaling({ hpa: { ...hpa, cpuThreshold: Number(e.target.value) } })} /></Field>
+              <Field label="CPU Threshold %"><input type="number" value={hpa.cpuThreshold ?? ""} onChange={(e) => setScaling({ hpa: { ...hpa, cpuThreshold: e.target.value ? Number(e.target.value) : null } })} placeholder="optional" /></Field>
               <Field label="Memory Threshold %"><input type="number" value={hpa.memoryThreshold ?? ""} onChange={(e) => setScaling({ hpa: { ...hpa, memoryThreshold: e.target.value ? Number(e.target.value) : null } })} placeholder="optional" /></Field>
             </div>
           ) : null}

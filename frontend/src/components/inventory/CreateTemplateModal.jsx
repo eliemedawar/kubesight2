@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 
 const WORKLOAD_TYPES = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
 const PULL_POLICIES = ["IfNotPresent", "Always", "Never"];
@@ -97,6 +98,12 @@ const EMPTY_FORM = {
   cpuLimit: "500m",
   memoryRequest: "128Mi",
   memoryLimit: "256Mi",
+  // Autoscaling (HPA) — requires CPU + memory requests to be defined
+  hpaEnabled: false,
+  hpaMinReplicas: "1",
+  hpaMaxReplicas: "5",
+  hpaCpuThreshold: "80",
+  hpaMemoryThreshold: "",
   // Deployment schema
   envVars: [{ ...EMPTY_ENV }],
   overrides: { ...DEFAULT_OVERRIDES },
@@ -127,6 +134,7 @@ function freshForm(category) {
 function formFromTemplate(detail) {
   const container = detail.containers?.[0] || {};
   const res = detail.resources || {};
+  const hpa = detail.scaling?.hpa || {};
   const schema = detail.schema || {};
   const overrides = schema.overrides || {};
   const storage = detail.storage || {};
@@ -183,6 +191,11 @@ function formFromTemplate(detail) {
     cpuLimit: res.cpuLimit || "500m",
     memoryRequest: res.memoryRequest || "128Mi",
     memoryLimit: res.memoryLimit || "256Mi",
+    hpaEnabled: Boolean(hpa.enabled),
+    hpaMinReplicas: hpa.minReplicas != null ? String(hpa.minReplicas) : "1",
+    hpaMaxReplicas: hpa.maxReplicas != null ? String(hpa.maxReplicas) : "5",
+    hpaCpuThreshold: hpa.cpuThreshold != null ? String(hpa.cpuThreshold) : "80",
+    hpaMemoryThreshold: hpa.memoryThreshold != null ? String(hpa.memoryThreshold) : "",
     envVars: envVars.length ? envVars : [{ ...EMPTY_ENV }],
     overrides: {
       image: Boolean(overrides.image),
@@ -286,6 +299,10 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
   const update = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }));
   const toggle = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.checked }));
 
+  // HPA can only be enabled when both CPU and memory requests are defined,
+  // since autoscaling computes utilization relative to those requests.
+  const hasHpaResources = Boolean(form.cpuRequest.trim() && form.memoryRequest.trim());
+
   // Generic handlers for repeatable list fields (envVars).
   const updateRow = (field, index, key) => (event) => {
     const value = event.target.type === "checkbox" ? event.target.checked : event.target.value;
@@ -352,6 +369,15 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
       setError("Container image is required.");
       return;
     }
+    if (
+      form.hpaEnabled &&
+      hasHpaResources &&
+      !form.hpaCpuThreshold.trim() &&
+      !form.hpaMemoryThreshold.trim()
+    ) {
+      setError("Set a CPU threshold, a memory threshold, or both for the autoscaler.");
+      return;
+    }
 
     const port = Number.parseInt(form.port, 10);
     const replicas = Number.parseInt(form.replicas, 10);
@@ -376,7 +402,23 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
         memoryRequest: form.memoryRequest.trim(),
         memoryLimit: form.memoryLimit.trim(),
       },
-      scaling: { replicas: Number.isFinite(replicas) ? replicas : 1 },
+      scaling: {
+        replicas: Number.isFinite(replicas) ? replicas : 1,
+        // HPA needs CPU + memory requests to compute utilization. Force it off
+        // when either is missing so we never persist an unusable autoscaler.
+        hpa: {
+          enabled: form.hpaEnabled && hasHpaResources,
+          minReplicas: Number.parseInt(form.hpaMinReplicas, 10) || 1,
+          maxReplicas: Number.parseInt(form.hpaMaxReplicas, 10) || 5,
+          // CPU and memory thresholds are independent — set either, or both.
+          cpuThreshold: form.hpaCpuThreshold.trim()
+            ? Number.parseInt(form.hpaCpuThreshold, 10)
+            : null,
+          memoryThreshold: form.hpaMemoryThreshold.trim()
+            ? Number.parseInt(form.hpaMemoryThreshold, 10)
+            : null,
+        },
+      },
     };
     if (form.serviceEnabled && Number.isFinite(port)) {
       payload.networking = {
@@ -496,11 +538,11 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
             </label>
             <label>
               Workload type
-              <select value={form.workloadType} onChange={update("workloadType")}>
+              <SearchableSelect value={form.workloadType} onChange={update("workloadType")}>
                 {WORKLOAD_TYPES.map((type) => (
                   <option key={type} value={type}>{type}</option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             <label className="form-grid__full">
               Description
@@ -508,12 +550,12 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
             </label>
             <label>
               Category
-              <select value={form.category} onChange={update("category")}>
+              <SearchableSelect value={form.category} onChange={update("category")}>
                 {categoryOptions.map((category) => (
                   <option key={category} value={category}>{category}</option>
                 ))}
                 <option value={NEW_CATEGORY}>+ New category…</option>
-              </select>
+              </SearchableSelect>
             </label>
             {form.category === NEW_CATEGORY ? (
               <label>
@@ -545,11 +587,11 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
             </label>
             <label>
               Image pull policy
-              <select value={form.pullPolicy} onChange={update("pullPolicy")}>
+              <SearchableSelect value={form.pullPolicy} onChange={update("pullPolicy")}>
                 {PULL_POLICIES.map((policy) => (
                   <option key={policy} value={policy}>{policy}</option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             <label className="checkbox-row form-grid__full">
               <input type="checkbox" checked={form.serviceEnabled} onChange={toggle("serviceEnabled")} />
@@ -595,23 +637,18 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
                     ×
                   </button>
                 </div>
-                <div className="schema-env-card__sources" role="radiogroup" aria-label={`Variable ${index + 1} kind`}>
-                  {ENV_KINDS.map((opt) => {
-                    const disabled = row.sensitive && opt.value !== "secret";
-                    const checked = (row.sensitive ? "secret" : row.kind) === opt.value;
-                    return (
-                      <label key={opt.value} className={`schema-source-chip${disabled ? " is-disabled" : ""}`}>
-                        <input
-                          type="radio"
-                          name={`env-kind-${index}`}
-                          checked={checked}
-                          disabled={disabled}
-                          onChange={() => setEnvKind(index, opt.value)}
-                        />
-                        <span>{opt.label}</span>
-                      </label>
-                    );
-                  })}
+                <div className="schema-env-card__sources">
+                  <SearchableSelect
+                    value={row.sensitive ? "secret" : row.kind}
+                    disabled={row.sensitive}
+                    onChange={(e) => setEnvKind(index, e.target.value)}
+                    aria-label={`Variable ${index + 1} kind`}
+                    className="schema-env-card__kind"
+                  >
+                    {ENV_KINDS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </SearchableSelect>
                 </div>
                 {!row.sensitive && row.kind === "value" ? (
                   <input
@@ -640,11 +677,11 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
               {form.dependencies.map((dep, depIndex) => (
                 <div key={depIndex} className="schema-dep-card">
                   <div className="schema-dep-card__top">
-                    <select value={dep.kind} onChange={updateDependency(depIndex, "kind")} aria-label={`Dependency ${depIndex + 1} kind`}>
+                    <SearchableSelect value={dep.kind} onChange={updateDependency(depIndex, "kind")} aria-label={`Dependency ${depIndex + 1} kind`}>
                       {DEPENDENCY_KINDS.map((kind) => (
                         <option key={kind} value={kind}>{kind}</option>
                       ))}
-                    </select>
+                    </SearchableSelect>
                     <input
                       value={dep.name}
                       onChange={updateDependency(depIndex, "name")}
@@ -824,11 +861,11 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
                   <div className="form-grid" style={{ marginTop: "var(--space-2)" }}>
                     <label>
                       Type
-                      <select value={probe.type} onChange={updateProbe(key, "type")}>
+                      <SearchableSelect value={probe.type} onChange={updateProbe(key, "type")}>
                         {PROBE_TYPES.map((opt) => (
                           <option key={opt.value} value={opt.value}>{opt.label}</option>
                         ))}
-                      </select>
+                      </SearchableSelect>
                     </label>
                     {probe.type === "http" ? (
                       <label>
@@ -884,6 +921,51 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
             </label>
           </div>
         </section>
+
+        {form.workloadType === "Deployment" || form.workloadType === "StatefulSet" ? (
+          <section className="form-section">
+            <h4>Autoscaling (HPA)</h4>
+            <label className={`wizard-checkbox${hasHpaResources ? "" : " wizard-checkbox--disabled"}`}>
+              <input
+                type="checkbox"
+                checked={form.hpaEnabled && hasHpaResources}
+                disabled={!hasHpaResources}
+                onChange={toggle("hpaEnabled")}
+              />
+              Enable Horizontal Pod Autoscaler
+            </label>
+            {!hasHpaResources ? (
+              <p className="wizard-hpa-warning">
+                ⚠️ HPA requires CPU and Memory requests to be defined above.
+              </p>
+            ) : null}
+            {form.hpaEnabled && hasHpaResources ? (
+              <>
+                <div className="form-grid">
+                  <label>
+                    Min replicas
+                    <input value={form.hpaMinReplicas} onChange={update("hpaMinReplicas")} inputMode="numeric" placeholder="1" />
+                  </label>
+                  <label>
+                    Max replicas
+                    <input value={form.hpaMaxReplicas} onChange={update("hpaMaxReplicas")} inputMode="numeric" placeholder="5" />
+                  </label>
+                  <label>
+                    CPU threshold %
+                    <input value={form.hpaCpuThreshold} onChange={update("hpaCpuThreshold")} inputMode="numeric" placeholder="optional" />
+                  </label>
+                  <label>
+                    Memory threshold %
+                    <input value={form.hpaMemoryThreshold} onChange={update("hpaMemoryThreshold")} inputMode="numeric" placeholder="optional" />
+                  </label>
+                </div>
+                <p className="muted" style={{ margin: "0.25rem 0 0" }}>
+                  Scale on CPU, memory, or both — set at least one threshold.
+                </p>
+              </>
+            ) : null}
+          </section>
+        ) : null}
 
         <div className="modal-actions">
           <button type="button" className="btn-outline" onClick={onClose} disabled={saving}>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getResourceListByType } from "../../api/clustersApi.js";
 import NamespaceSelect from "../inventory/NamespaceSelect.jsx";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 
 export const ALL_RESOURCES_VALUE = "*";
 
@@ -108,7 +109,7 @@ export default function PolicyScopeFields({ clusterId, scope, onChange, disabled
     <div className="alert-policy-form-grid">
       <label>
         Target
-        <select
+        <SearchableSelect
           value={normalized.type}
           onChange={handleTargetChange}
           disabled={disabled}
@@ -116,7 +117,7 @@ export default function PolicyScopeFields({ clusterId, scope, onChange, disabled
         >
           <option value="deployment">Deployment</option>
           <option value="pod">Pod</option>
-        </select>
+        </SearchableSelect>
       </label>
       <label>
         Namespace
@@ -130,7 +131,7 @@ export default function PolicyScopeFields({ clusterId, scope, onChange, disabled
       </label>
       <label>
         Resource
-        <select
+        <SearchableSelect
           value={normalized.resourceName || ALL_RESOURCES_VALUE}
           onChange={handleResourceChange}
           disabled={disabled || !clusterId || !normalized.namespace || loadingResources}
@@ -143,7 +144,7 @@ export default function PolicyScopeFields({ clusterId, scope, onChange, disabled
               {name}
             </option>
           ))}
-        </select>
+        </SearchableSelect>
         {resourceError ? <p className="muted namespace-select-hint">{resourceError}</p> : null}
       </label>
     </div>

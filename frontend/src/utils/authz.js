@@ -75,6 +75,18 @@ export const NAV_PAGES = [
 
   // Inventory
   { key: "inventory", label: "Inventory", permission: "inventory:view", section: "Inventory" },
+  {
+    key: "myRequests",
+    label: "My Requests",
+    permission: "deployment_requests:request",
+    section: "Inventory",
+  },
+  {
+    key: "changeBundles",
+    label: "Change Bundles",
+    anyPermissions: ["change_bundles:create", "change_bundles:view"],
+    section: "Inventory",
+  },
 
   // Monitoring
   { key: "logs", label: "Logs", permission: "logs:view", section: "Monitoring" },
@@ -980,6 +992,13 @@ export function pageAllowed(user, pageKey) {
       return hasPermission(user, "audit:view");
     case "deploymentRequests":
       return hasPermission(user, "deployment_requests:view");
+    case "myRequests":
+      return hasPermission(user, "deployment_requests:request");
+    case "changeBundles":
+      return (
+        hasPermission(user, "change_bundles:create") ||
+        hasPermission(user, "change_bundles:view")
+      );
     default:
       return pageNavPermissionAllowed(user, page);
   }

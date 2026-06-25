@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import {
   applyDeployImage,
   applyDeployYaml,
@@ -10,6 +10,7 @@ import {
   registerExistingApp,
   validateDeployYaml,
 } from "../../api/inventoryApi.js";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 import { useAuth } from "../../context/AuthContext.jsx";
 import { formatAccessError, isAccessDeniedError } from "../../utils/authz.js";
 import HelmDeployForm from "./HelmDeployForm.jsx";
@@ -120,7 +121,6 @@ export default function AddAppModal({
   const [preview, setPreview] = useState(null);
   /** @type {null | { content: string } | { hint: string }} */
   const [deployDiff, setDeployDiff] = useState(null);
-  const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -134,7 +134,6 @@ export default function AddAppModal({
       setWorkloads([]);
       setPreview(null);
       setDeployDiff(null);
-      setConfirmation("");
       setError("");
     }
   }, [open]);
@@ -178,11 +177,6 @@ export default function AddAppModal({
     };
   }, [mode, registerForm.clusterId, registerForm.namespace]);
 
-  const confirmationPhrase = useMemo(() => {
-    const ns = yamlForm.namespace || imageForm.namespace;
-    return ns ? `APPLY ${ns}` : "";
-  }, [yamlForm.namespace, imageForm.namespace]);
-
   if (!open) return null;
 
   const resetFlow = () => {
@@ -190,7 +184,6 @@ export default function AddAppModal({
     setMode("");
     setPreview(null);
     setDeployDiff(null);
-    setConfirmation("");
     setError("");
   };
 
@@ -278,7 +271,6 @@ export default function AddAppModal({
         clusterId: yamlForm.clusterId,
         namespace: yamlForm.namespace,
         yaml: yamlForm.yaml,
-        confirmation,
         deploymentName: yamlForm.deploymentName,
         description: yamlForm.description,
       });
@@ -319,7 +311,6 @@ export default function AddAppModal({
       await applyDeployImage({
         ...imageForm,
         environmentVariables: parseEnvVars(imageForm.envVars),
-        confirmation,
         tags: [],
       });
       onSuccess?.();
@@ -451,7 +442,7 @@ export default function AddAppModal({
           >
             <label>
               Cluster
-              <select
+              <SearchableSelect
                 required
                 value={registerForm.clusterId}
                 onChange={(e) =>
@@ -470,7 +461,7 @@ export default function AddAppModal({
                     {clusterOptionLabel(cluster)}
                   </option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             <label>
               Namespace
@@ -489,7 +480,7 @@ export default function AddAppModal({
             </label>
             <label>
               Detected Workload
-              <select
+              <SearchableSelect
                 required
                 value={
                   registerForm.workloadType && registerForm.workloadName
@@ -507,7 +498,7 @@ export default function AddAppModal({
                     {wl.type} / {wl.name}
                   </option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             <label>
               App Display Name
@@ -526,7 +517,7 @@ export default function AddAppModal({
             </label>
             <label>
               Environment
-              <select
+              <SearchableSelect
                 value={registerForm.environment}
                 onChange={(e) => setRegisterForm((p) => ({ ...p, environment: e.target.value }))}
               >
@@ -534,11 +525,11 @@ export default function AddAppModal({
                 {ENVIRONMENT_OPTIONS.map((opt) => (
                   <option key={opt} value={opt}>{opt}</option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             <label>
               Criticality
-              <select
+              <SearchableSelect
                 value={registerForm.criticality}
                 onChange={(e) => setRegisterForm((p) => ({ ...p, criticality: e.target.value }))}
               >
@@ -546,7 +537,7 @@ export default function AddAppModal({
                 {CRITICALITY_OPTIONS.map((opt) => (
                   <option key={opt} value={opt}>{opt}</option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             <label>
               Description
@@ -598,7 +589,7 @@ export default function AddAppModal({
           >
             <label>
               Cluster
-              <select
+              <SearchableSelect
                 required
                 value={yamlForm.clusterId}
                 onChange={(e) =>
@@ -611,7 +602,7 @@ export default function AddAppModal({
                     {clusterOptionLabel(cluster)}
                   </option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             <label>
               Namespace
@@ -686,20 +677,12 @@ export default function AddAppModal({
             {deployDiff?.hint ? (
               <p className="muted deploy-diff-hint">{deployDiff.hint}</p>
             ) : null}
-            <label>
-              Type <strong>{confirmationPhrase}</strong> to confirm
-              <input
-                value={confirmation}
-                onChange={(e) => setConfirmation(e.target.value)}
-                placeholder={confirmationPhrase}
-              />
-            </label>
             <div className="modal-actions">
               <button type="button" className="btn-text" onClick={() => setStep("yaml-form")}>Back</button>
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy || confirmation !== confirmationPhrase}
+                disabled={busy}
                 onClick={applyYaml}
               >
                 {busy ? "Applying..." : "Apply to Cluster"}
@@ -718,7 +701,7 @@ export default function AddAppModal({
           >
             <label>
               Cluster
-              <select
+              <SearchableSelect
                 required
                 value={imageForm.clusterId}
                 onChange={(e) =>
@@ -731,7 +714,7 @@ export default function AddAppModal({
                     {clusterOptionLabel(cluster)}
                   </option>
                 ))}
-              </select>
+              </SearchableSelect>
             </label>
             <label>
               Namespace
@@ -746,15 +729,15 @@ export default function AddAppModal({
             <label>Image Tag<input value={imageForm.imageTag} onChange={(e) => setImageForm((p) => ({ ...p, imageTag: e.target.value }))} /></label>
             <label>Replicas<input type="number" min="0" value={imageForm.replicas} onChange={(e) => setImageForm((p) => ({ ...p, replicas: Number(e.target.value) }))} /></label>
             <label>Container Port<input type="number" value={imageForm.containerPort} onChange={(e) => setImageForm((p) => ({ ...p, containerPort: Number(e.target.value) }))} /></label>
-            <label>Service Type<select value={imageForm.serviceType} onChange={(e) => setImageForm((p) => ({ ...p, serviceType: e.target.value }))}>{SERVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
+            <label>Service Type<SearchableSelect value={imageForm.serviceType} onChange={(e) => setImageForm((p) => ({ ...p, serviceType: e.target.value }))}>{SERVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</SearchableSelect></label>
             <label>CPU Request<input value={imageForm.cpuRequest} onChange={(e) => setImageForm((p) => ({ ...p, cpuRequest: e.target.value }))} /></label>
             <label>CPU Limit<input value={imageForm.cpuLimit} onChange={(e) => setImageForm((p) => ({ ...p, cpuLimit: e.target.value }))} /></label>
             <label>Memory Request<input value={imageForm.memoryRequest} onChange={(e) => setImageForm((p) => ({ ...p, memoryRequest: e.target.value }))} /></label>
             <label>Memory Limit<input value={imageForm.memoryLimit} onChange={(e) => setImageForm((p) => ({ ...p, memoryLimit: e.target.value }))} /></label>
             <label className="full-width">Environment Variables (KEY=value per line)<textarea rows={3} value={imageForm.envVars} onChange={(e) => setImageForm((p) => ({ ...p, envVars: e.target.value }))} /></label>
             <label>Owner / Team<input value={imageForm.ownerTeam} onChange={(e) => setImageForm((p) => ({ ...p, ownerTeam: e.target.value }))} /></label>
-            <label>Environment<select value={imageForm.environment} onChange={(e) => setImageForm((p) => ({ ...p, environment: e.target.value }))}><option value="">Not set</option>{ENVIRONMENT_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}</select></label>
-            <label>Criticality<select value={imageForm.criticality} onChange={(e) => setImageForm((p) => ({ ...p, criticality: e.target.value }))}><option value="">Not set</option>{CRITICALITY_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}</select></label>
+            <label>Environment<SearchableSelect value={imageForm.environment} onChange={(e) => setImageForm((p) => ({ ...p, environment: e.target.value }))}><option value="">Not set</option>{ENVIRONMENT_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}</SearchableSelect></label>
+            <label>Criticality<SearchableSelect value={imageForm.criticality} onChange={(e) => setImageForm((p) => ({ ...p, criticality: e.target.value }))}><option value="">Not set</option>{CRITICALITY_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}</SearchableSelect></label>
             <label className="full-width">Description<textarea rows={2} value={imageForm.description} onChange={(e) => setImageForm((p) => ({ ...p, description: e.target.value }))} /></label>
             <div className="modal-actions full-width">
               <button type="button" className="btn-text" onClick={() => setStep("deploy-choose")}>Back</button>
@@ -773,13 +756,9 @@ export default function AddAppModal({
                 <li key={`${res.kind}-${res.name}`}>{res.kind} {res.name}</li>
               ))}
             </ul>
-            <label>
-              Type <strong>{confirmationPhrase}</strong> to confirm
-              <input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder={confirmationPhrase} />
-            </label>
             <div className="modal-actions">
               <button type="button" className="btn-text" onClick={() => setStep("image-form")}>Back</button>
-              <button type="button" className="btn-primary" disabled={busy || confirmation !== confirmationPhrase} onClick={applyImage}>
+              <button type="button" className="btn-primary" disabled={busy} onClick={applyImage}>
                 {busy ? "Applying..." : "Apply to Cluster"}
               </button>
             </div>

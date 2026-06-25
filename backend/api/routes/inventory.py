@@ -322,7 +322,12 @@ def deploy_yaml_apply():
     confirmation = body.get("confirmation") or ""
     if not cluster_id or not namespace:
         return error_response("clusterId and namespace are required", 400)
-    data, error, status = apply_yaml(user, cluster_id, namespace, yaml_content, confirmation)
+    try:
+        data, error, status = apply_yaml(user, cluster_id, namespace, yaml_content, confirmation)
+    except K8sCommandError as exc:
+        return error_response(str(exc), 503)
+    except Exception as exc:  # noqa: BLE001 — surface a clean error, not a raw 500
+        return error_response(f"Deployment failed unexpectedly: {exc}", 500)
     if error:
         return error_response(error, status)
 
@@ -339,15 +344,18 @@ def deploy_yaml_apply():
             app_name = resources[0].get("name")
 
     if app_name:
-        create_or_update_from_deployment(
-            user,
-            cluster_id=cluster_id,
-            namespace=namespace,
-            display_name=app_name,
-            workload_type="Deployment",
-            workload_name=app_name,
-            description=description or None,
-        )
+        try:
+            create_or_update_from_deployment(
+                user,
+                cluster_id=cluster_id,
+                namespace=namespace,
+                display_name=app_name,
+                workload_type="Deployment",
+                workload_name=app_name,
+                description=description or None,
+            )
+        except Exception:  # noqa: BLE001 — apply already succeeded; don't fail the request
+            pass
 
     return success_response(data)
 

@@ -13,8 +13,6 @@ spec:
       labels:
         app: kubesight-frontend
     spec:
-      nodeSelector:
-        role: frontend
       containers:
         - name: frontend
           # Build: docker build -t kubaesight-frontend:vx ./frontend

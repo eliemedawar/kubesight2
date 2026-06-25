@@ -213,9 +213,28 @@ def _migrate_deployment_request_columns() -> None:
     if "deployment_requests" in table_names:
         _add_column_if_missing("deployment_requests", "required_approvals", "INTEGER DEFAULT 1")
         _add_column_if_missing("deployment_requests", "total_recipients", "INTEGER DEFAULT 1")
+        _add_column_if_missing("deployment_requests", "requested_window_start", "DATETIME")
+        _add_column_if_missing("deployment_requests", "requested_window_end", "DATETIME")
+        _add_column_if_missing("deployment_requests", "requested_window_timezone", "VARCHAR(64)")
     if "deployment_request_settings" in table_names:
         _add_column_if_missing("deployment_request_settings", "group_ids", "JSON")
         _add_column_if_missing("deployment_request_settings", "required_approvals", "INTEGER DEFAULT 1")
+        _add_column_if_missing("deployment_request_settings", "cluster_required_approvals", "JSON")
+
+
+def _migrate_change_bundle_columns() -> None:
+    """Forward-compatible column adds for change bundles (tables come from create_all)."""
+    table_names = inspect(db.engine).get_table_names()
+    if "change_bundles" in table_names:
+        _add_column_if_missing("change_bundles", "stop_on_failure", "INTEGER DEFAULT 1")
+        _add_column_if_missing("change_bundles", "execution_started_at", "DATETIME")
+        _add_column_if_missing("change_bundles", "execution_finished_at", "DATETIME")
+        _add_column_if_missing("change_bundles", "rejection_reason", "TEXT")
+        _add_column_if_missing("change_bundles", "requested_window_timezone", "VARCHAR(64)")
+    if "change_bundle_items" in table_names:
+        _add_column_if_missing("change_bundle_items", "cluster_name", "VARCHAR(255)")
+        _add_column_if_missing("change_bundle_items", "validation_message", "TEXT")
+        _add_column_if_missing("change_bundle_items", "execution_result", "JSON")
 
 
 def _migrate_alert_routing_user_receivers() -> None:
@@ -253,6 +272,7 @@ def _migrate_alert_routing_user_receivers() -> None:
 def run_migrations() -> None:
     db.create_all()
     _migrate_deployment_request_columns()
+    _migrate_change_bundle_columns()
     _migrate_alert_routing_user_receivers()
     _migrate_clusters_table()
     _migrate_app_catalog_helm_columns()

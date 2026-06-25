@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import NotificationsDropdown from "./NotificationsDropdown.jsx";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 
 const IconBell = () => (
   <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -57,6 +58,13 @@ export default function Topbar({
   canViewAlerts = false,
   notificationsEnabled = true,
   onViewAllAlerts,
+  requestUpdates = [],
+  canViewRequests = false,
+  requestBadgeCount = 0,
+  onViewAllRequests,
+  onNotificationsOpen,
+  onDismissRequestUpdate,
+  onClearRequestUpdates,
   displayUser,
   userInitials,
   onLogout,
@@ -65,7 +73,7 @@ export default function Topbar({
 }) {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const notificationsRef = useRef(null);
-  const badgeLabel = formatBadgeCount(alertBadgeCount);
+  const badgeLabel = formatBadgeCount((alertBadgeCount || 0) + (requestBadgeCount || 0));
 
   useEffect(() => {
     setNotificationsOpen(false);
@@ -97,12 +105,23 @@ export default function Topbar({
   }, [notificationsOpen]);
 
   const toggleNotifications = () => {
-    setNotificationsOpen((open) => !open);
+    setNotificationsOpen((open) => {
+      const next = !open;
+      if (next) {
+        onNotificationsOpen?.();
+      }
+      return next;
+    });
   };
 
   const handleViewAllAlerts = () => {
     setNotificationsOpen(false);
     onViewAllAlerts?.();
+  };
+
+  const handleViewAllRequests = () => {
+    setNotificationsOpen(false);
+    onViewAllRequests?.();
   };
 
   return (
@@ -121,7 +140,7 @@ export default function Topbar({
         {showClusterSelector ? (
           <div className="topbar-field">
             <p className="eyebrow">Active Cluster</p>
-            <select
+            <SearchableSelect
               value={selectedClusterId}
               onChange={(event) => onClusterChange(event.target.value)}
               disabled={loadingCore || !allowedClusters.length}
@@ -132,13 +151,13 @@ export default function Topbar({
                 </option>
               ))}
               {!allowedClusters.length ? <option value="">No clusters assigned</option> : null}
-            </select>
+            </SearchableSelect>
           </div>
         ) : null}
         {showNamespaceSelector ? (
           <div className="topbar-field">
             <p className="eyebrow">Active Namespace</p>
-            <select
+            <SearchableSelect
               value={selectedNamespace}
               onChange={(event) => onNamespaceChange(event.target.value)}
               disabled={loadingNamespaces || loadingResources || !allowedNamespaces.length}
@@ -149,7 +168,7 @@ export default function Topbar({
                 </option>
               ))}
               {!allowedNamespaces.length ? <option value="">No namespaces assigned</option> : null}
-            </select>
+            </SearchableSelect>
           </div>
         ) : null}
         </div>
@@ -170,6 +189,11 @@ export default function Topbar({
           <NotificationsDropdown
             open={notificationsOpen}
             alerts={notifications}
+            requestUpdates={requestUpdates}
+            canViewRequests={canViewRequests}
+            onViewAllRequests={handleViewAllRequests}
+            onDismissRequestUpdate={onDismissRequestUpdate}
+            onClearRequestUpdates={onClearRequestUpdates}
             clusterLabel={clusterLabel}
             canViewAlerts={canViewAlerts}
             notificationsEnabled={notificationsEnabled}

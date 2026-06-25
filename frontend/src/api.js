@@ -69,8 +69,10 @@ export {
 export {
   createDeploymentRequest,
   listDeploymentRequests,
+  listMyDeploymentRequests,
   approveDeploymentRequest,
   declineDeploymentRequest,
+  getClusterDeployEligibility,
   getDeploymentRequestRecipients,
   updateDeploymentRequestRecipients,
 } from "./api/deploymentRequestsApi";
