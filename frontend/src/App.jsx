@@ -1663,7 +1663,7 @@ export default function App() {
     </AppShell>
     {changeBundle.enabled ? (
       <>
-        {!changeBundle.isOpen ? (
+        {!changeBundle.isOpen && activePage !== "resources" ? (
         <button
           type="button"
           aria-label="Open change bundle"
