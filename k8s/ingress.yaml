@@ -7,7 +7,7 @@ spec:
   # Change to your controller class (nginx, traefik, etc.)
   ingressClassName: nginx
   rules:
-    - host: kubesight.local
+    - host: kubesight.areeba.com
       http:
         paths:
           # API routes — Flask blueprints are under /api

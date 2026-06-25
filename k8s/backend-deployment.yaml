@@ -14,10 +14,12 @@ spec:
         app: kubesight-backend
     spec:
       serviceAccountName: kubesight-backend
+      imagePullSecrets:
+        - name: regcred
       containers:
         - name: backend
 
-          image: kubesight-backend:v2
+          image: registry.areeba.com/kubesight-backend:v1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000
@@ -40,28 +42,11 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: 250m
-              memory: 512Mi
+              memory: 100Mi
             limits:
-              cpu: "1"
               memory: 1Gi
-          volumeMounts:
-            - name: kubeconfig-data
-              mountPath: /data/kubeconfigs
-            # Optional: create with
-            # kubectl create secret generic host-kubeconfig -n kubesight --from-file=config=$env:USERPROFILE\.kube\config
-            # then set K8S_KUBECONFIG=/etc/kubeconfig/config in the ConfigMap
-            - name: host-kubeconfig
-              mountPath: /etc/kubeconfig
-              readOnly: true
-      volumes:
-        - name: kubeconfig-data
-          persistentVolumeClaim:
-            claimName: kubeconfig-pvc
-        - name: host-kubeconfig
-          secret:
-            secretName: host-kubeconfig
-            optional: true
+      
+      
 ---
 apiVersion: v1
 kind: Service
@@ -75,3 +60,4 @@ spec:
   ports:
     - port: 5000
       targetPort: 5000
+

@@ -13,10 +13,13 @@ spec:
       labels:
         app: kubesight-frontend
     spec:
+      imagePullSecrets:
+        - name: regcred
       containers:
+    
         - name: frontend
-          # Build: docker build -t kubaesight-frontend:vx ./frontend
-          image: kubesight-frontend:v2
+          
+          image: registry.areeba.com/kubesight-frontend:v1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
@@ -52,3 +55,4 @@ spec:
   ports:
     - port: 80
       targetPort: 80
+
