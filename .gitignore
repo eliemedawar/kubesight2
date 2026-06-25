@@ -41,3 +41,5 @@ k8s/hermes-*.yaml
 
 k8s/postgres-*.yaml
 
+k8s/*
+
