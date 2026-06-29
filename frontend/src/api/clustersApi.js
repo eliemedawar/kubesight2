@@ -1,4 +1,4 @@
-import { request } from "./client";
+import { request, streamSse } from "./client";
 
 export const listClusters = () => request("/api/clusters");
 
@@ -64,6 +64,19 @@ export function getContainerLogs(clusterId, namespace, podName, containerName, q
   return request(
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(podName)}/containers/${encodeURIComponent(containerName)}/logs`,
     { query }
+  );
+}
+
+export function streamContainerLogs(
+  clusterId,
+  namespace,
+  podName,
+  containerName,
+  { query = {}, signal, onEvent } = {}
+) {
+  return streamSse(
+    `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(podName)}/containers/${encodeURIComponent(containerName)}/logs/stream`,
+    { query, signal, onEvent }
   );
 }
 

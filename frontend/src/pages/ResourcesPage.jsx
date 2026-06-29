@@ -33,6 +33,36 @@ const POD_FILTER_WORKLOAD_KINDS = new Set([
   "job",
 ]);
 
+// Column keys that hold a kubectl-style status we can filter on.
+const STATUS_COLUMN_KEYS = ["status", "updateStatus"];
+
+// Status values that mean the resource is fine. Anything else (CrashLoopBackOff,
+// ImagePullBackOff/ErrImagePull, ContainerCreating, Pending, Error, ExitCode:x,
+// Terminating, NotReady, Init:…) is treated as an issue when the filter is on.
+const HEALTHY_STATUSES = new Set([
+  "running",
+  "completed",
+  "succeeded",
+  "active",
+  "available",
+  "healthy",
+  "ready",
+  "bound",
+  "updated",
+  "true",
+]);
+
+function isIssueStatus(value) {
+  if (value == null) {
+    return false;
+  }
+  const status = String(value).trim().toLowerCase();
+  if (!status || status === "-" || status === "—") {
+    return false;
+  }
+  return !HEALTHY_STATUSES.has(status);
+}
+
 function podsForWorkload(pods, workloadName) {
   if (!workloadName) {
     return pods;
@@ -162,6 +192,7 @@ export default function ResourcesPage({
   const canDeploy = hasPermission("apps:deploy");
   const [workloadPodFilter, setWorkloadPodFilter] = useState({ name: "", kind: "" });
   const [search, setSearch] = useState("");
+  const [issuesOnly, setIssuesOnly] = useState(false);
   const [inspectModal, setInspectModal] = useState(CLOSED_MODAL);
   const [editModal, setEditModal] = useState(CLOSED_EDIT_MODAL);
 
@@ -590,14 +621,23 @@ export default function ResourcesPage({
   const active = visibleTableConfig[activeTab] || visibleTableConfig[tabKeys[0]];
 
   const searchTerm = search.trim().toLowerCase();
+  const statusKey = useMemo(
+    () => active?.columns.find((col) => STATUS_COLUMN_KEYS.includes(col.key))?.key || "",
+    [active]
+  );
+  const canFilterIssues = Boolean(statusKey);
   const filteredRows = useMemo(() => {
     if (!active) {
       return [];
     }
-    if (!searchTerm) {
-      return active.rows;
+    let rows = active.rows;
+    if (issuesOnly && statusKey) {
+      rows = rows.filter((row) => isIssueStatus(row[statusKey]));
     }
-    return active.rows.filter((row) =>
+    if (!searchTerm) {
+      return rows;
+    }
+    return rows.filter((row) =>
       active.columns.some((col) => {
         if (col.key === "actions") {
           return false;
@@ -609,7 +649,7 @@ export default function ResourcesPage({
         return String(value).toLowerCase().includes(searchTerm);
       })
     );
-  }, [active, searchTerm]);
+  }, [active, searchTerm, issuesOnly, statusKey]);
 
   const workloadFilterLabel = workloadPodFilter.kind
     ? workloadPodFilter.kind.replace(/([A-Z])/g, " $1").trim()
@@ -665,6 +705,17 @@ export default function ResourcesPage({
                 onChange={(event) => setSearch(event.target.value)}
                 aria-label="Search resources"
               />
+              {canFilterIssues ? (
+                <button
+                  type="button"
+                  className={`btn-outline btn-sm resources-issues-filter${issuesOnly ? " active" : ""}`}
+                  onClick={() => setIssuesOnly((prev) => !prev)}
+                  aria-pressed={issuesOnly}
+                  title="Show only resources with errors (CrashLoopBackOff, ImagePullBackOff, ContainerCreating, Pending, Error…)"
+                >
+                  {issuesOnly ? "Issues only ✓" : "Issues only"}
+                </button>
+              ) : null}
               {onRefreshTab ? (
                 <button
                   type="button"
@@ -711,14 +762,31 @@ export default function ResourcesPage({
                 })}
               </p>
             ) : filteredRows.length === 0 ? (
-              <p className="muted empty-state-inline">
-                No {(active.title || "resources").toLowerCase()} match “{search.trim()}”.{" "}
-                <button type="button" className="btn-text" onClick={() => setSearch("")}>
-                  Clear search
-                </button>
-              </p>
+              searchTerm ? (
+                <p className="muted empty-state-inline">
+                  No {(active.title || "resources").toLowerCase()} match “{search.trim()}”.{" "}
+                  <button type="button" className="btn-text" onClick={() => setSearch("")}>
+                    Clear search
+                  </button>
+                </p>
+              ) : (
+                <p className="muted empty-state-inline">
+                  No {(active.title || "resources").toLowerCase()} with issues in the{" "}
+                  {namespace || "selected"} namespace.{" "}
+                  <button type="button" className="btn-text" onClick={() => setIssuesOnly(false)}>
+                    Show all
+                  </button>
+                </p>
+              )
             ) : (
-              <DataTable columns={active.columns} rows={filteredRows} tableClassName="resources-table" />
+              <DataTable
+                columns={active.columns}
+                rows={filteredRows}
+                tableClassName="resources-table"
+                // While a search term or the issues filter is active, show every
+                // match on one page so a result is never hidden on a later page.
+                pageSize={searchTerm || issuesOnly ? Math.max(filteredRows.length, 1) : undefined}
+              />
             )
           ) : null}
           {activeTab === "services" &&

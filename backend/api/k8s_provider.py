@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -1579,6 +1580,121 @@ def pod_logs_from_k8s(
         "stream": "live" if live else "snapshot",
         "lines": lines,
     }
+
+
+def _popen_kubectl(
+    args: List[str],
+    context: Optional[str] = None,
+    kubeconfig_path: Optional[str] = None,
+) -> subprocess.Popen:
+    """Spawn a long-lived kubectl process (used for ``logs -f`` streaming)."""
+    command = ["kubectl"]
+    if kubeconfig_path:
+        command += ["--kubeconfig", kubeconfig_path]
+    if context:
+        command += ["--context", context]
+    command += args
+
+    env = os.environ.copy()
+    if kubeconfig_path:
+        env["KUBECONFIG"] = kubeconfig_path
+    elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
+        env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
+
+    try:
+        return subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+    except FileNotFoundError:
+        raise K8sCommandError(
+            "kubectl not found. Please install kubectl and ensure it is on your PATH."
+        )
+
+
+def stream_pod_log_lines(
+    *,
+    access: ClusterAccess,
+    namespace: str,
+    pod: str,
+    container: Optional[str],
+    since_seconds: Optional[int] = None,
+    since_time: Optional[datetime] = None,
+    tail_lines: Optional[int] = None,
+    timestamps: bool = True,
+    heartbeat_seconds: float = 15.0,
+):
+    """Follow pod logs via ``kubectl logs -f`` and yield events.
+
+    Yields ``("line", text)`` for each log line and ``("idle", None)`` whenever
+    ``heartbeat_seconds`` elapses without new output (so callers can emit SSE
+    keepalives and avoid proxy/worker timeouts). The generator returns once the
+    kubectl process exits; closing it terminates the process.
+    """
+    from .log_time_filters import format_rfc3339_z
+
+    tail = tail_lines if tail_lines is not None else 200
+    args = ["logs", pod, "-n", namespace, "-f", f"--tail={tail}"]
+    if timestamps:
+        args.append("--timestamps")
+    if container:
+        args += ["-c", container]
+    # --previous is incompatible with -f (a terminated container cannot be
+    # followed), so it is intentionally not supported here.
+    if since_time is not None:
+        args += ["--since-time", format_rfc3339_z(since_time)]
+    elif since_seconds is not None:
+        seconds = max(1, int(since_seconds))
+        args += [f"--since={seconds}s"]
+
+    process = _popen_kubectl(
+        args,
+        context=access.context_name,
+        kubeconfig_path=access.kubeconfig_path,
+    )
+
+    line_queue: "queue.Queue[Optional[str]]" = queue.Queue(maxsize=1000)
+
+    def _reader() -> None:
+        try:
+            for raw in process.stdout:  # type: ignore[union-attr]
+                line_queue.put(raw.rstrip("\n"))
+        finally:
+            line_queue.put(None)  # sentinel: stdout closed
+
+    reader = threading.Thread(target=_reader, name="kubectl-log-reader", daemon=True)
+    reader.start()
+
+    try:
+        while True:
+            try:
+                item = line_queue.get(timeout=heartbeat_seconds)
+            except queue.Empty:
+                if process.poll() is not None:
+                    break
+                yield ("idle", None)
+                continue
+            if item is None:
+                break
+            if item.strip():
+                yield ("line", item)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        for stream in (process.stdout, process.stderr):
+            try:
+                if stream:
+                    stream.close()
+            except Exception:
+                pass
 
 
 def _parse_k8s_version(version: str) -> tuple:

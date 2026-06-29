@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 from flask import Request
 
@@ -17,8 +18,14 @@ from ..k8s_provider import (
     pod_logs_from_k8s,
     resolve_cluster_access,
     should_use_real_k8s,
+    stream_pod_log_lines,
 )
-from ..log_noise import filter_health_probe_log_lines, filter_live_log_noise
+from ..log_noise import (
+    filter_health_probe_log_lines,
+    filter_live_log_noise,
+    is_health_probe_log_line,
+    is_logs_api_self_line,
+)
 from ..log_time_filters import (
     filter_log_lines_after,
     filter_log_lines_until,
@@ -235,6 +242,98 @@ def fetch_pod_logs(
         "stream": "live" if params["live"] else "snapshot",
         "lines": lines,
     }, None
+
+
+def _sse_frame(event: str, payload: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+def stream_pod_logs(
+    *,
+    cluster_id: str,
+    namespace: str,
+    pod_name: str,
+    container_name: Optional[str],
+    params: Dict[str, Any],
+) -> Tuple[Optional[Callable[[], Iterator[str]]], Optional[Any]]:
+    """Authorize and build a Server-Sent Events generator for ``kubectl logs -f``.
+
+    Returns ``(generator_factory, None)`` on success or ``(None, error_response)``
+    when access checks fail. The generator yields ``text/event-stream`` frames:
+    ``event: line`` for each log line, ``: hb`` comment heartbeats while idle, and
+    a final ``event: end`` when the stream closes.
+    """
+    user = get_current_user()
+    if user and not can_view_logs(user, cluster_id, namespace, pod_name, container_name):
+        log_audit(
+            "forbidden_access_attempt",
+            actor=user,
+            target_type="logs",
+            target_id=f"{cluster_id}/{namespace}/{pod_name}",
+        )
+        return None, error_response("Forbidden", 403)
+
+    container = (container_name or "").strip() or None
+    time_filters = params["time_filters"]
+
+    if not should_use_real_k8s(cluster_id):
+        mock_items = _mock_namespace_pods(cluster_id, namespace)
+        if mock_items is None:
+            return None, error_response("Cluster not found", 404)
+        mock_pod = next((item for item in mock_items if item.get("name") == pod_name), None)
+        if not mock_pod:
+            return None, error_response("Pod not found", 404)
+        if container and container not in (mock_pod.get("containers") or []):
+            return None, error_response("Container not found", 404)
+
+        mock_container = container or "app"
+
+        def mock_generator() -> Iterator[str]:
+            yield _sse_frame("open", {"stream": "live"})
+            for line in _mock_log_lines(
+                cluster_id=cluster_id,
+                namespace=namespace,
+                pod=pod_name,
+                container=mock_container,
+                previous=False,
+                live=True,
+                time_filters=time_filters,
+            ):
+                yield _sse_frame("line", {"line": line})
+            yield _sse_frame("end", {"reason": "mock"})
+
+        return mock_generator, None
+
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return None, error_response("Cluster not found", 404)
+
+    def generator() -> Iterator[str]:
+        yield _sse_frame("open", {"stream": "live"})
+        try:
+            for kind, text in stream_pod_log_lines(
+                access=access,
+                namespace=namespace,
+                pod=pod_name,
+                container=container,
+                since_seconds=time_filters.since_seconds,
+                since_time=time_filters.since_time,
+                tail_lines=params["tail_lines"],
+                timestamps=params["timestamps"],
+            ):
+                if kind == "idle":
+                    yield ": hb\n\n"
+                    continue
+                # Drop probe traffic and our own log-polling requests from the
+                # live stream, matching the snapshot endpoint's behaviour.
+                if is_logs_api_self_line(text) or is_health_probe_log_line(text):
+                    continue
+                yield _sse_frame("line", {"line": text})
+        except K8sCommandError as exc:
+            yield _sse_frame("error", {"message": str(exc)})
+        yield _sse_frame("end", {"reason": "closed"})
+
+    return generator, None
 
 
 def _mock_namespace_pods(cluster_id: str, namespace: str) -> Optional[list]:

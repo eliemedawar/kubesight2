@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   filterLogLinesByLevel,
   filterLogLinesBySearch,
@@ -46,6 +46,25 @@ export default function LogViewer({
   const prevLogTextRef = useRef("");
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [hasNewLogs, setHasNewLogs] = useState(false);
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  const toggleMaximized = useCallback(() => {
+    setIsMaximized((value) => !value);
+  }, []);
+
+  // Allow Esc to exit the maximized view.
+  useEffect(() => {
+    if (!isMaximized) {
+      return undefined;
+    }
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setIsMaximized(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isMaximized]);
 
   const filteredLines = useMemo(() => {
     let visible = lines;
@@ -180,7 +199,7 @@ export default function LogViewer({
 
   return (
     <section
-      className={`card log-viewer ${className}`.trim()}
+      className={`card log-viewer ${isMaximized ? "log-viewer--maximized" : ""} ${className}`.trim()}
       role="log"
       aria-live={live ? "polite" : "off"}
     >
@@ -200,6 +219,14 @@ export default function LogViewer({
           </button>
           <button type="button" className="btn-outline btn-sm" onClick={jumpToLatest} disabled={!hasLines}>
             Jump to latest
+          </button>
+          <button
+            type="button"
+            className="btn-outline btn-sm"
+            onClick={toggleMaximized}
+            aria-pressed={isMaximized}
+          >
+            {isMaximized ? "Exit fullscreen" : "Fullscreen"}
           </button>
         </div>
         {streaming ? (

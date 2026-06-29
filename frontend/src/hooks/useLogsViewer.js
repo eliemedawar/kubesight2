@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getContainerLogs } from "../api/clustersApi.js";
+import { getContainerLogs, streamContainerLogs } from "../api/clustersApi.js";
 import { appendLogLines, applyLogSnapshot, getIncrementalTailCursor } from "../utils/logFormat.js";
 import { buildLogTimeQuery } from "../utils/logTimeRange.js";
-
-const LIVE_POLL_MS = 3000;
 
 function logTargetKey(filters) {
   return [
@@ -147,7 +145,11 @@ export default function useLogsViewer(filters, { enabled = true } = {}) {
   }, []);
 
   const logTargetKeyValue = logTargetKey(filters);
+  const prevLiveRef = useRef(liveEnabled);
 
+  // Reset on target change. Live mode is fed by the streaming effect below
+  // (the `kubectl logs -f` tail provides the initial backlog), so only the
+  // snapshot (non-live) mode performs an explicit fetch here.
   useEffect(() => {
     if (!hasTarget) {
       setLogLines([]);
@@ -157,15 +159,15 @@ export default function useLogsViewer(filters, { enabled = true } = {}) {
       return undefined;
     }
 
-    const timeQuery = buildLogTimeQuery(filters);
-    if (timeQuery.error) {
-      setLogLines([]);
-      setError(timeQuery.error);
-      setLoading(false);
+    if (logTargetKeyRef.current === logTargetKeyValue) {
       return undefined;
     }
 
-    if (logTargetKeyRef.current === logTargetKeyValue) {
+    const timeQuery = buildLogTimeQuery(filters);
+    if (timeQuery.error && !liveEnabledRef.current) {
+      setLogLines([]);
+      setError(timeQuery.error);
+      setLoading(false);
       return undefined;
     }
 
@@ -174,39 +176,83 @@ export default function useLogsViewer(filters, { enabled = true } = {}) {
     initialLoadDoneRef.current = false;
     tailCursorRef.current = null;
     setLogLines([]);
-    fetchLogs({ silent: false, incremental: false });
+    setError("");
+    if (!liveEnabledRef.current) {
+      fetchLogs({ silent: false, incremental: false });
+    }
 
     return undefined;
   }, [hasTarget, logTargetKeyValue, filters, fetchLogs]);
 
+  // When the user toggles live off, load a snapshot for the current target;
+  // toggling it on clears the buffer so the stream repopulates from its tail.
+  useEffect(() => {
+    const wasLive = prevLiveRef.current;
+    prevLiveRef.current = liveEnabled;
+    if (wasLive === liveEnabled || !hasTarget) {
+      return;
+    }
+    setLogLines([]);
+    setError("");
+    tailCursorRef.current = null;
+    if (!liveEnabled) {
+      fetchLogs({ silent: false, incremental: false });
+    }
+  }, [liveEnabled, hasTarget, fetchLogs]);
+
+  // Live mode: follow logs over a Server-Sent Events stream (kubectl logs -f).
   useEffect(() => {
     if (!liveEnabled || !hasTarget) {
       return undefined;
     }
 
+    const controller = new AbortController();
     let cancelled = false;
-    let inFlight = false;
+    const currentFilters = filtersRef.current;
 
-    const tick = () => {
-      if (cancelled || !liveEnabledRef.current || inFlight) {
-        return;
+    const query = { timestamps: "true", tailLines: "200" };
+    const timeQuery = buildLogTimeQuery(currentFilters);
+    if (timeQuery.query?.sinceSeconds) {
+      query.sinceSeconds = timeQuery.query.sinceSeconds;
+    }
+
+    setError("");
+    streamContainerLogs(
+      currentFilters.cluster,
+      currentFilters.namespace,
+      currentFilters.pod,
+      currentFilters.container,
+      {
+        query,
+        signal: controller.signal,
+        onEvent: ({ event, data }) => {
+          if (cancelled) {
+            return;
+          }
+          if (event === "line" && data?.line) {
+            setLogLines((prev) => appendLogLines(prev, [data.line]));
+          } else if (event === "error" && data?.message) {
+            setError(data.message);
+          }
+        },
       }
-      if (!initialLoadDoneRef.current) {
-        return;
-      }
-      inFlight = true;
-      fetchLogs({ silent: true, incremental: true }).finally(() => {
-        inFlight = false;
+    )
+      .catch((streamError) => {
+        if (!cancelled && streamError.name !== "AbortError") {
+          setError(streamError.message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          initialLoadDoneRef.current = true;
+        }
       });
-    };
-
-    const pollTimer = window.setInterval(tick, LIVE_POLL_MS);
 
     return () => {
       cancelled = true;
-      window.clearInterval(pollTimer);
+      controller.abort();
     };
-  }, [liveEnabled, hasTarget, logTargetKeyValue, fetchLogs]);
+  }, [liveEnabled, hasTarget, logTargetKeyValue]);
 
   const refreshLogs = useCallback(() => {
     fetchLogs({ silent: false, incremental: false });

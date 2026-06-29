@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import yaml
-from flask import Blueprint, request
+from flask import Blueprint, Response, request, stream_with_context
 
 from ..cluster_access import custom_cluster_public_id, parse_custom_cluster_db_id
 from ..cluster_store import (
@@ -61,7 +61,7 @@ from ..mock_data import (
 )
 from ..models import Cluster
 from ..response import error_response, success_response
-from ..services.logs_service import fetch_pod_logs, parse_logs_query
+from ..services.logs_service import fetch_pod_logs, parse_logs_query, stream_pod_logs
 from ..services.resource_actions_service import (
     get_deployment_rollout_history,
     get_resource_describe,
@@ -759,3 +759,38 @@ def get_container_logs_route(
     if error:
         return error
     return success_response(data)
+
+
+@clusters_bp.route(
+    "/<cluster_id>/namespaces/<namespace>/pods/<pod_name>/containers/<container_name>/logs/stream",
+    methods=["GET"],
+)
+@require_permission("logs:view")
+@require_cluster_access
+@require_namespace_access
+def stream_container_logs_route(
+    cluster_id: str, namespace: str, pod_name: str, container_name: str
+):
+    """Server-Sent Events endpoint that follows logs via ``kubectl logs -f``."""
+    params, param_error = parse_logs_query(request)
+    if param_error:
+        return param_error
+
+    generator, error = stream_pod_logs(
+        cluster_id=cluster_id,
+        namespace=namespace,
+        pod_name=pod_name,
+        container_name=container_name,
+        params=params,
+    )
+    if error:
+        return error
+
+    response = Response(
+        stream_with_context(generator()),
+        mimetype="text/event-stream",
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    response.headers["Connection"] = "keep-alive"
+    return response

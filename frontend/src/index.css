@@ -1225,6 +1225,17 @@ tr:last-child td {
   flex-shrink: 0;
 }
 
+.resources-issues-filter {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.resources-issues-filter.active {
+  border-color: var(--danger, #c53030);
+  color: var(--danger, #c53030);
+  background: rgba(197, 48, 48, 0.08);
+}
+
 .resource-tab-error {
   color: var(--danger, #c53030);
 }
@@ -2029,6 +2040,30 @@ button:focus-visible {
 .log-viewer {
   padding: 0;
   overflow: hidden;
+}
+
+.log-viewer--maximized {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  margin: 0;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 100vh;
+}
+
+.log-viewer--maximized .log-viewer__frame {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.log-viewer--maximized .log-viewer__scroll {
+  max-height: none;
+  flex: 1;
+  min-height: 0;
 }
 
 .log-viewer__status {
