@@ -6,6 +6,7 @@ import LoadingState from "../components/common/LoadingState.jsx";
 import DataTable from "../components/common/DataTable.jsx";
 import ResourceRowActions from "../components/resources/ResourceRowActions.jsx";
 import {
+  getClusterPodIssues,
   getDeploymentRolloutHistory,
   getResourceDescribe,
   getResourceYaml,
@@ -193,6 +194,8 @@ export default function ResourcesPage({
   const [workloadPodFilter, setWorkloadPodFilter] = useState({ name: "", kind: "" });
   const [search, setSearch] = useState("");
   const [issuesOnly, setIssuesOnly] = useState(false);
+  const [allNsMode, setAllNsMode] = useState(false);
+  const [allNsData, setAllNsData] = useState({ pods: [], loading: false, error: "" });
   const [inspectModal, setInspectModal] = useState(CLOSED_MODAL);
   const [editModal, setEditModal] = useState(CLOSED_EDIT_MODAL);
 
@@ -209,6 +212,36 @@ export default function ResourcesPage({
   const closeEditModal = useCallback(() => {
     setEditModal(CLOSED_EDIT_MODAL);
   }, []);
+
+  const loadAllNsIssues = useCallback(async () => {
+    if (!clusterId) {
+      return;
+    }
+    setAllNsData((prev) => ({ ...prev, loading: true, error: "" }));
+    try {
+      const payload = await getClusterPodIssues(clusterId);
+      setAllNsData({ pods: payload.pods || [], loading: false, error: "" });
+    } catch (err) {
+      setAllNsData({
+        pods: [],
+        loading: false,
+        error: formatAccessError(err.message) || err.message || "Failed to scan namespaces",
+      });
+    }
+  }, [clusterId]);
+
+  // Cross-namespace issues are pods-only; leaving the Pods tab exits the mode.
+  useEffect(() => {
+    if (allNsMode && activeTab !== "pods") {
+      setAllNsMode(false);
+    }
+  }, [allNsMode, activeTab]);
+
+  useEffect(() => {
+    if (allNsMode) {
+      loadAllNsIssues();
+    }
+  }, [allNsMode, loadAllNsIssues]);
 
   const openTextInspect = useCallback(async ({ title, mode, fetchContent }) => {
     setInspectModal({
@@ -388,16 +421,19 @@ export default function ResourcesPage({
       ? { empty: true, message: EMPTY_MESSAGES.noNamespaces }
       : { empty: false };
 
+  const isAllNsPods = allNsMode && activeTab === "pods";
   const podSource = data.resources.pods || [];
-  const visiblePods = workloadPodFilter.name
+  const namespaceScopedPods = workloadPodFilter.name
     ? podsForWorkload(podSource, workloadPodFilter.name)
     : podSource;
+  const visiblePods = isAllNsPods ? allNsData.pods : namespaceScopedPods;
 
   const tableConfig = {
     pods: {
       title: "Pods",
       columns: [
         { key: "name", label: "Pod" },
+        ...(isAllNsPods ? [{ key: "namespace", label: "Namespace" }] : []),
         { key: "status", label: "Status" },
         { key: "ready", label: "Ready" },
         { key: "restarts", label: "Restarts" },
@@ -716,79 +752,128 @@ export default function ResourcesPage({
                   {issuesOnly ? "Issues only ✓" : "Issues only"}
                 </button>
               ) : null}
+              {activeTab === "pods" ? (
+                <button
+                  type="button"
+                  className={`btn-outline btn-sm resources-allns-filter${allNsMode ? " active" : ""}`}
+                  onClick={() => setAllNsMode((prev) => !prev)}
+                  aria-pressed={allNsMode}
+                  title="Scan every namespace in this cluster for pods with issues (CrashLoopBackOff, ImagePullBackOff, ContainerCreating, Pending, Error…)"
+                >
+                  {allNsMode ? "All namespaces ✓" : "All namespaces"}
+                </button>
+              ) : null}
               {onRefreshTab ? (
                 <button
                   type="button"
                   className="btn-outline btn-sm resources-tab-refresh"
-                  onClick={onRefreshTab}
-                  disabled={tabLoading || tabRefreshing}
-                  aria-busy={tabRefreshing}
+                  onClick={isAllNsPods ? loadAllNsIssues : onRefreshTab}
+                  disabled={isAllNsPods ? allNsData.loading : tabLoading || tabRefreshing}
+                  aria-busy={isAllNsPods ? allNsData.loading : tabRefreshing}
                 >
-                  {tabRefreshing ? "Refreshing…" : "Refresh"}
+                  {(isAllNsPods ? allNsData.loading : tabRefreshing) ? "Refreshing…" : "Refresh"}
                 </button>
               ) : null}
             </div>
           </div>
-          {activeTabError ? (
-            <p className="muted empty-state-inline resource-tab-error">{activeTabError}</p>
-          ) : null}
-          {tabLoading && !activeTabHasBeenLoaded ? (
-            <LoadingState label={`Loading ${active?.title || "resources"}...`} />
-          ) : null}
-          {workloadPodFilter.name && activeTab === "pods" ? (
-            <p className="muted resource-pod-filter-hint">
-              Showing pods for {workloadFilterLabel}{" "}
-              <strong>{workloadPodFilter.name}</strong>.{" "}
-              <button
-                type="button"
-                className="btn-text"
-                onClick={() => setWorkloadPodFilter({ name: "", kind: "" })}
-              >
-                Clear filter
-              </button>
-            </p>
-          ) : null}
-          {!tabLoading || activeTabHasBeenLoaded ? (
-            !active || active.rows.length === 0 ? (
-              <p className="muted empty-state-inline">
-                {getEmptyTabMessage({
-                  title: active?.title,
-                  namespace,
-                  workloadPodFilter,
-                  workloadFilterLabel,
-                  isAdmin,
-                  rawCount: rawResourceList.length,
-                  filteredCount: filteredResourceList.length,
-                })}
+          {isAllNsPods ? (
+            <>
+              <p className="muted resource-pod-filter-hint">
+                Showing pods with issues across <strong>all namespaces</strong> in this cluster.{" "}
+                <button type="button" className="btn-text" onClick={() => setAllNsMode(false)}>
+                  Back to {namespace || "namespace"} view
+                </button>
               </p>
-            ) : filteredRows.length === 0 ? (
-              searchTerm ? (
-                <p className="muted empty-state-inline">
-                  No {(active.title || "resources").toLowerCase()} match “{search.trim()}”.{" "}
-                  <button type="button" className="btn-text" onClick={() => setSearch("")}>
-                    Clear search
-                  </button>
-                </p>
+              {allNsData.loading ? (
+                <LoadingState label="Scanning all namespaces for issues..." />
+              ) : allNsData.error ? (
+                <p className="muted empty-state-inline resource-tab-error">{allNsData.error}</p>
+              ) : filteredRows.length === 0 ? (
+                searchTerm ? (
+                  <p className="muted empty-state-inline">
+                    No pods match “{search.trim()}”.{" "}
+                    <button type="button" className="btn-text" onClick={() => setSearch("")}>
+                      Clear search
+                    </button>
+                  </p>
+                ) : (
+                  <p className="muted empty-state-inline">
+                    No pods with issues across any namespace in this cluster. 🎉
+                  </p>
+                )
               ) : (
-                <p className="muted empty-state-inline">
-                  No {(active.title || "resources").toLowerCase()} with issues in the{" "}
-                  {namespace || "selected"} namespace.{" "}
-                  <button type="button" className="btn-text" onClick={() => setIssuesOnly(false)}>
-                    Show all
+                <DataTable
+                  columns={active.columns}
+                  rows={filteredRows}
+                  tableClassName="resources-table"
+                  pageSize={Math.max(filteredRows.length, 1)}
+                />
+              )}
+            </>
+          ) : (
+            <>
+              {activeTabError ? (
+                <p className="muted empty-state-inline resource-tab-error">{activeTabError}</p>
+              ) : null}
+              {tabLoading && !activeTabHasBeenLoaded ? (
+                <LoadingState label={`Loading ${active?.title || "resources"}...`} />
+              ) : null}
+              {workloadPodFilter.name && activeTab === "pods" ? (
+                <p className="muted resource-pod-filter-hint">
+                  Showing pods for {workloadFilterLabel}{" "}
+                  <strong>{workloadPodFilter.name}</strong>.{" "}
+                  <button
+                    type="button"
+                    className="btn-text"
+                    onClick={() => setWorkloadPodFilter({ name: "", kind: "" })}
+                  >
+                    Clear filter
                   </button>
                 </p>
-              )
-            ) : (
-              <DataTable
-                columns={active.columns}
-                rows={filteredRows}
-                tableClassName="resources-table"
-                // While a search term or the issues filter is active, show every
-                // match on one page so a result is never hidden on a later page.
-                pageSize={searchTerm || issuesOnly ? Math.max(filteredRows.length, 1) : undefined}
-              />
-            )
-          ) : null}
+              ) : null}
+              {!tabLoading || activeTabHasBeenLoaded ? (
+                !active || active.rows.length === 0 ? (
+                  <p className="muted empty-state-inline">
+                    {getEmptyTabMessage({
+                      title: active?.title,
+                      namespace,
+                      workloadPodFilter,
+                      workloadFilterLabel,
+                      isAdmin,
+                      rawCount: rawResourceList.length,
+                      filteredCount: filteredResourceList.length,
+                    })}
+                  </p>
+                ) : filteredRows.length === 0 ? (
+                  searchTerm ? (
+                    <p className="muted empty-state-inline">
+                      No {(active.title || "resources").toLowerCase()} match “{search.trim()}”.{" "}
+                      <button type="button" className="btn-text" onClick={() => setSearch("")}>
+                        Clear search
+                      </button>
+                    </p>
+                  ) : (
+                    <p className="muted empty-state-inline">
+                      No {(active.title || "resources").toLowerCase()} with issues in the{" "}
+                      {namespace || "selected"} namespace.{" "}
+                      <button type="button" className="btn-text" onClick={() => setIssuesOnly(false)}>
+                        Show all
+                      </button>
+                    </p>
+                  )
+                ) : (
+                  <DataTable
+                    columns={active.columns}
+                    rows={filteredRows}
+                    tableClassName="resources-table"
+                    // While a search term or the issues filter is active, show every
+                    // match on one page so a result is never hidden on a later page.
+                    pageSize={searchTerm || issuesOnly ? Math.max(filteredRows.length, 1) : undefined}
+                  />
+                )
+              ) : null}
+            </>
+          )}
           {activeTab === "services" &&
           tabKeys.includes("services") &&
           (data.resources.services || []).some((s) => s.canViewPorts === false || !(s.ports || []).length) ? (

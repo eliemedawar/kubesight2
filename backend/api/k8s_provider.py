@@ -850,6 +850,21 @@ def is_failed_pod_status(status: Optional[str]) -> bool:
     return bool(status and _FAILED_POD_STATUS_RE.search(status))
 
 
+# Pod display statuses that mean the pod is fine. Anything else (CrashLoopBackOff,
+# ImagePullBackOff/ErrImagePull, ContainerCreating, Pending, Error, ExitCode:x,
+# Terminating, NotReady, Init:…) counts as an issue worth surfacing.
+_HEALTHY_POD_STATUSES = {"running", "completed", "succeeded"}
+
+
+def is_issue_pod_status(status: Optional[str]) -> bool:
+    if not status:
+        return False
+    normalized = str(status).strip().lower()
+    if not normalized or normalized == "-":
+        return False
+    return normalized not in _HEALTHY_POD_STATUSES
+
+
 def _pod_has_ready_condition(status: Dict[str, Any]) -> bool:
     for condition in status.get("conditions") or []:
         if condition.get("type") == "Ready":
@@ -1363,6 +1378,42 @@ def namespace_resource_list_from_k8s(
         items = _build_namespace_cronjobs(namespace, cj_items)
 
     return {"namespace": namespace, list_key: items}
+
+
+def cluster_pod_issues_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
+    """Pods across *all* namespaces whose display status indicates a problem.
+
+    A single ``kubectl get pods --all-namespaces`` call (plus one ``top`` call)
+    backs the cross-namespace "issues" view so users don't have to open each
+    namespace looking for CrashLoopBackOff / ImagePullBackOff / etc.
+    """
+    from collections import defaultdict
+    from .k8s_metrics import fetch_pod_top_metrics
+
+    try:
+        output = _run_for_access(access, ["get", "pods", "--all-namespaces", "-o", "json"])
+        pod_items = json.loads(output).get("items", [])
+    except K8sCommandError:
+        pod_items = []
+
+    try:
+        top_by_pod = fetch_pod_top_metrics(access)
+    except Exception:
+        top_by_pod = {}
+
+    by_namespace: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for pod in pod_items:
+        ns = (pod.get("metadata") or {}).get("namespace") or "default"
+        by_namespace[ns].append(pod)
+
+    pods: List[Dict[str, Any]] = []
+    for ns, items in by_namespace.items():
+        for row in _build_namespace_pods(ns, items, top_by_pod):
+            if is_issue_pod_status(row.get("status")):
+                pods.append(row)
+
+    pods.sort(key=lambda p: ((p.get("namespace") or ""), (p.get("name") or "")))
+    return {"pods": pods, "count": len(pods)}
 
 
 def _event_timestamp_value(event: Dict[str, Any]) -> float:

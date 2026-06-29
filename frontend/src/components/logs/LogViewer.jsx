@@ -3,7 +3,6 @@ import {
   filterLogLinesByLevel,
   filterLogLinesBySearch,
   formatLogLinesToLocalTime,
-  getLogDisplayTimezone,
   stripLogTimestamps,
 } from "../../utils/logFormat.js";
 
@@ -88,7 +87,6 @@ export default function LogViewer({
     const lastLine = displayLines[displayLines.length - 1] ?? "";
     return displayLines.length * 100000 + lastLine.length + lastLine.charCodeAt(0);
   }, [displayLines]);
-  const timezoneLabel = useMemo(() => getLogDisplayTimezone(), []);
   const hasLines = displayLines.length > 0;
   const hasRawLines = lines.length > 0;
 
@@ -229,15 +227,6 @@ export default function LogViewer({
             {isMaximized ? "Exit fullscreen" : "Fullscreen"}
           </button>
         </div>
-        {streaming ? (
-          <div className="log-viewer__meta-badges log-viewer__meta-badges--inline">
-            <div className="log-viewer__live-badge" aria-label="Live log stream">
-              <span className="log-viewer__live-dot" aria-hidden="true" />
-              Live
-            </div>
-            <span className="log-viewer__timezone muted">Local time · {timezoneLabel}</span>
-          </div>
-        ) : null}
       </div>
 
       {loading && !hasRawLines ? <p className="muted log-viewer__status">Loading logs…</p> : null}

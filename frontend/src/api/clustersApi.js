@@ -46,6 +46,9 @@ export const getResourceListByType = (clusterId, namespace, resourceType) =>
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources/${encodeURIComponent(resourceType)}`
   );
 
+export const getClusterPodIssues = (clusterId) =>
+  request(`/api/clusters/${encodeURIComponent(clusterId)}/pod-issues`);
+
 export const getLogs = (query) => request("/api/logs", { query });
 
 export function listNamespacePodsForLogs(clusterId, namespace) {

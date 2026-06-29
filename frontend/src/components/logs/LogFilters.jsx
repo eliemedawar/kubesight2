@@ -139,7 +139,7 @@ export default function LogFilters({
       <div className="log-filters-toggles">
         <button
           type="button"
-          className={liveEnabled ? "btn-primary btn-sm" : "btn-outline btn-sm"}
+          className={liveEnabled ? "btn-sm log-live-toggle--on" : "btn-outline btn-sm"}
           onClick={onLiveToggle}
           aria-pressed={liveEnabled}
         >

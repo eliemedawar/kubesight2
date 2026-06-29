@@ -26,7 +26,9 @@ from ..db import db
 from ..k8s_provider import (
     K8sCommandError,
     cluster_overview_from_k8s,
+    cluster_pod_issues_from_k8s,
     invalidate_cluster_list_cache,
+    is_issue_pod_status,
     list_clusters_from_k8s,
     list_namespaces_from_k8s,
     list_configmaps_secrets_from_k8s,
@@ -535,6 +537,57 @@ def namespace_resource_list(cluster_id: str, namespace: str, resource_type: str)
     if user:
         payload = filter_namespace_resources(user, cluster_id, payload)
     return success_response(payload)
+
+
+@clusters_bp.route("/<cluster_id>/pod-issues", methods=["GET"])
+@require_permission("resources:view")
+@require_cluster_access
+def cluster_pod_issues(cluster_id: str):
+    """Pods with a problem status across every namespace the user can see."""
+    user = get_current_user()
+
+    access, err = _resolve_cluster_access_or_error(cluster_id)
+    if err:
+        return err
+    if access:
+        try:
+            payload = cluster_pod_issues_from_k8s(access)
+        except K8sCommandError as exc:
+            return error_response(f"Failed to scan namespaces for issues: {exc}", 503)
+
+        if user and not is_admin(user):
+            by_namespace: dict = {}
+            for pod in payload.get("pods", []):
+                by_namespace.setdefault(pod.get("namespace") or "", []).append(pod)
+            visible: list = []
+            for ns, pods in by_namespace.items():
+                if not ns or not can_access_namespace(user, cluster_id, ns):
+                    continue
+                filtered = filter_namespace_resources(
+                    user, cluster_id, {"namespace": ns, "pods": pods}
+                )
+                visible.extend(filtered.get("pods", []))
+            payload = {"pods": visible, "count": len(visible)}
+        return success_response({"clusterId": cluster_id, **payload})
+
+    # Mock mode: scan the canned namespace resources for issue statuses.
+    cluster_resources = NAMESPACE_RESOURCES.get(cluster_id) or {}
+    pods: list = []
+    for namespace, resources in cluster_resources.items():
+        if user and not is_admin(user) and not can_access_namespace(user, cluster_id, namespace):
+            continue
+        ns_pods = [
+            {**pod, "namespace": pod.get("namespace") or namespace}
+            for pod in (resources.get("pods") or [])
+            if is_issue_pod_status(pod.get("status"))
+        ]
+        if user and not is_admin(user):
+            ns_pods = filter_namespace_resources(
+                user, cluster_id, {"namespace": namespace, "pods": ns_pods}
+            ).get("pods", [])
+        pods.extend(ns_pods)
+    pods.sort(key=lambda p: ((p.get("namespace") or ""), (p.get("name") or "")))
+    return success_response({"clusterId": cluster_id, "pods": pods, "count": len(pods)})
 
 
 @clusters_bp.route(
