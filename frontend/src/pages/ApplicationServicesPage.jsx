@@ -567,6 +567,7 @@ function TopologyEditor({ topology, onChange }) {
         <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Add component</button>
       </div>
       <p className="muted topo-canvas-hint">
+        Components are created automatically from the deployments and pods you link below.
         Drag a box by its header to move it. Drag from the <span className="topo-handle-legend">●</span> handle on the right
         of a box to another box to connect them. Click a connection to remove it.
       </p>
@@ -637,10 +638,11 @@ function TopologyEditor({ topology, onChange }) {
             {nodes.map((node) => {
               if (typeof node.x !== "number") return null;
               const isLinkTarget = linking && linking.fromTempId !== node.tempId;
+              const isResource = Boolean(node.linkedDeployment);
               return (
                 <div
                   key={node.tempId}
-                  className={`topo-canvas-node${linking ? " is-linkable" : ""}`}
+                  className={`topo-canvas-node${linking ? " is-linkable" : ""}${isResource ? " is-resource" : ""}`}
                   style={{ left: node.x, top: node.y, width: E_NODE_W, height: E_NODE_H }}
                   onPointerEnter={() => { if (isLinkTarget) linkTargetRef.current = node.tempId; }}
                   onPointerLeave={() => { if (linkTargetRef.current === node.tempId) linkTargetRef.current = null; }}
@@ -648,24 +650,41 @@ function TopologyEditor({ topology, onChange }) {
                 >
                   <div className="topo-canvas-node-header" onPointerDown={(e) => onNodePointerDown(e, node)}>
                     <span className="topo-grip">⠿</span>
-                    <button type="button" className="topo-node-del" onClick={() => removeNode(node.tempId)} title="Remove component">✕</button>
+                    {isResource ? (
+                      <span className={`topo-node-kind topo-node-kind--${node.type === "pod" ? "pod" : "deployment"}`}>
+                        {node.type === "pod" ? "Pod" : "Deployment"}
+                      </span>
+                    ) : (
+                      <button type="button" className="topo-node-del" onClick={() => removeNode(node.tempId)} title="Remove component">✕</button>
+                    )}
                   </div>
-                  <input
-                    className="topo-canvas-input topo-canvas-input--name"
-                    value={node.name}
-                    onChange={(e) => updateNode(node.tempId, "name", e.target.value)}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    placeholder="Name *"
-                    maxLength={120}
-                  />
-                  <input
-                    className="topo-canvas-input"
-                    value={node.type || ""}
-                    onChange={(e) => updateNode(node.tempId, "type", e.target.value)}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    placeholder="Type (optional)"
-                    maxLength={80}
-                  />
+                  {isResource ? (
+                    <>
+                      <div className="topo-canvas-resource-name" title={node.name}>{node.name}</div>
+                      <div className="topo-canvas-resource-meta" title={`${node.linkedNamespace || ""}`}>
+                        {node.linkedNamespace || "—"}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <input
+                        className="topo-canvas-input topo-canvas-input--name"
+                        value={node.name}
+                        onChange={(e) => updateNode(node.tempId, "name", e.target.value)}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        placeholder="Name *"
+                        maxLength={120}
+                      />
+                      <input
+                        className="topo-canvas-input"
+                        value={node.type || ""}
+                        onChange={(e) => updateNode(node.tempId, "type", e.target.value)}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        placeholder="Type (optional)"
+                        maxLength={80}
+                      />
+                    </>
+                  )}
                   <div
                     className="topo-canvas-handle"
                     title="Drag to connect"
@@ -690,6 +709,9 @@ function initTopologyFromService(service) {
     name: n.name,
     type: n.type || "",
     description: n.description || "",
+    linkedClusterId: n.linkedClusterId || null,
+    linkedNamespace: n.linkedNamespace || null,
+    linkedDeployment: n.linkedDeployment || null,
     x: typeof n.positionX === "number" ? n.positionX : null,
     y: typeof n.positionY === "number" ? n.positionY : null,
   }));
@@ -700,12 +722,81 @@ function initTopologyFromService(service) {
   return { nodes, edges };
 }
 
+// ─── Linked-resource ↔ topology node sync ────────────────────────────────────
+// Each linked resource (deployment/pod) is mirrored as a topology component.
+// We key the mirror node off the resource identity (kind/cluster/ns/name), which
+// is persisted via the node's linked* fields so the link survives reload.
+
+const RES_SEP = "::";
+
+function resourceKey(dep) {
+  const kind = dep.kind || "deployment";
+  return [kind, dep.clusterId, dep.namespace, dep.deploymentName].join(RES_SEP);
+}
+
+function nodeResourceKey(node) {
+  if (!node.linkedDeployment || !node.linkedClusterId) return null;
+  const kind = (node.type || "deployment").toLowerCase() === "pod" ? "pod" : "deployment";
+  return [kind, node.linkedClusterId, node.linkedNamespace, node.linkedDeployment].join(RES_SEP);
+}
+
+// Reconcile topology nodes with the set of linked resources: add a component for
+// each new resource, drop components whose resource was unlinked, and keep any
+// manually-added (non-resource) components untouched.
+function syncTopologyWithResources(topology, deployments) {
+  const nodes = topology.nodes || [];
+  const edges = topology.edges || [];
+  const wantKeys = new Set(deployments.map(resourceKey));
+
+  // Keep manual components and resource components that are still linked.
+  const kept = nodes.filter((n) => {
+    const k = nodeResourceKey(n);
+    return k === null || wantKeys.has(k);
+  });
+  const haveKeys = new Set(kept.map(nodeResourceKey).filter(Boolean));
+
+  // Add a component for each newly linked resource.
+  const additions = [];
+  deployments.forEach((dep) => {
+    const k = resourceKey(dep);
+    if (haveKeys.has(k)) return;
+    haveKeys.add(k);
+    const idx = kept.length + additions.length;
+    additions.push({
+      tempId: newTempId(),
+      name: dep.deploymentName,
+      type: dep.kind || "deployment",
+      description: "",
+      linkedClusterId: dep.clusterId,
+      linkedNamespace: dep.namespace,
+      linkedDeployment: dep.deploymentName,
+      x: 40 + (idx % 4) * (E_NODE_W + 40),
+      y: 40 + Math.floor(idx / 4) * (E_NODE_H + 48),
+    });
+  });
+
+  const nextNodes = [...kept, ...additions];
+  const keptIds = new Set(nextNodes.map((n) => n.tempId));
+  const nextEdges = edges.filter((e) => keptIds.has(e.sourceTempId) && keptIds.has(e.targetTempId));
+  return { nodes: nextNodes, edges: nextEdges };
+}
+
 function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }) {
   const isEdit = Boolean(service?.id);
   const [name, setName] = useState(service?.name || "");
   const [description, setDescription] = useState(service?.description || "");
   const [deployments, setDeployments] = useState(service?.deployments || []);
-  const [topology, setTopology] = useState(() => initTopologyFromService(service));
+  // Mirror linked resources into the topology canvas on open so existing
+  // services pick up a component per linked deployment/pod.
+  const [topology, setTopology] = useState(() =>
+    syncTopologyWithResources(initTopologyFromService(service), service?.deployments || [])
+  );
+
+  // Adding/removing a linked resource adds/removes its mirrored component.
+  const handleDeploymentsChange = (next) => {
+    setDeployments(next);
+    setTopology((topo) => syncTopologyWithResources(topo, next));
+  };
 
   const handleSubmit = () => {
     if (!name.trim()) return;
@@ -721,6 +812,9 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
             name: n.name.trim(),
             type: n.type.trim() || undefined,
             description: n.description.trim() || undefined,
+            linkedClusterId: n.linkedClusterId || undefined,
+            linkedNamespace: n.linkedNamespace || undefined,
+            linkedDeployment: n.linkedDeployment || undefined,
             positionX: typeof n.x === "number" ? Math.round(n.x) : undefined,
             positionY: typeof n.y === "number" ? Math.round(n.y) : undefined,
           })),
@@ -771,7 +865,7 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
 
         <section className="form-section">
           <h4>Linked resources</h4>
-          <DeploymentPicker deployments={deployments} onChange={setDeployments} canEdit clusters={clusters} />
+          <DeploymentPicker deployments={deployments} onChange={handleDeploymentsChange} canEdit clusters={clusters} />
         </section>
 
         <div className="modal-actions">
