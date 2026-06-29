@@ -805,7 +805,7 @@ export default function ResourcesPage({
                 <DataTable
                   columns={active.columns}
                   rows={filteredRows}
-                  tableClassName="resources-table"
+                  tableClassName="resources-table resources-table--allns"
                   pageSize={Math.max(filteredRows.length, 1)}
                 />
               )}

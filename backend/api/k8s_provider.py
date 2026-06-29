@@ -618,6 +618,89 @@ def list_nodes_from_k8s(access: ClusterAccess) -> List[Dict[str, str]]:
     return items
 
 
+_NODE_HEALTH_ORDER = {"critical": 0, "warning": 1, "healthy": 2}
+
+
+def _node_roles(labels: Dict[str, Any]) -> List[str]:
+    roles = sorted(
+        key.split("/", 1)[1]
+        for key in labels
+        if key.startswith("node-role.kubernetes.io/") and "/" in key and key.split("/", 1)[1]
+    )
+    return roles or ["worker"]
+
+
+def build_node_health(
+    node_items: List[Dict[str, Any]],
+    top_by_name: Optional[Dict[str, Dict[str, float]]] = None,
+) -> List[Dict[str, Any]]:
+    """Per-node CPU/memory usage + readiness for the dashboard Node Health widget."""
+    from .k8s_metrics import _memory_to_mib
+
+    top_by_name = top_by_name or {}
+    rows: List[Dict[str, Any]] = []
+    for node in node_items:
+        meta = node.get("metadata", {}) or {}
+        status = node.get("status", {}) or {}
+        name = meta.get("name", "unknown")
+        conditions = status.get("conditions", []) or []
+        ready = any(
+            c.get("type") == "Ready" and c.get("status") == "True" for c in conditions
+        )
+        capacity = status.get("capacity", {}) or {}
+        allocatable = status.get("allocatable", {}) or {}
+
+        mem_total_mib = _memory_to_mib(str(allocatable.get("memory") or capacity.get("memory") or "0"))
+        cpu_total = _cpu_to_cores(str(allocatable.get("cpu") or capacity.get("cpu") or "0"))
+
+        usage = top_by_name.get(name, {})
+        mem_used_mib = float(usage.get("mem_mib") or 0.0)
+        cpu_used = float(usage.get("cpu") or 0.0)
+        mem_avail_mib = max(mem_total_mib - mem_used_mib, 0.0)
+        mem_pct = round(mem_used_mib / mem_total_mib * 100, 1) if mem_total_mib > 0 else None
+        cpu_pct = round(cpu_used / cpu_total * 100, 1) if cpu_total > 0 else None
+
+        if not ready:
+            node_status = "critical"
+        elif (mem_pct is not None and mem_pct >= 85) or (cpu_pct is not None and cpu_pct >= 90):
+            node_status = "warning"
+        else:
+            node_status = "healthy"
+
+        rows.append(
+            {
+                "name": name,
+                "status": node_status,
+                "ready": ready,
+                "roles": _node_roles(meta.get("labels", {}) or {}),
+                "kubeletVersion": (status.get("nodeInfo", {}) or {}).get("kubeletVersion") or "",
+                "podsCapacity": int(capacity.get("pods") or 0),
+                "cpuUsedCores": round(cpu_used, 2),
+                "cpuTotalCores": round(cpu_total, 2),
+                "cpuPercent": cpu_pct,
+                "memoryUsedMiB": round(mem_used_mib),
+                "memoryTotalMiB": round(mem_total_mib),
+                "memoryAvailableMiB": round(mem_avail_mib),
+                "memoryPercent": mem_pct,
+            }
+        )
+
+    rows.sort(key=lambda r: (_NODE_HEALTH_ORDER.get(r["status"], 3), r["name"]))
+    return rows
+
+
+def node_health_from_k8s(access: ClusterAccess) -> List[Dict[str, Any]]:
+    from .k8s_metrics import fetch_node_top_per_node
+
+    output = _run_for_access(access, ["get", "nodes", "-o", "json"])
+    node_items = json.loads(output).get("items", [])
+    try:
+        top_by_name = fetch_node_top_per_node(access)
+    except Exception:
+        top_by_name = {}
+    return build_node_health(node_items, top_by_name)
+
+
 def list_storage_classes_from_k8s(access: ClusterAccess) -> List[Dict[str, Any]]:
     output = _run_for_access(access, ["get", "storageclass", "-o", "json"])
     data = json.loads(output)

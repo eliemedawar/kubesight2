@@ -3493,6 +3493,25 @@ button:focus-visible {
   width: 11%;
 }
 
+/* All-namespaces view adds a Namespace column, so trim the wider columns to
+   keep the whole table within view (no horizontal scroll, Actions visible). */
+.resources-page .resources-table--allns .col-name {
+  width: 12%;
+}
+.resources-page .resources-table--allns .col-namespace {
+  width: 10%;
+}
+.resources-page .resources-table--allns .col-image {
+  width: 13%;
+}
+.resources-page .resources-table--allns .col-node {
+  width: 8%;
+}
+.resources-page .resources-table--allns .col-cpu,
+.resources-page .resources-table--allns .col-memory {
+  width: 8%;
+}
+
 .resources-page .resources-table .col-restarts,
 .resources-page .resources-table .col-age,
 .resources-page .resources-table .col-upToDate,
@@ -6238,6 +6257,45 @@ kbd {
 }
 .topo-canvas-handle:hover {
   box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.3);
+}
+/* Components mirrored from a linked deployment/pod. */
+.topo-canvas-node.is-resource {
+  border-color: #3b5168;
+  background: linear-gradient(180deg, #1e293b 0%, #1b2536 100%);
+}
+.topo-node-kind {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  color: #cbd5e1;
+  background: #334155;
+}
+.topo-node-kind--deployment {
+  color: #bae6fd;
+  background: rgba(56, 189, 248, 0.18);
+}
+.topo-node-kind--pod {
+  color: #ddd6fe;
+  background: rgba(139, 92, 246, 0.18);
+}
+.topo-canvas-resource-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0.1rem 0.05rem 0;
+}
+.topo-canvas-resource-meta {
+  font-size: 0.7rem;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── DataTable pagination ─────────────────────────────────── */

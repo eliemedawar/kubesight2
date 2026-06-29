@@ -289,6 +289,34 @@ def fetch_node_top_usage(access: Union[ClusterAccess, str], timeout: Optional[in
     return cpu_cores, memory_mib
 
 
+def fetch_node_top_per_node(
+    access: Union[ClusterAccess, str], timeout: Optional[int] = None
+) -> Dict[str, Dict[str, float]]:
+    """Return per-node usage {name: {"cpu": cores, "mem_mib": MiB}} from kubectl top nodes."""
+    context_name, kubeconfig_path = _access_kwargs(access)
+    result: Dict[str, Dict[str, float]] = {}
+    try:
+        output = _run_kubectl(
+            ["top", "nodes", "--no-headers"],
+            context=context_name,
+            kubeconfig_path=kubeconfig_path,
+            timeout=timeout,
+        )
+    except K8sCommandError:
+        return result
+
+    # Columns: NAME  CPU(cores)  CPU%  MEMORY(bytes)  MEMORY%
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        result[parts[0]] = {
+            "cpu": _cpu_to_cores(parts[1]),
+            "mem_mib": _memory_to_mib(parts[3]),
+        }
+    return result
+
+
 def metrics_server_available(access: Union[ClusterAccess, str]) -> bool:
     context_name, kubeconfig_path = _access_kwargs(access)
     try:

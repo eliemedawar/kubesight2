@@ -1545,6 +1545,12 @@ body.has-bundle-fab .page-content.ops-layout {
 .ops-bar { height: 5px; border-radius: 3px; background: #222838; overflow: hidden; }
 .ops-bar-fill { display: block; height: 100%; border-radius: 3px; }
 
+/* Node Health table has 5 columns (node, status, memory, free, usage bar). */
+.ops-table-head--nodes, .ops-table-row--nodes { grid-template-columns: 1.5fr 0.9fr 1.5fr 0.8fr 1.2fr; }
+.ops-table-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ops-table-mem { font-size: 11.5px; color: var(--od-sub); }
+.ops-table-free { font-size: 11.5px; color: var(--od-sub); }
+
 /* ── events ── */
 .ops-events { padding: 6px 8px; max-height: 360px; overflow-y: auto; }
 .ops-event { display: flex; gap: 11px; padding: 11px 12px; border-radius: 9px; }

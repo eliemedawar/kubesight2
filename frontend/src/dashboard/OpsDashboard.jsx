@@ -32,6 +32,12 @@ function fmtThroughput(value) {
   return `${Math.round(v)} KB/s`;
 }
 
+// Format a memory figure given in MiB as GiB (e.g. 31744 -> "31.0 GiB").
+function formatGiB(mib) {
+  if (mib == null || Number.isNaN(Number(mib))) return "—";
+  return `${(Number(mib) / 1024).toFixed(1)} GiB`;
+}
+
 // Simple trend marker from the rolling series (recent vs. a few samples back).
 function trend(arr) {
   if (!arr || arr.length < 6) return null;
@@ -77,6 +83,7 @@ export default function OpsDashboard({
   const version = summary?.version || {};
   const clusterInfo = summary?.clusterInfo || {};
   const namespaces = summary?.namespaces || [];
+  const nodeHealth = summary?.nodeHealth || [];
   const events = useMemo(
     () => [...(summary?.operationalEvents || []), ...(summary?.recentActivity || [])].slice(0, 10),
     [summary?.operationalEvents, summary?.recentActivity]
@@ -88,7 +95,6 @@ export default function OpsDashboard({
   const cpuPeak = series?.cpu?.length ? Math.round(Math.max(...series.cpu)) : null;
   const netIn = series?.netIn || [];
   const netOut = series?.netOut || [];
-  const maxNsPods = Math.max(1, ...namespaces.map((ns) => ns.pods || 0));
 
   const cpuTrend = trend(series?.cpu);
   const memTrend = trend(series?.mem);
@@ -332,41 +338,48 @@ export default function OpsDashboard({
         />
       </section>
 
-      {/* ── Namespace health + events ─────────────────────────── */}
+      {/* ── Node health + events ──────────────────────────────── */}
       <div className="ops-grid ops-grid--wide-left">
         <section className="ops-panel ops-panel--flush">
           <div className="ops-panel-bar">
-            <div className="ops-panel-title">Namespace Health</div>
-            <span className="ops-panel-count">{namespaces.length} namespaces</span>
+            <div className="ops-panel-title">Node Health</div>
+            <span className="ops-panel-count">{nodeHealth.length} nodes</span>
           </div>
-          <div className="ops-table-head">
-            <span>NAMESPACE</span>
+          <div className="ops-table-head ops-table-head--nodes">
+            <span>NODE</span>
             <span>STATUS</span>
-            <span>PODS</span>
-            <span>SHARE</span>
+            <span>MEMORY (USED / TOTAL)</span>
+            <span>FREE</span>
+            <span>USAGE</span>
           </div>
-          {namespaces.length ? (
-            namespaces.map((ns) => (
-              <div className="ops-table-row" key={ns.name}>
-                <span className="ops-mono ops-table-name">{ns.name}</span>
-                <span className="ops-status" style={{ color: statusColor(ns.status) }}>
-                  <span className="ops-dot" style={{ "--pill": statusColor(ns.status) }} />
-                  {statusLabel(ns.status)}
+          {nodeHealth.length ? (
+            nodeHealth.map((node) => (
+              <div className="ops-table-row ops-table-row--nodes" key={node.name}>
+                <span className="ops-mono ops-table-name" title={node.name}>
+                  {node.name}
                 </span>
-                <span className="ops-mono ops-table-pods">{ns.pods}</span>
+                <span className="ops-status" style={{ color: statusColor(node.status) }}>
+                  <span className="ops-dot" style={{ "--pill": statusColor(node.status) }} />
+                  {statusLabel(node.status)}
+                </span>
+                <span className="ops-mono ops-table-mem">
+                  {formatGiB(node.memoryUsedMiB)} / {formatGiB(node.memoryTotalMiB)}
+                  {node.memoryPercent != null ? ` · ${node.memoryPercent}%` : ""}
+                </span>
+                <span className="ops-mono ops-table-free">{formatGiB(node.memoryAvailableMiB)}</span>
                 <span className="ops-bar">
                   <span
                     className="ops-bar-fill"
                     style={{
-                      width: `${Math.round(((ns.pods || 0) / maxNsPods) * 100)}%`,
-                      background: statusColor(ns.status),
+                      width: `${Math.min(node.memoryPercent ?? 0, 100)}%`,
+                      background: statusColor(node.status),
                     }}
                   />
                 </span>
               </div>
             ))
           ) : (
-            <div className="ops-empty">No namespaces available for this cluster.</div>
+            <div className="ops-empty">No node metrics available for this cluster.</div>
           )}
         </section>
 

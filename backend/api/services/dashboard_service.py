@@ -19,10 +19,11 @@ from ..access_engine import (
 )
 from ..k8s_provider import (
     K8sCommandError,
+    node_health_from_k8s,
     resolve_cluster_access,
     should_use_real_k8s,
 )
-from ..mock_data import ALERTS, CLUSTER_OVERVIEWS, CLUSTERS, NAMESPACES
+from ..mock_data import ALERTS, CLUSTER_NODES, CLUSTER_OVERVIEWS, CLUSTERS, NAMESPACES
 from ..models import AuditLog, User
 from ..serializers import audit_log_to_dict
 from ..dashboard_intelligence import evaluate_version_status, utilization_from_overview_resources
@@ -509,6 +510,31 @@ def _mock_namespaces(cluster_id: str) -> List[Dict[str, Any]]:
     return NAMESPACES.get(cluster_id, [])
 
 
+def _mock_node_health(cluster_id: str) -> List[Dict[str, Any]]:
+    """Best-effort node health for mock clusters (no live metrics available)."""
+    rows: List[Dict[str, Any]] = []
+    for node in CLUSTER_NODES.get(cluster_id, []):
+        ready = str(node.get("status") or "").lower() == "ready"
+        rows.append(
+            {
+                "name": node.get("name", "unknown"),
+                "status": "healthy" if ready else "critical",
+                "ready": ready,
+                "roles": node.get("roles") or ["worker"],
+                "kubeletVersion": node.get("kubeletVersion") or "",
+                "podsCapacity": int(node.get("podsCapacity") or 0),
+                "cpuUsedCores": node.get("cpuUsedCores"),
+                "cpuTotalCores": node.get("cpuTotalCores"),
+                "cpuPercent": node.get("cpuPercent"),
+                "memoryUsedMiB": node.get("memoryUsedMiB"),
+                "memoryTotalMiB": node.get("memoryTotalMiB"),
+                "memoryAvailableMiB": node.get("memoryAvailableMiB"),
+                "memoryPercent": node.get("memoryPercent"),
+            }
+        )
+    return rows
+
+
 def _run_with_app_context(app, fn, *args, **kwargs):
     with app.app_context():
         return fn(*args, **kwargs)
@@ -686,6 +712,7 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
     parallel_latest_version: str = "unknown"
 
     cluster_unreachable = False
+    node_health: List[Dict[str, Any]] = []
     if should_use_real_k8s(cluster_id):
         access = resolve_cluster_access(cluster_id)
         if not access:
@@ -711,6 +738,11 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
             )
         except K8sCommandError as exc:
             return None, f"Failed to load dashboard summary: {exc}", 503
+        if not cluster_unreachable:
+            try:
+                node_health = node_health_from_k8s(access)
+            except K8sCommandError:
+                node_health = []
     else:
         cluster = _cluster_record(cluster_id)
         if not cluster:
@@ -721,6 +753,7 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         cpu_usage, memory_usage = utilization_from_overview_resources(
             (overview or {}).get("resources") or {}
         )
+        node_health = _mock_node_health(cluster_id)
 
     if user:
         namespaces = filter_namespaces_for_user(user, cluster_id, namespaces)
@@ -900,6 +933,7 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
             "lastSync": cluster.get("lastSync") if cluster else now,
         },
         "namespaces": _namespace_health(namespaces, alerts),
+        "nodeHealth": node_health,
         "recentActivity": _recent_activity(user, cluster_id),
         "operationalEvents": _operational_events(user, cluster_id),
         "userActivity": _user_activity(user),

@@ -523,6 +523,74 @@ export function NamespaceHealthWidget({ summary }) {
   );
 }
 
+function formatGiB(mib) {
+  if (mib == null || Number.isNaN(Number(mib))) {
+    return "—";
+  }
+  return `${(Number(mib) / 1024).toFixed(1)} GiB`;
+}
+
+function memoryBarTone(percent) {
+  if (percent == null) return "default";
+  if (percent >= 85) return "danger";
+  if (percent >= 70) return "warn";
+  return "ok";
+}
+
+export function NodeHealthWidget({ summary }) {
+  const nodes = summary?.nodeHealth || [];
+  return (
+    <InfoCard title="Node Health">
+      {nodes.length ? (
+        <ul className="dashboard-node-list">
+          {nodes.map((node) => {
+            const pct = node.memoryPercent;
+            const tone = memoryBarTone(pct);
+            return (
+              <li key={node.name} className={`dashboard-node-item status-${statusTone(node.status)}`}>
+                <div className="dashboard-node-head">
+                  <div className="dashboard-node-title">
+                    <strong>{node.name}</strong>
+                    {node.roles?.length ? (
+                      <span className="dashboard-node-roles">{node.roles.join(", ")}</span>
+                    ) : null}
+                  </div>
+                  <StatusBadge status={node.status} label={HEALTH_LABELS[node.status]} />
+                </div>
+                <div className="dashboard-node-metric">
+                  <div className="dashboard-node-metric-label">
+                    <span>Memory</span>
+                    <span>
+                      {formatGiB(node.memoryUsedMiB)} / {formatGiB(node.memoryTotalMiB)}
+                      {pct != null ? ` · ${pct}%` : ""}
+                    </span>
+                  </div>
+                  <div className="dashboard-node-bar">
+                    <div
+                      className={`dashboard-node-bar-fill tone-${tone}`}
+                      style={{ width: `${Math.min(pct ?? 0, 100)}%` }}
+                    />
+                  </div>
+                </div>
+                <div className="dashboard-node-stats">
+                  <span>{formatGiB(node.memoryAvailableMiB)} free</span>
+                  <span>
+                    CPU {node.cpuUsedCores ?? "—"} / {node.cpuTotalCores ?? "—"}
+                    {node.cpuPercent != null ? ` (${node.cpuPercent}%)` : ""}
+                  </span>
+                  {node.kubeletVersion ? <span>{node.kubeletVersion}</span> : null}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="muted">No node metrics available for this cluster.</p>
+      )}
+    </InfoCard>
+  );
+}
+
 export function MyAccessWidget({ summary }) {
   const access = summary?.myAccess || {};
   const clusters = access.clusters || [];
