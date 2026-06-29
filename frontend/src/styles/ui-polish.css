@@ -1423,12 +1423,16 @@ body.has-bundle-fab .page-content.ops-layout {
    ════════════════════════════════════════════════════════════════ */
 
 .ops-dash {
-  --od-panel: #13161e;
-  --od-border: #1f2433;
-  --od-divider: #181c26;
-  --od-muted: #5e6678;
-  --od-sub: #9aa4b5;
-  --od-text: #dde3ec;
+  /* Card/panel tokens derive from the app theme so the dashboard looks native
+     in both light and dark mode (instead of hardcoded dark-only colours). */
+  --od-panel: var(--bg-panel);
+  --od-panel-top: color-mix(in srgb, var(--bg-panel), #fff 4%);
+  --od-border: var(--border);
+  --od-divider: var(--border-soft);
+  --od-track: color-mix(in srgb, var(--text-main) 6%, transparent);
+  --od-muted: var(--text-muted);
+  --od-sub: var(--text-subtle);
+  --od-text: var(--text-main);
   --od-teal: #2dd4a7;
   --od-purple: #8b7ff0;
   --od-amber: #f5b945;
@@ -1462,7 +1466,7 @@ body.has-bundle-fab .page-content.ops-layout {
 .ops-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pill, var(--od-teal)); flex: none; }
 .ops-dot--teal { background: var(--od-teal); }
 
-.ops-range { display: inline-flex; padding: 3px; gap: 2px; background: #0e1118; border: 1px solid var(--od-border); border-radius: 9px; }
+.ops-range { display: inline-flex; padding: 3px; gap: 2px; background: var(--od-track); border: 1px solid var(--od-border); border-radius: 9px; }
 .ops-range-pill {
   appearance: none; border: none; background: transparent; color: var(--od-muted);
   font-family: var(--font-mono); font-size: 11px; font-weight: 500; letter-spacing: 0.04em;
@@ -1480,13 +1484,13 @@ body.has-bundle-fab .page-content.ops-layout {
 .ops-refresh:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
 
 /* ── panels (shared) ── */
-.ops-panel { background: var(--od-panel); border: 1px solid var(--od-border); border-radius: 14px; padding: 18px 18px 14px; min-width: 0; }
+.ops-panel { background: linear-gradient(180deg, var(--od-panel-top), var(--od-panel) 60%); border: 1px solid var(--od-border); border-radius: 14px; padding: 18px 18px 14px; min-width: 0; box-shadow: var(--shadow-sm); }
 .ops-panel--flush { padding: 0; overflow: hidden; }
 .ops-panel--col { display: flex; flex-direction: column; }
 .ops-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .ops-panel-title { font-size: 14.5px; font-weight: 600; color: var(--od-text); }
 .ops-panel-subtitle { font-size: 11.5px; color: var(--od-muted); margin-top: 3px; }
-.ops-panel-bar { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid #1c2130; }
+.ops-panel-bar { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--od-border); }
 .ops-panel-count { font-size: 11.5px; color: var(--od-muted); }
 .ops-panel-metric { text-align: right; }
 .ops-panel-metric-value { font-size: 22px; font-weight: 700; }
@@ -1495,7 +1499,8 @@ body.has-bundle-fab .page-content.ops-layout {
 
 /* ── KPI strip ── */
 .ops-kpi-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; }
-.ops-kpi { background: var(--od-panel); border: 1px solid var(--od-border); border-radius: 13px; padding: 16px; min-width: 0; }
+.ops-kpi { background: linear-gradient(180deg, var(--od-panel-top), var(--od-panel) 60%); border: 1px solid var(--od-border); border-radius: 13px; padding: 16px; min-width: 0; box-shadow: var(--shadow-sm); transition: border-color .15s ease, box-shadow .15s ease; }
+.ops-kpi:hover { border-color: color-mix(in srgb, var(--accent) 30%, var(--od-border)); box-shadow: var(--shadow-md); }
 .ops-kpi-head { display: flex; align-items: center; justify-content: space-between; min-height: 14px; }
 .ops-kpi-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.8px; color: var(--od-muted); }
 .ops-kpi-indicator { width: 9px; height: 9px; border-radius: 50%; background: var(--pill, var(--od-teal)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--pill, var(--od-teal)) 20%, transparent); }
@@ -1536,13 +1541,13 @@ body.has-bundle-fab .page-content.ops-layout {
 
 /* ── namespace health table ── */
 .ops-table-head, .ops-table-row { display: grid; grid-template-columns: 1.6fr 1fr 0.7fr 1.4fr; gap: 10px; align-items: center; }
-.ops-table-head { padding: 10px 18px; font-size: 10px; font-weight: 600; letter-spacing: .7px; color: var(--od-muted); border-bottom: 1px solid #1c2130; }
-.ops-table-row { padding: 12px 18px; border-bottom: 1px solid #161a24; }
+.ops-table-head { padding: 10px 18px; font-size: 10px; font-weight: 600; letter-spacing: .7px; color: var(--od-muted); border-bottom: 1px solid var(--od-border); }
+.ops-table-row { padding: 12px 18px; border-bottom: 1px solid var(--od-divider); }
 .ops-table-name { font-size: 12.5px; font-weight: 600; }
 .ops-table-pods { font-size: 11.5px; color: var(--od-sub); }
 .ops-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; }
 .ops-status .ops-dot { width: 7px; height: 7px; }
-.ops-bar { height: 5px; border-radius: 3px; background: #222838; overflow: hidden; }
+.ops-bar { height: 5px; border-radius: 3px; background: var(--od-track); overflow: hidden; }
 .ops-bar-fill { display: block; height: 100%; border-radius: 3px; }
 
 /* Node Health table has 5 columns (node, status, memory, free, usage bar). */
@@ -1554,7 +1559,7 @@ body.has-bundle-fab .page-content.ops-layout {
 /* ── events ── */
 .ops-events { padding: 6px 8px; max-height: 360px; overflow-y: auto; }
 .ops-event { display: flex; gap: 11px; padding: 11px 12px; border-radius: 9px; }
-.ops-event:hover { background: rgba(255, 255, 255, 0.02); }
+.ops-event:hover { background: color-mix(in srgb, var(--od-text) 5%, transparent); }
 .ops-event-dot { margin-top: 5px; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--pill, var(--accent)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--pill, var(--accent)) 20%, transparent); }
 .ops-event-body { min-width: 0; }
 .ops-event-msg { font-size: 12.5px; color: var(--od-text); line-height: 1.4; }
@@ -1566,7 +1571,7 @@ body.has-bundle-fab .page-content.ops-layout {
 .ops-kv-row.is-last { border-bottom: none; }
 .ops-kv-key { color: var(--od-muted); letter-spacing: 0.5px; }
 .ops-kv-val { font-family: var(--font-mono); color: var(--od-text); text-align: right; word-break: break-word; }
-.ops-upgrade-btn { margin-top: 12px; width: 100%; padding: 11px; border-radius: 9px; border: 1px solid #262c3b; background: #181c26; color: var(--od-text); font-size: 13px; font-weight: 600; cursor: pointer; }
+.ops-upgrade-btn { margin-top: 12px; width: 100%; padding: 11px; border-radius: 9px; border: 1px solid var(--od-border); background: var(--bg-interactive); color: var(--od-text); font-size: 13px; font-weight: 600; cursor: pointer; }
 .ops-upgrade-btn:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .ops-empty { padding: 18px; font-size: 12.5px; color: var(--od-muted); }
 

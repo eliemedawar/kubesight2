@@ -33,15 +33,19 @@ export function hexA(hex, a) {
 
 // Horizontal gridlines + right-aligned monospace axis labels.
 // `mono` is an optional unit suffix appended to each label (e.g. "%").
+// Axis/grid colours resolve from the dashboard theme tokens so the chart reads
+// correctly in both light and dark mode (falling back to the dark reference).
 export function grid(ctx, w, h, padL, padB, maxY, steps, mono) {
+  const axisLabel = cssVar("--od-muted", AXIS_LABEL);
+  const gridLine = cssVar("--od-divider", GRID_LINE);
   ctx.font = "10px 'IBM Plex Mono', monospace";
-  ctx.fillStyle = AXIS_LABEL;
+  ctx.fillStyle = axisLabel;
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
   for (let i = 0; i <= steps; i++) {
     const val = maxY - (maxY / steps) * i;
     const y = (h - padB) * (i / steps);
-    ctx.strokeStyle = GRID_LINE;
+    ctx.strokeStyle = gridLine;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(padL, y);
