@@ -240,6 +240,7 @@ export default function LogsPage({
               showTimestamps={showTimestamps}
               onRefresh={refreshLogs}
               onClear={clearLogs}
+              onSearchChange={(value) => updateFilters({ searchText: value })}
               onJumpToLatestRef={jumpRef}
               emptyMessage={
                 hasTarget

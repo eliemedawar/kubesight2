@@ -37,6 +37,7 @@ export default function LogViewer({
   showTimestamps = true,
   onRefresh,
   onClear,
+  onSearchChange,
   onJumpToLatestRef,
 }) {
   const scrollRef = useRef(null);
@@ -227,6 +228,19 @@ export default function LogViewer({
             {isMaximized ? "Exit fullscreen" : "Fullscreen"}
           </button>
         </div>
+
+        {isMaximized && onSearchChange ? (
+          <div className="log-viewer__toolbar-search">
+            <input
+              type="search"
+              className="form-input log-viewer__search-input"
+              placeholder="Filter log text…"
+              value={searchText}
+              onChange={(event) => onSearchChange(event.target.value)}
+              aria-label="Filter log text"
+            />
+          </div>
+        ) : null}
       </div>
 
       {loading && !hasRawLines ? <p className="muted log-viewer__status">Loading logs…</p> : null}

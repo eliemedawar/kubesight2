@@ -1,10 +1,10 @@
 :root {
-  /* ─── Content surface — OLED dark enterprise ─── */
-  --bg-main: #030712;
-  --bg-panel: #0d1117;
-  --bg-panel-strong: #111827;
-  --bg-elevated: #1c2333;
-  --bg-interactive: #1e293b;
+  /* ─── Content surface — dark enterprise (lifted for a brighter feel) ─── */
+  --bg-main: #0b1120;
+  --bg-panel: #161e2e;
+  --bg-panel-strong: #1b2436;
+  --bg-elevated: #232c40;
+  --bg-interactive: #2a3548;
 
   /* ─── Text ─── */
   --text-main: #f1f5f9;
@@ -33,8 +33,8 @@
   --info-border: rgba(6, 182, 212, 0.3);
 
   /* ─── Borders & shadows — dark mode ─── */
-  --border: rgba(255, 255, 255, 0.08);
-  --border-soft: rgba(255, 255, 255, 0.04);
+  --border: rgba(255, 255, 255, 0.11);
+  --border-soft: rgba(255, 255, 255, 0.06);
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.4);
@@ -62,8 +62,8 @@
   --font-size-lg: 1.0625rem;
   --font-size-xl: 1.625rem;
 
-  /* ─── Sidebar — deepest dark ─── */
-  --sidebar-bg: #020617;
+  /* ─── Sidebar — deep dark (lifted to match brighter surfaces) ─── */
+  --sidebar-bg: #0a1120;
   --sidebar-border: rgba(255, 255, 255, 0.06);
   --sidebar-nav-text: #475569;
   --sidebar-nav-hover-bg: rgba(255, 255, 255, 0.04);
@@ -2054,6 +2054,16 @@ button:focus-visible {
   gap: var(--space-2);
 }
 
+.log-viewer__toolbar-search {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.log-viewer__search-input {
+  min-width: 220px;
+}
+
 .log-viewer__meta-badges--inline {
   position: static;
   flex-direction: row;
@@ -3457,13 +3467,22 @@ button:focus-visible {
 
 .resources-page .resources-table .col-actions,
 .resources-page .resources-table td.col-actions {
-  width: 4.75rem;
-  min-width: 4.75rem;
-  max-width: 4.75rem;
-  overflow: visible;
+  /* Wide enough to hold up to 5 action icons (1.75rem each + gaps + cell
+     padding) so they never spill past the table edge and trigger a
+     horizontal scrollbar. */
+  width: 10.25rem;
+  min-width: 10.25rem;
+  max-width: 10.25rem;
+  overflow: hidden;
   white-space: nowrap;
   padding-left: 0.25rem;
   padding-right: 0.35rem;
+}
+
+/* Keep the action icons on a single row inside the cell. */
+.resources-page .resources-table .resource-actions-cell {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
 }
 
 .resources-page .resources-table .status-pill {
@@ -3482,7 +3501,7 @@ button:focus-visible {
 }
 
 .resources-page .resources-table .col-name {
-  width: 14%;
+  width: 13%;
 }
 
 .resources-page .resources-table .col-status {
@@ -3530,11 +3549,11 @@ button:focus-visible {
 }
 
 .resources-page .resources-table .col-image {
-  width: 18%;
+  width: 15%;
 }
 
 .resources-page .resources-table .col-node {
-  width: 11%;
+  width: 9%;
 }
 
 .resources-page .resources-table .col-updateStatus,
