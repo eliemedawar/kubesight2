@@ -103,6 +103,29 @@ def test_existing_configmap_produces_reference_only():
     assert "configMapKeyRef" in yaml_text
 
 
+def test_volume_mount_subpath_preserved_to_manifest():
+    template = _base_template(
+        volumeMounts=[{
+            "mountPath": "/opt/wso2KEY/wso2carbon.jks",
+            "kind": "secret",
+            "allowedSources": ["existingSecret"],
+            "subPath": "wso2carbon.jks",
+            "readOnly": True,
+        }],
+    )
+    answers = _answers(
+        volumes={"/opt/wso2KEY/wso2carbon.jks": {"source": "existingSecret", "secretName": "wso2-keys"}},
+    )
+    payload, err = resolve_template(template, answers)
+    assert err is None
+    mount = payload["environment"]["mountedFiles"][0]
+    assert mount["subPath"] == "wso2carbon.jks"
+    assert mount["secret"] == "wso2-keys"
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert "subPath: wso2carbon.jks" in yaml_text
+
+
 def test_override_applied_only_when_schema_allows():
     template = _base_template(overrides={"tag": True, "replicas": True})
     answers = _answers(overrides={"tag": "2.5.0", "replicas": 4})
@@ -322,3 +345,142 @@ def test_ingress_create_tls_requires_cert_and_key():
     )
     assert payload is None
     assert "certificate and private key" in err
+
+
+# --- Service Exposure -------------------------------------------------------
+
+def test_service_exposure_creates_service_from_ports():
+    answers = _answers(serviceExposure={
+        "createService": True,
+        "serviceName": "orders-svc",
+        "serviceType": "ClusterIP",
+        "ports": [{"include": True, "name": "http", "protocol": "TCP", "port": 8080, "targetPort": 8080}],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert err is None
+    svc = payload["networking"]["service"]
+    assert svc["enabled"] is True
+    assert svc["name"] == "orders-svc"
+    assert svc["ports"] == [{"name": "http", "protocol": "TCP", "port": 8080, "targetPort": 8080}]
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert "kind: Service" in yaml_text
+    assert "name: orders-svc" in yaml_text
+
+
+def test_service_exposure_opt_out_emits_no_service():
+    answers = _answers(serviceExposure={"createService": False})
+    payload, err = resolve_template(_base_template(), answers)
+    assert err is None
+    assert payload["networking"]["service"]["enabled"] is False
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert "kind: Service" not in yaml_text
+
+
+def test_service_exposure_excluded_ports_are_dropped():
+    answers = _answers(serviceExposure={
+        "createService": True,
+        "serviceName": "multi",
+        "serviceType": "ClusterIP",
+        "ports": [
+            {"include": True, "name": "http", "protocol": "TCP", "port": 80, "targetPort": 8080},
+            {"include": False, "name": "metrics", "protocol": "TCP", "port": 9090, "targetPort": 9090},
+        ],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert err is None
+    ports = payload["networking"]["service"]["ports"]
+    assert [p["port"] for p in ports] == [80]
+
+
+def test_service_exposure_nodeport_in_range():
+    answers = _answers(serviceExposure={
+        "createService": True,
+        "serviceName": "np",
+        "serviceType": "NodePort",
+        "ports": [{"include": True, "protocol": "TCP", "port": 80, "targetPort": 8080, "nodePort": 30080}],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert err is None
+    assert payload["networking"]["service"]["ports"][0]["nodePort"] == 30080
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert "nodePort: 30080" in yaml_text
+
+
+def test_service_exposure_rejects_out_of_range_nodeport():
+    answers = _answers(serviceExposure={
+        "createService": True,
+        "serviceName": "np",
+        "serviceType": "NodePort",
+        "ports": [{"include": True, "protocol": "TCP", "port": 80, "targetPort": 80, "nodePort": 1234}],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert payload is None
+    assert "nodePort" in err and "range" in err
+
+
+def test_service_exposure_nodeport_only_for_nodeport_type():
+    answers = _answers(serviceExposure={
+        "createService": True,
+        "serviceName": "svc",
+        "serviceType": "ClusterIP",
+        "ports": [{"include": True, "protocol": "TCP", "port": 80, "targetPort": 80, "nodePort": 30080}],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert payload is None
+    assert "nodePort can only be set" in err
+
+
+def test_service_exposure_rejects_invalid_name():
+    answers = _answers(serviceExposure={
+        "createService": True,
+        "serviceName": "Bad_Name",
+        "serviceType": "ClusterIP",
+        "ports": [{"include": True, "protocol": "TCP", "port": 80, "targetPort": 80}],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert payload is None
+    assert "service name" in err.lower()
+
+
+def test_service_exposure_requires_at_least_one_port():
+    answers = _answers(serviceExposure={
+        "createService": True,
+        "serviceName": "svc",
+        "serviceType": "ClusterIP",
+        "ports": [{"include": False, "protocol": "TCP", "port": 80, "targetPort": 80}],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert payload is None
+    assert "at least one port" in err
+
+
+def test_service_exposure_falls_back_to_detected_ports():
+    # createService with no explicit ports → resolver seeds from container ports.
+    answers = _answers(serviceExposure={"createService": True, "serviceName": "svc", "serviceType": "ClusterIP"})
+    payload, err = resolve_template(_base_template(), answers)
+    assert err is None
+    assert [p["port"] for p in payload["networking"]["service"]["ports"]] == [8080]
+
+
+def test_ingress_without_service_is_rejected():
+    answers = _answers(
+        serviceExposure={"createService": False},
+        ingress={"host": "orders.example.com", "tls": {"mode": "none"}},
+    )
+    payload, err = resolve_template(_base_template(), answers)
+    assert payload is None
+    assert err == "Ingress requires a Service. Please create or select a Service."
+
+
+def test_no_service_exposure_answer_keeps_template_default():
+    # Backward compat: an older client that doesn't send serviceExposure keeps the
+    # template's own networking.service defaults.
+    payload, err = resolve_template(_base_template(), _answers())
+    assert err is None
+    assert payload["networking"]["service"]["enabled"] is True
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert "kind: Service" in yaml_text

@@ -3,16 +3,21 @@ import { useEffect, useMemo, useState } from "react";
 import { applyWizardDeploy, resolveWizardTemplate } from "../../../api/inventoryApi.js";
 import {
   listNamespaceConfigResources,
-  listNamespacesByCluster,
   listStorageClasses,
 } from "../../../api/clustersApi.js";
 import { getClusterDeployEligibility } from "../../../api/deploymentRequestsApi.js";
 import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
 import YamlPreviewPanel from "./YamlPreviewPanel.jsx";
 import SearchableSelect from "../../common/SearchableSelect.jsx";
+import NamespaceSelect from "../NamespaceSelect.jsx";
 import AddToBundleButton from "../../changes/AddToBundleButton.jsx";
 
 const POD_KINDS = new Set(["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"]);
+// A Service makes sense for long-running, selector-addressable workloads. Jobs and
+// CronJobs run to completion and aren't fronted by a Service.
+const SERVICE_WORKLOADS = new Set(["Deployment", "StatefulSet", "DaemonSet"]);
+const SERVICE_TYPES = ["ClusterIP", "NodePort", "LoadBalancer"];
+const SERVICE_PROTOCOLS = ["TCP", "UDP"];
 const ACCESS_MODES = ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany"];
 const PV_TYPES = ["hostPath", "nfs", "local"];
 const RECLAIM_POLICIES = ["Retain", "Delete", "Recycle"];
@@ -73,6 +78,62 @@ function envNeedsInput(field) {
   return Boolean(field.required && !field.default);
 }
 
+/** Sanitize an app name into a DNS-1123 label for default Service/port names. */
+function dnsSlug(value, fallback = "app") {
+  const cleaned = String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || fallback;
+}
+
+/** Detect distinct container ports from the template's containers. Kubesight's
+ * flat template stores ports as plain numbers (the YAML importer flattens
+ * spec.template.spec.containers[*].ports[*].containerPort into this list). */
+function detectContainerPorts(template) {
+  const ports = [];
+  for (const container of template?.containers || []) {
+    for (const raw of container?.ports || []) {
+      const num = Number(typeof raw === "object" && raw ? raw.containerPort : raw);
+      if (Number.isInteger(num) && num >= 1 && num <= 65535 && !ports.includes(num)) {
+        ports.push(num);
+      }
+    }
+  }
+  return ports;
+}
+
+/** Build the initial Service Exposure answer by pre-filling from detected ports.
+ * When ports exist we default to creating a ClusterIP Service (the deployer can
+ * still opt out); when none are found we default to no Service. */
+function initServiceExposure(template) {
+  const detected = detectContainerPorts(template);
+  const appName = dnsSlug(template?.id || template?.name);
+  const templateSvc = template?.networking?.service || {};
+  const defaultType = SERVICE_TYPES.includes(templateSvc.type) ? templateSvc.type : "ClusterIP";
+  // Source the pre-filled ports from the detected container ports; if the template
+  // declares a Service port but no container ports were found, seed that instead.
+  let seedPorts = detected;
+  if (!seedPorts.length && templateSvc.enabled && Number(templateSvc.port)) {
+    seedPorts = [Number(templateSvc.port)];
+  }
+  return {
+    // Default to creating a Service whenever ports exist, or when the template
+    // already declares one — but never silently; the deployer can still opt out.
+    createService: detected.length > 0 || Boolean(templateSvc.enabled),
+    serviceName: String(templateSvc.name || `${appName}-service`),
+    serviceType: defaultType,
+    ports: seedPorts.map((port) => ({
+      include: true,
+      name: `tcp-${port}`,
+      protocol: "TCP",
+      port,
+      targetPort: port,
+      nodePort: "",
+    })),
+  };
+}
+
 /** Build the initial answers from the template schema's defaults. */
 function initAnswers(template, defaultClusterId) {
   const schema = template.schema || {};
@@ -85,11 +146,15 @@ function initAnswers(template, defaultClusterId) {
   for (const vm of schema.volumeMounts || []) {
     if (!vm.mountPath) continue;
     const sources = vm.allowedSources || VOLUME_KIND_SOURCES[vm.kind] || VOLUME_KIND_SOURCES.configMap;
+    // Default the created file's key to the subPath, or the mount path's basename
+    // (e.g. /opt/wso2KEY/wso2carbon.jks → wso2carbon.jks), so a "Create" mount lines
+    // up with the file the container expects at that path.
+    const defaultKey = (vm.subPath || vm.mountPath.split("/").pop() || "").trim();
     volumes[vm.mountPath] = {
       source: sources[0],
       configMapName: "",
       secretName: "",
-      items: [{ key: "", value: "", binary: false }],
+      items: [{ key: defaultKey, value: "", binary: false }],
     };
   }
   const ips = schema.imagePullSecret;
@@ -117,11 +182,50 @@ function initAnswers(template, defaultClusterId) {
         hostPath: "", nfsServer: "", nfsPath: "", localPath: "", nodeName: "",
       },
     },
+    serviceExposure: initServiceExposure(template),
     ingress: schema.ingress?.supported
       ? { host: "", path: "/", tls: { mode: "none", secret: "", cert: "", key: "" } }
       : null,
     changeSummary: "",
   };
+}
+
+/** Validate the Service Exposure step. Returns an error string ('' when valid) so
+ * the wizard can block Next and surface the reason inline. Mirrors the backend
+ * resolver's checks so the deployer sees problems before the round-trip. */
+function validateServiceStep(svc, { ingressRequired }) {
+  if (!svc?.createService) {
+    if (ingressRequired) return "Ingress requires a Service. Please create or select a Service.";
+    return "";
+  }
+  if (!String(svc.serviceName || "").trim()) return "Enter a service name.";
+  const included = (svc.ports || []).filter((p) => p.include);
+  if (!included.length) {
+    return "A Service requires at least one port — include a port or disable the Service.";
+  }
+  const seen = new Set();
+  for (const p of included) {
+    const port = Number(p.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return `Service port "${p.port ?? ""}" must be a whole number between 1 and 65535.`;
+    }
+    if (seen.has(port)) return `Service port ${port} is listed more than once.`;
+    seen.add(port);
+    if (p.targetPort !== "" && p.targetPort != null) {
+      const tp = Number(p.targetPort);
+      if (!Number.isInteger(tp) || tp < 1 || tp > 65535) {
+        return `Target port "${p.targetPort}" must be a whole number between 1 and 65535.`;
+      }
+    }
+    if (p.nodePort !== "" && p.nodePort != null) {
+      if (svc.serviceType !== "NodePort") return "A nodePort can only be set when the service type is NodePort.";
+      const np = Number(p.nodePort);
+      if (!Number.isInteger(np) || np < 30000 || np > 32767) {
+        return `nodePort "${p.nodePort}" must be a whole number between 30000 and 32767.`;
+      }
+    }
+  }
+  return "";
 }
 
 /** Steps are derived from the schema — empty sections are skipped entirely. The
@@ -137,6 +241,12 @@ function buildSteps(template) {
   // Storage is available for any pod workload so the deployer can attach a PVC/PV.
   if (POD_KINDS.has(template.workloadType || "Deployment")) steps.push({ key: "storage", label: "Storage" });
   if ((schema.volumeMounts || []).length) steps.push({ key: "volumes", label: "Volumes" });
+  // Service Exposure lets the deployer front a selector-addressable workload with a
+  // Service. Always offered for those kinds — the step itself handles the
+  // "no ports detected" case so a Service can still be created manually.
+  if (SERVICE_WORKLOADS.has(template.workloadType || "Deployment")) {
+    steps.push({ key: "service", label: "Service Exposure" });
+  }
   if (schema.ingress?.supported) steps.push({ key: "ingress", label: "Ingress" });
   steps.push({ key: "review", label: "Review & Deploy" });
   return steps;
@@ -161,11 +271,10 @@ export default function SchemaDeployWizard({
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [namespaces, setNamespaces] = useState([]);
-  const [namespacesLoading, setNamespacesLoading] = useState(false);
   const [configResources, setConfigResources] = useState({ configMaps: [], secrets: [] });
   const [storageClasses, setStorageClasses] = useState([]);
   const [eligibility, setEligibility] = useState(null);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
 
   const clusterId = answers.basics.clusterId;
   const namespace = answers.basics.namespace;
@@ -190,30 +299,8 @@ export default function SchemaDeployWizard({
     setResolved(null);
     setConfirmation("");
     setError("");
+    setShowCloseConfirm(false);
   }, [open, template, defaultClusterId]);
-
-  // Load namespaces for the chosen cluster so the deployer picks from a list.
-  useEffect(() => {
-    if (!open || !clusterId) {
-      setNamespaces([]);
-      return undefined;
-    }
-    let cancelled = false;
-    setNamespacesLoading(true);
-    listNamespacesByCluster(clusterId)
-      .then((res) => {
-        if (!cancelled) setNamespaces(Array.isArray(res?.items) ? res.items : []);
-      })
-      .catch(() => {
-        if (!cancelled) setNamespaces([]);
-      })
-      .finally(() => {
-        if (!cancelled) setNamespacesLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, clusterId]);
 
   // Load the namespace's ConfigMaps/Secrets so "existing" sources offer real
   // names and keys instead of free text.
@@ -286,6 +373,20 @@ export default function SchemaDeployWizard({
 
   const step = steps[stepIndex];
   const confirmationPhrase = answers.basics.namespace ? `APPLY ${answers.basics.namespace}` : "";
+
+  // Closing the wizard discards everything the deployer has entered, so any
+  // user-initiated dismissal (overlay click, ×, Cancel) asks for confirmation
+  // first. Programmatic closes after a successful deploy/add-to-bundle still call
+  // onClose directly and skip this.
+  const requestClose = () => {
+    if (busy) return;
+    setShowCloseConfirm(true);
+  };
+  const confirmClose = () => {
+    setShowCloseConfirm(false);
+    onClose();
+  };
+  const cancelClose = () => setShowCloseConfirm(false);
 
   const setBasics = (key, value) =>
     setAnswers((a) => ({ ...a, basics: { ...a.basics, [key]: value } }));
@@ -374,6 +475,35 @@ export default function SchemaDeployWizard({
     setAnswers((a) => ({ ...a, storage: { ...a.storage, newPvc: { ...a.storage.newPvc, ...patch } } }));
   const setPv = (patch) =>
     setAnswers((a) => ({ ...a, storage: { ...a.storage, pv: { ...a.storage.pv, ...patch } } }));
+  const setService = (patch) =>
+    setAnswers((a) => ({ ...a, serviceExposure: { ...a.serviceExposure, ...patch } }));
+  const updateServicePort = (index, patch) =>
+    setAnswers((a) => ({
+      ...a,
+      serviceExposure: {
+        ...a.serviceExposure,
+        ports: (a.serviceExposure.ports || []).map((p, i) => (i === index ? { ...p, ...patch } : p)),
+      },
+    }));
+  const addServicePort = () =>
+    setAnswers((a) => ({
+      ...a,
+      serviceExposure: {
+        ...a.serviceExposure,
+        ports: [
+          ...(a.serviceExposure.ports || []),
+          { include: true, name: "", protocol: "TCP", port: "", targetPort: "", nodePort: "" },
+        ],
+      },
+    }));
+  const removeServicePort = (index) =>
+    setAnswers((a) => ({
+      ...a,
+      serviceExposure: {
+        ...a.serviceExposure,
+        ports: (a.serviceExposure.ports || []).filter((_, i) => i !== index),
+      },
+    }));
   const setIngress = (patch) =>
     setAnswers((a) => ({ ...a, ingress: { ...a.ingress, ...patch } }));
   const setTls = (patch) =>
@@ -426,7 +556,17 @@ export default function SchemaDeployWizard({
     }
   };
 
-  const canProceed = step.key === "basics" ? basicsValid : true;
+  // An Ingress routes through a Service, so whenever this template offers an Ingress
+  // step the deployer must keep a Service. Mirrors the backend resolver's rule.
+  const ingressStepPresent = steps.some((s) => s.key === "ingress");
+  const ingressNeedsService = ingressStepPresent && !answers.serviceExposure?.createService;
+  const serviceStepError =
+    step.key === "service"
+      ? validateServiceStep(answers.serviceExposure, { ingressRequired: ingressNeedsService })
+      : "";
+
+  const canProceed =
+    step.key === "basics" ? basicsValid : step.key === "service" ? !serviceStepError : true;
 
   // Only block when the eligibility check is definitive: approval required and the
   // user has no active approval. In-flight or errored checks never disable Deploy —
@@ -437,7 +577,7 @@ export default function SchemaDeployWizard({
   const requiredApprovals = eligibility?.requiredApprovals;
 
   return (
-    <div className="modal-overlay wizard-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-overlay wizard-overlay" role="presentation" onClick={requestClose}>
       <section
         className="card modal-panel wizard-modal"
         role="dialog"
@@ -449,7 +589,7 @@ export default function SchemaDeployWizard({
             <h3 id="schema-wizard-title">Deploy {template.name}</h3>
             <p className="muted">{template.description || "Fill in only what this template leaves open."}</p>
           </div>
-          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">×</button>
+          <button type="button" className="modal-close" onClick={requestClose} aria-label="Close">×</button>
         </header>
 
         <nav className="wizard-stepper" aria-label="Deployment steps">
@@ -505,29 +645,11 @@ export default function SchemaDeployWizard({
                 </SearchableSelect>
               </Field>
               <Field label="Namespace">
-                <SearchableSelect
+                <NamespaceSelect
+                  clusterId={clusterId}
                   value={answers.basics.namespace}
                   onChange={(e) => setBasics("namespace", e.target.value)}
-                  disabled={!clusterId || namespacesLoading}
-                >
-                  <option value="">
-                    {!clusterId
-                      ? "select a cluster first"
-                      : namespacesLoading
-                        ? "loading namespaces…"
-                        : namespaces.length
-                          ? "— select namespace —"
-                          : "no namespaces found"}
-                  </option>
-                  {namespaces.map((ns) => {
-                    const nsName = ns.name || ns;
-                    return (
-                      <option key={nsName} value={nsName}>
-                        {nsName}
-                      </option>
-                    );
-                  })}
-                </SearchableSelect>
+                />
               </Field>
 
               {overrides.tag ? (
@@ -549,16 +671,6 @@ export default function SchemaDeployWizard({
               {overrides.storageSize ? (
                 <Field label="Storage size">
                   <input value={answers.overrides.storageSize || ""} onChange={(e) => setOverride("storageSize", e.target.value)} placeholder={template.storage?.newPvc?.size || "1Gi"} />
-                </Field>
-              ) : null}
-              {Array.isArray(overrides.serviceType) && overrides.serviceType.length ? (
-                <Field label="Service type">
-                  <SearchableSelect value={answers.overrides.serviceType || ""} onChange={(e) => setOverride("serviceType", e.target.value)}>
-                    <option value="">{template.networking?.service?.type || "ClusterIP"} (default)</option>
-                    {overrides.serviceType.map((t) => (
-                      <option key={t} value={t}>{t}</option>
-                    ))}
-                  </SearchableSelect>
                 </Field>
               ) : null}
               {overrides.image ? (
@@ -1070,6 +1182,165 @@ export default function SchemaDeployWizard({
             </div>
           ) : null}
 
+          {step.key === "service" ? (
+            <div className="wizard-step-panel">
+              <h4>Service Exposure</h4>
+              {(() => {
+                const svc = answers.serviceExposure || {};
+                const detected = detectContainerPorts(template);
+                const selectorLabel = `app: ${dnsSlug(answers.basics.appName || template.id)}`;
+                return (
+                  <>
+                    {detected.length ? (
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        This deployment exposes container port{detected.length > 1 ? "s" : ""}{" "}
+                        ({detected.join(", ")}). Do you want to create a Kubernetes Service?
+                      </p>
+                    ) : (
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        No container ports were found. You can still create a Service manually if needed.
+                      </p>
+                    )}
+
+                    <label className="wizard-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(svc.createService)}
+                        onChange={(e) => setService({ createService: e.target.checked })}
+                      />
+                      Create a Kubernetes Service
+                    </label>
+
+                    {ingressNeedsService ? (
+                      <p className="error-banner" role="alert" style={{ marginTop: "var(--space-3)" }}>
+                        Ingress requires a Service. Please create or select a Service.
+                      </p>
+                    ) : null}
+
+                    {svc.createService ? (
+                      <>
+                        <div className="schema-override-grid">
+                          <Field label="Service name">
+                            <input
+                              value={svc.serviceName || ""}
+                              onChange={(e) => setService({ serviceName: e.target.value })}
+                              placeholder={`${dnsSlug(answers.basics.appName || template.id)}-service`}
+                            />
+                          </Field>
+                          <Field label="Service type">
+                            <SearchableSelect
+                              value={svc.serviceType || "ClusterIP"}
+                              onChange={(e) => setService({ serviceType: e.target.value })}
+                            >
+                              {SERVICE_TYPES.map((t) => (
+                                <option key={t} value={t}>{t}</option>
+                              ))}
+                            </SearchableSelect>
+                          </Field>
+                        </div>
+
+                        <p className="muted" style={{ margin: "var(--space-2) 0 0" }}>
+                          Selector is locked to the deployment&apos;s pod labels ({selectorLabel}) to avoid
+                          breaking routing.
+                        </p>
+
+                        <h5 style={{ marginBottom: 0 }}>Ports</h5>
+                        {(svc.ports || []).length ? (
+                          (svc.ports || []).map((p, index) => (
+                            <div key={index} className="schema-env-card">
+                              <div className="schema-env-card__top">
+                                <label className="checkbox-row" style={{ marginRight: "auto" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(p.include)}
+                                    onChange={(e) => updateServicePort(index, { include: e.target.checked })}
+                                  />
+                                  <span>Include</span>
+                                </label>
+                                <button
+                                  type="button"
+                                  className="btn-outline template-env-row__remove"
+                                  onClick={() => removeServicePort(index)}
+                                  aria-label={`Remove port ${index + 1}`}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                              <div className="schema-override-grid">
+                                <Field label="Name">
+                                  <input
+                                    value={p.name || ""}
+                                    onChange={(e) => updateServicePort(index, { name: e.target.value })}
+                                    placeholder={`${(p.protocol || "tcp").toLowerCase()}-${p.port || "port"}`}
+                                    disabled={!p.include}
+                                  />
+                                </Field>
+                                <Field label="Protocol">
+                                  <SearchableSelect
+                                    value={p.protocol || "TCP"}
+                                    onChange={(e) => updateServicePort(index, { protocol: e.target.value })}
+                                    disabled={!p.include}
+                                  >
+                                    {SERVICE_PROTOCOLS.map((proto) => (
+                                      <option key={proto} value={proto}>{proto}</option>
+                                    ))}
+                                  </SearchableSelect>
+                                </Field>
+                                <Field label="Port">
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="65535"
+                                    value={p.port ?? ""}
+                                    onChange={(e) => updateServicePort(index, { port: e.target.value })}
+                                    disabled={!p.include}
+                                  />
+                                </Field>
+                                <Field label="Target port">
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="65535"
+                                    value={p.targetPort ?? ""}
+                                    onChange={(e) => updateServicePort(index, { targetPort: e.target.value })}
+                                    disabled={!p.include}
+                                  />
+                                </Field>
+                                {svc.serviceType === "NodePort" ? (
+                                  <Field label="Node port (30000–32767)">
+                                    <input
+                                      type="number"
+                                      min="30000"
+                                      max="32767"
+                                      value={p.nodePort ?? ""}
+                                      onChange={(e) => updateServicePort(index, { nodePort: e.target.value })}
+                                      placeholder="auto"
+                                      disabled={!p.include}
+                                    />
+                                  </Field>
+                                ) : null}
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="muted" style={{ marginTop: 0 }}>No ports yet — add one below.</p>
+                        )}
+                        <button type="button" className="btn-outline" onClick={addServicePort}>
+                          + Add port
+                        </button>
+                        {serviceStepError ? (
+                          <p className="error-banner" role="alert" style={{ marginTop: "var(--space-3)" }}>
+                            {serviceStepError}
+                          </p>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </>
+                );
+              })()}
+            </div>
+          ) : null}
+
           {step.key === "ingress" ? (
             <div className="wizard-step-panel">
               <h4>Ingress</h4>
@@ -1178,7 +1449,7 @@ export default function SchemaDeployWizard({
         </div>
 
         <footer className="wizard-modal__footer modal-actions">
-          <button type="button" className="btn-outline" onClick={stepIndex === 0 ? onClose : goBack} disabled={busy}>
+          <button type="button" className="btn-outline" onClick={stepIndex === 0 ? requestClose : goBack} disabled={busy}>
             {stepIndex === 0 ? "Cancel" : "Back"}
           </button>
           {step.key === "review" ? (
@@ -1208,6 +1479,40 @@ export default function SchemaDeployWizard({
           )}
         </footer>
       </section>
+
+      {showCloseConfirm ? (
+        <div
+          className="modal-overlay wizard-close-confirm"
+          role="presentation"
+          onClick={(e) => {
+            e.stopPropagation();
+            cancelClose();
+          }}
+        >
+          <section
+            className="card modal-panel wizard-close-confirm__panel"
+            role="alertdialog"
+            aria-labelledby="wizard-close-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="modal-header">
+              <h3 id="wizard-close-confirm-title">Discard this deployment?</h3>
+            </header>
+            <p className="muted" style={{ margin: "var(--space-2) 0 var(--space-4)" }}>
+              You have unsaved changes in this wizard. Closing it now will discard
+              everything you&apos;ve entered.
+            </p>
+            <footer className="modal-actions">
+              <button type="button" className="btn-outline" onClick={cancelClose}>
+                Keep editing
+              </button>
+              <button type="button" className="btn-primary" onClick={confirmClose}>
+                Discard &amp; close
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

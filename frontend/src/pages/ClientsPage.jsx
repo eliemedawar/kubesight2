@@ -8,6 +8,7 @@ import {
 } from "../api";
 import { useAuth } from "../context/AuthContext";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
+import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";

@@ -197,3 +197,31 @@ def test_generate_deployment_with_service():
     assert "kind: Service" in yaml_text
     assert summary["appName"] == "nginx-demo"
     assert len(summary["resources"]) >= 2
+
+
+def test_generate_multi_port_nodeport_service():
+    payload = {
+        "basics": {"appName": "api", "namespace": "default"},
+        "workloadType": "Deployment",
+        "containers": [{"name": "api", "image": "acme/api", "tag": "1.0", "ports": [8080, 9090]}],
+        "resources": {"cpuRequest": "100m", "cpuLimit": "500m", "memoryRequest": "128Mi", "memoryLimit": "256Mi"},
+        "networking": {"service": {
+            "enabled": True,
+            "name": "api-svc",
+            "type": "NodePort",
+            "ports": [
+                {"name": "http", "protocol": "TCP", "port": 8080, "targetPort": 8080, "nodePort": 30080},
+                {"name": "metrics", "protocol": "TCP", "port": 9090, "targetPort": 9090},
+            ],
+        }},
+        "scaling": {"replicas": 1},
+    }
+    yaml_text, summary, error = generate_wizard_manifests(payload)
+    assert error is None
+    assert "name: api-svc" in yaml_text
+    assert "type: NodePort" in yaml_text
+    assert "nodePort: 30080" in yaml_text
+    assert "name: http" in yaml_text
+    assert "name: metrics" in yaml_text
+    # Both ports surface on the Service.
+    assert "port: 8080" in yaml_text and "port: 9090" in yaml_text

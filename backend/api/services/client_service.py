@@ -174,9 +174,25 @@ def _mock_client_dict(client: Dict[str, Any]) -> Dict[str, Any]:
 
 def list_clients(user=None) -> Dict[str, Any]:
     clients = Client.query.order_by(Client.name.asc()).all()
+    if not clients:
+        return {"items": [], "count": 0}
+
+    # Fetch every service's health in a single batched (and cached) pass instead of
+    # calling get_service() per service per client. Clients share services, so the
+    # old per-client loop issued the same live kubectl calls repeatedly and serially
+    # — the dominant cost when opening the Clients tab. list_services() already
+    # builds one concurrent health map across all deployments and memoizes it.
+    from .application_service_service import list_services
+
+    services_index = {s["id"]: s for s in list_services(user=user).get("items", [])}
+
     items = []
     for client in clients:
-        svcs = _load_services_for_client(client, user=user)
+        svcs = [
+            services_index[link.service_id]
+            for link in client.service_links
+            if link.service_id in services_index
+        ]
         items.append(_client_to_dict(client, services=svcs))
     return {"items": items, "count": len(items)}
 

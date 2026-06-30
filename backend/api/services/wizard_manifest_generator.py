@@ -383,6 +383,62 @@ def _provisioned_config_documents(
     return docs
 
 
+def _service_port_specs(svc_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build a Service ``ports`` list from a service config.
+
+    Supports the multi-port shape the Deploy Wizard's Service Exposure step emits
+    (``ports`` is a list of ``{name, protocol, port, targetPort, nodePort}``) and
+    falls back to the legacy single-port fields (``port``/``targetPort``/``protocol``)
+    so older payloads and template defaults keep working.
+    """
+    svc_type = svc_cfg.get("type") or "ClusterIP"
+    raw_ports = svc_cfg.get("ports")
+    if not isinstance(raw_ports, list) or not raw_ports:
+        port = int(svc_cfg.get("port") or 80)
+        raw_ports = [{
+            "port": port,
+            "targetPort": svc_cfg.get("targetPort") or port,
+            "protocol": svc_cfg.get("protocol") or "TCP",
+        }]
+
+    specs: List[Dict[str, Any]] = []
+    for entry in raw_ports:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            port = int(entry.get("port") or entry.get("targetPort") or 80)
+        except (TypeError, ValueError):
+            continue
+        try:
+            target_port = int(entry.get("targetPort") or port)
+        except (TypeError, ValueError):
+            target_port = port
+        protocol = (entry.get("protocol") or "TCP").upper()
+        spec: Dict[str, Any] = {
+            "name": str(entry.get("name") or f"port-{port}"),
+            "protocol": protocol if protocol in ("TCP", "UDP", "SCTP") else "TCP",
+            "port": port,
+            "targetPort": target_port,
+        }
+        # nodePort is only meaningful for NodePort / LoadBalancer services.
+        node_port = entry.get("nodePort")
+        if node_port not in (None, "") and svc_type in ("NodePort", "LoadBalancer"):
+            try:
+                spec["nodePort"] = int(node_port)
+            except (TypeError, ValueError):
+                pass
+        specs.append(spec)
+    return specs
+
+
+def _primary_service_port(svc_cfg: Dict[str, Any]) -> int:
+    """The Service port an Ingress backend should target (first declared port)."""
+    specs = _service_port_specs(svc_cfg)
+    if specs:
+        return specs[0]["port"]
+    return int(svc_cfg.get("port") or 80)
+
+
 def _build_probe(probe: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     probe_type = probe.get("type") or "http"
     initial_delay = int(probe.get("initialDelaySeconds") or 5)
@@ -614,11 +670,7 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
             "spec": {
                 "type": svc.get("type") or "ClusterIP",
                 "selector": labels,
-                "ports": [{
-                    "port": int(svc.get("port") or 80),
-                    "targetPort": int(svc.get("targetPort") or svc.get("port") or 80),
-                    "protocol": svc.get("protocol") or "TCP",
-                }],
+                "ports": _service_port_specs(svc),
             },
         })
 
@@ -629,6 +681,8 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
     svc_cfg = networking.get("service") or {}
     if svc_cfg.get("enabled") and workload_type in WORKLOAD_KINDS:
         svc_name = _sanitize_name(svc_cfg.get("name") or f"{app_name}-service")
+        # The selector pins to the workload's pod template labels so routing
+        # always lands on this deployment's pods.
         documents.append({
             "apiVersion": "v1",
             "kind": "Service",
@@ -636,18 +690,14 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
             "spec": {
                 "type": svc_cfg.get("type") or "ClusterIP",
                 "selector": labels,
-                "ports": [{
-                    "port": int(svc_cfg.get("port") or 80),
-                    "targetPort": int(svc_cfg.get("targetPort") or svc_cfg.get("port") or 80),
-                    "protocol": svc_cfg.get("protocol") or "TCP",
-                }],
+                "ports": _service_port_specs(svc_cfg),
             },
         })
 
     ing_cfg = networking.get("ingress") or {}
     if ing_cfg.get("enabled"):
         ing_name = _sanitize_name(ing_cfg.get("name") or f"{app_name}-ingress")
-        svc_port = int((networking.get("service") or {}).get("port") or 80)
+        svc_port = _primary_service_port(networking.get("service") or {})
         rules = [{
             "host": ing_cfg.get("host") or f"{app_name}.local",
             "http": {

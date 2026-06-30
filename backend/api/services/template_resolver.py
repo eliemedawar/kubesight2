@@ -54,6 +54,8 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, List, Optional, Tuple
 
+from .wizard_manifest_generator import validate_k8s_name
+
 ENV_SOURCES = {
     "value",
     "existingConfigMap",
@@ -70,6 +72,11 @@ VOLUME_KIND_SOURCES = {
     "configMap": ["existingConfigMap", "createConfigMap"],
     "secret": ["existingSecret", "createSecret"],
 }
+
+SERVICE_TYPES = {"ClusterIP", "NodePort", "LoadBalancer"}
+SERVICE_PROTOCOLS = {"TCP", "UDP"}
+# Kubernetes restricts NodePort allocation to this range by default.
+NODE_PORT_MIN, NODE_PORT_MAX = 30000, 32767
 
 
 def _slug(value: str, fallback: str) -> str:
@@ -310,6 +317,10 @@ def _resolve_volume_mounts(
         vol_name = f"vol-{_slug(mount_path, str(index))}"
         read_only = bool(vm.get("readOnly"))
         items = answer.get("items") or []
+        # A subPath mounts a single key as a file at the path (preserved from an
+        # imported manifest), instead of mounting the whole resource as a directory.
+        sub_path = str(vm.get("subPath") or "").strip()
+        extra = {"subPath": sub_path} if sub_path else {}
 
         if kind == "configMap":
             name = str(answer.get("configMapName") or "").strip()
@@ -320,7 +331,7 @@ def _resolve_volume_mounts(
                     item_key = str(item.get("key") or "").strip()
                     if item_key:
                         provisioned.add_config_map(name, item_key, str(item.get("value") or ""), binary=bool(item.get("binary")))
-            mounts.append({"volumeName": vol_name, "mountPath": mount_path, "configMap": name, "readOnly": read_only})
+            mounts.append({"volumeName": vol_name, "mountPath": mount_path, "configMap": name, "readOnly": read_only, **extra})
         else:
             name = str(answer.get("secretName") or "").strip()
             if not name:
@@ -330,7 +341,7 @@ def _resolve_volume_mounts(
                     item_key = str(item.get("key") or "").strip()
                     if item_key:
                         provisioned.add_secret(name, item_key, str(item.get("value") or ""), binary=bool(item.get("binary")))
-            mounts.append({"volumeName": vol_name, "mountPath": mount_path, "secret": name, "readOnly": read_only})
+            mounts.append({"volumeName": vol_name, "mountPath": mount_path, "secret": name, "readOnly": read_only, **extra})
     return mounts, None
 
 
@@ -444,6 +455,138 @@ def _apply_dependencies(
     return None
 
 
+def detect_container_ports(containers: List[Dict[str, Any]]) -> List[int]:
+    """Collect the distinct container ports declared across all containers.
+
+    Kubesight's flat template stores ports as a list of numbers
+    (``container["ports"] = [8080, ...]``), but be lenient and also accept the
+    rendered-manifest shape (``[{"containerPort": 8080}]``).
+    """
+    ports: List[int] = []
+    for container in containers or []:
+        for raw in container.get("ports") or []:
+            value = raw.get("containerPort") if isinstance(raw, dict) else raw
+            try:
+                num = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= num <= 65535 and num not in ports:
+                ports.append(num)
+    return ports
+
+
+def _resolve_service_exposure(
+    answer: Optional[Dict[str, Any]],
+    app_name: str,
+    networking: Dict[str, Any],
+    containers: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Apply the deployer's Service Exposure choices to ``networking['service']``.
+
+    When ``answer`` is ``None`` the deployer never reached the step (e.g. an older
+    client or an Add-to-Bundle), so the template's own service defaults are left
+    untouched. Otherwise the deployer's choice is authoritative: it either disables
+    the Service or rebuilds it from the chosen name/type/ports.
+
+    Returns an error string, or ``None`` on success.
+    """
+    if answer is None:
+        return None
+
+    service = networking.setdefault("service", {})
+
+    if not answer.get("createService"):
+        # The deployer explicitly opted out — never silently create a Service.
+        service["enabled"] = False
+        return None
+
+    svc_type = str(answer.get("serviceType") or service.get("type") or "ClusterIP").strip()
+    if svc_type not in SERVICE_TYPES:
+        return f"Service type '{svc_type}' is not valid (use ClusterIP, NodePort, or LoadBalancer)."
+
+    svc_name = str(answer.get("serviceName") or f"{app_name}-service").strip()
+    name_err = validate_k8s_name(svc_name)
+    if name_err:
+        return f"Service name {name_err[0].lower()}{name_err[1:]}"
+
+    detected = detect_container_ports(containers)
+    raw_ports = answer.get("ports")
+    if not isinstance(raw_ports, list) or not raw_ports:
+        # Fall back to the detected container ports when the client sent none.
+        raw_ports = [{"port": p, "targetPort": p} for p in detected]
+
+    resolved_ports: List[Dict[str, Any]] = []
+    seen_ports: set = set()
+    for entry in raw_ports:
+        if not isinstance(entry, dict):
+            continue
+        # A port can be deselected in the UI; skip anything not included.
+        if "include" in entry and not entry.get("include"):
+            continue
+        try:
+            port = int(entry.get("port"))
+        except (TypeError, ValueError):
+            return "Each service port must be a whole number."
+        if not (1 <= port <= 65535):
+            return f"Service port {port} is out of range (1–65535)."
+        if port in seen_ports:
+            return f"Service port {port} is listed more than once."
+        seen_ports.add(port)
+
+        target_raw = entry.get("targetPort")
+        if target_raw in (None, ""):
+            target_port = port
+        else:
+            try:
+                target_port = int(target_raw)
+            except (TypeError, ValueError):
+                return f"Target port for service port {port} must be a whole number."
+            if not (1 <= target_port <= 65535):
+                return f"Target port {target_port} is out of range (1–65535)."
+
+        protocol = str(entry.get("protocol") or "TCP").upper()
+        if protocol not in SERVICE_PROTOCOLS:
+            return f"Protocol '{protocol}' is not valid (use TCP or UDP)."
+
+        name = str(entry.get("name") or "").strip() or f"{protocol.lower()}-{port}"
+        spec: Dict[str, Any] = {
+            "name": name,
+            "protocol": protocol,
+            "port": port,
+            "targetPort": target_port,
+        }
+
+        node_port_raw = entry.get("nodePort")
+        if node_port_raw not in (None, ""):
+            if svc_type != "NodePort":
+                return "A nodePort can only be set when the service type is NodePort."
+            try:
+                node_port = int(node_port_raw)
+            except (TypeError, ValueError):
+                return f"nodePort for service port {port} must be a whole number."
+            if not (NODE_PORT_MIN <= node_port <= NODE_PORT_MAX):
+                return f"nodePort {node_port} is out of range ({NODE_PORT_MIN}–{NODE_PORT_MAX})."
+            spec["nodePort"] = node_port
+
+        resolved_ports.append(spec)
+
+    if not resolved_ports:
+        return "A Service requires at least one port — include a port or disable the Service."
+
+    # The deployer's choice fully replaces the template's service defaults. Drop the
+    # legacy single-port keys so only the resolved ``ports`` list is authoritative.
+    service.pop("port", None)
+    service.pop("targetPort", None)
+    service.pop("protocol", None)
+    service.update({
+        "enabled": True,
+        "name": svc_name,
+        "type": svc_type,
+        "ports": resolved_ports,
+    })
+    return None
+
+
 def resolve_template(template: Dict[str, Any], answers: Dict[str, Any]) -> ResolveResult:
     """Merge a template + deployment answers into a flat wizard payload.
 
@@ -477,6 +620,17 @@ def resolve_template(template: Dict[str, Any], answers: Dict[str, Any]) -> Resol
     )
     if override_error:
         return None, override_error
+
+    # Service Exposure: the deployer decides whether the deployment also creates a
+    # Service. Their choice (when present) is authoritative over the template default.
+    service_error = _resolve_service_exposure(
+        answers.get("serviceExposure"),
+        app_name,
+        networking,
+        containers,
+    )
+    if service_error:
+        return None, service_error
 
     # A deployer's storage choices replace the template's storage defaults entirely.
     resolved_storage = _resolve_storage(answers.get("storage") or {})
@@ -545,6 +699,9 @@ def resolve_template(template: Dict[str, Any], answers: Dict[str, Any]) -> Resol
     tls_secrets: List[Dict[str, Any]] = []
     ingress_answer = answers.get("ingress") or {}
     if ingress_answer:
+        # An Ingress routes through a Service, so one must exist for this deployment.
+        if not (networking.get("service") or {}).get("enabled"):
+            return None, "Ingress requires a Service. Please create or select a Service."
         ingress = networking.setdefault("ingress", {})
         ingress["enabled"] = True
         if ingress_answer.get("host"):

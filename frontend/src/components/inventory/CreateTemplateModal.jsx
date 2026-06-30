@@ -30,7 +30,6 @@ const VOLUME_KIND_SOURCES = {
 };
 
 const DEPENDENCY_KINDS = ["postgresql", "redis", "kafka", "rabbitmq", "minio", "service"];
-const SERVICE_TYPES = ["ClusterIP", "NodePort", "LoadBalancer"];
 const PROBE_TYPES = [
   { value: "http", label: "HTTP GET" },
   { value: "tcp", label: "TCP socket" },
@@ -52,7 +51,7 @@ const EMPTY_DEPENDENCY = { kind: "postgresql", name: "", required: true, note: "
 
 // A volume-mount schema row: the deployer supplies the actual ConfigMap/Secret
 // (existing or freshly created) at deploy time.
-const EMPTY_VOLUME = { mountPath: "", kind: "configMap", readOnly: false };
+const EMPTY_VOLUME = { mountPath: "", kind: "configMap", readOnly: false, subPath: "" };
 
 // Every override the deployer may be granted lives here — the single home for the
 // lock-vs-override decision.
@@ -63,7 +62,6 @@ const DEFAULT_OVERRIDES = {
   resources: false,
   storageSize: false,
   ingressHost: false,
-  serviceTypes: [],
 };
 
 const PROBE_DEFAULTS = {
@@ -122,7 +120,7 @@ function freshForm(category) {
     ...EMPTY_FORM,
     category,
     envVars: [{ ...EMPTY_ENV }],
-    overrides: { ...DEFAULT_OVERRIDES, serviceTypes: [] },
+    overrides: { ...DEFAULT_OVERRIDES },
     dependencies: [],
     volumeMounts: [],
     probes: freshProbes(),
@@ -157,6 +155,7 @@ function formFromTemplate(detail) {
     mountPath: v.mountPath || "",
     kind: v.kind === "secret" ? "secret" : "configMap",
     readOnly: Boolean(v.readOnly),
+    subPath: v.subPath || "",
   }));
 
   const probes = freshProbes();
@@ -204,7 +203,6 @@ function formFromTemplate(detail) {
       resources: Boolean(overrides.resources),
       storageSize: Boolean(overrides.storageSize),
       ingressHost: Boolean(schema.ingress?.supported),
-      serviceTypes: Array.isArray(overrides.serviceType) ? overrides.serviceType : [],
     },
     dependencies,
     volumeMounts,
@@ -216,12 +214,20 @@ function formFromTemplate(detail) {
   };
 }
 
-export default function CreateTemplateModal({ open, existingCategories = [], template = null, onClose, onSubmit }) {
+export default function CreateTemplateModal({
+  open,
+  existingCategories = [],
+  template = null,
+  draft = null,
+  onClose,
+  onSubmit,
+}) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   // Which button is mid-flight, so we can label just that one "Saving…".
   const [pendingAction, setPendingAction] = useState("");
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const isEditing = Boolean(template);
 
   const categoryOptions = useMemo(() => {
@@ -239,12 +245,16 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
 
   useEffect(() => {
     if (open) {
-      setForm(template ? formFromTemplate(template) : freshForm(categoryOptions[0] || NEW_CATEGORY));
+      // `template` => edit/update an existing template; `draft` => prefill a brand
+      // new template (e.g. parsed from imported YAML) while staying in create mode.
+      const prefill = template || draft;
+      setForm(prefill ? formFromTemplate(prefill) : freshForm(categoryOptions[0] || NEW_CATEGORY));
       setError("");
       setSaving(false);
       setPendingAction("");
+      setShowCloseConfirm(false);
     }
-  }, [open, template, categoryOptions]);
+  }, [open, template, draft, categoryOptions]);
 
   // --- env schema handlers ---
   const setEnvKind = (index, kind) =>
@@ -274,13 +284,6 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
   const toggleOverride = (key) => (event) =>
     setForm((prev) => ({ ...prev, overrides: { ...prev.overrides, [key]: event.target.checked } }));
 
-  const toggleServiceType = (type) =>
-    setForm((prev) => {
-      const current = prev.overrides.serviceTypes || [];
-      const next = current.includes(type) ? current.filter((t) => t !== type) : [...current, type];
-      return { ...prev, overrides: { ...prev.overrides, serviceTypes: next } };
-    });
-
   // --- dependency handlers ---
   const updateDependency = (index, key) => (event) => {
     const value = event.target.type === "checkbox" ? event.target.checked : event.target.value;
@@ -295,6 +298,19 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
     setForm((prev) => ({ ...prev, dependencies: prev.dependencies.filter((_, i) => i !== index) }));
 
   if (!open) return null;
+
+  // Closing discards the in-progress template, so a user-initiated dismissal
+  // (backdrop click or Cancel) asks for confirmation first. Programmatic closes
+  // after a successful save call onClose directly and skip this.
+  const requestClose = () => {
+    if (saving) return;
+    setShowCloseConfirm(true);
+  };
+  const confirmClose = () => {
+    setShowCloseConfirm(false);
+    onClose();
+  };
+  const cancelClose = () => setShowCloseConfirm(false);
 
   const update = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }));
   const toggle = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.checked }));
@@ -468,7 +484,6 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
     for (const key of ["image", "tag", "replicas", "resources", "storageSize"]) {
       if (form.overrides[key]) overrides[key] = true;
     }
-    if ((form.overrides.serviceTypes || []).length) overrides.serviceType = form.overrides.serviceTypes;
     if (Object.keys(overrides).length) schema.overrides = overrides;
     if (envSchema.length) schema.env = envSchema;
 
@@ -489,7 +504,14 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
         const mountPath = (row.mountPath || "").trim();
         if (!mountPath) return null;
         const kind = row.kind === "secret" ? "secret" : "configMap";
-        return { mountPath, kind, allowedSources: VOLUME_KIND_SOURCES[kind], readOnly: Boolean(row.readOnly) };
+        const subPath = (row.subPath || "").trim();
+        return {
+          mountPath,
+          kind,
+          allowedSources: VOLUME_KIND_SOURCES[kind],
+          readOnly: Boolean(row.readOnly),
+          ...(subPath ? { subPath } : {}),
+        };
       })
       .filter(Boolean);
     if (volumeMounts.length) schema.volumeMounts = volumeMounts;
@@ -517,7 +539,7 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={requestClose}>
       <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="modal-card__header">
           <h3>{isEditing ? "Edit Template" : "Create Template"}</h3>
@@ -785,6 +807,13 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
                       </label>
                     ))}
                   </div>
+                  <input
+                    value={row.subPath || ""}
+                    onChange={updateRow("volumeMounts", index, "subPath")}
+                    placeholder="subPath (optional) — mount a single key as this file"
+                    aria-label={`Volume ${index + 1} subPath`}
+                    className="schema-env-card__default"
+                  />
                 </div>
               ))}
             </div>
@@ -824,17 +853,6 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
               <input type="checkbox" checked={form.overrides.ingressHost} onChange={toggleOverride("ingressHost")} />
               <span>Ingress host</span>
             </label>
-          </div>
-          <div className="schema-svc-types">
-            <span className="muted">Allowed service types (deployer may choose):</span>
-            <div className="schema-env-card__sources">
-              {SERVICE_TYPES.map((type) => (
-                <label key={type} className="schema-source-chip">
-                  <input type="checkbox" checked={(form.overrides.serviceTypes || []).includes(type)} onChange={() => toggleServiceType(type)} />
-                  <span>{type}</span>
-                </label>
-              ))}
-            </div>
           </div>
           {form.overrides.ingressHost ? (
             <label className="checkbox-row" style={{ marginTop: "var(--space-3)" }}>
@@ -968,7 +986,7 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
         ) : null}
 
         <div className="modal-actions">
-          <button type="button" className="btn-outline" onClick={onClose} disabled={saving}>
+          <button type="button" className="btn-outline" onClick={requestClose} disabled={saving}>
             Cancel
           </button>
           {isEditing ? (
@@ -987,6 +1005,42 @@ export default function CreateTemplateModal({ open, existingCategories = [], tem
           </button>
         </div>
       </div>
+
+      {showCloseConfirm ? (
+        <div
+          className="modal-backdrop template-close-confirm"
+          role="presentation"
+          onClick={(e) => {
+            e.stopPropagation();
+            cancelClose();
+          }}
+        >
+          <div
+            className="modal-card template-close-confirm__panel"
+            role="alertdialog"
+            aria-labelledby="template-close-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-card__header">
+              <h3 id="template-close-confirm-title">
+                Discard this {isEditing ? "edit" : "template"}?
+              </h3>
+              <p className="muted">
+                You have unsaved changes. Closing now will discard everything
+                you&apos;ve entered.
+              </p>
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="btn-outline" onClick={cancelClose}>
+                Keep editing
+              </button>
+              <button type="button" className="primary" onClick={confirmClose}>
+                Discard &amp; close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
