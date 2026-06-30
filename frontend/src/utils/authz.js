@@ -93,6 +93,12 @@ export const NAV_PAGES = [
 
   // Services
   {
+    key: "serviceCatalog",
+    label: "Service Catalog",
+    permission: "service_blueprints:view",
+    section: "Services",
+  },
+  {
     key: "applicationServices",
     label: "App Services",
     permission: "app_services:view",

@@ -57,6 +57,11 @@ PERMISSIONS = [
     ("clients:create", "Create clients"),
     ("clients:update", "Update clients"),
     ("clients:delete", "Delete clients"),
+    ("service_blueprints:view", "View service blueprints"),
+    ("service_blueprints:create", "Create service blueprints"),
+    ("service_blueprints:update", "Edit service blueprints"),
+    ("service_blueprints:delete", "Delete service blueprints"),
+    ("service_blueprints:deploy", "Deploy from a service blueprint"),
     ("api_tokens:manage", "Create and revoke API tokens"),
     ("deployment_requests:request", "Request a cluster deployment or change"),
     ("deployment_requests:view", "View deployment requests"),
@@ -126,6 +131,15 @@ PERMISSION_GROUPS = [
         "keys": ["clients:view", "clients:create", "clients:update", "clients:delete"],
     },
     {
+        "id": "serviceCatalog",
+        "label": "Service Catalog",
+        "keys": [
+            "service_blueprints:view", "service_blueprints:create",
+            "service_blueprints:update", "service_blueprints:delete",
+            "service_blueprints:deploy",
+        ],
+    },
+    {
         "id": "administration",
         "label": "Administration",
         "keys": [
@@ -145,6 +159,7 @@ DANGEROUS_PERMISSION_KEYS = {
     "helm:install", "helm:upgrade", "helm:rollback", "helm:uninstall", "helm:values:update",
     "app_services:delete", "clients:delete", "api_tokens:manage",
     "deployment_requests:manage", "change_bundles:manage",
+    "service_blueprints:delete", "service_blueprints:deploy",
 }
 
 
@@ -198,6 +213,7 @@ VIEWER_PERMISSIONS = [
     "helm:view",
     "app_services:view",
     "clients:view",
+    "service_blueprints:view",
     "deployment_requests:request",
     "change_bundles:create",
     "change_bundles:view",
@@ -228,6 +244,10 @@ OPERATOR_PERMISSIONS = [
     "clients:view",
     "clients:create",
     "clients:update",
+    "service_blueprints:view",
+    "service_blueprints:create",
+    "service_blueprints:update",
+    "service_blueprints:deploy",
     "deployment_requests:request",
     "deployment_requests:view",
     "change_bundles:create",
@@ -269,6 +289,11 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "clients:create",
     "clients:update",
     "clients:delete",
+    "service_blueprints:view",
+    "service_blueprints:create",
+    "service_blueprints:update",
+    "service_blueprints:delete",
+    "service_blueprints:deploy",
     "deployment_requests:request",
     "deployment_requests:view",
     "change_bundles:create",
@@ -285,6 +310,7 @@ HERMES_AGENT_PERMISSIONS = [
     "alerts:view",
     "app_services:view",
     "clients:view",
+    "service_blueprints:view",
 ]
 
 ROLE_DEFINITIONS = {

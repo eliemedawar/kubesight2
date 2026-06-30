@@ -342,16 +342,30 @@ function TopologyViewer({ nodes, edges, compact = false }) {
     return <p className="muted" style={{ fontSize: "0.875rem", fontStyle: "italic" }}>No topology defined yet.</p>;
   }
 
+  // Zoom out a touch by padding the viewBox with extra margin around the
+  // content, so the topology renders smaller and centered in its container.
+  const zoomMx = svgW * 0.12;
+  const zoomMy = svgH * 0.12;
+  // Never scale the SVG *up* past its natural size — otherwise a 1–2 node graph
+  // gets stretched to the full container width and the nodes balloon. Cap the
+  // rendered width to the viewBox width (treated as px) and center it; larger
+  // graphs still scale down to fit.
+  const naturalWidth = Math.round(svgW + zoomMx * 2);
+
   return (
     <div className={`topo-viewer${compact ? " topo-viewer--compact" : ""}`}>
-      <svg viewBox={`0 0 ${svgW} ${svgH}`}
-        style={{ display: "block", width: "100%", height: "auto" }}>
+      <svg viewBox={`${-zoomMx} ${-zoomMy} ${svgW + zoomMx * 2} ${svgH + zoomMy * 2}`}
+        preserveAspectRatio="xMidYMid meet"
+        style={{ display: "block", width: "100%", maxWidth: `${naturalWidth}px`, height: "auto", margin: "0 auto" }}>
         <defs>
           <filter id="topo-shadow" x="-30%" y="-30%" width="160%" height="160%">
             <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="rgba(0,0,0,0.5)" />
           </filter>
           <marker id="topo-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="#64748b" />
+          </marker>
+          <marker id="topo-arrow-ext" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#f5b945" />
           </marker>
         </defs>
 
@@ -379,19 +393,48 @@ function TopologyViewer({ nodes, edges, compact = false }) {
             const p2 = nodeExitPoint(tgtCX, tgtCY, -nx, -ny);
 
             let d;
+            let labelX, labelY;
             if (hasBidi) {
               const sign = String(edge.sourceNodeId) < String(edge.targetNodeId) ? 1 : -1;
               const px = -ny * 16 * sign, py = nx * 16 * sign;
               const mx = (p1.x + p2.x) / 2 + px, my = (p1.y + p2.y) / 2 + py;
               d = `M ${p1.x},${p1.y} Q ${mx},${my} ${p2.x},${p2.y}`;
+              labelX = mx; labelY = my;
             } else {
               d = `M ${p1.x},${p1.y} L ${p2.x},${p2.y}`;
+              labelX = (p1.x + p2.x) / 2; labelY = (p1.y + p2.y) / 2;
             }
 
+            const isExternal = edge.scope === "external";
+            const stroke = isExternal ? "#f5b945" : "#475569";
+            const protocol = edge.protocol || "";
+            const description = edge.description || "";
+            const descLabel = description.length > 32 ? description.slice(0, 31) + "…" : description;
+
+            const edgeTip = [protocol, edge.scope, edge.description].filter(Boolean).join(" · ");
+
             return (
-              <path key={edge.id ?? `e${idx}`} d={d}
-                fill="none" stroke="#475569" strokeWidth={1.5}
-                markerEnd="url(#topo-arrow)" />
+              <g key={edge.id ?? `e${idx}`}>
+                {edgeTip ? <title>{edgeTip}</title> : null}
+                <path d={d}
+                  fill="none" stroke={stroke} strokeWidth={1.5}
+                  strokeDasharray={isExternal ? "6 4" : undefined}
+                  markerEnd={`url(#${isExternal ? "topo-arrow-ext" : "topo-arrow"})`} />
+                {protocol ? (
+                  <text x={labelX} y={labelY - 5} textAnchor="middle"
+                    fill={isExternal ? "#f5b945" : "#94a3b8"} fontSize={10} fontWeight={600}
+                    style={{ paintOrder: "stroke" }} stroke="#0b1120" strokeWidth={3}>
+                    {protocol}
+                  </text>
+                ) : null}
+                {description ? (
+                  <text x={labelX} y={labelY + (protocol ? 7 : -2)} textAnchor="middle"
+                    fill="#94a3b8" fontSize={9}
+                    style={{ paintOrder: "stroke" }} stroke="#0b1120" strokeWidth={3}>
+                    {descLabel}
+                  </text>
+                ) : null}
+              </g>
             );
           })}
 
@@ -442,18 +485,36 @@ const E_NODE_W = 184;
 const E_NODE_H = 104;
 const TOPO_CANVAS_MIN_H = 440;
 
+// Connection metadata options.
+const EDGE_PROTOCOLS = ["HTTP", "HTTPS", "gRPC", "TCP", "UDP", "WebSocket", "AMQP", "Kafka", "SQL", "Redis", "DNS"];
+const DEFAULT_PROTOCOL = "HTTP";
+const DEFAULT_SCOPE = "internal";
+
+function edgeStroke(scope) {
+  return scope === "external" ? "#f5b945" : "#64748b";
+}
+
 function TopologyEditor({ topology, onChange }) {
   const { nodes, edges } = topology;
   const canvasRef = useRef(null);
-  const dragRef = useRef(null);          // { tempId, dx, dy } while dragging a node
-  const [linking, setLinking] = useState(null); // { fromTempId, x, y } while drawing an edge
+  const dragRef = useRef(null);          // { tempId, offX, offY, moved, pointerId } while dragging
+  const rafRef = useRef(0);              // pending requestAnimationFrame id for drag updates
+  const pendingRef = useRef(null);       // latest canvas point during a drag
   const linkTargetRef = useRef(null);    // tempId currently hovered while linking
+  const [linking, setLinking] = useState(null); // { fromTempId, x, y } while drawing an edge
+  const [drag, setDrag] = useState(null);        // { tempId, x, y } uncommitted live drag position
+  const [edgePopup, setEdgePopup] = useState(null); // { index, x, y } open connection editor
 
   const nodeById = useMemo(() => {
     const m = {};
     nodes.forEach((n) => { m[n.tempId] = n; });
     return m;
   }, [nodes]);
+
+  // Live position of a node: the one being dragged uses the uncommitted position
+  // so only this component re-renders during a drag (not the whole modal).
+  const posOf = (node) =>
+    drag && drag.tempId === node.tempId ? { x: drag.x, y: drag.y } : { x: node.x, y: node.y };
 
   // Auto-place any node that lacks a position (legacy/AI topologies, or first load).
   useEffect(() => {
@@ -470,6 +531,9 @@ function TopologyEditor({ topology, onChange }) {
     onChange({ nodes: placed, edges });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges]);
+
+  // Clean up a pending animation frame on unmount.
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
 
   const canvasPoint = (evt) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -496,6 +560,7 @@ function TopologyEditor({ topology, onChange }) {
   };
 
   const removeNode = (tempId) => {
+    setEdgePopup(null);
     onChange({
       nodes: nodes.filter((n) => n.tempId !== tempId),
       edges: edges.filter((e) => e.sourceTempId !== tempId && e.targetTempId !== tempId),
@@ -503,37 +568,87 @@ function TopologyEditor({ topology, onChange }) {
   };
 
   const removeEdge = (idx) => {
+    setEdgePopup(null);
     onChange({ nodes, edges: edges.filter((_, i) => i !== idx) });
+  };
+
+  const updateEdge = (idx, patch) => {
+    onChange({ nodes, edges: edges.map((e, i) => (i === idx ? { ...e, ...patch } : e)) });
+  };
+
+  // Geometry helpers (use live drag position so edges/labels follow the drag).
+  const centerOfNode = (node) => { const p = posOf(node); return { x: p.x + E_NODE_W / 2, y: p.y + E_NODE_H / 2 }; };
+  const handlePos = (node) => { const p = posOf(node); return { x: p.x + E_NODE_W, y: p.y + E_NODE_H / 2 }; };
+  const edgeEndpoints = (s, t) => {
+    const sc = centerOfNode(s), tc = centerOfNode(t);
+    const dx = tc.x - sc.x, dy = tc.y - sc.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = dx / len, ny = dy / len;
+    return {
+      p1: rectExitPoint(sc.x, sc.y, nx, ny, E_NODE_W, E_NODE_H),
+      p2: rectExitPoint(tc.x, tc.y, -nx, -ny, E_NODE_W, E_NODE_H),
+    };
   };
 
   // ── Node dragging ──
   const onNodePointerDown = (evt, node) => {
     if (evt.button !== 0) return;
     evt.stopPropagation();
+    setEdgePopup(null);
     const p = canvasPoint(evt);
-    dragRef.current = { tempId: node.tempId, dx: p.x - node.x, dy: p.y - node.y, moved: false };
+    dragRef.current = { tempId: node.tempId, offX: p.x - node.x, offY: p.y - node.y, moved: false, pointerId: evt.pointerId };
+    pendingRef.current = null;
+    setDrag({ tempId: node.tempId, x: node.x, y: node.y });
+    try { canvasRef.current?.setPointerCapture(evt.pointerId); } catch { /* not supported */ }
   };
 
   // ── Edge linking ──
+  // No pointer capture here: linking relies on the target node's hover/up
+  // events firing (capture would redirect them all to the canvas). Canvas
+  // pointermove/up still fire via event bubbling from the nodes.
   const onHandlePointerDown = (evt, node) => {
     if (evt.button !== 0) return;
     evt.stopPropagation();
+    setEdgePopup(null);
     const p = canvasPoint(evt);
     setLinking({ fromTempId: node.tempId, x: p.x, y: p.y });
     linkTargetRef.current = null;
   };
 
+  const flushDrag = () => {
+    rafRef.current = 0;
+    const pt = pendingRef.current;
+    const dr = dragRef.current;
+    if (!pt || !dr) return;
+    dr.moved = true;
+    setDrag({ tempId: dr.tempId, x: Math.max(0, pt.x - dr.offX), y: Math.max(0, pt.y - dr.offY) });
+  };
+
   const onCanvasPointerMove = (evt) => {
     const p = canvasPoint(evt);
     if (dragRef.current) {
-      const { tempId, dx, dy } = dragRef.current;
-      dragRef.current.moved = true;
-      const nx = Math.max(0, p.x - dx);
-      const ny = Math.max(0, p.y - dy);
-      onChange({ nodes: nodes.map((n) => (n.tempId === tempId ? { ...n, x: nx, y: ny } : n)), edges });
+      // Throttle drag updates to one per animation frame for smoothness.
+      pendingRef.current = p;
+      if (!rafRef.current) rafRef.current = requestAnimationFrame(flushDrag);
     } else if (linking) {
       setLinking((l) => (l ? { ...l, x: p.x, y: p.y } : l));
     }
+  };
+
+  const commitDrag = () => {
+    const dr = dragRef.current;
+    if (dr && dr.moved) {
+      const pt = pendingRef.current;
+      const x = pt ? Math.max(0, pt.x - dr.offX) : drag?.x;
+      const y = pt ? Math.max(0, pt.y - dr.offY) : drag?.y;
+      if (typeof x === "number" && typeof y === "number") {
+        onChange({ nodes: nodes.map((n) => (n.tempId === dr.tempId ? { ...n, x, y } : n)), edges });
+      }
+    }
+    dragRef.current = null;
+    pendingRef.current = null;
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
+    setDrag(null);
   };
 
   const finishLinking = () => {
@@ -541,24 +656,43 @@ function TopologyEditor({ topology, onChange }) {
     const to = linkTargetRef.current;
     if (from && to && from !== to) {
       const dup = edges.some((e) => e.sourceTempId === from && e.targetTempId === to);
-      if (!dup) onChange({ nodes, edges: [...edges, { sourceTempId: from, targetTempId: to }] });
+      if (!dup) {
+        const nextEdges = [...edges, { sourceTempId: from, targetTempId: to, protocol: DEFAULT_PROTOCOL, scope: DEFAULT_SCOPE }];
+        onChange({ nodes, edges: nextEdges });
+        // Open the connection editor on the freshly created edge.
+        const s = nodeById[from], t = nodeById[to];
+        if (s && t) {
+          const { p1, p2 } = edgeEndpoints(s, t);
+          setEdgePopup({ index: nextEdges.length - 1, x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 });
+        }
+      }
     }
     setLinking(null);
     linkTargetRef.current = null;
   };
 
-  const onCanvasPointerUp = () => {
-    dragRef.current = null;
+  const onCanvasPointerUp = (evt) => {
+    if (dragRef.current) {
+      try { canvasRef.current?.releasePointerCapture(evt.pointerId); } catch { /* ignore */ }
+      commitDrag();
+    }
     if (linking) finishLinking();
   };
 
-  // Geometry for rendering edges between editor boxes.
-  const centerOf = (n) => ({ x: n.x + E_NODE_W / 2, y: n.y + E_NODE_H / 2 });
-  const handlePos = (n) => ({ x: n.x + E_NODE_W, y: n.y + E_NODE_H / 2 });
+  // If the pointer leaves the canvas mid-link, cancel it. (Dragging uses pointer
+  // capture, so this never fires during a drag.)
+  const onCanvasPointerLeave = () => {
+    if (linking) {
+      setLinking(null);
+      linkTargetRef.current = null;
+    }
+  };
 
   const placedNodes = nodes.filter((n) => typeof n.x === "number" && typeof n.y === "number");
-  const contentW = placedNodes.reduce((m, n) => Math.max(m, n.x + E_NODE_W), 0) + 60;
-  const contentH = placedNodes.reduce((m, n) => Math.max(m, n.y + E_NODE_H), 0) + 60;
+  const contentW = placedNodes.reduce((m, n) => Math.max(m, posOf(n).x + E_NODE_W), 0) + 60;
+  const contentH = placedNodes.reduce((m, n) => Math.max(m, posOf(n).y + E_NODE_H), 0) + 60;
+
+  const popupEdge = edgePopup ? edges[edgePopup.index] : null;
 
   return (
     <div className="topo-editor">
@@ -569,16 +703,17 @@ function TopologyEditor({ topology, onChange }) {
       <p className="muted topo-canvas-hint">
         Components are created automatically from the deployments and pods you link below.
         Drag a box by its header to move it. Drag from the <span className="topo-handle-legend">●</span> handle on the right
-        of a box to another box to connect them. Click a connection to remove it.
+        of a box to another box to connect them. Click a connection to set its protocol and scope.
       </p>
 
       <div
         ref={canvasRef}
         className="topo-canvas"
         style={{ height: nodes.length ? Math.max(TOPO_CANVAS_MIN_H, contentH) : TOPO_CANVAS_MIN_H }}
+        onPointerDown={() => setEdgePopup(null)}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
-        onPointerLeave={onCanvasPointerUp}
+        onPointerLeave={onCanvasPointerLeave}
       >
         {nodes.length === 0 ? (
           <div className="topo-canvas-empty">
@@ -593,36 +728,32 @@ function TopologyEditor({ topology, onChange }) {
                 <marker id="topo-edit-arrow" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
                   <polygon points="0 0, 9 3.5, 0 7" fill="#64748b" />
                 </marker>
+                <marker id="topo-edit-arrow-ext" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+                  <polygon points="0 0, 9 3.5, 0 7" fill="#f5b945" />
+                </marker>
               </defs>
               {edges.map((edge, idx) => {
                 const s = nodeById[edge.sourceTempId];
                 const t = nodeById[edge.targetTempId];
                 if (!s || !t || typeof s.x !== "number" || typeof t.x !== "number") return null;
-                const sc = centerOf(s), tc = centerOf(t);
-                const dx = tc.x - sc.x, dy = tc.y - sc.y;
-                const len = Math.hypot(dx, dy) || 1;
-                const nx = dx / len, ny = dy / len;
-                const p1 = rectExitPoint(sc.x, sc.y, nx, ny, E_NODE_W, E_NODE_H);
-                const p2 = rectExitPoint(tc.x, tc.y, -nx, -ny, E_NODE_W, E_NODE_H);
-                const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+                const { p1, p2 } = edgeEndpoints(s, t);
+                const isExternal = edge.scope === "external";
+                const stroke = edgeStroke(edge.scope);
                 return (
                   <g key={idx} className="topo-canvas-edge" onPointerDown={(e) => e.stopPropagation()}>
                     <path
                       d={`M ${p1.x},${p1.y} L ${p2.x},${p2.y}`}
-                      fill="none" stroke="#475569" strokeWidth={2}
-                      markerEnd="url(#topo-edit-arrow)"
+                      fill="none" stroke={stroke} strokeWidth={2}
+                      strokeDasharray={isExternal ? "7 4" : undefined}
+                      markerEnd={`url(#${isExternal ? "topo-edit-arrow-ext" : "topo-edit-arrow"})`}
                     />
-                    {/* fat invisible hit-line + delete badge */}
+                    {/* fat invisible hit-line to make the connection easy to click */}
                     <path d={`M ${p1.x},${p1.y} L ${p2.x},${p2.y}`}
-                      fill="none" stroke="transparent" strokeWidth={14}
+                      fill="none" stroke="transparent" strokeWidth={16}
                       style={{ cursor: "pointer" }}
-                      onClick={() => removeEdge(idx)}>
-                      <title>Remove connection</title>
+                      onClick={() => setEdgePopup({ index: idx, x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 })}>
+                      <title>Edit connection</title>
                     </path>
-                    <g className="topo-edge-delete" onClick={() => removeEdge(idx)} style={{ cursor: "pointer" }}>
-                      <circle cx={mx} cy={my} r={9} />
-                      <text x={mx} y={my + 0.5} textAnchor="middle" dominantBaseline="middle">✕</text>
-                    </g>
                   </g>
                 );
               })}
@@ -634,16 +765,43 @@ function TopologyEditor({ topology, onChange }) {
               )}
             </svg>
 
+            {/* Connection labels (protocol + scope) — click to edit */}
+            {edges.map((edge, idx) => {
+              const s = nodeById[edge.sourceTempId];
+              const t = nodeById[edge.targetTempId];
+              if (!s || !t || typeof s.x !== "number" || typeof t.x !== "number") return null;
+              const { p1, p2 } = edgeEndpoints(s, t);
+              const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+              const isExternal = edge.scope === "external";
+              return (
+                <button
+                  key={`elabel-${idx}`}
+                  type="button"
+                  className={`topo-edge-label${isExternal ? " is-external" : ""}`}
+                  style={{ left: mx, top: my }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => setEdgePopup({ index: idx, x: mx, y: my })}
+                  title={edge.description ? edge.description : "Edit connection"}
+                >
+                  <span className="topo-edge-proto">{edge.protocol || DEFAULT_PROTOCOL}</span>
+                  <span className="topo-edge-scope">{isExternal ? "ext" : "int"}</span>
+                  {edge.description ? <span className="topo-edge-hasdesc" aria-hidden="true">•</span> : null}
+                </button>
+              );
+            })}
+
             {/* Node boxes */}
             {nodes.map((node) => {
               if (typeof node.x !== "number") return null;
               const isLinkTarget = linking && linking.fromTempId !== node.tempId;
               const isResource = Boolean(node.linkedDeployment);
+              const p = posOf(node);
+              const isDragging = drag && drag.tempId === node.tempId;
               return (
                 <div
                   key={node.tempId}
-                  className={`topo-canvas-node${linking ? " is-linkable" : ""}${isResource ? " is-resource" : ""}`}
-                  style={{ left: node.x, top: node.y, width: E_NODE_W, height: E_NODE_H }}
+                  className={`topo-canvas-node${linking ? " is-linkable" : ""}${isResource ? " is-resource" : ""}${isDragging ? " is-dragging" : ""}`}
+                  style={{ left: p.x, top: p.y, width: E_NODE_W, height: E_NODE_H }}
                   onPointerEnter={() => { if (isLinkTarget) linkTargetRef.current = node.tempId; }}
                   onPointerLeave={() => { if (linkTargetRef.current === node.tempId) linkTargetRef.current = null; }}
                   onPointerUp={() => { if (linking && isLinkTarget) { linkTargetRef.current = node.tempId; } }}
@@ -693,6 +851,60 @@ function TopologyEditor({ topology, onChange }) {
                 </div>
               );
             })}
+
+            {/* Connection editor popup */}
+            {popupEdge ? (
+              <div
+                className="topo-edge-popup"
+                style={{ left: edgePopup.x, top: edgePopup.y }}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                <div className="topo-edge-popup-title">Connection</div>
+                <label className="topo-edge-popup-field">
+                  <span>Protocol</span>
+                  <select
+                    value={popupEdge.protocol || DEFAULT_PROTOCOL}
+                    onChange={(e) => updateEdge(edgePopup.index, { protocol: e.target.value })}
+                  >
+                    {EDGE_PROTOCOLS.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </label>
+                <div className="topo-edge-popup-field">
+                  <span>Scope</span>
+                  <div className="topo-scope-toggle">
+                    {["internal", "external"].map((sc) => (
+                      <button
+                        key={sc}
+                        type="button"
+                        className={(popupEdge.scope || DEFAULT_SCOPE) === sc ? "is-active" : ""}
+                        onClick={() => updateEdge(edgePopup.index, { scope: sc })}
+                      >
+                        {sc === "internal" ? "Internal" : "External"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <label className="topo-edge-popup-field">
+                  <span>Description</span>
+                  <textarea
+                    className="topo-edge-popup-desc"
+                    value={popupEdge.description || ""}
+                    onChange={(e) => updateEdge(edgePopup.index, { description: e.target.value })}
+                    placeholder="IPs, ports, notes…"
+                    rows={2}
+                    maxLength={1000}
+                  />
+                </label>
+                <div className="topo-edge-popup-actions">
+                  <button type="button" className="btn-ghost danger btn-compact" onClick={() => removeEdge(edgePopup.index)}>
+                    Remove
+                  </button>
+                  <button type="button" className="btn-outline btn-compact" onClick={() => setEdgePopup(null)}>
+                    Done
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
       </div>
@@ -718,6 +930,9 @@ function initTopologyFromService(service) {
   const edges = (service.topology.edges || []).map((e) => ({
     sourceTempId: `node-${e.sourceNodeId}`,
     targetTempId: `node-${e.targetNodeId}`,
+    protocol: e.protocol || "",
+    scope: e.scope || "",
+    description: e.description || "",
   }));
   return { nodes, edges };
 }
@@ -820,7 +1035,13 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
           })),
         edges: topology.edges
           .filter((e) => e.sourceTempId && e.targetTempId && e.sourceTempId !== e.targetTempId)
-          .map((e) => ({ sourceTempId: e.sourceTempId, targetTempId: e.targetTempId })),
+          .map((e) => ({
+            sourceTempId: e.sourceTempId,
+            targetTempId: e.targetTempId,
+            protocol: e.protocol || undefined,
+            scope: e.scope || undefined,
+            description: e.description || undefined,
+          })),
       },
     });
   };
@@ -881,50 +1102,63 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
 
 // ─── Service detail panel ────────────────────────────────────────────────────
 
-function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdit, canDelete }) {
+function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdit, canDelete, onClose }) {
   const topo = service.topology || { nodes: [], edges: [] };
 
+  // Close on Escape.
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose?.(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
-    <div className="card" style={{ padding: "1.25rem" }}>
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "1rem", marginBottom: "1rem" }}>
-        <div>
-          <h3 style={{ margin: 0 }}>{service.name}</h3>
-          {service.description && (
-            <p className="muted" style={{ marginTop: "0.25rem", fontSize: "0.875rem" }}>{service.description}</p>
-          )}
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <div className="modal-card modal-card--wide service-detail-modal" role="dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="service-detail-modal__head">
+          <div>
+            <h3 style={{ margin: 0 }}>{service.name}</h3>
+            {service.description && (
+              <p className="muted" style={{ marginTop: "0.25rem", fontSize: "0.875rem" }}>{service.description}</p>
+            )}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            <HealthBadge health={service.health} />
+            <button type="button" className="btn-ghost modal-close" onClick={onClose} aria-label="Close">✕</button>
+          </div>
         </div>
-        <HealthBadge health={service.health} />
-      </div>
 
-      <div style={{ display: "flex", gap: "1.5rem", fontSize: "0.85rem", color: "var(--color-muted, #888)", marginBottom: "1.25rem" }}>
-        <span>{service.deploymentCount ?? 0} deployment{service.deploymentCount !== 1 ? "s" : ""}</span>
-        {topo.nodes.length > 0 && <span>{topo.nodes.length} component{topo.nodes.length !== 1 ? "s" : ""}</span>}
-        {service.createdAt && <span>Created {new Date(service.createdAt).toLocaleDateString()}</span>}
-      </div>
-
-      {topo.nodes.length > 0 && (
-        <div style={{ marginBottom: "1.25rem" }}>
-          <p className="form-label" style={{ marginBottom: "0.6rem" }}>Service Topology</p>
-          <TopologyViewer nodes={topo.nodes} edges={topo.edges} />
+        <div style={{ display: "flex", gap: "1.5rem", fontSize: "0.85rem", color: "var(--text-muted, #888)", margin: "0.75rem 0 1rem" }}>
+          <span>{service.deploymentCount ?? 0} deployment{service.deploymentCount !== 1 ? "s" : ""}</span>
+          {topo.nodes.length > 0 && <span>{topo.nodes.length} component{topo.nodes.length !== 1 ? "s" : ""}</span>}
+          {service.createdAt && <span>Created {new Date(service.createdAt).toLocaleDateString()}</span>}
         </div>
-      )}
 
-      {(service.deployments || []).length > 0 && (
-        <div style={{ marginBottom: "1.25rem" }}>
-          <p className="form-label" style={{ marginBottom: "0.5rem" }}>Linked resources</p>
-          {service.deployments.map((dep) => (
-            <DeploymentRow
-              key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}
-              dep={dep}
-              clusterName={clusterNameById?.[dep.clusterId]}
-            />
-          ))}
+        {topo.nodes.length > 0 && (
+          <div style={{ marginBottom: "1.25rem" }}>
+            <p className="form-label" style={{ marginBottom: "0.6rem" }}>Service Topology</p>
+            <TopologyViewer nodes={topo.nodes} edges={topo.edges} />
+          </div>
+        )}
+
+        {(service.deployments || []).length > 0 && (
+          <div style={{ marginBottom: "1.25rem" }}>
+            <p className="form-label" style={{ marginBottom: "0.5rem" }}>Linked resources</p>
+            {service.deployments.map((dep) => (
+              <DeploymentRow
+                key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}
+                dep={dep}
+                clusterName={clusterNameById?.[dep.clusterId]}
+              />
+            ))}
+          </div>
+        )}
+
+        <div className="modal-actions">
+          {canEdit && <button className="btn-outline btn-compact" onClick={onEdit}>Edit</button>}
+          {canDelete && <button className="btn-outline btn-compact danger" onClick={onDelete}>Delete</button>}
+          <button className="btn-outline btn-compact" onClick={onClose}>Close</button>
         </div>
-      )}
-
-      <div style={{ display: "flex", gap: "0.75rem" }}>
-        {canEdit && <button className="btn-outline btn-compact" onClick={onEdit}>Edit</button>}
-        {canDelete && <button className="btn-outline btn-compact danger" onClick={onDelete}>Delete</button>}
       </div>
     </div>
   );
@@ -1036,7 +1270,7 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
         </SearchableSelect>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: selectedService ? "1fr 1fr" : "1fr", gap: "1.25rem", alignItems: "start" }}>
+      <div>
         <div>
           {loading ? (
             <LoadingState label="Loading application services…" />
@@ -1088,17 +1322,19 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
           )}
         </div>
 
-        {selectedService && (
-          <ServiceDetailPanel
-            service={selectedService}
-            clusterNameById={Object.fromEntries(clusters.map((c) => [c.id, c.name || c.id]))}
-            onEdit={() => openEdit(selectedService)}
-            onDelete={() => handleDelete(selectedService)}
-            canEdit={canUpdate}
-            canDelete={canDelete && !deleting}
-          />
-        )}
       </div>
+
+      {selectedService && (
+        <ServiceDetailPanel
+          service={selectedService}
+          clusterNameById={Object.fromEntries(clusters.map((c) => [c.id, c.name || c.id]))}
+          onEdit={() => { const svc = selectedService; setSelectedId(null); openEdit(svc); }}
+          onDelete={() => handleDelete(selectedService)}
+          onClose={() => setSelectedId(null)}
+          canEdit={canUpdate}
+          canDelete={canDelete && !deleting}
+        />
+      )}
 
       {modalOpen && (
         <ServiceModal

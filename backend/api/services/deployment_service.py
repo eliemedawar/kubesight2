@@ -437,6 +437,25 @@ def _run_kubectl_diff(cluster_id: str, path: str, namespace: str) -> str:
     raise K8sCommandError(friendly_kubectl_diff_error(stderr))
 
 
+def _ensure_namespace(runner: RunKubectlFn, cluster_id: str, namespace: str) -> None:
+    """Create ``namespace`` if absent. Idempotent and best-effort: a pre-existing
+    namespace (incl. 'default') is left untouched, and an AlreadyExists race is
+    ignored. Other create errors propagate to surface as a deploy failure."""
+    ns = (namespace or "").strip()
+    if not ns or ns == "default":
+        return
+    try:
+        runner(cluster_id, ["get", "namespace", ns])
+        return  # already exists
+    except K8sCommandError:
+        pass
+    try:
+        runner(cluster_id, ["create", "namespace", ns])
+    except K8sCommandError as exc:
+        if "AlreadyExists" not in str(exc):
+            raise
+
+
 def apply_yaml(
     user: Optional[User],
     cluster_id: str,
@@ -504,6 +523,9 @@ def apply_yaml(
     path = _write_temp_yaml(sanitize_for_apply(yaml_content))
     try:
         runner = run_kubectl or _run_kubectl_for_cluster
+        # Create the target namespace if it doesn't exist yet, so deploying into a
+        # brand-new namespace (the "+ Create new namespace" option) works.
+        _ensure_namespace(runner, cluster_id, namespace)
         output = runner(cluster_id, ["apply", "-f", path, "-n", namespace])
         log_audit(
             "deployment_applied",

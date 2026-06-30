@@ -28,6 +28,10 @@ KIND_ALIASES = {
     "cronjobs": "cronjob",
     "service": "service",
     "services": "service",
+    "configmap": "configmap",
+    "configmaps": "configmap",
+    "secret": "secret",
+    "secrets": "secret",
 }
 
 KIND_PERMISSION = {
@@ -39,6 +43,21 @@ KIND_PERMISSION = {
     "job": "jobs:view",
     "cronjob": "cronjobs:view",
     "service": "services:view",
+    # ConfigMaps and Secrets have no dedicated view permission; they are gated by
+    # the page-level resources:view (and per-namespace access rules).
+    "configmap": "resources:view",
+    "secret": "resources:view",
+}
+
+# kubectl kind -> proper YAML kind casing for mock-mode YAML output.
+_YAML_KIND_CASING = {
+    "deployment": "Deployment",
+    "replicaset": "ReplicaSet",
+    "statefulset": "StatefulSet",
+    "daemonset": "DaemonSet",
+    "configmap": "ConfigMap",
+    "secret": "Secret",
+    "cronjob": "CronJob",
 }
 
 # Kinds that support the Resources "Restart" action. Pods are restarted by
@@ -101,9 +120,30 @@ def _mock_describe(kind: str, namespace: str, name: str) -> str:
 
 
 def _mock_yaml(kind: str, namespace: str, name: str) -> str:
+    yaml_kind = _YAML_KIND_CASING.get(kind, kind.capitalize())
+    if kind == "configmap":
+        return (
+            f"apiVersion: v1\n"
+            f"kind: ConfigMap\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {namespace}\n"
+            f"data:\n"
+            f"  example.key: example-value\n"
+        )
+    if kind == "secret":
+        return (
+            f"apiVersion: v1\n"
+            f"kind: Secret\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {namespace}\n"
+            f"type: Opaque\n"
+            f"data: {{}}\n"
+        )
     return (
         f"apiVersion: v1\n"
-        f"kind: {kind.capitalize() if kind != 'deployment' else 'Deployment'}\n"
+        f"kind: {yaml_kind}\n"
         f"metadata:\n"
         f"  name: {name}\n"
         f"  namespace: {namespace}\n"

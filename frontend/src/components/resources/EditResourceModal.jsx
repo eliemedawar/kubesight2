@@ -12,6 +12,17 @@ import { formatAccessError, isAccessDeniedError } from "../../utils/authz.js";
 import YamlPreviewPanel from "../inventory/wizard/YamlPreviewPanel.jsx";
 import AddToBundleButton from "../changes/AddToBundleButton.jsx";
 
+// kubectl kind -> human label / YAML Kind casing for the editable resource kinds.
+const KIND_META = {
+  deployment: { label: "deployment", yamlKind: "Deployment", actionType: "edit_deployment" },
+  configmap: { label: "config map", yamlKind: "ConfigMap", actionType: "edit_configmap" },
+  secret: { label: "secret", yamlKind: "Secret", actionType: "edit_secret" },
+};
+
+function metaForKind(kind) {
+  return KIND_META[kind] || { label: kind || "resource", yamlKind: kind || "Resource", actionType: "edit_resource" };
+}
+
 function describeDeployDiffError(err) {
   const message = err?.message || "Diff preview is unavailable.";
   if (isAccessDeniedError(message)) {
@@ -28,16 +39,18 @@ function describeDeployDiffError(err) {
   return formatAccessError(message, { suppressAccessDenied: false }) || message;
 }
 
-export default function EditDeploymentModal({
+export default function EditResourceModal({
   open,
   clusterId,
   namespace,
-  deploymentName,
+  kind = "deployment",
+  resourceName,
   onClose,
   onSuccess,
 }) {
   const { hasPermission } = usePermission();
   const canViewDeployDiff = hasPermission("apps:diff");
+  const meta = metaForKind(kind);
 
   const [step, setStep] = useState("edit");
   const [yaml, setYaml] = useState("");
@@ -84,7 +97,7 @@ export default function EditDeploymentModal({
       setLoading(false);
       return undefined;
     }
-    if (!clusterId || !namespace || !deploymentName) {
+    if (!clusterId || !namespace || !resourceName) {
       return undefined;
     }
     let cancelled = false;
@@ -93,8 +106,8 @@ export default function EditDeploymentModal({
     getResourceYaml({
       clusterId,
       namespace,
-      kind: "deployment",
-      name: deploymentName,
+      kind,
+      name: resourceName,
     })
       .then((payload) => {
         if (!cancelled) setYaml(payload.yaml || payload.output || "");
@@ -110,7 +123,7 @@ export default function EditDeploymentModal({
     return () => {
       cancelled = true;
     };
-  }, [open, clusterId, namespace, deploymentName]);
+  }, [open, clusterId, namespace, kind, resourceName]);
 
   if (!open) return null;
 
@@ -158,7 +171,9 @@ export default function EditDeploymentModal({
         clusterId,
         namespace,
         yaml,
-        deploymentName,
+        // Only Deployments register an inventory app; the backend ignores this
+        // for other kinds, but we leave it unset to keep intent clear.
+        deploymentName: kind === "deployment" ? resourceName : "",
       });
       onSuccess?.();
       onClose();
@@ -174,14 +189,14 @@ export default function EditDeploymentModal({
       <section
         className="card modal-panel modal-card--wide edit-deployment-modal"
         role="dialog"
-        aria-labelledby="edit-deployment-title"
+        aria-labelledby="edit-resource-title"
         onClick={(event) => event.stopPropagation()}
       >
         <header className="modal-header">
           <div>
-            <h3 id="edit-deployment-title">Edit &amp; apply — {deploymentName}</h3>
+            <h3 id="edit-resource-title">Edit &amp; apply — {resourceName}</h3>
             <p className="muted">
-              Edit the deployment YAML and apply it through the deploy pipeline.
+              Edit the {meta.label} YAML and apply it through the deploy pipeline.
             </p>
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
@@ -231,12 +246,12 @@ export default function EditDeploymentModal({
                   label="Add to Bundle"
                   disabled={busy || !yaml.trim()}
                   descriptor={{
-                    actionType: "edit_deployment",
+                    actionType: meta.actionType,
                     clusterId,
                     clusterName: clusterId,
                     namespace,
-                    resourceKind: "Deployment",
-                    resourceName: deploymentName,
+                    resourceKind: meta.yamlKind,
+                    resourceName,
                     yaml,
                   }}
                   onAdded={onClose}

@@ -334,14 +334,13 @@ def deploy_yaml_apply():
     description = body.get("description") or ""
     deployment_name = body.get("deploymentName") or body.get("deploymentNameOverride") or ""
     resources = data.get("resources") or []
-    app_name = deployment_name
-    if not app_name:
-        for res in resources:
-            if res.get("kind") == "Deployment":
-                app_name = res.get("name")
-                break
-        if not app_name and resources:
-            app_name = resources[0].get("name")
+    # Inventory registration is Deployment-scoped. Only register when the apply
+    # actually contains a Deployment so editing a standalone ConfigMap/Secret
+    # doesn't get recorded as a phantom deployment.
+    deployment_names = [res.get("name") for res in resources if res.get("kind") == "Deployment"]
+    app_name = ""
+    if deployment_names:
+        app_name = deployment_name if deployment_name in deployment_names else deployment_names[0]
 
     if app_name:
         try:

@@ -189,7 +189,10 @@ def _aggregate_health(statuses: List[str]) -> str:
         return "critical"
     if "warning" in statuses:
         return "warning"
-    return "healthy"
+    if "healthy" in statuses:
+        return "healthy"
+    # Only "unknown" (unreachable/not-found) statuses remain.
+    return "unknown"
 
 
 def _mock_deployment_detail(dep: Dict[str, Any]) -> Dict[str, Any]:
@@ -197,6 +200,7 @@ def _mock_deployment_detail(dep: Dict[str, Any]) -> Dict[str, Any]:
     health = _MOCK_DEPLOYMENT_HEALTH.get(key, {"desired": 1, "available": 1, "ready": 1})
     desired = health["desired"]
     available = health["available"]
+    ready = health["ready"]
     return {
         "id": dep["id"],
         "serviceId": dep["serviceId"],
@@ -205,8 +209,8 @@ def _mock_deployment_detail(dep: Dict[str, Any]) -> Dict[str, Any]:
         "deploymentName": dep["deploymentName"],
         "desiredReplicas": desired,
         "availableReplicas": available,
-        "readyReplicas": health["ready"],
-        "status": _deployment_status(desired, available),
+        "readyReplicas": ready,
+        "status": _deployment_status(desired, min(available, ready)),
     }
 
 
@@ -222,22 +226,15 @@ def _mock_service_health(service: Dict[str, Any]) -> str:
 # K8s live health (real mode)
 # ---------------------------------------------------------------------------
 
-def _fetch_namespace_deployment_map(
-    cluster_id: str,
-    namespace: str,
-    user=None,
-) -> Dict[str, Dict[str, Any]]:
-    """Return {deployment_name: raw_k8s_item} for all deployments in a namespace."""
-    from ..k8s_provider import K8sCommandError, _run_for_access, resolve_cluster_access, should_use_real_k8s
-    from ..access_engine import can_access_namespace
+def _deployments_for_access(access, namespace: str) -> Dict[str, Dict[str, Any]]:
+    """Run ``kubectl get deployments`` for an already-resolved cluster access and
+    return ``{deployment_name: raw_k8s_item}``.
 
-    if not should_use_real_k8s(cluster_id):
-        return {}
-    if user and not can_access_namespace(user, cluster_id, namespace):
-        return {}
-    access = resolve_cluster_access(cluster_id)
-    if not access:
-        return {}
+    This performs only the subprocess/JSON work and touches neither the DB nor
+    the Flask app context, so it is safe to call from worker threads.
+    """
+    from ..k8s_provider import K8sCommandError, _run_for_access
+
     try:
         output = _run_for_access(access, ["get", "deployments", "-n", namespace, "-o", "json"])
         items = json.loads(output).get("items", [])
@@ -250,16 +247,177 @@ def _fetch_namespace_deployment_map(
         return {}
 
 
-def _live_deployment_detail(dep_row, k8s_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    item = k8s_map.get(dep_row.deployment_name)
-    if item:
-        spec = item.get("spec", {})
-        status = item.get("status", {})
-        desired = spec.get("replicas") or 0
-        available = status.get("availableReplicas") or 0
-        ready = status.get("readyReplicas") or 0
-    else:
-        desired, available, ready = 0, 0, 0  # cluster unreachable or deployment not found → unknown
+def _fetch_namespace_deployment_map(
+    cluster_id: str,
+    namespace: str,
+    user=None,
+) -> Dict[str, Dict[str, Any]]:
+    """Return {deployment_name: raw_k8s_item} for all deployments in a namespace.
+
+    Resolves access (DB-backed) on the calling thread, so this must run inside a
+    Flask app context.
+    """
+    from ..k8s_provider import resolve_cluster_access, should_use_real_k8s
+    from ..access_engine import can_access_namespace
+
+    if not should_use_real_k8s(cluster_id):
+        return {}
+    if user and not can_access_namespace(user, cluster_id, namespace):
+        return {}
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return {}
+    return _deployments_for_access(access, namespace)
+
+
+# Container waiting/terminated reasons that mean a pod is genuinely broken
+# (as opposed to a transient "ContainerCreating"/"PodInitializing").
+_BAD_POD_REASONS = {
+    "crashloopbackoff", "imagepullbackoff", "errimagepull", "errimagepullbackoff",
+    "createcontainererror", "createcontainerconfigerror", "invalidimagename",
+    "runcontainererror", "oomkilled",
+}
+
+
+def _pods_for_access(access, namespace: str) -> List[Dict[str, Any]]:
+    """Run ``kubectl get pods`` for an already-resolved cluster access. Touches
+    neither the DB nor the Flask app context, so it is safe in worker threads."""
+    from ..k8s_provider import K8sCommandError, _run_for_access
+
+    try:
+        output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
+        return json.loads(output).get("items", [])
+    except (K8sCommandError, Exception):
+        return []
+
+
+def _fetch_namespace_pods(cluster_id: str, namespace: str, user=None) -> List[Dict[str, Any]]:
+    """Return the raw k8s pod items for a namespace (or [] if unavailable).
+
+    Resolves access (DB-backed) on the calling thread, so this must run inside a
+    Flask app context.
+    """
+    from ..k8s_provider import resolve_cluster_access, should_use_real_k8s
+    from ..access_engine import can_access_namespace
+
+    if not should_use_real_k8s(cluster_id):
+        return []
+    if user and not can_access_namespace(user, cluster_id, namespace):
+        return []
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return []
+    return _pods_for_access(access, namespace)
+
+
+def _pod_is_down(pod_item: Dict[str, Any]) -> bool:
+    """True if a pod is broken: failed, crash-looping, image-pull errors, or
+    running-but-not-ready (failing its readiness probe)."""
+    status = pod_item.get("status", {})
+    phase = (status.get("phase") or "").lower()
+    if phase == "succeeded":
+        return False
+    if phase == "failed":
+        return True
+
+    container_states = (status.get("containerStatuses") or []) + (status.get("initContainerStatuses") or [])
+    for cs in container_states:
+        state = cs.get("state") or {}
+        waiting_reason = ((state.get("waiting") or {}).get("reason") or "").lower()
+        if waiting_reason in _BAD_POD_REASONS:
+            return True
+        terminated_reason = ((state.get("terminated") or {}).get("reason") or "").lower()
+        if terminated_reason in _BAD_POD_REASONS:
+            return True
+
+    # A running pod whose Ready condition is False is up but failing.
+    if phase == "running":
+        for cond in (status.get("conditions") or []):
+            if cond.get("type") == "Ready":
+                return cond.get("status") != "True"
+    return False
+
+
+def _pod_belongs_to_deployment(pod_item: Dict[str, Any], deployment_name: str) -> bool:
+    """True if a pod is owned by a ReplicaSet of the given deployment. The RS name
+    is ``<deployment>-<hash>``, so we require the prefix and no extra '-' after it
+    (so deployment ``auth`` does not swallow pods of ``auth-api``)."""
+    prefix = f"{deployment_name}-"
+    for ref in pod_item.get("metadata", {}).get("ownerReferences", []) or []:
+        if ref.get("kind") != "ReplicaSet":
+            continue
+        rs_name = ref.get("name") or ""
+        if rs_name.startswith(prefix) and "-" not in rs_name[len(prefix):]:
+            return True
+    return False
+
+
+def _live_deployment_detail(dep_row, ns_data: Dict[str, Any]) -> Dict[str, Any]:
+    deployments = ns_data.get("deployments", {}) if isinstance(ns_data, dict) else {}
+    pods = ns_data.get("pods", []) if isinstance(ns_data, dict) else []
+    kind = getattr(dep_row, "resource_kind", None) or "deployment"
+
+    # A linked pod: health is simply that pod's own state.
+    if kind == "pod":
+        pod = next((p for p in pods if p.get("metadata", {}).get("name") == dep_row.deployment_name), None)
+        if pod is None:
+            status, desired, available, ready = "unknown", 0, 0, 0
+        else:
+            down = _pod_is_down(pod)
+            status, desired = ("critical", 1) if down else ("healthy", 1)
+            ready = available = 0 if down else 1
+        return {
+            "id": dep_row.id,
+            "serviceId": dep_row.service_id,
+            "clusterId": dep_row.cluster_id,
+            "namespace": dep_row.namespace,
+            "deploymentName": dep_row.deployment_name,
+            "kind": kind,
+            "desiredReplicas": desired,
+            "availableReplicas": available,
+            "readyReplicas": ready,
+            "status": status,
+        }
+
+    item = deployments.get(dep_row.deployment_name)
+    if item is None:
+        # Cluster unreachable or deployment not found. Report "unknown" rather
+        # than letting desired==0 fall through to "healthy", which would hide the
+        # real state of the linked deployment.
+        return {
+            "id": dep_row.id,
+            "serviceId": dep_row.service_id,
+            "clusterId": dep_row.cluster_id,
+            "namespace": dep_row.namespace,
+            "deploymentName": dep_row.deployment_name,
+            "kind": kind,
+            "desiredReplicas": 0,
+            "availableReplicas": 0,
+            "readyReplicas": 0,
+            "status": "unknown",
+        }
+
+    spec = item.get("spec", {})
+    status_obj = item.get("status", {})
+    desired = spec.get("replicas") or 0
+    available = status_obj.get("availableReplicas") or 0
+    ready = status_obj.get("readyReplicas") or 0
+    unavailable = status_obj.get("unavailableReplicas") or 0
+
+    # Base status off the stricter ready count, and flag any unavailable replicas.
+    status = _deployment_status(desired, min(available, ready))
+    if unavailable and status == "healthy":
+        status = "warning"
+
+    # Pod-level check: catch a down/crashing pod even when replica counts look OK
+    # (e.g. an extra or old pod stuck in CrashLoopBackOff).
+    dep_pods = [p for p in pods if _pod_belongs_to_deployment(p, dep_row.deployment_name)]
+    down_pods = [p for p in dep_pods if _pod_is_down(p)]
+    if down_pods:
+        if dep_pods and len(down_pods) == len(dep_pods):
+            status = "critical"
+        elif status != "critical":
+            status = "warning"
 
     return {
         "id": dep_row.id,
@@ -267,11 +425,11 @@ def _live_deployment_detail(dep_row, k8s_map: Dict[str, Dict[str, Any]]) -> Dict
         "clusterId": dep_row.cluster_id,
         "namespace": dep_row.namespace,
         "deploymentName": dep_row.deployment_name,
-        "kind": getattr(dep_row, "resource_kind", None) or "deployment",
+        "kind": kind,
         "desiredReplicas": desired,
         "availableReplicas": available,
         "readyReplicas": ready,
-        "status": _deployment_status(desired, available),
+        "status": status,
     }
 
 
@@ -279,15 +437,46 @@ def _build_k8s_health_map(
     deployments: List,
     user=None,
 ) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    """Fetch all unique (cluster, namespace) pairs in parallel and return a map."""
+    """Fetch all unique (cluster, namespace) pairs in parallel and return a map of
+    ``(cluster, namespace) -> {"deployments": {...}, "pods": [...]}``.
+
+    Access resolution (``should_use_real_k8s``, ``can_access_namespace``,
+    ``resolve_cluster_access``) is DB-backed and depends on the Flask app context
+    and the ``user`` ORM instance, so it must happen on the calling thread. Worker
+    threads run only the ``kubectl`` calls, which need neither. Doing the access
+    checks inside the threads would raise ``RuntimeError: Working outside of
+    application context``; that exception was previously swallowed, leaving every
+    namespace empty and making each linked deployment look healthy.
+    """
+    from ..k8s_provider import resolve_cluster_access, should_use_real_k8s
+    from ..access_engine import can_access_namespace
+
     pairs = list({(d.cluster_id, d.namespace) for d in deployments})
     result: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
-    def fetch(cluster_id: str, namespace: str):
-        return (cluster_id, namespace), _fetch_namespace_deployment_map(cluster_id, namespace, user=user)
+    # Resolve access on the main thread (valid app context + session).
+    accesses: Dict[Tuple[str, str], Any] = {}
+    for cluster_id, namespace in pairs:
+        if not should_use_real_k8s(cluster_id):
+            continue
+        if user is not None and not can_access_namespace(user, cluster_id, namespace):
+            continue
+        access = resolve_cluster_access(cluster_id)
+        if access:
+            accesses[(cluster_id, namespace)] = access
 
-    with ThreadPoolExecutor(max_workers=min(len(pairs), 8)) as pool:
-        futures = {pool.submit(fetch, c, n): (c, n) for c, n in pairs}
+    if not accesses:
+        return result
+
+    def fetch(key: Tuple[str, str], access):
+        _, namespace = key
+        return key, {
+            "deployments": _deployments_for_access(access, namespace),
+            "pods": _pods_for_access(access, namespace),
+        }
+
+    with ThreadPoolExecutor(max_workers=min(len(accesses), 8)) as pool:
+        futures = {pool.submit(fetch, k, a): k for k, a in accesses.items()}
         for fut in as_completed(futures):
             try:
                 key, data = fut.result()
@@ -336,6 +525,9 @@ def _topology_to_dict(svc: ApplicationService) -> Dict[str, Any]:
                 "id": e.id,
                 "sourceNodeId": e.source_node_id,
                 "targetNodeId": e.target_node_id,
+                "protocol": e.protocol,
+                "scope": e.scope,
+                "description": e.description,
             }
             for e in edges
         ],
@@ -431,10 +623,18 @@ def _save_topology(service_id: int, topology_payload: Dict[str, Any]) -> None:
         if key in seen_edges:
             continue
         seen_edges.add(key)
+        protocol = (edge_data.get("protocol") or "").strip()[:20] or None
+        scope = (edge_data.get("scope") or "").strip().lower()[:20] or None
+        if scope not in ("internal", "external"):
+            scope = None
+        description = (edge_data.get("description") or "").strip()[:1000] or None
         db.session.add(ApplicationServiceTopologyEdge(
             service_id=service_id,
             source_node_id=src_id,
             target_node_id=tgt_id,
+            protocol=protocol,
+            scope=scope,
+            description=description,
         ))
 
 
@@ -645,6 +845,14 @@ def delete_service(
         return None, "Application service not found", 404
 
     name = svc.name
+    # If this service was created by Deploy From Blueprint, remove the linked
+    # blueprint instance (AppService + its component mappings) too, so the
+    # Service Catalog's "deployed" count stays in sync.
+    from ..models import AppService
+
+    for instance in AppService.query.filter_by(application_service_id=service_id).all():
+        db.session.delete(instance)
+
     db.session.delete(svc)
     db.session.commit()
     log_audit(

@@ -719,6 +719,12 @@ class ApplicationServiceTopologyEdge(db.Model):
     service_id = db.Column(db.Integer, db.ForeignKey("application_services.id"), nullable=False)
     source_node_id = db.Column(db.Integer, db.ForeignKey("application_service_topology_nodes.id"), nullable=False)
     target_node_id = db.Column(db.Integer, db.ForeignKey("application_service_topology_nodes.id"), nullable=False)
+    # Connection metadata: wire protocol (HTTP, TCP, gRPC, …), whether the
+    # traffic is internal to the cluster or crosses an external boundary, and a
+    # free-text description (e.g. IPs, ports, notes).
+    protocol = db.Column(db.String(20), nullable=True)
+    scope = db.Column(db.String(20), nullable=True)
+    description = db.Column(db.Text, nullable=True)
     created_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
@@ -1075,3 +1081,301 @@ class ApiToken(db.Model):
     )
 
     user = db.relationship("User", foreign_keys=[user_id])
+
+
+# ---------------------------------------------------------------------------
+# Service Catalog — reusable business service blueprints
+# ---------------------------------------------------------------------------
+#
+# A ServiceBlueprint describes the *logical* architecture of a reusable business
+# service (e.g. "QR Code Service") using general components (Frontend, Backend,
+# Database, ...) and logical connections — independent of any real Kubernetes
+# object name. When deployed (Deploy From Blueprint), an AppService instance is
+# created and each logical component is mapped to a real/created/external/skipped
+# resource via AppServiceComponentMapping. Runtime topology is resolved from the
+# blueprint + mappings, never from hardcoded object names.
+
+class ServiceBlueprint(db.Model):
+    __tablename__ = "service_blueprints"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    description = db.Column(db.Text, nullable=True)
+    category = db.Column(db.String(80), nullable=True)
+    owner_team = db.Column(db.String(255), nullable=True)
+    criticality = db.Column(db.String(32), nullable=True)
+    # draft | ready | deprecated
+    status = db.Column(db.String(16), nullable=False, default="draft", index=True)
+    version = db.Column(db.String(32), nullable=False, default="1.0.0")
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+    components = db.relationship(
+        "ServiceBlueprintComponent",
+        back_populates="blueprint",
+        cascade="all, delete-orphan",
+        lazy="joined",
+        order_by="ServiceBlueprintComponent.position",
+    )
+    connections = db.relationship(
+        "ServiceBlueprintConnection",
+        back_populates="blueprint",
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+    requirements = db.relationship(
+        "ServiceBlueprintRequirement",
+        back_populates="blueprint",
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+    app_services = db.relationship(
+        "AppService",
+        back_populates="blueprint",
+        lazy="dynamic",
+    )
+
+
+class ServiceBlueprintComponent(db.Model):
+    __tablename__ = "service_blueprint_components"
+    __table_args__ = (
+        db.Index("ix_sbc_blueprint_id", "blueprint_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    blueprint_id = db.Column(
+        db.Integer,
+        db.ForeignKey("service_blueprints.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name = db.Column(db.String(120), nullable=False)
+    role = db.Column(db.String(120), nullable=True)
+    # deployment | statefulset | daemonset | cronjob | service | ingress |
+    # database | redis | kafka | worker | external_service | ...
+    component_type = db.Column(db.String(48), nullable=False, default="deployment")
+    required = db.Column(db.Boolean, nullable=False, default=True)
+    # Whether this component may be satisfied by an external dependency.
+    supports_external = db.Column(db.Boolean, nullable=False, default=False)
+    # Slug or id of a KubeSight deployment template used as the create-new default.
+    default_template_id = db.Column(db.String(120), nullable=True)
+    description = db.Column(db.Text, nullable=True)
+    # Smart defaults applied during Deploy From Blueprint (all optional JSON).
+    config_schema = db.Column(db.JSON, nullable=True)
+    default_values = db.Column(db.JSON, nullable=True)
+    validation_rules = db.Column(db.JSON, nullable=True)
+    default_port = db.Column(db.Integer, nullable=True)
+    default_resources = db.Column(db.JSON, nullable=True)
+    default_health = db.Column(db.JSON, nullable=True)
+    default_hpa = db.Column(db.JSON, nullable=True)
+    # Topology builder canvas position.
+    position_x = db.Column(db.Float, nullable=True)
+    position_y = db.Column(db.Float, nullable=True)
+    position = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    blueprint = db.relationship("ServiceBlueprint", back_populates="components")
+
+
+class ServiceBlueprintConnection(db.Model):
+    __tablename__ = "service_blueprint_connections"
+    __table_args__ = (
+        db.Index("ix_sbcn_blueprint_id", "blueprint_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    blueprint_id = db.Column(
+        db.Integer,
+        db.ForeignKey("service_blueprints.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_component_id = db.Column(
+        db.Integer,
+        db.ForeignKey("service_blueprint_components.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_component_id = db.Column(
+        db.Integer,
+        db.ForeignKey("service_blueprint_components.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    connection_type = db.Column(db.String(32), nullable=True)
+    protocol = db.Column(db.String(20), nullable=True)
+    port = db.Column(db.Integer, nullable=True)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    blueprint = db.relationship("ServiceBlueprint", back_populates="connections")
+    source_component = db.relationship(
+        "ServiceBlueprintComponent", foreign_keys=[source_component_id]
+    )
+    target_component = db.relationship(
+        "ServiceBlueprintComponent", foreign_keys=[target_component_id]
+    )
+
+
+class ServiceBlueprintRequirement(db.Model):
+    __tablename__ = "service_blueprint_requirements"
+    __table_args__ = (
+        db.Index("ix_sbr_blueprint_id", "blueprint_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    blueprint_id = db.Column(
+        db.Integer,
+        db.ForeignKey("service_blueprints.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Optional: requirement scoped to a single component.
+    component_id = db.Column(
+        db.Integer,
+        db.ForeignKey("service_blueprint_components.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    key = db.Column(db.String(120), nullable=False)
+    # env_var | secret | configmap | pvc | ingress_host | tls_secret |
+    # image_pull_secret | hpa | resource_limit | database_credential |
+    # external_endpoint | ...
+    requirement_type = db.Column(db.String(48), nullable=False, default="env_var")
+    required = db.Column(db.Boolean, nullable=False, default=True)
+    default_value = db.Column(db.Text, nullable=True)
+    allowed_values = db.Column(db.JSON, nullable=True)
+    # manual | dropdown | existing_secret | existing_configmap | generated |
+    # blueprint_default | detected_from_cluster
+    value_source = db.Column(db.String(32), nullable=False, default="manual")
+    secret = db.Column(db.Boolean, nullable=False, default=False)
+    auto_generate = db.Column(db.Boolean, nullable=False, default=False)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    blueprint = db.relationship("ServiceBlueprint", back_populates="requirements")
+
+
+class AppService(db.Model):
+    """A real deployed service instance created from a ServiceBlueprint.
+
+    Distinct from :class:`ApplicationService` (the manually-curated App Services
+    tab): an AppService is the blueprint-aware instance that ties a blueprint to
+    a client/environment/cluster/namespace and records how each logical component
+    maps to real Kubernetes resources.
+    """
+
+    __tablename__ = "app_services"
+    __table_args__ = (
+        db.Index("ix_app_service_client", "client_id"),
+        db.Index("ix_app_service_blueprint", "blueprint_id"),
+        db.Index("ix_app_service_cluster_ns", "cluster_id", "namespace"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(180), unique=True, nullable=False, index=True)
+    # Stable slug used in labels (kubesight.io/app-service-id).
+    slug = db.Column(db.String(180), nullable=True, index=True)
+    description = db.Column(db.Text, nullable=True)
+    client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=True)
+    blueprint_id = db.Column(
+        db.Integer, db.ForeignKey("service_blueprints.id"), nullable=True
+    )
+    # Bridge to the operational App Services tab (ApplicationService) created on
+    # deploy so the instance surfaces there with health/topology/workloads.
+    application_service_id = db.Column(
+        db.Integer, db.ForeignKey("application_services.id"), nullable=True
+    )
+    environment = db.Column(db.String(32), nullable=True)
+    cluster_id = db.Column(db.String(120), nullable=True, index=True)
+    namespace = db.Column(db.String(253), nullable=True)
+    # planned | deploying | active | degraded | failed
+    status = db.Column(db.String(24), nullable=False, default="planned", index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    blueprint = db.relationship("ServiceBlueprint", back_populates="app_services")
+    client = db.relationship("Client", foreign_keys=[client_id])
+    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+    component_mappings = db.relationship(
+        "AppServiceComponentMapping",
+        back_populates="app_service",
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+
+
+class AppServiceComponentMapping(db.Model):
+    __tablename__ = "app_service_component_mappings"
+    __table_args__ = (
+        db.Index("ix_ascm_app_service", "app_service_id"),
+        db.Index("ix_ascm_component", "blueprint_component_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    app_service_id = db.Column(
+        db.Integer,
+        db.ForeignKey("app_services.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    blueprint_component_id = db.Column(
+        db.Integer,
+        db.ForeignKey("service_blueprint_components.id"),
+        nullable=True,
+    )
+    # Denormalized component identity so runtime topology renders even if the
+    # blueprint component is later renamed/removed.
+    component_name = db.Column(db.String(120), nullable=True)
+    component_role = db.Column(db.String(120), nullable=True)
+    # create_new | existing_resource | external_dependency | skip
+    mapping_type = db.Column(db.String(24), nullable=False, default="create_new")
+    kubernetes_kind = db.Column(db.String(40), nullable=True)
+    kubernetes_name = db.Column(db.String(253), nullable=True)
+    namespace = db.Column(db.String(253), nullable=True)
+    cluster_id = db.Column(db.String(120), nullable=True)
+    external_endpoint = db.Column(db.String(512), nullable=True)
+    # planned | created | linked | skipped | failed
+    status = db.Column(db.String(24), nullable=False, default="planned")
+    # Auto-generated resource name (create_new) before it is materialized.
+    generated_name = db.Column(db.String(253), nullable=True)
+    # kubesight.io/* labels recorded for this mapping.
+    labels = db.Column(db.JSON, nullable=True)
+    # Resolved per-component values (ports, image tag, template, overrides, ...).
+    config = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    app_service = db.relationship("AppService", back_populates="component_mappings")
+    blueprint_component = db.relationship(
+        "ServiceBlueprintComponent", foreign_keys=[blueprint_component_id]
+    )

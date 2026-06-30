@@ -63,6 +63,41 @@ def test_namespace_view_resources_rules_allow_workloads(app):
         assert len(filtered["services"]) == 1
 
 
+def test_configmaps_and_secrets_follow_namespace_access(app):
+    with app.app_context():
+        viewer = User.query.filter_by(username="viewer").first()
+        apply_access_rules(
+            viewer,
+            _namespace_only_rules(
+                "docker-desktop",
+                "kubesight",
+                ["clusters:view", "namespaces:view", "resources:view"],
+            ),
+        )
+        from api.db import db
+
+        db.session.commit()
+
+        accessible = {
+            "namespace": "kubesight",
+            "configmaps": [{"name": "app-config"}],
+            "secrets": [{"name": "app-secret"}],
+        }
+        filtered = filter_namespace_resources(viewer, "docker-desktop", accessible)
+        assert len(filtered["configmaps"]) == 1
+        assert len(filtered["secrets"]) == 1
+
+        # A namespace the viewer has no rule for hides config maps and secrets.
+        other = {
+            "namespace": "other-ns",
+            "configmaps": [{"name": "app-config"}],
+            "secrets": [{"name": "app-secret"}],
+        }
+        hidden = filter_namespace_resources(viewer, "docker-desktop", other)
+        assert hidden["configmaps"] == []
+        assert hidden["secrets"] == []
+
+
 def test_cluster_level_resources_view_grants_workload_access(app):
     with app.app_context():
         viewer = User.query.filter_by(username="viewer").first()

@@ -67,6 +67,8 @@ NAMESPACE_RESOURCE_LIST_KEYS = (
     "jobs",
     "cronjobs",
     "services",
+    "configmaps",
+    "secrets",
 )
 
 
@@ -628,6 +630,13 @@ def filter_namespace_resources(user: User, cluster_id: str, resources: Dict[str,
             svc_copy["canViewPorts"] = bool(visible_ports)
         services.append(svc_copy)
 
+    # ConfigMaps and Secrets have no per-resource access rules; they are visible
+    # to any non-admin who can reach the namespace. The list payloads never carry
+    # secret values (only names/types/labels), so this matches resources:view.
+    namespace_visible = can_access_namespace(user, cluster_id, namespace)
+    configmaps = (resources.get("configmaps") or []) if namespace_visible else []
+    secrets = (resources.get("secrets") or []) if namespace_visible else []
+
     return {
         "namespace": namespace,
         "pods": pods,
@@ -638,6 +647,8 @@ def filter_namespace_resources(user: User, cluster_id: str, resources: Dict[str,
         "jobs": filtered_workloads["jobs"],
         "cronjobs": filtered_workloads["cronjobs"],
         "services": services,
+        "configmaps": configmaps,
+        "secrets": secrets,
     }
 
 

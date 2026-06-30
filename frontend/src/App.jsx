@@ -77,6 +77,7 @@ const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
 const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
+const ServiceCatalogPage = lazy(() => import("./pages/ServiceCatalogPage.jsx"));
 
 export default function App() {
   const {
@@ -1489,6 +1490,8 @@ export default function App() {
             canStart={hasPermission("upgrades:start") && canAccessCluster(selectedClusterId)}
           />
         );
+      case "serviceCatalog":
+        return <ServiceCatalogPage clusters={allowedClusters} />;
       case "applicationServices":
         return <ApplicationServicesPage clusters={allowedClusters} />;
       case "clients":

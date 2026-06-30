@@ -34,9 +34,13 @@ def _use_mock() -> bool:
 @require_permission("clients:view")
 def list_all_clients():
     user = get_current_user()
-    if _use_mock():
+    # Prefer real, DB-backed clients (incl. those linked by Deploy From
+    # Blueprint). Fall back to the demo/mock list only when there are none and no
+    # live cluster is configured.
+    real = list_clients(user=user)
+    if real.get("count", 0) == 0 and _use_mock():
         return success_response(list_clients_mock())
-    return success_response(list_clients(user=user))
+    return success_response(real)
 
 
 @clients_bp.route("", methods=["POST"])
@@ -57,10 +61,9 @@ def create_new_client():
 @require_permission("clients:view")
 def get_single_client(client_id: int):
     user = get_current_user()
-    if _use_mock():
+    data, error, status = get_client(client_id, user=user)
+    if error and status == 404 and _use_mock():
         data, error, status = get_client_mock(client_id)
-    else:
-        data, error, status = get_client(client_id, user=user)
     if error:
         return error_response(error, status)
     return success_response(data)

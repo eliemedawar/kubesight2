@@ -17,13 +17,17 @@ import { EMPTY_MESSAGES, formatAccessError } from "../utils/authz.js";
 import { usePermission } from "../hooks/usePermission.js";
 
 const ResourceInspectModal = lazy(() => import("../components/resources/ResourceInspectModal.jsx"));
-const EditDeploymentModal = lazy(() => import("../components/resources/EditDeploymentModal.jsx"));
+const EditResourceModal = lazy(() => import("../components/resources/EditResourceModal.jsx"));
+
+// Resource kinds that the Edit & apply modal can load/edit.
+const EDITABLE_KINDS = new Set(["deployment", "configmap", "secret"]);
 
 const CLOSED_EDIT_MODAL = {
   open: false,
   clusterId: "",
   namespace: "",
-  deploymentName: "",
+  kind: "",
+  resourceName: "",
 };
 
 const POD_FILTER_WORKLOAD_KINDS = new Set([
@@ -324,12 +328,13 @@ export default function ResourcesPage({
         return;
       }
 
-      if (actionId === "edit" && resourceKind === "deployment") {
+      if (actionId === "edit" && EDITABLE_KINDS.has(resourceKind)) {
         setEditModal({
           open: true,
           clusterId: resolvedCluster,
           namespace: resolvedNamespace,
-          deploymentName: resourceName,
+          kind: resourceKind,
+          resourceName,
         });
         return;
       }
@@ -495,6 +500,60 @@ export default function ResourcesPage({
           },
           "deployment",
           handleResourceAction
+        ),
+      })),
+    },
+    configMaps: {
+      title: "ConfigMaps",
+      columns: [
+        { key: "name", label: "ConfigMap" },
+        { key: "keys", label: "Keys" },
+        { key: "age", label: "Age" },
+        { key: "actions", label: "Actions" },
+      ],
+      rows: (data.resources.configmaps || []).map((cm) => ({
+        ...cm,
+        cluster: cm.cluster || clusterId,
+        namespace: cm.namespace || namespace,
+        keys: cm.keys ?? "-",
+        age: cm.age || "-",
+        actions: buildWorkloadActionsCell(
+          {
+            ...cm,
+            actions: canDeploy
+              ? [...(cm.actions || ["describe", "yaml"]), "edit"]
+              : cm.actions || ["describe", "yaml"],
+          },
+          "configmap",
+          handleResourceAction,
+          { fallback: "yaml" }
+        ),
+      })),
+    },
+    secrets: {
+      title: "Secrets",
+      columns: [
+        { key: "name", label: "Secret" },
+        { key: "type", label: "Type" },
+        { key: "age", label: "Age" },
+        { key: "actions", label: "Actions" },
+      ],
+      rows: (data.resources.secrets || []).map((sec) => ({
+        ...sec,
+        cluster: sec.cluster || clusterId,
+        namespace: sec.namespace || namespace,
+        type: sec.type || "Opaque",
+        age: sec.age || "-",
+        actions: buildWorkloadActionsCell(
+          {
+            ...sec,
+            actions: canDeploy
+              ? [...(sec.actions || ["describe", "yaml"]), "edit"]
+              : sec.actions || ["describe", "yaml"],
+          },
+          "secret",
+          handleResourceAction,
+          { fallback: "yaml" }
         ),
       })),
     },
@@ -715,7 +774,7 @@ export default function ResourcesPage({
       ) : (
         <>
           <div className="resources-tab-toolbar">
-            <nav className="tab-bar tab-bar--scroll" aria-label="resource-tabs">
+            <nav className="tab-bar resources-tab-bar" aria-label="resource-tabs">
               {Object.entries(visibleTableConfig).map(([key, config]) => (
                 <button
                   key={key}
@@ -899,11 +958,12 @@ export default function ResourcesPage({
       ) : null}
       {editModal.open ? (
         <Suspense fallback={null}>
-          <EditDeploymentModal
+          <EditResourceModal
             open={editModal.open}
             clusterId={editModal.clusterId}
             namespace={editModal.namespace}
-            deploymentName={editModal.deploymentName}
+            kind={editModal.kind}
+            resourceName={editModal.resourceName}
             onClose={closeEditModal}
             onSuccess={() => {
               onRefreshTab?.();

@@ -235,6 +235,12 @@ def _migrate_app_service_topology_positions() -> None:
     _add_column_if_missing("application_service_topology_nodes", "position_y", "FLOAT")
 
 
+def _migrate_app_service_topology_edge_meta() -> None:
+    _add_column_if_missing("application_service_topology_edges", "protocol", "VARCHAR(20)")
+    _add_column_if_missing("application_service_topology_edges", "scope", "VARCHAR(20)")
+    _add_column_if_missing("application_service_topology_edges", "description", "TEXT")
+
+
 def _migrate_deployment_request_columns() -> None:
     table_names = inspect(db.engine).get_table_names()
     if "deployment_requests" in table_names:
@@ -262,6 +268,46 @@ def _migrate_change_bundle_columns() -> None:
         _add_column_if_missing("change_bundle_items", "cluster_name", "VARCHAR(255)")
         _add_column_if_missing("change_bundle_items", "validation_message", "TEXT")
         _add_column_if_missing("change_bundle_items", "execution_result", "JSON")
+
+
+def _migrate_service_catalog_columns() -> None:
+    """Forward-compatible column adds for the Service Catalog tables.
+
+    The tables themselves are created by ``db.create_all()``; this only backfills
+    columns added after a table first shipped, mirroring the other migrators.
+    Idempotent and safe on a fresh database.
+    """
+    table_names = inspect(db.engine).get_table_names()
+    if "service_blueprint_components" in table_names:
+        for col, sql_type in [
+            ("supports_external", "BOOLEAN DEFAULT 0"),
+            ("default_template_id", "VARCHAR(120)"),
+            ("default_port", "INTEGER"),
+            ("default_resources", "JSON"),
+            ("default_health", "JSON"),
+            ("default_hpa", "JSON"),
+            ("position_x", "FLOAT"),
+            ("position_y", "FLOAT"),
+            ("position", "INTEGER DEFAULT 0"),
+        ]:
+            _add_column_if_missing("service_blueprint_components", col, sql_type)
+    if "app_services" in table_names:
+        for col, sql_type in [
+            ("slug", "VARCHAR(180)"),
+            ("description", "TEXT"),
+            ("created_by_user_id", "INTEGER"),
+            ("application_service_id", "INTEGER"),
+        ]:
+            _add_column_if_missing("app_services", col, sql_type)
+    if "app_service_component_mappings" in table_names:
+        for col, sql_type in [
+            ("component_name", "VARCHAR(120)"),
+            ("component_role", "VARCHAR(120)"),
+            ("generated_name", "VARCHAR(253)"),
+            ("labels", "JSON"),
+            ("config", "JSON"),
+        ]:
+            _add_column_if_missing("app_service_component_mappings", col, sql_type)
 
 
 def _migrate_alert_routing_user_receivers() -> None:
@@ -309,6 +355,8 @@ def run_migrations() -> None:
     _migrate_legacy_users()
     _migrate_app_service_deployments()
     _migrate_app_service_topology_positions()
+    _migrate_app_service_topology_edge_meta()
+    _migrate_service_catalog_columns()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations
 

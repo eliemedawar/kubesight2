@@ -17,6 +17,8 @@ export const NAMESPACE_RESOURCE_LIST_KEYS = [
   "jobs",
   "cronjobs",
   "services",
+  "configmaps",
+  "secrets",
 ];
 
 export const RESOURCE_TAB_DEFINITIONS = [
@@ -27,6 +29,20 @@ export const RESOURCE_TAB_DEFINITIONS = [
     title: "Deployments",
     permission: "deployments:view",
     resourceKind: "deployment",
+  },
+  {
+    tabKey: "configMaps",
+    listKey: "configmaps",
+    title: "ConfigMaps",
+    permission: "resources:view",
+    resourceKind: "configmap",
+  },
+  {
+    tabKey: "secrets",
+    listKey: "secrets",
+    title: "Secrets",
+    permission: "resources:view",
+    resourceKind: "secret",
   },
   {
     tabKey: "replicaSets",

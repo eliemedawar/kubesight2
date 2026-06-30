@@ -898,6 +898,8 @@ NAMESPACE_RESOURCE_LIST_KEYS = (
     "jobs",
     "cronjobs",
     "services",
+    "configmaps",
+    "secrets",
 )
 
 
@@ -1456,6 +1458,12 @@ def namespace_resource_list_from_k8s(
     elif list_key == "jobs":
         job_items = _get_namespace_items(access, "jobs", namespace)
         items = _build_namespace_jobs(namespace, job_items)
+    elif list_key == "configmaps":
+        cm_items = _get_namespace_items(access, "configmaps", namespace)
+        items = _build_namespace_configmaps(namespace, cm_items)
+    elif list_key == "secrets":
+        secret_items = _get_namespace_items(access, "secrets", namespace)
+        items = _build_namespace_secrets(namespace, secret_items)
     else:
         cj_items = _get_namespace_items(access, "cronjobs", namespace)
         items = _build_namespace_cronjobs(namespace, cj_items)

@@ -36,9 +36,13 @@ def _use_mock() -> bool:
 @require_permission("app_services:view")
 def list_app_services():
     user = get_current_user()
-    if _use_mock():
+    # Prefer real, DB-backed services (incl. those created by Deploy From
+    # Blueprint). Only fall back to the demo/mock list when there are none and
+    # no live cluster is configured, so a fresh install still shows the demo.
+    real = list_services(user=user)
+    if real.get("count", 0) == 0 and _use_mock():
         return success_response(list_services_mock())
-    return success_response(list_services(user=user))
+    return success_response(real)
 
 
 @app_services_bp.route("", methods=["POST"])
@@ -59,10 +63,11 @@ def create_app_service():
 @require_permission("app_services:view")
 def get_app_service(service_id: int):
     user = get_current_user()
-    if _use_mock():
+    # Prefer a real DB service; fall back to the demo/mock service only when not
+    # found and no live cluster is configured.
+    data, error, status = get_service(service_id, user=user)
+    if error and status == 404 and _use_mock():
         data, error, status = get_service_mock(service_id)
-    else:
-        data, error, status = get_service(service_id, user=user)
     if error:
         return error_response(error, status)
     return success_response(data)
