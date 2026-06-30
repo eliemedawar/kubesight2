@@ -100,6 +100,13 @@ export function deleteWizardTemplate(templateId) {
   return request(`/api/inventory/deploy/wizard/templates/${templateId}`, { method: "DELETE" });
 }
 
+export function importTemplatesFromYaml(yaml) {
+  return request("/api/inventory/deploy/wizard/templates/import", {
+    method: "POST",
+    body: { yaml },
+  });
+}
+
 export function deleteWizardTemplateCategory(category) {
   return request(`/api/inventory/deploy/wizard/templates/categories/${encodeURIComponent(category)}`, {
     method: "DELETE",

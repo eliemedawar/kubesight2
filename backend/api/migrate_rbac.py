@@ -228,11 +228,47 @@ def _migrate_app_service_deployments() -> None:
         "resource_kind",
         "VARCHAR(20) NOT NULL DEFAULT 'deployment'",
     )
+    # Optional DR counterpart columns for each linked component.
+    for col, sql_type in [
+        ("dr_cluster_id", "VARCHAR(120)"),
+        ("dr_namespace", "VARCHAR(253)"),
+        ("dr_resource_name", "VARCHAR(253)"),
+        ("dr_resource_kind", "VARCHAR(20)"),
+    ]:
+        _add_column_if_missing("application_service_deployments", col, sql_type)
 
 
 def _migrate_app_service_topology_positions() -> None:
     _add_column_if_missing("application_service_topology_nodes", "position_x", "FLOAT")
     _add_column_if_missing("application_service_topology_nodes", "position_y", "FLOAT")
+    # Optional reference to a predefined TopologyComponent.
+    _add_column_if_missing("application_service_topology_nodes", "component_id", "INTEGER")
+
+
+def _migrate_topology_components() -> None:
+    """Forward-compatible column adds for the topology_components table.
+
+    The table itself is created by ``db.create_all()``; this only backfills
+    columns added after it first shipped. Idempotent and safe on a fresh DB.
+    """
+    if "topology_components" not in inspect(db.engine).get_table_names():
+        return
+    for col, sql_type in [
+        ("category", "VARCHAR(80)"),
+        ("description", "TEXT"),
+        ("check_type", "VARCHAR(16) NOT NULL DEFAULT 'none'"),
+        ("health_check_url", "VARCHAR(512)"),
+        ("tcp_host", "VARCHAR(253)"),
+        ("tcp_port", "INTEGER"),
+        ("webhook_token", "VARCHAR(64)"),
+        ("heartbeat_interval_seconds", "INTEGER DEFAULT 300"),
+        ("last_heartbeat_at", "DATETIME"),
+        ("last_status", "VARCHAR(16)"),
+        ("last_message", "TEXT"),
+        ("last_checked_at", "DATETIME"),
+        ("created_by", "INTEGER"),
+    ]:
+        _add_column_if_missing("topology_components", col, sql_type)
 
 
 def _migrate_app_service_topology_edge_meta() -> None:
@@ -356,6 +392,7 @@ def run_migrations() -> None:
     _migrate_app_service_deployments()
     _migrate_app_service_topology_positions()
     _migrate_app_service_topology_edge_meta()
+    _migrate_topology_components()
     _migrate_service_catalog_columns()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations

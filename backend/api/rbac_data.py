@@ -69,6 +69,11 @@ PERMISSIONS = [
     ("change_bundles:create", "Create and submit change bundles"),
     ("change_bundles:view", "View change bundles"),
     ("change_bundles:manage", "Approve or reject change bundles"),
+    ("components:view", "View topology components"),
+    ("components:create", "Create topology components"),
+    ("components:update", "Update topology components"),
+    ("components:delete", "Delete topology components"),
+    ("components:check", "Run topology component health checks"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -140,6 +145,14 @@ PERMISSION_GROUPS = [
         ],
     },
     {
+        "id": "components",
+        "label": "Components",
+        "keys": [
+            "components:view", "components:create", "components:update",
+            "components:delete", "components:check",
+        ],
+    },
+    {
         "id": "administration",
         "label": "Administration",
         "keys": [
@@ -160,6 +173,7 @@ DANGEROUS_PERMISSION_KEYS = {
     "app_services:delete", "clients:delete", "api_tokens:manage",
     "deployment_requests:manage", "change_bundles:manage",
     "service_blueprints:delete", "service_blueprints:deploy",
+    "components:delete",
 }
 
 
@@ -217,6 +231,7 @@ VIEWER_PERMISSIONS = [
     "deployment_requests:request",
     "change_bundles:create",
     "change_bundles:view",
+    "components:view",
 ]
 
 OPERATOR_PERMISSIONS = [
@@ -252,6 +267,10 @@ OPERATOR_PERMISSIONS = [
     "deployment_requests:view",
     "change_bundles:create",
     "change_bundles:view",
+    "components:view",
+    "components:create",
+    "components:update",
+    "components:check",
 ]
 
 CLUSTER_ADMIN_PERMISSIONS = [
@@ -298,6 +317,11 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "deployment_requests:view",
     "change_bundles:create",
     "change_bundles:view",
+    "components:view",
+    "components:create",
+    "components:update",
+    "components:delete",
+    "components:check",
 ]
 
 HERMES_AGENT_PERMISSIONS = [
@@ -311,6 +335,7 @@ HERMES_AGENT_PERMISSIONS = [
     "app_services:view",
     "clients:view",
     "service_blueprints:view",
+    "components:view",
 ]
 
 ROLE_DEFINITIONS = {

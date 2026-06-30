@@ -666,6 +666,13 @@ class ApplicationServiceDeployment(db.Model):
     namespace = db.Column(db.String(253), nullable=False)
     deployment_name = db.Column(db.String(253), nullable=False)
     resource_kind = db.Column(db.String(20), nullable=False, default="deployment")
+    # Optional disaster-recovery counterpart for this component. Operator-linked
+    # manually — the DR resource may live on a different cluster/namespace and
+    # have a completely different name, so nothing here is autodetected.
+    dr_cluster_id = db.Column(db.String(120), nullable=True)
+    dr_namespace = db.Column(db.String(253), nullable=True)
+    dr_resource_name = db.Column(db.String(253), nullable=True)
+    dr_resource_kind = db.Column(db.String(20), nullable=True)
     created_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
@@ -689,6 +696,8 @@ class ApplicationServiceTopologyNode(db.Model):
     linked_cluster_id = db.Column(db.String(120), nullable=True)
     linked_namespace = db.Column(db.String(253), nullable=True)
     linked_deployment = db.Column(db.String(253), nullable=True)
+    # Optional reference to a predefined, reusable TopologyComponent (e.g. "WAF").
+    component_id = db.Column(db.Integer, db.ForeignKey("topology_components.id"), nullable=True)
     position_x = db.Column(db.Float, nullable=True)
     position_y = db.Column(db.Float, nullable=True)
     created_at = db.Column(
@@ -704,6 +713,7 @@ class ApplicationServiceTopologyNode(db.Model):
     )
 
     service = db.relationship("ApplicationService", back_populates="topology_nodes")
+    component = db.relationship("TopologyComponent", foreign_keys=[component_id])
 
 
 class ApplicationServiceTopologyEdge(db.Model):
@@ -1379,3 +1389,53 @@ class AppServiceComponentMapping(db.Model):
     blueprint_component = db.relationship(
         "ServiceBlueprintComponent", foreign_keys=[blueprint_component_id]
     )
+
+
+# ---------------------------------------------------------------------------
+# Topology Components
+#
+# A reusable, predefined building block (e.g. "WAF", "API Gateway") that can be
+# dropped into an application service's topology. Each component carries an
+# optional health check (outbound HTTP/TCP probe, or an inbound webhook
+# heartbeat) so its current status can be shown in a table and on the topology.
+# ---------------------------------------------------------------------------
+
+class TopologyComponent(db.Model):
+    __tablename__ = "topology_components"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    # Free-text category shown as the node "type" (e.g. Security, Gateway, Cache).
+    category = db.Column(db.String(80), nullable=True)
+    description = db.Column(db.Text, nullable=True)
+
+    # Health check configuration.
+    # none | http | tcp | webhook
+    check_type = db.Column(db.String(16), nullable=False, default="none")
+    health_check_url = db.Column(db.String(512), nullable=True)   # http
+    tcp_host = db.Column(db.String(253), nullable=True)            # tcp
+    tcp_port = db.Column(db.Integer, nullable=True)               # tcp
+    webhook_token = db.Column(db.String(64), nullable=True)        # webhook (inbound)
+    # For webhook checks: a heartbeat older than this many seconds is unhealthy.
+    heartbeat_interval_seconds = db.Column(db.Integer, nullable=True, default=300)
+    last_heartbeat_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # Last computed health: healthy | degraded | unhealthy | unknown
+    last_status = db.Column(db.String(16), nullable=True)
+    last_message = db.Column(db.Text, nullable=True)
+    last_checked_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    created_by_user = db.relationship("User", foreign_keys=[created_by])

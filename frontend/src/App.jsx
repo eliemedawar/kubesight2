@@ -78,6 +78,7 @@ const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogMo
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
 const ServiceCatalogPage = lazy(() => import("./pages/ServiceCatalogPage.jsx"));
+const ComponentsPage = lazy(() => import("./pages/ComponentsPage.jsx"));
 
 export default function App() {
   const {
@@ -1494,6 +1495,8 @@ export default function App() {
         return <ServiceCatalogPage clusters={allowedClusters} />;
       case "applicationServices":
         return <ApplicationServicesPage clusters={allowedClusters} />;
+      case "components":
+        return <ComponentsPage />;
       case "clients":
         return <ClientsPage />;
       case "userManagement":

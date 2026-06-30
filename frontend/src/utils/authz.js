@@ -105,6 +105,12 @@ export const NAV_PAGES = [
     section: "Services",
   },
   {
+    key: "components",
+    label: "Components",
+    permission: "components:view",
+    section: "Services",
+  },
+  {
     key: "clients",
     label: "Clients",
     permission: "clients:view",

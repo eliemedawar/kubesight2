@@ -31,6 +31,9 @@ def test_dashboard_missing_metrics_server(client, admin_token):
                     unavailable,
                     None,
                     None,
+                    "unknown",
+                    False,
+                    [],
                 )
                 response = client.get(
                     "/api/dashboard/summary?clusterId=c1",

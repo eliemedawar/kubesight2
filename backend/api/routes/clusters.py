@@ -65,6 +65,7 @@ from ..models import Cluster
 from ..response import error_response, success_response
 from ..services.logs_service import fetch_pod_logs, parse_logs_query, stream_pod_logs
 from ..services.resource_actions_service import (
+    exec_in_pod,
     get_deployment_rollout_history,
     get_resource_describe,
     get_resource_yaml,
@@ -635,6 +636,29 @@ def resource_restart(cluster_id: str, namespace: str, resource_kind: str, resour
     user = get_current_user()
     data, error, status = restart_resource(
         user, cluster_id, namespace, resource_kind, resource_name
+    )
+    if error:
+        return error_response(error, status)
+    return success_response(data)
+
+
+@clusters_bp.route(
+    "/<cluster_id>/namespaces/<namespace>/pods/<pod_name>/exec",
+    methods=["POST"],
+)
+@require_permission("apps:deploy")
+@require_cluster_access
+@require_namespace_access
+def pod_exec(cluster_id: str, namespace: str, pod_name: str):
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    data, error, status = exec_in_pod(
+        user,
+        cluster_id,
+        namespace,
+        pod_name,
+        payload.get("command", ""),
+        payload.get("container"),
     )
     if error:
         return error_response(error, status)

@@ -11,6 +11,7 @@ import {
 } from "../../api/inventoryApi.js";
 import { groupTemplatesByCategory, resolveCategoryOrder } from "../../utils/applicationTemplates.js";
 import CreateTemplateModal from "./CreateTemplateModal.jsx";
+import ImportTemplatesModal from "./ImportTemplatesModal.jsx";
 
 export default function TemplateMarketplace({
   canDeploy = false,
@@ -25,6 +26,7 @@ export default function TemplateMarketplace({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [editTemplate, setEditTemplate] = useState(null);
   const [actionError, setActionError] = useState("");
   const [deletingId, setDeletingId] = useState("");
@@ -214,6 +216,26 @@ export default function TemplateMarketplace({
             <span className="template-card__cta">New template</span>
           </button>
         ) : null}
+
+        {canManageTemplates ? (
+          <button
+            type="button"
+            className="template-card template-card--scratch card"
+            onClick={() => setImportOpen(true)}
+            disabled={busy}
+          >
+            <span className="template-card__icon" aria-hidden="true">
+              ⤓
+            </span>
+            <div className="template-card__body">
+              <h3>Import from YAML</h3>
+              <p className="muted">
+                Upload a Kubernetes YAML file and turn each deployment into a reusable template.
+              </p>
+            </div>
+            <span className="template-card__cta">Import YAML</span>
+          </button>
+        ) : null}
       </section>
 
       {!loading ? (
@@ -348,6 +370,15 @@ export default function TemplateMarketplace({
             setEditTemplate(null);
           }}
           onSubmit={handleSubmitTemplate}
+        />
+      ) : null}
+
+      {canManageTemplates ? (
+        <ImportTemplatesModal
+          open={importOpen}
+          existingCategories={presentCategories}
+          onClose={() => setImportOpen(false)}
+          onSaved={loadTemplates}
         />
       ) : null}
     </div>

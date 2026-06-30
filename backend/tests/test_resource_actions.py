@@ -60,3 +60,41 @@ def test_admin_secret_yaml_mock(client, admin_token):
     data = response.get_json()["data"]
     assert data["kind"] == "secret"
     assert "kind: Secret" in data["yaml"]
+
+
+def _exec_url(pod: str) -> str:
+    return f"/api/clusters/{CLUSTER}/namespaces/{NAMESPACE}/pods/{pod}/exec"
+
+
+def test_admin_exec_pod_mock(client, admin_token):
+    response = client.post(
+        _exec_url("payments-api-abc123"),
+        json={"command": "ls"},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    data = response.get_json()["data"]
+    assert data["pod"] == "payments-api-abc123"
+    assert data["command"] == "ls"
+    assert "bin" in data["output"]
+
+
+def test_exec_pod_requires_command(client, admin_token):
+    response = client.post(
+        _exec_url("payments-api-abc123"),
+        json={"command": "   "},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 400
+
+
+def test_exec_pod_echo_mock(client, admin_token):
+    response = client.post(
+        _exec_url("payments-api-abc123"),
+        json={"command": "echo hello world", "container": "app"},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    data = response.get_json()["data"]
+    assert data["output"] == "hello world"
+    assert data["container"] == "app"

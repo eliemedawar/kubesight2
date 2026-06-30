@@ -109,6 +109,13 @@ export function restartResource({ clusterId, namespace, kind, name }) {
   );
 }
 
+export function execInPod({ clusterId, namespace, podName, command, container }) {
+  return request(
+    `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(podName)}/exec`,
+    { method: "POST", body: { command, container: container || undefined } }
+  );
+}
+
 export function getDeploymentRolloutHistory({ clusterId, namespace, deploymentName }) {
   return request(
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/deployments/${encodeURIComponent(deploymentName)}/rollout-history`

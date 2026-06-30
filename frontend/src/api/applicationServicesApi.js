@@ -24,3 +24,8 @@ export const listPickerPods = (clusterId, namespace) =>
   request(
     `/api/application-services/picker/pods?clusterId=${encodeURIComponent(clusterId)}&namespace=${encodeURIComponent(namespace)}`
   );
+
+export const listPickerWorkloads = (clusterId, namespace, kind) =>
+  request(
+    `/api/application-services/picker/workloads?clusterId=${encodeURIComponent(clusterId)}&namespace=${encodeURIComponent(namespace)}&kind=${encodeURIComponent(kind)}`
+  );

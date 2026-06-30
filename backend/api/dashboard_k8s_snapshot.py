@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import logging
@@ -13,11 +13,12 @@ from typing import Any, Dict, List, Tuple
 logger = logging.getLogger(__name__)
 
 from .cluster_access import ClusterAccess
-from .k8s_metrics import PodTopMetrics, cluster_utilization_metrics_from_nodes, fetch_node_top_usage, fetch_pod_top_metrics
+from .k8s_metrics import PodTopMetrics, cluster_utilization_metrics_from_nodes, fetch_node_top_per_node, fetch_pod_top_metrics
 from .k8s_provider import (
     _node_capacity_totals,
     _run_for_access,
     build_namespaces_from_data,
+    build_node_health,
     compute_pod_display_status,
     is_failed_pod_status,
     list_cpu_alerts_from_pod_data,
@@ -37,6 +38,7 @@ class DashboardK8sSnapshot:
     node_top_cpu: float
     node_top_mib: float
     pod_top: PodTopMetrics
+    node_top_by_name: Dict[str, Dict[str, float]] = field(default_factory=dict)
     reachable: bool = True
 
 
@@ -84,7 +86,10 @@ def fetch_dashboard_k8s_snapshot(access: ClusterAccess) -> DashboardK8sSnapshot:
         ns_raw_future = pool.submit(_run_for_access, access, ["get", "namespaces", "-o", "json"], _kt)
         dep_future = pool.submit(_run_for_access, access, ["get", "deployments", "-A", "-o", "json"], _kt)
         svc_future = pool.submit(_run_for_access, access, ["get", "services", "-A", "-o", "json"], _kt)
-        node_top_future = pool.submit(fetch_node_top_usage, access, _TOP_TIMEOUT)
+        # Per-node usage (not just the aggregate): summed it gives the same
+        # cluster totals the utilization panel needs, and the per-node breakdown
+        # feeds Node Health without a second `kubectl top nodes` round-trip.
+        node_top_future = pool.submit(fetch_node_top_per_node, access, _TOP_TIMEOUT)
         pod_top_future = pool.submit(fetch_pod_top_metrics, access, False, _TOP_TIMEOUT)
 
         node_items, nodes_ok = _safe_json_items(nodes_future, "nodes")
@@ -96,9 +101,11 @@ def fetch_dashboard_k8s_snapshot(access: ClusterAccess) -> DashboardK8sSnapshot:
         services_raw, _ = _safe_json_items(svc_future, "services")
 
         try:
-            node_top_cpu, node_top_mib = node_top_future.result()
+            node_top_by_name = node_top_future.result()
         except Exception:
-            node_top_cpu, node_top_mib = 0.0, 0.0
+            node_top_by_name = {}
+        node_top_cpu = sum(usage.get("cpu", 0.0) for usage in node_top_by_name.values())
+        node_top_mib = sum(usage.get("mem_mib", 0.0) for usage in node_top_by_name.values())
         try:
             pod_top = pod_top_future.result()
         except Exception:
@@ -119,8 +126,14 @@ def fetch_dashboard_k8s_snapshot(access: ClusterAccess) -> DashboardK8sSnapshot:
         node_top_cpu=node_top_cpu,
         node_top_mib=node_top_mib,
         pod_top=pod_top,
+        node_top_by_name=node_top_by_name,
         reachable=reachable,
     )
+
+
+def node_health_from_snapshot(snapshot: DashboardK8sSnapshot) -> List[Dict[str, Any]]:
+    """Per-node health from the already-fetched snapshot — no extra kubectl calls."""
+    return build_node_health(snapshot.node_items, snapshot.node_top_by_name)
 
 
 def _resolve_usage_totals(snapshot: DashboardK8sSnapshot) -> Tuple[float, float, float, float]:

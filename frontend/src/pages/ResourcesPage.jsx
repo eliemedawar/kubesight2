@@ -18,6 +18,15 @@ import { usePermission } from "../hooks/usePermission.js";
 
 const ResourceInspectModal = lazy(() => import("../components/resources/ResourceInspectModal.jsx"));
 const EditResourceModal = lazy(() => import("../components/resources/EditResourceModal.jsx"));
+const ExecPodModal = lazy(() => import("../components/resources/ExecPodModal.jsx"));
+
+const CLOSED_EXEC_MODAL = {
+  open: false,
+  clusterId: "",
+  namespace: "",
+  pod: "",
+  containers: [],
+};
 
 // Resource kinds that the Edit & apply modal can load/edit.
 const EDITABLE_KINDS = new Set(["deployment", "configmap", "secret"]);
@@ -83,6 +92,9 @@ function buildPodActionsCell(pod, onResourceAction, canRestart = false) {
   }
   if (canRestart && !actions.includes("restart")) {
     actions.push("restart");
+  }
+  if (canRestart && !actions.includes("exec")) {
+    actions.push("exec");
   }
   return (
     <ResourceRowActions
@@ -202,6 +214,7 @@ export default function ResourcesPage({
   const [allNsData, setAllNsData] = useState({ pods: [], loading: false, error: "" });
   const [inspectModal, setInspectModal] = useState(CLOSED_MODAL);
   const [editModal, setEditModal] = useState(CLOSED_EDIT_MODAL);
+  const [execModal, setExecModal] = useState(CLOSED_EXEC_MODAL);
 
   useEffect(() => {
     if (!tabKeys.includes(activeTab)) {
@@ -215,6 +228,10 @@ export default function ResourcesPage({
 
   const closeEditModal = useCallback(() => {
     setEditModal(CLOSED_EDIT_MODAL);
+  }, []);
+
+  const closeExecModal = useCallback(() => {
+    setExecModal(CLOSED_EXEC_MODAL);
   }, []);
 
   const loadAllNsIssues = useCallback(async () => {
@@ -335,6 +352,17 @@ export default function ResourcesPage({
           namespace: resolvedNamespace,
           kind: resourceKind,
           resourceName,
+        });
+        return;
+      }
+
+      if (actionId === "exec" && resourceKind === "pod") {
+        setExecModal({
+          open: true,
+          clusterId: resolvedCluster,
+          namespace: resolvedNamespace,
+          pod: resourceName,
+          containers: Array.isArray(resource.containers) ? resource.containers : [],
         });
         return;
       }
@@ -969,6 +997,18 @@ export default function ResourcesPage({
               onRefreshTab?.();
               closeEditModal();
             }}
+          />
+        </Suspense>
+      ) : null}
+      {execModal.open ? (
+        <Suspense fallback={null}>
+          <ExecPodModal
+            open={execModal.open}
+            clusterId={execModal.clusterId}
+            namespace={execModal.namespace}
+            pod={execModal.pod}
+            containers={execModal.containers}
+            onClose={closeExecModal}
           />
         </Suspense>
       ) : null}

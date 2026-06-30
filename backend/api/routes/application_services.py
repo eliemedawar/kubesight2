@@ -11,6 +11,7 @@ from ..services.application_service_service import (
     get_service_mock,
     list_picker_deployments,
     list_picker_pods,
+    list_picker_workloads,
     list_services,
     list_services_mock,
     update_service,
@@ -115,6 +116,19 @@ def picker_pods():
     namespace = (request.args.get("namespace") or "").strip()
     user = get_current_user()
     data, error, status = list_picker_pods(cluster_id, namespace, user=user)
+    if error:
+        return error_response(error, status)
+    return success_response(data)
+
+
+@app_services_bp.route("/picker/workloads", methods=["GET"])
+@require_any_permission("app_services:create", "app_services:update")
+def picker_workloads():
+    cluster_id = (request.args.get("clusterId") or "").strip()
+    namespace = (request.args.get("namespace") or "").strip()
+    kind = (request.args.get("kind") or "deployment").strip()
+    user = get_current_user()
+    data, error, status = list_picker_workloads(cluster_id, namespace, kind, user=user)
     if error:
         return error_response(error, status)
     return success_response(data)

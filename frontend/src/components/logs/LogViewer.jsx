@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  detectLogLevel,
   filterLogLinesByLevel,
   filterLogLinesBySearch,
   formatLogLinesToLocalTime,
@@ -16,10 +17,23 @@ function isNearBottom(container) {
   return distance <= SCROLL_THRESHOLD_PX;
 }
 
-function LogContent({ text, revision }) {
+function LogContent({ lines, revision }) {
   return (
     <pre className="log-viewer__content" data-revision={revision}>
-      {text}
+      {lines.map((line, index) => {
+        const level = detectLogLevel(line);
+        const isError =
+          level === "ERROR" || level === "FATAL" || /\b(?:failed|failure)\b/i.test(line);
+        return (
+          <span
+            key={index}
+            className={`log-viewer__line${isError ? " log-viewer__line--error" : ""}`}
+          >
+            {line === "" ? " " : line}
+            {"\n"}
+          </span>
+        );
+      })}
     </pre>
   );
 }
@@ -255,7 +269,7 @@ export default function LogViewer({
       {hasLines ? (
         <div className="log-viewer__frame">
           <div ref={scrollRef} className="log-viewer__scroll" onScroll={handleScroll}>
-            <LogContent text={logText} revision={logRevision} />
+            <LogContent lines={displayLines} revision={logRevision} />
           </div>
           {showJumpControl ? (
             <button

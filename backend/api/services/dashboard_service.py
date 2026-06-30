@@ -19,7 +19,6 @@ from ..access_engine import (
 )
 from ..k8s_provider import (
     K8sCommandError,
-    node_health_from_k8s,
     resolve_cluster_access,
     should_use_real_k8s,
 )
@@ -605,6 +604,7 @@ def _load_real_k8s_dashboard_data(
     Optional[Dict[str, int]],
     str,
     bool,
+    List[Dict[str, Any]],
 ]:
     """Fetch Kubernetes inputs once, then derive dashboard sections in memory."""
     from flask import current_app
@@ -613,6 +613,7 @@ def _load_real_k8s_dashboard_data(
         alerts_from_snapshot,
         cluster_info_from_snapshot,
         fetch_dashboard_k8s_snapshot,
+        node_health_from_snapshot,
         overview_from_snapshot,
         utilization_from_snapshot,
     )
@@ -652,6 +653,8 @@ def _load_real_k8s_dashboard_data(
     overview = overview_from_snapshot(access, snapshot)
     alerts = alerts_from_snapshot(access, cluster_id, snapshot)
     cpu_usage, memory_usage = utilization_from_snapshot(snapshot)
+    # Derived from the snapshot's node data — no extra kubectl round-trip.
+    node_health = node_health_from_snapshot(snapshot) if snapshot.reachable else []
 
     upgrade_result = None
     if user and user_has_permission(user, "upgrades:precheck") and cluster_info:
@@ -669,6 +672,7 @@ def _load_real_k8s_dashboard_data(
         inventory_summary,
         prefetched_latest_version,
         not snapshot.reachable,
+        node_health,
     )
 
 
@@ -729,6 +733,7 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
                 parallel_inventory_summary,
                 parallel_latest_version,
                 cluster_unreachable,
+                node_health,
             ) = _load_real_k8s_dashboard_data(cluster_id, access, user)
             cluster, ready_nodes, total_nodes = _cluster_record_from_access(
                 cluster_id,
@@ -738,11 +743,6 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
             )
         except K8sCommandError as exc:
             return None, f"Failed to load dashboard summary: {exc}", 503
-        if not cluster_unreachable:
-            try:
-                node_health = node_health_from_k8s(access)
-            except K8sCommandError:
-                node_health = []
     else:
         cluster = _cluster_record(cluster_id)
         if not cluster:

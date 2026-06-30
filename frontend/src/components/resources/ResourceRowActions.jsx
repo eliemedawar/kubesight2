@@ -9,6 +9,7 @@ import {
   IconHistory,
   IconInfo,
   IconRefresh,
+  IconTerminal,
   InventoryIconButton,
 } from "../inventory/InventoryActionIcons.jsx";
 
@@ -19,6 +20,7 @@ const ACTION_CONFIG = {
   pods: { label: "View pods", Icon: IconCube },
   rollout: { label: "Rollout history", Icon: IconHistory },
   restart: { label: "Restart", Icon: IconRefresh },
+  exec: { label: "Exec into pod", Icon: IconTerminal },
   yaml: { label: "View YAML", Icon: IconCode },
   details: { label: "Details", Icon: IconEye },
   edit: { label: "Edit & apply", Icon: IconEdit },

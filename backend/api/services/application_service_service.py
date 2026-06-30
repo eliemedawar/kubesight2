@@ -1,13 +1,41 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..audit import log_audit
 from ..db import db
 from ..models import ApplicationService, ApplicationServiceDeployment, ApplicationServiceTopologyNode, ApplicationServiceTopologyEdge
+
+# Short-lived cache for the live service list. Building it runs `kubectl` against
+# every linked namespace, so reopening the page would otherwise pay that cost
+# every time. The TTL keeps health reasonably fresh while making repeat opens
+# (and the common navigate-away-and-back) effectively instant. Keyed per user so
+# one user's namespace-filtered health never leaks to another.
+_LIST_CACHE_TTL_SECONDS = int(os.getenv("APP_SERVICES_LIST_CACHE_TTL_SECONDS", "15"))
+_list_services_cache: Dict[Any, Tuple[float, Dict[str, Any]]] = {}
+_list_services_cache_lock = threading.Lock()
+
+
+def _list_cache_disabled() -> bool:
+    """Disable caching under pytest so patched kubectl/mutations aren't masked."""
+    try:
+        from flask import current_app
+
+        return bool(getattr(current_app, "config", {}).get("TESTING"))
+    except Exception:
+        return False
+
+
+def invalidate_list_services_cache() -> None:
+    with _list_services_cache_lock:
+        _list_services_cache.clear()
 
 # ---------------------------------------------------------------------------
 # Mock data
@@ -211,6 +239,8 @@ def _mock_deployment_detail(dep: Dict[str, Any]) -> Dict[str, Any]:
         "availableReplicas": available,
         "readyReplicas": ready,
         "status": _deployment_status(desired, min(available, ready)),
+        "dr": None,
+        "drStatus": None,
     }
 
 
@@ -226,17 +256,30 @@ def _mock_service_health(service: Dict[str, Any]) -> str:
 # K8s live health (real mode)
 # ---------------------------------------------------------------------------
 
-def _deployments_for_access(access, namespace: str) -> Dict[str, Dict[str, Any]]:
-    """Run ``kubectl get deployments`` for an already-resolved cluster access and
-    return ``{deployment_name: raw_k8s_item}``.
+# Supported workload kinds for a linked resource / DR counterpart and the
+# kubectl resource name + per-namespace health-map key for each. "pod" is handled
+# separately (it has no replica spec).
+_KIND_TO_KUBECTL = {
+    "deployment": "deployments",
+    "statefulset": "statefulsets",
+    "daemonset": "daemonsets",
+    "pod": "pods",
+}
+WORKLOAD_KINDS = ("deployment", "statefulset", "daemonset", "pod")
 
-    This performs only the subprocess/JSON work and touches neither the DB nor
-    the Flask app context, so it is safe to call from worker threads.
-    """
+
+def _normalize_kind(value: Optional[str], default: str = "deployment") -> str:
+    kind = (value or "").strip().lower()
+    return kind if kind in WORKLOAD_KINDS else default
+
+
+def _workloads_for_access(access, namespace: str, kubectl_kind: str) -> Dict[str, Dict[str, Any]]:
+    """Run ``kubectl get <kind>`` for an already-resolved cluster access and return
+    ``{name: raw_k8s_item}``. Subprocess/JSON only — safe in worker threads."""
     from ..k8s_provider import K8sCommandError, _run_for_access
 
     try:
-        output = _run_for_access(access, ["get", "deployments", "-n", namespace, "-o", "json"])
+        output = _run_for_access(access, ["get", kubectl_kind, "-n", namespace, "-o", "json"])
         items = json.loads(output).get("items", [])
         return {
             item.get("metadata", {}).get("name", ""): item
@@ -245,6 +288,11 @@ def _deployments_for_access(access, namespace: str) -> Dict[str, Dict[str, Any]]
         }
     except (K8sCommandError, Exception):
         return {}
+
+
+def _deployments_for_access(access, namespace: str) -> Dict[str, Dict[str, Any]]:
+    """Run ``kubectl get deployments`` and return ``{deployment_name: raw_item}``."""
+    return _workloads_for_access(access, namespace, "deployments")
 
 
 def _fetch_namespace_deployment_map(
@@ -352,20 +400,52 @@ def _pod_belongs_to_deployment(pod_item: Dict[str, Any], deployment_name: str) -
     return False
 
 
-def _live_deployment_detail(dep_row, ns_data: Dict[str, Any]) -> Dict[str, Any]:
-    deployments = ns_data.get("deployments", {}) if isinstance(ns_data, dict) else {}
-    pods = ns_data.get("pods", []) if isinstance(ns_data, dict) else []
-    kind = getattr(dep_row, "resource_kind", None) or "deployment"
+# kind -> the ownerReference.kind that directly owns the pods (StatefulSets and
+# DaemonSets own pods directly; Deployments own them via a ReplicaSet).
+_DIRECT_POD_OWNER = {"statefulset": "StatefulSet", "daemonset": "DaemonSet"}
 
-    # A linked pod: health is simply that pod's own state.
-    if kind == "pod":
-        pod = next((p for p in pods if p.get("metadata", {}).get("name") == dep_row.deployment_name), None)
-        if pod is None:
-            status, desired, available, ready = "unknown", 0, 0, 0
-        else:
-            down = _pod_is_down(pod)
-            status, desired = ("critical", 1) if down else ("healthy", 1)
-            ready = available = 0 if down else 1
+
+def _pod_owned_by_workload(pod_item: Dict[str, Any], kind: str, name: str) -> bool:
+    """True if a pod belongs to the given workload, across kinds."""
+    if kind == "deployment":
+        return _pod_belongs_to_deployment(pod_item, name)
+    owner_kind = _DIRECT_POD_OWNER.get(kind)
+    if not owner_kind:
+        return False
+    for ref in pod_item.get("metadata", {}).get("ownerReferences", []) or []:
+        if ref.get("kind") == owner_kind and ref.get("name") == name:
+            return True
+    return False
+
+
+def _workload_replica_counts(kind: str, item: Dict[str, Any]) -> Tuple[int, int, int, int]:
+    """Return (desired, ready, available, unavailable) for a workload object.
+
+    DaemonSets expose scheduling counts instead of ``spec.replicas``; Deployments
+    and StatefulSets both use the replicas/readyReplicas/availableReplicas shape.
+    """
+    spec = item.get("spec", {})
+    status = item.get("status", {})
+    if kind == "daemonset":
+        desired = status.get("desiredNumberScheduled") or 0
+        ready = status.get("numberReady") or 0
+        available = status.get("numberAvailable")
+        available = ready if available is None else available
+        unavailable = status.get("numberUnavailable") or 0
+    else:  # deployment, statefulset
+        desired = spec.get("replicas") or 0
+        ready = status.get("readyReplicas") or 0
+        available = status.get("availableReplicas")
+        available = ready if available is None else available
+        unavailable = status.get("unavailableReplicas") or 0
+    return desired, ready, available, unavailable
+
+
+def _live_deployment_detail(dep_row, ns_data: Dict[str, Any]) -> Dict[str, Any]:
+    pods = ns_data.get("pods", []) if isinstance(ns_data, dict) else []
+    kind = _normalize_kind(getattr(dep_row, "resource_kind", None))
+
+    def _result(desired, available, ready, status):
         return {
             "id": dep_row.id,
             "serviceId": dep_row.service_id,
@@ -379,30 +459,24 @@ def _live_deployment_detail(dep_row, ns_data: Dict[str, Any]) -> Dict[str, Any]:
             "status": status,
         }
 
-    item = deployments.get(dep_row.deployment_name)
-    if item is None:
-        # Cluster unreachable or deployment not found. Report "unknown" rather
-        # than letting desired==0 fall through to "healthy", which would hide the
-        # real state of the linked deployment.
-        return {
-            "id": dep_row.id,
-            "serviceId": dep_row.service_id,
-            "clusterId": dep_row.cluster_id,
-            "namespace": dep_row.namespace,
-            "deploymentName": dep_row.deployment_name,
-            "kind": kind,
-            "desiredReplicas": 0,
-            "availableReplicas": 0,
-            "readyReplicas": 0,
-            "status": "unknown",
-        }
+    # A linked pod: health is simply that pod's own state.
+    if kind == "pod":
+        pod = next((p for p in pods if p.get("metadata", {}).get("name") == dep_row.deployment_name), None)
+        if pod is None:
+            return _result(0, 0, 0, "unknown")
+        down = _pod_is_down(pod)
+        return _result(1, 0 if down else 1, 0 if down else 1, "critical" if down else "healthy")
 
-    spec = item.get("spec", {})
-    status_obj = item.get("status", {})
-    desired = spec.get("replicas") or 0
-    available = status_obj.get("availableReplicas") or 0
-    ready = status_obj.get("readyReplicas") or 0
-    unavailable = status_obj.get("unavailableReplicas") or 0
+    map_key = _KIND_TO_KUBECTL.get(kind, "deployments")
+    items = ns_data.get(map_key, {}) if isinstance(ns_data, dict) else {}
+    item = items.get(dep_row.deployment_name)
+    if item is None:
+        # Cluster unreachable or workload not found. Report "unknown" rather than
+        # letting desired==0 fall through to "healthy", which would hide the real
+        # state of the linked workload.
+        return _result(0, 0, 0, "unknown")
+
+    desired, ready, available, unavailable = _workload_replica_counts(kind, item)
 
     # Base status off the stricter ready count, and flag any unavailable replicas.
     status = _deployment_status(desired, min(available, ready))
@@ -411,7 +485,7 @@ def _live_deployment_detail(dep_row, ns_data: Dict[str, Any]) -> Dict[str, Any]:
 
     # Pod-level check: catch a down/crashing pod even when replica counts look OK
     # (e.g. an extra or old pod stuck in CrashLoopBackOff).
-    dep_pods = [p for p in pods if _pod_belongs_to_deployment(p, dep_row.deployment_name)]
+    dep_pods = [p for p in pods if _pod_owned_by_workload(p, kind, dep_row.deployment_name)]
     down_pods = [p for p in dep_pods if _pod_is_down(p)]
     if down_pods:
         if dep_pods and len(down_pods) == len(dep_pods):
@@ -419,18 +493,7 @@ def _live_deployment_detail(dep_row, ns_data: Dict[str, Any]) -> Dict[str, Any]:
         elif status != "critical":
             status = "warning"
 
-    return {
-        "id": dep_row.id,
-        "serviceId": dep_row.service_id,
-        "clusterId": dep_row.cluster_id,
-        "namespace": dep_row.namespace,
-        "deploymentName": dep_row.deployment_name,
-        "kind": kind,
-        "desiredReplicas": desired,
-        "availableReplicas": available,
-        "readyReplicas": ready,
-        "status": status,
-    }
+    return _result(desired, available, ready, status)
 
 
 def _build_k8s_health_map(
@@ -451,36 +514,65 @@ def _build_k8s_health_map(
     from ..k8s_provider import resolve_cluster_access, should_use_real_k8s
     from ..access_engine import can_access_namespace
 
-    pairs = list({(d.cluster_id, d.namespace) for d in deployments})
+    # Figure out which workload kinds are actually linked in each (cluster,
+    # namespace) pair. A namespace whose linked resources are all Deployments
+    # should never pay for statefulset/daemonset fetches. "pods" is always
+    # needed: both pod-kind links and the pod-level health check on every
+    # workload read the pod list.
+    needed_kinds: Dict[Tuple[str, str], set] = {}
+
+    def _want(pair: Tuple[str, str], kind: str) -> None:
+        bucket = needed_kinds.setdefault(pair, {"pods"})
+        bucket.add(_KIND_TO_KUBECTL.get(kind, "deployments"))
+
+    for d in deployments:
+        _want((d.cluster_id, d.namespace), _normalize_kind(getattr(d, "resource_kind", None)))
+        # DR counterparts may live on a different cluster/namespace.
+        if _has_dr(d):
+            _want((d.dr_cluster_id, d.dr_namespace), _normalize_kind(getattr(d, "dr_resource_kind", None)))
+
     result: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     # Resolve access on the main thread (valid app context + session).
     accesses: Dict[Tuple[str, str], Any] = {}
-    for cluster_id, namespace in pairs:
+    for pair in needed_kinds:
+        cluster_id, namespace = pair
         if not should_use_real_k8s(cluster_id):
             continue
         if user is not None and not can_access_namespace(user, cluster_id, namespace):
             continue
         access = resolve_cluster_access(cluster_id)
         if access:
-            accesses[(cluster_id, namespace)] = access
+            accesses[pair] = access
 
     if not accesses:
         return result
 
-    def fetch(key: Tuple[str, str], access):
-        _, namespace = key
-        return key, {
-            "deployments": _deployments_for_access(access, namespace),
-            "pods": _pods_for_access(access, namespace),
-        }
+    # Seed every reachable pair with empty buckets so a kind we deliberately
+    # skipped (because nothing links it) reads as empty rather than absent.
+    for pair in accesses:
+        result[pair] = {"deployments": {}, "statefulsets": {}, "daemonsets": {}, "pods": []}
 
-    with ThreadPoolExecutor(max_workers=min(len(accesses), 8)) as pool:
-        futures = {pool.submit(fetch, k, a): k for k, a in accesses.items()}
+    # Flatten to one task per (pair, kind) so every kubectl call runs
+    # concurrently, instead of four serial calls inside each namespace's worker.
+    tasks = [
+        (pair, accesses[pair], kubectl_kind)
+        for pair in accesses
+        for kubectl_kind in needed_kinds[pair]
+    ]
+
+    def fetch(pair: Tuple[str, str], access, kubectl_kind: str):
+        _, namespace = pair
+        if kubectl_kind == "pods":
+            return pair, "pods", _pods_for_access(access, namespace)
+        return pair, kubectl_kind, _workloads_for_access(access, namespace, kubectl_kind)
+
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as pool:
+        futures = [pool.submit(fetch, p, a, k) for (p, a, k) in tasks]
         for fut in as_completed(futures):
             try:
-                key, data = fut.result()
-                result[key] = data
+                pair, bucket, data = fut.result()
+                result[pair][bucket] = data
             except Exception:
                 pass
     return result
@@ -490,6 +582,84 @@ def _build_k8s_health_map(
 # Serializers
 # ---------------------------------------------------------------------------
 
+def _has_dr(dep: ApplicationServiceDeployment) -> bool:
+    """True when a linked component has a fully-configured DR counterpart."""
+    return bool(
+        getattr(dep, "dr_cluster_id", None)
+        and getattr(dep, "dr_namespace", None)
+        and getattr(dep, "dr_resource_name", None)
+    )
+
+
+def _dr_config(dep: ApplicationServiceDeployment) -> Optional[Dict[str, Any]]:
+    if not _has_dr(dep):
+        return None
+    return {
+        "clusterId": dep.dr_cluster_id,
+        "namespace": dep.dr_namespace,
+        "deploymentName": dep.dr_resource_name,
+        "kind": dep.dr_resource_kind or "deployment",
+    }
+
+
+def _dr_target_row(dep: ApplicationServiceDeployment) -> SimpleNamespace:
+    """A lightweight stand-in row representing the DR counterpart, so it can be
+    fed to :func:`_live_deployment_detail` to compute live DR health."""
+    return SimpleNamespace(
+        id=dep.id,
+        service_id=dep.service_id,
+        cluster_id=dep.dr_cluster_id,
+        namespace=dep.dr_namespace,
+        deployment_name=dep.dr_resource_name,
+        resource_kind=dep.dr_resource_kind or "deployment",
+    )
+
+
+def _attach_dr(
+    dep_detail: Dict[str, Any],
+    dep_row: ApplicationServiceDeployment,
+    k8s_map: Optional[Dict[Tuple[str, str], Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Annotate a primary component's detail with its DR config + live DR status."""
+    config = _dr_config(dep_row)
+    dep_detail["dr"] = config
+    if not config:
+        dep_detail["drStatus"] = None
+        return dep_detail
+    if k8s_map is not None:
+        dr_detail = _live_deployment_detail(
+            _dr_target_row(dep_row),
+            k8s_map.get((dep_row.dr_cluster_id, dep_row.dr_namespace), {}),
+        )
+        dep_detail["drStatus"] = dr_detail["status"]
+        dep_detail["drDetail"] = dr_detail
+    else:
+        dep_detail["drStatus"] = "unknown"
+    return dep_detail
+
+
+def _dr_fields_from_payload(dep: Dict[str, Any], primary_kind: str) -> Dict[str, Any]:
+    """Extract DR counterpart columns from a linked-resource payload.
+
+    Accepts either a nested ``dr`` object or flat ``drClusterId`` / ``drNamespace``
+    / ``drResourceName`` / ``drResourceKind`` keys. Returns all-None when DR is not
+    fully specified, so a partially-filled DR link is simply ignored.
+    """
+    dr = dep.get("dr") if isinstance(dep.get("dr"), dict) else {}
+    cluster_id = (dr.get("clusterId") or dep.get("drClusterId") or "").strip()
+    namespace = (dr.get("namespace") or dep.get("drNamespace") or "").strip()
+    name = (dr.get("deploymentName") or dep.get("drResourceName") or "").strip()
+    kind = _normalize_kind(dr.get("kind") or dep.get("drResourceKind"), default=_normalize_kind(primary_kind))
+    if not (cluster_id and namespace and name):
+        return {"dr_cluster_id": None, "dr_namespace": None, "dr_resource_name": None, "dr_resource_kind": None}
+    return {
+        "dr_cluster_id": cluster_id,
+        "dr_namespace": namespace,
+        "dr_resource_name": name,
+        "dr_resource_kind": kind,
+    }
+
+
 def _dep_to_dict(dep: ApplicationServiceDeployment) -> Dict[str, Any]:
     return {
         "id": dep.id,
@@ -498,7 +668,22 @@ def _dep_to_dict(dep: ApplicationServiceDeployment) -> Dict[str, Any]:
         "namespace": dep.namespace,
         "deploymentName": dep.deployment_name,
         "kind": getattr(dep, "resource_kind", None) or "deployment",
+        "dr": _dr_config(dep),
         "createdAt": dep.created_at.isoformat() if dep.created_at else None,
+    }
+
+
+def _node_component_fields(node) -> Dict[str, Any]:
+    """Resolve a node's predefined-component link (id + live status) for the UI."""
+    component = getattr(node, "component", None)
+    if not node.component_id or not component:
+        return {"componentId": node.component_id, "component": None, "componentStatus": None}
+    from .topology_component_service import component_summary
+
+    return {
+        "componentId": node.component_id,
+        "component": component_summary(component),
+        "componentStatus": component.last_status or "unknown",
     }
 
 
@@ -517,6 +702,7 @@ def _topology_to_dict(svc: ApplicationService) -> Dict[str, Any]:
                 "linkedDeployment": n.linked_deployment,
                 "positionX": n.position_x,
                 "positionY": n.position_y,
+                **_node_component_fields(n),
             }
             for n in nodes
         ],
@@ -534,13 +720,40 @@ def _topology_to_dict(svc: ApplicationService) -> Dict[str, Any]:
     }
 
 
+# A predefined component's health uses healthy/degraded/unhealthy/unknown; the
+# service health uses healthy/warning/critical/unknown. Map so that an unhealthy
+# component drags the whole service to "critical" and a degraded one to "warning".
+_COMPONENT_TO_SERVICE_HEALTH = {
+    "healthy": "healthy",
+    "degraded": "warning",
+    "unhealthy": "critical",
+    "unknown": "unknown",
+}
+
+
 def _service_to_dict(
     svc: ApplicationService,
     deployment_details: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     deps = deployment_details if deployment_details is not None else [_dep_to_dict(d) for d in svc.deployments]
+    topology = _topology_to_dict(svc)
+
+    # Overall service health combines linked-workload health with the health of
+    # any predefined components dropped into the topology — so an unhealthy
+    # component makes the whole service unhealthy.
     statuses = [d.get("status", "unknown") for d in deps if "status" in d]
-    health = _aggregate_health(statuses) if statuses else "unknown"
+    component_statuses = [
+        _COMPONENT_TO_SERVICE_HEALTH.get(node["componentStatus"], "unknown")
+        for node in topology["nodes"]
+        if node.get("componentStatus")
+    ]
+    combined = statuses + component_statuses
+    health = _aggregate_health(combined) if combined else "unknown"
+
+    # DR health: aggregate of every configured DR counterpart's status. None when
+    # no component on this service has a DR counterpart linked.
+    dr_statuses = [d.get("drStatus") for d in deps if d.get("drStatus")]
+    dr_health = _aggregate_health(dr_statuses) if dr_statuses else None
     return {
         "id": svc.id,
         "name": svc.name,
@@ -548,10 +761,29 @@ def _service_to_dict(
         "deploymentCount": len(svc.deployments),
         "deployments": deps,
         "health": health,
-        "topology": _topology_to_dict(svc),
+        "componentHealth": _aggregate_health(component_statuses) if component_statuses else None,
+        "hasDr": bool(dr_statuses),
+        "drHealth": dr_health,
+        "topology": topology,
         "createdAt": svc.created_at.isoformat() if svc.created_at else None,
         "updatedAt": svc.updated_at.isoformat() if svc.updated_at else None,
     }
+
+
+def _build_deployment_details(
+    svc: ApplicationService,
+    k8s_map: Optional[Dict[Tuple[str, str], Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Per-component detail dicts with both primary health and DR annotations."""
+    details = []
+    for dep in svc.deployments:
+        if k8s_map is not None:
+            detail = _live_deployment_detail(dep, k8s_map.get((dep.cluster_id, dep.namespace), {}))
+        else:
+            detail = _dep_to_dict(dep)
+        _attach_dr(detail, dep, k8s_map)
+        details.append(detail)
+    return details
 
 
 def _service_list_item(
@@ -559,13 +791,7 @@ def _service_list_item(
     k8s_health_map: Optional[Dict[Tuple[str, str], Dict[str, Any]]] = None,
     user=None,
 ) -> Dict[str, Any]:
-    if k8s_health_map is not None:
-        deps = [
-            _live_deployment_detail(d, k8s_health_map.get((d.cluster_id, d.namespace), {}))
-            for d in svc.deployments
-        ]
-    else:
-        deps = [_dep_to_dict(d) for d in svc.deployments]
+    deps = _build_deployment_details(svc, k8s_health_map)
     return _service_to_dict(svc, deployment_details=deps)
 
 
@@ -589,6 +815,24 @@ def _save_topology(service_id: int, topology_payload: Dict[str, Any]) -> None:
         except (TypeError, ValueError):
             return None
 
+    def _coerce_int_or_none(value):
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    # Resolve which predefined component ids actually exist, so a stale id in the
+    # payload never produces a dangling FK.
+    from ..models import TopologyComponent
+
+    def _resolve_component_id(raw):
+        cid = _coerce_int_or_none(raw)
+        if cid is None:
+            return None
+        return cid if TopologyComponent.query.get(cid) else None
+
     temp_to_id: Dict[str, int] = {}
     for node_data in nodes_raw:
         name = (node_data.get("name") or "").strip()
@@ -602,6 +846,7 @@ def _save_topology(service_id: int, topology_payload: Dict[str, Any]) -> None:
             linked_cluster_id=(node_data.get("linkedClusterId") or "").strip() or None,
             linked_namespace=(node_data.get("linkedNamespace") or "").strip() or None,
             linked_deployment=(node_data.get("linkedDeployment") or "").strip() or None,
+            component_id=_resolve_component_id(node_data.get("componentId")),
             position_x=_coerce_pos(node_data.get("positionX")),
             position_y=_coerce_pos(node_data.get("positionY")),
         )
@@ -643,17 +888,42 @@ def _save_topology(service_id: int, topology_payload: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def list_services(user=None) -> Dict[str, Any]:
-    from ..k8s_provider import should_use_real_k8s
+    cache_enabled = not _list_cache_disabled()
+    cache_key = getattr(user, "id", None) if user else "anon"
+    if cache_enabled:
+        now_ts = time.time()
+        with _list_services_cache_lock:
+            cached = _list_services_cache.get(cache_key)
+        if cached and cached[0] > now_ts:
+            return cached[1]
+
     services = ApplicationService.query.order_by(ApplicationService.name.asc()).all()
 
-    # Collect all deployment rows and fetch live health if in real mode.
+    # Collect all deployment rows and fetch live health if in real mode. DR
+    # counterparts may live on a different cluster, so consider those too.
     all_deployments = [d for svc in services for d in svc.deployments]
     k8s_map: Optional[Dict[Tuple[str, str], Dict[str, Any]]] = None
-    if all_deployments and any(should_use_real_k8s(d.cluster_id) for d in all_deployments):
+    if all_deployments and _any_real_cluster(all_deployments):
         k8s_map = _build_k8s_health_map(all_deployments, user=user)
 
     items = [_service_list_item(svc, k8s_health_map=k8s_map, user=user) for svc in services]
-    return {"items": items, "count": len(items)}
+    payload = {"items": items, "count": len(items)}
+
+    if cache_enabled:
+        with _list_services_cache_lock:
+            _list_services_cache[cache_key] = (time.time() + _LIST_CACHE_TTL_SECONDS, payload)
+    return payload
+
+
+def _any_real_cluster(deployments: List[ApplicationServiceDeployment]) -> bool:
+    from ..k8s_provider import should_use_real_k8s
+
+    for d in deployments:
+        if should_use_real_k8s(d.cluster_id):
+            return True
+        if _has_dr(d) and should_use_real_k8s(d.dr_cluster_id):
+            return True
+    return False
 
 
 def list_services_mock() -> Dict[str, Any]:
@@ -668,6 +938,8 @@ def list_services_mock() -> Dict[str, Any]:
             "deploymentCount": len(svc["deployments"]),
             "deployments": dep_details,
             "health": _aggregate_health(statuses),
+            "hasDr": False,
+            "drHealth": None,
             "topology": svc.get("topology", {"nodes": [], "edges": []}),
             "createdAt": svc["createdAt"],
             "updatedAt": svc["updatedAt"],
@@ -680,16 +952,11 @@ def get_service(service_id: int, user=None) -> Tuple[Optional[Dict[str, Any]], O
     if not svc:
         return None, "Application service not found", 404
 
-    from ..k8s_provider import should_use_real_k8s
-    if svc.deployments and any(should_use_real_k8s(d.cluster_id) for d in svc.deployments):
+    k8s_map: Optional[Dict[Tuple[str, str], Dict[str, Any]]] = None
+    if svc.deployments and _any_real_cluster(list(svc.deployments)):
         k8s_map = _build_k8s_health_map(list(svc.deployments), user=user)
-        deps = [
-            _live_deployment_detail(d, k8s_map.get((d.cluster_id, d.namespace), {}))
-            for d in svc.deployments
-        ]
-    else:
-        deps = [_dep_to_dict(d) for d in svc.deployments]
 
+    deps = _build_deployment_details(svc, k8s_map)
     return _service_to_dict(svc, deployment_details=deps), None, 200
 
 
@@ -706,6 +973,8 @@ def get_service_mock(service_id: int) -> Tuple[Optional[Dict[str, Any]], Optiona
         "deploymentCount": len(svc["deployments"]),
         "deployments": dep_details,
         "health": _aggregate_health(statuses),
+        "hasDr": False,
+        "drHealth": None,
         "topology": svc.get("topology", {"nodes": [], "edges": []}),
         "createdAt": svc["createdAt"],
         "updatedAt": svc["updatedAt"],
@@ -738,21 +1007,21 @@ def create_service(
         cluster_id = (dep.get("clusterId") or "").strip()
         namespace = (dep.get("namespace") or "").strip()
         deployment_name = (dep.get("deploymentName") or "").strip()
-        resource_kind = dep.get("kind", "deployment") or "deployment"
-        if resource_kind not in ("deployment", "pod"):
-            resource_kind = "deployment"
+        resource_kind = _normalize_kind(dep.get("kind"))
         if not (cluster_id and namespace and deployment_name):
             continue
         key = (cluster_id, namespace, deployment_name, resource_kind)
         if key in seen:
             continue
         seen.add(key)
+        dr = _dr_fields_from_payload(dep, resource_kind)
         db.session.add(ApplicationServiceDeployment(
             service_id=svc.id,
             cluster_id=cluster_id,
             namespace=namespace,
             deployment_name=deployment_name,
             resource_kind=resource_kind,
+            **dr,
         ))
 
     topology_payload = payload.get("topology") or {}
@@ -766,6 +1035,7 @@ def create_service(
         target_id=str(svc.id),
         details={"name": name, "deploymentCount": len(seen), "topologyNodeCount": len(topology_payload.get("nodes") or [])},
     )
+    invalidate_list_services_cache()
     data, _, _ = get_service(svc.id)
     return data, None, 201
 
@@ -804,21 +1074,21 @@ def update_service(
         cluster_id = (dep.get("clusterId") or "").strip()
         namespace = (dep.get("namespace") or "").strip()
         deployment_name = (dep.get("deploymentName") or "").strip()
-        resource_kind = dep.get("kind", "deployment") or "deployment"
-        if resource_kind not in ("deployment", "pod"):
-            resource_kind = "deployment"
+        resource_kind = _normalize_kind(dep.get("kind"))
         if not (cluster_id and namespace and deployment_name):
             continue
         key = (cluster_id, namespace, deployment_name, resource_kind)
         if key in seen:
             continue
         seen.add(key)
+        dr = _dr_fields_from_payload(dep, resource_kind)
         db.session.add(ApplicationServiceDeployment(
             service_id=svc.id,
             cluster_id=cluster_id,
             namespace=namespace,
             deployment_name=deployment_name,
             resource_kind=resource_kind,
+            **dr,
         ))
 
     topology_payload = payload.get("topology") or {}
@@ -832,6 +1102,7 @@ def update_service(
         target_id=str(svc.id),
         details={"name": name, "deploymentCount": len(seen), "topologyNodeCount": len(topology_payload.get("nodes") or [])},
     )
+    invalidate_list_services_cache()
     data, _, _ = get_service(svc.id)
     return data, None, 200
 
@@ -862,6 +1133,7 @@ def delete_service(
         target_id=str(service_id),
         details={"name": name},
     )
+    invalidate_list_services_cache()
     return {"id": service_id, "deleted": True}, None, 200
 
 
@@ -953,3 +1225,57 @@ def list_picker_pods(
         return {"items": names, "count": len(names)}, None, 200
     except K8sCommandError as exc:
         return None, f"Failed to list pods: {exc}", 503
+
+
+# ---------------------------------------------------------------------------
+# Generic workload picker — list names of any supported kind in a namespace
+# (Deployment / StatefulSet / DaemonSet / Pod), respecting RBAC.
+# ---------------------------------------------------------------------------
+
+def list_picker_workloads(
+    cluster_id: str,
+    namespace: str,
+    kind: str,
+    user=None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    from ..k8s_provider import K8sCommandError, _run_for_access, resolve_cluster_access, should_use_real_k8s
+
+    if not cluster_id or not namespace:
+        return None, "clusterId and namespace are required.", 400
+
+    normalized = _normalize_kind(kind)
+    kubectl_kind = _KIND_TO_KUBECTL.get(normalized, "deployments")
+
+    if user:
+        from ..access_engine import can_access_cluster as cac, can_access_namespace as can
+        if not cac(user, cluster_id):
+            return None, "Forbidden", 403
+        if not can(user, cluster_id, namespace):
+            return None, "Forbidden", 403
+
+    if not should_use_real_k8s(cluster_id):
+        # Only deployments have mock names; other kinds are empty in demo mode.
+        if normalized == "deployment":
+            names = sorted({
+                dep_name
+                for (cid, ns, dep_name) in _MOCK_DEPLOYMENT_HEALTH
+                if cid == cluster_id and ns == namespace
+            })
+            return {"items": names, "count": len(names)}, None, 200
+        return {"items": [], "count": 0}, None, 200
+
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return None, "Cluster not found", 404
+
+    try:
+        output = _run_for_access(access, ["get", kubectl_kind, "-n", namespace, "-o", "json"])
+        items = json.loads(output).get("items", [])
+        names = sorted(
+            item.get("metadata", {}).get("name", "")
+            for item in items
+            if item.get("metadata", {}).get("name")
+        )
+        return {"items": names, "count": len(names)}, None, 200
+    except K8sCommandError as exc:
+        return None, f"Failed to list {kubectl_kind}: {exc}", 503

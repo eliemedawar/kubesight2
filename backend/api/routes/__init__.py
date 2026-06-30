@@ -22,6 +22,7 @@ from .ai import ai_bp
 from .api_tokens import api_tokens_bp
 from .deployment_requests import deployment_requests_bp
 from .change_bundles import change_bundles_bp
+from .topology_components import topology_components_bp
 
 
 def register_blueprints(app: Flask) -> None:
@@ -48,3 +49,4 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(api_tokens_bp)
     app.register_blueprint(deployment_requests_bp)
     app.register_blueprint(change_bundles_bp)
+    app.register_blueprint(topology_components_bp)

@@ -67,6 +67,13 @@ RESTART_SUPPORTED_KINDS = {"pod", "deployment", "statefulset", "daemonset"}
 # Permission gating writes from the Resources page (mirrors the deployment edit action).
 RESTART_PERMISSION = "apps:deploy"
 
+# Exec into a pod runs arbitrary commands in a container, so it is gated by the
+# same write-level permission as restart.
+EXEC_PERMISSION = "apps:deploy"
+
+# Upper bound on a single exec command length (defensive — avoids unbounded argv).
+_MAX_EXEC_COMMAND_LENGTH = 4000
+
 
 def _normalize_kind(kind: str) -> Optional[str]:
     return KIND_ALIASES.get((kind or "").strip().lower())
@@ -409,3 +416,108 @@ def restart_resource(
             details={"action": "restart", "error": str(exc), "result": "failed"},
         )
         return None, str(exc), 503
+
+
+def _mock_exec_output(command: str, container: Optional[str]) -> str:
+    """Best-effort simulated output for common commands in mock mode."""
+    cmd = command.strip()
+    first = cmd.split()[0] if cmd else ""
+    target = f" (container {container})" if container else ""
+    if first in {"pwd"}:
+        return "/"
+    if first in {"whoami", "id"}:
+        return "root" if first == "whoami" else "uid=0(root) gid=0(root) groups=0(root)"
+    if first in {"hostname"}:
+        return "mock-pod"
+    if first in {"ls", "dir"}:
+        return "bin\nboot\ndev\netc\nhome\nlib\nproc\nroot\nsys\ntmp\nusr\nvar"
+    if first in {"env", "printenv"}:
+        return "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nHOME=/root\nKUBERNETES_SERVICE_HOST=10.96.0.1"
+    if first in {"echo"}:
+        return cmd[len("echo"):].strip()
+    if first in {"cat"}:
+        return f"(mock) contents of {cmd[len('cat'):].strip() or 'file'} not available in mock mode"
+    return f"(mock environment{target}) command executed: {cmd}"
+
+
+def exec_in_pod(
+    user: Optional[User],
+    cluster_id: str,
+    namespace: str,
+    pod_name: str,
+    command: str,
+    container: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Run a single command inside a pod container (``kubectl exec -- sh -c``)."""
+    if not pod_name.strip():
+        return None, "Invalid pod name", 400
+
+    command = (command or "").strip()
+    if not command:
+        return None, "Command is required", 400
+    if len(command) > _MAX_EXEC_COMMAND_LENGTH:
+        return None, f"Command exceeds {_MAX_EXEC_COMMAND_LENGTH} characters", 400
+
+    container = (container or "").strip() or None
+
+    # Reuse the restart access checks: exec is a write-level pod action.
+    denied = _check_resource_restart_access(user, cluster_id, namespace, "pod", pod_name)
+    if denied:
+        return None, denied[0], denied[1]
+
+    if not should_use_real_k8s(cluster_id):
+        data = {
+            "clusterId": cluster_id,
+            "namespace": namespace,
+            "pod": pod_name,
+            "container": container,
+            "command": command,
+            "output": _mock_exec_output(command, container),
+            "mode": "mock",
+        }
+        log_audit(
+            "pod_exec",
+            actor=user,
+            target_type="pod",
+            target_id=f"{cluster_id}/{namespace}/{pod_name}",
+            details={"command": command, "container": container, "result": "success"},
+        )
+        return data, None, 200
+
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return None, "Cluster not found", 404
+
+    args = ["exec", pod_name, "-n", namespace]
+    if container:
+        args += ["-c", container]
+    args += ["--", "sh", "-c", command]
+
+    try:
+        output = _run_kubectl_for_cluster(cluster_id, args)
+        log_audit(
+            "pod_exec",
+            actor=user,
+            target_type="pod",
+            target_id=f"{cluster_id}/{namespace}/{pod_name}",
+            details={"command": command, "container": container, "result": "success"},
+        )
+        return {
+            "clusterId": cluster_id,
+            "namespace": namespace,
+            "pod": pod_name,
+            "container": container,
+            "command": command,
+            "output": output,
+        }, None, 200
+    except K8sCommandError as exc:
+        log_audit(
+            "resource_action_failed",
+            actor=user,
+            target_type="pod",
+            target_id=f"{cluster_id}/{namespace}/{pod_name}",
+            details={"action": "exec", "command": command, "error": str(exc), "result": "failed"},
+        )
+        # kubectl exec surfaces non-zero command exit codes as command errors; show
+        # the captured stderr/stdout to the user rather than a generic failure.
+        return None, str(exc), 400

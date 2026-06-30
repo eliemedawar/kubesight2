@@ -58,6 +58,7 @@ export {
   deleteApplicationService,
   listPickerDeployments,
   listPickerPods,
+  listPickerWorkloads,
 } from "./api/applicationServicesApi";
 export {
   listClients,
@@ -66,6 +67,14 @@ export {
   updateClient,
   deleteClient,
 } from "./api/clientsApi";
+export {
+  listComponents,
+  getComponent,
+  createComponent,
+  updateComponent,
+  deleteComponent,
+  checkComponentHealth,
+} from "./api/topologyComponentsApi";
 export {
   createDeploymentRequest,
   listDeploymentRequests,

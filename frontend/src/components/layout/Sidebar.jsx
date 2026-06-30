@@ -89,6 +89,12 @@ const NAV_ICONS = {
       <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-6-3a2 2 0 11-4 0 2 2 0 014 0zm-2 4a5 5 0 00-4.546 2.916A5.986 5.986 0 0010 16a5.986 5.986 0 004.546-2.084A5 5 0 0010 11z" clipRule="evenodd" />
     </svg>
   ),
+  components: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path d="M9 2.5a1 1 0 011 0l4.5 2.598a1 1 0 01.5.866V8L10 10.5 5 8V5.964a1 1 0 01.5-.866L9 2.5z" />
+      <path d="M3 9.5l4.5 2.598V17L3 14.402V9.5zM17 9.5v4.902L12.5 17v-4.902L17 9.5z" opacity="0.6" />
+    </svg>
+  ),
 };
 
 const K8S_LOGO = (

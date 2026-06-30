@@ -3,9 +3,9 @@ import {
   createApplicationService,
   deleteApplicationService,
   listApplicationServices,
+  listComponents,
   listNamespacesByCluster,
-  listPickerDeployments,
-  listPickerPods,
+  listPickerWorkloads,
   updateApplicationService,
 } from "../api";
 import { useAuth } from "../context/AuthContext";
@@ -14,6 +14,23 @@ import LoadingState from "../components/common/LoadingState.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
+
+// Supported workload kinds for linked resources, DR counterparts and topology.
+const WORKLOAD_KINDS = ["deployment", "statefulset", "daemonset", "pod"];
+const KIND_LABEL = {
+  deployment: "Deployment",
+  statefulset: "StatefulSet",
+  daemonset: "DaemonSet",
+  pod: "Pod",
+};
+
+// Component health → topology node indicator color.
+const TOPO_STATUS_COLOR = {
+  healthy: "#22c55e",
+  degraded: "#f59e0b",
+  unhealthy: "#ef4444",
+  unknown: "#64748b",
+};
 
 // ─── Health badge ────────────────────────────────────────────────────────────
 
@@ -24,50 +41,22 @@ function HealthBadge({ health }) {
   return <span className={`status-badge status-badge--${variant}`}>{health || "unknown"}</span>;
 }
 
-// ─── Deployment picker components ────────────────────────────────────────────
-
-function DeploymentPickerList({ deployments: items, linked, clusterId, namespace, kind, onAdd }) {
-  const [search, setSearch] = useState("");
-  const filtered = items.filter((dep) => {
-    const name = typeof dep === "string" ? dep : dep.name;
-    return name.toLowerCase().includes(search.toLowerCase());
-  });
-  return (
-    <div className="dep-pick-list-wrap">
-      {items.length > 5 && (
-        <input className="ss-search dep-pick-search" placeholder={`Search ${kind}s…`}
-          value={search} onChange={(e) => setSearch(e.target.value)} />
-      )}
-      <div className="dep-pick-scroll">
-        {filtered.length === 0 ? (
-          <p className="muted" style={{ fontSize: "0.85rem", padding: "0.35rem 0" }}>No matches.</p>
-        ) : (
-          filtered.map((dep) => {
-            const depName = typeof dep === "string" ? dep : dep.name;
-            const alreadyAdded = linked.some(
-              (d) => d.clusterId === clusterId && d.namespace === namespace && d.deploymentName === depName && (d.kind || "deployment") === kind
-            );
-            return (
-              <div key={depName} className="dep-picker-option">
-                <span>{depName}</span>
-                <button type="button" className="btn-outline btn-compact"
-                  onClick={() => onAdd(depName)} disabled={alreadyAdded}>
-                  {alreadyAdded ? "Added" : "Add"}
-                </button>
-              </div>
-            );
-          })
-        )}
-      </div>
-    </div>
-  );
+// DR status reuses the same health vocabulary (healthy/warning/critical/unknown).
+// A service with no DR counterparts linked shows a muted "No DR" pill.
+function DrBadge({ hasDr, drHealth }) {
+  if (!hasDr) {
+    return <span className="status-badge status-badge--pending">No DR</span>;
+  }
+  return <HealthBadge health={drHealth || "unknown"} />;
 }
+
+// ─── Deployment picker components ────────────────────────────────────────────
 
 function DeploymentRow({ dep, clusterName, onRemove }) {
   const kind = dep.kind || "deployment";
   return (
     <div className="dep-picker-row">
-      <span className={`dep-picker-kind dep-picker-kind--${kind}`}>{kind}</span>
+      <span className={`dep-picker-kind dep-picker-kind--${kind}`}>{KIND_LABEL[kind] || kind}</span>
       <span className="dep-picker-cluster">{clusterName || dep.clusterId}</span>
       <span className="dep-picker-sep">/</span>
       <span className="dep-picker-ns">{dep.namespace}</span>
@@ -95,8 +84,7 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
     setItemsLoading(true);
     setPickerError("");
     try {
-      const fn = kind === "pod" ? listPickerPods : listPickerDeployments;
-      const res = await fn(cluster, namespace);
+      const res = await listPickerWorkloads(cluster, namespace, kind);
       setPickerItems(res.items || []);
     } catch (err) {
       setPickerError(err.message || `Failed to load ${kind}s`);
@@ -142,6 +130,17 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
 
   const clusterNameById = Object.fromEntries(clusters.map((c) => [c.id, c.name || c.id]));
   const nsOptions = namespaces.map((n) => (typeof n === "string" ? n : n.name));
+  // Resources in the picked namespace not already linked (for the same kind).
+  const availablePickerItems = pickerItems.filter(
+    (name) =>
+      !deployments.some(
+        (d) =>
+          d.clusterId === pickerCluster &&
+          d.namespace === pickerNamespace &&
+          d.deploymentName === name &&
+          (d.kind || "deployment") === pickerKind
+      )
+  );
 
   return (
     <div className="dep-picker">
@@ -162,17 +161,13 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
       {canEdit && (
         <div className="dep-picker-add">
           <p className="muted" style={{ fontSize: "0.8125rem", fontWeight: 500, marginBottom: "0.4rem" }}>Add resource</p>
-          <div className="dep-picker-kind-toggle" style={{ display: "flex", gap: "0.375rem", marginBottom: "0.5rem" }}>
-            {["deployment", "pod"].map((k) => (
-              <button key={k} type="button"
-                className={`btn-outline btn-compact${pickerKind === k ? " dep-picker-kind-active" : ""}`}
-                onClick={() => handleKindChange(k)}
-                style={{ textTransform: "capitalize" }}>
-                {k}
-              </button>
-            ))}
-          </div>
           <div className="dep-picker-controls">
+            <SearchableSelect
+              options={WORKLOAD_KINDS.map((k) => ({ value: k, label: KIND_LABEL[k] }))}
+              value={pickerKind}
+              onChange={(e) => handleKindChange(e.target.value)}
+              placeholder="Kind…"
+            />
             <SearchableSelect
               options={clusters.map((c) => ({ value: c.id, label: c.name || c.id }))}
               value={pickerCluster}
@@ -186,17 +181,122 @@ function DeploymentPicker({ deployments, onChange, canEdit, clusters = [] }) {
               placeholder={nsLoading ? "Loading…" : "Select namespace…"}
               disabled={!pickerCluster || nsLoading}
             />
+            <SearchableSelect
+              options={availablePickerItems.map((name) => ({ value: name, label: name }))}
+              value=""
+              onChange={(e) => e.target.value && addDeployment(e.target.value)}
+              placeholder={
+                itemsLoading ? "Loading…" : !pickerNamespace ? `Select ${KIND_LABEL[pickerKind]}…` : `Add ${KIND_LABEL[pickerKind]}…`
+              }
+              disabled={!pickerNamespace || itemsLoading}
+            />
           </div>
           {pickerError && <p className="banner-message error" style={{ marginTop: "0.5rem" }}>{pickerError}</p>}
-          {itemsLoading && <p className="muted" style={{ fontSize: "0.85rem" }}>Loading {pickerKind}s…</p>}
-          {pickerItems.length > 0 && (
-            <DeploymentPickerList deployments={pickerItems} linked={deployments}
-              clusterId={pickerCluster} namespace={pickerNamespace} kind={pickerKind} onAdd={addDeployment} />
-          )}
           {pickerNamespace && !itemsLoading && pickerItems.length === 0 && (
-            <p className="muted" style={{ fontSize: "0.85rem" }}>No {pickerKind}s found in this namespace.</p>
+            <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.4rem" }}>No {KIND_LABEL[pickerKind]}s found in this namespace.</p>
+          )}
+          {pickerNamespace && !itemsLoading && pickerItems.length > 0 && availablePickerItems.length === 0 && (
+            <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.4rem" }}>All {KIND_LABEL[pickerKind]}s in this namespace are already linked.</p>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ─── DR linker (per-component disaster-recovery counterpart) ──────────────────
+
+function DRLinker({ dr, onChange, clusters = [] }) {
+  const [editing, setEditing] = useState(!dr);
+  const [cluster, setCluster] = useState(dr?.clusterId || "");
+  const [namespace, setNamespace] = useState(dr?.namespace || "");
+  const [kind, setKind] = useState(dr?.kind || "deployment");
+  const [namespaces, setNamespaces] = useState([]);
+  const [items, setItems] = useState([]);
+  const [nsLoading, setNsLoading] = useState(false);
+  const [itemsLoading, setItemsLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const clusterNameById = Object.fromEntries(clusters.map((c) => [c.id, c.name || c.id]));
+
+  const loadNamespaces = async (val) => {
+    if (!val) { setNamespaces([]); return; }
+    setNsLoading(true);
+    try {
+      const res = await listNamespacesByCluster(val);
+      setNamespaces((res.items || res.namespaces || res || []).map((n) => (typeof n === "string" ? n : n.name)));
+    } catch (err) {
+      setError(err.message || "Failed to load namespaces");
+    } finally { setNsLoading(false); }
+  };
+
+  const loadItems = async (cl, ns, k) => {
+    if (!cl || !ns) { setItems([]); return; }
+    setItemsLoading(true);
+    setError("");
+    try {
+      const res = await listPickerWorkloads(cl, ns, k);
+      setItems(res.items || []);
+    } catch (err) {
+      setError(err.message || `Failed to load ${k}s`);
+    } finally { setItemsLoading(false); }
+  };
+
+  const handleCluster = (val) => {
+    setCluster(val); setNamespace(""); setItems([]); setNamespaces([]);
+    loadNamespaces(val);
+  };
+  const handleNamespace = (val) => { setNamespace(val); setItems([]); loadItems(cluster, val, kind); };
+  const handleKind = (k) => { setKind(k); setItems([]); if (cluster && namespace) loadItems(cluster, namespace, k); };
+
+  const pick = (name) => {
+    onChange({ clusterId: cluster, namespace, deploymentName: name, kind });
+    setEditing(false);
+  };
+
+  const clearLink = () => { onChange(null); setEditing(true); setCluster(""); setNamespace(""); setItems([]); };
+
+  if (dr && !editing) {
+    return (
+      <div className="dr-linker dr-linker--set">
+        <DeploymentRow
+          dep={{ clusterId: dr.clusterId, namespace: dr.namespace, deploymentName: dr.deploymentName, kind: dr.kind }}
+          clusterName={clusterNameById[dr.clusterId]}
+        />
+        <div style={{ display: "flex", gap: "0.35rem", marginTop: "0.25rem" }}>
+          <button type="button" className="btn-outline btn-compact" onClick={() => { setEditing(true); loadNamespaces(dr.clusterId); loadItems(dr.clusterId, dr.namespace, dr.kind); }}>Change</button>
+          <button type="button" className="btn-ghost btn-compact danger" onClick={clearLink}>Remove DR</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="dr-linker dr-linker--edit">
+      <div className="dep-picker-controls">
+        <SearchableSelect
+          options={WORKLOAD_KINDS.map((k) => ({ value: k, label: KIND_LABEL[k] }))}
+          value={kind} onChange={(e) => handleKind(e.target.value)} placeholder="Kind…" />
+        <SearchableSelect
+          options={clusters.map((c) => ({ value: c.id, label: c.name || c.id }))}
+          value={cluster} onChange={(e) => handleCluster(e.target.value)} placeholder="DR cluster…" />
+        <SearchableSelect
+          options={namespaces.map((n) => ({ value: n, label: n }))}
+          value={namespace} onChange={(e) => handleNamespace(e.target.value)}
+          placeholder={nsLoading ? "Loading…" : "DR namespace…"} disabled={!cluster || nsLoading} />
+        <SearchableSelect
+          options={items.map((name) => ({ value: name, label: name }))}
+          value=""
+          onChange={(e) => e.target.value && pick(e.target.value)}
+          placeholder={itemsLoading ? "Loading…" : !namespace ? `Select ${KIND_LABEL[kind]}…` : `DR ${KIND_LABEL[kind]}…`}
+          disabled={!namespace || itemsLoading} />
+      </div>
+      {error && <p className="banner-message error" style={{ marginTop: "0.4rem" }}>{error}</p>}
+      {namespace && !itemsLoading && items.length === 0 && (
+        <p className="muted" style={{ fontSize: "0.82rem", marginTop: "0.4rem" }}>No {KIND_LABEL[kind]}s found in this namespace.</p>
+      )}
+      {dr && (
+        <button type="button" className="btn-ghost btn-compact danger" style={{ marginTop: "0.35rem" }} onClick={clearLink}>Remove DR</button>
       )}
     </div>
   );
@@ -448,12 +548,19 @@ function TopologyViewer({ nodes, edges, compact = false }) {
             const label = node.name.length > 17 ? node.name.slice(0, 16) + "…" : node.name;
             const typeLabel = node.type && node.type.length > 16 ? node.type.slice(0, 15) + "…" : node.type;
 
+            const statusColor = node.componentStatus ? TOPO_STATUS_COLOR[node.componentStatus] : null;
+
             return (
               <g key={node.id} title={node.description || node.name}>
                 <rect x={pos.x} y={pos.y} width={NODE_W} height={NODE_H}
                   rx={8} ry={8}
-                  fill="#1e293b" stroke="#334155" strokeWidth={1.5}
+                  fill="#1e293b" stroke={statusColor || "#334155"} strokeWidth={statusColor ? 2 : 1.5}
                   filter="url(#topo-shadow)" />
+                {statusColor && (
+                  <circle cx={pos.x + NODE_W - 11} cy={pos.y + 11} r={4} fill={statusColor}>
+                    <title>{`Component health: ${node.componentStatus}`}</title>
+                  </circle>
+                )}
                 {hasType && (
                   <text x={pos.x + NODE_W / 2} y={typeY}
                     textAnchor="middle" dominantBaseline="middle"
@@ -494,7 +601,7 @@ function edgeStroke(scope) {
   return scope === "external" ? "#f5b945" : "#64748b";
 }
 
-function TopologyEditor({ topology, onChange }) {
+function TopologyEditor({ topology, onChange, components = [] }) {
   const { nodes, edges } = topology;
   const canvasRef = useRef(null);
   const dragRef = useRef(null);          // { tempId, offX, offY, moved, pointerId } while dragging
@@ -544,13 +651,35 @@ function TopologyEditor({ topology, onChange }) {
     };
   };
 
-  const addNode = () => {
-    // Drop the new box into a free area near the top-left, staggered by count.
+  // Next free drop position near the top-left, staggered by node count.
+  const nextDropPos = () => {
     const i = nodes.length;
-    const x = 40 + (i % 4) * (E_NODE_W + 40);
-    const y = 40 + Math.floor(i / 4) * (E_NODE_H + 48);
+    return { x: 40 + (i % 4) * (E_NODE_W + 40), y: 40 + Math.floor(i / 4) * (E_NODE_H + 48) };
+  };
+
+  const addNode = () => {
+    const { x, y } = nextDropPos();
     onChange({
       nodes: [...nodes, { tempId: newTempId(), name: "", type: "", description: "", x, y }],
+      edges,
+    });
+  };
+
+  // Add a node backed by a predefined component (e.g. "WAF").
+  const addComponentNode = (componentId) => {
+    const comp = components.find((c) => String(c.id) === String(componentId));
+    if (!comp) return;
+    const { x, y } = nextDropPos();
+    onChange({
+      nodes: [...nodes, {
+        tempId: newTempId(),
+        name: comp.name,
+        type: comp.category || "Component",
+        description: comp.description || "",
+        componentId: comp.id,
+        componentStatus: comp.lastStatus || "unknown",
+        x, y,
+      }],
       edges,
     });
   };
@@ -698,12 +827,27 @@ function TopologyEditor({ topology, onChange }) {
     <div className="topo-editor">
       <div className="topo-editor-block-header">
         <span className="topo-editor-block-title">Topology canvas</span>
-        <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Add component</button>
+        <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+          {components.length > 0 && (
+            <div style={{ minWidth: 190 }}>
+              <SearchableSelect
+                options={components.map((c) => ({
+                  value: String(c.id),
+                  label: c.category ? `${c.name} · ${c.category}` : c.name,
+                }))}
+                value=""
+                onChange={(e) => e.target.value && addComponentNode(e.target.value)}
+                placeholder="+ Add from Components…"
+              />
+            </div>
+          )}
+          <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Custom</button>
+        </div>
       </div>
       <p className="muted topo-canvas-hint">
-        Components are created automatically from the deployments and pods you link below.
-        Drag a box by its header to move it. Drag from the <span className="topo-handle-legend">●</span> handle on the right
-        of a box to another box to connect them. Click a connection to set its protocol and scope.
+        Add a predefined building block from <strong>Components</strong>, a custom box, or link deployments/pods below
+        (which appear here automatically). Drag a box by its header to move it. Drag from the
+        <span className="topo-handle-legend">●</span> handle on the right of a box to another to connect them.
       </p>
 
       <div
@@ -795,12 +939,13 @@ function TopologyEditor({ topology, onChange }) {
               if (typeof node.x !== "number") return null;
               const isLinkTarget = linking && linking.fromTempId !== node.tempId;
               const isResource = Boolean(node.linkedDeployment);
+              const isComponent = !isResource && Boolean(node.componentId);
               const p = posOf(node);
               const isDragging = drag && drag.tempId === node.tempId;
               return (
                 <div
                   key={node.tempId}
-                  className={`topo-canvas-node${linking ? " is-linkable" : ""}${isResource ? " is-resource" : ""}${isDragging ? " is-dragging" : ""}`}
+                  className={`topo-canvas-node${linking ? " is-linkable" : ""}${isResource ? " is-resource" : ""}${isComponent ? " is-component" : ""}${isDragging ? " is-dragging" : ""}`}
                   style={{ left: p.x, top: p.y, width: E_NODE_W, height: E_NODE_H }}
                   onPointerEnter={() => { if (isLinkTarget) linkTargetRef.current = node.tempId; }}
                   onPointerLeave={() => { if (linkTargetRef.current === node.tempId) linkTargetRef.current = null; }}
@@ -809,18 +954,27 @@ function TopologyEditor({ topology, onChange }) {
                   <div className="topo-canvas-node-header" onPointerDown={(e) => onNodePointerDown(e, node)}>
                     <span className="topo-grip">⠿</span>
                     {isResource ? (
-                      <span className={`topo-node-kind topo-node-kind--${node.type === "pod" ? "pod" : "deployment"}`}>
-                        {node.type === "pod" ? "Pod" : "Deployment"}
+                      <span className={`topo-node-kind topo-node-kind--${(node.type || "deployment").toLowerCase()}`}>
+                        {KIND_LABEL[(node.type || "deployment").toLowerCase()] || "Deployment"}
                       </span>
+                    ) : isComponent ? (
+                      <>
+                        <span className="topo-node-kind topo-node-kind--component">{node.type || "Component"}</span>
+                        {node.componentStatus ? (
+                          <span className={`topo-node-status topo-node-status--${node.componentStatus}`}
+                            title={`Component health: ${node.componentStatus}`} />
+                        ) : null}
+                        <button type="button" className="topo-node-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeNode(node.tempId)} title="Remove component">✕</button>
+                      </>
                     ) : (
-                      <button type="button" className="topo-node-del" onClick={() => removeNode(node.tempId)} title="Remove component">✕</button>
+                      <button type="button" className="topo-node-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeNode(node.tempId)} title="Remove component">✕</button>
                     )}
                   </div>
-                  {isResource ? (
+                  {isResource || isComponent ? (
                     <>
                       <div className="topo-canvas-resource-name" title={node.name}>{node.name}</div>
-                      <div className="topo-canvas-resource-meta" title={`${node.linkedNamespace || ""}`}>
-                        {node.linkedNamespace || "—"}
+                      <div className="topo-canvas-resource-meta" title={isComponent ? (node.type || "") : (node.linkedNamespace || "")}>
+                        {isComponent ? (node.description || node.type || "Component") : (node.linkedNamespace || "—")}
                       </div>
                     </>
                   ) : (
@@ -924,6 +1078,8 @@ function initTopologyFromService(service) {
     linkedClusterId: n.linkedClusterId || null,
     linkedNamespace: n.linkedNamespace || null,
     linkedDeployment: n.linkedDeployment || null,
+    componentId: n.componentId || null,
+    componentStatus: n.componentStatus || (n.component ? n.component.lastStatus : null),
     x: typeof n.positionX === "number" ? n.positionX : null,
     y: typeof n.positionY === "number" ? n.positionY : null,
   }));
@@ -951,7 +1107,8 @@ function resourceKey(dep) {
 
 function nodeResourceKey(node) {
   if (!node.linkedDeployment || !node.linkedClusterId) return null;
-  const kind = (node.type || "deployment").toLowerCase() === "pod" ? "pod" : "deployment";
+  const raw = (node.type || "deployment").toLowerCase();
+  const kind = WORKLOAD_KINDS.includes(raw) ? raw : "deployment";
   return [kind, node.linkedClusterId, node.linkedNamespace, node.linkedDeployment].join(RES_SEP);
 }
 
@@ -1006,6 +1163,11 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
   const [topology, setTopology] = useState(() =>
     syncTopologyWithResources(initTopologyFromService(service), service?.deployments || [])
   );
+  // Predefined components available to drop into the topology.
+  const [components, setComponents] = useState([]);
+  useEffect(() => {
+    listComponents().then((r) => setComponents(r.items || [])).catch(() => setComponents([]));
+  }, []);
 
   // Adding/removing a linked resource adds/removes its mirrored component.
   const handleDeploymentsChange = (next) => {
@@ -1030,6 +1192,7 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
             linkedClusterId: n.linkedClusterId || undefined,
             linkedNamespace: n.linkedNamespace || undefined,
             linkedDeployment: n.linkedDeployment || undefined,
+            componentId: n.componentId || undefined,
             positionX: typeof n.x === "number" ? Math.round(n.x) : undefined,
             positionY: typeof n.y === "number" ? Math.round(n.y) : undefined,
           })),
@@ -1081,12 +1244,45 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
           <p className="muted" style={{ fontSize: "0.8125rem", marginBottom: "0.85rem" }}>
             Define the components and connections that make up this service's architecture.
           </p>
-          <TopologyEditor topology={topology} onChange={setTopology} />
+          <TopologyEditor topology={topology} onChange={setTopology} components={components} />
         </section>
 
         <section className="form-section">
           <h4>Linked resources</h4>
           <DeploymentPicker deployments={deployments} onChange={handleDeploymentsChange} canEdit clusters={clusters} />
+        </section>
+
+        <section className="form-section">
+          <h4>Disaster Recovery <span className="muted" style={{ fontWeight: 400 }}>(optional)</span></h4>
+          <p className="muted" style={{ fontSize: "0.8125rem", marginBottom: "0.85rem" }}>
+            Manually link each component to its DR counterpart. The DR resource can live on a
+            different cluster/namespace and have a different name.
+          </p>
+          {deployments.length === 0 ? (
+            <p className="muted" style={{ fontSize: "0.85rem" }}>Link resources above first, then map them to DR here.</p>
+          ) : (
+            <div className="dr-link-list">
+              {deployments.map((dep, idx) => (
+                <div key={`${dep.kind || "deployment"}/${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`} className="dr-link-row">
+                  <div className="dr-link-primary">
+                    <span className="form-label" style={{ fontSize: "0.72rem" }}>Primary</span>
+                    <DeploymentRow dep={dep} clusterName={(clusters.find((c) => c.id === dep.clusterId) || {}).name || dep.clusterId} />
+                  </div>
+                  <span className="dr-link-arrow" aria-hidden="true">→</span>
+                  <div className="dr-link-dr">
+                    <span className="form-label" style={{ fontSize: "0.72rem" }}>Disaster recovery</span>
+                    <DRLinker
+                      dr={dep.dr}
+                      clusters={clusters}
+                      onChange={(drObj) =>
+                        setDeployments((prev) => prev.map((d, i) => (i === idx ? { ...d, dr: drObj || undefined } : d)))
+                      }
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         <div className="modal-actions">
@@ -1102,8 +1298,92 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
 
 // ─── Service detail panel ────────────────────────────────────────────────────
 
+function tabStyle(active) {
+  return {
+    background: "none",
+    border: "none",
+    padding: "0.5rem 0.85rem",
+    cursor: "pointer",
+    fontWeight: 600,
+    fontSize: "0.875rem",
+    color: active ? "var(--accent, #38bdf8)" : "var(--text-muted, #94a3b8)",
+    borderBottom: active ? "2px solid var(--accent, #38bdf8)" : "2px solid transparent",
+    marginBottom: "-1px",
+  };
+}
+
+function DRSheet({ service, clusterNameById }) {
+  const drDeployments = (service.deployments || []).filter((d) => d.dr);
+  const noDr = (service.deployments || []).filter((d) => !d.dr);
+
+  if (drDeployments.length === 0) {
+    return (
+      <div className="dr-sheet">
+        <EmptyState
+          message="No disaster recovery configured"
+          hint="Edit this service to link its components to their DR counterparts."
+          variant="applications"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="dr-sheet">
+      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
+        <span className="form-label" style={{ margin: 0 }}>Overall DR status</span>
+        <DrBadge hasDr={service.hasDr} drHealth={service.drHealth} />
+      </div>
+
+      <div className="table-shell">
+        <div className="table-scroll-region">
+          <table>
+            <thead>
+              <tr>
+                <th>Primary component</th>
+                <th>DR counterpart</th>
+                <th>DR status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {drDeployments.map((dep) => (
+                <tr key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}>
+                  <td>
+                    <DeploymentRow dep={dep} clusterName={clusterNameById?.[dep.clusterId]} />
+                  </td>
+                  <td>
+                    <DeploymentRow
+                      dep={{ clusterId: dep.dr.clusterId, namespace: dep.dr.namespace, deploymentName: dep.dr.deploymentName, kind: dep.dr.kind }}
+                      clusterName={clusterNameById?.[dep.dr.clusterId]}
+                    />
+                  </td>
+                  <td><HealthBadge health={dep.drStatus || "unknown"} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {noDr.length > 0 && (
+        <div style={{ marginTop: "1rem" }}>
+          <p className="form-label" style={{ marginBottom: "0.5rem" }}>Components without DR</p>
+          {noDr.map((dep) => (
+            <div key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}
+              style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <DeploymentRow dep={dep} clusterName={clusterNameById?.[dep.clusterId]} />
+              <span className="status-badge status-badge--pending">No DR</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdit, canDelete, onClose }) {
   const topo = service.topology || { nodes: [], edges: [] };
+  const [tab, setTab] = useState("overview");
 
   // Close on Escape.
   useEffect(() => {
@@ -1128,30 +1408,56 @@ function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdi
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: "1.5rem", fontSize: "0.85rem", color: "var(--text-muted, #888)", margin: "0.75rem 0 1rem" }}>
-          <span>{service.deploymentCount ?? 0} deployment{service.deploymentCount !== 1 ? "s" : ""}</span>
-          {topo.nodes.length > 0 && <span>{topo.nodes.length} component{topo.nodes.length !== 1 ? "s" : ""}</span>}
-          {service.createdAt && <span>Created {new Date(service.createdAt).toLocaleDateString()}</span>}
+        {/* Sheet tabs: main service view ↔ DR status */}
+        <div className="service-detail-tabs" role="tablist"
+          style={{ display: "flex", gap: "0.25rem", borderBottom: "1px solid var(--border, #1e293b)", margin: "0.75rem 0 1rem" }}>
+          <button type="button" role="tab" aria-selected={tab === "overview"}
+            className={`tab-btn${tab === "overview" ? " tab-btn--active" : ""}`}
+            onClick={() => setTab("overview")}
+            style={tabStyle(tab === "overview")}>
+            Overview
+          </button>
+          <button type="button" role="tab" aria-selected={tab === "dr"}
+            className={`tab-btn${tab === "dr" ? " tab-btn--active" : ""}`}
+            onClick={() => setTab("dr")}
+            style={tabStyle(tab === "dr")}>
+            DR Status
+            <span style={{ marginLeft: "0.5rem", verticalAlign: "middle" }}>
+              <DrBadge hasDr={service.hasDr} drHealth={service.drHealth} />
+            </span>
+          </button>
         </div>
 
-        {topo.nodes.length > 0 && (
-          <div style={{ marginBottom: "1.25rem" }}>
-            <p className="form-label" style={{ marginBottom: "0.6rem" }}>Service Topology</p>
-            <TopologyViewer nodes={topo.nodes} edges={topo.edges} />
-          </div>
-        )}
+        {tab === "overview" ? (
+          <>
+            <div style={{ display: "flex", gap: "1.5rem", fontSize: "0.85rem", color: "var(--text-muted, #888)", margin: "0 0 1rem" }}>
+              <span>{service.deploymentCount ?? 0} deployment{service.deploymentCount !== 1 ? "s" : ""}</span>
+              {topo.nodes.length > 0 && <span>{topo.nodes.length} component{topo.nodes.length !== 1 ? "s" : ""}</span>}
+              {service.createdAt && <span>Created {new Date(service.createdAt).toLocaleDateString()}</span>}
+            </div>
 
-        {(service.deployments || []).length > 0 && (
-          <div style={{ marginBottom: "1.25rem" }}>
-            <p className="form-label" style={{ marginBottom: "0.5rem" }}>Linked resources</p>
-            {service.deployments.map((dep) => (
-              <DeploymentRow
-                key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}
-                dep={dep}
-                clusterName={clusterNameById?.[dep.clusterId]}
-              />
-            ))}
-          </div>
+            {topo.nodes.length > 0 && (
+              <div style={{ marginBottom: "1.25rem" }}>
+                <p className="form-label" style={{ marginBottom: "0.6rem" }}>Service Topology</p>
+                <TopologyViewer nodes={topo.nodes} edges={topo.edges} />
+              </div>
+            )}
+
+            {(service.deployments || []).length > 0 && (
+              <div style={{ marginBottom: "1.25rem" }}>
+                <p className="form-label" style={{ marginBottom: "0.5rem" }}>Linked resources</p>
+                {service.deployments.map((dep) => (
+                  <DeploymentRow
+                    key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}
+                    dep={dep}
+                    clusterName={clusterNameById?.[dep.clusterId]}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <DRSheet service={service} clusterNameById={clusterNameById} />
         )}
 
         <div className="modal-actions">
@@ -1287,6 +1593,7 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
                     <tr>
                       <th>Name</th>
                       <th>Health</th>
+                      <th>DR Status</th>
                       <th>Topology</th>
                       <th>Updated</th>
                     </tr>
@@ -1306,6 +1613,7 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
                             )}
                           </td>
                           <td><HealthBadge health={svc.health} /></td>
+                          <td><DrBadge hasDr={svc.hasDr} drHealth={svc.drHealth} /></td>
                           <td className="muted" style={{ fontSize: "0.8rem" }}>
                             {nodeCount > 0 ? `${nodeCount} component${nodeCount !== 1 ? "s" : ""}` : "—"}
                           </td>

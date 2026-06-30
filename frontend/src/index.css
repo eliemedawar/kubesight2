@@ -1668,6 +1668,16 @@ tr:last-child td {
   box-shadow: var(--shadow-md);
 }
 
+/* Sits above the wizard it's confirming the dismissal of. */
+.wizard-close-confirm {
+  z-index: 50;
+  background: rgba(17, 24, 39, 0.55);
+}
+
+.wizard-close-confirm__panel {
+  width: min(26rem, 100%);
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -2191,6 +2201,11 @@ button:focus-visible {
   line-height: 1.45;
 }
 
+.log-viewer__line--error {
+  color: #ef4444;
+  font-weight: 600;
+}
+
 .log-viewer__jump {
   position: absolute;
   right: var(--space-3);
@@ -2629,6 +2644,16 @@ button:focus-visible {
   display: grid;
   gap: var(--space-3);
   box-shadow: var(--shadow-md);
+}
+
+/* Sits above the template modal it's confirming the dismissal of. */
+.template-close-confirm {
+  z-index: 60;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.template-close-confirm__panel {
+  width: min(26rem, 100%);
 }
 
 .modal-actions,
@@ -3615,6 +3640,95 @@ button:focus-visible {
 .resource-pod-filter-hint {
   margin: 0 0 var(--space-3);
   font-size: var(--font-size-sm);
+}
+
+.exec-pod-modal__container {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.exec-pod-modal__container select {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-interactive);
+  color: var(--text-primary);
+}
+
+.exec-pod-modal__terminal {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--font-size-sm);
+  background: #0b1020;
+  color: #e6edf3;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  height: min(24rem, 50vh);
+  overflow: auto;
+}
+
+.exec-pod-modal__hint {
+  margin: 0;
+}
+
+.exec-pod-modal__hint code,
+.exec-pod-modal__line code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0 0.3em;
+  border-radius: var(--radius-sm);
+}
+
+.exec-pod-modal__line {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+
+.exec-pod-modal__line--command {
+  color: #e6edf3;
+  margin-top: var(--space-2);
+}
+
+.exec-pod-modal__line--output {
+  color: #9fb4c7;
+}
+
+.exec-pod-modal__line--error {
+  color: #ff7b72;
+}
+
+.exec-pod-modal__prompt {
+  color: #3fb950;
+  font-weight: 600;
+}
+
+.exec-pod-modal__form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  background: #0b1020;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+}
+
+.exec-pod-modal__input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #e6edf3;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--font-size-sm);
+}
+
+.exec-pod-modal__input::placeholder {
+  color: #6b7a8d;
 }
 
 .dashboard-my-access-first {
@@ -6094,6 +6208,8 @@ kbd {
 }
 .dep-picker-kind--deployment { background: var(--accent-soft); color: #60a5fa; }
 .dep-picker-kind--pod { background: var(--ok-soft); color: #4ade80; }
+.dep-picker-kind--statefulset { background: rgba(236, 72, 153, 0.16); color: #f472b6; }
+.dep-picker-kind--daemonset { background: rgba(245, 158, 11, 0.16); color: #fbbf24; }
 .dep-picker-kind-active { background: var(--color-primary, #4f46e5) !important; color: #fff !important; border-color: var(--color-primary, #4f46e5) !important; }
 .dep-picker-add { display: flex; flex-direction: column; gap: 0.5rem; }
 .dep-picker-controls { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
@@ -6109,6 +6225,27 @@ kbd {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm, 4px);
+}
+
+/* ─── DR linker (per-component disaster recovery) ─── */
+.dr-link-list { display: flex; flex-direction: column; gap: 0.75rem; }
+.dr-link-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: start;
+  gap: 0.75rem;
+  padding: 0.6rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 0.5rem);
+}
+.dr-link-primary, .dr-link-dr { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+.dr-link-arrow { align-self: center; color: var(--text-subtle, #94a3b8); font-size: 1.1rem; }
+.dr-linker { display: flex; flex-direction: column; gap: 0.35rem; }
+.dr-linker--edit .dep-picker-controls { flex-wrap: wrap; }
+@media (max-width: 720px) {
+  .dr-link-row { grid-template-columns: 1fr; }
+  .dr-link-arrow { transform: rotate(90deg); }
 }
 
 /* ─── Topology Viewer ─── */
@@ -6451,6 +6588,34 @@ kbd {
   color: #ddd6fe;
   background: rgba(139, 92, 246, 0.18);
 }
+.topo-node-kind--statefulset {
+  color: #fbcfe8;
+  background: rgba(236, 72, 153, 0.18);
+}
+.topo-node-kind--daemonset {
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.18);
+}
+.topo-node-kind--component {
+  color: #c7d2fe;
+  background: rgba(99, 102, 241, 0.2);
+}
+.topo-canvas-node.is-component {
+  border-color: rgba(99, 102, 241, 0.5);
+}
+.topo-node-status {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: 4px;
+  background: #64748b;
+  flex-shrink: 0;
+}
+.topo-node-status--healthy { background: #22c55e; }
+.topo-node-status--degraded { background: #f59e0b; }
+.topo-node-status--unhealthy { background: #ef4444; }
+.topo-node-status--unknown { background: #64748b; }
 .topo-canvas-resource-name {
   font-size: 0.82rem;
   font-weight: 600;

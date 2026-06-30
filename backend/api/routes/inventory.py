@@ -34,6 +34,7 @@ from ..services.wizard_manifest_generator import generate_wizard_manifests, vali
 from ..services.prerequisite_validator import validate_prerequisites
 from ..services.wizard_templates import list_templates, get_template
 from ..services.template_resolver import resolve_template
+from ..services.yaml_template_parser import parse_yaml_to_template_drafts
 from ..services.user_template_service import (
     create_user_template,
     delete_user_template,
@@ -464,6 +465,25 @@ def deploy_wizard_template_create():
     if error:
         return error_response(error, status)
     return success_response(data, status_code=status)
+
+
+@inventory_bp.route("/deploy/wizard/templates/import", methods=["POST"])
+@require_permission("inventory:view")
+def deploy_wizard_template_import():
+    """Parse uploaded YAML into template drafts the deployer reviews and saves.
+
+    Pure parse — nothing is persisted here. Each draft has the template-detail
+    shape the create-template modal consumes; the user saves each via the existing
+    create endpoint (which audits the creation).
+    """
+    if not _can_manage_templates():
+        return error_response("Forbidden", 403)
+    body = _body()
+    yaml_content = body.get("yaml") or body.get("yamlContent") or ""
+    drafts, error = parse_yaml_to_template_drafts(yaml_content)
+    if error:
+        return error_response(error, 400)
+    return success_response({"drafts": drafts})
 
 
 @inventory_bp.route("/deploy/wizard/templates/<template_id>", methods=["PUT"])
