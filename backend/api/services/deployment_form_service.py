@@ -124,6 +124,18 @@ def collect_form_dropdowns(
                 if isinstance(s, dict) and s.get("type") == "kubernetes.io/dockerconfigjson" and _name_of(s)
             }
         )
+
+    # --- Allowed image registries (from linked registry connections) ---
+    # When registries are linked, their hosts feed the image-registry allow-list
+    # the form validator enforces. No linked registries -> key absent -> no check.
+    try:
+        from .registry_service import allowed_registry_hosts
+
+        hosts = allowed_registry_hosts()
+        if hosts:
+            dd["allowedRegistries"] = hosts
+    except Exception:
+        pass
     return dd
 
 

@@ -74,6 +74,8 @@ PERMISSIONS = [
     ("components:update", "Update topology components"),
     ("components:delete", "Delete topology components"),
     ("components:check", "Run topology component health checks"),
+    ("registries:view", "View linked image registries"),
+    ("registries:manage", "Add, edit, and remove linked image registries"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -158,7 +160,7 @@ PERMISSION_GROUPS = [
         "keys": [
             "users:view", "users:manage", "users:create", "users:update", "users:disable", "users:delete",
             "roles:view", "roles:manage", "settings:view", "settings:manage",
-            "audit:view", "api_tokens:manage",
+            "audit:view", "api_tokens:manage", "registries:view", "registries:manage",
         ],
     },
 ]
@@ -173,7 +175,7 @@ DANGEROUS_PERMISSION_KEYS = {
     "app_services:delete", "clients:delete", "api_tokens:manage",
     "deployment_requests:manage", "change_bundles:manage",
     "service_blueprints:delete", "service_blueprints:deploy",
-    "components:delete",
+    "components:delete", "registries:manage",
 }
 
 

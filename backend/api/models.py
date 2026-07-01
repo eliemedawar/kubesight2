@@ -1531,3 +1531,48 @@ class DeploymentFormImport(db.Model):
 
     generation = db.relationship("DeploymentFormGeneration", foreign_keys=[generation_id])
     uploaded_by_user = db.relationship("User", foreign_keys=[uploaded_by])
+
+
+class RegistryConnection(db.Model):
+    """A linked container image registry (e.g. Sonatype Nexus).
+
+    Before a deploy, KubeSight can query the registry's Docker Registry HTTP API
+    V2 to confirm each container image actually exists — a cheap ``HEAD`` on the
+    manifest, no layer pull. ``enforcement`` decides what happens when an image is
+    missing: ``block`` fails the dry-run/apply, ``warn`` surfaces a warning, ``off``
+    skips the check. Only images whose registry host matches ``base_url`` are
+    checked against this connection; everything else is left to Kubernetes.
+    """
+
+    __tablename__ = "registry_connections"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, default="")
+    # nexus | generic (any Docker Registry V2 endpoint)
+    registry_type = db.Column(db.String(32), nullable=False, default="nexus")
+    # The registry host[:port] as it appears in image references, e.g.
+    # "nexus.example.com:8083". Used both to build the V2 URL and to match images.
+    base_url = db.Column(db.String(255), nullable=False, default="")
+    # none | basic (bearer is auto-negotiated from a WWW-Authenticate challenge)
+    auth_mode = db.Column(db.String(16), nullable=False, default="basic")
+    username = db.Column(db.String(255), nullable=False, default="")
+    password_encrypted = db.Column(db.Text, nullable=True)
+    verify_tls = db.Column(db.Boolean, nullable=False, default=True)
+    ca_cert = db.Column(db.Text, nullable=True)
+    # off | warn | block
+    enforcement = db.Column(db.String(8), nullable=False, default="block")
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_test_status = db.Column(db.String(16), nullable=True)
+    last_test_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )

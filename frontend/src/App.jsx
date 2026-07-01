@@ -74,6 +74,7 @@ const DeploymentRequestsPage = lazy(() => import("./pages/DeploymentRequestsPage
 const MyRequestsPage = lazy(() => import("./pages/MyRequestsPage.jsx"));
 const ChangeBundlesPage = lazy(() => import("./pages/ChangeBundlesPage.jsx"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
+const ImageRegistriesPage = lazy(() => import("./pages/ImageRegistriesPage.jsx"));
 const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
@@ -1472,6 +1473,8 @@ export default function App() {
         );
       case "alertRouting":
         return <AlertRoutingPage />;
+      case "imageRegistries":
+        return <ImageRegistriesPage canManage={hasPermission("registries:manage")} />;
       case "upgrade":
         return (
           <UpgradeSafeModePage
@@ -1609,7 +1612,8 @@ export default function App() {
     activePage !== "userManagement" &&
     activePage !== "auditLogs" &&
     activePage !== "settings" &&
-    activePage !== "alertRouting"
+    activePage !== "alertRouting" &&
+    activePage !== "imageRegistries"
       ? EMPTY_MESSAGES.noClusters
       : "";
 

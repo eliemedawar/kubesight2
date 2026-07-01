@@ -346,6 +346,29 @@ def _migrate_service_catalog_columns() -> None:
             _add_column_if_missing("app_service_component_mappings", col, sql_type)
 
 
+def _migrate_registry_connection_columns() -> None:
+    """Forward-compatible column adds for the registry_connections table.
+
+    The table itself is created by ``db.create_all()``; this only backfills
+    columns added after it first shipped, mirroring the other migrators.
+    Idempotent and safe on a fresh database.
+    """
+    if "registry_connections" not in inspect(db.engine).get_table_names():
+        return
+    for col, sql_type in [
+        ("registry_type", "VARCHAR(32) DEFAULT 'nexus'"),
+        ("auth_mode", "VARCHAR(16) DEFAULT 'basic'"),
+        ("verify_tls", "BOOLEAN DEFAULT 1"),
+        ("ca_cert", "TEXT"),
+        ("enforcement", "VARCHAR(8) DEFAULT 'block'"),
+        ("enabled", "BOOLEAN DEFAULT 1"),
+        ("last_test_at", "DATETIME"),
+        ("last_test_status", "VARCHAR(16)"),
+        ("last_test_message", "TEXT"),
+    ]:
+        _add_column_if_missing("registry_connections", col, sql_type)
+
+
 def _migrate_alert_routing_user_receivers() -> None:
     """Add user/role linkage to receivers and migrate static emails to users."""
     if "alert_routing_receivers" not in inspect(db.engine).get_table_names():
@@ -394,6 +417,7 @@ def run_migrations() -> None:
     _migrate_app_service_topology_edge_meta()
     _migrate_topology_components()
     _migrate_service_catalog_columns()
+    _migrate_registry_connection_columns()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations
 

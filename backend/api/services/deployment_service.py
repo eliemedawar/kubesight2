@@ -205,6 +205,45 @@ def validate_yaml(
     }, None, 200
 
 
+def check_registry_images(
+    yaml_content: str,
+) -> Tuple[List[Dict[str, Any]], bool, Optional[str]]:
+    """Verify container images exist in their linked registry before deploying.
+
+    Returns ``(checks, blocking, error_message)``. ``blocking`` is True (with a
+    human-readable ``error_message``) only when an image is missing from a
+    registry whose enforcement is ``block``. Registries that are unreachable, or
+    images with no matching linked registry, never block — the deploy proceeds
+    and Kubernetes remains the final authority. Any unexpected error is swallowed
+    so the image gate can never take down an otherwise-valid deploy.
+    """
+    try:
+        from .registry_service import check_images, images_from_documents
+
+        documents, err = parse_yaml_documents(yaml_content)
+        if err or not documents:
+            return [], False, None
+        images = images_from_documents(documents)
+        if not images:
+            return [], False, None
+        checks, blocking = check_images(images)
+        if not blocking:
+            return checks, False, None
+        missing = [
+            c["image"]
+            for c in checks
+            if c.get("status") == "not_found" and c.get("enforcement") == "block"
+        ]
+        message = (
+            "Deployment blocked: the following image(s) were not found in the "
+            "linked registry — " + ", ".join(missing) + ". Push the image or "
+            "correct the tag, then try again."
+        )
+        return checks, True, message
+    except Exception:  # noqa: BLE001 — the image gate must never break a deploy
+        return [], False, None
+
+
 def _write_temp_yaml(yaml_content: str) -> str:
     fd, path = tempfile.mkstemp(suffix=".yaml", prefix="kubesight-deploy-")
     os.close(fd)
@@ -250,6 +289,17 @@ def dry_run_yaml(
     if err:
         return None, err, code
 
+    image_checks, image_blocking, image_err = check_registry_images(yaml_content)
+    if image_blocking:
+        log_audit(
+            "deployment_failed",
+            actor=user,
+            target_type="deployment",
+            target_id=f"{cluster_id}/{namespace}",
+            details={"action": "dry-run", "error": image_err, "reason": "image_not_in_registry"},
+        )
+        return None, image_err, 422
+
     path = _write_temp_yaml(sanitize_for_apply(yaml_content))
     try:
         runner = run_kubectl or _run_kubectl_for_cluster
@@ -272,6 +322,7 @@ def dry_run_yaml(
         return {
             "dryRun": True,
             "output": output,
+            "imageChecks": image_checks,
             **(validation or {}),
         }, None, 200
     except K8sCommandError as exc:
@@ -520,6 +571,17 @@ def apply_yaml(
     if err:
         return None, err, code
 
+    image_checks, image_blocking, image_err = check_registry_images(yaml_content)
+    if image_blocking:
+        log_audit(
+            "deployment_failed",
+            actor=user,
+            target_type="deployment",
+            target_id=f"{cluster_id}/{namespace}",
+            details={"action": "apply", "error": image_err, "reason": "image_not_in_registry"},
+        )
+        return None, image_err, 422
+
     path = _write_temp_yaml(sanitize_for_apply(yaml_content))
     try:
         runner = run_kubectl or _run_kubectl_for_cluster
@@ -539,7 +601,7 @@ def apply_yaml(
                 "result": "success",
             },
         )
-        return {"applied": True, "output": output, **(validation or {})}, None, 200
+        return {"applied": True, "output": output, "imageChecks": image_checks, **(validation or {})}, None, 200
     except K8sCommandError as exc:
         log_audit(
             "deployment_failed",

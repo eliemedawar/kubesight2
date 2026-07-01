@@ -11,6 +11,7 @@ import {
   WizardSectionHeader,
 } from "./WizardShared.jsx";
 import SearchableSelect from "../../common/SearchableSelect.jsx";
+import ImageAvailabilityHint from "./ImageAvailabilityHint.jsx";
 import { STORAGE_TOOLTIPS } from "../../../lib/storageValidation.js";
 import {
   applyNewPvcStorageDefaults,
@@ -457,6 +458,7 @@ export function StepContainers({ state, setState }) {
             </Field>
             <Field label="Image *">
               <input value={container.image} onChange={(e) => updateContainer(index, { image: e.target.value })} placeholder="nginx" />
+              <ImageAvailabilityHint image={container.image} tag={container.tag} />
             </Field>
             <Field label="Tag">
               <input value={container.tag} onChange={(e) => updateContainer(index, { tag: e.target.value })} placeholder="latest" />

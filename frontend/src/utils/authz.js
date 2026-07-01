@@ -144,6 +144,12 @@ export const NAV_PAGES = [
     adminOnly: true,
     section: "Administration",
   },
+  {
+    key: "imageRegistries",
+    label: "Image Registries",
+    permission: "registries:view",
+    section: "Administration",
+  },
   { key: "settings", label: "Settings", permission: "settings:view", section: "Administration" },
 
   // Operations
@@ -996,6 +1002,8 @@ export function pageAllowed(user, pageKey) {
       );
     case "settings":
       return hasPermission(user, "settings:view");
+    case "imageRegistries":
+      return hasPermission(user, "registries:view");
     case "alertRouting":
       return isAdminUser(user);
     case "userManagement":
