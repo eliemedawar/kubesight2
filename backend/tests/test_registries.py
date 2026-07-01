@@ -92,6 +92,26 @@ def test_check_manifest_unreachable(monkeypatch):
     assert "reach" in msg.lower()
 
 
+def test_ping_ok(monkeypatch):
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        lambda req, **kw: _FakeResp(200),
+    )
+    status, msg = registry_client.ping("nexus.example.com", username="u", password="p")
+    assert status == registry_client.FOUND
+    assert "successful" in msg.lower()
+
+
+def test_ping_auth_failure(monkeypatch):
+    def fake(req, **kw):
+        raise _http_error(401)  # no bearer challenge -> credentials rejected
+
+    monkeypatch.setattr(registry_client.urllib.request, "urlopen", fake)
+    status, msg = registry_client.ping("nexus.example.com", username="u", password="bad")
+    assert status == registry_client.UNREACHABLE
+    assert "credential" in msg.lower()
+
+
 def test_check_manifest_bearer_token_flow(monkeypatch):
     """401 + Bearer challenge -> fetch token -> retry succeeds."""
     calls = {"head": 0}
@@ -137,6 +157,22 @@ def test_create_and_match_connection(app, monkeypatch):
         conn = registry_service.match_connection("nexus.example.com:8083")
         assert conn is not None
         assert registry_service.allowed_registry_hosts() == ["nexus.example.com:8083"]
+
+
+def test_connection_uses_v2_ping(app, monkeypatch):
+    conn = _make_conn(app)
+    seen = {}
+
+    def fake(req, **kw):
+        seen["url"] = req.full_url
+        return _FakeResp(200)
+
+    monkeypatch.setattr(registry_client.urllib.request, "urlopen", fake)
+    with app.app_context():
+        result = registry_service.test_connection(conn["id"])
+        assert result["status"] == "ok"
+        # Pings the base /v2/ endpoint, not a fake manifest path.
+        assert seen["url"].endswith("/v2/")
 
 
 def test_check_image_no_matching_registry(app):

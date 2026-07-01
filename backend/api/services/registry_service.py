@@ -154,23 +154,18 @@ def _record_test(row: RegistryConnection, status: str, message: str) -> None:
 
 
 def test_connection(connection_id: int) -> Dict[str, Any]:
-    """Ping ``/v2/`` on the registry to confirm reachability + credentials."""
+    """Ping the registry's base ``/v2/`` endpoint to confirm reachability + creds."""
     row = get_connection(connection_id)
-    status, message = registry_client.check_manifest(
+    status, message = registry_client.ping(
         row.base_url,
-        # A repo/tag that (almost) never exists: a 404 still proves the endpoint
-        # answered and authenticated, which is all a connection test needs.
-        "kubesight/_connectivity_probe",
-        "does-not-exist",
         username=row.username,
         password=decrypt_secret(row.password_encrypted or ""),
         verify_tls=bool(row.verify_tls),
         ca_cert=row.ca_cert,
     )
-    # FOUND/NOT_FOUND both mean the registry answered us -> connection OK.
-    ok = status in (FOUND, NOT_FOUND)
+    ok = status == FOUND
     result_status = "ok" if ok else "error"
-    result_message = "Connection successful." if ok else message
+    result_message = message
     _record_test(row, result_status, result_message)
     return {"status": result_status, "message": result_message, **serialize(row)}
 

@@ -151,12 +151,18 @@ def _fetch_bearer_token(
     return body.get("token") or body.get("access_token")
 
 
-def _do_head(
-    url: str, *, authorization: Optional[str], context: ssl.SSLContext
+def _do_request(
+    url: str,
+    *,
+    method: str,
+    authorization: Optional[str],
+    context: ssl.SSLContext,
+    accept: Optional[str] = None,
 ) -> Tuple[int, Optional[str]]:
-    """HEAD ``url``; returns (status_code, www_authenticate_header)."""
-    req = urllib.request.Request(url, method="HEAD")
-    req.add_header("Accept", _MANIFEST_ACCEPT)
+    """Issue ``method`` on ``url``; returns (status_code, www_authenticate_header)."""
+    req = urllib.request.Request(url, method=method)
+    if accept:
+        req.add_header("Accept", accept)
     if authorization:
         req.add_header("Authorization", authorization)
     try:
@@ -164,6 +170,77 @@ def _do_head(
             return resp.status, None
     except urllib.error.HTTPError as exc:
         return exc.code, exc.headers.get("WWW-Authenticate")
+
+
+def _do_head(
+    url: str, *, authorization: Optional[str], context: ssl.SSLContext
+) -> Tuple[int, Optional[str]]:
+    """HEAD ``url`` for a manifest; returns (status_code, www_authenticate_header)."""
+    return _do_request(
+        url, method="HEAD", authorization=authorization, context=context, accept=_MANIFEST_ACCEPT
+    )
+
+
+def _normalize_base(base_url: str) -> Optional[str]:
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        return None
+    if "://" not in base:
+        base = "https://" + base
+    return base
+
+
+def ping(
+    base_url: str,
+    *,
+    username: str = "",
+    password: str = "",
+    verify_tls: bool = True,
+    ca_cert: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Check reachability + credentials via the registry's base ``GET /v2/`` endpoint.
+
+    This is the canonical Docker Registry V2 "ping": a 200 (after the optional
+    Bearer-token handshake) means the endpoint is reachable and the credentials
+    are accepted. Returns ``(status, detail)`` where status is :data:`FOUND` when
+    the registry answered OK, or :data:`UNREACHABLE` otherwise.
+    """
+    base = _normalize_base(base_url)
+    if not base:
+        return UNREACHABLE, "No registry URL configured."
+
+    context = _ssl_context(verify_tls, ca_cert)
+    url = f"{base}/v2/"
+    basic = _basic_header(username, password)
+
+    try:
+        status, www_auth = _do_request(url, method="GET", authorization=basic, context=context)
+        if status == 401 and www_auth:
+            challenge = _parse_bearer_challenge(www_auth)
+            if challenge:
+                token = _fetch_bearer_token(challenge, auth_header=basic, context=context)
+                if token:
+                    status, _ = _do_request(
+                        url, method="GET", authorization=f"Bearer {token}", context=context
+                    )
+
+        if status == 200:
+            return FOUND, "Connection successful."
+        if status in (401, 403):
+            return UNREACHABLE, "Registry rejected the credentials (authentication failed)."
+        if status == 404:
+            # The endpoint answered but /v2/ isn't there — usually a wrong URL or
+            # a Nexus repo served under a /repository/<name>/ path.
+            return UNREACHABLE, (
+                "Registry did not expose a Docker V2 API at this URL (404). Check the "
+                "host/port — for Nexus, use the repository's Docker connector host."
+            )
+        return UNREACHABLE, f"Registry returned an unexpected status ({status})."
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        return UNREACHABLE, f"Could not reach the registry: {reason}"
+    except (ssl.SSLError, OSError) as exc:
+        return UNREACHABLE, f"Could not reach the registry: {exc}"
 
 
 def check_manifest(

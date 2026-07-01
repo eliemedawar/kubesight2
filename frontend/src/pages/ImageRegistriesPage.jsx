@@ -123,8 +123,15 @@ export default function ImageRegistriesPage({ canManage = false }) {
     setError("");
     setNotice("");
     try {
+      // The request succeeds (200) even when the registry is unreachable — the
+      // real verdict is in result.status, so route failures to the error banner
+      // rather than the green success banner.
       const result = await testRegistry(id);
-      setNotice(result.message || "Connection tested.");
+      if (result.status === "ok") {
+        setNotice(result.message || "Connection successful.");
+      } else {
+        setError(result.message || "Connection test failed.");
+      }
       await load();
     } catch (err) {
       setError(err.message || "Connection test failed.");
@@ -167,7 +174,7 @@ export default function ImageRegistriesPage({ canManage = false }) {
   };
 
   return (
-    <>
+    <div className="registry-page">
       <PageTitle
         title="Image Registries"
         subtitle="Link a container registry (e.g. Sonatype Nexus) so KubeSight verifies each image exists before deploying."
@@ -176,7 +183,7 @@ export default function ImageRegistriesPage({ canManage = false }) {
       {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
       {notice ? (
         <div className="banner banner-success" role="status">
-          {notice}
+          <span>{notice}</span>
           <button type="button" className="link-button" onClick={() => setNotice("")}>
             Dismiss
           </button>
@@ -212,7 +219,10 @@ export default function ImageRegistriesPage({ canManage = false }) {
                   <td>{row.enabled ? "Yes" : "No"}</td>
                   <td>
                     {row.lastTestStatus ? (
-                      <span className={`badge ${row.lastTestStatus === "ok" ? "status-ok" : "status-error"}`}>
+                      <span
+                        className={`badge ${row.lastTestStatus === "ok" ? "status-ok" : "status-error"}`}
+                        title={row.lastTestMessage || ""}
+                      >
                         {row.lastTestStatus === "ok" ? "OK" : "Failed"}
                       </span>
                     ) : (
@@ -242,7 +252,7 @@ export default function ImageRegistriesPage({ canManage = false }) {
       {canManage ? (
         <section className="card">
           <h3>{editingId ? "Edit registry" : "Link a registry"}</h3>
-          <form className="settings-form" onSubmit={submit}>
+          <form className="settings-form registry-form" onSubmit={submit}>
             <label>
               Name
               <input value={form.name} onChange={(e) => setField("name", e.target.value)} placeholder="Nexus (prod)" required />
@@ -296,15 +306,17 @@ export default function ImageRegistriesPage({ canManage = false }) {
                 <option value="off">Do not check</option>
               </SearchableSelect>
             </label>
-            <label className="checkbox-label">
-              <input type="checkbox" checked={form.verifyTls} onChange={(e) => setField("verifyTls", e.target.checked)} />
-              Verify TLS certificate
-            </label>
-            <label className="checkbox-label">
-              <input type="checkbox" checked={form.enabled} onChange={(e) => setField("enabled", e.target.checked)} />
-              Enabled
-            </label>
-            <div className="form-actions">
+            <div className="registry-form__checks">
+              <label className="checkbox-label">
+                <input type="checkbox" checked={form.verifyTls} onChange={(e) => setField("verifyTls", e.target.checked)} />
+                Verify TLS certificate
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={form.enabled} onChange={(e) => setField("enabled", e.target.checked)} />
+                Enabled
+              </label>
+            </div>
+            <div className="form-actions registry-form__row-full">
               <button type="submit" disabled={saving}>
                 {saving ? "Saving…" : editingId ? "Save changes" : "Link registry"}
               </button>
@@ -345,6 +357,6 @@ export default function ImageRegistriesPage({ canManage = false }) {
           </p>
         ) : null}
       </section>
-    </>
+    </div>
   );
 }
