@@ -5,7 +5,7 @@ import {
   listNamespaceConfigResources,
   listStorageClasses,
 } from "../../../api/clustersApi.js";
-import { checkImage } from "../../../api/registriesApi.js";
+import { checkImage, listRegistries } from "../../../api/registriesApi.js";
 import { getClusterDeployEligibility } from "../../../api/deploymentRequestsApi.js";
 import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
 import YamlPreviewPanel from "./YamlPreviewPanel.jsx";
@@ -324,6 +324,7 @@ export default function SchemaDeployWizard({
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [imageChecks, setImageChecks] = useState([]);
   const [imageChecking, setImageChecking] = useState(false);
+  const [registries, setRegistries] = useState([]);
 
   const clusterId = answers.basics.clusterId;
   const namespace = answers.basics.namespace;
@@ -340,6 +341,20 @@ export default function SchemaDeployWizard({
   const hpaChecked =
     (answers.overrides.hpaEnabled ?? template?.scaling?.hpa?.enabled ?? false) && mergedHasRequests;
   const templateHpa = template?.scaling?.hpa || {};
+
+  // Linked registries offered in Basics — the deployer picks where to pull the
+  // image from; the chosen host is applied to every container image on resolve.
+  const registryOptions = useMemo(
+    () =>
+      (registries || [])
+        .filter((r) => r.enabled)
+        .map((r) => {
+          const host = (r.imageHosts && r.imageHosts[0]) || r.host || r.baseUrl;
+          return { value: host, label: `${r.name} — ${host}` };
+        })
+        .filter((r) => r.value),
+    [registries],
+  );
 
   useEffect(() => {
     if (!open || !template) return;
@@ -401,6 +416,25 @@ export default function SchemaDeployWizard({
       cancelled = true;
     };
   }, [open, clusterId]);
+
+  // Linked image registries — populate the "Pull from registry" picker in Basics.
+  useEffect(() => {
+    if (!open) {
+      setRegistries([]);
+      return undefined;
+    }
+    let cancelled = false;
+    listRegistries()
+      .then((res) => {
+        if (!cancelled) setRegistries(Array.isArray(res?.items) ? res.items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setRegistries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   // Storage classes for the chosen cluster (new-PVC picker).
   useEffect(() => {
@@ -737,6 +771,24 @@ export default function SchemaDeployWizard({
                   onChange={(e) => setBasics("namespace", e.target.value)}
                 />
               </Field>
+
+              {registryOptions.length ? (
+                <Field label="Pull image from registry">
+                  <SearchableSelect
+                    value={answers.overrides.registryHost || ""}
+                    onChange={(e) => setOverride("registryHost", e.target.value)}
+                  >
+                    <option value="">— use image as defined in the template —</option>
+                    {registryOptions.map((r) => (
+                      <option key={r.value} value={r.value}>{r.label}</option>
+                    ))}
+                  </SearchableSelect>
+                  <span className="wizard-field__hint">
+                    Repoints every container image at the chosen registry host; availability
+                    is verified on the Review step.
+                  </span>
+                </Field>
+              ) : null}
 
               {overrides.tag ? (
                 <Field label="Image tag">

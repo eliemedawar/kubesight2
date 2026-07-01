@@ -38,6 +38,22 @@ def test_parse_image_reference_blank():
     assert registry_client.parse_image_reference("  ") is None
 
 
+@pytest.mark.parametrize(
+    "image,host,expected",
+    [
+        ("registry.old.com/team/app", "registry.new.com", "registry.new.com/team/app"),
+        ("nginx", "registry.new.com", "registry.new.com/nginx"),
+        ("team/app", "reg:8083", "reg:8083/team/app"),
+        ("img:tag", "reg.io", "reg.io/img:tag"),
+        ("anything", "", "anything"),  # no host -> unchanged
+    ],
+)
+def test_rewrite_image_host(image, host, expected):
+    from api.services.template_resolver import _rewrite_image_host
+
+    assert _rewrite_image_host(image, host) == expected
+
+
 # ---------------------------------------------------------------------------
 # registry_client — Docker V2 HEAD manifest, with a fake urlopen
 # ---------------------------------------------------------------------------

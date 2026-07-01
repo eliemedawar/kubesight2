@@ -351,6 +351,23 @@ def _resolve_volume_mounts(
     return mounts, None
 
 
+def _rewrite_image_host(image: str, new_host: str) -> str:
+    """Replace (or add) the registry host in an image reference.
+
+    ``registry.old.com/team/app`` + ``registry.new.com`` -> ``registry.new.com/team/app``;
+    ``nginx`` + ``registry.new.com`` -> ``registry.new.com/nginx``. The tag/digest is
+    carried on the image string's suffix (or a sibling ``tag`` field) and untouched.
+    """
+    image = str(image or "").strip()
+    new_host = str(new_host or "").strip().rstrip("/")
+    if not image or not new_host:
+        return image
+    first, sep, rest = image.partition("/")
+    has_host = bool(sep) and ("." in first or ":" in first or first == "localhost")
+    repository = rest if has_host else image
+    return f"{new_host}/{repository}"
+
+
 def _apply_overrides(
     template: Dict[str, Any],
     schema_overrides: Dict[str, Any],
@@ -366,6 +383,15 @@ def _apply_overrides(
         containers[0]["tag"] = str(overrides["tag"]).strip()
     if overrides.get("image") and schema_overrides.get("image") and containers:
         containers[0]["image"] = str(overrides["image"]).strip()
+
+    # Registry choice: repoint every container image at the chosen registry host.
+    # Always honored (not schema-gated) — picking where to pull from is a safe
+    # deploy-time decision, and the pre-deploy image check verifies the result.
+    registry_host = str(overrides.get("registryHost") or "").strip()
+    if registry_host:
+        for container in containers:
+            if container.get("image"):
+                container["image"] = _rewrite_image_host(container["image"], registry_host)
 
     if overrides.get("replicas") is not None and schema_overrides.get("replicas"):
         try:
