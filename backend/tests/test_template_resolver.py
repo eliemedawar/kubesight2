@@ -48,6 +48,36 @@ def test_optional_env_uses_template_default():
     assert {"name": "APP_ENV", "value": "production"} in env
 
 
+def test_required_env_with_default_uses_default_when_left_blank():
+    # The wizard always sends an explicit source ("value") with an empty string
+    # for defaulted vars it shows as "using defaults"; the default must still apply.
+    template = _base_template(
+        env=[{"key": "SPRING_PROFILES_ACTIVE", "required": True, "default": "sit"}],
+    )
+    answers = _answers(env={"SPRING_PROFILES_ACTIVE": {"source": "value", "value": ""}})
+    payload, err = resolve_template(template, answers)
+    assert err is None
+    assert {"name": "SPRING_PROFILES_ACTIVE", "value": "sit"} in payload["environment"]["envVars"]
+
+
+def test_typed_value_overrides_default():
+    template = _base_template(
+        env=[{"key": "SPRING_PROFILES_ACTIVE", "required": True, "default": "sit"}],
+    )
+    answers = _answers(env={"SPRING_PROFILES_ACTIVE": {"source": "value", "value": "prod"}})
+    payload, err = resolve_template(template, answers)
+    assert err is None
+    assert {"name": "SPRING_PROFILES_ACTIVE", "value": "prod"} in payload["environment"]["envVars"]
+
+
+def test_required_env_with_no_default_and_blank_value_still_errors():
+    template = _base_template(env=[{"key": "DB_HOST", "required": True, "allowedSources": ["value"]}])
+    answers = _answers(env={"DB_HOST": {"source": "value", "value": ""}})
+    payload, err = resolve_template(template, answers)
+    assert payload is None
+    assert "DB_HOST" in err and "required" in err
+
+
 def test_sensitive_var_rejects_plaintext_source():
     template = _base_template(
         env=[{"key": "DB_PASSWORD", "required": True, "sensitive": True,

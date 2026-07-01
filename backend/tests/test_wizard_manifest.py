@@ -158,6 +158,29 @@ def test_generate_deployment_with_pvc_volume_mount():
     assert "name: data" in yaml_text
 
 
+def test_pvc_and_pv_emitted_before_workload():
+    # kubectl applies a multi-doc file in order; the claim (and its bound volume)
+    # must exist before the pod that mounts it, or the pod churns on
+    # "persistentvolumeclaim not found" / "unbound immediate PVC" until it catches up.
+    payload = {
+        "basics": {"appName": "data-app", "namespace": "default"},
+        "workloadType": "Deployment",
+        "containers": [{"name": "app", "image": "nginx", "tag": "latest", "ports": [80]}],
+        "resources": {"cpuRequest": "100m", "cpuLimit": "500m", "memoryRequest": "128Mi", "memoryLimit": "256Mi"},
+        "storage": {
+            "pvcMode": "new",
+            "advanced": {"createManualPv": True, "storageType": "hostPath", "hostPath": "/data"},
+            "newPvc": {"name": "data-pvc", "size": "1Gi", "accessMode": "ReadWriteOnce"},
+            "volumeMounts": [{"name": "data", "mountPath": "/data"}],
+        },
+        "scaling": {"replicas": 1},
+    }
+    yaml_text, _, error = generate_wizard_manifests(payload)
+    assert error is None
+    assert yaml_text.index("kind: PersistentVolume\n") < yaml_text.index("kind: PersistentVolumeClaim")
+    assert yaml_text.index("kind: PersistentVolumeClaim") < yaml_text.index("kind: Deployment")
+
+
 def test_generate_deployment_volume_mount_uses_updated_pvc_name():
     payload = {
         "basics": {"appName": "data-app", "namespace": "default"},

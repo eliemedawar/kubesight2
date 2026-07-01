@@ -632,6 +632,14 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
     # dependency wiring are emitted first so the workload can reference them.
     documents.extend(_provisioned_config_documents(environment, namespace, labels))
 
+    # Emit the PV/PVC before the workload so the claim (and its bound volume) exist
+    # before the pod that mounts it. Applied the other way round, kubectl creates the
+    # Deployment first and the pod churns on "persistentvolumeclaim not found" /
+    # "unbound immediate PersistentVolumeClaims" until the claim catches up.
+    pvc_mode = storage.get("pvcMode") or "none"
+    if pvc_mode == "new":
+        _append_pvc_documents(documents, storage, namespace, labels, default_name=f"{app_name}-pvc")
+
     if workload_type in WORKLOAD_KINDS:
         pod_template = _pod_template(
             app_name, namespace, labels, annotations, containers, resources, environment, storage, health_checks
@@ -673,10 +681,6 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
                 "ports": _service_port_specs(svc),
             },
         })
-
-    pvc_mode = storage.get("pvcMode") or "none"
-    if pvc_mode == "new":
-        _append_pvc_documents(documents, storage, namespace, labels, default_name=f"{app_name}-pvc")
 
     svc_cfg = networking.get("service") or {}
     if svc_cfg.get("enabled") and workload_type in WORKLOAD_KINDS:

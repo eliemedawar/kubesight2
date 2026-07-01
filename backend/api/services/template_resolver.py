@@ -268,8 +268,14 @@ def _resolve_env_entry(
 
     if source == "value":
         value = str(answer.get("value") or "")
-        if not value and required:
-            return None, f"Environment variable '{key}' is required."
+        if not value:
+            # Deployer left it blank — fall back to the template default so a
+            # defaulted variable deploys as-is. A typed value overrides the default.
+            default = field.get("default")
+            if default is not None and str(default) != "":
+                return {"name": key, "value": str(default)}, None
+            if required:
+                return None, f"Environment variable '{key}' is required."
         return {"name": key, "value": value}, None
 
     ref_key = str(answer.get("key") or key).strip() or key
