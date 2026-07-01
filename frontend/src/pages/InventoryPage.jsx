@@ -4,11 +4,18 @@ import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import TemplateMarketplace from "../components/inventory/TemplateMarketplace.jsx";
 import { getWizardTemplate } from "../api/inventoryApi.js";
+import { applyImportToWizard } from "../api/deploymentFormsApi.js";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
 import { normalizeClusterOptions } from "../utils/clusterOptions.js";
 import { applyTemplate, createEmptyWizardState } from "../components/inventory/wizard/wizardDefaults.js";
 
 const AddAppModal = lazy(() => import("../components/inventory/AddAppModal.jsx"));
+const GenerateDeploymentFormModal = lazy(() =>
+  import("../components/inventory/GenerateDeploymentFormModal.jsx")
+);
+const ImportDeploymentFormModal = lazy(() =>
+  import("../components/inventory/ImportDeploymentFormModal.jsx")
+);
 const ApplicationBuilderWizard = lazy(() =>
   import("../components/inventory/wizard/ApplicationBuilderWizard.jsx")
 );
@@ -44,6 +51,9 @@ export default function InventoryPage({
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardInitialState, setWizardInitialState] = useState(null);
   const [schemaTemplate, setSchemaTemplate] = useState(null);
+  const [schemaInitialAnswers, setSchemaInitialAnswers] = useState(null);
+  const [generateFormTemplate, setGenerateFormTemplate] = useState(null);
+  const [importFormOpen, setImportFormOpen] = useState(false);
   const [templateBusy, setTemplateBusy] = useState(false);
   const [templateError, setTemplateError] = useState("");
 
@@ -57,13 +67,37 @@ export default function InventoryPage({
   const openWizardFromScratch = () => {
     setTemplateError("");
     setSchemaTemplate(null);
+    setSchemaInitialAnswers(null);
     setWizardInitialState(createEmptyWizardState(resolvedDefaultClusterId));
     setWizardOpen(true);
+  };
+
+  const closeSchemaWizard = () => {
+    setSchemaTemplate(null);
+    setSchemaInitialAnswers(null);
+  };
+
+  // "Open in Deploy Wizard" from an imported form: resolve the current template +
+  // parsed answers, then open the schema wizard prefilled with them.
+  const openWizardFromImport = async (importRecord) => {
+    setTemplateBusy(true);
+    setTemplateError("");
+    try {
+      const state = await applyImportToWizard(importRecord.id);
+      setImportFormOpen(false);
+      setSchemaInitialAnswers(state.answers || null);
+      setSchemaTemplate(state.template);
+    } catch (err) {
+      setTemplateError(err.message || "Failed to open the wizard from the imported form.");
+    } finally {
+      setTemplateBusy(false);
+    }
   };
 
   const openWizardFromTemplate = async (templateId) => {
     setTemplateBusy(true);
     setTemplateError("");
+    setSchemaInitialAnswers(null);  // a plain template open must not reuse imported answers
     try {
       const template = await getWizardTemplate(templateId);
       if (hasDeploymentSchema(template)) {
@@ -131,6 +165,8 @@ export default function InventoryPage({
         busy={templateBusy}
         onStartFromScratch={openWizardFromScratch}
         onSelectTemplate={openWizardFromTemplate}
+        onGenerateForm={canDeploy ? (template) => setGenerateFormTemplate(template) : undefined}
+        onImportForm={canDeploy ? () => setImportFormOpen(true) : undefined}
       />
 
       {addModalOpen ? (
@@ -171,10 +207,33 @@ export default function InventoryPage({
           <SchemaDeployWizard
             open={Boolean(schemaTemplate)}
             template={schemaTemplate}
-            onClose={() => setSchemaTemplate(null)}
+            onClose={closeSchemaWizard}
             onSuccess={() => onRefresh?.()}
             clusterOptions={clusterSelectOptions}
             defaultClusterId={resolvedDefaultClusterId}
+            initialAnswers={schemaInitialAnswers}
+          />
+        </Suspense>
+      ) : null}
+
+      {generateFormTemplate ? (
+        <Suspense fallback={null}>
+          <GenerateDeploymentFormModal
+            open={Boolean(generateFormTemplate)}
+            template={generateFormTemplate}
+            clusterOptions={clusterSelectOptions}
+            defaultClusterId={resolvedDefaultClusterId}
+            onClose={() => setGenerateFormTemplate(null)}
+          />
+        </Suspense>
+      ) : null}
+
+      {importFormOpen ? (
+        <Suspense fallback={null}>
+          <ImportDeploymentFormModal
+            open={importFormOpen}
+            onClose={() => setImportFormOpen(false)}
+            onContinueInWizard={openWizardFromImport}
           />
         </Suspense>
       ) : null}

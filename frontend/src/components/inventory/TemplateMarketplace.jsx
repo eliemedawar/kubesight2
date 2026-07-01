@@ -20,6 +20,8 @@ export default function TemplateMarketplace({
   defaultClusterId = "",
   onStartFromScratch,
   onSelectTemplate,
+  onGenerateForm,
+  onImportForm,
   busy = false,
 }) {
   const [templates, setTemplates] = useState([]);
@@ -236,6 +238,26 @@ export default function TemplateMarketplace({
             <span className="template-card__cta">Import YAML</span>
           </button>
         ) : null}
+
+        {onImportForm ? (
+          <button
+            type="button"
+            className="template-card template-card--scratch card"
+            onClick={onImportForm}
+            disabled={busy}
+          >
+            <span className="template-card__icon" aria-hidden="true">
+              ⇪
+            </span>
+            <div className="template-card__body">
+              <h3>Import from Form</h3>
+              <p className="muted">
+                Upload a filled Excel deployment form to validate it and prefill the Deploy Wizard.
+              </p>
+            </div>
+            <span className="template-card__cta">Import .xlsx</span>
+          </button>
+        ) : null}
       </section>
 
       {!loading ? (
@@ -326,6 +348,18 @@ export default function TemplateMarketplace({
                           </div>
                           <p className="template-card__description muted">{template.description}</p>
                         </button>
+                        {onGenerateForm ? (
+                          <button
+                            type="button"
+                            className="template-card__form-btn"
+                            title="Generate an Excel deployment form"
+                            aria-label={`Generate deployment form for ${template.name}`}
+                            onClick={() => onGenerateForm(template)}
+                            disabled={busy}
+                          >
+                            ⤓ Form
+                          </button>
+                        ) : null}
                         {canManageTemplates && template.custom ? (
                           <>
                             <button

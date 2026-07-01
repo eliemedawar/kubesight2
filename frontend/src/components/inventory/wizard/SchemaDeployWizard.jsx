@@ -190,6 +190,25 @@ function initAnswers(template, defaultClusterId) {
   };
 }
 
+/** Deep-merge partial answers (e.g. from an imported deployment form) onto the
+ * template-derived defaults so structure (env sub-fields, storage, ...) is kept. */
+function mergeAnswers(base, extra) {
+  if (!extra || typeof extra !== "object") return base;
+  const out = Array.isArray(base) ? [...base] : { ...base };
+  for (const [key, value] of Object.entries(extra)) {
+    const current = out[key];
+    if (
+      value && typeof value === "object" && !Array.isArray(value) &&
+      current && typeof current === "object" && !Array.isArray(current)
+    ) {
+      out[key] = mergeAnswers(current, value);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 /** Validate the Service Exposure step. Returns an error string ('' when valid) so
  * the wizard can block Next and surface the reason inline. Mirrors the backend
  * resolver's checks so the deployer sees problems before the round-trip. */
@@ -259,6 +278,7 @@ export default function SchemaDeployWizard({
   onSuccess,
   clusterOptions = [],
   defaultClusterId = "",
+  initialAnswers = null,
 }) {
   const clusterSelectOptions = normalizeClusterOptions(clusterOptions);
   const schema = template?.schema || {};
@@ -266,7 +286,9 @@ export default function SchemaDeployWizard({
 
   const steps = useMemo(() => (template ? buildSteps(template) : []), [template]);
   const [stepIndex, setStepIndex] = useState(0);
-  const [answers, setAnswers] = useState(() => initAnswers(template || {}, defaultClusterId));
+  const [answers, setAnswers] = useState(() =>
+    mergeAnswers(initAnswers(template || {}, defaultClusterId), initialAnswers),
+  );
   const [resolved, setResolved] = useState(null);
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
@@ -295,12 +317,14 @@ export default function SchemaDeployWizard({
   useEffect(() => {
     if (!open || !template) return;
     setStepIndex(0);
-    setAnswers(initAnswers(template, defaultClusterId));
+    // Merge any imported/prefilled answers over the template defaults so opening
+    // the wizard from an imported deployment form keeps the filled values.
+    setAnswers(mergeAnswers(initAnswers(template, defaultClusterId), initialAnswers));
     setResolved(null);
     setConfirmation("");
     setError("");
     setShowCloseConfirm(false);
-  }, [open, template, defaultClusterId]);
+  }, [open, template, defaultClusterId, initialAnswers]);
 
   // Load the namespace's ConfigMaps/Secrets so "existing" sources offer real
   // names and keys instead of free text.

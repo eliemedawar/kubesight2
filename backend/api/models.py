@@ -1439,3 +1439,95 @@ class TopologyComponent(db.Model):
     )
 
     created_by_user = db.relationship("User", foreign_keys=[created_by])
+
+
+# ---------------------------------------------------------------------------
+# Smart Deployment Form — offline Excel round-trip for the Deploy Wizard
+# ---------------------------------------------------------------------------
+#
+# A deployment form is generated *from* a UserTemplate (the source of truth): the
+# template's defaults + schema become a fillable .xlsx. The filled file is uploaded
+# back, parsed into the wizard's ``answers`` shape, re-validated against the current
+# template + live cluster, and used to prefill the Deploy Wizard. The Excel never
+# becomes the deploy payload — ``resolve_template`` still merges the template with the
+# parsed answers. These two tables track generations and imports for auditing, form
+# forgery/expiry checks, and re-validation.
+
+class DeploymentFormGeneration(db.Model):
+    """A generated deployment form (one downloaded .xlsx) issued from a template."""
+
+    __tablename__ = "deployment_form_generations"
+    __table_args__ = (
+        db.Index("ix_deployment_form_gen_template", "template_slug", "created_at"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    # Public form id embedded in the workbook's hidden metadata sheet.
+    form_uid = db.Column(db.String(48), unique=True, nullable=False, index=True)
+    template_slug = db.Column(db.String(120), nullable=False, index=True)
+    # Content-hash of the template detail at generation time (Kubesight has no
+    # version table); import compares this to detect template drift.
+    template_version = db.Column(db.String(64), nullable=False, default="")
+    schema_version = db.Column(db.Integer, nullable=False, default=1)
+    generated_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    cluster_id = db.Column(db.String(120), nullable=True)
+    namespace = db.Column(db.String(253), nullable=True)
+    # The form field schema baked into the workbook + the metadata block.
+    schema_json = db.Column(db.JSON, nullable=False, default=dict)
+    metadata_json = db.Column(db.JSON, nullable=False, default=dict)
+    # active | expired | consumed
+    status = db.Column(db.String(16), nullable=False, default="active", index=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    generated_by_user = db.relationship("User", foreign_keys=[generated_by])
+
+
+class DeploymentFormImport(db.Model):
+    """An uploaded deployment form after parsing + validation.
+
+    ``parsed_answers_json`` holds the wizard ``answers`` reconstructed from the
+    workbook; ``validation_result_json`` holds the structured ✅/⚠️/❌ result the UI
+    renders. Nothing here is deployed — it only prefills the wizard / bundle.
+    """
+
+    __tablename__ = "deployment_form_imports"
+    __table_args__ = (
+        db.Index("ix_deployment_form_import_status", "status", "created_at"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    generation_id = db.Column(
+        db.Integer,
+        db.ForeignKey("deployment_form_generations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    form_uid = db.Column(db.String(48), nullable=True, index=True)
+    template_slug = db.Column(db.String(120), nullable=False, index=True)
+    template_version = db.Column(db.String(64), nullable=False, default="")
+    uploaded_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    cluster_id = db.Column(db.String(120), nullable=True)
+    namespace = db.Column(db.String(253), nullable=True)
+    parsed_answers_json = db.Column(db.JSON, nullable=False, default=dict)
+    validation_result_json = db.Column(db.JSON, nullable=False, default=dict)
+    # parsed | valid | invalid | applied | bundled | submitted
+    status = db.Column(db.String(16), nullable=False, default="parsed", index=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    generation = db.relationship("DeploymentFormGeneration", foreign_keys=[generation_id])
+    uploaded_by_user = db.relationship("User", foreign_keys=[uploaded_by])
