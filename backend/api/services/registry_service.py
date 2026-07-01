@@ -11,6 +11,7 @@ the deploy should be blocked).
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -29,6 +30,35 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
+def _normalize_hosts(value: Any) -> List[str]:
+    """Parse a list or comma/space/newline-separated string into unique hosts."""
+    if isinstance(value, (list, tuple)):
+        parts = [str(v) for v in value]
+    else:
+        parts = re.split(r"[\s,;]+", str(value or ""))
+    out: List[str] = []
+    seen: set = set()
+    for part in parts:
+        host = part.strip().lower().rstrip("/")
+        # Tolerate a pasted scheme (https://host) or trailing path.
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        host = host.split("/", 1)[0]
+        if host and host not in seen:
+            seen.add(host)
+            out.append(host)
+    return out
+
+
+def _connection_hosts(row: RegistryConnection) -> List[str]:
+    """All image-reference hosts this connection matches: base URL host + aliases."""
+    hosts = _normalize_hosts(row.image_hosts)
+    base_host = registry_client.registry_host_of(row.base_url).lower()
+    if base_host and base_host not in hosts:
+        hosts.append(base_host)
+    return hosts
+
+
 # ---------------------------------------------------------------------------
 # CRUD + serialization
 # ---------------------------------------------------------------------------
@@ -40,6 +70,8 @@ def serialize(row: RegistryConnection) -> Dict[str, Any]:
         "registryType": row.registry_type or "nexus",
         "baseUrl": row.base_url or "",
         "authMode": row.auth_mode or "basic",
+        "imageHosts": _normalize_hosts(row.image_hosts),
+        "matchHosts": _connection_hosts(row),
         "username": row.username or "",
         "passwordConfigured": bool(row.password_encrypted),
         "verifyTls": bool(row.verify_tls),
@@ -118,6 +150,10 @@ def _apply_payload(row: RegistryConnection, payload: Dict[str, Any]) -> None:
     if ca_cert is not None:
         row.ca_cert = str(ca_cert).strip() or None
 
+    if "imageHosts" in payload:
+        hosts = _normalize_hosts(payload.get("imageHosts"))
+        row.image_hosts = ",".join(hosts) or None
+
 
 def create_connection(payload: Dict[str, Any]) -> Dict[str, Any]:
     row = RegistryConnection()
@@ -179,19 +215,21 @@ def _enabled_connections() -> List[RegistryConnection]:
 
 
 def match_connection(registry_host: str) -> Optional[RegistryConnection]:
-    """The enabled connection whose host matches ``registry_host`` (or None)."""
+    """The enabled connection matching ``registry_host`` (base URL host or alias)."""
     host = (registry_host or "").strip().lower()
     if not host:
         return None
     for row in _enabled_connections():
-        if registry_client.registry_host_of(row.base_url).lower() == host:
+        if host in _connection_hosts(row):
             return row
     return None
 
 
 def allowed_registry_hosts() -> List[str]:
-    """Hosts of all enabled connections — feeds the deploy allow-list."""
-    hosts = {registry_client.registry_host_of(r.base_url) for r in _enabled_connections()}
+    """Every image host of all enabled connections — feeds the deploy allow-list."""
+    hosts: set = set()
+    for row in _enabled_connections():
+        hosts.update(_connection_hosts(row))
     return sorted(h for h in hosts if h)
 
 

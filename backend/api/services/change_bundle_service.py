@@ -36,7 +36,12 @@ from .deployment_request_service import (
     _resolve_recipients_with_source,
     cluster_required_approvals,
 )
-from .deployment_service import parse_yaml_documents, sanitize_for_apply, validate_yaml
+from .deployment_service import (
+    check_registry_images,
+    parse_yaml_documents,
+    sanitize_for_apply,
+    validate_yaml,
+)
 
 # Audit action names (kept stable so audit log filters can target them).
 ACTION_ITEM_ADDED = "BUNDLE_ITEM_ADDED"
@@ -471,6 +476,12 @@ def _validate_item_now(item: ChangeBundleItem) -> None:
         result, err, _ = validate_yaml(
             item.yaml_preview or "", item.namespace, user=None, preview_mode=True
         )
+        if not err:
+            # Reject staging an image that's missing from its linked registry
+            # (block enforcement) — early feedback; execution re-checks too.
+            _checks, blocking, image_err = check_registry_images(item.yaml_preview or "")
+            if blocking:
+                err = image_err
         if err:
             item.validation_status = "invalid"
             item.validation_message = err

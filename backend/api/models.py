@@ -1550,9 +1550,14 @@ class RegistryConnection(db.Model):
     name = db.Column(db.String(120), nullable=False, default="")
     # nexus | generic (any Docker Registry V2 endpoint)
     registry_type = db.Column(db.String(32), nullable=False, default="nexus")
-    # The registry host[:port] as it appears in image references, e.g.
-    # "nexus.example.com:8083". Used both to build the V2 URL and to match images.
+    # How the backend REACHES the registry V2 API — a host[:port] or full URL,
+    # e.g. "nexus.example.com:8083" or "https://10.0.0.5:8083". May be an IP.
     base_url = db.Column(db.String(255), nullable=False, default="")
+    # Host(s) as they appear in image REFERENCES (comma-separated), e.g.
+    # "registry.example.com". An image is matched to this connection when its
+    # registry host is base_url's host OR any of these. Lets you connect by IP
+    # but still match images pulled by hostname.
+    image_hosts = db.Column(db.Text, nullable=True)
     # none | basic (bearer is auto-negotiated from a WWW-Authenticate challenge)
     auth_mode = db.Column(db.String(16), nullable=False, default="basic")
     username = db.Column(db.String(255), nullable=False, default="")

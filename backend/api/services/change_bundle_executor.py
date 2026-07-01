@@ -21,6 +21,7 @@ from .deployment_service import (
     _cleanup_temp,
     _run_kubectl_for_cluster,
     _write_temp_yaml,
+    check_registry_images,
     sanitize_for_apply,
     validate_yaml,
 )
@@ -66,6 +67,11 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Optional[str]:
         )
         if err:
             return err
+
+        # Confirm each image still exists in its linked registry (block enforcement).
+        _checks, blocking, image_err = check_registry_images(item.yaml_preview or "")
+        if blocking:
+            return image_err
 
     if not should_use_real_k8s(item.cluster_id):
         return None

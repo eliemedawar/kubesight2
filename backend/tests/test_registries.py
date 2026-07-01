@@ -182,6 +182,28 @@ def test_check_image_no_matching_registry(app):
         assert result["status"] == "no_connection"
 
 
+def test_image_host_alias_matches_when_connected_by_ip(app, monkeypatch):
+    # Connected by IP, but images are pulled by hostname -> declare the alias.
+    _make_conn(app, baseUrl="10.4.23.182", imageHosts=["registry.areeba.com"])
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        lambda req, **kw: _FakeResp(200),
+    )
+    with app.app_context():
+        conn = registry_service.match_connection("registry.areeba.com")
+        assert conn is not None
+        result = registry_service.check_image("registry.areeba.com/team/api:1.0")
+        assert result["status"] == "found"
+        assert "registry.areeba.com" in registry_service.allowed_registry_hosts()
+
+
+def test_image_host_alias_accepts_comma_string(app):
+    conn = _make_conn(app, baseUrl="10.4.23.182", imageHosts="registry.areeba.com, reg2.areeba.com")
+    with app.app_context():
+        assert set(conn["imageHosts"]) == {"registry.areeba.com", "reg2.areeba.com"}
+        assert registry_service.match_connection("reg2.areeba.com") is not None
+
+
 def test_check_images_blocks_missing(app, monkeypatch):
     _make_conn(app, enforcement="block")
 
@@ -253,6 +275,30 @@ def test_deploy_gate_allows_present_image(app, monkeypatch):
         _, blocking, message = check_registry_images(_DEPLOY_YAML)
         assert blocking is False
         assert message is None
+
+
+def test_change_bundle_item_gate_marks_invalid(app, monkeypatch):
+    """Staging an apply item with a missing image marks it invalid (block)."""
+    from api.models import ChangeBundleItem
+    from api.services.change_bundle_service import _validate_item_now
+
+    _make_conn(app, enforcement="block")
+
+    def fake(req, **kw):
+        raise _http_error(404)
+
+    monkeypatch.setattr(registry_client.urllib.request, "urlopen", fake)
+    with app.app_context():
+        item = ChangeBundleItem(
+            namespace="default",
+            resource_kind="Deployment",
+            resource_name="api",
+            yaml_preview=_DEPLOY_YAML,
+            new_payload_json={"execution": {"mode": "apply"}},
+        )
+        _validate_item_now(item)
+        assert item.validation_status == "invalid"
+        assert "not found" in (item.validation_message or "").lower()
 
 
 # ---------------------------------------------------------------------------

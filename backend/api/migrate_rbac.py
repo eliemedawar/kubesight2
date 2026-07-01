@@ -357,6 +357,7 @@ def _migrate_registry_connection_columns() -> None:
         return
     for col, sql_type in [
         ("registry_type", "VARCHAR(32) DEFAULT 'nexus'"),
+        ("image_hosts", "TEXT"),
         ("auth_mode", "VARCHAR(16) DEFAULT 'basic'"),
         ("verify_tls", "BOOLEAN DEFAULT 1"),
         ("ca_cert", "TEXT"),
