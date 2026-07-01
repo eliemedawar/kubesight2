@@ -5,6 +5,7 @@ import {
   listNamespaceConfigResources,
   listStorageClasses,
 } from "../../../api/clustersApi.js";
+import { checkImage } from "../../../api/registriesApi.js";
 import { getClusterDeployEligibility } from "../../../api/deploymentRequestsApi.js";
 import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
 import YamlPreviewPanel from "./YamlPreviewPanel.jsx";
@@ -247,6 +248,30 @@ function validateServiceStep(svc, { ingressRequired }) {
   return "";
 }
 
+/** Every distinct container image referenced in a generated manifest, pulled
+ * straight from the YAML so it's independent of the payload's exact shape. */
+function imagesFromYaml(yaml) {
+  const out = [];
+  const seen = new Set();
+  const re = /(?:^|\n)\s*-?\s*image:\s*["']?([^\s"']+)["']?/g;
+  let match;
+  while ((match = re.exec(String(yaml || ""))) !== null) {
+    const image = match[1];
+    if (image && !seen.has(image)) {
+      seen.add(image);
+      out.push(image);
+    }
+  }
+  return out;
+}
+
+const IMAGE_STATUS = {
+  found: { label: "Available", className: "status-ok" },
+  not_found: { label: "Not found in registry", className: "status-error" },
+  unreachable: { label: "Registry unreachable", className: "status-warn" },
+  no_connection: { label: "Not checked (no linked registry)", className: "status-muted" },
+};
+
 /** Steps are derived from the schema — empty sections are skipped entirely. The
  * Environment step appears whenever the template declares any variable; required
  * ones are shown up front and optional/defaulted ones are collapsed. */
@@ -297,6 +322,8 @@ export default function SchemaDeployWizard({
   const [storageClasses, setStorageClasses] = useState([]);
   const [eligibility, setEligibility] = useState(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  const [imageChecks, setImageChecks] = useState([]);
+  const [imageChecking, setImageChecking] = useState(false);
 
   const clusterId = answers.basics.clusterId;
   const namespace = answers.basics.namespace;
@@ -324,6 +351,7 @@ export default function SchemaDeployWizard({
     setConfirmation("");
     setError("");
     setShowCloseConfirm(false);
+    setImageChecks([]);
   }, [open, template, defaultClusterId, initialAnswers]);
 
   // Load the namespace's ConfigMaps/Secrets so "existing" sources offer real
@@ -543,13 +571,41 @@ export default function SchemaDeployWizard({
 
   const basicsValid = answers.basics.appName.trim() && answers.basics.namespace.trim() && answers.basics.clusterId;
 
+  // Verify each container image exists in a linked registry. Runs when the
+  // deployer reaches Review so a missing image blocks Deploy before it ever
+  // reaches the cluster (the backend apply gate is the authoritative fallback).
+  const runImageChecks = async (yaml) => {
+    const images = imagesFromYaml(yaml);
+    if (!images.length) {
+      setImageChecks([]);
+      return;
+    }
+    setImageChecking(true);
+    try {
+      const results = await Promise.all(
+        images.map((image) =>
+          checkImage(image).catch(() => ({
+            image,
+            status: "unreachable",
+            message: "Could not run the image check.",
+            enforcement: "off",
+          })),
+        ),
+      );
+      setImageChecks(results);
+    } finally {
+      setImageChecking(false);
+    }
+  };
+
   const goNext = async () => {
     setError("");
     const nextIndex = stepIndex + 1;
     if (steps[nextIndex]?.key === "review") {
       setBusy(true);
       try {
-        await resolve();
+        const result = await resolve();
+        await runImageChecks(result?.yaml);
       } catch (err) {
         setError(err.message || "Could not assemble the deployment.");
         setBusy(false);
@@ -599,6 +655,12 @@ export default function SchemaDeployWizard({
     eligibility && eligibility.approvalRequired && !eligibility.hasActiveApproval,
   );
   const requiredApprovals = eligibility?.requiredApprovals;
+
+  // Missing images in a block-enforced linked registry stop the deploy.
+  const missingImages = imageChecks.filter(
+    (c) => c.status === "not_found" && c.enforcement === "block",
+  );
+  const imageBlocked = missingImages.length > 0;
 
   return (
     <div className="modal-overlay wizard-overlay" role="presentation" onClick={requestClose}>
@@ -1458,6 +1520,32 @@ export default function SchemaDeployWizard({
                   ))}
                 </div>
               ) : null}
+
+              <div className="wizard-image-check">
+                <h5 style={{ margin: "0 0 var(--space-2)" }}>Image availability</h5>
+                {imageChecking ? (
+                  <p className="muted" style={{ margin: 0 }}>Checking images against linked registries…</p>
+                ) : imageChecks.length ? (
+                  <ul className="wizard-image-check__list">
+                    {imageChecks.map((c) => (
+                      <li key={c.image} className={IMAGE_STATUS[c.status]?.className || ""}>
+                        <span className="badge">{IMAGE_STATUS[c.status]?.label || c.status}</span>
+                        <code className="mono">{c.image}</code>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted" style={{ margin: 0 }}>No container images to verify.</p>
+                )}
+                {imageBlocked ? (
+                  <p className="error-banner" role="alert" style={{ marginTop: "var(--space-3)" }}>
+                    Deployment blocked: {missingImages.map((c) => c.image).join(", ")}{" "}
+                    {missingImages.length === 1 ? "was" : "were"} not found in the linked registry.
+                    Push the image or fix the tag, then re-check.
+                  </p>
+                ) : null}
+              </div>
+
               <Field label="Change summary">
                 <input value={answers.changeSummary} onChange={(e) => setAnswers((a) => ({ ...a, changeSummary: e.target.value }))} placeholder="Initial deploy" />
               </Field>
@@ -1481,7 +1569,7 @@ export default function SchemaDeployWizard({
               <AddToBundleButton
                 className="btn-outline"
                 label="Add to Bundle"
-                disabled={busy || !resolved?.yaml}
+                disabled={busy || !resolved?.yaml || imageBlocked}
                 descriptor={{
                   actionType: "create_from_template",
                   clusterId,
@@ -1492,7 +1580,7 @@ export default function SchemaDeployWizard({
                 }}
                 onAdded={onClose}
               />
-              <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase || approvalBlocked}>
+              <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase || approvalBlocked || imageBlocked}>
                 {busy ? "Deploying…" : "Deploy Application"}
               </button>
             </>
