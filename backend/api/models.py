@@ -779,6 +779,12 @@ class Client(db.Model):
         cascade="all, delete-orphan",
         lazy="dynamic",
     )
+    service_egress_connections = db.relationship(
+        "ClientServiceEgressConnection",
+        back_populates="client",
+        cascade="all, delete-orphan",
+        lazy="dynamic",
+    )
 
 
 class ClientApplicationService(db.Model):
@@ -851,6 +857,64 @@ class ClientServiceConnection(db.Model):
     )
 
     client = db.relationship("Client", back_populates="service_connections")
+    service = db.relationship("ApplicationService")
+
+
+class ClientServiceEgressConnection(db.Model):
+    """Per-deployment *egress* connectivity: how a service component reaches a client.
+
+    The counterpart to :class:`ClientServiceConnection` (which describes the
+    inbound client → service path). This describes the reverse direction — a
+    specific deployment/topology node inside the service reaching back out to the
+    client (e.g. ``persona-ms → connectivity → AUDI``). It is keyed per topology
+    node so each deployment in a service can carry its own independent egress
+    config. Like the inbound overlay, the reusable service topology is never
+    duplicated: the composed egress topology reverses the service topology edges
+    and appends a transport node and client node onto the service entrypoint.
+    """
+
+    __tablename__ = "client_service_egress_connections"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "client_id", "service_id", "node_ref", name="uq_client_service_egress_connection"
+        ),
+        db.Index("ix_csec_client_id", "client_id"),
+        db.Index("ix_csec_service_id", "service_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False)
+    service_id = db.Column(db.Integer, db.ForeignKey("application_services.id"), nullable=False)
+    # Identifies the source topology node (deployment) within the service. Stored
+    # as a string so it works for both integer node ids and synthetic ids.
+    node_ref = db.Column(db.String(120), nullable=False)
+    # Snapshot of the node's display name, kept for resilience if the node id
+    # changes but the deployment is re-identified by name.
+    node_name = db.Column(db.String(253), nullable=True)
+    source_ip = db.Column(db.String(64), nullable=True)
+    destination_ip = db.Column(db.String(64), nullable=True)
+    # VPN | Leased Line | MPLS | Internet | Private Link | Direct Connect |
+    # Internal Network | Other  (validated in the service layer).
+    transport_type = db.Column(db.String(32), nullable=True)
+    # Free-text carrier / circuit name; required when transport_type is "Other".
+    transport_name = db.Column(db.String(255), nullable=True)
+    transport_notes = db.Column(db.Text, nullable=True)
+    # active | inactive | degraded | planned  (free-text-ish operational status).
+    status = db.Column(db.String(32), nullable=False, default="active")
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    client = db.relationship("Client", back_populates="service_egress_connections")
     service = db.relationship("ApplicationService")
 
 

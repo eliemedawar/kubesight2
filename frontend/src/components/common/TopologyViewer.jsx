@@ -17,6 +17,7 @@ const OVERLAY_ACCENT = {
   client: "var(--info)",
   transport: "var(--ai)",
   service: "var(--ok)",
+  origin: "var(--ok)",
 };
 
 export const NODE_W = 160;

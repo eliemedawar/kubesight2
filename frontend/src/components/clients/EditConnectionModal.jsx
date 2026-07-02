@@ -24,6 +24,8 @@ export default function EditConnectionModal({
   onSave,
   saving,
   error,
+  heading = "Edit Connection",
+  subtitle,
 }) {
   const c = connection || {};
   const [sourceIp, setSourceIp] = useState(c.sourceIp || "");
@@ -52,9 +54,11 @@ export default function EditConnectionModal({
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="modal-card__header">
-          <h3>Edit Connection</h3>
+          <h3>{heading}</h3>
           <p className="muted">
-            Client-specific connectivity for <strong>{clientName}</strong> → <strong>{serviceName}</strong>.
+            {subtitle || (
+              <>Client-specific connectivity for <strong>{clientName}</strong> → <strong>{serviceName}</strong>.</>
+            )}
           </p>
         </div>
 

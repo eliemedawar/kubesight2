@@ -45,6 +45,7 @@ export default function InventoryPage({
   canDeploy = false,
   canHelmInstall = false,
   canManageTemplates = false,
+  isAdmin = false,
   onRefresh,
 }) {
   const [addModalOpen, setAddModalOpen] = useState(false);
@@ -160,6 +161,7 @@ export default function InventoryPage({
       <TemplateMarketplace
         canDeploy={canDeploy}
         canManageTemplates={canManageTemplates}
+        isAdmin={isAdmin}
         clusterOptions={clusterSelectOptions}
         defaultClusterId={resolvedDefaultClusterId}
         busy={templateBusy}

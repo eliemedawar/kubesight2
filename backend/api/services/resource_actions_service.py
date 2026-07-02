@@ -32,6 +32,9 @@ KIND_ALIASES = {
     "configmaps": "configmap",
     "secret": "secret",
     "secrets": "secret",
+    "ingress": "ingress",
+    "ingresses": "ingress",
+    "ing": "ingress",
 }
 
 KIND_PERMISSION = {
@@ -43,10 +46,11 @@ KIND_PERMISSION = {
     "job": "jobs:view",
     "cronjob": "cronjobs:view",
     "service": "services:view",
-    # ConfigMaps and Secrets have no dedicated view permission; they are gated by
-    # the page-level resources:view (and per-namespace access rules).
+    # ConfigMaps, Secrets and Ingresses have no dedicated view permission; they are
+    # gated by the page-level resources:view (and per-namespace access rules).
     "configmap": "resources:view",
     "secret": "resources:view",
+    "ingress": "resources:view",
 }
 
 # kubectl kind -> proper YAML kind casing for mock-mode YAML output.
@@ -58,6 +62,7 @@ _YAML_KIND_CASING = {
     "configmap": "ConfigMap",
     "secret": "Secret",
     "cronjob": "CronJob",
+    "ingress": "Ingress",
 }
 
 # Kinds that support the Resources "Restart" action. Pods are restarted by
@@ -147,6 +152,26 @@ def _mock_yaml(kind: str, namespace: str, name: str) -> str:
             f"  namespace: {namespace}\n"
             f"type: Opaque\n"
             f"data: {{}}\n"
+        )
+    if kind == "ingress":
+        return (
+            f"apiVersion: networking.k8s.io/v1\n"
+            f"kind: Ingress\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {namespace}\n"
+            f"spec:\n"
+            f"  rules:\n"
+            f"    - host: {name}.example.com\n"
+            f"      http:\n"
+            f"        paths:\n"
+            f"          - path: /\n"
+            f"            pathType: Prefix\n"
+            f"            backend:\n"
+            f"              service:\n"
+            f"                name: {name}\n"
+            f"                port:\n"
+            f"                  number: 80\n"
         )
     return (
         f"apiVersion: v1\n"

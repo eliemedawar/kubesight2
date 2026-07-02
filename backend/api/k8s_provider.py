@@ -1105,6 +1105,7 @@ NAMESPACE_RESOURCE_LIST_KEYS = (
     "services",
     "configmaps",
     "secrets",
+    "ingress",
 )
 
 
@@ -1430,6 +1431,7 @@ def _build_namespace_ingress(namespace: str, ing_items: List[Dict[str, Any]]) ->
                 "backendService": backend_service,
                 "tlsEnabled": bool(tls_entries),
                 "age": format_k8s_age(meta.get("creationTimestamp")),
+                "actions": ["describe", "yaml"],
             }
         )
     return items
@@ -1704,6 +1706,9 @@ def _namespace_resource_list_from_k8s_uncached(
     elif list_key == "secrets":
         secret_items = _get_namespace_items(access, "secrets", namespace)
         items = _build_namespace_secrets(namespace, secret_items)
+    elif list_key == "ingress":
+        ing_items = _get_namespace_items(access, "ingress", namespace)
+        items = _build_namespace_ingress(namespace, ing_items)
     else:
         cj_items = _get_namespace_items(access, "cronjobs", namespace)
         items = _build_namespace_cronjobs(namespace, cj_items)

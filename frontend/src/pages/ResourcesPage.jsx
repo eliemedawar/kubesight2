@@ -29,7 +29,7 @@ const CLOSED_EXEC_MODAL = {
 };
 
 // Resource kinds that the Edit & apply modal can load/edit.
-const EDITABLE_KINDS = new Set(["deployment", "configmap", "secret"]);
+const EDITABLE_KINDS = new Set(["deployment", "configmap", "secret", "ingress"]);
 
 const CLOSED_EDIT_MODAL = {
   open: false,
@@ -734,6 +734,39 @@ export default function ResourcesPage({
         targetPods: svc.targetPods || "-",
         age: svc.age || "-",
         actions: buildServiceActionsCell(svc, handleResourceAction),
+      })),
+    },
+    ingresses: {
+      title: "Ingresses",
+      columns: [
+        { key: "name", label: "Ingress" },
+        { key: "host", label: "Host" },
+        { key: "path", label: "Path" },
+        { key: "backendService", label: "Backend service" },
+        { key: "tls", label: "TLS" },
+        { key: "age", label: "Age" },
+        { key: "actions", label: "Actions" },
+      ],
+      rows: (data.resources.ingress || []).map((ing) => ({
+        ...ing,
+        cluster: ing.cluster || clusterId,
+        namespace: ing.namespace || namespace,
+        host: ing.host || "-",
+        path: ing.path || "-",
+        backendService: ing.backendService || "-",
+        tls: ing.tlsEnabled ? "Yes" : "No",
+        age: ing.age || "-",
+        actions: buildWorkloadActionsCell(
+          {
+            ...ing,
+            actions: canDeploy
+              ? [...(ing.actions || ["describe", "yaml"]), "edit"]
+              : ing.actions || ["describe", "yaml"],
+          },
+          "ingress",
+          handleResourceAction,
+          { fallback: "yaml" }
+        ),
       })),
     },
   };

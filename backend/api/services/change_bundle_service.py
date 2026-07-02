@@ -57,6 +57,9 @@ VALID_ACTIONS = {"approve", "decline"}
 ACTION_TYPES: Dict[str, Dict[str, str]] = {
     "create_from_template": {"mode": "apply", "permission": "apps:deploy"},
     "edit_deployment": {"mode": "apply", "permission": "apps:deploy"},
+    "edit_configmap": {"mode": "apply", "permission": "apps:deploy"},
+    "edit_secret": {"mode": "apply", "permission": "apps:deploy"},
+    "edit_ingress": {"mode": "apply", "permission": "apps:deploy"},
     "change_image": {"mode": "apply", "permission": "apps:deploy"},
     "update_env": {"mode": "apply", "permission": "apps:deploy"},
     "update_resources": {"mode": "apply", "permission": "apps:deploy"},
@@ -410,7 +413,15 @@ def build_item_preview(action_type: str, payload: Dict[str, Any]) -> Dict[str, A
             "namespace": ns or namespace,
         }
 
-    if action_type in ("edit_deployment", "update_env", "update_resources", "update_hpa"):
+    if action_type in (
+        "edit_deployment",
+        "edit_configmap",
+        "edit_secret",
+        "edit_ingress",
+        "update_env",
+        "update_resources",
+        "update_hpa",
+    ):
         yaml_content = payload.get("yaml") or ""
         if not yaml_content.strip():
             raise ChangeBundleError("YAML content is required for this change.", 400)

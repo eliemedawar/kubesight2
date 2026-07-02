@@ -724,6 +724,12 @@ export function getAllowedResources(user, clusterId, namespace, resources = {}) 
       };
     });
 
+  // Ingresses have no per-resource access rules; they follow namespace visibility
+  // (mirrors the backend's configmap/secret/ingress handling).
+  const ingress = canAccessNamespace(user, clusterId, namespace)
+    ? resources.ingress || []
+    : [];
+
   return {
     pods,
     deployments,
@@ -733,6 +739,7 @@ export function getAllowedResources(user, clusterId, namespace, resources = {}) 
     jobs,
     cronjobs,
     services,
+    ingress,
   };
 }
 

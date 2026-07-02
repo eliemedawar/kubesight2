@@ -16,6 +16,7 @@ import ImportTemplatesModal from "./ImportTemplatesModal.jsx";
 export default function TemplateMarketplace({
   canDeploy = false,
   canManageTemplates = false,
+  isAdmin = false,
   clusterOptions = [],
   defaultClusterId = "",
   onStartFromScratch,
@@ -321,7 +322,7 @@ export default function TemplateMarketplace({
                     <h2 id={`category-${category}`} className="template-marketplace__category-title">
                       {category}
                     </h2>
-                    {canManageTemplates && customCount > 0 ? (
+                    {canManageTemplates && isAdmin && customCount > 0 ? (
                       <button
                         type="button"
                         className="template-marketplace__category-delete"

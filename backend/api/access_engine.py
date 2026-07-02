@@ -69,6 +69,7 @@ NAMESPACE_RESOURCE_LIST_KEYS = (
     "services",
     "configmaps",
     "secrets",
+    "ingress",
 )
 
 
@@ -672,6 +673,9 @@ def filter_namespace_resources(user: User, cluster_id: str, resources: Dict[str,
     namespace_visible = can_access_namespace(user, cluster_id, namespace)
     configmaps = (resources.get("configmaps") or []) if namespace_visible else []
     secrets = (resources.get("secrets") or []) if namespace_visible else []
+    # Ingresses have no per-resource access rules; like ConfigMaps/Secrets they are
+    # visible to any non-admin who can reach the namespace and hold resources:view.
+    ingress = (resources.get("ingress") or []) if namespace_visible else []
 
     return {
         "namespace": namespace,
@@ -685,6 +689,7 @@ def filter_namespace_resources(user: User, cluster_id: str, resources: Dict[str,
         "services": services,
         "configmaps": configmaps,
         "secrets": secrets,
+        "ingress": ingress,
     }
 
 

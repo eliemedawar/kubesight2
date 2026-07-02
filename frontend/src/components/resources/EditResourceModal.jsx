@@ -17,6 +17,7 @@ const KIND_META = {
   deployment: { label: "deployment", yamlKind: "Deployment", actionType: "edit_deployment" },
   configmap: { label: "config map", yamlKind: "ConfigMap", actionType: "edit_configmap" },
   secret: { label: "secret", yamlKind: "Secret", actionType: "edit_secret" },
+  ingress: { label: "ingress", yamlKind: "Ingress", actionType: "edit_ingress" },
 };
 
 function metaForKind(kind) {

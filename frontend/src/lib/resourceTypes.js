@@ -19,6 +19,7 @@ export const NAMESPACE_RESOURCE_LIST_KEYS = [
   "services",
   "configmaps",
   "secrets",
+  "ingress",
 ];
 
 export const RESOURCE_TAB_DEFINITIONS = [
@@ -79,6 +80,13 @@ export const RESOURCE_TAB_DEFINITIONS = [
     title: "Services",
     permission: "services:view",
     resourceKind: "service",
+  },
+  {
+    tabKey: "ingresses",
+    listKey: "ingress",
+    title: "Ingresses",
+    permission: "resources:view",
+    resourceKind: "ingress",
   },
 ];
 

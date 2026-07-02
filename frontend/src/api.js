@@ -71,6 +71,10 @@ export {
   saveClientServiceConnection,
   getClientServiceTopology,
   deleteClientServiceConnection,
+  listServiceEgressNodes,
+  saveClientServiceEgressConnection,
+  getClientServiceEgressTopology,
+  deleteClientServiceEgressConnection,
 } from "./api/clientsApi";
 export {
   listComponents,

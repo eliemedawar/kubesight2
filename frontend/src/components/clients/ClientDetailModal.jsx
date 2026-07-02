@@ -4,6 +4,10 @@ import {
   saveClientServiceConnection,
   getClientServiceTopology,
   deleteClientServiceConnection,
+  listServiceEgressNodes,
+  saveClientServiceEgressConnection,
+  getClientServiceEgressTopology,
+  deleteClientServiceEgressConnection,
 } from "../../api";
 import TopologyViewer from "../common/TopologyViewer.jsx";
 import SearchableSelect from "../common/SearchableSelect.jsx";
@@ -43,7 +47,35 @@ function tabStyle(active) {
 
 // ─── Connectivity Topology tab ────────────────────────────────────────────────
 
-function TopologyTab({ clientId, services, selectedServiceId, onSelectService }) {
+function DirectionToggle({ direction, onChange }) {
+  const opts = [
+    { id: "inbound", label: "Inbound (Client → Service)" },
+    { id: "outbound", label: "Outbound (Service → Client)" },
+  ];
+  return (
+    <div role="tablist" aria-label="Topology direction"
+      style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: "0.5rem", overflow: "hidden", marginBottom: "1rem" }}>
+      {opts.map((o) => {
+        const active = direction === o.id;
+        return (
+          <button key={o.id} type="button" role="tab" aria-selected={active}
+            onClick={() => onChange(o.id)}
+            style={{
+              background: active ? "var(--accent)" : "transparent",
+              color: active ? "var(--accent-contrast, #fff)" : "var(--text-muted)",
+              border: "none", padding: "0.4rem 0.9rem", cursor: "pointer",
+              fontWeight: 600, fontSize: "0.8125rem",
+            }}>
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Inbound: Client → Transport → Service → … → Deployments.
+function InboundTopology({ clientId, selectedServiceId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -60,14 +92,141 @@ function TopologyTab({ clientId, services, selectedServiceId, onSelectService })
     return () => { cancelled = true; };
   }, [clientId, selectedServiceId]);
 
-  if (services.length === 0) {
-    return <EmptyState message="No services linked to this client." hint="Assign a service to configure connectivity." />;
+  if (!selectedServiceId) return <p className="muted">Select a service to view its client access topology.</p>;
+  if (loading) return <LoadingState label="Composing topology…" />;
+  if (error) return <p className="banner-message error">{error}</p>;
+  if (!data) return null;
+
+  const conn = data.connection;
+  return (
+    <>
+      <div className="access-summary" style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem 1.5rem", marginBottom: "1rem", fontSize: "0.85rem" }}>
+        <div><span className="muted">Client: </span><strong>{data.client?.name}</strong></div>
+        <div><span className="muted">Source IP: </span>{orDash(conn?.sourceIp)}</div>
+        <div><span className="muted">Transport: </span>{orDash(conn?.transportType)}</div>
+        <div><span className="muted">Destination IP: </span>{orDash(conn?.destinationIp)}</div>
+      </div>
+      <TopologyViewer nodes={data.topology?.nodes} edges={data.topology?.edges} fillWidth />
+    </>
+  );
+}
+
+// Outbound: selected Deployment → … → Transport → Client (reverse chain).
+function OutboundTopology({ clientId, selectedServiceId, canUpdate, reloadKey, onEditEgress, onRemoveEgress }) {
+  const [nodes, setNodes] = useState([]);
+  const [hasTopology, setHasTopology] = useState(true);
+  const [selectedNodeRef, setSelectedNodeRef] = useState(null);
+  const [nodesLoading, setNodesLoading] = useState(false);
+  const [nodesError, setNodesError] = useState("");
+
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  // Load the service's egress-eligible deployment nodes.
+  useEffect(() => {
+    if (!selectedServiceId) { setNodes([]); setSelectedNodeRef(null); return; }
+    let cancelled = false;
+    setNodesLoading(true);
+    setNodesError("");
+    listServiceEgressNodes(clientId, selectedServiceId)
+      .then((res) => {
+        if (cancelled) return;
+        const items = res.items || [];
+        setNodes(items);
+        setHasTopology(!!res.hasTopology);
+        setSelectedNodeRef((prev) => {
+          if (prev && items.some((n) => n.nodeRef === prev)) return prev;
+          return items.length ? items[0].nodeRef : null;
+        });
+      })
+      .catch((err) => { if (!cancelled) setNodesError(err.message || "Failed to load deployments."); })
+      .finally(() => { if (!cancelled) setNodesLoading(false); });
+    return () => { cancelled = true; };
+  }, [clientId, selectedServiceId, reloadKey]);
+
+  // Compose the reverse topology for the selected deployment.
+  useEffect(() => {
+    if (!selectedServiceId || !selectedNodeRef) { setData(null); return; }
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    getClientServiceEgressTopology(clientId, selectedServiceId, selectedNodeRef)
+      .then((res) => { if (!cancelled) setData(res); })
+      .catch((err) => { if (!cancelled) setError(err.message || "Failed to load topology."); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [clientId, selectedServiceId, selectedNodeRef, reloadKey]);
+
+  if (!selectedServiceId) return <p className="muted">Select a service to view its service-to-client topology.</p>;
+  if (nodesLoading) return <LoadingState label="Loading deployments…" />;
+  if (nodesError) return <p className="banner-message error">{nodesError}</p>;
+  if (!hasTopology || nodes.length === 0) {
+    return <EmptyState message="This service has no deployments to configure egress from." hint="Define the service topology first." />;
   }
 
+  const selectedNode = nodes.find((n) => n.nodeRef === selectedNodeRef);
   const conn = data?.connection;
 
   return (
     <div>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: "1rem", marginBottom: "1rem" }}>
+        <div style={{ minWidth: 240 }}>
+          <p className="form-label" style={{ marginBottom: "0.35rem" }}>Deployment (source)</p>
+          <SearchableSelect
+            options={nodes.map((n) => ({ value: n.nodeRef, label: n.nodeName }))}
+            value={selectedNodeRef || ""}
+            onChange={(e) => setSelectedNodeRef(e.target.value || null)}
+            placeholder="Select a deployment…"
+          />
+        </div>
+        {canUpdate && selectedNode && (
+          <div style={{ display: "flex", gap: "0.35rem" }}>
+            <button type="button" className="primary btn-compact"
+              onClick={() => onEditEgress(selectedNode)}>
+              {selectedNode.connection ? "Edit Connection" : "Configure"}
+            </button>
+            {selectedNode.connection && (
+              <button type="button" className="btn-ghost btn-compact danger"
+                onClick={() => onRemoveEgress(selectedNode)}>
+                Remove
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {loading ? (
+        <LoadingState label="Composing topology…" />
+      ) : error ? (
+        <p className="banner-message error">{error}</p>
+      ) : data ? (
+        <>
+          <div className="access-summary" style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem 1.5rem", marginBottom: "1rem", fontSize: "0.85rem" }}>
+            <div><span className="muted">Deployment: </span><strong>{data.node?.name}</strong></div>
+            <div><span className="muted">Source IP: </span>{orDash(conn?.sourceIp)}</div>
+            <div><span className="muted">Transport: </span>{orDash(conn?.transportType)}</div>
+            <div><span className="muted">Destination IP: </span>{orDash(conn?.destinationIp)}</div>
+            <div><span className="muted">Client: </span><strong>{data.client?.name}</strong></div>
+          </div>
+          <TopologyViewer nodes={data.topology?.nodes} edges={data.topology?.edges} fillWidth />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function TopologyTab({ clientId, services, selectedServiceId, onSelectService, canUpdate, egressReloadKey, onEditEgress, onRemoveEgress }) {
+  const [direction, setDirection] = useState("inbound");
+
+  if (services.length === 0) {
+    return <EmptyState message="No services linked to this client." hint="Assign a service to configure connectivity." />;
+  }
+
+  return (
+    <div>
+      <DirectionToggle direction={direction} onChange={setDirection} />
+
       <div style={{ maxWidth: 340, marginBottom: "1rem" }}>
         <p className="form-label" style={{ marginBottom: "0.35rem" }}>Service</p>
         <SearchableSelect
@@ -78,23 +237,18 @@ function TopologyTab({ clientId, services, selectedServiceId, onSelectService })
         />
       </div>
 
-      {!selectedServiceId ? (
-        <p className="muted">Select a service to view its client access topology.</p>
-      ) : loading ? (
-        <LoadingState label="Composing topology…" />
-      ) : error ? (
-        <p className="banner-message error">{error}</p>
-      ) : data ? (
-        <>
-          <div className="access-summary" style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem 1.5rem", marginBottom: "1rem", fontSize: "0.85rem" }}>
-            <div><span className="muted">Client: </span><strong>{data.client?.name}</strong></div>
-            <div><span className="muted">Source IP: </span>{orDash(conn?.sourceIp)}</div>
-            <div><span className="muted">Transport: </span>{orDash(conn?.transportType)}</div>
-            <div><span className="muted">Destination IP: </span>{orDash(conn?.destinationIp)}</div>
-          </div>
-          <TopologyViewer nodes={data.topology?.nodes} edges={data.topology?.edges} fillWidth />
-        </>
-      ) : null}
+      {direction === "inbound" ? (
+        <InboundTopology clientId={clientId} selectedServiceId={selectedServiceId} />
+      ) : (
+        <OutboundTopology
+          clientId={clientId}
+          selectedServiceId={selectedServiceId}
+          canUpdate={canUpdate}
+          reloadKey={egressReloadKey}
+          onEditEgress={(node) => onEditEgress(selectedServiceId, node)}
+          onRemoveEgress={(node) => onRemoveEgress(selectedServiceId, node)}
+        />
+      )}
     </div>
   );
 }
@@ -220,6 +374,12 @@ export default function ClientDetailModal({
   const [savingConn, setSavingConn] = useState(false);
   const [connError, setConnError] = useState("");
 
+  // Egress (Service → Client) editing state.
+  const [editingEgress, setEditingEgress] = useState(null); // { serviceId, serviceName, nodeRef, nodeName, connection }
+  const [savingEgress, setSavingEgress] = useState(false);
+  const [egressError, setEgressError] = useState("");
+  const [egressReloadKey, setEgressReloadKey] = useState(0);
+
   const loadServices = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -237,10 +397,10 @@ export default function ClientDetailModal({
 
   // Close on Escape (only when no nested modal is open).
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape" && !editingConn) onClose?.(); };
+    const onKey = (e) => { if (e.key === "Escape" && !editingConn && !editingEgress) onClose?.(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, editingConn]);
+  }, [onClose, editingConn, editingEgress]);
 
   const handleViewTopology = (serviceId) => {
     setSelectedServiceId(serviceId);
@@ -266,6 +426,46 @@ export default function ClientDetailModal({
     try {
       await deleteClientServiceConnection(client.id, svc.serviceId);
       await loadServices();
+    } catch (err) {
+      setError(err.message || "Remove failed.");
+    }
+  };
+
+  const serviceNameOf = (serviceId) =>
+    services.find((s) => s.serviceId === serviceId)?.serviceName || "";
+
+  const handleEditEgress = (serviceId, node) => {
+    setEgressError("");
+    setEditingEgress({
+      serviceId,
+      serviceName: serviceNameOf(serviceId),
+      nodeRef: node.nodeRef,
+      nodeName: node.nodeName,
+      connection: node.connection,
+    });
+  };
+
+  const handleSaveEgress = async (payload) => {
+    setSavingEgress(true);
+    setEgressError("");
+    try {
+      await saveClientServiceEgressConnection(
+        client.id, editingEgress.serviceId, editingEgress.nodeRef, payload
+      );
+      setEditingEgress(null);
+      setEgressReloadKey((k) => k + 1);
+    } catch (err) {
+      setEgressError(err.message || "Save failed.");
+    } finally {
+      setSavingEgress(false);
+    }
+  };
+
+  const handleRemoveEgress = async (serviceId, node) => {
+    if (!window.confirm(`Remove egress connectivity for "${node.nodeName}"?`)) return;
+    try {
+      await deleteClientServiceEgressConnection(client.id, serviceId, node.nodeRef);
+      setEgressReloadKey((k) => k + 1);
     } catch (err) {
       setError(err.message || "Remove failed.");
     }
@@ -338,6 +538,10 @@ export default function ClientDetailModal({
                 services={services}
                 selectedServiceId={selectedServiceId}
                 onSelectService={setSelectedServiceId}
+                canUpdate={canUpdate}
+                egressReloadKey={egressReloadKey}
+                onEditEgress={handleEditEgress}
+                onRemoveEgress={handleRemoveEgress}
               />
             )}
             {tab === "access" && (
@@ -360,6 +564,18 @@ export default function ClientDetailModal({
           onSave={handleSaveConnection}
           saving={savingConn}
           error={connError}
+        />
+      )}
+
+      {editingEgress && (
+        <EditConnectionModal
+          heading="Edit Egress Connection"
+          subtitle={<>Service-to-client connectivity for <strong>{editingEgress.nodeName}</strong> → <strong>{client.name}</strong>.</>}
+          connection={editingEgress.connection}
+          onClose={() => setEditingEgress(null)}
+          onSave={handleSaveEgress}
+          saving={savingEgress}
+          error={egressError}
         />
       )}
     </div>

@@ -16,9 +16,13 @@ from ..services.client_service import (
 from ..services.client_service_connection_service import (
     TRANSPORT_TYPES,
     delete_connection,
+    delete_egress_connection,
+    get_client_service_egress_topology,
     get_client_service_topology,
     list_client_services,
+    list_service_egress_nodes,
     upsert_connection,
+    upsert_egress_connection,
 )
 
 clients_bp = Blueprint("clients", __name__, url_prefix="/api/clients")
@@ -143,6 +147,66 @@ def delete_client_service_connection(client_id: int, service_id: int):
     deactivate = (request.args.get("deactivate") or "").strip().lower() in {"1", "true", "yes"}
     data, error, status = delete_connection(
         client_id, service_id, actor_user_id=_actor_user_id(), deactivate=deactivate
+    )
+    if error:
+        return error_response(error, status)
+    return success_response(data)
+
+
+# ---------------------------------------------------------------------------
+# Egress (Service → Client) — per-deployment reverse connectivity
+# ---------------------------------------------------------------------------
+
+@clients_bp.route("/<int:client_id>/services/<int:service_id>/egress-nodes", methods=["GET"])
+@require_permission("clients:view")
+def list_client_service_egress_nodes(client_id: int, service_id: int):
+    user = get_current_user()
+    data, error, status = list_service_egress_nodes(client_id, service_id, user=user)
+    if error:
+        return error_response(error, status)
+    return success_response(data)
+
+
+@clients_bp.route(
+    "/<int:client_id>/services/<int:service_id>/egress/<node_ref>/connection",
+    methods=["POST", "PUT"],
+)
+@require_permission("clients:update")
+def upsert_client_service_egress_connection(client_id: int, service_id: int, node_ref: str):
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    data, error, status = upsert_egress_connection(
+        client_id, service_id, node_ref, payload, actor_user_id=_actor_user_id(), user=user
+    )
+    if error:
+        return error_response(error, status)
+    return success_response(data, status_code=status)
+
+
+@clients_bp.route(
+    "/<int:client_id>/services/<int:service_id>/egress/<node_ref>/topology",
+    methods=["GET"],
+)
+@require_permission("clients:view")
+def client_service_egress_topology(client_id: int, service_id: int, node_ref: str):
+    user = get_current_user()
+    data, error, status = get_client_service_egress_topology(
+        client_id, service_id, node_ref, user=user
+    )
+    if error:
+        return error_response(error, status)
+    return success_response(data)
+
+
+@clients_bp.route(
+    "/<int:client_id>/services/<int:service_id>/egress/<node_ref>/connection",
+    methods=["DELETE"],
+)
+@require_permission("clients:update")
+def delete_client_service_egress_connection(client_id: int, service_id: int, node_ref: str):
+    deactivate = (request.args.get("deactivate") or "").strip().lower() in {"1", "true", "yes"}
+    data, error, status = delete_egress_connection(
+        client_id, service_id, node_ref, actor_user_id=_actor_user_id(), deactivate=deactivate
     )
     if error:
         return error_response(error, status)

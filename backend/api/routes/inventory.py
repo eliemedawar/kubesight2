@@ -51,7 +51,7 @@ from ..services.application_version_service import (
     rollback_to_version,
 )
 from ..k8s_provider import K8sCommandError, resolve_cluster_access, _run_for_access
-from ..access_engine import can_access_namespace, user_has_permission
+from ..access_engine import can_access_namespace, is_admin, user_has_permission
 
 inventory_bp = Blueprint("inventory", __name__, url_prefix="/api/inventory")
 
@@ -520,6 +520,10 @@ def deploy_wizard_template_category_delete(category: str):
     if not _can_manage_templates():
         return error_response("Forbidden", 403)
     user = get_current_user()
+    from ..auth_utils import auth_required_enabled
+
+    if auth_required_enabled() and not (user and is_admin(user)):
+        return error_response("Admin permission required to delete categories.", 403)
     data, error, status = delete_user_template_category(category, actor_user_id=user.id if user else None)
     if error:
         return error_response(error, status)

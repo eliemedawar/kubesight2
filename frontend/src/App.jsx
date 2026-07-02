@@ -1367,6 +1367,7 @@ export default function App() {
             canDeploy={hasPermission("apps:deploy")}
             canHelmInstall={hasPermission("helm:install")}
             canManageTemplates={hasPermission("inventory:update")}
+            isAdmin={isAdmin}
             onRefresh={loadInventory}
           />
         );
