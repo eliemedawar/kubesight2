@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from sqlalchemy import inspect, text
 
 from .db import db
@@ -15,12 +17,26 @@ def _table_columns(table_name: str) -> set:
     return {col["name"] for col in inspector.get_columns(table_name)}
 
 
+def _portable_type(sql_type: str) -> str:
+    """Translate SQLite-flavored column types in raw DDL for the active dialect.
+
+    These migrators hand-write ``ALTER TABLE ... ADD COLUMN`` with literal type
+    strings. SQLite is permissive (``DATETIME`` and integer boolean defaults are
+    fine), but PostgreSQL is strict: it has no ``DATETIME`` type. The model uses
+    ``DateTime(timezone=True)`` (rendered as ``TIMESTAMP WITH TIME ZONE`` by
+    ``create_all``), so map ``DATETIME`` accordingly on non-SQLite backends.
+    """
+    if db.engine.dialect.name == "sqlite":
+        return sql_type
+    return re.sub(r"\bDATETIME\b", "TIMESTAMP WITH TIME ZONE", sql_type, flags=re.IGNORECASE)
+
+
 def _add_column_if_missing(table_name: str, col: str, sql_type: str) -> None:
     cols = _table_columns(table_name)
     if col in cols:
         return
     with db.engine.begin() as conn:
-        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col} {sql_type}"))
+        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col} {_portable_type(sql_type)}"))
 
 
 def _drop_column_if_exists(table_name: str, col: str) -> None:
