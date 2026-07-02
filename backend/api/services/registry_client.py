@@ -43,6 +43,11 @@ FOUND = "found"
 NOT_FOUND = "not_found"
 UNREACHABLE = "unreachable"
 
+# Docker Hub's registry endpoints. Official images live under the implicit
+# "library/" namespace, so a single-name repo (e.g. "nginx") must be expanded to
+# "library/nginx" for the V2 API — the Docker client does this transparently.
+_DOCKERHUB_HOSTS = {"docker.io", "registry-1.docker.io", "index.docker.io"}
+
 
 @dataclass
 class ParsedImage:
@@ -92,8 +97,10 @@ def parse_image_reference(image: str) -> Optional[ParsedImage]:
     if not repository:
         return None
 
-    # Docker Hub shorthand: bare `nginx` means `library/nginx`.
-    if not registry and "/" not in repository:
+    # Docker Hub official-image shorthand: a single-name repo means `library/<name>`.
+    # Applies to the bare form (`nginx`, no host) AND the explicit Docker Hub hosts
+    # (`registry-1.docker.io/nginx`), so deployers never have to type `library/`.
+    if (not registry or registry.lower() in _DOCKERHUB_HOSTS) and "/" not in repository:
         repository = f"library/{repository}"
 
     return ParsedImage(registry=registry, repository=repository, reference=reference)

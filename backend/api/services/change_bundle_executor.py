@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..audit import log_audit
 from ..db import db
@@ -56,8 +56,13 @@ def _resource_arg(item: ChangeBundleItem) -> str:
     return f"{(item.resource_kind or 'deployment').lower()}/{item.resource_name}"
 
 
-def _revalidate(item: ChangeBundleItem, mode: str) -> Optional[str]:
-    """Re-check the item against live cluster state. Returns an error string or None."""
+def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optional[str]]:
+    """Re-check the item against live cluster state at execution time.
+
+    Returns ``(error, reason)``: ``error`` is None when the item is good to apply;
+    otherwise ``reason`` is one of ``"validation" | "image" | "target"`` so the
+    caller can react (e.g. alert recipients when an image vanished).
+    """
     if mode == "apply":
         # The bundle's approval is the authorization, so cluster-scoped/sensitive
         # kinds are not hard-blocked here (preview_mode); the actual apply runs
@@ -66,15 +71,18 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Optional[str]:
             item.yaml_preview or "", item.namespace, user=None, preview_mode=True
         )
         if err:
-            return err
+            return err, "validation"
 
-        # Confirm each image still exists in its linked registry (block enforcement).
+        # Confirm each image STILL exists in its linked registry — an image that
+        # was present when the bundle was staged may have been deleted before the
+        # (possibly days-later) deploy window opened. Block enforcement stops the
+        # apply so a now-missing image never reaches the cluster.
         _checks, blocking, image_err = check_registry_images(item.yaml_preview or "")
         if blocking:
-            return image_err
+            return image_err, "image"
 
     if not should_use_real_k8s(item.cluster_id):
-        return None
+        return None, None
 
     # For changes to an existing object, confirm the target still exists.
     if mode in ("scale", "delete"):
@@ -84,8 +92,8 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Optional[str]:
                 ["get", _resource_arg(item), "-n", item.namespace],
             )
         except K8sCommandError as exc:
-            return f"Target no longer exists or is unreachable: {exc}"
-    return None
+            return f"Target no longer exists or is unreachable: {exc}", "target"
+    return None, None
 
 
 def _apply_item(item: ChangeBundleItem, mode: str) -> str:
@@ -156,15 +164,21 @@ def execute_bundle(bundle: ChangeBundle) -> str:
         item.status = "applying"
         db.session.commit()
 
-        err = _revalidate(item, mode)
+        err, reason = _revalidate(item, mode)
         if err:
             failed += 1
             item.status = "failed"
             item.validation_status = "invalid"
             item.validation_message = err
-            item.execution_result = {"ok": False, "error": err, "phase": "revalidate"}
+            item.execution_result = {
+                "ok": False, "error": err, "phase": "revalidate", "reason": reason,
+            }
             db.session.commit()
-            _audit_item(ACTION_ITEM_FAILED, bundle, item, {"error": err})
+            _audit_item(ACTION_ITEM_FAILED, bundle, item, {"error": err, "reason": reason})
+            # A vanished image is an operational surprise the requester/ops need to
+            # know about — notify configured recipients so the skipped deploy is seen.
+            if reason == "image":
+                _notify_image_unavailable(bundle, item, err)
             if bundle.stop_on_failure:
                 stopped = True
             continue
@@ -203,6 +217,37 @@ def execute_bundle(bundle: ChangeBundle) -> str:
         details={"bundleId": bundle.id, "succeeded": succeeded, "failed": failed},
     )
     return final
+
+
+def _notify_image_unavailable(bundle: ChangeBundle, item: ChangeBundleItem, message: str) -> None:
+    """Alert configured recipients that a scheduled deploy was blocked on a missing image.
+
+    Best-effort: a delivery problem must never crash bundle execution.
+    """
+    try:
+        from .alert_routing_service import notify_operational_alert
+
+        alert_id = f"bundle-{bundle.id}-item-{item.id}-image-{int(_now().timestamp())}"
+        notify_operational_alert(
+            {
+                "id": alert_id,
+                "title": f"Change bundle #{bundle.id} blocked — image unavailable",
+                "severity": "warning",
+                "status": "firing",
+                "clusterId": item.cluster_id,
+                "namespace": item.namespace,
+                "resourceType": item.resource_kind,
+                "deployment": item.resource_name,
+                "description": (
+                    f"Scheduled deploy of {item.resource_kind}/{item.resource_name} in "
+                    f"{item.namespace} ({item.cluster_name or item.cluster_id}) was NOT applied: "
+                    f"{message}"
+                ),
+                "firedAt": _now().isoformat(),
+            }
+        )
+    except Exception:  # noqa: BLE001 — never let a notification failure stop execution
+        logger.exception("Failed to send image-unavailable alert for bundle #%s", bundle.id)
 
 
 def _audit_item(action: str, bundle: ChangeBundle, item: ChangeBundleItem, extra: Dict[str, Any]) -> None:

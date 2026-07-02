@@ -905,6 +905,25 @@ def _dispatch_to_destinations(
     return summary
 
 
+def notify_operational_alert(alert: Dict[str, Any]) -> Dict[str, Any]:
+    """Deliver a one-off operational alert to every enabled receiver.
+
+    Unlike policy alerts, this isn't tied to an AlertPolicy — it's used for
+    system events like a scheduled change bundle whose image vanished before the
+    deploy window. The caller must supply a unique ``id`` (so repeat-delivery
+    dedup never suppresses it); ``status`` defaults to ``firing``.
+    """
+    payload = {"status": "firing", "severity": "warning", **alert}
+    receivers = AlertRoutingReceiver.query.filter(
+        AlertRoutingReceiver.enabled.is_(True)
+    ).all()
+    destinations = [(receiver, "") for receiver in receivers]
+    if not destinations:
+        return {"sent": 0, "skipped": 0, "errors": ["No enabled receivers configured."]}
+    # repeat_interval_seconds=1 + a unique alert id => always delivered once.
+    return _dispatch_to_destinations(payload, destinations, repeat_interval_seconds=1)
+
+
 def dispatch_policy_alert_notifications(alert: Dict[str, Any]) -> Dict[str, Any]:
     policy_id = alert.get("policyId")
     if not policy_id:

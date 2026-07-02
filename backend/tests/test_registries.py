@@ -23,6 +23,11 @@ from tests.conftest import auth_headers
     [
         ("nginx", ("", "library/nginx", "latest")),
         ("nginx:1.25", ("", "library/nginx", "1.25")),
+        # Docker Hub host with a single-name repo auto-expands to library/.
+        ("registry-1.docker.io/nginx", ("registry-1.docker.io", "library/nginx", "latest")),
+        ("docker.io/nginx:1.27", ("docker.io", "library/nginx", "1.27")),
+        # A namespaced repo on Docker Hub is left as-is.
+        ("registry-1.docker.io/bitnami/redis:7", ("registry-1.docker.io", "bitnami/redis", "7")),
         ("myco.nexus:8083/team/api:v2", ("myco.nexus:8083", "team/api", "v2")),
         ("localhost:5000/foo", ("localhost:5000", "foo", "latest")),
         ("registry.io/a/b/c:tag", ("registry.io", "a/b/c", "tag")),
@@ -291,6 +296,55 @@ def test_deploy_gate_allows_present_image(app, monkeypatch):
         _, blocking, message = check_registry_images(_DEPLOY_YAML)
         assert blocking is False
         assert message is None
+
+
+def test_executor_revalidate_flags_missing_image(app, monkeypatch):
+    """At execution the re-check flags a now-missing image with reason 'image'."""
+    from api.models import ChangeBundleItem
+    from api.services.change_bundle_executor import _revalidate
+
+    _make_conn(app, enforcement="block")
+
+    def fake(req, **kw):
+        raise _http_error(404)
+
+    monkeypatch.setattr(registry_client.urllib.request, "urlopen", fake)
+    with app.app_context():
+        item = ChangeBundleItem(
+            cluster_id="mock",
+            namespace="default",
+            resource_kind="Deployment",
+            resource_name="api",
+            yaml_preview=_DEPLOY_YAML,
+            new_payload_json={"execution": {"mode": "apply"}},
+        )
+        err, reason = _revalidate(item, "apply")
+        assert reason == "image"
+        assert "not found" in (err or "").lower()
+
+
+def test_notify_operational_alert_dispatches_to_enabled_receivers(app, monkeypatch):
+    from api.db import db
+    from api.models import AlertRoutingReceiver
+    import api.services.alert_routing_service as ars
+
+    with app.app_context():
+        receiver = AlertRoutingReceiver(
+            name="ops", receiver_type="webhook", url="https://example.com/hook",
+            http_method="POST", enabled=True,
+        )
+        db.session.add(receiver)
+        db.session.commit()
+
+        delivered = []
+        monkeypatch.setattr(
+            ars, "_deliver_to_receiver", lambda r, alert: delivered.append(r.id)
+        )
+        result = ars.notify_operational_alert(
+            {"id": "bundle-1-item-1-image-123", "title": "blocked", "description": "d"}
+        )
+        assert result["sent"] == 1
+        assert delivered
 
 
 def test_change_bundle_item_gate_marks_invalid(app, monkeypatch):
