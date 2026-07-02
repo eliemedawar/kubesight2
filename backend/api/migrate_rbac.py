@@ -316,7 +316,7 @@ def _migrate_service_catalog_columns() -> None:
     table_names = inspect(db.engine).get_table_names()
     if "service_blueprint_components" in table_names:
         for col, sql_type in [
-            ("supports_external", "BOOLEAN DEFAULT 0"),
+            ("supports_external", "BOOLEAN DEFAULT false"),
             ("default_template_id", "VARCHAR(120)"),
             ("default_port", "INTEGER"),
             ("default_resources", "JSON"),
@@ -365,7 +365,7 @@ def _migrate_client_service_connections() -> None:
         ("namespace", "VARCHAR(253)"),
         ("environment", "VARCHAR(64)"),
         ("status", "VARCHAR(32) DEFAULT 'active'"),
-        ("is_active", "BOOLEAN DEFAULT 1"),
+        ("is_active", "BOOLEAN DEFAULT true"),
     ]:
         _add_column_if_missing("client_service_connections", col, sql_type)
 
@@ -389,7 +389,7 @@ def _migrate_client_service_egress_connections() -> None:
         ("transport_notes", "TEXT"),
         ("direction", "VARCHAR(16) DEFAULT 'outbound'"),
         ("status", "VARCHAR(32) DEFAULT 'active'"),
-        ("is_active", "BOOLEAN DEFAULT 1"),
+        ("is_active", "BOOLEAN DEFAULT true"),
     ]:
         _add_column_if_missing("client_service_egress_connections", col, sql_type)
 
@@ -407,10 +407,10 @@ def _migrate_registry_connection_columns() -> None:
         ("registry_type", "VARCHAR(32) DEFAULT 'nexus'"),
         ("image_hosts", "TEXT"),
         ("auth_mode", "VARCHAR(16) DEFAULT 'basic'"),
-        ("verify_tls", "BOOLEAN DEFAULT 1"),
+        ("verify_tls", "BOOLEAN DEFAULT true"),
         ("ca_cert", "TEXT"),
         ("enforcement", "VARCHAR(8) DEFAULT 'block'"),
-        ("enabled", "BOOLEAN DEFAULT 1"),
+        ("enabled", "BOOLEAN DEFAULT true"),
         ("last_test_at", "DATETIME"),
         ("last_test_status", "VARCHAR(16)"),
         ("last_test_message", "TEXT"),
@@ -460,21 +460,25 @@ def _migrate_user_onboarding_columns() -> None:
     """
     if "users" not in inspect(db.engine).get_table_names():
         return
+    # NB: boolean columns use the SQL boolean literals ``false``/``true`` rather
+    # than ``0``/``1``. PostgreSQL rejects an integer default on a BOOLEAN column
+    # (DatatypeMismatch); SQLite (3.23+) accepts the keyword form too, so this is
+    # portable across both backends.
     for col, sql_type in [
         ("last_login_ip", "VARCHAR(64)"),
-        ("must_change_password", "BOOLEAN DEFAULT 0"),
+        ("must_change_password", "BOOLEAN DEFAULT false"),
         ("temporary_password_expires_at", "DATETIME"),
-        ("temporary_password_used", "BOOLEAN DEFAULT 0"),
-        ("mfa_enabled", "BOOLEAN DEFAULT 0"),
+        ("temporary_password_used", "BOOLEAN DEFAULT false"),
+        ("mfa_enabled", "BOOLEAN DEFAULT false"),
         ("totp_secret", "VARCHAR(64)"),
-        ("first_login_completed", "BOOLEAN DEFAULT 1"),
+        ("first_login_completed", "BOOLEAN DEFAULT true"),
         ("failed_login_attempts", "INTEGER DEFAULT 0"),
         ("mfa_failed_attempts", "INTEGER DEFAULT 0"),
         ("last_failed_login_at", "DATETIME"),
         ("locked_until", "DATETIME"),
         ("lock_reason", "VARCHAR(64)"),
         ("lock_count_24h", "INTEGER DEFAULT 0"),
-        ("requires_admin_unlock", "BOOLEAN DEFAULT 0"),
+        ("requires_admin_unlock", "BOOLEAN DEFAULT false"),
         ("created_by_admin_id", "INTEGER"),
     ]:
         _add_column_if_missing("users", col, sql_type)
