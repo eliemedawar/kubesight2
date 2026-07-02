@@ -22,8 +22,10 @@ export const testCustomCluster = (clusterId) =>
 export const getClusterOverview = (clusterId) =>
   request(`/api/clusters/${encodeURIComponent(clusterId)}/overview`);
 
-export const listNamespacesByCluster = (clusterId) =>
-  request(`/api/clusters/${encodeURIComponent(clusterId)}/namespaces`);
+export const listNamespacesByCluster = (clusterId, { lite = false } = {}) =>
+  request(`/api/clusters/${encodeURIComponent(clusterId)}/namespaces`, {
+    query: lite ? { lite: 1 } : undefined,
+  });
 
 export const listStorageClasses = (clusterId) =>
   request(`/api/clusters/${encodeURIComponent(clusterId)}/storageclasses`);

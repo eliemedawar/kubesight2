@@ -83,6 +83,7 @@ def fetch_dashboard_k8s_snapshot(access: ClusterAccess) -> DashboardK8sSnapshot:
         f"snapshot:{access.cluster_id}",
         _SNAPSHOT_TTL_SECONDS,
         lambda: _fetch_dashboard_k8s_snapshot_uncached(access),
+        stale_ttl=int(os.getenv("DASHBOARD_SNAPSHOT_STALE_TTL_SECONDS", "120")),
     )
 
 

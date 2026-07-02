@@ -275,19 +275,26 @@ def _normalize_kind(value: Optional[str], default: str = "deployment") -> str:
 
 def _workloads_for_access(access, namespace: str, kubectl_kind: str) -> Dict[str, Dict[str, Any]]:
     """Run ``kubectl get <kind>`` for an already-resolved cluster access and return
-    ``{name: raw_k8s_item}``. Subprocess/JSON only — safe in worker threads."""
-    from ..k8s_provider import K8sCommandError, _run_for_access
+    ``{name: raw_k8s_item}``. Subprocess/JSON only — safe in worker threads.
 
-    try:
-        output = _run_for_access(access, ["get", kubectl_kind, "-n", namespace, "-o", "json"])
-        items = json.loads(output).get("items", [])
-        return {
-            item.get("metadata", {}).get("name", ""): item
-            for item in items
-            if item.get("metadata", {}).get("name")
-        }
-    except (K8sCommandError, Exception):
-        return {}
+    Cached under the shared ``res:{cluster}:{ns}:`` prefix (10s TTL + stale
+    serve), so Clients/Services tab loads and health polls share one kubectl
+    call per (namespace, kind) and mutations invalidate it automatically."""
+    from ..k8s_provider import K8sCommandError, _run_for_access, cached_namespace_read
+
+    def _fetch() -> Dict[str, Dict[str, Any]]:
+        try:
+            output = _run_for_access(access, ["get", kubectl_kind, "-n", namespace, "-o", "json"])
+            items = json.loads(output).get("items", [])
+            return {
+                item.get("metadata", {}).get("name", ""): item
+                for item in items
+                if item.get("metadata", {}).get("name")
+            }
+        except (K8sCommandError, Exception):
+            return {}
+
+    return cached_namespace_read(access, namespace, f"svc-{kubectl_kind}", _fetch)
 
 
 def _deployments_for_access(access, namespace: str) -> Dict[str, Dict[str, Any]]:
@@ -329,14 +336,18 @@ _BAD_POD_REASONS = {
 
 def _pods_for_access(access, namespace: str) -> List[Dict[str, Any]]:
     """Run ``kubectl get pods`` for an already-resolved cluster access. Touches
-    neither the DB nor the Flask app context, so it is safe in worker threads."""
-    from ..k8s_provider import K8sCommandError, _run_for_access
+    neither the DB nor the Flask app context, so it is safe in worker threads.
+    Cached like :func:`_workloads_for_access`."""
+    from ..k8s_provider import K8sCommandError, _run_for_access, cached_namespace_read
 
-    try:
-        output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
-        return json.loads(output).get("items", [])
-    except (K8sCommandError, Exception):
-        return []
+    def _fetch() -> List[Dict[str, Any]]:
+        try:
+            output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
+            return json.loads(output).get("items", [])
+        except (K8sCommandError, Exception):
+            return []
+
+    return cached_namespace_read(access, namespace, "svc-pods", _fetch)
 
 
 def _fetch_namespace_pods(cluster_id: str, namespace: str, user=None) -> List[Dict[str, Any]]:

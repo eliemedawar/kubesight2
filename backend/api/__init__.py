@@ -262,5 +262,10 @@ def create_app(config_object=None) -> Flask:
 
     if not is_testing:
         start_alert_policy_scheduler(app)
+        # Pre-populate kubectl-backed caches so the first tab clicks after
+        # startup hit warm data instead of paying multi-second cold loads.
+        from .cache_warmer import warm_caches_async
+
+        warm_caches_async(app)
 
     return app

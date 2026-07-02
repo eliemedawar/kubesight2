@@ -127,6 +127,16 @@ def list_clusters():
     if user and payload.get("items"):
         payload["items"] = filter_clusters_for_user(user, payload["items"])
         payload["count"] = len(payload["items"])
+
+    # The cluster list is the first call after login — use it to warm the
+    # namespace/inventory/service-health caches in the background (throttled)
+    # so the user's first tab clicks land on warm data.
+    from flask import current_app
+
+    from ..cache_warmer import warm_caches_async
+
+    warm_caches_async(current_app._get_current_object())
+
     return success_response(payload)
 
 
@@ -393,7 +403,14 @@ def cluster_namespaces(cluster_id: str):
         return err
     if access:
         try:
-            namespaces = list_namespaces_from_k8s(access)
+            # lite=1 returns names from a single kubectl call for instant first
+            # paint; the client fetches the full summary in the background.
+            if request.args.get("lite") in ("1", "true"):
+                from ..k8s_provider import list_namespace_names_from_k8s
+
+                namespaces = list_namespace_names_from_k8s(access)
+            else:
+                namespaces = list_namespaces_from_k8s(access)
             items = namespaces["items"]
             if user:
                 items = filter_namespaces_for_user(user, cluster_id, items)

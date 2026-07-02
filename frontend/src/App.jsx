@@ -487,8 +487,12 @@ export default function App() {
       let namespaces = [];
       try {
         const needsOverview = resolvedActivePage === "clusterOverview";
+        // Two-phase namespaces load: the lite request (one kubectl call) paints
+        // the page and selector immediately; the full summary (counts + usage,
+        // several kubectl calls) is requested in parallel and merged in below.
+        const fullNamespacesPromise = listNamespacesByCluster(selectedClusterId);
         const [namespacesResult, overviewResult] = await Promise.allSettled([
-          listNamespacesByCluster(selectedClusterId),
+          listNamespacesByCluster(selectedClusterId, { lite: true }),
           needsOverview ? getClusterOverview(selectedClusterId) : Promise.resolve(null),
         ]);
 
@@ -497,7 +501,30 @@ export default function App() {
         }
 
         if (namespacesResult.status === "rejected") {
-          throw namespacesResult.reason;
+          // Lite path failed — fall back to the full request before erroring.
+          try {
+            namespacesResult.value = await fullNamespacesPromise;
+            namespacesResult.status = "fulfilled";
+          } catch {
+            throw namespacesResult.reason;
+          }
+          if (cancelled) {
+            return;
+          }
+        } else {
+          fullNamespacesPromise
+            .then((fullRes) => {
+              if (cancelled || clusterContextClusterRef.current !== selectedClusterId) {
+                return;
+              }
+              const fullItems = fullRes.items || [];
+              if (fullItems.length) {
+                setData((prev) => ({ ...prev, namespaces: fullItems }));
+              }
+            })
+            .catch(() => {
+              // Lite data is already on screen; keep it if the full load fails.
+            });
         }
 
         if (overviewResult.status === "fulfilled" && overviewResult.value) {

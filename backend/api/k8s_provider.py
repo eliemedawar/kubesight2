@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .cluster_access import ClusterAccess, custom_cluster_public_id, is_custom_cluster_id, parse_custom_cluster_db_id
-from .ttl_cache import TTLCache
+from .ttl_cache import TTLCache, caching_disabled
 
 
 class K8sCommandError(RuntimeError):
@@ -25,6 +25,13 @@ _K8S_READ_CACHE = TTLCache("k8s-reads")
 _CONTEXT_LIST_TTL_SECONDS = int(os.getenv("K8S_CONTEXT_CACHE_TTL_SECONDS", "20"))
 _NAMESPACE_LIST_TTL_SECONDS = int(os.getenv("K8S_NAMESPACE_CACHE_TTL_SECONDS", "15"))
 _RESOURCE_LIST_TTL_SECONDS = int(os.getenv("K8S_RESOURCE_CACHE_TTL_SECONDS", "10"))
+# How long an expired entry may still be served instantly while a background
+# thread refreshes it (stale-while-revalidate). Only used with compute
+# closures that are kubectl-only (no DB / app-context access).
+_STALE_SERVE_TTL_SECONDS = int(os.getenv("K8S_STALE_SERVE_TTL_SECONDS", "600"))
+# Circuit-breaker window after a cluster times out: reads/writes to that
+# cluster fail immediately instead of hanging, until the window expires.
+_UNREACHABLE_BACKOFF_SECONDS = int(os.getenv("K8S_UNREACHABLE_BACKOFF_SECONDS", "20"))
 
 
 def invalidate_namespace_resources_cache(
@@ -101,6 +108,31 @@ def should_use_real_k8s(cluster_id: Optional[str] = None) -> bool:
 
 _KUBECTL_DEFAULT_TIMEOUT = int(os.getenv("KUBECTL_TIMEOUT_SECONDS", "30"))
 _KUBECTL_LONG_TIMEOUT = int(os.getenv("KUBECTL_LONG_TIMEOUT_SECONDS", "120"))
+# API round-trip bound passed to kubectl itself. Without it, an unreachable or
+# hanging API server stalls every read for the full subprocess kill timeout
+# (30s) instead of failing within seconds.
+_KUBECTL_REQUEST_TIMEOUT = int(os.getenv("KUBECTL_REQUEST_TIMEOUT_SECONDS", "10"))
+
+# Verbs whose single API request may legitimately run long (command execution
+# inside a container) — never clamp these to the short request timeout.
+_REQUEST_TIMEOUT_EXEMPT_VERBS = {"exec", "port-forward", "cp", "drain", "cordon", "uncordon"}
+
+
+def _request_timeout_flag(args: List[str], effective_timeout: int) -> List[str]:
+    if any(str(a).startswith("--request-timeout") for a in args):
+        return []
+    verb = args[0] if args else ""
+    if verb in _REQUEST_TIMEOUT_EXEMPT_VERBS or verb == "config":
+        return []
+    if "-f" in args and verb == "logs":
+        return []  # follow streams must not be cut off
+    # Long-timeout invocations (upgrades etc.) keep their own generous bound.
+    seconds = (
+        effective_timeout
+        if effective_timeout > _KUBECTL_DEFAULT_TIMEOUT
+        else min(_KUBECTL_REQUEST_TIMEOUT, effective_timeout)
+    )
+    return [f"--request-timeout={seconds}s"]
 
 
 def _run_kubectl(
@@ -109,11 +141,25 @@ def _run_kubectl(
     kubeconfig_path: Optional[str] = None,
     timeout: Optional[int] = None,
 ) -> str:
+    breaker_key = f"down:{kubeconfig_path or ''}:{context or ''}"
+    breaker_enabled = (
+        bool(args)
+        and args[0] != "config"  # local kubeconfig ops never touch the API
+        and not caching_disabled()
+    )
+    if breaker_enabled and _K8S_READ_CACHE.get(breaker_key):
+        raise K8sCommandError(
+            "Cluster API is unreachable (a recent request timed out). "
+            f"Retrying automatically within {_UNREACHABLE_BACKOFF_SECONDS}s."
+        )
+
     command = ["kubectl"]
     if kubeconfig_path:
         command += ["--kubeconfig", kubeconfig_path]
     if context:
         command += ["--context", context]
+    effective_timeout = timeout if timeout is not None else _KUBECTL_DEFAULT_TIMEOUT
+    command += _request_timeout_flag(args, effective_timeout)
     command += args
 
     env = os.environ.copy()
@@ -122,7 +168,6 @@ def _run_kubectl(
     elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
         env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
 
-    effective_timeout = timeout if timeout is not None else _KUBECTL_DEFAULT_TIMEOUT
     try:
         completed = subprocess.run(
             command,
@@ -137,11 +182,27 @@ def _run_kubectl(
             "kubectl not found. Please install kubectl and ensure it is on your PATH."
         )
     except subprocess.TimeoutExpired:
+        if breaker_enabled:
+            _K8S_READ_CACHE.set(breaker_key, True, _UNREACHABLE_BACKOFF_SECONDS)
         raise K8sCommandError(
             f"kubectl command timed out after {effective_timeout}s: {' '.join(args[:3])}"
         )
     if completed.returncode != 0:
         stderr = (completed.stderr or "").strip()
+        # Trip the breaker on network-level timeouts so the next callers fail
+        # fast instead of each re-paying kubectl's retry loop (~25s) against an
+        # unreachable API server.
+        if breaker_enabled and any(
+            marker in stderr
+            for marker in (
+                "Client.Timeout exceeded",
+                "context deadline exceeded",
+                "i/o timeout",
+                "request canceled while waiting for connection",
+                "no route to host",
+            )
+        ):
+            _K8S_READ_CACHE.set(breaker_key, True, _UNREACHABLE_BACKOFF_SECONDS)
         raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
     return completed.stdout
 
@@ -305,77 +366,105 @@ def _discovered_clusters_from_k8s() -> List[Dict[str, Any]]:
     return items
 
 
+def _custom_cluster_item(cluster_snapshot: Dict[str, Any], now: str) -> Dict[str, Any]:
+    """Build one custom-cluster list row. kubectl-only — safe in worker threads."""
+    public_id = cluster_snapshot["public_id"]
+    status = cluster_snapshot["status"]
+    version = "unknown"
+    nodes = 0
+    cpu_usage_percent: Optional[float] = None
+    memory_usage_percent: Optional[float] = None
+    kubeconfig_path = cluster_snapshot["kubeconfig_path"]
+    if kubeconfig_path and Path(kubeconfig_path).is_file():
+        access = ClusterAccess(
+            cluster_id=public_id,
+            context_name=cluster_snapshot["context_name"],
+            kubeconfig_path=kubeconfig_path,
+            display_name=cluster_snapshot["name"],
+            is_custom=True,
+        )
+        try:
+            version_output = _run_for_access(access, ["version", "-o", "json"])
+            version_data = json.loads(version_output)
+            version = (
+                version_data.get("serverVersion", {}).get("gitVersion")
+                or version_data.get("serverVersion", {}).get("major", "unknown")
+            )
+        except Exception:
+            status = "warning"
+        try:
+            nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
+            node_items = json.loads(nodes_output).get("items", [])
+            nodes = len(node_items)
+            if node_items:
+                from .k8s_metrics import cluster_resource_usage
+
+                cpu_capacity, mem_capacity = _node_capacity_totals(node_items)
+                cpu_usage_percent, memory_usage_percent, _, _ = cluster_resource_usage(
+                    access, cpu_capacity, mem_capacity
+                )
+        except Exception:
+            status = "warning"
+
+    return {
+        "id": public_id,
+        "name": cluster_snapshot["name"],
+        "provider": "custom",
+        "region": cluster_snapshot["region"],
+        "status": status,
+        "k8sVersion": version,
+        "nodes": nodes,
+        "cpuUsage": cpu_usage_percent,
+        "memoryUsage": memory_usage_percent,
+        "lastSync": cluster_snapshot["last_sync"] or now,
+        "contextName": cluster_snapshot["context_name"],
+        "host": cluster_snapshot["host"],
+        "port": cluster_snapshot["port"],
+        "protocol": cluster_snapshot["protocol"],
+        "source": "custom",
+    }
+
+
 def _custom_clusters_as_items() -> List[Dict[str, Any]]:
+    from concurrent.futures import ThreadPoolExecutor
+
     from .cluster_store import list_active_custom_clusters
 
-    items: List[Dict[str, Any]] = []
     now = datetime.now(timezone.utc).isoformat()
+
+    # Snapshot ORM fields on this thread (valid session), then probe each
+    # cluster in parallel — probing serially meant one slow/unreachable
+    # cluster delayed the whole cluster list by its full timeout.
+    snapshots: List[Dict[str, Any]] = []
     for cluster in list_active_custom_clusters():
-        public_id = custom_cluster_public_id(cluster.id)
-        status = "healthy"
         if cluster.last_connection_status == "error":
             status = "warning"
         elif cluster.last_connection_status == "connected":
             status = "healthy"
         else:
             status = "unknown"
-
-        version = "unknown"
-        nodes = 0
-        cpu_usage_percent: Optional[float] = None
-        memory_usage_percent: Optional[float] = None
-        kubeconfig_path = cluster.kubeconfig_path
-        if kubeconfig_path and Path(kubeconfig_path).is_file():
-            access = ClusterAccess(
-                cluster_id=public_id,
-                context_name=cluster.context_name,
-                kubeconfig_path=kubeconfig_path,
-                display_name=cluster.name,
-                is_custom=True,
-            )
-            try:
-                version_output = _run_for_access(access, ["version", "-o", "json"])
-                version_data = json.loads(version_output)
-                version = (
-                    version_data.get("serverVersion", {}).get("gitVersion")
-                    or version_data.get("serverVersion", {}).get("major", "unknown")
-                )
-            except Exception:
-                status = "warning"
-            try:
-                nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
-                node_items = json.loads(nodes_output).get("items", [])
-                nodes = len(node_items)
-                if node_items:
-                    from .k8s_metrics import cluster_resource_usage
-
-                    cpu_capacity, mem_capacity = _node_capacity_totals(node_items)
-                    cpu_usage_percent, memory_usage_percent, _, _ = cluster_resource_usage(
-                        access, cpu_capacity, mem_capacity
-                    )
-            except Exception:
-                status = "warning"
-
-        items.append(
+        snapshots.append(
             {
-                "id": public_id,
+                "public_id": custom_cluster_public_id(cluster.id),
                 "name": cluster.name,
-                "provider": "custom",
-                "region": f"{cluster.protocol}://{cluster.host}:{cluster.port}",
                 "status": status,
-                "k8sVersion": version,
-                "nodes": nodes,
-                "cpuUsage": cpu_usage_percent,
-                "memoryUsage": memory_usage_percent,
-                "lastSync": cluster.last_tested_at.isoformat() if cluster.last_tested_at else now,
-                "contextName": cluster.context_name,
+                "kubeconfig_path": cluster.kubeconfig_path,
+                "context_name": cluster.context_name,
+                "region": f"{cluster.protocol}://{cluster.host}:{cluster.port}",
+                "last_sync": cluster.last_tested_at.isoformat() if cluster.last_tested_at else None,
                 "host": cluster.host,
                 "port": cluster.port,
                 "protocol": cluster.protocol,
-                "source": "custom",
             }
         )
-    return items
+
+    if not snapshots:
+        return []
+    if len(snapshots) == 1:
+        return [_custom_cluster_item(snapshots[0], now)]
+
+    with ThreadPoolExecutor(max_workers=min(4, len(snapshots))) as pool:
+        return list(pool.map(lambda snap: _custom_cluster_item(snap, now), snapshots))
 
 
 _CLUSTER_LIST_CACHE_TTL_SECONDS = 30
@@ -481,6 +570,7 @@ def cluster_overview_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
         f"overview:{access.cluster_id}",
         _NAMESPACE_LIST_TTL_SECONDS,
         lambda: _cluster_overview_from_k8s_uncached(access),
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
     )
 
 
@@ -624,6 +714,53 @@ def list_namespaces_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
         f"nslist:{access.cluster_id}",
         _NAMESPACE_LIST_TTL_SECONDS,
         lambda: _list_namespaces_from_k8s_uncached(access),
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
+    )
+
+
+def list_namespace_names_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
+    """Fast namespace list: one kubectl call, names only (counts left null).
+
+    First paint for the Namespaces page and the namespace selector; the full
+    summary (5 kubectl calls incl. ``top pods``) loads in the background and
+    replaces it. Returns the full summary when one is already cached."""
+    full = _K8S_READ_CACHE.get(f"nslist:{access.cluster_id}")
+    if full is not None:
+        return full
+
+    def _fetch() -> Dict[str, Any]:
+        output = _run_for_access(access, ["get", "namespaces", "-o", "json"])
+        items = [
+            {
+                "name": ns.get("metadata", {}).get("name", "unknown"),
+                "pods": None,
+                "deployments": None,
+                "services": None,
+                "cpuUsage": None,
+                "memoryUsage": None,
+                "alerts": None,
+                "status": "active",
+            }
+            for ns in json.loads(output).get("items", [])
+        ]
+        return {"items": items, "count": len(items), "lite": True}
+
+    return _K8S_READ_CACHE.get_or_compute(
+        f"nsnames:{access.cluster_id}",
+        _NAMESPACE_LIST_TTL_SECONDS,
+        _fetch,
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
+    )
+
+
+def cached_namespace_read(access: ClusterAccess, namespace: str, bucket: str, compute) -> Any:
+    """Cache an arbitrary kubectl-only namespace read under the shared
+    ``res:{cluster}:{namespace}:`` prefix so mutation invalidation covers it."""
+    return _K8S_READ_CACHE.get_or_compute(
+        f"res:{access.cluster_id}:{namespace}:{bucket}",
+        _RESOURCE_LIST_TTL_SECONDS,
+        compute,
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
     )
 
 
@@ -631,12 +768,17 @@ def _list_namespaces_from_k8s_uncached(access: ClusterAccess) -> Dict[str, Any]:
     from .k8s_metrics import fetch_pod_top_metrics
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    # 5 independent kubectl calls — one worker each. (With 4 workers the fifth
+    # call queued behind the others, adding a full kubectl round-trip to every
+    # cold namespaces load.) `top pods` gets a bounded timeout so a slow or
+    # missing metrics-server cannot stall the whole summary.
+    top_timeout = int(os.getenv("KUBECTL_TOP_TIMEOUT_SECONDS", "8"))
+    with ThreadPoolExecutor(max_workers=5) as pool:
         ns_future = pool.submit(_run_for_access, access, ["get", "namespaces", "-o", "json"])
         pods_future = pool.submit(_run_for_access, access, ["get", "pods", "-A", "-o", "json"])
         dep_future = pool.submit(_run_for_access, access, ["get", "deployments", "-A", "-o", "json"])
         svc_future = pool.submit(_run_for_access, access, ["get", "services", "-A", "-o", "json"])
-        pod_top_future = pool.submit(fetch_pod_top_metrics, access)
+        pod_top_future = pool.submit(fetch_pod_top_metrics, access, False, top_timeout)
 
         try:
             namespaces_raw = json.loads(ns_future.result()).get("items", [])
@@ -1440,6 +1582,7 @@ def namespace_resources_from_k8s(
         key,
         _RESOURCE_LIST_TTL_SECONDS,
         lambda: _namespace_resources_from_k8s_uncached(access, namespace),
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
     )
 
 
@@ -1522,6 +1665,7 @@ def namespace_resource_list_from_k8s(
         key,
         _RESOURCE_LIST_TTL_SECONDS,
         lambda: _namespace_resource_list_from_k8s_uncached(access, namespace, list_key),
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
     )
 
 
@@ -2030,6 +2174,7 @@ def list_alerts_for_access(access: ClusterAccess, cluster_id: Optional[str] = No
         f"alerts:{access.cluster_id}:{cluster_id or ''}",
         _RESOURCE_LIST_TTL_SECONDS,
         lambda: _list_alerts_for_access_uncached(access, cluster_id),
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
     )
 
 
