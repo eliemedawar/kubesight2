@@ -564,6 +564,7 @@ export default function ClientDetailModal({
           connection={editingConn.connection}
           showDirection
           defaultDirection="inbound"
+          directionEntity="service"
           onClose={() => setEditingConn(null)}
           onSave={handleSaveConnection}
           saving={savingConn}

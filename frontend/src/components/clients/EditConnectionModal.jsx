@@ -14,10 +14,12 @@ export const TRANSPORT_TYPES = [
 
 const STATUS_OPTIONS = ["active", "inactive", "degraded", "planned"];
 
-// Direction of the direct deployment↔client link (egress only).
-const DIRECTION_OPTIONS = [
-  { value: "outbound", label: "Outbound — deployment → client" },
-  { value: "inbound", label: "Inbound — client → deployment" },
+// Direction of the connectivity link. `entity` is the service-side endpoint
+// ("service" for the per-service inbound overlay, "deployment" for per-deployment
+// egress) so the labels read correctly in each context.
+const directionOptions = (entity) => [
+  { value: "outbound", label: `Outbound — ${entity} → client` },
+  { value: "inbound", label: `Inbound — client → ${entity}` },
   { value: "both", label: "Both — bidirectional" },
 ];
 
@@ -35,6 +37,7 @@ export default function EditConnectionModal({
   subtitle,
   showDirection = false,
   defaultDirection = "outbound",
+  directionEntity = "deployment",
 }) {
   const c = connection || {};
   const [sourceIp, setSourceIp] = useState(c.sourceIp || "");
@@ -118,7 +121,7 @@ export default function EditConnectionModal({
               <label>
                 Direction
                 <SearchableSelect
-                  options={DIRECTION_OPTIONS}
+                  options={directionOptions(directionEntity)}
                   value={direction}
                   onChange={(e) => setDirection(e.target.value || "outbound")}
                   placeholder="Select direction…"
