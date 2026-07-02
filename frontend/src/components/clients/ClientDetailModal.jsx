@@ -92,7 +92,7 @@ function TopologyTab({ clientId, services, selectedServiceId, onSelectService })
             <div><span className="muted">Transport: </span>{orDash(conn?.transportType)}</div>
             <div><span className="muted">Destination IP: </span>{orDash(conn?.destinationIp)}</div>
           </div>
-          <TopologyViewer nodes={data.topology?.nodes} edges={data.topology?.edges} />
+          <TopologyViewer nodes={data.topology?.nodes} edges={data.topology?.edges} fillWidth />
         </>
       ) : null}
     </div>
@@ -141,61 +141,74 @@ function ServicesTab({ services, clusterNameById, canUpdate, onViewTopology, onE
   if (services.length === 0) {
     return <EmptyState message="No services linked to this client." hint="Edit the client to assign application services." />;
   }
+  const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
   return (
-    <div className="table-shell">
-      <div className="table-scroll-region">
-        <table>
-          <thead>
-            <tr>
-              <th>Service</th>
-              <th>Source IP</th>
-              <th>Destination IP</th>
-              <th>Transport</th>
-              <th>Cluster</th>
-              <th>Namespace</th>
-              <th>Environment</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {services.map((svc) => {
-              const c = svc.connection || {};
-              return (
-                <tr key={svc.serviceId}>
-                  <td>
-                    <strong>{svc.serviceName}</strong>
-                    <div style={{ marginTop: "0.2rem" }}><HealthBadge health={svc.health} /></div>
-                  </td>
-                  <td>{orDash(c.sourceIp)}</td>
-                  <td>{orDash(c.destinationIp)}</td>
-                  <td>{orDash(c.transportType)}</td>
-                  <td>{orDash(c.clusterId ? (clusterNameById[c.clusterId] || c.clusterId) : "")}</td>
-                  <td>{orDash(c.namespace)}</td>
-                  <td>{orDash(c.environment)}</td>
-                  <td><ConnStatusBadge status={svc.connection ? c.status : null} /></td>
-                  <td>
-                    <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
-                      <button type="button" className="btn-outline btn-compact" onClick={() => onViewTopology(svc.serviceId)}>
-                        View Topology
-                      </button>
-                      {canUpdate && (
-                        <button type="button" className="btn-outline btn-compact" onClick={() => onEditConnection(svc)}>
-                          Edit Connection
+    <div>
+      {canUpdate && (
+        <p className="muted" style={{ fontSize: "0.8125rem", margin: "0 0 0.6rem" }}>
+          Click a service row to configure its connectivity, or use the actions on the right.
+        </p>
+      )}
+      <div className="table-shell">
+        <div className="table-scroll-region">
+          <table>
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>Source IP</th>
+                <th>Destination IP</th>
+                <th>Transport</th>
+                <th>Cluster</th>
+                <th>Namespace</th>
+                <th>Environment</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {services.map((svc) => {
+                const c = svc.connection || {};
+                return (
+                  <tr
+                    key={svc.serviceId}
+                    style={canUpdate ? { cursor: "pointer" } : undefined}
+                    onClick={canUpdate ? () => onEditConnection(svc) : undefined}
+                    title={canUpdate ? "Configure connectivity" : undefined}
+                  >
+                    <td>
+                      <strong>{svc.serviceName}</strong>
+                      <div style={{ marginTop: "0.2rem" }}><HealthBadge health={svc.health} /></div>
+                    </td>
+                    <td>{orDash(c.sourceIp)}</td>
+                    <td>{orDash(c.destinationIp)}</td>
+                    <td>{orDash(c.transportType)}</td>
+                    <td>{orDash(c.clusterId ? (clusterNameById[c.clusterId] || c.clusterId) : "")}</td>
+                    <td>{orDash(c.namespace)}</td>
+                    <td>{orDash(c.environment)}</td>
+                    <td><ConnStatusBadge status={svc.connection ? c.status : null} /></td>
+                    <td>
+                      <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
+                        <button type="button" className="btn-outline btn-compact" onClick={stop(() => onViewTopology(svc.serviceId))}>
+                          View Topology
                         </button>
-                      )}
-                      {canUpdate && svc.connection && (
-                        <button type="button" className="btn-ghost btn-compact danger" onClick={() => onRemove(svc)}>
-                          Remove
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                        {canUpdate && (
+                          <button type="button" className="btn-outline btn-compact" onClick={stop(() => onEditConnection(svc))}>
+                            {svc.connection ? "Edit Connection" : "Configure"}
+                          </button>
+                        )}
+                        {canUpdate && svc.connection && (
+                          <button type="button" className="btn-ghost btn-compact danger" onClick={stop(() => onRemove(svc))}>
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

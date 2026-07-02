@@ -72,81 +72,90 @@ export function computeLayout(nodes, edges) {
     };
   }
 
+  // Layered (Sugiyama-style) top-to-bottom layout. Topologies are directed
+  // flows (Client → Transport → entrypoint → downstream), so ranking nodes by
+  // their longest path from a root and stacking layers vertically produces a
+  // readable hierarchy instead of the scattered blob a force layout gives.
   const ids = nodes.map((nd) => String(nd.id));
+  const idSet = new Set(ids);
 
-  // Place nodes initially on a circle so no two start at the same point
-  const initR = Math.max(160, (n * (NODE_W + 50)) / (2 * Math.PI));
-  const pos = {}, vel = {};
-  ids.forEach((id, i) => {
-    const angle = (2 * Math.PI * i / n) - Math.PI / 2;
-    pos[id] = { x: initR * Math.cos(angle), y: initR * Math.sin(angle) };
-    vel[id] = { x: 0, y: 0 };
+  const outAdj = {}, inAdj = {};
+  ids.forEach((id) => { outAdj[id] = []; inAdj[id] = []; });
+  const seenPair = new Set();
+  edges.forEach((e) => {
+    const s = String(e.sourceNodeId), t = String(e.targetNodeId);
+    if (s === t || !idSet.has(s) || !idSet.has(t)) return;
+    const key = `${s}→${t}`;
+    if (seenPair.has(key)) return;
+    seenPair.add(key);
+    outAdj[s].push(t);
+    inAdj[t].push(s);
   });
 
-  const REPEL = 22000;
-  const SPRING_K = 0.07;
-  const SPRING_LEN = Math.max(NODE_W * 2.4, 300);
-
-  for (let iter = 0; iter < 200; iter++) {
-    const cool = Math.pow(1 - iter / 200, 2);
-
-    // Repulsion between every node pair
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        const a = pos[ids[i]], b = pos[ids[j]];
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const d2 = dx * dx + dy * dy || 0.01;
-        const d = Math.sqrt(d2);
-        const f = REPEL / d2;
-        const fx = (dx / d) * f, fy = (dy / d) * f;
-        vel[ids[i]].x -= fx; vel[ids[i]].y -= fy;
-        vel[ids[j]].x += fx; vel[ids[j]].y += fy;
-      }
-    }
-
-    // Spring attraction along edges (count bidi pairs once)
-    const seen = new Set();
-    edges.forEach((e) => {
-      const s = String(e.sourceNodeId), t = String(e.targetNodeId);
-      if (s === t || !pos[s] || !pos[t]) return;
-      const key = s < t ? `${s}|${t}` : `${t}|${s}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      const dx = pos[t].x - pos[s].x, dy = pos[t].y - pos[s].y;
-      const d = Math.sqrt(dx * dx + dy * dy) || 0.1;
-      const f = SPRING_K * (d - SPRING_LEN);
-      const fx = (dx / d) * f, fy = (dy / d) * f;
-      vel[s].x += fx; vel[s].y += fy;
-      vel[t].x -= fx; vel[t].y -= fy;
+  // Longest-path ranking via relaxation (iteration count caps any cycle).
+  const rank = {};
+  ids.forEach((id) => { rank[id] = 0; });
+  for (let iter = 0; iter < ids.length; iter++) {
+    let changed = false;
+    ids.forEach((s) => {
+      outAdj[s].forEach((t) => {
+        if (rank[t] < rank[s] + 1) { rank[t] = rank[s] + 1; changed = true; }
+      });
     });
-
-    // Integrate with cooling
-    ids.forEach((id) => {
-      pos[id].x += vel[id].x * cool;
-      pos[id].y += vel[id].y * cool;
-      vel[id].x *= 0.65;
-      vel[id].y *= 0.65;
-    });
+    if (!changed) break;
   }
 
-  // Shift to (0,0) origin
-  const xs = ids.map((id) => pos[id].x), ys = ids.map((id) => pos[id].y);
-  const minX = Math.min(...xs), minY = Math.min(...ys);
-  const maxX = Math.max(...xs), maxY = Math.max(...ys);
-
-  const positions = {};
+  // Bucket nodes into layers by rank (input order preserved within each layer).
+  const layers = [];
   ids.forEach((id) => {
-    positions[id] = { x: pos[id].x - minX, y: pos[id].y - minY };
+    const r = rank[id];
+    (layers[r] = layers[r] || []).push(id);
   });
 
+  // Reduce edge crossings: order each layer by the mean position of its parents
+  // in the layer above (barycenter heuristic, a few passes).
+  for (let pass = 0; pass < 4; pass++) {
+    for (let r = 1; r < layers.length; r++) {
+      if (!layers[r] || !layers[r - 1]) continue;
+      const prevPos = {};
+      layers[r - 1].forEach((id, i) => { prevPos[id] = i; });
+      layers[r] = layers[r]
+        .map((id, i) => {
+          const parents = inAdj[id].filter((p) => rank[p] === r - 1);
+          const bc = parents.length
+            ? parents.reduce((a, p) => a + prevPos[p], 0) / parents.length
+            : i;
+          return { id, bc };
+        })
+        .sort((a, b) => a.bc - b.bc)
+        .map((o) => o.id);
+    }
+  }
+
+  const H_GAP = NODE_W + 70;   // horizontal spacing within a layer
+  const V_GAP = NODE_H + 90;   // vertical spacing between layers
+  const maxCount = Math.max(1, ...layers.map((l) => (l ? l.length : 0)));
+  const rowWidth = (maxCount - 1) * H_GAP;
+
+  const positions = {};
+  layers.forEach((layer, r) => {
+    if (!layer) return;
+    const layerW = (layer.length - 1) * H_GAP;
+    const offsetX = (rowWidth - layerW) / 2; // center each layer
+    layer.forEach((id, i) => {
+      positions[id] = { x: offsetX + i * H_GAP, y: r * V_GAP };
+    });
+  });
+
+  const layerCount = layers.length;
   return {
     positions,
-    svgW: (maxX - minX) + NODE_W + PAD * 2,
-    svgH: (maxY - minY) + NODE_H + PAD * 2,
+    svgW: rowWidth + NODE_W + PAD * 2,
+    svgH: (layerCount - 1) * V_GAP + NODE_H + PAD * 2,
   };
 }
 
-export default function TopologyViewer({ nodes, edges, compact = false }) {
+export default function TopologyViewer({ nodes, edges, compact = false, fillWidth = false }) {
   const { positions, svgW, svgH } = useMemo(
     () => computeLayout(nodes || [], edges || []),
     [nodes, edges]
@@ -158,19 +167,24 @@ export default function TopologyViewer({ nodes, edges, compact = false }) {
 
   // Zoom out a touch by padding the viewBox with extra margin around the
   // content, so the topology renders smaller and centered in its container.
-  const zoomMx = svgW * 0.12;
-  const zoomMy = svgH * 0.12;
+  // fillWidth trims the margin and lets the graph scale up to fill the
+  // container (used where the viewer owns a large panel, e.g. the client
+  // access topology) so small graphs stay readable instead of shrinking.
+  const marginFactor = fillWidth ? 0.05 : 0.12;
+  const zoomMx = svgW * marginFactor;
+  const zoomMy = svgH * marginFactor;
   // Never scale the SVG *up* past its natural size — otherwise a 1–2 node graph
   // gets stretched to the full container width and the nodes balloon. Cap the
   // rendered width to the viewBox width (treated as px) and center it; larger
-  // graphs still scale down to fit.
+  // graphs still scale down to fit. When fillWidth is set the cap is lifted so
+  // the graph uses the full available width.
   const naturalWidth = Math.round(svgW + zoomMx * 2);
 
   return (
     <div className={`topo-viewer${compact ? " topo-viewer--compact" : ""}`}>
       <svg viewBox={`${-zoomMx} ${-zoomMy} ${svgW + zoomMx * 2} ${svgH + zoomMy * 2}`}
         preserveAspectRatio="xMidYMid meet"
-        style={{ display: "block", width: "100%", maxWidth: `${naturalWidth}px`, height: "auto", margin: "0 auto" }}>
+        style={{ display: "block", width: "100%", maxWidth: fillWidth ? "100%" : `${naturalWidth}px`, height: "auto", margin: "0 auto" }}>
         <defs>
           <filter id="topo-shadow" x="-30%" y="-30%" width="160%" height="160%">
             <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="rgba(0,0,0,0.5)" />
