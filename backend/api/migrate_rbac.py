@@ -346,6 +346,30 @@ def _migrate_service_catalog_columns() -> None:
             _add_column_if_missing("app_service_component_mappings", col, sql_type)
 
 
+def _migrate_client_service_connections() -> None:
+    """Forward-compatible column adds for the client_service_connections table.
+
+    The table itself is created by ``db.create_all()``; this only backfills
+    columns added after it first shipped, mirroring the other migrators.
+    Idempotent and safe on a fresh database.
+    """
+    if "client_service_connections" not in inspect(db.engine).get_table_names():
+        return
+    for col, sql_type in [
+        ("source_ip", "VARCHAR(64)"),
+        ("destination_ip", "VARCHAR(64)"),
+        ("transport_type", "VARCHAR(32)"),
+        ("transport_name", "VARCHAR(255)"),
+        ("transport_notes", "TEXT"),
+        ("cluster_id", "VARCHAR(120)"),
+        ("namespace", "VARCHAR(253)"),
+        ("environment", "VARCHAR(64)"),
+        ("status", "VARCHAR(32) DEFAULT 'active'"),
+        ("is_active", "BOOLEAN DEFAULT 1"),
+    ]:
+        _add_column_if_missing("client_service_connections", col, sql_type)
+
+
 def _migrate_registry_connection_columns() -> None:
     """Forward-compatible column adds for the registry_connections table.
 
@@ -418,6 +442,7 @@ def run_migrations() -> None:
     _migrate_app_service_topology_edge_meta()
     _migrate_topology_components()
     _migrate_service_catalog_columns()
+    _migrate_client_service_connections()
     _migrate_registry_connection_columns()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations

@@ -66,6 +66,11 @@ export {
   createClient,
   updateClient,
   deleteClient,
+  listTransportTypes,
+  listClientServices,
+  saveClientServiceConnection,
+  getClientServiceTopology,
+  deleteClientServiceConnection,
 } from "./api/clientsApi";
 export {
   listComponents,

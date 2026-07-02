@@ -14,3 +14,28 @@ export const updateClient = (id, payload) =>
 
 export const deleteClient = (id) =>
   request(`/api/clients/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+// ─── Client Service Access Topology (client-specific connectivity overlays) ───
+
+export const listTransportTypes = () =>
+  request("/api/clients/transport-types");
+
+export const listClientServices = (clientId) =>
+  request(`/api/clients/${encodeURIComponent(clientId)}/services`);
+
+export const saveClientServiceConnection = (clientId, serviceId, payload) =>
+  request(
+    `/api/clients/${encodeURIComponent(clientId)}/services/${encodeURIComponent(serviceId)}/connection`,
+    { method: "POST", body: payload }
+  );
+
+export const getClientServiceTopology = (clientId, serviceId) =>
+  request(
+    `/api/clients/${encodeURIComponent(clientId)}/services/${encodeURIComponent(serviceId)}/topology`
+  );
+
+export const deleteClientServiceConnection = (clientId, serviceId, { deactivate = false } = {}) =>
+  request(
+    `/api/clients/${encodeURIComponent(clientId)}/services/${encodeURIComponent(serviceId)}/connection${deactivate ? "?deactivate=true" : ""}`,
+    { method: "DELETE" }
+  );

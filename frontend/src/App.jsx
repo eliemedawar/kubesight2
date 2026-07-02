@@ -1501,7 +1501,7 @@ export default function App() {
       case "components":
         return <ComponentsPage />;
       case "clients":
-        return <ClientsPage />;
+        return <ClientsPage clusters={allowedClusters} />;
       case "userManagement":
         return <UserManagementPage clusters={allowedClusters} />;
       case "auditLogs":

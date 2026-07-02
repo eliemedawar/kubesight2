@@ -773,6 +773,12 @@ class Client(db.Model):
         cascade="all, delete-orphan",
         lazy="joined",
     )
+    service_connections = db.relationship(
+        "ClientServiceConnection",
+        back_populates="client",
+        cascade="all, delete-orphan",
+        lazy="dynamic",
+    )
 
 
 class ClientApplicationService(db.Model):
@@ -794,6 +800,58 @@ class ClientApplicationService(db.Model):
 
     client = db.relationship("Client", back_populates="service_links")
     service = db.relationship("ApplicationService", back_populates="client_links")
+
+
+class ClientServiceConnection(db.Model):
+    """Client-specific connectivity overlay for a client↔service link.
+
+    The reusable service topology (:class:`ApplicationServiceTopologyNode` /
+    ``...Edge``) is never duplicated per client. Instead, each client-service
+    pair carries a single connectivity overlay describing *how this particular
+    client reaches the service* — source/destination IPs, transport, and the
+    cluster/namespace/environment it lands in. The composed client topology
+    endpoint prepends a client node and a transport node onto the shared service
+    topology using these fields; the service topology itself is left untouched.
+    """
+
+    __tablename__ = "client_service_connections"
+    __table_args__ = (
+        db.UniqueConstraint("client_id", "service_id", name="uq_client_service_connection"),
+        db.Index("ix_csc_client_id", "client_id"),
+        db.Index("ix_csc_service_id", "service_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, db.ForeignKey("clients.id"), nullable=False)
+    service_id = db.Column(db.Integer, db.ForeignKey("application_services.id"), nullable=False)
+    source_ip = db.Column(db.String(64), nullable=True)
+    destination_ip = db.Column(db.String(64), nullable=True)
+    # VPN | Leased Line | MPLS | Internet | Private Link | Direct Connect |
+    # Internal Network | Other  (validated in the service layer).
+    transport_type = db.Column(db.String(32), nullable=True)
+    # Free-text carrier / circuit name; required when transport_type is "Other".
+    transport_name = db.Column(db.String(255), nullable=True)
+    transport_notes = db.Column(db.Text, nullable=True)
+    cluster_id = db.Column(db.String(120), nullable=True)
+    namespace = db.Column(db.String(253), nullable=True)
+    environment = db.Column(db.String(64), nullable=True)
+    # active | inactive | degraded | planned  (free-text-ish operational status).
+    status = db.Column(db.String(32), nullable=False, default="active")
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    client = db.relationship("Client", back_populates="service_connections")
+    service = db.relationship("ApplicationService")
 
 
 class UserTemplate(db.Model):

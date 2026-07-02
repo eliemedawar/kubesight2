@@ -13,6 +13,7 @@ import LoadingState from "../components/common/LoadingState.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
+import ClientDetailModal from "../components/clients/ClientDetailModal.jsx";
 
 const STATUS_BADGE = {
   healthy: "pass",
@@ -159,73 +160,7 @@ function ClientModal({ client, allServices, onClose, onSave, saving, error }) {
   );
 }
 
-function ClientDetailPanel({ client, onEdit, onDelete, canEdit, canDelete }) {
-  return (
-    <div className="card" style={{ padding: "1.25rem" }}>
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "1rem", marginBottom: "1rem" }}>
-        <div>
-          <h3 style={{ margin: 0 }}>{client.name}</h3>
-          {client.contactPerson && (
-            <p className="muted" style={{ marginTop: "0.25rem", fontSize: "0.875rem" }}>
-              {client.contactPerson}
-            </p>
-          )}
-        </div>
-        <StatusBadge status={client.status} />
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", fontSize: "0.875rem", marginBottom: "1.25rem" }}>
-        {client.email && (
-          <div>
-            <span className="muted">Email: </span>
-            <a href={`mailto:${client.email}`}>{client.email}</a>
-          </div>
-        )}
-        {client.phone && (
-          <div>
-            <span className="muted">Phone: </span>
-            <span>{client.phone}</span>
-          </div>
-        )}
-        {client.notes && (
-          <div>
-            <span className="muted">Notes: </span>
-            <span>{client.notes}</span>
-          </div>
-        )}
-        <div className="muted">
-          {client.serviceCount ?? 0} service{client.serviceCount !== 1 ? "s" : ""}
-          {client.createdAt && ` · Created ${new Date(client.createdAt).toLocaleDateString()}`}
-        </div>
-      </div>
-
-      {(client.services || []).length > 0 && (
-        <div style={{ marginBottom: "1.25rem" }}>
-          <p className="form-label" style={{ marginBottom: "0.5rem" }}>Assigned services</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
-            {client.services.map((svc) => (
-              <div key={svc.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem" }}>
-                <span>{svc.name}</span>
-                <StatusBadge status={svc.health} />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div style={{ display: "flex", gap: "0.75rem" }}>
-        {canEdit && (
-          <button className="btn-outline btn-compact" onClick={onEdit}>Edit</button>
-        )}
-        {canDelete && (
-          <button className="btn-outline btn-compact danger" onClick={onDelete}>Delete</button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-export default function ClientsPage() {
+export default function ClientsPage({ clusters = [] }) {
   const { hasPermission } = useAuth();
   const canView = hasPermission("clients:view");
   const canCreate = hasPermission("clients:create");
@@ -367,7 +302,7 @@ export default function ClientsPage() {
         </SearchableSelect>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: selectedClient ? "1fr 1fr" : "1fr", gap: "1.25rem", alignItems: "start" }}>
+      <div>
         <div>
           {loading ? (
             <LoadingState label="Loading clients…" />
@@ -416,16 +351,19 @@ export default function ClientsPage() {
           )}
         </div>
 
-        {selectedClient && (
-          <ClientDetailPanel
-            client={selectedClient}
-            onEdit={() => openEdit(selectedClient)}
-            onDelete={() => handleDelete(selectedClient)}
-            canEdit={canUpdate}
-            canDelete={canDelete && !deleting}
-          />
-        )}
       </div>
+
+      {selectedClient && (
+        <ClientDetailModal
+          client={selectedClient}
+          clusters={clusters}
+          canUpdate={canUpdate}
+          canDelete={canDelete && !deleting}
+          onEditClient={() => { const c = selectedClient; setSelectedId(null); openEdit(c); }}
+          onDeleteClient={() => { const c = selectedClient; setSelectedId(null); handleDelete(c); }}
+          onClose={() => setSelectedId(null)}
+        />
+      )}
 
       {modalOpen && (
         <ClientModal
