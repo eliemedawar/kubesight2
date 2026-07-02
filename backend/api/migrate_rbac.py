@@ -380,6 +380,7 @@ def _migrate_client_service_connections() -> None:
         ("cluster_id", "VARCHAR(120)"),
         ("namespace", "VARCHAR(253)"),
         ("environment", "VARCHAR(64)"),
+        ("direction", "VARCHAR(16) DEFAULT 'inbound'"),
         ("status", "VARCHAR(32) DEFAULT 'active'"),
         ("is_active", "BOOLEAN DEFAULT true"),
     ]:

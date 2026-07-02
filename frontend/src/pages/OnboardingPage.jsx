@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 
 const PASSWORD_RULES = [
@@ -33,28 +33,36 @@ export default function OnboardingPage() {
   const passwordValid = passwordChecks.every((c) => c.ok);
   const passwordsMatch = password.length > 0 && password === confirm;
 
-  // When we reach the MFA setup step, fetch the TOTP secret + QR once.
+  // Guard so the enrolment request is only auto-fired once per mfa_setup entry
+  // (never in a retry loop — on failure we surface the error + a Retry button).
+  const requestedRef = useRef(false);
+
+  const loadEnrollment = useCallback(async () => {
+    setError("");
+    setEnrolling(true);
+    try {
+      const data = await startTotpSetup();
+      setEnrollment(data);
+    } catch (err) {
+      setError(err.message || "Could not start MFA setup. Please retry.");
+      requestedRef.current = false; // allow a manual retry
+    } finally {
+      setEnrolling(false);
+    }
+  }, [startTotpSetup]);
+
+  // Fetch the TOTP secret + QR once when the MFA-setup step is reached.
   useEffect(() => {
-    if (stage !== "mfa_setup" || enrollment || enrolling) {
+    if (stage !== "mfa_setup") {
+      requestedRef.current = false;
       return;
     }
-    let cancelled = false;
-    setEnrolling(true);
-    setError("");
-    startTotpSetup()
-      .then((data) => {
-        if (!cancelled) setEnrollment(data);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err.message || "Could not start MFA setup.");
-      })
-      .finally(() => {
-        if (!cancelled) setEnrolling(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [stage, enrollment, enrolling, startTotpSetup]);
+    if (requestedRef.current || enrollment) {
+      return;
+    }
+    requestedRef.current = true;
+    loadEnrollment();
+  }, [stage, enrollment, loadEnrollment]);
 
   const handlePasswordSubmit = async (event) => {
     event.preventDefault();
@@ -164,13 +172,22 @@ export default function OnboardingPage() {
               or any TOTP app, then enter the 6-digit code it shows.
             </p>
             {enrolling ? <p className="muted">Generating your MFA secret…</p> : null}
+            {!enrolling && !enrollment ? (
+              <button type="button" className="btn-outline" onClick={loadEnrollment}>
+                Retry generating QR code
+              </button>
+            ) : null}
             {enrollment ? (
               <>
-                <div className="mfa-qr">
-                  <img src={enrollment.qrDataUri} alt="MFA QR code" width={192} height={192} />
-                </div>
+                {enrollment.qrDataUri ? (
+                  <div className="mfa-qr">
+                    <img src={enrollment.qrDataUri} alt="MFA QR code" width={192} height={192} />
+                  </div>
+                ) : null}
                 <p className="mfa-secret">
-                  Can't scan? Enter this key manually:
+                  {enrollment.qrDataUri
+                    ? "Can't scan? Enter this key manually:"
+                    : "Add this key to your authenticator app:"}
                   <code>{enrollment.secret}</code>
                 </p>
               </>

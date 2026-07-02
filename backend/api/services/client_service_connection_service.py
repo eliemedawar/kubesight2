@@ -63,6 +63,7 @@ def _connection_to_dict(conn: Optional[ClientServiceConnection]) -> Optional[Dic
         "clusterId": conn.cluster_id or "",
         "namespace": conn.namespace or "",
         "environment": conn.environment or "",
+        "direction": conn.direction or "inbound",
         "status": conn.status or "active",
         "isActive": bool(conn.is_active),
         "createdAt": conn.created_at.isoformat() if conn.created_at else None,
@@ -96,14 +97,14 @@ def _normalize_transport_type(value: Any) -> Tuple[Optional[str], Optional[str]]
     return match, None
 
 
-def _normalize_direction(value: Any) -> Tuple[str, Optional[str]]:
-    """Return (direction, error). Empty falls back to the default (outbound)."""
+def _normalize_direction(value: Any, default: str = _DEFAULT_DIRECTION) -> Tuple[str, Optional[str]]:
+    """Return (direction, error). Empty falls back to ``default``."""
     raw = (str(value).strip().lower() if value is not None else "")
     if not raw:
-        return _DEFAULT_DIRECTION, None
+        return default, None
     if raw not in EGRESS_DIRECTIONS:
         allowed = ", ".join(EGRESS_DIRECTIONS)
-        return _DEFAULT_DIRECTION, f"Invalid direction. Allowed: {allowed}."
+        return default, f"Invalid direction. Allowed: {allowed}."
     return raw, None
 
 
@@ -188,6 +189,10 @@ def upsert_connection(
     if transport_type == "Other" and not transport_name:
         return None, "Transport name is required when transport type is 'Other'.", 400
 
+    direction, derr = _normalize_direction(payload.get("direction"), default="inbound")
+    if derr:
+        return None, derr, 400
+
     # Ensure the client↔service link exists so connectivity always implies the
     # service is one of the client's services (idempotent).
     link = ClientApplicationService.query.filter_by(
@@ -212,6 +217,7 @@ def upsert_connection(
     conn.cluster_id = _clean(payload.get("clusterId"), 120)
     conn.namespace = _clean(payload.get("namespace"), 253)
     conn.environment = _clean(payload.get("environment"), 64)
+    conn.direction = direction
     conn.status = _clean(payload.get("status"), 32) or "active"
     if "isActive" in payload:
         conn.is_active = bool(payload.get("isActive"))
@@ -229,6 +235,7 @@ def upsert_connection(
             "serviceId": service_id,
             "serviceName": service.name,
             "transportType": conn.transport_type,
+            "direction": conn.direction,
             "status": conn.status,
         },
     )
@@ -362,51 +369,56 @@ def get_client_service_topology(
         "transportName": transport_name,
     }
 
-    # The transport node's name already shows the transport type (e.g. "VPN"),
-    # so the client→transport edge only labels the source IP — not the transport
-    # again (which read as a duplicate "VPN").
-    overlay_edges = [
-        {
-            "id": f"edge-{client_node_id}-{transport_node_id}",
-            "sourceNodeId": client_node_id,
-            "targetNodeId": transport_node_id,
-            "scope": "external",
-            "description": f"Source {source_ip}",
-        }
-    ]
-
     nodes = [client_node, transport_node]
-    edges = list(overlay_edges)
+    edges: List[Dict[str, Any]] = []
 
+    # Attach point on the service side: its entrypoint when it has a topology,
+    # otherwise a synthetic service node so we still show Client ↔ Transport ↔
+    # Service.
     entry_id = _entry_node_id(svc_nodes, svc_edges)
     if entry_id is None:
-        # Service has no topology yet: still show Client → Transport → Service.
-        service_node_id = f"service-{service_id}"
+        service_attach_id = f"service-{service_id}"
         nodes.append({
-            "id": service_node_id,
+            "id": service_attach_id,
             "name": service.name,
             "type": "Service",
             "description": service.description or "Service entrypoint",
             "overlay": "service",
         })
-        edges.append({
-            "id": f"edge-{transport_node_id}-{service_node_id}",
-            "sourceNodeId": transport_node_id,
-            "targetNodeId": service_node_id,
-            "scope": "external",
-            "description": f"Destination {dest_ip}",
-        })
     else:
         # Splice the transport node into the existing service entrypoint.
         nodes.extend(svc_nodes)
         edges.extend(svc_edges)
-        edges.append({
-            "id": f"edge-{transport_node_id}-{entry_id}",
-            "sourceNodeId": transport_node_id,
-            "targetNodeId": entry_id,
-            "scope": "external",
-            "description": f"Destination {dest_ip}",
-        })
+        service_attach_id = entry_id
+
+    # The two connectivity hops in the *inbound* orientation (client reaches the
+    # service). The connection's saved `direction` flips the arrows:
+    #   inbound  → client → transport → service  (client talks to service)
+    #   outbound → service → transport → client  (service talks to client)
+    #   both     → both directions (bidirectional)
+    # The transport node's name already shows the transport type (e.g. "VPN"), so
+    # the client↔transport hop only labels the source IP, not the transport again.
+    direction = (conn.direction if conn else None) or "inbound"
+    conn_hops = [
+        (client_node_id, transport_node_id, f"Source {source_ip}"),
+        (transport_node_id, service_attach_id, f"Destination {dest_ip}"),
+    ]
+    seen_pairs = {(str(e["sourceNodeId"]), str(e["targetNodeId"])) for e in edges}
+    for i, (a, b, desc) in enumerate(conn_hops):
+        if direction in ("inbound", "both") and (str(a), str(b)) not in seen_pairs:
+            edges.append({
+                "id": f"edge-conn-in-{i}",
+                "sourceNodeId": a, "targetNodeId": b,
+                "scope": "external", "description": desc,
+            })
+            seen_pairs.add((str(a), str(b)))
+        if direction in ("outbound", "both") and (str(b), str(a)) not in seen_pairs:
+            edges.append({
+                "id": f"edge-conn-out-{i}",
+                "sourceNodeId": b, "targetNodeId": a,
+                "scope": "external", "description": desc,
+            })
+            seen_pairs.add((str(b), str(a)))
 
     return (
         {
@@ -689,10 +701,6 @@ def get_client_service_egress_topology(
     transport_type = (conn.transport_type if conn else None) or _NOT_CONFIGURED
     transport_name = (conn.transport_name if conn else None) or ""
 
-    # The service entrypoint (root of the *original* flow) becomes the last hop
-    # before the transport in the reversed flow.
-    entry_id = _entry_node_id(svc_nodes, svc_edges)
-
     # Reverse every service edge; flag the selected deployment as the origin.
     nodes: List[Dict[str, Any]] = []
     for n in svc_nodes:
@@ -736,26 +744,18 @@ def get_client_service_egress_topology(
     }
     nodes.extend([transport_node, client_node])
 
-    # Service-chain context: the reversed chain always feeds the transport hub
-    # through the service's original entrypoint.
-    edges.append({
-        "id": f"edge-{entry_id}-{transport_node_id}",
-        "sourceNodeId": entry_id,
-        "targetNodeId": transport_node_id,
-        "scope": "external",
-        "description": f"Source {source_ip}",
-    })
-
-    # The direct deployment↔client link, routed through the transport node, drawn
-    # on top of the reversed service chain shown above for context. Its arrow
-    # direction follows the connection's saved `direction`:
+    # Only the selected deployment links to the connectivity/client — NOT the
+    # service entrypoint. The reversed service chain (deployment → … → entrypoint)
+    # is kept purely as context and hangs off the deployment; the transport and
+    # client nodes attach solely through the direct deployment link below. Its
+    # arrow direction follows the connection's saved `direction`:
     #   outbound → deployment → transport → client  (deployment talks to client)
     #   inbound  → client → transport → deployment  (client talks to deployment)
     #   both     → both directions (bidirectional)
     direction = (conn.direction if conn else None) or _DEFAULT_DIRECTION
     # Each hop as (source, target, label) in the *outbound* orientation.
     direct_hops = [
-        (str(node_ref), transport_node_id, "Direct"),
+        (str(node_ref), transport_node_id, f"Source {source_ip}"),
         (transport_node_id, client_node_id, f"Destination {dest_ip}"),
     ]
     seen_pairs = {(str(e["sourceNodeId"]), str(e["targetNodeId"])) for e in edges}

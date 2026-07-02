@@ -872,6 +872,10 @@ class ClientServiceConnection(db.Model):
     cluster_id = db.Column(db.String(120), nullable=True)
     namespace = db.Column(db.String(253), nullable=True)
     environment = db.Column(db.String(64), nullable=True)
+    # Direction of the client↔service connectivity link drawn in the composed
+    # topology: inbound (client → service), outbound (service → client), or both
+    # (bidirectional). Validated in the service layer. Defaults to "inbound".
+    direction = db.Column(db.String(16), nullable=False, default="inbound")
     # active | inactive | degraded | planned  (free-text-ish operational status).
     status = db.Column(db.String(32), nullable=False, default="active")
     is_active = db.Column(db.Boolean, nullable=False, default=True)

@@ -105,6 +105,7 @@ function InboundTopology({ clientId, selectedServiceId }) {
         <div><span className="muted">Source IP: </span>{orDash(conn?.sourceIp)}</div>
         <div><span className="muted">Transport: </span>{orDash(conn?.transportType)}</div>
         <div><span className="muted">Destination IP: </span>{orDash(conn?.destinationIp)}</div>
+        <div><span className="muted">Direction: </span>{orDash(conn?.direction)}</div>
       </div>
       <TopologyViewer nodes={data.topology?.nodes} edges={data.topology?.edges} fillWidth />
     </>
@@ -561,6 +562,8 @@ export default function ClientDetailModal({
           clientName={client.name}
           serviceName={editingConn.serviceName}
           connection={editingConn.connection}
+          showDirection
+          defaultDirection="inbound"
           onClose={() => setEditingConn(null)}
           onSave={handleSaveConnection}
           saving={savingConn}

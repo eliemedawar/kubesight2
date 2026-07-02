@@ -31,9 +31,17 @@ def provisioning_uri(secret: str, account_name: str) -> str:
 
 
 def qr_data_uri(uri: str) -> str:
-    """Render an otpauth URI as a self-contained PNG ``data:`` URI."""
-    qr = segno.make(uri, error="m")
-    return qr.png_data_uri(scale=6, border=2)
+    """Render an otpauth URI as a self-contained PNG ``data:`` URI.
+
+    Returns an empty string if QR rendering fails for any reason — enrolment must
+    still succeed, since the user can always type the base32 secret into their
+    authenticator app manually.
+    """
+    try:
+        qr = segno.make(uri, error="m")
+        return qr.png_data_uri(scale=6, border=2)
+    except Exception:
+        return ""
 
 
 def build_enrollment(secret: str, account_name: str) -> dict:

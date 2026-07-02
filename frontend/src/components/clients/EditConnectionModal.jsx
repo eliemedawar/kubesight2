@@ -34,6 +34,7 @@ export default function EditConnectionModal({
   heading = "Edit Connection",
   subtitle,
   showDirection = false,
+  defaultDirection = "outbound",
 }) {
   const c = connection || {};
   const [sourceIp, setSourceIp] = useState(c.sourceIp || "");
@@ -41,7 +42,7 @@ export default function EditConnectionModal({
   const [transportType, setTransportType] = useState(c.transportType || "");
   const [transportName, setTransportName] = useState(c.transportName || "");
   const [transportNotes, setTransportNotes] = useState(c.transportNotes || "");
-  const [direction, setDirection] = useState(c.direction || "outbound");
+  const [direction, setDirection] = useState(c.direction || defaultDirection);
   const [status, setStatus] = useState(c.status || "active");
 
   const isOther = transportType === "Other";

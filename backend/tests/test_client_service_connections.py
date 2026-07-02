@@ -171,6 +171,56 @@ class TestComposedTopology:
             for e in topo["edges"]
         )
 
+    def _topo_with_direction(self, client, admin_token, direction):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        client.post(
+            f"/api/clients/{cl['id']}/services/{svc['id']}/connection",
+            json={"sourceIp": "196.10.20.5", "destinationIp": "10.4.12.50",
+                  "transportType": "VPN", "direction": direction},
+            headers=auth_headers(admin_token),
+        )
+        res = client.get(f"/api/clients/{cl['id']}/services/{svc['id']}/topology", headers=auth_headers(admin_token))
+        assert res.status_code == 200, res.get_json()
+        return res.get_json()["data"]
+
+    def _ids(self, topo):
+        client_node = next(n for n in topo["nodes"] if n["name"] == "Bank ABC")["id"]
+        transport = next(n for n in topo["nodes"] if n["name"] == "VPN")["id"]
+        waf = next(n for n in topo["nodes"] if n["name"] == "WAF")["id"]
+        return str(client_node), str(transport), str(waf)
+
+    def _has_edge(self, topo, src, tgt):
+        return any(
+            str(e["sourceNodeId"]) == src and str(e["targetNodeId"]) == tgt
+            for e in topo["edges"]
+        )
+
+    def test_direction_defaults_inbound(self, client, admin_token):
+        data = self._topo_with_direction(client, admin_token, "")
+        assert data["connection"]["direction"] == "inbound"
+        client_node, transport, waf = self._ids(data["topology"])
+        # inbound: client → transport → service (WAF).
+        assert self._has_edge(data["topology"], client_node, transport)
+        assert self._has_edge(data["topology"], transport, waf)
+
+    def test_direction_outbound_reverses_link(self, client, admin_token):
+        data = self._topo_with_direction(client, admin_token, "outbound")
+        client_node, transport, waf = self._ids(data["topology"])
+        # outbound: service (WAF) → transport → client.
+        assert self._has_edge(data["topology"], waf, transport)
+        assert self._has_edge(data["topology"], transport, client_node)
+        assert not self._has_edge(data["topology"], client_node, transport)
+        assert not self._has_edge(data["topology"], transport, waf)
+
+    def test_direction_both_is_bidirectional(self, client, admin_token):
+        data = self._topo_with_direction(client, admin_token, "both")
+        client_node, transport, waf = self._ids(data["topology"])
+        assert self._has_edge(data["topology"], client_node, transport)
+        assert self._has_edge(data["topology"], transport, client_node)
+        assert self._has_edge(data["topology"], transport, waf)
+        assert self._has_edge(data["topology"], waf, transport)
+
     def test_topology_without_service_topology_still_shows_chain(self, client, admin_token):
         svc = _create_service(client, admin_token, name="No Topo Svc")
         cl = _create_client(client, admin_token, service_ids=[svc["id"]])
