@@ -19,6 +19,11 @@ def require_auth(fn: Callable):
         user = get_current_user()
         if not user:
             return error_response("Unauthorized", 401)
+        # Defense in depth: full access tokens are only ever minted once
+        # onboarding is complete, but block any protected endpoint outright if a
+        # user still owes first-login setup (password change + MFA enrolment).
+        if not getattr(user, "first_login_completed", True):
+            return error_response("First-login setup is not complete.", 403)
         return fn(*args, **kwargs)
 
     return wrapper

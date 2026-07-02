@@ -52,6 +52,37 @@ class User(db.Model):
         onupdate=lambda: datetime.now(timezone.utc),
     )
     last_login_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_login_ip = db.Column(db.String(64), nullable=True)
+
+    # --- Onboarding / first-login authentication flow -------------------
+    # A newly created user receives a random temporary password (hashed in
+    # ``password_hash``) that must be changed on first login. ``mfa_enabled`` and
+    # ``totp_secret`` back TOTP MFA enrolment; ``first_login_completed`` gates
+    # dashboard access until password change + MFA setup are both done. Existing
+    # users are migrated with ``first_login_completed = True`` so they are never
+    # forced through onboarding retroactively.
+    must_change_password = db.Column(db.Boolean, nullable=False, default=False)
+    temporary_password_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # Single-use guard for the temporary password: flipped to True once the user
+    # replaces it, so a temporary password can never authenticate twice.
+    temporary_password_used = db.Column(db.Boolean, nullable=False, default=False)
+    mfa_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    totp_secret = db.Column(db.String(64), nullable=True)
+    first_login_completed = db.Column(db.Boolean, nullable=False, default=True)
+
+    # --- Failed-attempt / lockout tracking ------------------------------
+    # Password and MFA failures are counted separately. Five consecutive
+    # failures of either kind trigger a 15-minute temporary lock; three temporary
+    # locks inside 24h escalate to ``requires_admin_unlock`` (only an admin can
+    # clear it). ``is_active`` remains the canonical enabled/disabled flag.
+    failed_login_attempts = db.Column(db.Integer, nullable=False, default=0)
+    mfa_failed_attempts = db.Column(db.Integer, nullable=False, default=0)
+    last_failed_login_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    locked_until = db.Column(db.DateTime(timezone=True), nullable=True)
+    lock_reason = db.Column(db.String(64), nullable=True)
+    lock_count_24h = db.Column(db.Integer, nullable=False, default=0)
+    requires_admin_unlock = db.Column(db.Boolean, nullable=False, default=False)
+    created_by_admin_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
 
     role = db.relationship("Role", back_populates="users")
     cluster_access_entries = db.relationship(
@@ -899,6 +930,11 @@ class ClientServiceEgressConnection(db.Model):
     # Free-text carrier / circuit name; required when transport_type is "Other".
     transport_name = db.Column(db.String(255), nullable=True)
     transport_notes = db.Column(db.Text, nullable=True)
+    # Direction of the *direct* deployment↔client link drawn on top of the
+    # reversed service chain: outbound (deployment → client), inbound
+    # (client → deployment), or both (bidirectional). Validated in the service
+    # layer. Defaults to "outbound".
+    direction = db.Column(db.String(16), nullable=False, default="outbound")
     # active | inactive | degraded | planned  (free-text-ish operational status).
     status = db.Column(db.String(32), nullable=False, default="active")
     is_active = db.Column(db.Boolean, nullable=False, default=True)

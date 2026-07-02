@@ -94,6 +94,30 @@ class TestUpsertEgress:
         assert data["sourceIp"] == "10.4.12.50"
         assert data["transportType"] == "VPN"
         assert data["nodeName"] == "Backend API"
+        assert data["direction"] == "outbound"  # default
+
+    def test_direction_saved(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        node_ref = self._first_node_ref(client, admin_token, cl["id"], svc["id"])
+        res = client.post(
+            f"/api/clients/{cl['id']}/services/{svc['id']}/egress/{node_ref}/connection",
+            json={"transportType": "VPN", "direction": "both"},
+            headers=auth_headers(admin_token),
+        )
+        assert res.status_code == 201, res.get_json()
+        assert res.get_json()["data"]["direction"] == "both"
+
+    def test_invalid_direction_rejected(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        node_ref = self._first_node_ref(client, admin_token, cl["id"], svc["id"])
+        res = client.post(
+            f"/api/clients/{cl['id']}/services/{svc['id']}/egress/{node_ref}/connection",
+            json={"transportType": "VPN", "direction": "sideways"},
+            headers=auth_headers(admin_token),
+        )
+        assert res.status_code == 400
 
     def test_update_returns_200(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
@@ -177,6 +201,60 @@ class TestEgressTopology:
             str(e["sourceNodeId"]) == str(transport["id"]) and str(e["targetNodeId"]) == str(client_node["id"])
             for e in topo["edges"]
         )
+        # The deployment also talks directly to the client: a direct
+        # deployment → transport edge (transport → client already exists).
+        assert any(
+            str(e["sourceNodeId"]) == str(origin["id"]) and str(e["targetNodeId"]) == str(transport["id"])
+            for e in topo["edges"]
+        )
+
+    def _topo_with_direction(self, client, admin_token, direction):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        node_ref = TestUpsertEgress()._first_node_ref(client, admin_token, cl["id"], svc["id"])
+        client.post(
+            f"/api/clients/{cl['id']}/services/{svc['id']}/egress/{node_ref}/connection",
+            json={"sourceIp": "10.4.12.50", "destinationIp": "196.10.20.5",
+                  "transportType": "VPN", "direction": direction},
+            headers=auth_headers(admin_token),
+        )
+        res = client.get(
+            f"/api/clients/{cl['id']}/services/{svc['id']}/egress/{node_ref}/topology",
+            headers=auth_headers(admin_token),
+        )
+        assert res.status_code == 200, res.get_json()
+        return res.get_json()["data"]["topology"]
+
+    def _ids(self, topo):
+        origin = next(n for n in topo["nodes"] if n["name"] == "Backend API")["id"]
+        transport = next(n for n in topo["nodes"] if n["name"] == "VPN")["id"]
+        client_node = next(n for n in topo["nodes"] if n["name"] == "Bank ABC")["id"]
+        return str(origin), str(transport), str(client_node)
+
+    def _has_edge(self, topo, src, tgt):
+        return any(
+            str(e["sourceNodeId"]) == src and str(e["targetNodeId"]) == tgt
+            for e in topo["edges"]
+        )
+
+    def test_direction_inbound_reverses_direct_link(self, client, admin_token):
+        topo = self._topo_with_direction(client, admin_token, "inbound")
+        origin, transport, client_node = self._ids(topo)
+        # Inbound: client → transport → deployment.
+        assert self._has_edge(topo, client_node, transport)
+        assert self._has_edge(topo, transport, origin)
+        # ...and NOT the outbound orientation of the direct link.
+        assert not self._has_edge(topo, origin, transport)
+        assert not self._has_edge(topo, transport, client_node)
+
+    def test_direction_both_is_bidirectional(self, client, admin_token):
+        topo = self._topo_with_direction(client, admin_token, "both")
+        origin, transport, client_node = self._ids(topo)
+        # Both orientations of each hop are present.
+        assert self._has_edge(topo, origin, transport)
+        assert self._has_edge(topo, transport, origin)
+        assert self._has_edge(topo, transport, client_node)
+        assert self._has_edge(topo, client_node, transport)
 
     def test_topology_without_connection_shows_not_configured(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())

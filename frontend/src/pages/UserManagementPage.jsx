@@ -3,9 +3,16 @@ import {
   createUser,
   deleteUser,
   disableUser,
+  enableUser,
+  forcePasswordReset,
   getUser,
   listRoles,
   listUsers,
+  lockUser,
+  resendTemporaryPassword,
+  resetFailedAttempts,
+  resetUserMfa,
+  unlockUser,
   updateUser,
 } from "../api";
 import { useAuth } from "../context/AuthContext";
@@ -39,6 +46,8 @@ export default function UserManagementPage({ clusters = [] }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const [busyUserId, setBusyUserId] = useState(null);
 
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
@@ -102,10 +111,16 @@ export default function UserManagementPage({ clusters = [] }) {
       if (roleFilter !== "all" && user.role !== roleFilter) {
         return false;
       }
-      if (statusFilter === "active" && !user.isActive) {
+      if (statusFilter === "active" && user.accountStatus !== "active") {
         return false;
       }
       if (statusFilter === "inactive" && user.isActive) {
+        return false;
+      }
+      if (statusFilter === "locked" && !user.isLocked) {
+        return false;
+      }
+      if (statusFilter === "pending" && user.accountStatus !== "first_login_pending") {
         return false;
       }
       if (clusterFilter !== "all") {
@@ -150,14 +165,59 @@ export default function UserManagementPage({ clusters = [] }) {
         savedUser = await updateUser(editing.id, payload);
       } else {
         savedUser = await createUser(payload);
+        showTemporaryPasswordNotice(savedUser, "created");
       }
       setModalOpen(false);
-      setEditingUser(savedUser || null);
+      setEditingUser(editing ? savedUser || null : null);
       await loadData();
     } catch (err) {
       throw err;
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Surface the outcome of a temporary-password action. When SMTP is configured
+  // the password was emailed and never returned; otherwise we show the plaintext
+  // once so the admin can pass it along out of band.
+  const showTemporaryPasswordNotice = (result, verb) => {
+    if (!result) {
+      return;
+    }
+    const who = result.username ? ` for ${result.username}` : "";
+    if (result.temporaryPassword) {
+      setNotice({
+        tone: "warn",
+        title: `User ${verb}. SMTP is not configured, so share this temporary password securely${who}:`,
+        password: result.temporaryPassword,
+      });
+    } else if (result.temporaryPasswordEmailed) {
+      setNotice({
+        tone: "ok",
+        title: `User ${verb}. A temporary password has been emailed${who}.`,
+      });
+    } else {
+      setNotice({ tone: "ok", title: `User ${verb}.` });
+    }
+  };
+
+  const runAction = async (user, actionFn, { confirm, onResult } = {}) => {
+    if (confirm && !window.confirm(confirm)) {
+      return;
+    }
+    setError("");
+    setNotice(null);
+    setBusyUserId(user.id);
+    try {
+      const result = await actionFn(user.id);
+      if (onResult) {
+        onResult(result);
+      }
+      await loadData();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyUserId(null);
     }
   };
 
@@ -216,6 +276,24 @@ export default function UserManagementPage({ clusters = [] }) {
     }
   };
 
+  const STATUS_META = {
+    active: { label: "Active", tone: "ok" },
+    disabled: { label: "Disabled", tone: "warn" },
+    temp_locked: { label: "Temporarily locked", tone: "warn" },
+    admin_locked: { label: "Locked (admin unlock)", tone: "danger" },
+    first_login_pending: { label: "First login pending", tone: "info" },
+  };
+
+  const renderStatus = (user) => {
+    const meta = STATUS_META[user.accountStatus] || STATUS_META.active;
+    return (
+      <div className="user-status-cell">
+        <span className={`status-pill ${meta.tone}`}>{meta.label}</span>
+        {user.mfaEnabled ? <span className="status-pill info">MFA</span> : null}
+      </div>
+    );
+  };
+
   return (
     <div className="ops-page">
       <section className="card ops-section">
@@ -256,6 +334,20 @@ export default function UserManagementPage({ clusters = [] }) {
               <p className="banner-message">You have read-only access to user accounts.</p>
             ) : null}
 
+            {notice ? (
+              <div className={`banner-message ${notice.tone === "warn" ? "error" : ""} user-notice`}>
+                <div className="user-notice__row">
+                  <span>{notice.title}</span>
+                  <button type="button" className="btn-link" onClick={() => setNotice(null)}>
+                    Dismiss
+                  </button>
+                </div>
+                {notice.password ? (
+                  <code className="user-notice__password">{notice.password}</code>
+                ) : null}
+              </div>
+            ) : null}
+
             {loading ? (
               <LoadingState label="Loading users…" />
             ) : isAccessDeniedError(error) ? (
@@ -292,6 +384,8 @@ export default function UserManagementPage({ clusters = [] }) {
                   <option value="all">All</option>
                   <option value="active">Active</option>
                   <option value="inactive">Disabled</option>
+                  <option value="locked">Locked</option>
+                  <option value="pending">First login pending</option>
                 </SearchableSelect>
               </label>
               <label>
@@ -336,11 +430,7 @@ export default function UserManagementPage({ clusters = [] }) {
                           <td>
                             <span className="role-badge">{user.role}</span>
                           </td>
-                          <td>
-                            <span className={`status-pill ${user.isActive ? "ok" : "warn"}`}>
-                              {user.isActive ? "Active" : "Disabled"}
-                            </span>
-                          </td>
+                          <td>{renderStatus(user)}</td>
                           <td>{formatDate(user.lastLoginAt)}</td>
                           <td>{formatDate(user.createdAt)}</td>
                           <td className="table-actions">
@@ -348,6 +438,98 @@ export default function UserManagementPage({ clusters = [] }) {
                               <button type="button" className="btn-outline" onClick={() => openEdit(user.id)}>
                                 Edit
                               </button>
+                            ) : null}
+                            {canUpdate ? (
+                              <details className="row-actions-menu">
+                                <summary className="btn-outline">Security ▾</summary>
+                                <div className="row-actions-menu__panel">
+                                  {user.isLocked ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        runAction(user, unlockUser, {
+                                          confirm: `Unlock ${user.username}?`,
+                                        })
+                                      }
+                                      disabled={busyUserId === user.id}
+                                    >
+                                      Unlock account
+                                    </button>
+                                  ) : null}
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      runAction(user, resetFailedAttempts, {})
+                                    }
+                                    disabled={busyUserId === user.id}
+                                  >
+                                    Reset failed attempts
+                                  </button>
+                                  {user.mfaEnabled ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        runAction(user, resetUserMfa, {
+                                          confirm: `Reset MFA for ${user.username}? They must re-enrol at next sign-in.`,
+                                        })
+                                      }
+                                      disabled={busyUserId === user.id}
+                                    >
+                                      Reset MFA
+                                    </button>
+                                  ) : null}
+                                  {user.isActive ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        runAction(user, resendTemporaryPassword, {
+                                          confirm: `Send a new temporary password to ${user.username}?`,
+                                          onResult: (r) => showTemporaryPasswordNotice(r, "updated"),
+                                        })
+                                      }
+                                      disabled={busyUserId === user.id}
+                                    >
+                                      Resend temporary password
+                                    </button>
+                                  ) : null}
+                                  {user.isActive ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        runAction(user, forcePasswordReset, {
+                                          confirm: `Force ${user.username} to reset their password?`,
+                                          onResult: (r) => showTemporaryPasswordNotice(r, "updated"),
+                                        })
+                                      }
+                                      disabled={busyUserId === user.id}
+                                    >
+                                      Force password reset
+                                    </button>
+                                  ) : null}
+                                  {user.isActive && !user.requiresAdminUnlock && currentUser?.id !== user.id ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        runAction(user, lockUser, {
+                                          confirm: `Lock ${user.username} until an admin unlocks the account?`,
+                                        })
+                                      }
+                                      disabled={busyUserId === user.id}
+                                    >
+                                      Lock account
+                                    </button>
+                                  ) : null}
+                                  {!user.isActive ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => runAction(user, enableUser, {})}
+                                      disabled={busyUserId === user.id}
+                                    >
+                                      Enable account
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </details>
                             ) : null}
                             {user.isActive && canDisable ? (
                               <button
@@ -361,7 +543,7 @@ export default function UserManagementPage({ clusters = [] }) {
                                     : undefined
                                 }
                               >
-                                Disable User
+                                Disable
                               </button>
                             ) : null}
                             {canDelete ? (

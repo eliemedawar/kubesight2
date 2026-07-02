@@ -164,6 +164,140 @@ def send_email(to_address: str, subject: str, body: str, *, html_body: Optional[
         raise EmailDeliveryError(f"SMTP send failed: {exc}") from exc
 
 
+def send_temporary_password_email(
+    to_address: str,
+    *,
+    username: str,
+    full_name: str,
+    temporary_password: str,
+    expires_hours: int = 24,
+) -> None:
+    """Email a newly created user their one-time temporary password."""
+    greeting = full_name.strip() or username
+    subject = "Your KubeSight account — temporary password"
+    body = (
+        f"Hello {greeting},\n\n"
+        "An administrator has created a KubeSight account for you.\n\n"
+        f"Username: {username}\n"
+        f"Temporary password: {temporary_password}\n\n"
+        f"This temporary password expires in {expires_hours} hours and can be used only once.\n\n"
+        "On first sign-in you will be asked to:\n"
+        "  1. Set a new permanent password.\n"
+        "  2. Set up multi-factor authentication (MFA) with an authenticator app.\n\n"
+        "After that, every sign-in will require your password and a 6-digit MFA code.\n\n"
+        "If you were not expecting this email, contact your administrator.\n\n"
+        "— KubeSight"
+    )
+    html_body = f"""\
+<div style="font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2937;line-height:1.6">
+  <h2 style="margin:0 0 12px">Welcome to KubeSight</h2>
+  <p>Hello {greeting},</p>
+  <p>An administrator has created a KubeSight account for you.</p>
+  <table style="border-collapse:collapse;margin:16px 0">
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Username</td>
+        <td style="padding:4px 0;font-weight:600">{username}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Temporary password</td>
+        <td style="padding:4px 0"><code style="background:#f3f4f6;padding:4px 8px;border-radius:6px;font-size:15px">{temporary_password}</code></td></tr>
+  </table>
+  <p style="color:#b91c1c">This temporary password expires in {expires_hours} hours and can be used only once.</p>
+  <p>On first sign-in you will be asked to set a new permanent password and configure
+     multi-factor authentication (MFA). After that, every sign-in requires your
+     password and a 6-digit MFA code.</p>
+  <p style="color:#6b7280;font-size:13px">If you were not expecting this email, contact your administrator.</p>
+  <p style="color:#6b7280;font-size:13px">— KubeSight</p>
+</div>"""
+    send_email(to_address, subject, body, html_body=html_body)
+
+
+def send_login_notification_email(
+    to_address: str,
+    *,
+    username: str,
+    full_name: str,
+    login_time: str,
+    ip_address: str,
+    user_agent: str = "",
+) -> None:
+    """Email a security notice after a successful sign-in."""
+    greeting = full_name.strip() or username
+    subject = "KubeSight sign-in notification"
+    ua_line = f"Browser / device: {user_agent}\n" if user_agent else ""
+    body = (
+        f"Hello {greeting},\n\n"
+        "Your KubeSight account was just signed in.\n\n"
+        f"Time: {login_time}\n"
+        f"IP address: {ip_address or 'unknown'}\n"
+        f"{ua_line}"
+        "\nIf this was you, no action is needed. "
+        "If this was not you, contact your administrator immediately.\n\n"
+        "— KubeSight"
+    )
+    ua_html = (
+        f'<tr><td style="padding:4px 12px 4px 0;color:#6b7280">Browser / device</td>'
+        f'<td style="padding:4px 0">{user_agent}</td></tr>'
+        if user_agent
+        else ""
+    )
+    html_body = f"""\
+<div style="font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2937;line-height:1.6">
+  <h2 style="margin:0 0 12px">New sign-in to your KubeSight account</h2>
+  <p>Hello {greeting},</p>
+  <p>Your KubeSight account was just signed in.</p>
+  <table style="border-collapse:collapse;margin:16px 0">
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Time</td>
+        <td style="padding:4px 0;font-weight:600">{login_time}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#6b7280">IP address</td>
+        <td style="padding:4px 0">{ip_address or 'unknown'}</td></tr>
+    {ua_html}
+  </table>
+  <p>If this was you, no action is needed.</p>
+  <p style="color:#b91c1c;font-weight:600">If this was not you, contact your administrator immediately.</p>
+  <p style="color:#6b7280;font-size:13px">— KubeSight</p>
+</div>"""
+    send_email(to_address, subject, body, html_body=html_body)
+
+
+def send_security_event_email(
+    to_address: str,
+    *,
+    username: str,
+    full_name: str,
+    subject: str,
+    headline: str,
+    lines: list,
+    ip_address: str = "",
+    show_contact_admin: bool = True,
+) -> None:
+    """Send a generic account-security notification (locks, resets, changes)."""
+    greeting = full_name.strip() or username
+    body_lines = [f"Hello {greeting},", "", headline, ""]
+    body_lines.extend(lines)
+    if ip_address:
+        body_lines.append(f"IP address: {ip_address}")
+    if show_contact_admin:
+        body_lines.extend(["", "If this was not you, contact your administrator immediately."])
+    body_lines.extend(["", "— KubeSight"])
+    body = "\n".join(body_lines)
+
+    detail_html = "".join(f"<li>{line}</li>" for line in lines if line)
+    ip_html = f"<li>IP address: {ip_address}</li>" if ip_address else ""
+    contact_html = (
+        '<p style="color:#b91c1c;font-weight:600">If this was not you, contact your '
+        "administrator immediately.</p>"
+        if show_contact_admin
+        else ""
+    )
+    html_body = f"""\
+<div style="font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2937;line-height:1.6">
+  <h2 style="margin:0 0 12px">{headline}</h2>
+  <p>Hello {greeting},</p>
+  <ul style="margin:12px 0;padding-left:20px">{detail_html}{ip_html}</ul>
+  {contact_html}
+  <p style="color:#6b7280;font-size:13px">— KubeSight</p>
+</div>"""
+    send_email(to_address, subject, body, html_body=html_body)
+
+
 def send_alert_email(to_address: str, alert: Dict[str, Any], *, test: bool = False) -> None:
     if not to_address or "@" not in to_address:
         raise EmailDeliveryError("Recipient email address is not configured.")

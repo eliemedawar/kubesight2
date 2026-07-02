@@ -52,6 +52,7 @@ import {
 import { applyTheme, storeThemePreference } from "./utils/theme.js";
 
 const LoginPage = lazy(() => import("./pages/LoginPage"));
+const OnboardingPage = lazy(() => import("./pages/OnboardingPage.jsx"));
 const NoFeaturesPage = lazy(() =>
   import("./pages/AccessDeniedPage.jsx").then((module) => ({ default: module.NoFeaturesPage }))
 );
@@ -97,6 +98,7 @@ export default function App() {
     shouldShowAccessError,
     filterAlertsForUser,
     isAdmin,
+    needsOnboarding,
   } = useAuth();
   const changeBundle = useChangeBundle();
 
@@ -1623,6 +1625,17 @@ export default function App() {
       <div className="login-screen">
         <p className="muted">Loading session...</p>
       </div>
+    );
+  }
+
+  // First-login setup (password change + MFA enrolment) blocks all dashboard
+  // access until complete. This runs before the authenticated check because the
+  // user does not hold a full session token yet.
+  if (needsOnboarding) {
+    return (
+      <Suspense fallback={<RouteLoadingFallback label="Loading setup..." />}>
+        <OnboardingPage />
+      </Suspense>
     );
   }
 

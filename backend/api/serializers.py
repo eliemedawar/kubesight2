@@ -1,11 +1,36 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .access import get_user_cluster_ids, get_user_namespace_access, get_user_permission_keys, is_admin
 from .access_rules import access_rule_to_dict, apply_access_rules, get_user_access_rules
 from .models import AuditLog, Role, User, UserClusterAccess, UserNamespaceAccess
 from .rbac_data import ALL_PERMISSION_KEYS
+
+
+def _user_is_locked(user: User) -> bool:
+    locked_until = getattr(user, "locked_until", None)
+    if not locked_until:
+        return False
+    if locked_until.tzinfo is None:
+        locked_until = locked_until.replace(tzinfo=timezone.utc)
+    return locked_until > datetime.now(timezone.utc)
+
+
+def _account_status(user: User) -> str:
+    """A single label the UI renders as a status badge."""
+    if not user.is_active:
+        return "disabled"
+    if bool(getattr(user, "requires_admin_unlock", False)):
+        return "admin_locked"
+    if _user_is_locked(user):
+        return "temp_locked"
+    if bool(getattr(user, "must_change_password", False)) or not bool(
+        getattr(user, "first_login_completed", True)
+    ):
+        return "first_login_pending"
+    return "active"
 
 
 def role_has_full_access(role: Role) -> bool:
@@ -46,6 +71,16 @@ def user_to_dict(user: User, include_access: bool = False) -> Dict[str, Any]:
         "createdAt": user.created_at.isoformat() if user.created_at else None,
         "updatedAt": user.updated_at.isoformat() if user.updated_at else None,
         "lastLoginAt": user.last_login_at.isoformat() if user.last_login_at else None,
+        "lastLoginIp": getattr(user, "last_login_ip", None),
+        "mustChangePassword": bool(getattr(user, "must_change_password", False)),
+        "mfaEnabled": bool(getattr(user, "mfa_enabled", False)),
+        "firstLoginCompleted": bool(getattr(user, "first_login_completed", True)),
+        "requiresAdminUnlock": bool(getattr(user, "requires_admin_unlock", False)),
+        "lockReason": getattr(user, "lock_reason", None),
+        "failedLoginAttempts": getattr(user, "failed_login_attempts", 0) or 0,
+        "mfaFailedAttempts": getattr(user, "mfa_failed_attempts", 0) or 0,
+        "isLocked": _user_is_locked(user) or bool(getattr(user, "requires_admin_unlock", False)),
+        "accountStatus": _account_status(user),
     }
     if include_access:
         payload["isAdmin"] = is_admin(user)

@@ -36,6 +36,13 @@ TRANSPORT_TYPES = [
 
 _NOT_CONFIGURED = "Not configured"
 
+# Direction of the direct deployment↔client link (egress connections only):
+#   outbound → deployment talks to client (deployment → transport → client)
+#   inbound  → client talks to deployment (client → transport → deployment)
+#   both     → bidirectional
+EGRESS_DIRECTIONS = ["outbound", "inbound", "both"]
+_DEFAULT_DIRECTION = "outbound"
+
 
 # ---------------------------------------------------------------------------
 # Serializers
@@ -87,6 +94,17 @@ def _normalize_transport_type(value: Any) -> Tuple[Optional[str], Optional[str]]
         allowed = ", ".join(TRANSPORT_TYPES)
         return None, f"Invalid transport type. Allowed: {allowed}."
     return match, None
+
+
+def _normalize_direction(value: Any) -> Tuple[str, Optional[str]]:
+    """Return (direction, error). Empty falls back to the default (outbound)."""
+    raw = (str(value).strip().lower() if value is not None else "")
+    if not raw:
+        return _DEFAULT_DIRECTION, None
+    if raw not in EGRESS_DIRECTIONS:
+        allowed = ", ".join(EGRESS_DIRECTIONS)
+        return _DEFAULT_DIRECTION, f"Invalid direction. Allowed: {allowed}."
+    return raw, None
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +447,7 @@ def _egress_to_dict(conn: Optional[ClientServiceEgressConnection]) -> Optional[D
         "transportType": conn.transport_type or "",
         "transportName": conn.transport_name or "",
         "transportNotes": conn.transport_notes or "",
+        "direction": conn.direction or _DEFAULT_DIRECTION,
         "status": conn.status or "active",
         "isActive": bool(conn.is_active),
         "createdAt": conn.created_at.isoformat() if conn.created_at else None,
@@ -540,6 +559,10 @@ def upsert_egress_connection(
     if transport_type == "Other" and not transport_name:
         return None, "Transport name is required when transport type is 'Other'.", 400
 
+    direction, derr = _normalize_direction(payload.get("direction"))
+    if derr:
+        return None, derr, 400
+
     # Egress always implies the service is linked to the client (idempotent).
     link = ClientApplicationService.query.filter_by(
         client_id=client_id, service_id=service_id
@@ -563,6 +586,7 @@ def upsert_egress_connection(
     conn.transport_type = transport_type
     conn.transport_name = transport_name
     conn.transport_notes = _clean(payload.get("transportNotes"), 4000)
+    conn.direction = direction
     conn.status = _clean(payload.get("status"), 32) or "active"
     if "isActive" in payload:
         conn.is_active = bool(payload.get("isActive"))
@@ -582,6 +606,7 @@ def upsert_egress_connection(
             "nodeRef": node_ref,
             "nodeName": conn.node_name,
             "transportType": conn.transport_type,
+            "direction": conn.direction,
             "status": conn.status,
         },
     )
@@ -711,7 +736,8 @@ def get_client_service_egress_topology(
     }
     nodes.extend([transport_node, client_node])
 
-    # entrypoint → transport → client. Label with the egress source/destination.
+    # Service-chain context: the reversed chain always feeds the transport hub
+    # through the service's original entrypoint.
     edges.append({
         "id": f"edge-{entry_id}-{transport_node_id}",
         "sourceNodeId": entry_id,
@@ -719,13 +745,35 @@ def get_client_service_egress_topology(
         "scope": "external",
         "description": f"Source {source_ip}",
     })
-    edges.append({
-        "id": f"edge-{transport_node_id}-{client_node_id}",
-        "sourceNodeId": transport_node_id,
-        "targetNodeId": client_node_id,
-        "scope": "external",
-        "description": f"Destination {dest_ip}",
-    })
+
+    # The direct deployment↔client link, routed through the transport node, drawn
+    # on top of the reversed service chain shown above for context. Its arrow
+    # direction follows the connection's saved `direction`:
+    #   outbound → deployment → transport → client  (deployment talks to client)
+    #   inbound  → client → transport → deployment  (client talks to deployment)
+    #   both     → both directions (bidirectional)
+    direction = (conn.direction if conn else None) or _DEFAULT_DIRECTION
+    # Each hop as (source, target, label) in the *outbound* orientation.
+    direct_hops = [
+        (str(node_ref), transport_node_id, "Direct"),
+        (transport_node_id, client_node_id, f"Destination {dest_ip}"),
+    ]
+    seen_pairs = {(str(e["sourceNodeId"]), str(e["targetNodeId"])) for e in edges}
+    for i, (a, b, desc) in enumerate(direct_hops):
+        if direction in ("outbound", "both") and (str(a), str(b)) not in seen_pairs:
+            edges.append({
+                "id": f"edge-direct-out-{i}",
+                "sourceNodeId": a, "targetNodeId": b,
+                "scope": "external", "description": desc,
+            })
+            seen_pairs.add((str(a), str(b)))
+        if direction in ("inbound", "both") and (str(b), str(a)) not in seen_pairs:
+            edges.append({
+                "id": f"edge-direct-in-{i}",
+                "sourceNodeId": b, "targetNodeId": a,
+                "scope": "external", "description": desc,
+            })
+            seen_pairs.add((str(b), str(a)))
 
     origin = node_index.get(node_ref, {})
     return (

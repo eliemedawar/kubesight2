@@ -387,6 +387,7 @@ def _migrate_client_service_egress_connections() -> None:
         ("transport_type", "VARCHAR(32)"),
         ("transport_name", "VARCHAR(255)"),
         ("transport_notes", "TEXT"),
+        ("direction", "VARCHAR(16) DEFAULT 'outbound'"),
         ("status", "VARCHAR(32) DEFAULT 'active'"),
         ("is_active", "BOOLEAN DEFAULT 1"),
     ]:
@@ -449,8 +450,39 @@ def _migrate_alert_routing_user_receivers() -> None:
         db.session.commit()
 
 
+def _migrate_user_onboarding_columns() -> None:
+    """Add first-login / MFA columns to the users table (idempotent).
+
+    Existing rows must NOT be forced through onboarding, so ``first_login_completed``
+    defaults to 1 (true) — every pre-existing account keeps logging in normally.
+    Only accounts created after this migration (via the admin create-user flow)
+    are provisioned with ``first_login_completed = 0``.
+    """
+    if "users" not in inspect(db.engine).get_table_names():
+        return
+    for col, sql_type in [
+        ("last_login_ip", "VARCHAR(64)"),
+        ("must_change_password", "BOOLEAN DEFAULT 0"),
+        ("temporary_password_expires_at", "DATETIME"),
+        ("temporary_password_used", "BOOLEAN DEFAULT 0"),
+        ("mfa_enabled", "BOOLEAN DEFAULT 0"),
+        ("totp_secret", "VARCHAR(64)"),
+        ("first_login_completed", "BOOLEAN DEFAULT 1"),
+        ("failed_login_attempts", "INTEGER DEFAULT 0"),
+        ("mfa_failed_attempts", "INTEGER DEFAULT 0"),
+        ("last_failed_login_at", "DATETIME"),
+        ("locked_until", "DATETIME"),
+        ("lock_reason", "VARCHAR(64)"),
+        ("lock_count_24h", "INTEGER DEFAULT 0"),
+        ("requires_admin_unlock", "BOOLEAN DEFAULT 0"),
+        ("created_by_admin_id", "INTEGER"),
+    ]:
+        _add_column_if_missing("users", col, sql_type)
+
+
 def run_migrations() -> None:
     db.create_all()
+    _migrate_user_onboarding_columns()
     _migrate_deployment_request_columns()
     _migrate_change_bundle_columns()
     _migrate_alert_routing_user_receivers()

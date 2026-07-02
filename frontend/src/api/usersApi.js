@@ -9,6 +9,24 @@ export const disableUser = (id) => request(`/api/users/${id}`, { method: "DELETE
 export const deleteUser = (id) =>
   request(`/api/users/${id}/permanent`, { method: "DELETE" });
 
+export const resendTemporaryPassword = (id) =>
+  request(`/api/users/${id}/resend-temporary-password`, { method: "POST" });
+
+export const resetUserMfa = (id) =>
+  request(`/api/users/${id}/reset-mfa`, { method: "POST" });
+
+export const unlockUser = (id) => request(`/api/users/${id}/unlock`, { method: "POST" });
+
+export const resetFailedAttempts = (id) =>
+  request(`/api/users/${id}/reset-failed-attempts`, { method: "POST" });
+
+export const forcePasswordReset = (id) =>
+  request(`/api/users/${id}/force-password-reset`, { method: "POST" });
+
+export const lockUser = (id) => request(`/api/users/${id}/lock`, { method: "POST" });
+
+export const enableUser = (id) => request(`/api/users/${id}/enable`, { method: "POST" });
+
 export const listUserAccessRules = (userId) =>
   request(`/api/users/${userId}/access-rules`);
 

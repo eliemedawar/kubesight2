@@ -14,6 +14,13 @@ export const TRANSPORT_TYPES = [
 
 const STATUS_OPTIONS = ["active", "inactive", "degraded", "planned"];
 
+// Direction of the direct deployment↔client link (egress only).
+const DIRECTION_OPTIONS = [
+  { value: "outbound", label: "Outbound — deployment → client" },
+  { value: "inbound", label: "Inbound — client → deployment" },
+  { value: "both", label: "Both — bidirectional" },
+];
+
 // Modal to configure the client-specific connectivity overlay for one
 // client↔service link. Nothing here touches the reusable service topology.
 export default function EditConnectionModal({
@@ -26,6 +33,7 @@ export default function EditConnectionModal({
   error,
   heading = "Edit Connection",
   subtitle,
+  showDirection = false,
 }) {
   const c = connection || {};
   const [sourceIp, setSourceIp] = useState(c.sourceIp || "");
@@ -33,6 +41,7 @@ export default function EditConnectionModal({
   const [transportType, setTransportType] = useState(c.transportType || "");
   const [transportName, setTransportName] = useState(c.transportName || "");
   const [transportNotes, setTransportNotes] = useState(c.transportNotes || "");
+  const [direction, setDirection] = useState(c.direction || "outbound");
   const [status, setStatus] = useState(c.status || "active");
 
   const isOther = transportType === "Other";
@@ -47,6 +56,7 @@ export default function EditConnectionModal({
       transportName: transportName.trim(),
       transportNotes: transportNotes.trim(),
       status: status || "active",
+      ...(showDirection ? { direction } : {}),
     });
   };
 
@@ -103,6 +113,17 @@ export default function EditConnectionModal({
                 placeholder={isOther ? "Custom transport (required)" : "e.g. Circuit ID / provider"}
               />
             </label>
+            {showDirection && (
+              <label>
+                Direction
+                <SearchableSelect
+                  options={DIRECTION_OPTIONS}
+                  value={direction}
+                  onChange={(e) => setDirection(e.target.value || "outbound")}
+                  placeholder="Select direction…"
+                />
+              </label>
+            )}
             <label className="form-grid__full">
               Notes
               <textarea

@@ -123,6 +123,69 @@ def update_user(user_id: int):
     return success_response(user_to_dict(user, include_access=True))
 
 
+@users_bp.route("/<int:user_id>/resend-temporary-password", methods=["POST"])
+@require_any_permission("users:update", "users:manage")
+def resend_temporary_password(user_id: int):
+    data, error, status = user_service.resend_temporary_password(user_id)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status)
+
+
+@users_bp.route("/<int:user_id>/reset-mfa", methods=["POST"])
+@require_any_permission("users:update", "users:manage")
+def reset_mfa(user_id: int):
+    data, error, status = user_service.reset_mfa(user_id)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status)
+
+
+@users_bp.route("/<int:user_id>/unlock", methods=["POST"])
+@require_any_permission("users:update", "users:manage")
+def unlock_account(user_id: int):
+    data, error, status = user_service.unlock_account(user_id)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status)
+
+
+@users_bp.route("/<int:user_id>/reset-failed-attempts", methods=["POST"])
+@require_any_permission("users:update", "users:manage")
+def reset_failed_attempts(user_id: int):
+    data, error, status = user_service.reset_failed_attempts(user_id)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status)
+
+
+@users_bp.route("/<int:user_id>/force-password-reset", methods=["POST"])
+@require_any_permission("users:update", "users:manage")
+def force_password_reset(user_id: int):
+    data, error, status = user_service.force_password_reset(user_id)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status)
+
+
+@users_bp.route("/<int:user_id>/lock", methods=["POST"])
+@require_any_permission("users:update", "users:manage")
+def lock_account(user_id: int):
+    data, error, status = user_service.lock_account(user_id)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status)
+
+
+@users_bp.route("/<int:user_id>/enable", methods=["POST"])
+@require_any_permission("users:update", "users:manage", "users:disable")
+def enable_user(user_id: int):
+    data, error, status = user_service.enable_user(user_id)
+    if error:
+        return error_response(error, status)
+    return success_response(data, status)
+
+
 @users_bp.route("/<int:user_id>", methods=["DELETE"])
 @require_permission("users:disable")
 def disable_user(user_id: int):

@@ -207,6 +207,7 @@ function OutboundTopology({ clientId, selectedServiceId, canUpdate, reloadKey, o
             <div><span className="muted">Source IP: </span>{orDash(conn?.sourceIp)}</div>
             <div><span className="muted">Transport: </span>{orDash(conn?.transportType)}</div>
             <div><span className="muted">Destination IP: </span>{orDash(conn?.destinationIp)}</div>
+            <div><span className="muted">Direction: </span>{orDash(conn?.direction)}</div>
             <div><span className="muted">Client: </span><strong>{data.client?.name}</strong></div>
           </div>
           <TopologyViewer nodes={data.topology?.nodes} edges={data.topology?.edges} fillWidth />
@@ -571,6 +572,7 @@ export default function ClientDetailModal({
         <EditConnectionModal
           heading="Edit Egress Connection"
           subtitle={<>Service-to-client connectivity for <strong>{editingEgress.nodeName}</strong> → <strong>{client.name}</strong>.</>}
+          showDirection
           connection={editingEgress.connection}
           onClose={() => setEditingEgress(null)}
           onSave={handleSaveEgress}

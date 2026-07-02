@@ -29,7 +29,6 @@ export default function UserFormModal({
     username: "",
     fullName: "",
     email: "",
-    password: "",
     roleId: "",
     isActive: true,
   });
@@ -95,7 +94,6 @@ export default function UserFormModal({
         username: "",
         fullName: "",
         email: "",
-        password: "",
         roleId: roles[0]?.id || "",
         isActive: true,
       });
@@ -128,7 +126,6 @@ export default function UserFormModal({
         username: profile.username,
         fullName: profile.fullName || "",
         email: profile.email || "",
-        password: "",
         roleId: profile.roleId || "",
         isActive: profile.isActive !== false,
       });
@@ -177,8 +174,8 @@ export default function UserFormModal({
       setFormError("Username is required.");
       return;
     }
-    if (!editingUser && !form.password) {
-      setFormError("Password is required for new users.");
+    if (!editingUser && (!form.email.trim() || !form.email.includes("@"))) {
+      setFormError("A valid email is required — the temporary password is sent there.");
       return;
     }
 
@@ -216,7 +213,6 @@ export default function UserFormModal({
         ? []
         : grantsToAccessRules(clusterGrants, selectedRole?.permissions || []),
     };
-    if (form.password) payload.password = form.password;
 
     try {
       await onSave(payload, editingUser);
@@ -237,6 +233,12 @@ export default function UserFormModal({
         <div className="modal-card__header">
           <h3>{editingUser ? "Edit User" : "Add User"}</h3>
           <p className="muted">Assign a role and choose what clusters and resources this person can use.</p>
+          {!editingUser ? (
+            <p className="muted">
+              No password needed — KubeSight emails the user a temporary password. On first
+              sign-in they set a permanent password and enrol MFA.
+            </p>
+          ) : null}
         </div>
 
         {formError ? <p className="banner-message error">{formError}</p> : null}
@@ -265,19 +267,11 @@ export default function UserFormModal({
               />
             </label>
             <label>
-              Email
+              Email {editingUser ? "" : "(required)"}
               <input
                 type="email"
                 value={form.email}
                 onChange={(e) => setForm((p) => ({ ...p, email: e.target.value }))}
-              />
-            </label>
-            <label>
-              Password {editingUser ? "(optional)" : "(required)"}
-              <input
-                type="password"
-                value={form.password}
-                onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
               />
             </label>
             <label className="role-select-label form-grid__full">

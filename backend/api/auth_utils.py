@@ -26,16 +26,48 @@ def jwt_expiry_hours() -> int:
         return 8
 
 
-def create_access_token(user: User) -> str:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": str(user.id),
-        "username": user.username,
-        "iat": now,
-        "exp": now + timedelta(hours=jwt_expiry_hours()),
-    }
+# JWT "purpose" claim values. A full "access" token authorizes protected app
+# endpoints; the short-lived "onboarding" and "mfa" tokens authorize ONLY their
+# respective first-login / login-MFA endpoints and are rejected everywhere else.
+PURPOSE_ACCESS = "access"
+PURPOSE_ONBOARDING = "onboarding"
+PURPOSE_MFA = "mfa"
+
+# Interim tokens (onboarding, pending-MFA) are intentionally short-lived — they
+# only need to survive a single multi-step setup / challenge.
+_INTERIM_TOKEN_MINUTES = 30
+
+
+def _encode_token(payload: Dict[str, Any]) -> str:
     token = jwt.encode(payload, _jwt_secret(), algorithm="HS256")
     return token if isinstance(token, str) else token.decode("utf-8")
+
+
+def create_access_token(user: User) -> str:
+    now = datetime.now(timezone.utc)
+    return _encode_token(
+        {
+            "sub": str(user.id),
+            "username": user.username,
+            "purpose": PURPOSE_ACCESS,
+            "iat": now,
+            "exp": now + timedelta(hours=jwt_expiry_hours()),
+        }
+    )
+
+
+def create_interim_token(user: User, purpose: str) -> str:
+    """Mint a short-lived token scoped to the onboarding or MFA-challenge flow."""
+    now = datetime.now(timezone.utc)
+    return _encode_token(
+        {
+            "sub": str(user.id),
+            "username": user.username,
+            "purpose": purpose,
+            "iat": now,
+            "exp": now + timedelta(minutes=_INTERIM_TOKEN_MINUTES),
+        }
+    )
 
 
 def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
@@ -54,8 +86,7 @@ def get_bearer_token() -> Optional[str]:
     return auth_header[7:].strip() or None
 
 
-def load_user_from_token(token: str) -> Optional[User]:
-    payload = decode_access_token(token)
+def _user_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[User]:
     if not payload:
         return None
     user_id = payload.get("sub")
@@ -69,6 +100,27 @@ def load_user_from_token(token: str) -> Optional[User]:
     if not user or not user.is_active:
         return None
     return user
+
+
+def load_user_from_token(token: str) -> Optional[User]:
+    """Resolve a full access token to its user.
+
+    Interim onboarding / MFA-challenge tokens carry a different ``purpose`` and
+    are deliberately NOT accepted here, so they can never reach a protected
+    endpoint even though they are valid JWTs.
+    """
+    payload = decode_access_token(token)
+    if not payload or payload.get("purpose", PURPOSE_ACCESS) != PURPOSE_ACCESS:
+        return None
+    return _user_from_payload(payload)
+
+
+def load_user_for_purpose(token: str, purpose: str) -> Optional[User]:
+    """Resolve an interim (onboarding / MFA) token, requiring its exact purpose."""
+    payload = decode_access_token(token)
+    if not payload or payload.get("purpose") != purpose:
+        return None
+    return _user_from_payload(payload)
 
 
 def _load_user_from_api_token(raw_token: str) -> Optional[User]:

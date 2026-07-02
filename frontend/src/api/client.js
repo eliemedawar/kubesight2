@@ -40,14 +40,14 @@ export const setUnauthorizedHandler = (handler) => {
 // mount) share one network request instead of hitting the backend twice.
 const inflightGets = new Map();
 
-export async function request(path, { method = "GET", body, query, auth = true } = {}) {
+export async function request(path, { method = "GET", body, query, auth = true, authToken } = {}) {
   if (method === "GET") {
-    const key = `${path}${toQueryString(query)}|${auth ? getStoredToken() || "" : ""}`;
+    const key = `${path}${toQueryString(query)}|${auth ? authToken || getStoredToken() || "" : ""}`;
     const pending = inflightGets.get(key);
     if (pending) {
       return pending;
     }
-    const promise = performRequest(path, { method, body, query, auth }).finally(() => {
+    const promise = performRequest(path, { method, body, query, auth, authToken }).finally(() => {
       if (inflightGets.get(key) === promise) {
         inflightGets.delete(key);
       }
@@ -55,14 +55,16 @@ export async function request(path, { method = "GET", body, query, auth = true }
     inflightGets.set(key, promise);
     return promise;
   }
-  return performRequest(path, { method, body, query, auth });
+  return performRequest(path, { method, body, query, auth, authToken });
 }
 
-async function performRequest(path, { method = "GET", body, query, auth = true } = {}) {
+async function performRequest(path, { method = "GET", body, query, auth = true, authToken } = {}) {
   const url = `${getBaseUrl()}${path}${toQueryString(query)}`;
   const headers = { "Content-Type": "application/json" };
   if (auth) {
-    const token = getStoredToken();
+    // An explicit `authToken` (interim onboarding / MFA token) overrides the
+    // stored session token; those flows run before a session exists.
+    const token = authToken || getStoredToken();
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }

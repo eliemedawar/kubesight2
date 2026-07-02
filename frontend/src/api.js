@@ -1,6 +1,14 @@
 /** @deprecated Import from ./api/* modules; kept for backward compatibility. */
 export { setUnauthorizedHandler, request, getBaseUrl } from "./api/client";
-export { login, logout, fetchCurrentUser } from "./api/authApi";
+export {
+  login,
+  logout,
+  fetchCurrentUser,
+  changeTemporaryPassword,
+  setupTotp,
+  verifyFirstLoginTotp,
+  verifyLoginMfa,
+} from "./api/authApi";
 export {
   listUsers,
   getUser,
@@ -8,6 +16,13 @@ export {
   updateUser,
   disableUser,
   deleteUser,
+  resendTemporaryPassword,
+  resetUserMfa,
+  unlockUser,
+  resetFailedAttempts,
+  forcePasswordReset,
+  lockUser,
+  enableUser,
   listUserAccessRules,
   replaceUserAccessRules,
   listRoles,
