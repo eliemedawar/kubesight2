@@ -35,8 +35,8 @@ function tabStyle(active) {
     cursor: "pointer",
     fontWeight: 600,
     fontSize: "0.875rem",
-    color: active ? "var(--accent, #38bdf8)" : "var(--text-muted, #94a3b8)",
-    borderBottom: active ? "2px solid var(--accent, #38bdf8)" : "2px solid transparent",
+    color: active ? "var(--accent-strong)" : "var(--text-muted)",
+    borderBottom: active ? "2px solid var(--accent)" : "2px solid transparent",
     marginBottom: "-1px",
   };
 }
@@ -292,7 +292,7 @@ export default function ClientDetailModal({
         </div>
 
         <div className="service-detail-tabs" role="tablist"
-          style={{ display: "flex", gap: "0.25rem", borderBottom: "1px solid var(--border, #1e293b)", margin: "0.75rem 0 1rem", flexWrap: "wrap" }}>
+          style={{ display: "flex", gap: "0.25rem", borderBottom: "1px solid var(--border)", margin: "0.75rem 0 1rem", flexWrap: "wrap" }}>
           {TABS.map((t) => (
             <button key={t.id} type="button" role="tab" aria-selected={tab === t.id}
               onClick={() => setTab(t.id)} style={tabStyle(tab === t.id)}>

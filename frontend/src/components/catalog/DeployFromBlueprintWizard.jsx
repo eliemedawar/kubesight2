@@ -369,7 +369,7 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
                   type="button"
                   className="link-button"
                   onClick={() => { setCreatingNamespace(false); setTargetField("namespace", ""); }}
-                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--accent, #2563eb)" }}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--accent-strong)" }}
                 >
                   Choose existing instead
                 </button>

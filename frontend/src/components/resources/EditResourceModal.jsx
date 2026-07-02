@@ -210,9 +210,9 @@ export default function EditResourceModal({
           <p
             className="error-banner"
             style={{
-              background: "#fee2e2",
-              border: "1px solid #dc2626",
-              color: "#b91c1c",
+              background: "var(--danger-soft)",
+              border: "1px solid var(--danger-border)",
+              color: "var(--danger)",
               fontWeight: 600,
               padding: "0.75rem 1rem",
               borderRadius: "8px",

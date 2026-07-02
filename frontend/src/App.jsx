@@ -1678,30 +1678,14 @@ export default function App() {
           type="button"
           aria-label="Open change bundle"
           onClick={changeBundle.openDrawer}
-          style={{
-            position: "fixed",
-            right: 20,
-            bottom: 20,
-            zIndex: 60,
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "10px 16px",
-            borderRadius: 999,
-            border: "1px solid #334155",
-            background: "#38bdf8",
-            color: "#0f172a",
-            fontWeight: 600,
-            boxShadow: "0 8px 24px rgba(0,0,0,.35)",
-            cursor: "pointer",
-          }}
+          className="fab"
         >
           Change Bundle
           {changeBundle.itemCount > 0 ? (
             <span
               style={{
-                background: "#0f172a",
-                color: "#38bdf8",
+                background: "var(--bg-main)",
+                color: "var(--accent-strong)",
                 borderRadius: 999,
                 minWidth: 20,
                 height: 20,

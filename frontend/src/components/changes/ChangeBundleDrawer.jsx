@@ -15,9 +15,9 @@ const ACTION_OPTIONS = [
 const ACTION_LABEL = Object.fromEntries(ACTION_OPTIONS.map((o) => [o.value, o.label]));
 
 const STATUS_COLORS = {
-  valid: "#16a34a",
-  invalid: "#dc2626",
-  pending: "#94a3b8",
+  valid: "var(--ok)",
+  invalid: "var(--danger)",
+  pending: "var(--text-muted)",
 };
 
 function ActionBadge({ type }) {
@@ -26,9 +26,9 @@ function ActionBadge({ type }) {
       style={{
         fontSize: "0.7rem",
         fontWeight: 600,
-        color: "#38bdf8",
-        background: "rgba(56,189,248,0.12)",
-        border: "1px solid rgba(56,189,248,0.3)",
+        color: "var(--info)",
+        background: "var(--info-soft)",
+        border: "1px solid var(--info-border)",
         borderRadius: 6,
         padding: "2px 8px",
         whiteSpace: "nowrap",
@@ -133,9 +133,9 @@ export default function ChangeBundleDrawer() {
           right: 0,
           height: "100vh",
           width: "min(560px, 100vw)",
-          background: "var(--surface, #1e293b)",
-          borderLeft: "1px solid var(--border, #334155)",
-          boxShadow: "-12px 0 30px rgba(0,0,0,.35)",
+          background: "var(--bg-elevated)",
+          borderLeft: "1px solid var(--border)",
+          boxShadow: "var(--shadow-lg)",
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
@@ -143,7 +143,7 @@ export default function ChangeBundleDrawer() {
       >
         <header
           className="modal-header"
-          style={{ padding: "var(--space-3)", borderBottom: "1px solid var(--border,#334155)" }}
+          style={{ padding: "var(--space-3)", borderBottom: "1px solid var(--border)" }}
         >
           <div>
             <h3 style={{ margin: 0 }}>Change Bundle</h3>
@@ -179,7 +179,7 @@ export default function ChangeBundleDrawer() {
                   <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
                     <ActionBadge type={item.actionType} />
                     <span
-                      style={{ fontSize: "0.72rem", color: STATUS_COLORS[item.validationStatus] || "#94a3b8" }}
+                      style={{ fontSize: "0.72rem", color: STATUS_COLORS[item.validationStatus] || "var(--text-muted)" }}
                     >
                       {item.validationStatus === "invalid" ? "✕ invalid" : item.validationStatus === "valid" ? "✓ valid" : "…"}
                     </span>
@@ -190,7 +190,7 @@ export default function ChangeBundleDrawer() {
                     {item.resourceName ? ` / ${item.resourceKind} ${item.resourceName}` : ""}
                   </div>
                   {item.validationMessage ? (
-                    <p className="muted" style={{ margin: "4px 0 0", fontSize: "0.75rem", color: "#dc2626" }}>
+                    <p className="muted" style={{ margin: "4px 0 0", fontSize: "0.75rem", color: "var(--danger)" }}>
                       {item.validationMessage}
                     </p>
                   ) : null}
@@ -216,7 +216,7 @@ export default function ChangeBundleDrawer() {
                     <button
                       type="button"
                       className="btn-text"
-                      style={{ fontSize: "0.78rem", padding: 0, color: "#dc2626" }}
+                      style={{ fontSize: "0.78rem", padding: 0, color: "var(--danger)" }}
                       onClick={() => removeItem(item.id)}
                     >
                       Remove
@@ -228,9 +228,9 @@ export default function ChangeBundleDrawer() {
                         marginTop: 8,
                         maxHeight: 240,
                         overflow: "auto",
-                        background: "#0f172a",
-                        color: "#e2e8f0",
-                        border: "1px solid #334155",
+                        background: "var(--bg-inset)",
+                        color: "var(--text-main)",
+                        border: "1px solid var(--border)",
                         borderRadius: 8,
                         padding: 10,
                         fontSize: "0.72rem",
@@ -247,9 +247,9 @@ export default function ChangeBundleDrawer() {
                         marginTop: 8,
                         maxHeight: 240,
                         overflow: "auto",
-                        background: "#0f172a",
-                        color: "#e2e8f0",
-                        border: "1px solid #334155",
+                        background: "var(--bg-inset)",
+                        color: "var(--text-main)",
+                        border: "1px solid var(--border)",
                         borderRadius: 8,
                         padding: 10,
                         fontSize: "0.72rem",
@@ -266,7 +266,7 @@ export default function ChangeBundleDrawer() {
           )}
         </div>
 
-        <footer style={{ borderTop: "1px solid var(--border,#334155)", padding: "var(--space-3)" }}>
+        <footer style={{ borderTop: "1px solid var(--border)", padding: "var(--space-3)" }}>
           <div className="form-grid">
             <label className="form-grid__full">
               Note / reason
@@ -297,7 +297,7 @@ export default function ChangeBundleDrawer() {
             </label>
             <label
               className="form-grid__full"
-              style={{ flexDirection: "row", alignItems: "center", gap: 8, color: "#ef4444", fontWeight: 600 }}
+              style={{ flexDirection: "row", alignItems: "center", gap: 8, color: "var(--danger)", fontWeight: 600 }}
             >
               <input
                 type="checkbox"

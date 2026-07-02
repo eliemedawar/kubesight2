@@ -259,7 +259,7 @@ export default function RoleFormModal({
                           {isDangerous(key) ? (
                             <span
                               title="Privileged / destructive permission"
-                              style={{ color: "#dc2626", marginLeft: 6, fontSize: "0.7rem", fontWeight: 600 }}
+                              style={{ color: "var(--danger)", marginLeft: 6, fontSize: "0.7rem", fontWeight: 600 }}
                             >
                               ●
                             </span>

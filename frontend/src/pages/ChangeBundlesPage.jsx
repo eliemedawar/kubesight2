@@ -12,16 +12,16 @@ import { usePermission } from "../hooks/usePermission.js";
 import { useChangeBundle } from "../context/ChangeBundleContext";
 
 const STATUS_STYLE = {
-  draft: { bg: "rgba(148,163,184,0.15)", fg: "#94a3b8", label: "Draft" },
-  pending_approval: { bg: "rgba(251,191,36,0.15)", fg: "#fbbf24", label: "Pending approval" },
-  approved: { bg: "rgba(56,189,248,0.15)", fg: "#38bdf8", label: "Approved" },
-  rejected: { bg: "rgba(220,38,38,0.15)", fg: "#f87171", label: "Rejected" },
-  scheduled: { bg: "rgba(56,189,248,0.15)", fg: "#38bdf8", label: "Scheduled" },
-  deploying: { bg: "rgba(168,85,247,0.15)", fg: "#c084fc", label: "Deploying" },
-  completed: { bg: "rgba(22,163,74,0.15)", fg: "#4ade80", label: "Completed" },
-  failed: { bg: "rgba(220,38,38,0.15)", fg: "#f87171", label: "Failed" },
-  partially_failed: { bg: "rgba(234,88,12,0.15)", fg: "#fb923c", label: "Partially failed" },
-  expired: { bg: "rgba(148,163,184,0.15)", fg: "#94a3b8", label: "Expired" },
+  draft: { bg: "var(--bg-interactive)", fg: "var(--text-muted)", label: "Draft" },
+  pending_approval: { bg: "var(--warn-soft)", fg: "var(--warn)", label: "Pending approval" },
+  approved: { bg: "var(--info-soft)", fg: "var(--info)", label: "Approved" },
+  rejected: { bg: "var(--danger-soft)", fg: "var(--danger)", label: "Rejected" },
+  scheduled: { bg: "var(--info-soft)", fg: "var(--info)", label: "Scheduled" },
+  deploying: { bg: "var(--ai-soft)", fg: "var(--ai)", label: "Deploying" },
+  completed: { bg: "var(--ok-soft)", fg: "var(--ok)", label: "Completed" },
+  failed: { bg: "var(--danger-soft)", fg: "var(--danger)", label: "Failed" },
+  partially_failed: { bg: "var(--warn-soft)", fg: "var(--warn)", label: "Partially failed" },
+  expired: { bg: "var(--bg-interactive)", fg: "var(--text-muted)", label: "Expired" },
 };
 
 function StatusBadge({ status }) {
@@ -48,7 +48,7 @@ function ItemRow({ item }) {
     <li className="card" style={{ padding: "var(--space-2) var(--space-3)" }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
         <div style={{ fontSize: "0.85rem" }}>
-          <span style={{ color: "#38bdf8", fontWeight: 600 }}>{item.actionType}</span>{" "}
+          <span style={{ color: "var(--accent-strong)", fontWeight: 600 }}>{item.actionType}</span>{" "}
           — {item.clusterName || item.clusterId}
           {item.namespace ? ` / ${item.namespace}` : ""}
           {item.resourceName ? ` / ${item.resourceKind} ${item.resourceName}` : ""}
@@ -56,7 +56,7 @@ function ItemRow({ item }) {
         <StatusBadge status={item.status === "pending" ? "draft" : item.status} />
       </div>
       {item.executionResult?.error ? (
-        <p className="muted" style={{ margin: "4px 0 0", fontSize: "0.75rem", color: "#f87171" }}>
+        <p className="muted" style={{ margin: "4px 0 0", fontSize: "0.75rem", color: "var(--danger)" }}>
           {item.executionResult.error}
         </p>
       ) : null}
@@ -76,9 +76,9 @@ function ItemRow({ item }) {
             marginTop: 8,
             maxHeight: 240,
             overflow: "auto",
-            background: "#0f172a",
-            color: "#e2e8f0",
-            border: "1px solid #334155",
+            background: "var(--bg-inset)",
+            color: "var(--text-main)",
+            border: "1px solid var(--border-strong)",
             borderRadius: 8,
             padding: 10,
             fontSize: "0.72rem",
@@ -141,7 +141,7 @@ function BundleCard({ bundle, canManage, onApprove, onReject, onDelete, busy }) 
             </p>
           ) : null}
           {bundle.rejectionReason ? (
-            <p className="muted" style={{ margin: "2px 0 0", fontSize: "0.78rem", color: "#f87171" }}>
+            <p className="muted" style={{ margin: "2px 0 0", fontSize: "0.78rem", color: "var(--danger)" }}>
               Reason: {bundle.rejectionReason}
             </p>
           ) : null}
@@ -177,7 +177,7 @@ function BundleCard({ bundle, canManage, onApprove, onReject, onDelete, busy }) 
             <button
               type="button"
               className="btn-text btn-compact"
-              style={{ color: "#dc2626" }}
+              style={{ color: "var(--danger)" }}
               disabled={busy}
               onClick={() => onDelete(bundle)}
             >

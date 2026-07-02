@@ -314,7 +314,7 @@ const DEFAULT_PROTOCOL = "HTTP";
 const DEFAULT_SCOPE = "internal";
 
 function edgeStroke(scope) {
-  return scope === "external" ? "#f5b945" : "#64748b";
+  return scope === "external" ? "var(--warn)" : "var(--text-muted)";
 }
 
 function TopologyEditor({ topology, onChange, components = [] }) {
@@ -586,10 +586,10 @@ function TopologyEditor({ topology, onChange, components = [] }) {
             <svg className="topo-canvas-edges" width={contentW} height={contentH}>
               <defs>
                 <marker id="topo-edit-arrow" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
-                  <polygon points="0 0, 9 3.5, 0 7" fill="#64748b" />
+                  <polygon points="0 0, 9 3.5, 0 7" fill="var(--text-muted)" />
                 </marker>
                 <marker id="topo-edit-arrow-ext" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
-                  <polygon points="0 0, 9 3.5, 0 7" fill="#f5b945" />
+                  <polygon points="0 0, 9 3.5, 0 7" fill="var(--warn)" />
                 </marker>
               </defs>
               {edges.map((edge, idx) => {
@@ -620,7 +620,7 @@ function TopologyEditor({ topology, onChange, components = [] }) {
               {linking && nodeById[linking.fromTempId] && (
                 <path
                   d={`M ${handlePos(nodeById[linking.fromTempId]).x},${handlePos(nodeById[linking.fromTempId]).y} L ${linking.x},${linking.y}`}
-                  fill="none" stroke="#38bdf8" strokeWidth={2} strokeDasharray="5 4"
+                  fill="none" stroke="var(--accent)" strokeWidth={2} strokeDasharray="5 4"
                 />
               )}
             </svg>
@@ -1022,8 +1022,8 @@ function tabStyle(active) {
     cursor: "pointer",
     fontWeight: 600,
     fontSize: "0.875rem",
-    color: active ? "var(--accent, #38bdf8)" : "var(--text-muted, #94a3b8)",
-    borderBottom: active ? "2px solid var(--accent, #38bdf8)" : "2px solid transparent",
+    color: active ? "var(--accent-strong)" : "var(--text-muted)",
+    borderBottom: active ? "2px solid var(--accent)" : "2px solid transparent",
     marginBottom: "-1px",
   };
 }
@@ -1126,7 +1126,7 @@ function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdi
 
         {/* Sheet tabs: main service view ↔ DR status */}
         <div className="service-detail-tabs" role="tablist"
-          style={{ display: "flex", gap: "0.25rem", borderBottom: "1px solid var(--border, #1e293b)", margin: "0.75rem 0 1rem" }}>
+          style={{ display: "flex", gap: "0.25rem", borderBottom: "1px solid var(--border)", margin: "0.75rem 0 1rem" }}>
           <button type="button" role="tab" aria-selected={tab === "overview"}
             className={`tab-btn${tab === "overview" ? " tab-btn--active" : ""}`}
             onClick={() => setTab("overview")}

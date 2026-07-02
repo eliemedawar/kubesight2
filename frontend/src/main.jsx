@@ -7,6 +7,7 @@ import { ChangeBundleProvider } from "./context/ChangeBundleContext.jsx";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import "./index.css";
 import "./styles/ui-polish.css";
+import "./styles/premium.css";
 
 async function bootstrap() {
   await loadRuntimeConfig();

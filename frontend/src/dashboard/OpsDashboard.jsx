@@ -5,19 +5,14 @@ import { cssVar, drawArea, drawLines, drawStacked } from "./charts/chartDraw.js"
 import { TIME_RANGES } from "./useDashboardSeries.js";
 import { formatDashboardTime, formatLatestVersion } from "../utils/dashboardStatus.js";
 
-// Reference palette (KubeSight Operations Dashboard mock).
-const TEAL = "#2dd4a7";
-const PURPLE = "#8b7ff0";
-const AMBER = "#f5b945";
-const DANGER = "#f87171";
-
-// Per-status accent for dots / pills / bars.
+// Per-status accent for dots / pills / bars — resolved from design tokens at
+// call time so the palette tracks the active theme.
 function statusColor(status) {
   const s = String(status || "").toLowerCase();
-  if (s === "critical" || s === "failed" || s === "fail") return DANGER;
-  if (s === "warning" || s === "warn") return AMBER;
-  if (s === "healthy" || s === "passed" || s === "pass" || s === "ready") return TEAL;
-  return "#5e6678";
+  if (s === "critical" || s === "failed" || s === "fail") return cssVar("--danger", "#f04444");
+  if (s === "warning" || s === "warn") return cssVar("--warn", "#f5a623");
+  if (s === "healthy" || s === "passed" || s === "pass" || s === "ready") return cssVar("--ok", "#26c165");
+  return cssVar("--text-muted", "#7c8ba1");
 }
 
 function statusLabel(status) {
@@ -90,6 +85,11 @@ export default function OpsDashboard({
   );
 
   const accent = cssVar("--accent", "#3b82f6");
+  // Chart palette from design tokens (theme-aware), resolved per render.
+  const TEAL = cssVar("--chart-8", "#2dd4bf");
+  const PURPLE = cssVar("--chart-3", "#8b5cf6");
+  const AMBER = cssVar("--warn", "#f5a623");
+  const DANGER = cssVar("--danger", "#f04444");
   const bands = series?.cpuBands || [];
   const bandColors = bands.map((_, i) => (i === 0 ? accent : i === 1 ? TEAL : PURPLE));
   const cpuPeak = series?.cpu?.length ? Math.round(Math.max(...series.cpu)) : null;

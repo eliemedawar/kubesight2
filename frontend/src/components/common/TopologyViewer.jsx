@@ -6,17 +6,17 @@ import { useMemo } from "react";
 
 // Component health → topology node indicator color.
 export const TOPO_STATUS_COLOR = {
-  healthy: "#22c55e",
-  degraded: "#f59e0b",
-  unhealthy: "#ef4444",
-  unknown: "#64748b",
+  healthy: "var(--ok)",
+  degraded: "var(--warn)",
+  unhealthy: "var(--danger)",
+  unknown: "var(--text-muted)",
 };
 
 // Accent colors for the client-access overlay node types.
 const OVERLAY_ACCENT = {
-  client: "#38bdf8",
-  transport: "#a78bfa",
-  service: "#22c55e",
+  client: "var(--info)",
+  transport: "var(--ai)",
+  service: "var(--ok)",
 };
 
 export const NODE_W = 160;
@@ -190,10 +190,10 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
             <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="rgba(0,0,0,0.5)" />
           </filter>
           <marker id="topo-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="#64748b" />
+            <polygon points="0 0, 8 3, 0 6" fill="var(--text-muted)" />
           </marker>
           <marker id="topo-arrow-ext" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="#f5b945" />
+            <polygon points="0 0, 8 3, 0 6" fill="var(--warn)" />
           </marker>
         </defs>
 
@@ -234,7 +234,7 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
             }
 
             const isExternal = edge.scope === "external";
-            const stroke = isExternal ? "#f5b945" : "#475569";
+            const stroke = isExternal ? "var(--warn)" : "var(--border-strong)";
             const protocol = edge.protocol || "";
             const description = edge.description || "";
             const descLabel = description.length > 32 ? description.slice(0, 31) + "…" : description;
@@ -250,15 +250,15 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
                   markerEnd={`url(#${isExternal ? "topo-arrow-ext" : "topo-arrow"})`} />
                 {protocol ? (
                   <text x={labelX} y={labelY - 5} textAnchor="middle"
-                    fill={isExternal ? "#f5b945" : "#94a3b8"} fontSize={10} fontWeight={600}
-                    style={{ paintOrder: "stroke" }} stroke="#0b1120" strokeWidth={3}>
+                    fill={isExternal ? "var(--warn)" : "var(--text-muted)"} fontSize={10} fontWeight={600}
+                    style={{ paintOrder: "stroke" }} stroke="var(--bg-inset)" strokeWidth={3}>
                     {protocol}
                   </text>
                 ) : null}
                 {description ? (
                   <text x={labelX} y={labelY + (protocol ? 7 : -2)} textAnchor="middle"
-                    fill="#94a3b8" fontSize={9}
-                    style={{ paintOrder: "stroke" }} stroke="#0b1120" strokeWidth={3}>
+                    fill="var(--text-muted)" fontSize={9}
+                    style={{ paintOrder: "stroke" }} stroke="var(--bg-inset)" strokeWidth={3}>
                     {descLabel}
                   </text>
                 ) : null}
@@ -278,14 +278,14 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
 
             const overlayAccent = node.overlay ? OVERLAY_ACCENT[node.overlay] : null;
             const statusColor = node.componentStatus ? TOPO_STATUS_COLOR[node.componentStatus] : null;
-            const strokeColor = overlayAccent || statusColor || "#334155";
+            const strokeColor = overlayAccent || statusColor || "var(--border-strong)";
 
             return (
               <g key={node.id} title={node.description || node.name}>
                 {node.description ? <title>{node.description}</title> : null}
                 <rect x={pos.x} y={pos.y} width={NODE_W} height={NODE_H}
                   rx={8} ry={8}
-                  fill={overlayAccent ? "#0f1e33" : "#1e293b"} stroke={strokeColor} strokeWidth={overlayAccent || statusColor ? 2 : 1.5}
+                  fill={overlayAccent ? "var(--bg-panel-strong)" : "var(--bg-panel)"} stroke={strokeColor} strokeWidth={overlayAccent || statusColor ? 2 : 1.5}
                   filter="url(#topo-shadow)" />
                 {statusColor && !overlayAccent && (
                   <circle cx={pos.x + NODE_W - 11} cy={pos.y + 11} r={4} fill={statusColor}>
@@ -295,13 +295,13 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
                 {hasType && (
                   <text x={pos.x + NODE_W / 2} y={typeY}
                     textAnchor="middle" dominantBaseline="middle"
-                    fill={overlayAccent || "#64748b"} fontSize={10} fontWeight={500} letterSpacing="0.06em">
+                    fill={overlayAccent || "var(--text-muted)"} fontSize={10} fontWeight={500} letterSpacing="0.06em">
                     {typeLabel?.toUpperCase()}
                   </text>
                 )}
                 <text x={pos.x + NODE_W / 2} y={nameY}
                   textAnchor="middle" dominantBaseline="middle"
-                  fill="#e2e8f0" fontSize={13} fontWeight={600}>
+                  fill="var(--text-main)" fontSize={13} fontWeight={600}>
                   {label}
                 </text>
               </g>

@@ -1,0 +1,415 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   KubeSight Premium Layer — Design System v2 "Mission Control"
+   Loaded after index.css + ui-polish.css: cross-cutting finishing pass for
+   every primitive (forms, tables, tabs, modals, dropdowns, pills, feedback).
+   Rules here use tokens only — see design-system/MASTER.md.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Forms: inputs, selects, textareas ─── */
+input,
+select,
+textarea {
+  background: var(--bg-panel);
+  color: var(--text-main);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.75rem;
+  font-size: var(--font-size-sm);
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
+input:hover:not(:disabled):not(:focus),
+select:hover:not(:disabled):not(:focus),
+textarea:hover:not(:disabled):not(:focus) {
+  border-color: var(--text-muted);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--bg-panel-strong);
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%237c8ba1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  padding-right: 2.1rem;
+}
+
+textarea {
+  line-height: 1.55;
+  resize: vertical;
+}
+
+label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+  width: 1rem;
+  height: 1rem;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* ─── Tables ─── */
+.table-shell,
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-sm), var(--highlight);
+}
+
+th {
+  font-size: 0.6875rem;
+  letter-spacing: 0.07em;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-panel-strong);
+  border-bottom: 1px solid var(--border);
+  padding-top: 0.65rem;
+  padding-bottom: 0.65rem;
+}
+
+td {
+  font-size: var(--font-size-sm);
+  color: var(--text-main);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+tbody tr:hover {
+  background: var(--bg-interactive);
+}
+
+.data-table-row--clickable,
+tr[role="button"] {
+  cursor: pointer;
+}
+
+.table-cell-mono,
+td .mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+td.numeric,
+th.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Pagination */
+.data-table-pager__btn {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-subtle);
+}
+
+.data-table-pager__btn:hover:not(:disabled) {
+  background: var(--bg-interactive);
+  border-color: transparent;
+  color: var(--text-main);
+}
+
+.data-table-pager__info {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Status pills — tokenized, with leading dot ─── */
+.status-pill {
+  gap: 0.4rem;
+  padding: 0.2rem 0.65rem 0.2rem 0.55rem;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.status-pill::before {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.status-pill.ok { color: var(--ok); }
+.status-pill.warn { color: var(--warn); }
+.status-pill.danger { color: var(--danger); }
+.status-pill.info { color: var(--info); }
+.status-pill.unknown {
+  color: var(--text-muted);
+  background: var(--bg-interactive);
+  border-color: var(--border);
+}
+
+/* ─── Tabs — underline style ─── */
+.tab-bar {
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 0;
+}
+
+.tab-bar button {
+  position: relative;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 0.5rem 0.85rem calc(0.5rem + 2px);
+  margin-bottom: -1px;
+  box-shadow: inset 0 -2px 0 transparent;
+  transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.tab-bar button:hover {
+  background: var(--bg-interactive);
+  color: var(--text-main);
+  border: none;
+}
+
+.tab-bar button.active {
+  background: transparent;
+  border: none;
+  color: var(--accent-strong);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.tab-bar button:focus-visible {
+  box-shadow: var(--ring), inset 0 -2px 0 var(--accent);
+}
+
+/* ─── Modals — both modal systems (overlay/panel and backdrop/card) ─── */
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modal-rise {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.modal-overlay,
+.modal-backdrop {
+  background: var(--backdrop);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: modal-fade-in var(--dur) var(--ease);
+}
+
+.modal-panel,
+.modal-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg), var(--highlight);
+  animation: modal-rise var(--dur) var(--ease);
+}
+
+.modal-header,
+.modal-card__header {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.modal-header h3,
+.modal-card__header h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+}
+
+.modal-actions {
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.modal-close {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.modal-close:hover {
+  background: var(--bg-interactive);
+  border-color: transparent;
+  color: var(--text-main);
+}
+
+/* ─── Dropdowns / popovers ─── */
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.notifications-dropdown,
+.ss-menu {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md), var(--highlight);
+  animation: pop-in var(--dur-fast) var(--ease);
+}
+
+/* ─── Icon buttons ─── */
+.icon-button {
+  border-radius: var(--radius-md);
+  color: var(--text-subtle);
+}
+
+.icon-button:hover {
+  color: var(--text-main);
+}
+
+.user-avatar {
+  border: 1px solid var(--accent-border);
+}
+
+/* ─── Topbar details ─── */
+.topbar-field label,
+.topbar-field .eyebrow {
+  font-size: 0.6563rem;
+  margin-bottom: 0;
+}
+
+.topbar select {
+  background-color: var(--bg-panel-strong);
+  border-color: var(--border);
+  font-weight: 500;
+}
+
+.topbar select:hover:not(:disabled):not(:focus) {
+  border-color: var(--border-strong);
+  background-color: var(--bg-interactive);
+}
+
+/* ─── Feedback: empty, loading, error ─── */
+.empty-state {
+  gap: var(--space-2);
+}
+
+.empty-state__icon {
+  width: 3.25rem;
+  height: 3.25rem;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  margin-bottom: var(--space-2);
+}
+
+.empty-state__title {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.error-banner,
+.banner-message--error {
+  border: 1px solid var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--text-main);
+  border-radius: var(--radius-md);
+}
+
+/* ─── Code & log wells ─── */
+.log-output,
+pre,
+code {
+  font-family: var(--font-mono);
+}
+
+.log-output {
+  background: var(--bg-inset);
+  border-radius: var(--radius-md);
+  line-height: 1.65;
+}
+
+kbd {
+  font-family: var(--font-mono);
+}
+
+/* ─── Wizard steppers — shared upgrade for any .wizard-stepper pattern ─── */
+.wizard-stepper .step-index,
+.wizard-step-index {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Floating action button (change bundle) ─── */
+.fab {
+  position: fixed;
+  right: var(--space-6);
+  bottom: var(--space-6);
+  z-index: 45;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.1rem;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: var(--shadow-lg);
+}
+
+.fab:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* ─── Section headings inside pages ─── */
+.ops-section h3,
+.card > h3,
+.card header h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--text-strong);
+}
+
+/* ─── AI (Hermes) surfaces ─── */
+.ai-accent,
+.hermes-badge {
+  background: var(--ai-soft);
+  border: 1px solid var(--ai-border);
+  color: var(--ai);
+  border-radius: var(--radius-full);
+  padding: 0.15rem 0.6rem;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+/* ─── Selection color ─── */
+::selection {
+  background: var(--accent-soft);
+  color: var(--text-strong);
+}

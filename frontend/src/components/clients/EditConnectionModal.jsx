@@ -91,7 +91,7 @@ export default function EditConnectionModal({
               />
             </label>
             <label>
-              Transport name/details {isOther && <span style={{ color: "var(--danger, #ef4444)" }}>*</span>}
+              Transport name/details {isOther && <span style={{ color: "var(--danger)" }}>*</span>}
               <input
                 value={transportName}
                 onChange={(e) => setTransportName(e.target.value)}

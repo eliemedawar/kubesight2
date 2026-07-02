@@ -286,7 +286,7 @@ export default function BlueprintEditorModal({ blueprint, categories = [], onClo
                 <button type="button" className="link-button"
                   onClick={() => { setCreatingCategory(false); set("category", ""); }}
                   style={{ background: "none", border: "none", padding: 0, cursor: "pointer",
-                    color: "var(--accent, #2563eb)", fontSize: "0.75rem", marginTop: "0.2rem", textAlign: "left" }}>
+                    color: "var(--accent-strong)", fontSize: "0.75rem", marginTop: "0.2rem", textAlign: "left" }}>
                   Choose existing instead
                 </button>
               )}

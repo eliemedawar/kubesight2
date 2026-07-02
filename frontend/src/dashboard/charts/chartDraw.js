@@ -120,7 +120,7 @@ export function drawArea(ctx, w, h, arr, color, maxY, limit, mono) {
   if (limit) {
     const ly = h - padB - (limit / maxY) * (h - padB);
     ctx.setLineDash([5, 4]);
-    ctx.strokeStyle = LIMIT_COLOR;
+    ctx.strokeStyle = cssVar("--warn", LIMIT_COLOR);
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.moveTo(padL, ly);

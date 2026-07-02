@@ -272,7 +272,7 @@ export default function ConfigureRecipientsModal({ open, onClose, clusters = [] 
                 {!config.smtpConfigured ? (
                   <>
                     <br />
-                    <span style={{ color: "var(--color-warn, #fbbf24)" }}>
+                    <span style={{ color: "var(--warn)" }}>
                       SMTP is not configured — emails will not be delivered until it is
                       set up in Settings → Alert Routing.
                     </span>

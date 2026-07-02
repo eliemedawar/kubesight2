@@ -46,7 +46,7 @@ export default function AddToBundleButton({
         {busy ? "Adding…" : label}
       </button>
       {error ? (
-        <span className="muted" style={{ color: "#dc2626", fontSize: "0.72rem" }}>
+        <span className="muted" style={{ color: "var(--danger)", fontSize: "0.72rem" }}>
           {error}
         </span>
       ) : null}

@@ -236,7 +236,7 @@ export function MemoryUsageWidget({ summary, series }) {
       metric={summary?.memoryUsage}
       statIcon={<IconMemory />}
       sparkData={series?.mem}
-      sparkColor="#8b7ff0"
+      sparkColor="--chart-3"
     />
   );
 }
