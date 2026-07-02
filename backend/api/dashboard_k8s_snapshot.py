@@ -23,10 +23,17 @@ from .k8s_provider import (
     is_failed_pod_status,
     list_cpu_alerts_from_pod_data,
 )
+from .ttl_cache import TTLCache
 from .upgrade_provider import build_cluster_info
 
 
 _DASHBOARD_KUBECTL_TIMEOUT = int(os.getenv("DASHBOARD_KUBECTL_TIMEOUT_SECONDS", "10"))
+
+# The dashboard payload cache is per-user (it embeds RBAC-filtered data), but
+# the raw kubectl snapshot is identical for everyone. Caching it per cluster
+# means N users hitting the dashboard trigger one kubectl batch, not N.
+_SNAPSHOT_TTL_SECONDS = int(os.getenv("DASHBOARD_SNAPSHOT_TTL_SECONDS", "15"))
+_snapshot_cache = TTLCache("dashboard-snapshot")
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,18 @@ def _strip_pod(pod: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def fetch_dashboard_k8s_snapshot(access: ClusterAccess) -> DashboardK8sSnapshot:
+    """Cluster snapshot shared across users, single-flight per cluster.
+
+    Concurrent dashboard requests for the same cluster share one kubectl batch
+    instead of each spawning eight subprocesses."""
+    return _snapshot_cache.get_or_compute(
+        f"snapshot:{access.cluster_id}",
+        _SNAPSHOT_TTL_SECONDS,
+        lambda: _fetch_dashboard_k8s_snapshot_uncached(access),
+    )
+
+
+def _fetch_dashboard_k8s_snapshot_uncached(access: ClusterAccess) -> DashboardK8sSnapshot:
     """Fetch all cluster data in one parallel batch with no redundant kubectl calls.
 
     Namespaces, deployments, and services are fetched alongside pods so that

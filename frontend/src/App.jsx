@@ -162,6 +162,7 @@ export default function App() {
   }, [settingsDraft.theme]);
 
   const applicationDetailRequestRef = useRef(0);
+  const alertsLoadRef = useRef({ key: "", at: 0 });
   const clusterContextClusterRef = useRef("");
   const upgradeLoadClusterRef = useRef("");
   const dashboardLoadClusterRef = useRef("");
@@ -566,10 +567,19 @@ export default function App() {
       return;
     }
 
+    // Page switches re-run this effect; skip the network round-trip when the
+    // same cluster/user combination was fetched moments ago.
+    const alertsKey = `${selectedClusterId}|${authUser?.id || ""}`;
+    const lastLoad = alertsLoadRef.current;
+    if (lastLoad.key === alertsKey && Date.now() - lastLoad.at < 30000) {
+      return;
+    }
+
     let cancelled = false;
     const loadAlerts = async () => {
       try {
         const alertsRes = await listAlerts({ cluster: selectedClusterId });
+        alertsLoadRef.current = { key: alertsKey, at: Date.now() };
         if (!cancelled) {
           const filteredAlerts = filterAlertsForUser(alertsRes.items || []);
           setData((prev) => ({

@@ -115,7 +115,11 @@ export function useNamespaceResourceCache({
 
       const request = (async () => {
         try {
-          const payload = await getResourceListByType(clusterId, namespace, listKey);
+          // Manual refresh (force) bypasses the server-side read cache too, so
+          // the user always gets live data when they explicitly ask for it.
+          const payload = await getResourceListByType(clusterId, namespace, listKey, {
+            fresh: force,
+          });
           const items = payload[listKey] || [];
           applyListKey(clusterId, namespace, listKey, items);
           setTabErrors((prev) => {

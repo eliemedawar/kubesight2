@@ -155,6 +155,17 @@ def run_helm(
     if completed.returncode != 0:
         stderr = (completed.stderr or completed.stdout or "").strip()
         raise HelmCommandError(stderr or f"helm command failed: {' '.join(command)}")
+
+    # Helm installs/upgrades/rollbacks change workloads — drop cached namespace
+    # resource reads for this cluster so the UI reflects the release right away.
+    verb = args[0] if args else ""
+    if verb in {"install", "upgrade", "uninstall", "rollback", "delete"} and "--dry-run" not in args:
+        from ..k8s_provider import invalidate_namespace_resources_cache
+        from .inventory_service import invalidate_inventory_discovery_cache
+
+        invalidate_namespace_resources_cache(access.cluster_id)
+        invalidate_inventory_discovery_cache(access.cluster_id)
+
     return completed.stdout
 
 

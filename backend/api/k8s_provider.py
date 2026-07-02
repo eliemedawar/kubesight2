@@ -11,31 +11,73 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .cluster_access import ClusterAccess, custom_cluster_public_id, is_custom_cluster_id, parse_custom_cluster_db_id
+from .ttl_cache import TTLCache
 
 
 class K8sCommandError(RuntimeError):
     pass
 
 
+# Absorbs repeated kubectl subprocess work across concurrent requests and
+# users. Short TTLs keep data near-live; single-flight means a burst of
+# identical requests spawns one kubectl process instead of one per request.
+_K8S_READ_CACHE = TTLCache("k8s-reads")
+_CONTEXT_LIST_TTL_SECONDS = int(os.getenv("K8S_CONTEXT_CACHE_TTL_SECONDS", "20"))
+_NAMESPACE_LIST_TTL_SECONDS = int(os.getenv("K8S_NAMESPACE_CACHE_TTL_SECONDS", "15"))
+_RESOURCE_LIST_TTL_SECONDS = int(os.getenv("K8S_RESOURCE_CACHE_TTL_SECONDS", "10"))
+
+
+def invalidate_namespace_resources_cache(
+    cluster_id: Optional[str] = None, namespace: Optional[str] = None
+) -> None:
+    """Drop cached namespace/resource reads after a mutation (deploy, restart, scale)."""
+    if cluster_id and namespace:
+        _K8S_READ_CACHE.invalidate(f"res:{cluster_id}:{namespace}:")
+        _K8S_READ_CACHE.invalidate(f"nslist:{cluster_id}")
+    elif cluster_id:
+        _K8S_READ_CACHE.invalidate(f"res:{cluster_id}:")
+        _K8S_READ_CACHE.invalidate(f"nslist:{cluster_id}")
+    else:
+        _K8S_READ_CACHE.invalidate("res:")
+        _K8S_READ_CACHE.invalidate("nslist:")
+
+
 def _is_true(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _kubectl_context_names() -> List[str]:
+    """Context names from kubeconfig, cached briefly — this runs on nearly every
+    request via ``resolve_cluster_access``/``is_real_mode_enabled`` and each call
+    is a full kubectl subprocess."""
+
+    def _fetch() -> List[str]:
+        output = _run_kubectl(["config", "get-contexts", "-o", "name"])
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    return _K8S_READ_CACHE.get_or_compute("contexts", _CONTEXT_LIST_TTL_SECONDS, _fetch)
+
+
 def _kubectl_has_contexts() -> bool:
     try:
-        output = _run_kubectl(["config", "get-contexts", "-o", "name"])
-        return bool(output.strip())
+        return bool(_kubectl_context_names())
     except K8sCommandError:
         return False
 
 
 def _has_active_custom_clusters() -> bool:
-    try:
-        from .cluster_store import list_active_custom_clusters
+    """Cached DB existence check — ``should_use_real_k8s`` runs several times
+    per request and each call was a separate query."""
 
-        return bool(list_active_custom_clusters())
-    except Exception:
-        return False
+    def _check() -> bool:
+        try:
+            from .cluster_store import list_active_custom_clusters
+
+            return bool(list_active_custom_clusters())
+        except Exception:
+            return False
+
+    return _K8S_READ_CACHE.get_or_compute("custom-clusters-active", 10, _check)
 
 
 def is_real_mode_enabled() -> bool:
@@ -225,8 +267,7 @@ def _discovered_cluster_from_context(context_name: str, now: str) -> Dict[str, A
 def _discovered_clusters_from_k8s() -> List[Dict[str, Any]]:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    contexts_output = _run_kubectl(["config", "get-contexts", "-o", "name"])
-    contexts = [line.strip() for line in contexts_output.splitlines() if line.strip()]
+    contexts = _kubectl_context_names()
     if not contexts:
         return []
 
@@ -347,6 +388,8 @@ def invalidate_cluster_list_cache() -> None:
     with _cluster_list_cache_lock:
         _cluster_list_cache["payload"] = None
         _cluster_list_cache["expires_at"] = 0.0
+    _K8S_READ_CACHE.invalidate("custom-clusters-active")
+    _K8S_READ_CACHE.invalidate("contexts")
 
 
 def _cluster_list_cache_disabled() -> bool:
@@ -401,8 +444,7 @@ def resolve_cluster_access(cluster_id: str) -> Optional[ClusterAccess]:
         )
 
     try:
-        contexts_output = _run_kubectl(["config", "get-contexts", "-o", "name"])
-        contexts = [line.strip() for line in contexts_output.splitlines() if line.strip()]
+        contexts = _kubectl_context_names()
     except K8sCommandError:
         contexts = []
 
@@ -434,6 +476,15 @@ def resolve_context_for_cluster(cluster_id: str) -> Optional[str]:
 
 
 def cluster_overview_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
+    """Cluster overview, cached briefly per cluster (no per-user data)."""
+    return _K8S_READ_CACHE.get_or_compute(
+        f"overview:{access.cluster_id}",
+        _NAMESPACE_LIST_TTL_SECONDS,
+        lambda: _cluster_overview_from_k8s_uncached(access),
+    )
+
+
+def _cluster_overview_from_k8s_uncached(access: ClusterAccess) -> Dict[str, Any]:
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -565,6 +616,18 @@ def build_namespaces_from_data(
 
 
 def list_namespaces_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
+    """Namespace summary, cached briefly per cluster and shared across users.
+
+    RBAC filtering happens in the route layer on the returned payload, so the
+    cached value is safe to share between users with different access."""
+    return _K8S_READ_CACHE.get_or_compute(
+        f"nslist:{access.cluster_id}",
+        _NAMESPACE_LIST_TTL_SECONDS,
+        lambda: _list_namespaces_from_k8s_uncached(access),
+    )
+
+
+def _list_namespaces_from_k8s_uncached(access: ClusterAccess) -> Dict[str, Any]:
     from .k8s_metrics import fetch_pod_top_metrics
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1363,7 +1426,24 @@ def _build_namespace_cronjobs(namespace: str, cj_items: List[Dict[str, Any]]) ->
     return cronjobs
 
 
-def namespace_resources_from_k8s(access: ClusterAccess, namespace: str) -> Dict[str, Any]:
+def namespace_resources_from_k8s(
+    access: ClusterAccess, namespace: str, fresh: bool = False
+) -> Dict[str, Any]:
+    """All resource lists for a namespace, cached briefly and shared across users.
+
+    RBAC filtering happens in the route layer, so the cached payload is safe to
+    share. ``fresh=True`` (manual refresh) bypasses and repopulates the cache."""
+    key = f"res:{access.cluster_id}:{namespace}:__all__"
+    if fresh:
+        _K8S_READ_CACHE.invalidate(key)
+    return _K8S_READ_CACHE.get_or_compute(
+        key,
+        _RESOURCE_LIST_TTL_SECONDS,
+        lambda: _namespace_resources_from_k8s_uncached(access, namespace),
+    )
+
+
+def _namespace_resources_from_k8s_uncached(access: ClusterAccess, namespace: str) -> Dict[str, Any]:
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from .k8s_metrics import fetch_pod_top_metrics
 
@@ -1427,11 +1507,27 @@ def namespace_resources_from_k8s(access: ClusterAccess, namespace: str) -> Dict[
 
 
 def namespace_resource_list_from_k8s(
-    access: ClusterAccess, namespace: str, list_key: str
+    access: ClusterAccess, namespace: str, list_key: str, fresh: bool = False
 ) -> Dict[str, Any]:
+    """One resource list for a namespace, cached briefly and shared across users.
+
+    RBAC filtering happens in the route layer, so the cached payload is safe to
+    share. ``fresh=True`` (manual refresh) bypasses and repopulates the cache."""
     if list_key not in NAMESPACE_RESOURCE_LIST_KEYS:
         raise ValueError(f"Unsupported resource type: {list_key}")
+    key = f"res:{access.cluster_id}:{namespace}:{list_key}"
+    if fresh:
+        _K8S_READ_CACHE.invalidate(key)
+    return _K8S_READ_CACHE.get_or_compute(
+        key,
+        _RESOURCE_LIST_TTL_SECONDS,
+        lambda: _namespace_resource_list_from_k8s_uncached(access, namespace, list_key),
+    )
 
+
+def _namespace_resource_list_from_k8s_uncached(
+    access: ClusterAccess, namespace: str, list_key: str
+) -> Dict[str, Any]:
     if list_key == "pods":
         from .k8s_metrics import fetch_pod_top_metrics
 
@@ -1926,7 +2022,20 @@ def list_cpu_alerts_from_pod_data(
 
 
 def list_alerts_for_access(access: ClusterAccess, cluster_id: Optional[str] = None) -> Dict[str, Any]:
-    """CPU-threshold alerts for a single cluster without listing every kube context."""
+    """CPU-threshold alerts for one cluster, cached briefly and shared across users.
+
+    The frontend refetches alerts on every page switch; per-user RBAC filtering
+    happens on the returned items, so sharing the raw scan is safe."""
+    return _K8S_READ_CACHE.get_or_compute(
+        f"alerts:{access.cluster_id}:{cluster_id or ''}",
+        _RESOURCE_LIST_TTL_SECONDS,
+        lambda: _list_alerts_for_access_uncached(access, cluster_id),
+    )
+
+
+def _list_alerts_for_access_uncached(
+    access: ClusterAccess, cluster_id: Optional[str] = None
+) -> Dict[str, Any]:
     from .k8s_metrics import CPU_ALERT_THRESHOLD_PERCENT, fetch_pod_cpu_usage_cores
 
     current_cluster_id = cluster_id or access.cluster_id

@@ -36,7 +36,29 @@ export const setUnauthorizedHandler = (handler) => {
   onUnauthorized = handler;
 };
 
+// Concurrent identical GETs (e.g. two components loading the same list at
+// mount) share one network request instead of hitting the backend twice.
+const inflightGets = new Map();
+
 export async function request(path, { method = "GET", body, query, auth = true } = {}) {
+  if (method === "GET") {
+    const key = `${path}${toQueryString(query)}|${auth ? getStoredToken() || "" : ""}`;
+    const pending = inflightGets.get(key);
+    if (pending) {
+      return pending;
+    }
+    const promise = performRequest(path, { method, body, query, auth }).finally(() => {
+      if (inflightGets.get(key) === promise) {
+        inflightGets.delete(key);
+      }
+    });
+    inflightGets.set(key, promise);
+    return promise;
+  }
+  return performRequest(path, { method, body, query, auth });
+}
+
+async function performRequest(path, { method = "GET", body, query, auth = true } = {}) {
   const url = `${getBaseUrl()}${path}${toQueryString(query)}`;
   const headers = { "Content-Type": "application/json" };
   if (auth) {

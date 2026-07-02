@@ -281,12 +281,24 @@ def _activity_message(entry: Dict[str, Any]) -> str:
     return f"{action.replace('_', ' ').title()} on {target}{f' {target_id}' if target_id else ''}"
 
 
-def _recent_activity(user: Optional[User], cluster_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+def _load_recent_audit_entries(limit: int = 200) -> List[AuditLog]:
+    """One shared audit-log fetch per dashboard request — the activity,
+    operational-events, and user-activity widgets all filter the same rows."""
+    return AuditLog.query.order_by(AuditLog.created_at.desc()).limit(limit).all()
+
+
+def _recent_activity(
+    user: Optional[User],
+    cluster_id: str,
+    limit: int = 10,
+    entries: Optional[List[AuditLog]] = None,
+) -> List[Dict[str, Any]]:
     if not user or not user_has_permission(user, "audit:view"):
         return []
 
     allowed_clusters = set(get_user_cluster_ids(user)) if not is_admin(user) else None
-    entries = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(200).all()
+    if entries is None:
+        entries = _load_recent_audit_entries()
     items: List[Dict[str, Any]] = []
 
     for entry in entries:
@@ -321,14 +333,20 @@ def _recent_activity(user: Optional[User], cluster_id: str, limit: int = 10) -> 
     return items
 
 
-def _operational_events(user: Optional[User], cluster_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+def _operational_events(
+    user: Optional[User],
+    cluster_id: str,
+    limit: int = 10,
+    entries: Optional[List[AuditLog]] = None,
+) -> List[Dict[str, Any]]:
     if not user or user_has_permission(user, "audit:view"):
         return []
     if not user_has_permission(user, "upgrades:precheck"):
         return []
 
     allowed_clusters = set(get_user_cluster_ids(user)) if not is_admin(user) else None
-    entries = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(200).all()
+    if entries is None:
+        entries = _load_recent_audit_entries()
     items: List[Dict[str, Any]] = []
 
     for entry in entries:
@@ -362,11 +380,16 @@ def _operational_events(user: Optional[User], cluster_id: str, limit: int = 10) 
     return items
 
 
-def _user_activity(user: Optional[User], limit: int = 10) -> List[Dict[str, Any]]:
+def _user_activity(
+    user: Optional[User],
+    limit: int = 10,
+    entries: Optional[List[AuditLog]] = None,
+) -> List[Dict[str, Any]]:
     if not user or not user_has_permission(user, "users:view"):
         return []
 
-    entries = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(200).all()
+    if entries is None:
+        entries = _load_recent_audit_entries()
     items: List[Dict[str, Any]] = []
 
     for entry in entries:
@@ -888,6 +911,18 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
 
         inventory_summary = get_dashboard_inventory_summary(user, cluster_id)
 
+    # One audit-log query shared by the three activity widgets (previously each
+    # ran its own 200-row query). Skipped entirely when no widget can render.
+    needs_audit_entries = bool(
+        user
+        and (
+            user_has_permission(user, "audit:view")
+            or user_has_permission(user, "upgrades:precheck")
+            or user_has_permission(user, "users:view")
+        )
+    )
+    audit_entries = _load_recent_audit_entries() if needs_audit_entries else []
+
     payload = {
         "clusterId": cluster_id,
         "lastUpdated": overview.get("updatedAt") or now,
@@ -934,9 +969,9 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         },
         "namespaces": _namespace_health(namespaces, alerts),
         "nodeHealth": node_health,
-        "recentActivity": _recent_activity(user, cluster_id),
-        "operationalEvents": _operational_events(user, cluster_id),
-        "userActivity": _user_activity(user),
+        "recentActivity": _recent_activity(user, cluster_id, entries=audit_entries),
+        "operationalEvents": _operational_events(user, cluster_id, entries=audit_entries),
+        "userActivity": _user_activity(user, entries=audit_entries),
         "myAccess": _build_my_access(user, cluster_id, cluster=cluster),
         "upgradeStatus": {
             **upgrade_status,

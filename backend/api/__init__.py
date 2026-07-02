@@ -1,3 +1,4 @@
+import gzip
 import logging
 import os
 import time
@@ -116,6 +117,60 @@ def _register_error_handlers(app: Flask) -> None:
         return jsonify({"error": "Internal server error", "status": 500}), 500
 
 
+_GZIP_MIN_BYTES = int(os.getenv("RESPONSE_GZIP_MIN_BYTES", "1024"))
+_GZIP_MIMETYPES = ("application/json", "text/", "application/javascript")
+
+
+def _configure_response_compression(app: Flask) -> None:
+    """Gzip large JSON/text responses (no extra dependency).
+
+    Resource tables and dashboard payloads for big clusters run to hundreds of
+    KB of JSON; gzip typically cuts them 5-10x. Streaming responses (SSE log
+    follow) and small bodies are left untouched.
+    """
+
+    @app.after_request
+    def compress_response(response):
+        if (
+            response.direct_passthrough
+            or response.is_streamed
+            or response.status_code < 200
+            or response.status_code >= 300
+            or "Content-Encoding" in response.headers
+        ):
+            return response
+        if not any(response.mimetype.startswith(m) for m in _GZIP_MIMETYPES):
+            return response
+        accept_encoding = request.headers.get("Accept-Encoding", "")
+        if "gzip" not in accept_encoding.lower():
+            return response
+        body = response.get_data()
+        if len(body) < _GZIP_MIN_BYTES:
+            return response
+        response.set_data(gzip.compress(body, compresslevel=6))
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Content-Length"] = str(len(response.get_data()))
+        vary = response.headers.get("Vary", "")
+        if "accept-encoding" not in vary.lower():
+            response.headers["Vary"] = f"{vary}, Accept-Encoding".strip(", ")
+        return response
+
+
+def _default_engine_options(database_url: str) -> dict:
+    """Connection-pool hardening: recover dropped connections instead of 500ing."""
+    options = {"pool_pre_ping": True}
+    if not database_url.startswith("sqlite"):
+        options.update(
+            {
+                "pool_recycle": int(os.getenv("DB_POOL_RECYCLE_SECONDS", "280")),
+                "pool_size": int(os.getenv("DB_POOL_SIZE", "10")),
+                "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "20")),
+                "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30")),
+            }
+        )
+    return options
+
+
 def _configure_cors(app: Flask) -> None:
     raw = os.getenv("CORS_ORIGINS", "*").strip()
     if not raw or raw == "*":
@@ -160,9 +215,14 @@ def create_app(config_object=None) -> Flask:
             "JWT_SECRET_KEY", "kubesight-dev-secret-change-me"
         )
     app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
+    app.config.setdefault(
+        "SQLALCHEMY_ENGINE_OPTIONS",
+        _default_engine_options(app.config["SQLALCHEMY_DATABASE_URI"]),
+    )
 
     db.init_app(app)
     _configure_cors(app)
+    _configure_response_compression(app)
     _configure_access_log_filters()
     _configure_api_request_logging(app)
 

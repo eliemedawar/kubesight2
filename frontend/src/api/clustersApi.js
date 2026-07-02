@@ -36,14 +36,16 @@ export const listNamespaceConfigResources = (clusterId, namespace) =>
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/config-resources`
   );
 
-export const getResourcesByClusterNamespace = (clusterId, namespace) =>
+export const getResourcesByClusterNamespace = (clusterId, namespace, { fresh = false } = {}) =>
   request(
-    `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources`
+    `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources`,
+    { query: fresh ? { fresh: 1 } : undefined }
   );
 
-export const getResourceListByType = (clusterId, namespace, resourceType) =>
+export const getResourceListByType = (clusterId, namespace, resourceType, { fresh = false } = {}) =>
   request(
-    `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources/${encodeURIComponent(resourceType)}`
+    `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources/${encodeURIComponent(resourceType)}`,
+    { query: fresh ? { fresh: 1 } : undefined }
   );
 
 export const getClusterPodIssues = (clusterId) =>

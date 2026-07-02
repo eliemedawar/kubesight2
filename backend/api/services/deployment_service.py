@@ -107,13 +107,37 @@ def sanitize_for_apply(yaml_content: str) -> str:
     )
 
 
+# kubectl verbs that change cluster state — after these run, cached namespace
+# resource reads for the touched scope must be dropped so the UI sees the change.
+_MUTATING_KUBECTL_VERBS = {
+    "apply", "create", "delete", "scale", "rollout", "patch", "set",
+    "replace", "annotate", "label", "expose", "autoscale",
+}
+
+
+def _namespace_from_kubectl_args(args: List[str]) -> Optional[str]:
+    for index, token in enumerate(args):
+        if token in ("-n", "--namespace") and index + 1 < len(args):
+            return args[index + 1]
+        if token.startswith("--namespace="):
+            return token.split("=", 1)[1]
+    return None
+
+
 def _run_kubectl_for_cluster(cluster_id: str, args: List[str]) -> str:
-    from ..k8s_provider import _run_for_access
+    from ..k8s_provider import _run_for_access, invalidate_namespace_resources_cache
 
     access = resolve_cluster_access(cluster_id)
     if not access:
         raise K8sCommandError(f"Cluster not found: {cluster_id}")
-    return _run_for_access(access, args)
+    output = _run_for_access(access, args)
+    verb = args[0] if args else ""
+    if verb in _MUTATING_KUBECTL_VERBS and "--dry-run=server" not in args and "--dry-run=client" not in args:
+        invalidate_namespace_resources_cache(cluster_id, _namespace_from_kubectl_args(args))
+        from .inventory_service import invalidate_inventory_discovery_cache
+
+        invalidate_inventory_discovery_cache(cluster_id)
+    return output
 
 
 def parse_yaml_documents(yaml_content: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:

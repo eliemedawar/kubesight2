@@ -441,7 +441,8 @@ def namespace_resources(cluster_id: str, namespace: str):
         return err
     if access:
         try:
-            resources = namespace_resources_from_k8s(access, namespace)
+            fresh = request.args.get("fresh") in ("1", "true")
+            resources = namespace_resources_from_k8s(access, namespace, fresh=fresh)
             if user:
                 resources = filter_namespace_resources(user, cluster_id, resources)
             return success_response(resources)
@@ -504,7 +505,10 @@ def namespace_resource_list(cluster_id: str, namespace: str, resource_type: str)
         return err
     if access:
         try:
-            resources = namespace_resource_list_from_k8s(access, namespace, resource_type)
+            fresh = request.args.get("fresh") in ("1", "true")
+            resources = namespace_resource_list_from_k8s(
+                access, namespace, resource_type, fresh=fresh
+            )
             if user:
                 resources = filter_namespace_resources(user, cluster_id, resources)
             return success_response(resources)

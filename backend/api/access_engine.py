@@ -72,21 +72,56 @@ NAMESPACE_RESOURCE_LIST_KEYS = (
 )
 
 
+def _request_memo(name: str) -> Optional[Dict[int, Any]]:
+    """Per-request memo dict stored on flask.g, or None outside a request.
+
+    Disabled under TESTING so tests that mutate roles inside one app context
+    never observe stale permission sets."""
+    try:
+        from flask import current_app
+
+        if current_app.config.get("TESTING"):
+            return None
+        cache = getattr(g, name, None)
+        if cache is None:
+            cache = {}
+            setattr(g, name, cache)
+        return cache
+    except RuntimeError:
+        return None
+
+
 def is_admin(user: User) -> bool:
+    # Memoized per request: this runs once per row when filtering large
+    # resource lists, and rebuilding the permission set each time is O(perms).
+    memo = _request_memo("_is_admin_by_user_id")
+    if memo is not None and user.id in memo:
+        return memo[user.id]
+    result = _compute_is_admin(user)
+    if memo is not None:
+        memo[user.id] = result
+    return result
+
+
+def _compute_is_admin(user: User) -> bool:
     if not user.role:
         return False
     if user.role.name == "admin":
         return True
-    granted = {perm.key for perm in user.role.permissions}
+    granted = get_user_permission_keys(user)
     from .rbac_data import ALL_PERMISSION_KEYS
 
     return set(ALL_PERMISSION_KEYS).issubset(granted)
 
 
 def get_user_permission_keys(user: User) -> Set[str]:
-    if not user.role:
-        return set()
-    return {perm.key for perm in user.role.permissions}
+    memo = _request_memo("_perm_keys_by_user_id")
+    if memo is not None and user.id in memo:
+        return memo[user.id]
+    keys = {perm.key for perm in user.role.permissions} if user.role else set()
+    if memo is not None:
+        memo[user.id] = keys
+    return keys
 
 
 def user_has_permission(user: User, permission_key: str) -> bool:
@@ -562,10 +597,11 @@ def filter_namespace_resources(user: User, cluster_id: str, resources: Dict[str,
             continue
         pod_copy = dict(pod)
         actions = list(pod_copy.get("actions") or [])
-        if "logs" in actions and not can_view_logs(user, cluster_id, namespace, name):
+        logs_allowed = can_view_logs(user, cluster_id, namespace, name)
+        if "logs" in actions and not logs_allowed:
             actions = [a for a in actions if a != "logs"]
         pod_copy["actions"] = actions
-        pod_copy["canViewLogs"] = can_view_logs(user, cluster_id, namespace, name)
+        pod_copy["canViewLogs"] = logs_allowed
         pods.append(pod_copy)
 
     deployments = [

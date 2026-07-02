@@ -29,6 +29,18 @@ from ..k8s_provider import (
 )
 from ..mock_data import ALERTS, CLUSTERS, HELM_RELEASES, HELM_RELEASE_DETAILS, INVENTORY_DETAIL_EXTRAS, NAMESPACE_RESOURCES, NAMESPACES
 from ..models import User
+from ..ttl_cache import TTLCache
+
+import os as _os
+
+# Discovery output is user-independent, so one kubectl batch serves every user
+# looking at the same cluster for a short window.
+_INVENTORY_DISCOVERY_CACHE = TTLCache("inventory-discovery")
+_INVENTORY_DISCOVERY_TTL_SECONDS = int(_os.getenv("INVENTORY_DISCOVERY_TTL_SECONDS", "20"))
+
+
+def invalidate_inventory_discovery_cache(cluster_id: Optional[str] = None) -> None:
+    _INVENTORY_DISCOVERY_CACHE.invalidate(f"inv:{cluster_id}" if cluster_id else "inv:")
 
 WORKLOAD_TYPES = ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 RESOURCE_TYPE_BY_WORKLOAD = {
@@ -190,21 +202,15 @@ def _format_inventory_memory_usage(memory_mib: float) -> str:
     return f"{int(round(memory_mib))} MiB"
 
 
-def _build_app_usage_index(
-    access: Any,
+def _build_app_usage_index_from_pods(
+    pod_items: List[Dict[str, Any]],
     top_by_pod: Dict[Tuple[str, str], Dict[str, float]],
 ) -> Dict[Tuple[str, str], Dict[str, float]]:
     """Sum kubectl top pod metrics by (namespace, resolved app name)."""
-    from ..k8s_provider import _run_for_access
-
     index: Dict[Tuple[str, str], Dict[str, float]] = defaultdict(lambda: {"cpu": 0.0, "memory_mib": 0.0})
     if not top_by_pod:
         return index
-    try:
-        output = _run_for_access(access, ["get", "pods", "-A", "-o", "json"])
-    except K8sCommandError:
-        return index
-    for pod in json.loads(output).get("items", []):
+    for pod in pod_items:
         meta = pod.get("metadata") or {}
         namespace = meta.get("namespace") or "default"
         pod_name = meta.get("name") or ""
@@ -545,16 +551,27 @@ def _list_accessible_cluster_ids(user: Optional[User]) -> List[str]:
 
 
 def _discover_cluster_inventory_real(cluster_id: str) -> List[Dict[str, Any]]:
+    """Per-cluster inventory discovery, cached briefly and shared across users.
+
+    The result is user-independent (RBAC filtering happens in list_inventory),
+    so it is safe to share. Rows are shallow-copied on the way out because
+    callers merge Helm/catalog metadata into them in place."""
+    rows = _INVENTORY_DISCOVERY_CACHE.get_or_compute(
+        f"inv:{cluster_id}",
+        _INVENTORY_DISCOVERY_TTL_SECONDS,
+        lambda: _discover_cluster_inventory_real_uncached(cluster_id),
+    )
+    return [dict(row) for row in rows]
+
+
+def _discover_cluster_inventory_real_uncached(cluster_id: str) -> List[Dict[str, Any]]:
     access = resolve_cluster_access(cluster_id)
     if not access:
         return []
     now = datetime.now(timezone.utc).isoformat()
     groups: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    metrics_available = metrics_server_available(access)
-    top_by_pod: Dict[Tuple[str, str], Dict[str, float]] = {}
-    if metrics_available:
-        top_by_pod = fetch_pod_top_metrics(access)
-    app_usage_index = _build_app_usage_index(access, top_by_pod)
+
+    from concurrent.futures import ThreadPoolExecutor
 
     from ..k8s_provider import _run_for_access
 
@@ -566,19 +583,52 @@ def _discover_cluster_inventory_real(cluster_id: str) -> List[Dict[str, Any]]:
         ("cronjobs", "CronJob"),
     ]
 
-    services_output = _run_for_access(access, ["get", "services", "-A", "-o", "json"])
-    svc_items = json.loads(services_output).get("items", [])
+    # Everything here is an independent kubectl call — run them in one parallel
+    # batch instead of the previous sequential chain of up to nine subprocesses.
+    def _fetch_items(kind: str) -> List[Dict[str, Any]]:
+        try:
+            output = _run_for_access(access, ["get", kind, "-A", "-o", "json"])
+            return json.loads(output).get("items", [])
+        except K8sCommandError:
+            return []
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        metrics_future = pool.submit(metrics_server_available, access)
+        top_future = pool.submit(fetch_pod_top_metrics, access)
+        pods_future = pool.submit(_fetch_items, "pods")
+        svc_future = pool.submit(_fetch_items, "services")
+        kind_futures = {
+            workload_type: pool.submit(_fetch_items, resource_kind)
+            for resource_kind, workload_type in resource_specs
+        }
+
+        try:
+            metrics_available = bool(metrics_future.result())
+        except Exception:
+            metrics_available = False
+        top_by_pod: Dict[Tuple[str, str], Dict[str, float]] = {}
+        if metrics_available:
+            try:
+                top_by_pod = top_future.result()
+            except Exception:
+                top_by_pod = {}
+        else:
+            top_future.cancel()
+        pod_items = pods_future.result()
+        svc_items = svc_future.result()
+        items_by_workload_type = {
+            workload_type: future.result() for workload_type, future in kind_futures.items()
+        }
+
+    app_usage_index = _build_app_usage_index_from_pods(pod_items, top_by_pod)
+
     services_by_ns: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for svc in svc_items:
         ns = svc.get("metadata", {}).get("namespace", "default")
         services_by_ns[ns].append(svc)
 
     for resource_kind, workload_type in resource_specs:
-        try:
-            output = _run_for_access(access, ["get", resource_kind, "-A", "-o", "json"])
-        except K8sCommandError:
-            continue
-        for item in json.loads(output).get("items", []):
+        for item in items_by_workload_type.get(workload_type) or []:
             meta = item.get("metadata", {})
             spec = item.get("spec", {})
             status = item.get("status", {})
@@ -878,17 +928,47 @@ def _merge_helm_releases(items: List[Dict[str, Any]], helm_items: List[Dict[str,
     return result
 
 
+def _discover_many_clusters(cluster_ids: List[str], discover_fn) -> List[Dict[str, Any]]:
+    """Run per-cluster discovery for several clusters in parallel.
+
+    Each worker gets its own app context because discovery resolves custom
+    clusters from the database."""
+    if not cluster_ids:
+        return []
+    if len(cluster_ids) == 1:
+        try:
+            return list(discover_fn(cluster_ids[0]))
+        except Exception:
+            return []
+
+    from concurrent.futures import ThreadPoolExecutor
+    from flask import current_app
+
+    app = current_app._get_current_object()
+
+    def _one(cluster_id: str) -> List[Dict[str, Any]]:
+        with app.app_context():
+            try:
+                return list(discover_fn(cluster_id))
+            except Exception:
+                return []
+
+    items: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(4, len(cluster_ids))) as pool:
+        for result in pool.map(_one, cluster_ids):
+            items.extend(result)
+    return items
+
+
 def list_inventory(user: Optional[User], filters: Optional[Dict[str, str]] = None) -> Tuple[List[Dict[str, Any]], Optional[str], int]:
     filters = filters or {}
     items: List[Dict[str, Any]] = []
     cluster_filter = (filters.get("cluster") or filters.get("clusterId") or "").strip()
 
     if should_use_real_k8s() and not cluster_filter:
-        for cluster_id in _list_accessible_cluster_ids(user):
-            try:
-                items.extend(_discover_cluster_inventory_real(cluster_id))
-            except K8sCommandError:
-                continue
+        items = _discover_many_clusters(
+            _list_accessible_cluster_ids(user), _discover_cluster_inventory_real
+        )
     elif should_use_real_k8s(cluster_filter) and cluster_filter:
         try:
             items = _discover_cluster_inventory_real(cluster_filter)
@@ -901,11 +981,9 @@ def list_inventory(user: Optional[User], filters: Optional[Dict[str, str]] = Non
 
     helm_items: List[Dict[str, Any]] = []
     if should_use_real_k8s() and not cluster_filter:
-        for cluster_id in _list_accessible_cluster_ids(user):
-            try:
-                helm_items.extend(_discover_helm_inventory_real(cluster_id))
-            except Exception:
-                continue
+        helm_items = _discover_many_clusters(
+            _list_accessible_cluster_ids(user), _discover_helm_inventory_real
+        )
     elif should_use_real_k8s(cluster_filter) and cluster_filter:
         try:
             helm_items = _discover_helm_inventory_real(cluster_filter)
