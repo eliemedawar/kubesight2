@@ -101,7 +101,7 @@ function TopologyTab({ clientId, services, selectedServiceId, onSelectService })
 
 // ─── Access Details tab ───────────────────────────────────────────────────────
 
-function AccessDetailsTab({ services, clusterNameById }) {
+function AccessDetailsTab({ services }) {
   if (services.length === 0) {
     return <EmptyState message="No services linked to this client." />;
   }
@@ -120,9 +120,6 @@ function AccessDetailsTab({ services, clusterNameById }) {
               <div><span className="muted">Destination IP: </span>{orDash(c.destinationIp)}</div>
               <div><span className="muted">Transport: </span>{orDash(c.transportType)}</div>
               <div><span className="muted">Transport details: </span>{orDash(c.transportName)}</div>
-              <div><span className="muted">Cluster: </span>{orDash(c.clusterId ? (clusterNameById[c.clusterId] || c.clusterId) : "")}</div>
-              <div><span className="muted">Namespace: </span>{orDash(c.namespace)}</div>
-              <div><span className="muted">Environment: </span>{orDash(c.environment)}</div>
               <div><span className="muted">Active: </span>{svc.connection ? (c.isActive ? "Yes" : "No") : <span className="muted">Not configured</span>}</div>
               {c.transportNotes && (
                 <div className="form-grid__full"><span className="muted">Notes: </span>{c.transportNotes}</div>
@@ -137,79 +134,68 @@ function AccessDetailsTab({ services, clusterNameById }) {
 
 // ─── Services tab ─────────────────────────────────────────────────────────────
 
-function ServicesTab({ services, clusterNameById, canUpdate, onViewTopology, onEditConnection, onRemove }) {
+function Field({ label, children }) {
+  return (
+    <div>
+      <div className="muted" style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</div>
+      <div style={{ fontSize: "0.85rem" }}>{children}</div>
+    </div>
+  );
+}
+
+function ServicesTab({ services, canUpdate, onViewTopology, onEditConnection, onRemove }) {
   if (services.length === 0) {
     return <EmptyState message="No services linked to this client." hint="Edit the client to assign application services." />;
   }
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
   return (
-    <div>
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
       {canUpdate && (
-        <p className="muted" style={{ fontSize: "0.8125rem", margin: "0 0 0.6rem" }}>
-          Click a service row to configure its connectivity, or use the actions on the right.
+        <p className="muted" style={{ fontSize: "0.8125rem", margin: 0 }}>
+          Click a service card (or “Configure”) to set its client-specific connectivity.
         </p>
       )}
-      <div className="table-shell">
-        <div className="table-scroll-region">
-          <table>
-            <thead>
-              <tr>
-                <th>Service</th>
-                <th>Source IP</th>
-                <th>Destination IP</th>
-                <th>Transport</th>
-                <th>Cluster</th>
-                <th>Namespace</th>
-                <th>Environment</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {services.map((svc) => {
-                const c = svc.connection || {};
-                return (
-                  <tr
-                    key={svc.serviceId}
-                    style={canUpdate ? { cursor: "pointer" } : undefined}
-                    onClick={canUpdate ? () => onEditConnection(svc) : undefined}
-                    title={canUpdate ? "Configure connectivity" : undefined}
-                  >
-                    <td>
-                      <strong>{svc.serviceName}</strong>
-                      <div style={{ marginTop: "0.2rem" }}><HealthBadge health={svc.health} /></div>
-                    </td>
-                    <td>{orDash(c.sourceIp)}</td>
-                    <td>{orDash(c.destinationIp)}</td>
-                    <td>{orDash(c.transportType)}</td>
-                    <td>{orDash(c.clusterId ? (clusterNameById[c.clusterId] || c.clusterId) : "")}</td>
-                    <td>{orDash(c.namespace)}</td>
-                    <td>{orDash(c.environment)}</td>
-                    <td><ConnStatusBadge status={svc.connection ? c.status : null} /></td>
-                    <td>
-                      <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
-                        <button type="button" className="btn-outline btn-compact" onClick={stop(() => onViewTopology(svc.serviceId))}>
-                          View Topology
-                        </button>
-                        {canUpdate && (
-                          <button type="button" className="btn-outline btn-compact" onClick={stop(() => onEditConnection(svc))}>
-                            {svc.connection ? "Edit Connection" : "Configure"}
-                          </button>
-                        )}
-                        {canUpdate && svc.connection && (
-                          <button type="button" className="btn-ghost btn-compact danger" onClick={stop(() => onRemove(svc))}>
-                            Remove
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {services.map((svc) => {
+        const c = svc.connection || {};
+        return (
+          <div
+            key={svc.serviceId}
+            className="card"
+            style={{ padding: "0.9rem 1rem", cursor: canUpdate ? "pointer" : undefined }}
+            onClick={canUpdate ? () => onEditConnection(svc) : undefined}
+            title={canUpdate ? "Configure connectivity" : undefined}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+                <strong>{svc.serviceName}</strong>
+                <HealthBadge health={svc.health} />
+                <ConnStatusBadge status={svc.connection ? c.status : null} />
+              </div>
+              <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
+                <button type="button" className="btn-outline btn-compact" onClick={stop(() => onViewTopology(svc.serviceId))}>
+                  View Topology
+                </button>
+                {canUpdate && (
+                  <button type="button" className="primary btn-compact" onClick={stop(() => onEditConnection(svc))}>
+                    {svc.connection ? "Edit Connection" : "Configure"}
+                  </button>
+                )}
+                {canUpdate && svc.connection && (
+                  <button type="button" className="btn-ghost btn-compact danger" onClick={stop(() => onRemove(svc))}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "0.6rem 1rem" }}>
+              <Field label="Source IP">{orDash(c.sourceIp)}</Field>
+              <Field label="Destination IP">{orDash(c.destinationIp)}</Field>
+              <Field label="Transport">{orDash(c.transportType)}</Field>
+              <Field label="Transport details">{orDash(c.transportName)}</Field>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -218,7 +204,6 @@ function ServicesTab({ services, clusterNameById, canUpdate, onViewTopology, onE
 
 export default function ClientDetailModal({
   client,
-  clusters = [],
   canUpdate,
   canDelete,
   onEditClient,
@@ -234,8 +219,6 @@ export default function ClientDetailModal({
   const [editingConn, setEditingConn] = useState(null); // { serviceId, serviceName, connection }
   const [savingConn, setSavingConn] = useState(false);
   const [connError, setConnError] = useState("");
-
-  const clusterNameById = Object.fromEntries(clusters.map((cl) => [cl.id, cl.name || cl.id]));
 
   const loadServices = useCallback(async () => {
     setLoading(true);
@@ -343,7 +326,6 @@ export default function ClientDetailModal({
             {tab === "services" && (
               <ServicesTab
                 services={services}
-                clusterNameById={clusterNameById}
                 canUpdate={canUpdate}
                 onViewTopology={handleViewTopology}
                 onEditConnection={(svc) => { setConnError(""); setEditingConn({ serviceId: svc.serviceId, serviceName: svc.serviceName, connection: svc.connection }); }}
@@ -359,7 +341,7 @@ export default function ClientDetailModal({
               />
             )}
             {tab === "access" && (
-              <AccessDetailsTab services={services} clusterNameById={clusterNameById} />
+              <AccessDetailsTab services={services} />
             )}
           </>
         )}
@@ -374,7 +356,6 @@ export default function ClientDetailModal({
           clientName={client.name}
           serviceName={editingConn.serviceName}
           connection={editingConn.connection}
-          clusters={clusters}
           onClose={() => setEditingConn(null)}
           onSave={handleSaveConnection}
           saving={savingConn}

@@ -343,12 +343,14 @@ def get_client_service_topology(
         "transportName": transport_name,
     }
 
+    # The transport node's name already shows the transport type (e.g. "VPN"),
+    # so the client→transport edge only labels the source IP — not the transport
+    # again (which read as a duplicate "VPN").
     overlay_edges = [
         {
             "id": f"edge-{client_node_id}-{transport_node_id}",
             "sourceNodeId": client_node_id,
             "targetNodeId": transport_node_id,
-            "protocol": transport_type if transport_type != _NOT_CONFIGURED else None,
             "scope": "external",
             "description": f"Source {source_ip}",
         }

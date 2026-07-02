@@ -20,7 +20,6 @@ export default function EditConnectionModal({
   clientName,
   serviceName,
   connection,
-  clusters = [],
   onClose,
   onSave,
   saving,
@@ -32,9 +31,6 @@ export default function EditConnectionModal({
   const [transportType, setTransportType] = useState(c.transportType || "");
   const [transportName, setTransportName] = useState(c.transportName || "");
   const [transportNotes, setTransportNotes] = useState(c.transportNotes || "");
-  const [clusterId, setClusterId] = useState(c.clusterId || "");
-  const [namespace, setNamespace] = useState(c.namespace || "");
-  const [environment, setEnvironment] = useState(c.environment || "");
   const [status, setStatus] = useState(c.status || "active");
 
   const isOther = transportType === "Other";
@@ -48,9 +44,6 @@ export default function EditConnectionModal({
       transportType: transportType || "",
       transportName: transportName.trim(),
       transportNotes: transportNotes.trim(),
-      clusterId: clusterId || "",
-      namespace: namespace.trim(),
-      environment: environment.trim(),
       status: status || "active",
     });
   };
@@ -120,38 +113,8 @@ export default function EditConnectionModal({
         </section>
 
         <section className="form-section">
-          <h4>Landing</h4>
+          <h4>Status</h4>
           <div className="form-grid">
-            <label>
-              Cluster
-              <SearchableSelect
-                options={[
-                  { value: "", label: "—" },
-                  ...clusters.map((cl) => ({ value: cl.id, label: cl.name || cl.id })),
-                ]}
-                value={clusterId}
-                onChange={(e) => setClusterId(e.target.value)}
-                placeholder="Select cluster…"
-              />
-            </label>
-            <label>
-              Namespace
-              <input
-                value={namespace}
-                onChange={(e) => setNamespace(e.target.value)}
-                maxLength={253}
-                placeholder="e.g. production"
-              />
-            </label>
-            <label>
-              Environment
-              <input
-                value={environment}
-                onChange={(e) => setEnvironment(e.target.value)}
-                maxLength={64}
-                placeholder="e.g. production"
-              />
-            </label>
             <label>
               Status
               <SearchableSelect
