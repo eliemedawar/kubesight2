@@ -22,9 +22,16 @@ export const testCustomCluster = (clusterId) =>
 export const getClusterOverview = (clusterId) =>
   request(`/api/clusters/${encodeURIComponent(clusterId)}/overview`);
 
-export const listNamespacesByCluster = (clusterId, { lite = false } = {}) =>
+export const listNamespacesByCluster = (clusterId, { lite = false, counts = false } = {}) =>
   request(`/api/clusters/${encodeURIComponent(clusterId)}/namespaces`, {
-    query: lite ? { lite: 1 } : undefined,
+    query: lite ? { lite: 1 } : counts ? { counts: 1 } : undefined,
+  });
+
+// Per-namespace CPU/memory only — loaded in the background and merged onto rows
+// that already show counts, so a slow/missing metrics-server can't blank them.
+export const listNamespaceMetricsByCluster = (clusterId) =>
+  request(`/api/clusters/${encodeURIComponent(clusterId)}/namespaces`, {
+    query: { metrics: 1 },
   });
 
 export const listStorageClasses = (clusterId) =>

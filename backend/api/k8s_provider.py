@@ -41,12 +41,18 @@ def invalidate_namespace_resources_cache(
     if cluster_id and namespace:
         _K8S_READ_CACHE.invalidate(f"res:{cluster_id}:{namespace}:")
         _K8S_READ_CACHE.invalidate(f"nslist:{cluster_id}")
+        _K8S_READ_CACHE.invalidate(f"nscounts:{cluster_id}")
+        _K8S_READ_CACHE.invalidate(f"nsmetrics:{cluster_id}")
     elif cluster_id:
         _K8S_READ_CACHE.invalidate(f"res:{cluster_id}:")
         _K8S_READ_CACHE.invalidate(f"nslist:{cluster_id}")
+        _K8S_READ_CACHE.invalidate(f"nscounts:{cluster_id}")
+        _K8S_READ_CACHE.invalidate(f"nsmetrics:{cluster_id}")
     else:
         _K8S_READ_CACHE.invalidate("res:")
         _K8S_READ_CACHE.invalidate("nslist:")
+        _K8S_READ_CACHE.invalidate("nscounts:")
+        _K8S_READ_CACHE.invalidate("nsmetrics:")
 
 
 def _is_true(value: str) -> bool:
@@ -659,8 +665,13 @@ def build_namespaces_from_data(
     deployments_raw: List[Dict[str, Any]],
     services_raw: List[Dict[str, Any]],
     pod_top: Dict[Any, Any],
+    include_metrics: bool = True,
 ) -> Dict[str, Any]:
-    """Build namespace list purely from pre-fetched data — no kubectl calls."""
+    """Build namespace list purely from pre-fetched data — no kubectl calls.
+
+    When ``include_metrics`` is False the CPU/memory keys are omitted entirely
+    (not set to ``None``) so the payload can be merged over an existing row on
+    the client without clobbering metrics that arrived from a separate call."""
     pod_counts: Dict[str, int] = {}
     for pod in pod_items:
         ns = pod.get("metadata", {}).get("namespace", "default")
@@ -690,18 +701,20 @@ def build_namespaces_from_data(
         cpu_cores = round(ns_usage["cpu"], 3)
         memory_gib = round(ns_usage["memory_mib"] / 1024, 2)
         has_metrics = cpu_cores > 0 or memory_gib > 0
-        items.append({
+        item: Dict[str, Any] = {
             "name": name,
             "pods": pods_count,
             "deployments": dep_counts.get(name, 0),
             "services": svc_counts.get(name, 0),
-            "cpuUsageCores": cpu_cores if has_metrics or pods_count == 0 else None,
-            "memoryUsageGiB": memory_gib if has_metrics or pods_count == 0 else None,
-            "cpuUsage": f"{cpu_cores:.3f} cores" if has_metrics or pods_count == 0 else "-",
-            "memoryUsage": f"{memory_gib:.2f} GiB" if has_metrics or pods_count == 0 else "-",
             "alerts": 0,
             "status": "active",
-        })
+        }
+        if include_metrics:
+            item["cpuUsageCores"] = cpu_cores if has_metrics or pods_count == 0 else None
+            item["memoryUsageGiB"] = memory_gib if has_metrics or pods_count == 0 else None
+            item["cpuUsage"] = f"{cpu_cores:.3f} cores" if has_metrics or pods_count == 0 else "-"
+            item["memoryUsage"] = f"{memory_gib:.2f} GiB" if has_metrics or pods_count == 0 else "-"
+        items.append(item)
     return {"items": items, "count": len(items)}
 
 
@@ -718,12 +731,69 @@ def list_namespaces_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
     )
 
 
+def list_namespace_counts_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
+    """Namespace list with pods/deployments/services counts but NO metrics.
+
+    Four kubectl calls, none of which touch metrics-server, so this reliably
+    fills the count columns even when ``kubectl top`` is slow or unavailable.
+    CPU/memory load separately via :func:`list_namespace_metrics_from_k8s`.
+    Returns the full summary (counts + metrics) when one is already cached."""
+    full = _K8S_READ_CACHE.get(f"nslist:{access.cluster_id}")
+    if full is not None:
+        return full
+    return _K8S_READ_CACHE.get_or_compute(
+        f"nscounts:{access.cluster_id}",
+        _NAMESPACE_LIST_TTL_SECONDS,
+        lambda: _list_namespaces_from_k8s_uncached(access, include_metrics=False),
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
+    )
+
+
+def list_namespace_metrics_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
+    """Per-namespace CPU/memory usage from a single ``kubectl top pods -A`` call.
+
+    Items carry only the metric keys plus ``name`` so the client can merge them
+    onto rows already showing counts. Namespaces with no reported usage are
+    omitted. A slow/missing metrics-server yields an empty list, never an error
+    that would blank the counts."""
+
+    def _fetch() -> Dict[str, Any]:
+        from .k8s_metrics import fetch_pod_top_metrics
+
+        top_timeout = int(os.getenv("KUBECTL_TOP_TIMEOUT_SECONDS", "8"))
+        pod_top = fetch_pod_top_metrics(access, False, top_timeout)
+        usage: Dict[str, Dict[str, float]] = {}
+        for (namespace, _), metrics in pod_top.items():
+            entry = usage.setdefault(namespace, {"cpu": 0.0, "memory_mib": 0.0})
+            entry["cpu"] += metrics.get("cpu", 0.0)
+            entry["memory_mib"] += metrics.get("memory", 0.0)
+        items: List[Dict[str, Any]] = []
+        for name, u in usage.items():
+            cpu_cores = round(u["cpu"], 3)
+            memory_gib = round(u["memory_mib"] / 1024, 2)
+            items.append({
+                "name": name,
+                "cpuUsageCores": cpu_cores,
+                "memoryUsageGiB": memory_gib,
+                "cpuUsage": f"{cpu_cores:.3f} cores",
+                "memoryUsage": f"{memory_gib:.2f} GiB",
+            })
+        return {"items": items, "count": len(items)}
+
+    return _K8S_READ_CACHE.get_or_compute(
+        f"nsmetrics:{access.cluster_id}",
+        _NAMESPACE_LIST_TTL_SECONDS,
+        _fetch,
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
+    )
+
+
 def list_namespace_names_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
     """Fast namespace list: one kubectl call, names only (counts left null).
 
-    First paint for the Namespaces page and the namespace selector; the full
-    summary (5 kubectl calls incl. ``top pods``) loads in the background and
-    replaces it. Returns the full summary when one is already cached."""
+    First paint for the Namespaces page and the namespace selector; the counts
+    and metrics load in the background and replace it. Returns the full summary
+    when one is already cached."""
     full = _K8S_READ_CACHE.get(f"nslist:{access.cluster_id}")
     if full is not None:
         return full
@@ -764,21 +834,29 @@ def cached_namespace_read(access: ClusterAccess, namespace: str, bucket: str, co
     )
 
 
-def _list_namespaces_from_k8s_uncached(access: ClusterAccess) -> Dict[str, Any]:
+def _list_namespaces_from_k8s_uncached(
+    access: ClusterAccess, include_metrics: bool = True
+) -> Dict[str, Any]:
     from .k8s_metrics import fetch_pod_top_metrics
     from concurrent.futures import ThreadPoolExecutor
 
-    # 5 independent kubectl calls — one worker each. (With 4 workers the fifth
-    # call queued behind the others, adding a full kubectl round-trip to every
-    # cold namespaces load.) `top pods` gets a bounded timeout so a slow or
-    # missing metrics-server cannot stall the whole summary.
+    # Independent kubectl calls — one worker each. (Fewer workers than calls
+    # would queue the last call behind the others, adding a full kubectl
+    # round-trip to every cold load.) When metrics are included, `top pods`
+    # gets a bounded timeout so a slow or missing metrics-server cannot stall
+    # the whole summary; when excluded, the counts never depend on it at all.
     top_timeout = int(os.getenv("KUBECTL_TOP_TIMEOUT_SECONDS", "8"))
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    max_workers = 5 if include_metrics else 4
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         ns_future = pool.submit(_run_for_access, access, ["get", "namespaces", "-o", "json"])
         pods_future = pool.submit(_run_for_access, access, ["get", "pods", "-A", "-o", "json"])
         dep_future = pool.submit(_run_for_access, access, ["get", "deployments", "-A", "-o", "json"])
         svc_future = pool.submit(_run_for_access, access, ["get", "services", "-A", "-o", "json"])
-        pod_top_future = pool.submit(fetch_pod_top_metrics, access, False, top_timeout)
+        pod_top_future = (
+            pool.submit(fetch_pod_top_metrics, access, False, top_timeout)
+            if include_metrics
+            else None
+        )
 
         try:
             namespaces_raw = json.loads(ns_future.result()).get("items", [])
@@ -796,12 +874,18 @@ def _list_namespaces_from_k8s_uncached(access: ClusterAccess) -> Dict[str, Any]:
             services_raw = json.loads(svc_future.result()).get("items", [])
         except Exception:
             services_raw = []
-        try:
-            pod_top = pod_top_future.result()
-        except Exception:
+        if pod_top_future is not None:
+            try:
+                pod_top = pod_top_future.result()
+            except Exception:
+                pod_top = {}
+        else:
             pod_top = {}
 
-    return build_namespaces_from_data(namespaces_raw, pod_items, deployments_raw, services_raw, pod_top)
+    return build_namespaces_from_data(
+        namespaces_raw, pod_items, deployments_raw, services_raw, pod_top,
+        include_metrics=include_metrics,
+    )
 
 
 def summarize_node_items(node_items: List[Dict[str, Any]]) -> List[Dict[str, str]]:

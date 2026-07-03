@@ -43,6 +43,7 @@ export {
   testCustomCluster,
   getClusterOverview,
   listNamespacesByCluster,
+  listNamespaceMetricsByCluster,
   getResourcesByClusterNamespace,
   getResourceListByType,
   getLogs,

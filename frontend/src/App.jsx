@@ -10,6 +10,7 @@ import {
   listClusters,
   testAlertEmail,
   listNamespacesByCluster,
+  listNamespaceMetricsByCluster,
   getUpgradeInfo,
   getUpgradeJob,
   runUpgradePrecheck,
@@ -489,10 +490,12 @@ export default function App() {
       let namespaces = [];
       try {
         const needsOverview = resolvedActivePage === "clusterOverview";
-        // Two-phase namespaces load: the lite request (one kubectl call) paints
-        // the page and selector immediately; the full summary (counts + usage,
-        // several kubectl calls) is requested in parallel and merged in below.
-        const fullNamespacesPromise = listNamespacesByCluster(selectedClusterId);
+        // Namespaces load in phases so slow/failing metrics can never blank the
+        // counts. Lite (one kubectl call) paints the page and namespace selector
+        // immediately; counts (pods/deployments/services, no metrics-server) is
+        // merged in next; metrics (CPU/memory) is merged in silently whenever it
+        // arrives — a slow or missing metrics-server no longer holds up numbers.
+        const countsPromise = listNamespacesByCluster(selectedClusterId, { counts: true });
         const [namespacesResult, overviewResult] = await Promise.allSettled([
           listNamespacesByCluster(selectedClusterId, { lite: true }),
           needsOverview ? getClusterOverview(selectedClusterId) : Promise.resolve(null),
@@ -502,10 +505,11 @@ export default function App() {
           return;
         }
 
-        if (namespacesResult.status === "rejected") {
-          // Lite path failed — fall back to the full request before erroring.
+        const liteSucceeded = namespacesResult.status === "fulfilled";
+        if (!liteSucceeded) {
+          // Lite path failed — fall back to the counts request before erroring.
           try {
-            namespacesResult.value = await fullNamespacesPromise;
+            namespacesResult.value = await countsPromise;
             namespacesResult.status = "fulfilled";
           } catch {
             throw namespacesResult.reason;
@@ -513,20 +517,6 @@ export default function App() {
           if (cancelled) {
             return;
           }
-        } else {
-          fullNamespacesPromise
-            .then((fullRes) => {
-              if (cancelled || clusterContextClusterRef.current !== selectedClusterId) {
-                return;
-              }
-              const fullItems = fullRes.items || [];
-              if (fullItems.length) {
-                setData((prev) => ({ ...prev, namespaces: fullItems }));
-              }
-            })
-            .catch(() => {
-              // Lite data is already on screen; keep it if the full load fails.
-            });
         }
 
         if (overviewResult.status === "fulfilled" && overviewResult.value) {
@@ -542,6 +532,33 @@ export default function App() {
         defaultNamespace = namespaces[0]?.name || "";
         setData((prev) => ({ ...prev, namespaces }));
         clusterContextClusterRef.current = selectedClusterId;
+
+        // Merge later phases in without blocking first paint. Counts and metrics
+        // carry disjoint fields, so merging by name is order-independent —
+        // whichever resolves first is never clobbered by the other.
+        const stillCurrent = () =>
+          !cancelled && clusterContextClusterRef.current === selectedClusterId;
+        const mergeNamespaces = (incoming) => {
+          if (!incoming?.length || !stillCurrent()) {
+            return;
+          }
+          setData((prev) => {
+            const byName = new Map(incoming.map((ns) => [ns.name, ns]));
+            const merged = prev.namespaces.map((ns) =>
+              byName.has(ns.name) ? { ...ns, ...byName.get(ns.name) } : ns
+            );
+            return { ...prev, namespaces: merged };
+          });
+        };
+
+        if (liteSucceeded) {
+          // Only needed when lite names were painted; the fallback above has
+          // already applied the counts payload.
+          countsPromise.then((res) => mergeNamespaces(res.items)).catch(() => {});
+        }
+        listNamespaceMetricsByCluster(selectedClusterId)
+          .then((res) => mergeNamespaces(res.items))
+          .catch(() => {});
       } catch (loadError) {
         if (!cancelled) {
           clusterContextClusterRef.current = "";

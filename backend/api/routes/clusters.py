@@ -403,12 +403,24 @@ def cluster_namespaces(cluster_id: str):
         return err
     if access:
         try:
-            # lite=1 returns names from a single kubectl call for instant first
-            # paint; the client fetches the full summary in the background.
+            # The client loads the Namespaces page in phases so slow metrics can
+            # never blank the counts:
+            #   lite=1    → names only (one kubectl call), instant first paint
+            #   counts=1  → pods/deployments/services counts (no metrics-server)
+            #   metrics=1 → CPU/memory only, merged in when ready
+            # No param → the full summary (used by other callers of this route).
             if request.args.get("lite") in ("1", "true"):
                 from ..k8s_provider import list_namespace_names_from_k8s
 
                 namespaces = list_namespace_names_from_k8s(access)
+            elif request.args.get("counts") in ("1", "true"):
+                from ..k8s_provider import list_namespace_counts_from_k8s
+
+                namespaces = list_namespace_counts_from_k8s(access)
+            elif request.args.get("metrics") in ("1", "true"):
+                from ..k8s_provider import list_namespace_metrics_from_k8s
+
+                namespaces = list_namespace_metrics_from_k8s(access)
             else:
                 namespaces = list_namespaces_from_k8s(access)
             items = namespaces["items"]
