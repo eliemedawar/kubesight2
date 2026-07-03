@@ -6,7 +6,13 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..access_engine import can_access_namespace, can_access_resource, user_has_permission
 from ..audit import log_audit
-from ..k8s_provider import K8sCommandError, resolve_cluster_access, should_use_real_k8s
+from ..k8s_provider import (
+    K8sCommandError,
+    cached_namespace_read,
+    resolve_cluster_access,
+    should_use_real_k8s,
+)
+from ..k8s_provider import _run_for_access
 from ..models import User
 from .deployment_service import _run_kubectl_for_cluster
 from .inventory_actions_service import _mock_rollout_history, parse_rollout_history
@@ -214,9 +220,15 @@ def get_resource_describe(
         return None, "Cluster not found", 404
 
     try:
-        output = _run_kubectl_for_cluster(
-            cluster_id,
-            ["describe", normalized, name, "-n", namespace],
+        # Read-only kubectl call — cache under the namespace-read prefix so
+        # reopening the same resource is instant and concurrent identical
+        # requests single-flight one kubectl process. Mutation invalidation
+        # (deploy/restart/scale) already clears the `res:{cluster}:{ns}:` prefix.
+        output = cached_namespace_read(
+            access,
+            namespace,
+            f"describe:{normalized}:{name}",
+            lambda: _run_for_access(access, ["describe", normalized, name, "-n", namespace]),
         )
         log_audit(
             "resource_describe_viewed",
@@ -265,9 +277,12 @@ def get_resource_yaml(
         return None, "Cluster not found", 404
 
     try:
-        yaml_content = _run_kubectl_for_cluster(
-            cluster_id,
-            ["get", normalized, name, "-n", namespace, "-o", "yaml"],
+        # Read-only kubectl call — cached (see get_resource_describe rationale).
+        yaml_content = cached_namespace_read(
+            access,
+            namespace,
+            f"yaml:{normalized}:{name}",
+            lambda: _run_for_access(access, ["get", normalized, name, "-n", namespace, "-o", "yaml"]),
         )
         log_audit(
             "resource_yaml_viewed",

@@ -18,6 +18,8 @@ const OVERLAY_ACCENT = {
   transport: "var(--ai)",
   service: "var(--ok)",
   origin: "var(--ok)",
+  // Components the client-access connection attaches to (client↔transport↔target).
+  target: "var(--ok)",
 };
 
 export const NODE_W = 160;

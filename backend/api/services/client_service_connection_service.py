@@ -1,14 +1,18 @@
 """Client Service Access Topology — client-specific connectivity overlays.
 
-Each client↔service link can carry a single :class:`ClientServiceConnection`
-describing how *this* client reaches the service (source/destination IP,
-transport, landing cluster/namespace/environment). The reusable service topology
-is never duplicated per client: the composed client topology simply prepends a
-client node and a transport node onto the shared service topology.
+Each client↔service link carries a single :class:`ClientServiceConnection`
+describing how *this* client connects to the service: the direction (client →
+service, service → client, or both), the transport (VPN, Leased Line, …), the
+source/destination IPs, and **which component(s)** of the service the connection
+attaches to. The reusable service topology is never duplicated per client: the
+composed client topology simply overlays a client node and a transport node onto
+the shared service topology, linking the transport to each selected component
+(falling back to the service entrypoint when no components are chosen).
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,7 +23,6 @@ from ..models import (
     Client,
     ClientApplicationService,
     ClientServiceConnection,
-    ClientServiceEgressConnection,
 )
 
 # Allowed transport types (dropdown). "Other" permits a custom transport_name.
@@ -36,17 +39,38 @@ TRANSPORT_TYPES = [
 
 _NOT_CONFIGURED = "Not configured"
 
-# Direction of the direct deployment↔client link (egress connections only):
-#   outbound → deployment talks to client (deployment → transport → client)
-#   inbound  → client talks to deployment (client → transport → deployment)
+# Direction of the client↔service connectivity link drawn in the composed
+# topology:
+#   inbound  → client talks to the service   (client → transport → component)
+#   outbound → service talks to the client   (component → transport → client)
 #   both     → bidirectional
-EGRESS_DIRECTIONS = ["outbound", "inbound", "both"]
-_DEFAULT_DIRECTION = "outbound"
+DIRECTIONS = ["inbound", "outbound", "both"]
+_DEFAULT_DIRECTION = "inbound"
 
 
 # ---------------------------------------------------------------------------
 # Serializers
 # ---------------------------------------------------------------------------
+
+def _parse_component_refs(raw: Any) -> List[Dict[str, str]]:
+    """Decode the stored JSON component_refs into ``[{ref, name}]``.
+
+    Tolerant of legacy/empty values and malformed JSON (returns ``[]``).
+    """
+    if not raw:
+        return []
+    try:
+        data = raw if isinstance(raw, list) else json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    out: List[Dict[str, str]] = []
+    for item in data or []:
+        if isinstance(item, dict) and item.get("ref") is not None:
+            out.append({"ref": str(item["ref"]), "name": str(item.get("name") or item["ref"])})
+        elif item is not None:
+            out.append({"ref": str(item), "name": str(item)})
+    return out
+
 
 def _connection_to_dict(conn: Optional[ClientServiceConnection]) -> Optional[Dict[str, Any]]:
     if conn is None:
@@ -63,7 +87,8 @@ def _connection_to_dict(conn: Optional[ClientServiceConnection]) -> Optional[Dic
         "clusterId": conn.cluster_id or "",
         "namespace": conn.namespace or "",
         "environment": conn.environment or "",
-        "direction": conn.direction or "inbound",
+        "componentRefs": _parse_component_refs(conn.component_refs),
+        "direction": conn.direction or _DEFAULT_DIRECTION,
         "status": conn.status or "active",
         "isActive": bool(conn.is_active),
         "createdAt": conn.created_at.isoformat() if conn.created_at else None,
@@ -74,6 +99,18 @@ def _connection_to_dict(conn: Optional[ClientServiceConnection]) -> Optional[Dic
 def _connections_by_service(client_id: int) -> Dict[int, ClientServiceConnection]:
     rows = ClientServiceConnection.query.filter_by(client_id=client_id).all()
     return {row.service_id: row for row in rows}
+
+
+def _service_components(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """The service's topology nodes offered as connection targets in the picker."""
+    return [
+        {
+            "ref": str(n.get("id")),
+            "name": n.get("name") or str(n.get("id")),
+            "type": n.get("type") or "",
+        }
+        for n in nodes
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -102,10 +139,56 @@ def _normalize_direction(value: Any, default: str = _DEFAULT_DIRECTION) -> Tuple
     raw = (str(value).strip().lower() if value is not None else "")
     if not raw:
         return default, None
-    if raw not in EGRESS_DIRECTIONS:
-        allowed = ", ".join(EGRESS_DIRECTIONS)
+    if raw not in DIRECTIONS:
+        allowed = ", ".join(DIRECTIONS)
         return default, f"Invalid direction. Allowed: {allowed}."
     return raw, None
+
+
+def _normalize_component_refs(
+    value: Any, svc_nodes: List[Dict[str, Any]]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Validate the requested component refs against the live service topology.
+
+    Returns (json_or_none, error). Empty/absent selection stores ``None`` (the
+    composed topology then falls back to the service entrypoint). Every ref must
+    match a node id in the service topology.
+    """
+    if value is None:
+        return None, None
+    if not isinstance(value, (list, tuple)):
+        return None, "componentRefs must be a list."
+
+    # Accept a list of ref strings or of {ref, name} objects.
+    requested: List[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            ref = item.get("ref")
+        else:
+            ref = item
+        if ref is None or str(ref).strip() == "":
+            continue
+        requested.append(str(ref).strip())
+
+    if not requested:
+        return None, None
+
+    by_id = {str(n.get("id")): n for n in svc_nodes}
+    if not by_id:
+        return None, "This service has no topology components to attach to."
+
+    resolved: List[Dict[str, str]] = []
+    seen: set = set()
+    for ref in requested:
+        node = by_id.get(ref)
+        if node is None:
+            return None, f"Component '{ref}' is not part of this service topology."
+        if ref in seen:
+            continue
+        seen.add(ref)
+        resolved.append({"ref": ref, "name": str(node.get("name") or ref)})
+
+    return json.dumps(resolved), None
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +231,15 @@ def list_client_services(
                 "topology": {"nodes": [], "edges": []},
             }
         conn = connections.get(sid)
+        svc_nodes = (svc.get("topology") or {}).get("nodes") or []
         items.append({
             "serviceId": svc["id"],
             "serviceName": svc["name"],
             "serviceDescription": svc.get("description", ""),
             "health": svc.get("health", "unknown"),
-            "hasTopology": bool((svc.get("topology") or {}).get("nodes")),
+            "hasTopology": bool(svc_nodes),
+            # Components the Edit Connection modal offers for multi-select.
+            "components": _service_components(svc_nodes),
             "connection": _connection_to_dict(conn),
         })
 
@@ -173,6 +259,7 @@ def upsert_connection(
     service_id: int,
     payload: Dict[str, Any],
     actor_user_id: Optional[int] = None,
+    user=None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     client = Client.query.get(client_id)
     if not client:
@@ -192,6 +279,13 @@ def upsert_connection(
     direction, derr = _normalize_direction(payload.get("direction"), default="inbound")
     if derr:
         return None, derr, 400
+
+    # Validate the selected components against the live service topology.
+    _, svc_topo = _service_topology(service_id, user=user)
+    svc_nodes = list(svc_topo.get("nodes") or [])
+    component_refs, cerr = _normalize_component_refs(payload.get("componentRefs"), svc_nodes)
+    if cerr:
+        return None, cerr, 400
 
     # Ensure the client↔service link exists so connectivity always implies the
     # service is one of the client's services (idempotent).
@@ -217,6 +311,10 @@ def upsert_connection(
     conn.cluster_id = _clean(payload.get("clusterId"), 120)
     conn.namespace = _clean(payload.get("namespace"), 253)
     conn.environment = _clean(payload.get("environment"), 64)
+    # Only overwrite the stored components when the payload carried the key, so a
+    # partial update (e.g. status-only) doesn't silently clear the selection.
+    if "componentRefs" in payload:
+        conn.component_refs = component_refs
     conn.direction = direction
     conn.status = _clean(payload.get("status"), 32) or "active"
     if "isActive" in payload:
@@ -236,6 +334,7 @@ def upsert_connection(
             "serviceName": service.name,
             "transportType": conn.transport_type,
             "direction": conn.direction,
+            "componentRefs": _parse_component_refs(conn.component_refs),
             "status": conn.status,
         },
     )
@@ -284,7 +383,7 @@ def delete_connection(
 
 
 # ---------------------------------------------------------------------------
-# Composed client → transport → service topology
+# Composed client → transport → component(s) topology
 # ---------------------------------------------------------------------------
 
 def _service_topology(service_id: int, user=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -369,56 +468,71 @@ def get_client_service_topology(
         "transportName": transport_name,
     }
 
-    nodes = [client_node, transport_node]
+    nodes: List[Dict[str, Any]] = [client_node, transport_node]
     edges: List[Dict[str, Any]] = []
 
-    # Attach point on the service side: its entrypoint when it has a topology,
-    # otherwise a synthetic service node so we still show Client ↔ Transport ↔
-    # Service.
-    entry_id = _entry_node_id(svc_nodes, svc_edges)
-    if entry_id is None:
+    # Determine the service-side attach point(s): the connection's selected
+    # components when set, otherwise the service entrypoint (fallback). When the
+    # service has no topology at all, synthesize a single service node so we
+    # still render Client ↔ Transport ↔ Service.
+    node_index = {str(n.get("id")): n for n in svc_nodes}
+    saved_refs = _parse_component_refs(conn.component_refs) if conn else []
+
+    if svc_nodes:
+        nodes.extend(svc_nodes)
+        edges.extend(svc_edges)
+        attach_ids = [node_index[r["ref"]]["id"] for r in saved_refs if r["ref"] in node_index]
+        if not attach_ids:
+            entry_id = _entry_node_id(svc_nodes, svc_edges)
+            attach_ids = [entry_id] if entry_id is not None else []
+        # Accent the components this connection lands on.
+        attach_id_strs = {str(a) for a in attach_ids}
+        for n in nodes:
+            if str(n.get("id")) in attach_id_strs:
+                n["overlay"] = "target"
+    else:
         service_attach_id = f"service-{service_id}"
         nodes.append({
             "id": service_attach_id,
             "name": service.name,
             "type": "Service",
             "description": service.description or "Service entrypoint",
-            "overlay": "service",
+            "overlay": "target",
         })
-    else:
-        # Splice the transport node into the existing service entrypoint.
-        nodes.extend(svc_nodes)
-        edges.extend(svc_edges)
-        service_attach_id = entry_id
+        attach_ids = [service_attach_id]
 
-    # The two connectivity hops in the *inbound* orientation (client reaches the
-    # service). The connection's saved `direction` flips the arrows:
-    #   inbound  → client → transport → service  (client talks to service)
-    #   outbound → service → transport → client  (service talks to client)
+    # Draw the two connectivity hops through the shared transport node for each
+    # attach target. The saved `direction` flips the arrows:
+    #   inbound  → client → transport → component  (client talks to service)
+    #   outbound → component → transport → client  (service talks to client)
     #   both     → both directions (bidirectional)
     # The transport node's name already shows the transport type (e.g. "VPN"), so
     # the client↔transport hop only labels the source IP, not the transport again.
-    direction = (conn.direction if conn else None) or "inbound"
-    conn_hops = [
-        (client_node_id, transport_node_id, f"Source {source_ip}"),
-        (transport_node_id, service_attach_id, f"Destination {dest_ip}"),
-    ]
+    direction = (conn.direction if conn else None) or _DEFAULT_DIRECTION
     seen_pairs = {(str(e["sourceNodeId"]), str(e["targetNodeId"])) for e in edges}
-    for i, (a, b, desc) in enumerate(conn_hops):
-        if direction in ("inbound", "both") and (str(a), str(b)) not in seen_pairs:
-            edges.append({
-                "id": f"edge-conn-in-{i}",
-                "sourceNodeId": a, "targetNodeId": b,
-                "scope": "external", "description": desc,
-            })
-            seen_pairs.add((str(a), str(b)))
-        if direction in ("outbound", "both") and (str(b), str(a)) not in seen_pairs:
-            edges.append({
-                "id": f"edge-conn-out-{i}",
-                "sourceNodeId": b, "targetNodeId": a,
-                "scope": "external", "description": desc,
-            })
-            seen_pairs.add((str(b), str(a)))
+
+    def _add_edge(prefix: str, i: int, a: Any, b: Any, desc: str) -> None:
+        if (str(a), str(b)) in seen_pairs:
+            return
+        edges.append({
+            "id": f"{prefix}-{i}",
+            "sourceNodeId": a, "targetNodeId": b,
+            "scope": "external", "description": desc,
+        })
+        seen_pairs.add((str(a), str(b)))
+
+    # client → transport (shared, drawn once) in the requested orientation(s).
+    if direction in ("inbound", "both"):
+        _add_edge("edge-conn-in", 0, client_node_id, transport_node_id, f"Source {source_ip}")
+    if direction in ("outbound", "both"):
+        _add_edge("edge-conn-out", 0, transport_node_id, client_node_id, f"Source {source_ip}")
+
+    # transport → each component (one hop per selected component).
+    for idx, target in enumerate(attach_ids):
+        if direction in ("inbound", "both"):
+            _add_edge("edge-conn-in", idx + 1, transport_node_id, target, f"Destination {dest_ip}")
+        if direction in ("outbound", "both"):
+            _add_edge("edge-conn-out", idx + 1, target, transport_node_id, f"Destination {dest_ip}")
 
     return (
         {
@@ -434,363 +548,6 @@ def get_client_service_topology(
                 "health": svc_summary.get("health", "unknown"),
             },
             "connection": _connection_to_dict(conn),
-            "topology": {"nodes": nodes, "edges": edges},
-        },
-        None,
-        200,
-    )
-
-
-# ===========================================================================
-# Egress (Service → Client): per-deployment reverse connectivity
-# ===========================================================================
-
-def _egress_to_dict(conn: Optional[ClientServiceEgressConnection]) -> Optional[Dict[str, Any]]:
-    if conn is None:
-        return None
-    return {
-        "id": conn.id,
-        "clientId": conn.client_id,
-        "serviceId": conn.service_id,
-        "nodeRef": conn.node_ref,
-        "nodeName": conn.node_name or "",
-        "sourceIp": conn.source_ip or "",
-        "destinationIp": conn.destination_ip or "",
-        "transportType": conn.transport_type or "",
-        "transportName": conn.transport_name or "",
-        "transportNotes": conn.transport_notes or "",
-        "direction": conn.direction or _DEFAULT_DIRECTION,
-        "status": conn.status or "active",
-        "isActive": bool(conn.is_active),
-        "createdAt": conn.created_at.isoformat() if conn.created_at else None,
-        "updatedAt": conn.updated_at.isoformat() if conn.updated_at else None,
-    }
-
-
-def _egress_source_nodes(
-    nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """Egress-eligible source nodes: the service's deployments / leaf endpoints.
-
-    A node is a candidate egress origin when it is a *leaf* of the service flow
-    (no outbound edge) — in the inbound topology these are the deployments the
-    traffic terminates at. When the topology has no edges (or every node is a
-    source), every node is offered so the picker is never empty.
-    """
-    if not nodes:
-        return []
-    sources = {str(e.get("sourceNodeId")) for e in edges}
-    leaves = [n for n in nodes if str(n.get("id")) not in sources]
-    return leaves or list(nodes)
-
-
-def _egress_by_node(client_id: int, service_id: int) -> Dict[str, ClientServiceEgressConnection]:
-    rows = ClientServiceEgressConnection.query.filter_by(
-        client_id=client_id, service_id=service_id
-    ).all()
-    return {row.node_ref: row for row in rows}
-
-
-def list_service_egress_nodes(
-    client_id: int,
-    service_id: int,
-    user=None,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
-    """List the service's egress-eligible deployment nodes + their egress config."""
-    client = Client.query.get(client_id)
-    if not client:
-        return None, "Client not found", 404
-    service = ApplicationService.query.get(service_id)
-    if not service:
-        return None, "Application service not found", 404
-
-    svc_summary, svc_topo = _service_topology(service_id, user=user)
-    svc_nodes = list(svc_topo.get("nodes") or [])
-    svc_edges = list(svc_topo.get("edges") or [])
-    candidates = _egress_source_nodes(svc_nodes, svc_edges)
-    connections = _egress_by_node(client_id, service_id)
-
-    items: List[Dict[str, Any]] = []
-    for node in candidates:
-        node_ref = str(node.get("id"))
-        conn = connections.get(node_ref)
-        items.append({
-            "nodeRef": node_ref,
-            "nodeName": node.get("name") or node_ref,
-            "nodeType": node.get("type") or "",
-            "connection": _egress_to_dict(conn),
-        })
-
-    return (
-        {
-            "items": items,
-            "count": len(items),
-            "clientId": client.id,
-            "clientName": client.name,
-            "serviceId": service.id,
-            "serviceName": service.name,
-            "hasTopology": bool(svc_nodes),
-        },
-        None,
-        200,
-    )
-
-
-def upsert_egress_connection(
-    client_id: int,
-    service_id: int,
-    node_ref: str,
-    payload: Dict[str, Any],
-    actor_user_id: Optional[int] = None,
-    user=None,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
-    client = Client.query.get(client_id)
-    if not client:
-        return None, "Client not found", 404
-    service = ApplicationService.query.get(service_id)
-    if not service:
-        return None, "Application service not found", 404
-
-    node_ref = (str(node_ref).strip() if node_ref is not None else "")
-    if not node_ref:
-        return None, "A deployment node reference is required.", 400
-
-    # Validate the node exists in (and is egress-eligible for) the service.
-    _, svc_topo = _service_topology(service_id, user=user)
-    svc_nodes = list(svc_topo.get("nodes") or [])
-    svc_edges = list(svc_topo.get("edges") or [])
-    candidates = {str(n.get("id")): n for n in _egress_source_nodes(svc_nodes, svc_edges)}
-    node = candidates.get(node_ref)
-    if node is None:
-        return None, "Deployment node not found in this service topology.", 404
-
-    transport_type, terr = _normalize_transport_type(payload.get("transportType"))
-    if terr:
-        return None, terr, 400
-    transport_name = _clean(payload.get("transportName"), 255)
-    if transport_type == "Other" and not transport_name:
-        return None, "Transport name is required when transport type is 'Other'.", 400
-
-    direction, derr = _normalize_direction(payload.get("direction"))
-    if derr:
-        return None, derr, 400
-
-    # Egress always implies the service is linked to the client (idempotent).
-    link = ClientApplicationService.query.filter_by(
-        client_id=client_id, service_id=service_id
-    ).first()
-    if not link:
-        db.session.add(ClientApplicationService(client_id=client_id, service_id=service_id))
-
-    conn = ClientServiceEgressConnection.query.filter_by(
-        client_id=client_id, service_id=service_id, node_ref=node_ref
-    ).first()
-    is_new = conn is None
-    if is_new:
-        conn = ClientServiceEgressConnection(
-            client_id=client_id, service_id=service_id, node_ref=node_ref
-        )
-        db.session.add(conn)
-
-    conn.node_name = _clean(node.get("name"), 253) or node_ref
-    conn.source_ip = _clean(payload.get("sourceIp"), 64)
-    conn.destination_ip = _clean(payload.get("destinationIp"), 64)
-    conn.transport_type = transport_type
-    conn.transport_name = transport_name
-    conn.transport_notes = _clean(payload.get("transportNotes"), 4000)
-    conn.direction = direction
-    conn.status = _clean(payload.get("status"), 32) or "active"
-    if "isActive" in payload:
-        conn.is_active = bool(payload.get("isActive"))
-    conn.updated_at = datetime.now(timezone.utc)
-
-    db.session.commit()
-    log_audit(
-        "client_service_egress_connection_created" if is_new else "client_service_egress_connection_updated",
-        actor_user_id=actor_user_id,
-        target_type="client_service_egress_connection",
-        target_id=str(conn.id),
-        details={
-            "clientId": client_id,
-            "clientName": client.name,
-            "serviceId": service_id,
-            "serviceName": service.name,
-            "nodeRef": node_ref,
-            "nodeName": conn.node_name,
-            "transportType": conn.transport_type,
-            "direction": conn.direction,
-            "status": conn.status,
-        },
-    )
-    return _egress_to_dict(conn), None, (201 if is_new else 200)
-
-
-def delete_egress_connection(
-    client_id: int,
-    service_id: int,
-    node_ref: str,
-    actor_user_id: Optional[int] = None,
-    deactivate: bool = False,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
-    conn = ClientServiceEgressConnection.query.filter_by(
-        client_id=client_id, service_id=service_id, node_ref=str(node_ref)
-    ).first()
-    if not conn:
-        return None, "Egress connection not found", 404
-
-    conn_id = conn.id
-    if deactivate:
-        conn.is_active = False
-        conn.status = "inactive"
-        conn.updated_at = datetime.now(timezone.utc)
-        db.session.commit()
-        result = {"id": conn_id, "deactivated": True, "clientId": client_id, "serviceId": service_id, "nodeRef": node_ref}
-        action = "client_service_egress_connection_deactivated"
-    else:
-        db.session.delete(conn)
-        db.session.commit()
-        result = {"id": conn_id, "deleted": True, "clientId": client_id, "serviceId": service_id, "nodeRef": node_ref}
-        action = "client_service_egress_connection_deleted"
-
-    log_audit(
-        action,
-        actor_user_id=actor_user_id,
-        target_type="client_service_egress_connection",
-        target_id=str(conn_id),
-        details={"clientId": client_id, "serviceId": service_id, "nodeRef": node_ref},
-    )
-    return result, None, 200
-
-
-def get_client_service_egress_topology(
-    client_id: int,
-    service_id: int,
-    node_ref: str,
-    user=None,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
-    """Compose the reverse (deployment → … → connectivity → client) topology.
-
-    The reusable service topology is reversed edge-for-edge so the selected
-    deployment sits at the origin; the service's original entrypoint then feeds a
-    transport node and finally the client node.
-    """
-    client = Client.query.get(client_id)
-    if not client:
-        return None, "Client not found", 404
-    service = ApplicationService.query.get(service_id)
-    if not service:
-        return None, "Application service not found", 404
-
-    node_ref = str(node_ref)
-    svc_summary, svc_topo = _service_topology(service_id, user=user)
-    svc_nodes = list(svc_topo.get("nodes") or [])
-    svc_edges = list(svc_topo.get("edges") or [])
-    if not svc_nodes:
-        return None, "Service has no topology to compose an egress path from.", 404
-
-    node_index = {str(n.get("id")): n for n in svc_nodes}
-    if node_ref not in node_index:
-        return None, "Deployment node not found in this service topology.", 404
-
-    conn = ClientServiceEgressConnection.query.filter_by(
-        client_id=client_id, service_id=service_id, node_ref=node_ref
-    ).first()
-
-    source_ip = (conn.source_ip if conn else None) or _NOT_CONFIGURED
-    dest_ip = (conn.destination_ip if conn else None) or _NOT_CONFIGURED
-    transport_type = (conn.transport_type if conn else None) or _NOT_CONFIGURED
-    transport_name = (conn.transport_name if conn else None) or ""
-
-    # Reverse every service edge; flag the selected deployment as the origin.
-    nodes: List[Dict[str, Any]] = []
-    for n in svc_nodes:
-        node = dict(n)
-        if str(node.get("id")) == node_ref:
-            node["overlay"] = "origin"
-        nodes.append(node)
-
-    edges: List[Dict[str, Any]] = []
-    for e in svc_edges:
-        edges.append({
-            "id": f"rev-{e.get('id')}",
-            "sourceNodeId": e.get("targetNodeId"),
-            "targetNodeId": e.get("sourceNodeId"),
-            "scope": e.get("scope"),
-            "description": e.get("description"),
-        })
-
-    client_node_id = f"egress-client-{client_id}"
-    transport_node_id = f"egress-transport-{client_id}-{service_id}-{node_ref}"
-
-    transport_desc_parts = [f"Source: {source_ip}", f"Destination: {dest_ip}"]
-    if transport_name:
-        transport_desc_parts.append(transport_name)
-    transport_node = {
-        "id": transport_node_id,
-        "name": transport_type,
-        "type": "Connectivity",
-        "description": " · ".join(transport_desc_parts),
-        "overlay": "transport",
-        "sourceIp": source_ip,
-        "destinationIp": dest_ip,
-        "transportName": transport_name,
-    }
-    client_node = {
-        "id": client_node_id,
-        "name": client.name,
-        "type": "Client",
-        "description": client.contact_person or client.email or "Client",
-        "overlay": "client",
-    }
-    nodes.extend([transport_node, client_node])
-
-    # Only the selected deployment links to the connectivity/client — NOT the
-    # service entrypoint. The reversed service chain (deployment → … → entrypoint)
-    # is kept purely as context and hangs off the deployment; the transport and
-    # client nodes attach solely through the direct deployment link below. Its
-    # arrow direction follows the connection's saved `direction`:
-    #   outbound → deployment → transport → client  (deployment talks to client)
-    #   inbound  → client → transport → deployment  (client talks to deployment)
-    #   both     → both directions (bidirectional)
-    direction = (conn.direction if conn else None) or _DEFAULT_DIRECTION
-    # Each hop as (source, target, label) in the *outbound* orientation.
-    direct_hops = [
-        (str(node_ref), transport_node_id, f"Source {source_ip}"),
-        (transport_node_id, client_node_id, f"Destination {dest_ip}"),
-    ]
-    seen_pairs = {(str(e["sourceNodeId"]), str(e["targetNodeId"])) for e in edges}
-    for i, (a, b, desc) in enumerate(direct_hops):
-        if direction in ("outbound", "both") and (str(a), str(b)) not in seen_pairs:
-            edges.append({
-                "id": f"edge-direct-out-{i}",
-                "sourceNodeId": a, "targetNodeId": b,
-                "scope": "external", "description": desc,
-            })
-            seen_pairs.add((str(a), str(b)))
-        if direction in ("inbound", "both") and (str(b), str(a)) not in seen_pairs:
-            edges.append({
-                "id": f"edge-direct-in-{i}",
-                "sourceNodeId": b, "targetNodeId": a,
-                "scope": "external", "description": desc,
-            })
-            seen_pairs.add((str(b), str(a)))
-
-    origin = node_index.get(node_ref, {})
-    return (
-        {
-            "client": {
-                "id": client.id,
-                "name": client.name,
-                "contactPerson": client.contact_person or "",
-                "email": client.email or "",
-            },
-            "service": {
-                "id": service.id,
-                "name": service.name,
-                "health": svc_summary.get("health", "unknown"),
-            },
-            "node": {"ref": node_ref, "name": origin.get("name") or node_ref, "type": origin.get("type") or ""},
-            "connection": _egress_to_dict(conn),
             "topology": {"nodes": nodes, "edges": edges},
         },
         None,

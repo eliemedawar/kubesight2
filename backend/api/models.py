@@ -872,6 +872,12 @@ class ClientServiceConnection(db.Model):
     cluster_id = db.Column(db.String(120), nullable=True)
     namespace = db.Column(db.String(253), nullable=True)
     environment = db.Column(db.String(64), nullable=True)
+    # JSON-encoded list of the service topology components this connection
+    # attaches to, e.g. ``[{"ref": "3", "name": "persona-ms"}]``. The composed
+    # client topology draws client → transport → each of these components. Empty
+    # or null falls back to the service entrypoint (keeps pre-existing rows
+    # rendering). Validated against live topology node ids in the service layer.
+    component_refs = db.Column(db.Text, nullable=True)
     # Direction of the client↔service connectivity link drawn in the composed
     # topology: inbound (client → service), outbound (service → client), or both
     # (bidirectional). Validated in the service layer. Defaults to "inbound".
@@ -896,7 +902,14 @@ class ClientServiceConnection(db.Model):
 
 
 class ClientServiceEgressConnection(db.Model):
-    """Per-deployment *egress* connectivity: how a service component reaches a client.
+    """DEPRECATED — superseded by :attr:`ClientServiceConnection.component_refs`.
+
+    No longer referenced by the app (routes/service layer/UI were removed when
+    inbound + egress were unified into a single per-client↔service connection
+    with a direction and a multi-component selection). The table is retained so
+    historical rows are not dropped; a later cleanup migration may remove it.
+
+    Per-deployment *egress* connectivity: how a service component reaches a client.
 
     The counterpart to :class:`ClientServiceConnection` (which describes the
     inbound client → service path). This describes the reverse direction — a

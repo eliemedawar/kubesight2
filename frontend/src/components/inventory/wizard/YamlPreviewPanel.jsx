@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function YamlPreviewPanel({
   yaml = "",
@@ -11,6 +11,20 @@ export default function YamlPreviewPanel({
 }) {
   const [compareMode, setCompareMode] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  // Let Escape exit fullscreen without closing the surrounding modal.
+  useEffect(() => {
+    if (!fullscreen) return undefined;
+    const handleKey = (event) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        setFullscreen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKey, true);
+    return () => window.removeEventListener("keydown", handleKey, true);
+  }, [fullscreen]);
 
   const handleCopy = async () => {
     try {
@@ -35,7 +49,7 @@ export default function YamlPreviewPanel({
   };
 
   return (
-    <div className="wizard-yaml-panel">
+    <div className={`wizard-yaml-panel${fullscreen ? " wizard-yaml-panel--fullscreen" : ""}`}>
       <div className="wizard-yaml-panel__toolbar">
         <span className="muted">Generated Manifest</span>
         <div className="wizard-yaml-panel__actions">
@@ -49,6 +63,14 @@ export default function YamlPreviewPanel({
           </button>
           <button type="button" className="btn-outline btn-sm" onClick={handleDownload}>
             Download
+          </button>
+          <button
+            type="button"
+            className="btn-outline btn-sm"
+            onClick={() => setFullscreen((v) => !v)}
+            aria-pressed={fullscreen}
+          >
+            {fullscreen ? "Exit fullscreen" : "Fullscreen"}
           </button>
         </div>
       </div>

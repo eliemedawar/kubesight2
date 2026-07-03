@@ -274,3 +274,99 @@ class TestDeleteConnection:
             headers=auth_headers(admin_token),
         )
         assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Component selection (which service component(s) the connection attaches to)
+# ---------------------------------------------------------------------------
+
+class TestComponentSelection:
+    def _node_id(self, svc, name):
+        return next(n["id"] for n in svc["topology"]["nodes"] if n["name"] == name)
+
+    def _post_conn(self, client, token, cl, svc, **payload):
+        return client.post(
+            f"/api/clients/{cl['id']}/services/{svc['id']}/connection",
+            json=payload, headers=auth_headers(token),
+        )
+
+    def _topology(self, client, token, cl, svc):
+        res = client.get(f"/api/clients/{cl['id']}/services/{svc['id']}/topology", headers=auth_headers(token))
+        assert res.status_code == 200, res.get_json()
+        return res.get_json()["data"]["topology"]
+
+    def _transport_id(self, topo):
+        return next(n for n in topo["nodes"] if n["name"] == "VPN")["id"]
+
+    def _has_edge(self, topo, src, tgt):
+        return any(
+            str(e["sourceNodeId"]) == str(src) and str(e["targetNodeId"]) == str(tgt)
+            for e in topo["edges"]
+        )
+
+    def test_list_services_includes_components(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        res = client.get(f"/api/clients/{cl['id']}/services", headers=auth_headers(admin_token))
+        item = res.get_json()["data"]["items"][0]
+        assert {c["name"] for c in item["components"]} == {"WAF", "Backend API"}
+
+    def test_connection_stores_component_refs(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        backend = self._node_id(svc, "Backend API")
+        res = self._post_conn(client, admin_token, cl, svc, transportType="VPN", componentRefs=[str(backend)])
+        assert res.status_code == 201, res.get_json()
+        refs = res.get_json()["data"]["componentRefs"]
+        assert [r["ref"] for r in refs] == [str(backend)]
+        assert refs[0]["name"] == "Backend API"
+
+    def test_invalid_component_ref_rejected(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        res = self._post_conn(client, admin_token, cl, svc, transportType="VPN", componentRefs=["99999"])
+        assert res.status_code == 400
+
+    def test_topology_attaches_to_selected_component_only(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        backend = self._node_id(svc, "Backend API")
+        waf = self._node_id(svc, "WAF")
+        self._post_conn(client, admin_token, cl, svc, transportType="VPN", direction="inbound", componentRefs=[str(backend)])
+        topo = self._topology(client, admin_token, cl, svc)
+        transport = self._transport_id(topo)
+        # inbound: transport → selected Backend API, NOT the WAF entrypoint.
+        assert self._has_edge(topo, transport, backend)
+        assert not self._has_edge(topo, transport, waf)
+
+    def test_topology_attaches_to_multiple_components(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        backend = self._node_id(svc, "Backend API")
+        waf = self._node_id(svc, "WAF")
+        self._post_conn(client, admin_token, cl, svc, transportType="VPN", direction="inbound",
+                        componentRefs=[str(backend), str(waf)])
+        topo = self._topology(client, admin_token, cl, svc)
+        transport = self._transport_id(topo)
+        assert self._has_edge(topo, transport, backend)
+        assert self._has_edge(topo, transport, waf)
+
+    def test_topology_falls_back_to_entrypoint_without_components(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        waf = self._node_id(svc, "WAF")
+        self._post_conn(client, admin_token, cl, svc, transportType="VPN")
+        topo = self._topology(client, admin_token, cl, svc)
+        transport = self._transport_id(topo)
+        # No components selected → attaches to the WAF entrypoint (legacy behavior).
+        assert self._has_edge(topo, transport, waf)
+
+    def test_status_only_update_keeps_component_refs(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        backend = self._node_id(svc, "Backend API")
+        self._post_conn(client, admin_token, cl, svc, transportType="VPN", componentRefs=[str(backend)])
+        # A partial update that omits componentRefs must not clear the selection.
+        res = self._post_conn(client, admin_token, cl, svc, transportType="VPN", status="degraded")
+        refs = res.get_json()["data"]["componentRefs"]
+        assert [r["ref"] for r in refs] == [str(backend)]

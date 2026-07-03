@@ -5734,6 +5734,26 @@ button:focus-visible {
   min-height: 280px;
 }
 
+/* Fullscreen YAML editing: lift the panel out of the modal into an overlay
+   that fills the viewport so long manifests are easier to read and edit. */
+.wizard-yaml-panel--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 1.25rem 1.25rem;
+  background: var(--bg-app, var(--bg-panel-strong));
+}
+
+.wizard-yaml-panel--fullscreen .wizard-yaml-panel__editor,
+.wizard-yaml-panel--fullscreen .wizard-yaml-panel__diff {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  resize: none;
+}
+
 .wizard-version-detail {
   margin-top: 1.25rem;
   padding: 1rem;
