@@ -34,6 +34,34 @@ function componentNames(conn) {
   return refs.map((r) => r.name).join(", ");
 }
 
+// Per-component addressing rows (name: source → destination) for detail views.
+function ComponentAddressing({ conn }) {
+  const refs = conn?.componentRefs || [];
+  if (!refs.length) {
+    return (
+      <div>
+        <span className="muted">Attaches to service entrypoint · </span>
+        {conn?.sourceIp || <span className="muted">no src</span>}
+        <span className="muted"> → </span>
+        {conn?.destinationIp || <span className="muted">no dst</span>}
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+      {refs.map((r) => (
+        <div key={r.ref}>
+          <strong>{r.name}</strong>
+          <span className="muted"> · </span>
+          {r.sourceIp || <span className="muted">no src</span>}
+          <span className="muted"> → </span>
+          {r.destinationIp || <span className="muted">no dst</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function tabStyle(active) {
   return {
     background: "none",
@@ -81,8 +109,6 @@ function ConnectivityTopology({ clientId, selectedServiceId }) {
         <div><span className="muted">Client: </span><strong>{data.client?.name}</strong></div>
         <div><span className="muted">Direction: </span>{orDash(conn?.direction)}</div>
         <div><span className="muted">Transport: </span>{orDash(conn?.transportType)}</div>
-        <div><span className="muted">Source IP: </span>{orDash(conn?.sourceIp)}</div>
-        <div><span className="muted">Destination IP: </span>{orDash(conn?.destinationIp)}</div>
         <div><span className="muted">Components: </span>{componentNames(conn)}</div>
       </div>
       <TopologyViewer nodes={data.topology?.nodes} edges={data.topology?.edges} fillWidth />
@@ -131,10 +157,12 @@ function AccessDetailsTab({ services }) {
             <div className="form-grid" style={{ fontSize: "0.85rem" }}>
               <div><span className="muted">Direction: </span>{orDash(c.direction)}</div>
               <div><span className="muted">Transport: </span>{orDash(c.transportType)}</div>
-              <div><span className="muted">Source IP: </span>{orDash(c.sourceIp)}</div>
-              <div><span className="muted">Destination IP: </span>{orDash(c.destinationIp)}</div>
-              <div className="form-grid__full"><span className="muted">Components: </span>{componentNames(svc.connection)}</div>
+              <div><span className="muted">Transport details: </span>{orDash(c.transportName)}</div>
               <div><span className="muted">Active: </span>{svc.connection ? (c.isActive ? "Yes" : "No") : <span className="muted">Not configured</span>}</div>
+              <div className="form-grid__full" style={{ marginTop: "0.25rem" }}>
+                <div className="muted" style={{ marginBottom: "0.25rem" }}>Components &amp; addressing</div>
+                {svc.connection ? <ComponentAddressing conn={svc.connection} /> : <span className="muted">Not configured</span>}
+              </div>
               {c.transportNotes && (
                 <div className="form-grid__full"><span className="muted">Notes: </span>{c.transportNotes}</div>
               )}
@@ -204,8 +232,6 @@ function ServicesTab({ services, canUpdate, onViewTopology, onEditConnection, on
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "0.6rem 1rem" }}>
               <Field label="Direction">{orDash(c.direction)}</Field>
               <Field label="Transport">{orDash(c.transportType)}</Field>
-              <Field label="Source IP">{orDash(c.sourceIp)}</Field>
-              <Field label="Destination IP">{orDash(c.destinationIp)}</Field>
               <Field label="Components">{componentNames(svc.connection)}</Field>
             </div>
           </div>

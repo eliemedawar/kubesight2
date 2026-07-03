@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
-from flask import request
+from flask import current_app, request
 
 from ..audit import log_audit
 from ..auth_utils import (
@@ -217,22 +218,57 @@ def _recent_temp_lock_count(user: User) -> int:
     )
 
 
+def _send_email_async(task: Callable[[], None]) -> None:
+    """Run an email-send task without blocking the request.
+
+    The SMTP handshake can take seconds (up to the 30s socket timeout when the
+    relay is slow or down), and these notifications sit directly on the login
+    path — the user must never wait on them for their session token. Under
+    TESTING the task runs inline so tests stay deterministic. Failures are
+    swallowed: notification email is always best-effort.
+    """
+    app = current_app._get_current_object()
+    if app.config.get("TESTING"):
+        try:
+            task()
+        except Exception:
+            pass
+        return
+
+    def _runner() -> None:
+        with app.app_context():
+            try:
+                task()
+            except Exception:
+                pass
+
+    threading.Thread(target=_runner, name="kubesight-auth-email", daemon=True).start()
+
+
 def _send_security_email(user: User, subject: str, headline: str, lines, *, contact_admin=True) -> None:
     if not user.email or "@" not in user.email:
         return
-    try:
+    # Capture plain values now: the background task must not touch the request
+    # context or the session-bound user instance.
+    email = user.email
+    username = user.username
+    full_name = user.full_name
+    ip_address = _client_ip()
+    detail_lines = list(lines)
+
+    def _task() -> None:
         send_security_event_email(
-            user.email,
-            username=user.username,
-            full_name=user.full_name,
+            email,
+            username=username,
+            full_name=full_name,
             subject=subject,
             headline=headline,
-            lines=list(lines),
-            ip_address=_client_ip(),
+            lines=detail_lines,
+            ip_address=ip_address,
             show_contact_admin=contact_admin,
         )
-    except (EmailDeliveryError, Exception):
-        pass
+
+    _send_email_async(_task)
 
 
 def _apply_lock(user: User, reason: str) -> None:
@@ -369,29 +405,41 @@ def _onboarding_payload(user: User, stage: str) -> Dict[str, Any]:
     }
 
 
-def _send_login_email(user: User) -> bool:
+def _send_login_email(user: User) -> None:
     """Send the "your account was signed in" security email. Never fatal."""
     if not user.email or "@" not in user.email:
-        return False
-    try:
-        send_login_notification_email(
-            user.email,
-            username=user.username,
-            full_name=user.full_name,
-            login_time=_now().strftime("%Y-%m-%d %H:%M:%S UTC"),
-            ip_address=_client_ip(),
-            user_agent=_user_agent(),
-        )
+        return
+    # Capture plain values now: the background task must not touch the request
+    # context or the session-bound user instance.
+    email = user.email
+    username = user.username
+    full_name = user.full_name
+    user_id = user.id
+    login_time = _now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    ip_address = _client_ip()
+    user_agent = _user_agent()
+
+    def _task() -> None:
+        try:
+            send_login_notification_email(
+                email,
+                username=username,
+                full_name=full_name,
+                login_time=login_time,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        except (EmailDeliveryError, Exception):
+            return
         log_audit(
             "login_email_sent",
-            actor_user_id=user.id,
+            actor_user_id=user_id,
             target_type="user",
-            target_id=str(user.id),
-            details={"email": user.email, "ip": _client_ip()},
+            target_id=str(user_id),
+            details={"email": email, "ip": ip_address},
         )
-        return True
-    except (EmailDeliveryError, Exception):
-        return False
+
+    _send_email_async(_task)
 
 
 def _complete_login(user: User) -> Tuple[Dict[str, Any], None, int]:

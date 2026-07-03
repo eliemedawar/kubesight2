@@ -30,8 +30,8 @@ function componentHeading(direction) {
 
 // Modal to configure the client-specific connectivity overlay for one
 // client↔service link: direction, transport, the service component(s) the
-// connection attaches to, and source/destination IPs. Nothing here touches the
-// reusable service topology.
+// connection attaches to (each with its own source/destination IP), and status.
+// Nothing here touches the reusable service topology.
 export default function EditConnectionModal({
   clientName,
   serviceName,
@@ -49,23 +49,34 @@ export default function EditConnectionModal({
   const [transportType, setTransportType] = useState(c.transportType || "");
   const [transportName, setTransportName] = useState(c.transportName || "");
   const [transportNotes, setTransportNotes] = useState(c.transportNotes || "");
+  const [status, setStatus] = useState(c.status || "active");
+  // Connection-level IPs — only used when the service has no components to attach to.
   const [sourceIp, setSourceIp] = useState(c.sourceIp || "");
   const [destinationIp, setDestinationIp] = useState(c.destinationIp || "");
-  const [status, setStatus] = useState(c.status || "active");
-  const [selectedRefs, setSelectedRefs] = useState(
-    () => new Set((c.componentRefs || []).map((r) => String(r.ref)))
-  );
+  // Per-component selection + addressing: { [ref]: { sourceIp, destinationIp } }.
+  const [compData, setCompData] = useState(() => {
+    const init = {};
+    (c.componentRefs || []).forEach((r) => {
+      init[String(r.ref)] = { sourceIp: r.sourceIp || "", destinationIp: r.destinationIp || "" };
+    });
+    return init;
+  });
 
   const isOther = transportType === "Other";
   const otherMissing = isOther && !transportName.trim();
+  const hasComponents = components.length > 0;
 
   const toggleRef = (ref) => {
-    setSelectedRefs((prev) => {
-      const next = new Set(prev);
-      if (next.has(ref)) next.delete(ref);
-      else next.add(ref);
+    setCompData((prev) => {
+      const next = { ...prev };
+      if (next[ref]) delete next[ref];
+      else next[ref] = { sourceIp: "", destinationIp: "" };
       return next;
     });
+  };
+
+  const setCompField = (ref, field, val) => {
+    setCompData((prev) => ({ ...prev, [ref]: { ...prev[ref], [field]: val } }));
   };
 
   const handleSubmit = () => {
@@ -75,10 +86,15 @@ export default function EditConnectionModal({
       transportType: transportType || "",
       transportName: transportName.trim(),
       transportNotes: transportNotes.trim(),
-      sourceIp: sourceIp.trim(),
-      destinationIp: destinationIp.trim(),
       status: status || "active",
-      componentRefs: [...selectedRefs],
+      // Connection-level IPs matter only for the no-component (entrypoint) case.
+      sourceIp: hasComponents ? "" : sourceIp.trim(),
+      destinationIp: hasComponents ? "" : destinationIp.trim(),
+      componentRefs: Object.entries(compData).map(([ref, v]) => ({
+        ref,
+        sourceIp: (v.sourceIp || "").trim(),
+        destinationIp: (v.destinationIp || "").trim(),
+      })),
     });
   };
 
@@ -131,42 +147,76 @@ export default function EditConnectionModal({
 
         <section className="form-section">
           <h4>{componentHeading(direction)}</h4>
-          {components.length === 0 ? (
-            <p className="muted" style={{ fontSize: "0.85rem", margin: 0 }}>
-              This service has no topology components. The connection will attach to the service entrypoint.
-            </p>
+          {!hasComponents ? (
+            <>
+              <p className="muted" style={{ fontSize: "0.85rem", margin: "0 0 0.75rem" }}>
+                This service has no topology components. The connection attaches to the service entrypoint.
+              </p>
+              <div className="form-grid">
+                <label>
+                  Source IP
+                  <input value={sourceIp} onChange={(e) => setSourceIp(e.target.value)} maxLength={64} placeholder="e.g. 196.10.20.5" />
+                </label>
+                <label>
+                  Destination IP
+                  <input value={destinationIp} onChange={(e) => setDestinationIp(e.target.value)} maxLength={64} placeholder="e.g. 10.4.12.50" />
+                </label>
+              </div>
+            </>
           ) : (
             <>
               <p className="muted" style={{ fontSize: "0.8125rem", margin: "0 0 0.5rem" }}>
-                Select one or more. Leave empty to attach to the service entrypoint.
+                Select one or more components — each has its own source &amp; destination IP. Leave all unchecked to attach to the service entrypoint.
               </p>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-                  gap: "0.4rem 1rem",
-                  maxHeight: 220,
-                  overflowY: "auto",
-                }}
-              >
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
                 {components.map((comp) => {
                   const ref = String(comp.ref);
+                  const selected = Boolean(compData[ref]);
                   return (
-                    <label
+                    <div
                       key={ref}
-                      style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", cursor: "pointer" }}
+                      style={{
+                        border: "1px solid var(--border)",
+                        borderRadius: "0.5rem",
+                        padding: "0.6rem 0.75rem",
+                        background: selected ? "var(--bg-panel-strong, var(--bg-inset))" : "transparent",
+                      }}
                     >
-                      <input
-                        type="checkbox"
-                        checked={selectedRefs.has(ref)}
-                        onChange={() => toggleRef(ref)}
-                        style={{ width: "auto", margin: 0 }}
-                      />
-                      <span>
-                        {comp.name}
-                        {comp.type && <span className="muted"> · {comp.type}</span>}
-                      </span>
-                    </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", cursor: "pointer", margin: 0 }}>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => toggleRef(ref)}
+                          style={{ width: "auto", margin: 0 }}
+                        />
+                        <span style={{ fontWeight: 600 }}>
+                          {comp.name}
+                          {comp.type && <span className="muted" style={{ fontWeight: 400 }}> · {comp.type}</span>}
+                        </span>
+                      </label>
+                      {selected && (
+                        <div className="form-grid" style={{ marginTop: "0.6rem" }}>
+                          <label>
+                            Source IP
+                            <input
+                              value={compData[ref].sourceIp}
+                              onChange={(e) => setCompField(ref, "sourceIp", e.target.value)}
+                              maxLength={64}
+                              placeholder="e.g. 196.10.20.5"
+                            />
+                          </label>
+                          <label>
+                            Destination IP
+                            <input
+                              value={compData[ref].destinationIp}
+                              onChange={(e) => setCompField(ref, "destinationIp", e.target.value)}
+                              maxLength={64}
+                              placeholder="e.g. 10.4.12.50"
+                            />
+                          </label>
+                        </div>
+                      )}
+                    </div>
                   );
                 })}
               </div>
@@ -175,26 +225,8 @@ export default function EditConnectionModal({
         </section>
 
         <section className="form-section">
-          <h4>Addressing</h4>
+          <h4>Status &amp; notes</h4>
           <div className="form-grid">
-            <label>
-              Source IP
-              <input
-                value={sourceIp}
-                onChange={(e) => setSourceIp(e.target.value)}
-                maxLength={64}
-                placeholder="e.g. 196.10.20.5"
-              />
-            </label>
-            <label>
-              Destination IP
-              <input
-                value={destinationIp}
-                onChange={(e) => setDestinationIp(e.target.value)}
-                maxLength={64}
-                placeholder="e.g. 10.4.12.50"
-              />
-            </label>
             <label>
               Status
               <SearchableSelect

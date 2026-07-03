@@ -5,6 +5,7 @@ import ErrorBoundary from "./components/common/ErrorBoundary.jsx";
 import { AuthProvider } from "./context/AuthContext.jsx";
 import { ChangeBundleProvider } from "./context/ChangeBundleContext.jsx";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
+import "./styles/fonts.css";
 import "./index.css";
 import "./styles/ui-polish.css";
 import "./styles/premium.css";

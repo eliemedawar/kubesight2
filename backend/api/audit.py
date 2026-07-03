@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from flask import request
+from flask import has_request_context, request
 
 from .db import db
 from .models import AuditLog, User
@@ -23,9 +23,11 @@ def log_audit(
         action=action,
         target_type=target_type,
         target_id=str(target_id) if target_id is not None else None,
+        # An "ip" passed explicitly in details wins (callers may resolve
+        # X-Forwarded-For, or run outside a request context entirely).
         details={
+            "ip": request.remote_addr if has_request_context() else None,
             **(details or {}),
-            "ip": request.remote_addr if request else None,
         },
     )
     db.session.add(entry)

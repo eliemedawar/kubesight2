@@ -66,9 +66,14 @@ def _parse_component_refs(raw: Any) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     for item in data or []:
         if isinstance(item, dict) and item.get("ref") is not None:
-            out.append({"ref": str(item["ref"]), "name": str(item.get("name") or item["ref"])})
+            out.append({
+                "ref": str(item["ref"]),
+                "name": str(item.get("name") or item["ref"]),
+                "sourceIp": str(item.get("sourceIp") or ""),
+                "destinationIp": str(item.get("destinationIp") or ""),
+            })
         elif item is not None:
-            out.append({"ref": str(item), "name": str(item)})
+            out.append({"ref": str(item), "name": str(item), "sourceIp": "", "destinationIp": ""})
     return out
 
 
@@ -159,16 +164,18 @@ def _normalize_component_refs(
     if not isinstance(value, (list, tuple)):
         return None, "componentRefs must be a list."
 
-    # Accept a list of ref strings or of {ref, name} objects.
-    requested: List[str] = []
+    # Accept a list of ref strings or of {ref, name, sourceIp, destinationIp}.
+    requested: List[Dict[str, Any]] = []
     for item in value:
         if isinstance(item, dict):
             ref = item.get("ref")
+            src = item.get("sourceIp")
+            dst = item.get("destinationIp")
         else:
-            ref = item
+            ref, src, dst = item, None, None
         if ref is None or str(ref).strip() == "":
             continue
-        requested.append(str(ref).strip())
+        requested.append({"ref": str(ref).strip(), "sourceIp": src, "destinationIp": dst})
 
     if not requested:
         return None, None
@@ -179,14 +186,21 @@ def _normalize_component_refs(
 
     resolved: List[Dict[str, str]] = []
     seen: set = set()
-    for ref in requested:
+    for item in requested:
+        ref = item["ref"]
         node = by_id.get(ref)
         if node is None:
             return None, f"Component '{ref}' is not part of this service topology."
         if ref in seen:
             continue
         seen.add(ref)
-        resolved.append({"ref": ref, "name": str(node.get("name") or ref)})
+        resolved.append({
+            "ref": ref,
+            "name": str(node.get("name") or ref),
+            # Per-component addressing (each component can have its own IPs).
+            "sourceIp": _clean(item.get("sourceIp"), 64) or "",
+            "destinationIp": _clean(item.get("destinationIp"), 64) or "",
+        })
 
     return json.dumps(resolved), None
 
@@ -438,15 +452,14 @@ def get_client_service_topology(
     svc_nodes = list(svc_topo.get("nodes") or [])
     svc_edges = list(svc_topo.get("edges") or [])
 
-    source_ip = (conn.source_ip if conn else None) or _NOT_CONFIGURED
-    dest_ip = (conn.destination_ip if conn else None) or _NOT_CONFIGURED
+    conn_source = (conn.source_ip if conn else None) or ""
+    conn_dest = (conn.destination_ip if conn else None) or ""
     transport_type = (conn.transport_type if conn else None) or _NOT_CONFIGURED
     transport_name = (conn.transport_name if conn else None) or ""
 
     client_node_id = f"client-{client_id}"
-    transport_node_id = f"transport-{client_id}-{service_id}"
 
-    # Overlay nodes (string ids never collide with the integer service node ids).
+    # Overlay client node (string ids never collide with integer service node ids).
     client_node = {
         "id": client_node_id,
         "name": client.name,
@@ -454,39 +467,42 @@ def get_client_service_topology(
         "description": client.contact_person or client.email or "Client",
         "overlay": "client",
     }
-    transport_desc_parts = [f"Source: {source_ip}", f"Destination: {dest_ip}"]
-    if transport_name:
-        transport_desc_parts.append(transport_name)
-    transport_node = {
-        "id": transport_node_id,
-        "name": transport_type,
-        "type": "Connectivity",
-        "description": " · ".join(transport_desc_parts),
-        "overlay": "transport",
-        "sourceIp": source_ip,
-        "destinationIp": dest_ip,
-        "transportName": transport_name,
-    }
 
-    nodes: List[Dict[str, Any]] = [client_node, transport_node]
+    nodes: List[Dict[str, Any]] = [client_node]
     edges: List[Dict[str, Any]] = []
 
     # Determine the service-side attach point(s): the connection's selected
-    # components when set, otherwise the service entrypoint (fallback). When the
-    # service has no topology at all, synthesize a single service node so we
-    # still render Client ↔ Transport ↔ Service.
+    # components (each with its own source/destination IP) when set, otherwise the
+    # service entrypoint (fallback, using the connection-level IPs). When the
+    # service has no topology at all, synthesize a single service node so we still
+    # render Client ↔ Transport ↔ Service.
     node_index = {str(n.get("id")): n for n in svc_nodes}
     saved_refs = _parse_component_refs(conn.component_refs) if conn else []
 
+    # Each target: {"id", "sourceIp", "destinationIp"}. Per-component IP falls back
+    # to the connection-level IP, then to "Not configured".
+    targets: List[Dict[str, Any]] = []
     if svc_nodes:
         nodes.extend(svc_nodes)
         edges.extend(svc_edges)
-        attach_ids = [node_index[r["ref"]]["id"] for r in saved_refs if r["ref"] in node_index]
-        if not attach_ids:
+        resolved = [r for r in saved_refs if r["ref"] in node_index]
+        if resolved:
+            for r in resolved:
+                targets.append({
+                    "id": node_index[r["ref"]]["id"],
+                    "sourceIp": r.get("sourceIp") or conn_source or _NOT_CONFIGURED,
+                    "destinationIp": r.get("destinationIp") or conn_dest or _NOT_CONFIGURED,
+                })
+        else:
             entry_id = _entry_node_id(svc_nodes, svc_edges)
-            attach_ids = [entry_id] if entry_id is not None else []
+            if entry_id is not None:
+                targets.append({
+                    "id": entry_id,
+                    "sourceIp": conn_source or _NOT_CONFIGURED,
+                    "destinationIp": conn_dest or _NOT_CONFIGURED,
+                })
         # Accent the components this connection lands on.
-        attach_id_strs = {str(a) for a in attach_ids}
+        attach_id_strs = {str(t["id"]) for t in targets}
         for n in nodes:
             if str(n.get("id")) in attach_id_strs:
                 n["overlay"] = "target"
@@ -499,40 +515,56 @@ def get_client_service_topology(
             "description": service.description or "Service entrypoint",
             "overlay": "target",
         })
-        attach_ids = [service_attach_id]
+        targets.append({
+            "id": service_attach_id,
+            "sourceIp": conn_source or _NOT_CONFIGURED,
+            "destinationIp": conn_dest or _NOT_CONFIGURED,
+        })
 
-    # Draw the two connectivity hops through the shared transport node for each
-    # attach target. The saved `direction` flips the arrows:
+    # One transport node per target so each component's own source/destination IP
+    # is shown unambiguously. With multiple components this branches from the
+    # client into parallel client → transport → component paths (a readable tree)
+    # instead of chaining every component through a single shared hop. The saved
+    # `direction` flips the arrows:
     #   inbound  → client → transport → component  (client talks to service)
     #   outbound → component → transport → client  (service talks to client)
     #   both     → both directions (bidirectional)
-    # The transport node's name already shows the transport type (e.g. "VPN"), so
-    # the client↔transport hop only labels the source IP, not the transport again.
     direction = (conn.direction if conn else None) or _DEFAULT_DIRECTION
     seen_pairs = {(str(e["sourceNodeId"]), str(e["targetNodeId"])) for e in edges}
 
-    def _add_edge(prefix: str, i: int, a: Any, b: Any, desc: str) -> None:
+    def _add_edge(edge_id: str, a: Any, b: Any, desc: str) -> None:
         if (str(a), str(b)) in seen_pairs:
             return
         edges.append({
-            "id": f"{prefix}-{i}",
+            "id": edge_id,
             "sourceNodeId": a, "targetNodeId": b,
             "scope": "external", "description": desc,
         })
         seen_pairs.add((str(a), str(b)))
 
-    # client → transport (shared, drawn once) in the requested orientation(s).
-    if direction in ("inbound", "both"):
-        _add_edge("edge-conn-in", 0, client_node_id, transport_node_id, f"Source {source_ip}")
-    if direction in ("outbound", "both"):
-        _add_edge("edge-conn-out", 0, transport_node_id, client_node_id, f"Source {source_ip}")
-
-    # transport → each component (one hop per selected component).
-    for idx, target in enumerate(attach_ids):
+    for idx, target in enumerate(targets):
+        src_ip = target["sourceIp"]
+        dst_ip = target["destinationIp"]
+        transport_node_id = f"transport-{client_id}-{service_id}-{idx}"
+        transport_desc_parts = [f"Source: {src_ip}", f"Destination: {dst_ip}"]
+        if transport_name:
+            transport_desc_parts.append(transport_name)
+        nodes.append({
+            "id": transport_node_id,
+            "name": transport_type,
+            "type": "Connectivity",
+            "description": " · ".join(transport_desc_parts),
+            "overlay": "transport",
+            "sourceIp": src_ip,
+            "destinationIp": dst_ip,
+            "transportName": transport_name,
+        })
         if direction in ("inbound", "both"):
-            _add_edge("edge-conn-in", idx + 1, transport_node_id, target, f"Destination {dest_ip}")
+            _add_edge(f"edge-conn-in-{idx}-a", client_node_id, transport_node_id, f"Source {src_ip}")
+            _add_edge(f"edge-conn-in-{idx}-b", transport_node_id, target["id"], f"Destination {dst_ip}")
         if direction in ("outbound", "both"):
-            _add_edge("edge-conn-out", idx + 1, target, transport_node_id, f"Destination {dest_ip}")
+            _add_edge(f"edge-conn-out-{idx}-a", transport_node_id, client_node_id, f"Source {src_ip}")
+            _add_edge(f"edge-conn-out-{idx}-b", target["id"], transport_node_id, f"Destination {dst_ip}")
 
     return (
         {

@@ -315,11 +315,16 @@ class TestComponentSelection:
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
         cl = _create_client(client, admin_token, service_ids=[svc["id"]])
         backend = self._node_id(svc, "Backend API")
-        res = self._post_conn(client, admin_token, cl, svc, transportType="VPN", componentRefs=[str(backend)])
+        res = self._post_conn(
+            client, admin_token, cl, svc, transportType="VPN",
+            componentRefs=[{"ref": str(backend), "sourceIp": "10.0.0.1", "destinationIp": "10.0.0.2"}],
+        )
         assert res.status_code == 201, res.get_json()
         refs = res.get_json()["data"]["componentRefs"]
         assert [r["ref"] for r in refs] == [str(backend)]
         assert refs[0]["name"] == "Backend API"
+        assert refs[0]["sourceIp"] == "10.0.0.1"
+        assert refs[0]["destinationIp"] == "10.0.0.2"
 
     def test_invalid_component_ref_rejected(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
@@ -347,9 +352,36 @@ class TestComponentSelection:
         self._post_conn(client, admin_token, cl, svc, transportType="VPN", direction="inbound",
                         componentRefs=[str(backend), str(waf)])
         topo = self._topology(client, admin_token, cl, svc)
-        transport = self._transport_id(topo)
-        assert self._has_edge(topo, transport, backend)
-        assert self._has_edge(topo, transport, waf)
+        # One transport node per component: parallel client → transport → component
+        # paths, not a single shared hop.
+        transports = [n for n in topo["nodes"] if n["name"] == "VPN"]
+        assert len(transports) == 2
+        client_node = next(n for n in topo["nodes"] if n["name"] == "Bank ABC")["id"]
+        for target in (backend, waf):
+            assert any(
+                self._has_edge(topo, client_node, t["id"]) and self._has_edge(topo, t["id"], target)
+                for t in transports
+            )
+
+    def test_per_component_ips_on_own_transport(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        backend = self._node_id(svc, "Backend API")
+        waf = self._node_id(svc, "WAF")
+        self._post_conn(
+            client, admin_token, cl, svc, transportType="VPN", direction="inbound",
+            componentRefs=[
+                {"ref": str(backend), "sourceIp": "10.0.0.1", "destinationIp": "10.0.0.2"},
+                {"ref": str(waf), "sourceIp": "10.1.1.1", "destinationIp": "10.1.1.2"},
+            ],
+        )
+        topo = self._topology(client, admin_token, cl, svc)
+        transports = [n for n in topo["nodes"] if n["name"] == "VPN"]
+        # Each component's transport node carries that component's own IPs.
+        bt = next(t for t in transports if self._has_edge(topo, t["id"], backend))
+        assert "10.0.0.1" in bt["description"] and "10.0.0.2" in bt["description"]
+        wt = next(t for t in transports if self._has_edge(topo, t["id"], waf))
+        assert "10.1.1.1" in wt["description"] and "10.1.1.2" in wt["description"]
 
     def test_topology_falls_back_to_entrypoint_without_components(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
