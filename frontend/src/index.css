@@ -1,67 +1,69 @@
 :root {
-  /* ═══ KubeSight Design System v2 — "Mission Control" (see design-system/MASTER.md) ═══ */
+  /* ═══ KubeSight Design System v3 — "Signal" (see design-system/MASTER.md) ═══
+     Light-first, built on the areeba identity: warm paper canvas, ink text,
+     hairline borders, and ONE red used as the instrument of attention. */
 
-  /* ─── Content surfaces — layered blue-slate, dark-first ─── */
-  --bg-main: #0a0f1c;
-  --bg-panel: #111927;
-  --bg-panel-strong: #16202f;
-  --bg-elevated: #1c2839;
-  --bg-interactive: #243146;
-  --bg-inset: #070b13;
+  /* ─── Content surfaces — warm paper, light-first ─── */
+  --bg-main: #f8f7f5;
+  --bg-panel: #ffffff;
+  --bg-panel-strong: #faf9f7;
+  --bg-elevated: #ffffff;
+  --bg-interactive: #f3f2ef;
+  --bg-inset: #f4f3f0;
 
-  /* ─── Text ─── */
-  --text-strong: #f8fafc;
-  --text-main: #e6ecf4;
-  --text-subtle: #b6c2d4;
-  --text-muted: #7c8ba1;
+  /* ─── Text — warm ink ─── */
+  --text-strong: #131417;
+  --text-main: #1a1b1e;
+  --text-subtle: #494b52;
+  --text-muted: #6e7076;
 
-  /* ─── Primary accent — electric blue ─── */
-  --accent: #3b82f6;
-  --accent-hover: #2f6fe0;
-  --accent-strong: #71a5f9;
-  --accent-soft: rgba(59, 130, 246, 0.14);
-  --accent-border: rgba(59, 130, 246, 0.38);
+  /* ─── Primary accent — areeba brand red ─── */
+  --accent: #ff2929;
+  --accent-hover: #e31b1b;
+  --accent-strong: #d71f1f; /* red as TEXT on white — 5:1 */
+  --accent-soft: rgba(255, 41, 41, 0.09);
+  --accent-border: rgba(255, 41, 41, 0.35);
 
-  /* ─── Semantic status — dark-mode tuned ─── */
-  --ok: #26c165;
-  --ok-soft: rgba(38, 193, 101, 0.12);
-  --ok-border: rgba(38, 193, 101, 0.32);
-  --warn: #f5a623;
-  --warn-soft: rgba(245, 166, 35, 0.12);
-  --warn-border: rgba(245, 166, 35, 0.32);
-  --danger: #f04444;
-  --danger-soft: rgba(240, 68, 68, 0.12);
-  --danger-border: rgba(240, 68, 68, 0.32);
-  --danger-hover: #d63333;
-  --info: #22b8dd;
-  --info-soft: rgba(34, 184, 221, 0.12);
-  --info-border: rgba(34, 184, 221, 0.32);
+  /* ─── Semantic status — light-mode tuned, distinct from brand red ─── */
+  --ok: #178a45;
+  --ok-soft: rgba(23, 138, 69, 0.1);
+  --ok-border: rgba(23, 138, 69, 0.3);
+  --warn: #a66104;
+  --warn-soft: rgba(166, 97, 4, 0.1);
+  --warn-border: rgba(166, 97, 4, 0.3);
+  --danger: #d71f1f;
+  --danger-soft: rgba(215, 31, 31, 0.09);
+  --danger-border: rgba(215, 31, 31, 0.3);
+  --danger-hover: #b31212;
+  --info: #0e7490;
+  --info-soft: rgba(14, 116, 144, 0.1);
+  --info-border: rgba(14, 116, 144, 0.28);
 
   /* ─── AI (Hermes) — violet, reserved for AI surfaces only ─── */
-  --ai: #8b5cf6;
-  --ai-soft: rgba(139, 92, 246, 0.14);
-  --ai-border: rgba(139, 92, 246, 0.36);
+  --ai: #7c3aed;
+  --ai-soft: rgba(124, 58, 237, 0.1);
+  --ai-border: rgba(124, 58, 237, 0.3);
 
-  /* ─── Chart palette ─── */
-  --chart-1: #3b82f6;
-  --chart-2: #22d3ee;
-  --chart-3: #8b5cf6;
-  --chart-4: #34d399;
-  --chart-5: #fbbf24;
-  --chart-6: #fb7185;
-  --chart-7: #818cf8;
-  --chart-8: #2dd4bf;
+  /* ─── Chart palette — fixed categorical order (CVD-validated) ─── */
+  --chart-1: #ff2929;
+  --chart-2: #2563eb;
+  --chart-3: #d97706;
+  --chart-4: #0d9488;
+  --chart-5: #7c3aed;
+  --chart-6: #059669;
+  --chart-7: #4f46e5;
+  --chart-8: #0891b2;
 
   /* ─── Borders, elevation, focus ─── */
-  --border: rgba(148, 163, 199, 0.16);
-  --border-soft: rgba(148, 163, 199, 0.09);
-  --border-strong: rgba(148, 163, 199, 0.28);
-  --shadow-sm: 0 1px 2px rgba(2, 6, 16, 0.5), 0 1px 3px rgba(2, 6, 16, 0.32);
-  --shadow-md: 0 4px 14px rgba(2, 6, 16, 0.5), 0 2px 6px rgba(2, 6, 16, 0.35);
-  --shadow-lg: 0 16px 48px rgba(2, 6, 16, 0.62), 0 6px 16px rgba(2, 6, 16, 0.42);
-  --highlight: inset 0 1px 0 rgba(255, 255, 255, 0.045);
-  --ring: 0 0 0 3px var(--accent-soft);
-  --backdrop: rgba(4, 8, 16, 0.62);
+  --border: #e9e7e3;
+  --border-soft: #f0efeb;
+  --border-strong: #d8d6d0;
+  --shadow-sm: 0 1px 2px rgba(26, 27, 30, 0.05);
+  --shadow-md: 0 2px 8px rgba(26, 27, 30, 0.06), 0 1px 2px rgba(26, 27, 30, 0.05);
+  --shadow-lg: 0 24px 60px -12px rgba(26, 27, 30, 0.14), 0 4px 14px rgba(26, 27, 30, 0.06);
+  --highlight: none;
+  --ring: 0 0 0 3px rgba(255, 41, 41, 0.15);
+  --backdrop: rgba(23, 21, 18, 0.42);
 
   /* ─── Motion ─── */
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
@@ -78,11 +80,11 @@
   --space-6: 1.5rem;
   --space-8: 2rem;
 
-  /* ─── Border radius ─── */
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
+  /* ─── Border radius — the circle is the brand ─── */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1.125rem;
+  --radius-xl: 1.375rem;
   --radius-full: 999px;
 
   /* ─── Typography ─── */
@@ -97,19 +99,21 @@
   --font-size-xl: 1.5rem;
   --font-size-2xl: 1.875rem;
 
-  /* ─── Sidebar — brand surface, dark in both themes ─── */
-  --sidebar-bg: #0a0e18;
-  --sidebar-border: rgba(148, 163, 199, 0.1);
-  --sidebar-nav-text: #8593a9;
-  --sidebar-nav-hover-bg: rgba(255, 255, 255, 0.05);
-  --sidebar-nav-hover-text: #dbe4f0;
-  --sidebar-nav-active-bg: rgba(59, 130, 246, 0.16);
-  --sidebar-nav-active-text: #8ab4fa;
-  --sidebar-nav-active-border: #3b82f6;
-  --sidebar-section-label: #4d5b72;
-  --sidebar-brand-text: #f1f5f9;
-  --sidebar-brand-sub: #4d5b72;
-  --sidebar-footer-text: #4d5b72;
+  /* ─── Sidebar — white brand surface, red-soft active pill ─── */
+  --sidebar-bg: #ffffff;
+  --sidebar-border: #e9e7e3;
+  --sidebar-nav-text: #55575e;
+  --sidebar-nav-hover-bg: #f3f2ef;
+  --sidebar-nav-hover-text: #1a1b1e;
+  --sidebar-nav-active-bg: #fff1ef;
+  --sidebar-nav-active-text: #d71f1f;
+  --sidebar-nav-active-border: #ff2929;
+  --sidebar-section-label: #8b8d96;
+  --sidebar-brand-text: #1a1b1e;
+  --sidebar-brand-sub: #8b8d96;
+  --sidebar-footer-text: #8b8d96;
+
+  color-scheme: light;
 
   /* ─── Layout ─── */
   --sidebar-width: 15rem;
@@ -122,66 +126,78 @@
   --bp-mobile-sm: 640px;
 }
 
-/* ─── Light theme — applied when <html data-theme="light"> ─── */
-[data-theme="light"] {
-  --bg-main: #f4f6fa;
-  --bg-panel: #ffffff;
-  --bg-panel-strong: #f8fafc;
-  --bg-elevated: #ffffff;
-  --bg-interactive: #eef2f7;
-  --bg-inset: #f1f5f9;
+/* ─── Dark theme — applied when <html data-theme="dark"> ───
+   Signal dark: warm neutral ink surfaces (no blue cast), same red voice. */
+[data-theme="dark"] {
+  --bg-main: #101112;
+  --bg-panel: #17181a;
+  --bg-panel-strong: #1c1d20;
+  --bg-elevated: #222327;
+  --bg-interactive: #2a2b30;
+  --bg-inset: #0b0c0d;
 
-  --text-strong: #0b1324;
-  --text-main: #1a2436;
-  --text-subtle: #42506a;
-  --text-muted: #64748b;
+  --text-strong: #fafaf9;
+  --text-main: #ececea;
+  --text-subtle: #b9bab6;
+  --text-muted: #85868c;
 
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-strong: #2563eb;
-  --accent-soft: rgba(37, 99, 235, 0.1);
-  --accent-border: rgba(37, 99, 235, 0.32);
+  --accent: #ff3b3b;
+  --accent-hover: #e62e2e;
+  --accent-strong: #ff7a70; /* red as TEXT on dark panels */
+  --accent-soft: rgba(255, 59, 59, 0.14);
+  --accent-border: rgba(255, 59, 59, 0.4);
 
-  --ok: #15803d;
-  --ok-soft: rgba(21, 128, 61, 0.1);
-  --ok-border: rgba(21, 128, 61, 0.28);
-  --warn: #b45309;
-  --warn-soft: rgba(180, 83, 9, 0.1);
-  --warn-border: rgba(180, 83, 9, 0.28);
-  --danger: #dc2626;
-  --danger-soft: rgba(220, 38, 38, 0.1);
-  --danger-border: rgba(220, 38, 38, 0.28);
-  --danger-hover: #b91c1c;
-  --info: #0e7490;
-  --info-soft: rgba(14, 116, 144, 0.1);
-  --info-border: rgba(14, 116, 144, 0.28);
+  --ok: #2fbe6b;
+  --ok-soft: rgba(47, 190, 107, 0.12);
+  --ok-border: rgba(47, 190, 107, 0.32);
+  --warn: #f0a32b;
+  --warn-soft: rgba(240, 163, 43, 0.12);
+  --warn-border: rgba(240, 163, 43, 0.32);
+  --danger: #ff4d4d;
+  --danger-soft: rgba(255, 77, 77, 0.12);
+  --danger-border: rgba(255, 77, 77, 0.32);
+  --danger-hover: #e33c3c;
+  --info: #2cb8dc;
+  --info-soft: rgba(44, 184, 220, 0.12);
+  --info-border: rgba(44, 184, 220, 0.32);
 
-  --ai: #7c3aed;
-  --ai-soft: rgba(124, 58, 237, 0.1);
-  --ai-border: rgba(124, 58, 237, 0.3);
+  --ai: #a78bfa;
+  --ai-soft: rgba(167, 139, 250, 0.14);
+  --ai-border: rgba(167, 139, 250, 0.36);
 
-  --chart-1: #2563eb;
-  --chart-2: #0891b2;
-  --chart-3: #7c3aed;
-  --chart-4: #059669;
-  --chart-5: #d97706;
-  --chart-6: #e11d48;
-  --chart-7: #4f46e5;
-  --chart-8: #0d9488;
+  --chart-1: #ff5a52;
+  --chart-2: #5b8df8;
+  --chart-3: #f0a32b;
+  --chart-4: #2dd4bf;
+  --chart-5: #a78bfa;
+  --chart-6: #34d399;
+  --chart-7: #818cf8;
+  --chart-8: #22d3ee;
 
-  --border: rgba(15, 23, 42, 0.1);
-  --border-soft: rgba(15, 23, 42, 0.06);
-  --border-strong: rgba(15, 23, 42, 0.2);
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.05);
-  --shadow-md: 0 4px 14px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.05);
-  --shadow-lg: 0 16px 48px rgba(15, 23, 42, 0.14), 0 6px 16px rgba(15, 23, 42, 0.08);
-  --highlight: none;
-  --ring: 0 0 0 3px var(--accent-soft);
-  --backdrop: rgba(15, 23, 42, 0.42);
+  --border: rgba(235, 232, 225, 0.12);
+  --border-soft: rgba(235, 232, 225, 0.07);
+  --border-strong: rgba(235, 232, 225, 0.22);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.32);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.62), 0 6px 16px rgba(0, 0, 0, 0.42);
+  --highlight: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --ring: 0 0 0 3px rgba(255, 59, 59, 0.22);
+  --backdrop: rgba(0, 0, 0, 0.62);
 
-  /* Sidebar stays dark in light theme — it is the brand surface. */
+  --sidebar-bg: #141416;
+  --sidebar-border: rgba(235, 232, 225, 0.1);
+  --sidebar-nav-text: #9a9ba0;
+  --sidebar-nav-hover-bg: rgba(255, 255, 255, 0.05);
+  --sidebar-nav-hover-text: #ececea;
+  --sidebar-nav-active-bg: rgba(255, 59, 59, 0.14);
+  --sidebar-nav-active-text: #ff7a70;
+  --sidebar-nav-active-border: #ff3b3b;
+  --sidebar-section-label: #6c6d73;
+  --sidebar-brand-text: #fafaf9;
+  --sidebar-brand-sub: #6c6d73;
+  --sidebar-footer-text: #6c6d73;
 
-  color-scheme: light;
+  color-scheme: dark;
 }
 
 * {
@@ -257,11 +273,11 @@ button {
   align-items: center;
   justify-content: center;
   gap: 0.45rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   background: var(--bg-panel);
   color: var(--text-main);
-  border-radius: var(--radius-md);
-  padding: 0.5rem 0.95rem;
+  border-radius: var(--radius-full);
+  padding: 0.5rem 1.05rem;
   cursor: pointer;
   font-weight: 600;
   font-size: var(--font-size-sm);
@@ -293,7 +309,7 @@ button svg {
   background: var(--accent);
   border-color: var(--accent);
   color: #ffffff;
-  box-shadow: 0 1px 2px rgba(2, 6, 16, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  box-shadow: 0 2px 10px -2px rgba(255, 41, 41, 0.45);
 }
 
 .primary:hover {
@@ -2477,8 +2493,7 @@ button:focus-visible {
   place-content: center;
   padding: var(--space-5);
   overflow-y: auto;
-  background: radial-gradient(ellipse at 60% 20%, rgba(59, 130, 246, 0.08) 0%, transparent 60%),
-              radial-gradient(ellipse at 20% 80%, rgba(99, 102, 241, 0.05) 0%, transparent 50%),
+  background: radial-gradient(ellipse at 60% 20%, var(--accent-soft) 0%, transparent 60%),
               var(--bg-main);
 }
 
@@ -3806,7 +3821,7 @@ button:focus-visible {
 .exec-pod-modal__terminal {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: var(--font-size-sm);
-  background: #0b1020;
+  background: #101113;
   color: #e6edf3;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -3856,7 +3871,7 @@ button:focus-visible {
   align-items: center;
   gap: var(--space-2);
   margin-top: var(--space-3);
-  background: #0b1020;
+  background: #101113;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: var(--space-2) var(--space-3);
@@ -5920,9 +5935,9 @@ label {
 .skeleton {
   background: linear-gradient(
     90deg,
-    var(--bg-panel-strong) 25%,
-    rgba(255, 255, 255, 0.08) 50%,
-    var(--bg-panel-strong) 75%
+    var(--bg-interactive) 25%,
+    var(--bg-panel-strong) 50%,
+    var(--bg-interactive) 75%
   );
   background-size: 800px 100%;
   animation: skeleton-shimmer 1.4s ease-in-out infinite;
@@ -6104,7 +6119,7 @@ tbody tr:hover {
   padding: var(--space-4) var(--space-5);
 }
 
-/* ─── Improved login screen ─── */
+/* ─── Improved login screen — Signal: paper canvas, one red glow ─── */
 .login-screen {
   height: 100vh;
   height: 100dvh;
@@ -6114,47 +6129,46 @@ tbody tr:hover {
   padding: var(--space-5);
   overflow-y: auto;
   background:
-    radial-gradient(52rem 30rem at 50% -8rem, rgba(59, 130, 246, 0.16), transparent 68%),
-    radial-gradient(40rem 26rem at 88% 108%, rgba(139, 92, 246, 0.08), transparent 70%),
-    #0a0e18;
+    radial-gradient(52rem 30rem at 50% -10rem, var(--accent-soft), transparent 68%),
+    var(--bg-main);
 }
 
 .login-card {
   width: min(26rem, 100%);
-  border: 1px solid rgba(148, 163, 199, 0.14);
+  border: 1px solid var(--border);
   border-radius: var(--radius-xl);
-  background: #131b2c;
+  background: var(--bg-panel);
   padding: var(--space-8);
   display: grid;
   gap: var(--space-4);
-  box-shadow: 0 24px 64px rgba(2, 6, 16, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  box-shadow: var(--shadow-lg), var(--highlight);
 }
 
 .login-card h1 {
   font-family: var(--font-display);
   font-size: var(--font-size-xl);
   font-weight: 800;
-  color: #f8fafc;
+  color: var(--text-strong);
   letter-spacing: -0.025em;
 }
 
 .login-card p {
-  color: #7c8ba1;
+  color: var(--text-muted);
   margin-bottom: var(--space-2);
 }
 
 .login-card label {
   display: grid;
   gap: var(--space-1);
-  color: #b6c2d4;
+  color: var(--text-subtle);
   font-size: var(--font-size-sm);
   font-weight: 500;
 }
 
 .login-card input {
-  background: #0a0f1c;
-  color: #f1f5f9;
-  border: 1px solid rgba(148, 163, 199, 0.28);
+  background: var(--bg-panel);
+  color: var(--text-main);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   padding: 0.6rem 0.75rem;
   transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
@@ -6162,8 +6176,8 @@ tbody tr:hover {
 
 .login-card input:focus {
   outline: none;
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.22);
+  border-color: var(--accent);
+  box-shadow: var(--ring);
 }
 
 .login-card .primary {

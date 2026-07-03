@@ -1,0 +1,151 @@
+/* Signal page-specific styles — users (owned by its page rework; shared vocabulary lives in screens.css) */
+
+/* ── Layout rhythm ──────────────────────────────────────────────── */
+.users-page .user-management-tabs {
+  margin-bottom: var(--space-4);
+}
+
+.users-page .users-kpis {
+  margin-bottom: var(--space-4);
+}
+
+/* ── KPI strip — locked tile speaks in danger, only when non-zero ── */
+.users-kpi--locked .sg-kpi-label {
+  color: var(--danger);
+}
+
+.users-kpi--locked .sg-kpi-value b {
+  color: var(--danger);
+}
+
+/* ── Identity cell: avatar + name + mono email/username ─────────── */
+.users-id-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.users-id-text {
+  min-width: 0;
+}
+
+.users-id-name {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+  line-height: 1.3;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.users-id-sub {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Avatar tints rotate through the theme-aware chart tokens (2..8);
+   text color comes from .sg-avatar (var(--bg-panel)) in both themes. */
+.users-av-0 { background: var(--chart-2); }
+.users-av-1 { background: var(--chart-3); }
+.users-av-2 { background: var(--chart-4); }
+.users-av-3 { background: var(--chart-5); }
+.users-av-4 { background: var(--chart-6); }
+.users-av-5 { background: var(--chart-7); }
+.users-av-6 { background: var(--chart-8); }
+
+/* ── Table refinements ──────────────────────────────────────────── */
+.users-table th.r,
+.users-table td.r {
+  text-align: right;
+}
+
+.users-table .status-pill,
+.users-table .sg-tag {
+  white-space: nowrap;
+}
+
+.users-table td.users-last-login {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── Actions cell ───────────────────────────────────────────────── */
+.users-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.users-btn-sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.32rem 0.85rem;
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+.users-btn-sm svg {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.users-invite {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.users-invite svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+/* Ghost ⋯ menu trigger — round, quiet, keyboard-visible */
+.users-more {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--dur-fast, 120ms) var(--ease, ease), color var(--dur-fast, 120ms) var(--ease, ease);
+}
+
+.users-more:hover {
+  background: var(--bg-interactive);
+  color: var(--text-main);
+}
+
+.users-more:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.users-more svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+/* Destructive entries inside the row menu */
+.row-actions-menu__panel button.users-menu-danger {
+  color: var(--danger);
+}
+
+.row-actions-menu__panel button.users-menu-danger:hover {
+  background: var(--danger-soft);
+}

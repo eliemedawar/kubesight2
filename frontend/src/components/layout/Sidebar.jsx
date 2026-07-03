@@ -110,8 +110,8 @@ const K8S_LOGO = (
     <path d="M16 8l-1.2 4.8H11l3.6 2.8-1.2 4.4 2.6-2 2.6 2-1.2-4.4L21 12.8h-3.8L16 8z" fill="white" />
     <defs>
       <linearGradient id="k8s-grad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-        <stop stopColor="#3b82f6" />
-        <stop offset="1" stopColor="#6366f1" />
+        <stop stopColor="#ff2929" />
+        <stop offset="1" stopColor="#d71f1f" />
       </linearGradient>
     </defs>
   </svg>

@@ -7,9 +7,10 @@ export const THEME_STORAGE_KEY = "kubesight-theme";
 export function resolveTheme(theme) {
   if (theme === "light" || theme === "dark") return theme;
   if (typeof window !== "undefined" && window.matchMedia) {
-    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    // Light-first: only an explicit OS dark preference yields dark.
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
-  return "dark";
+  return "light";
 }
 
 export function applyTheme(theme) {

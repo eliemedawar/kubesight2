@@ -363,10 +363,7 @@ td:last-child button,
   font-size: 1.125rem;
   font-weight: 800;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #60a5fa 0%, #818cf8 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--sidebar-brand-text);
 }
 
 .sidebar-brand .brand-subtitle {
@@ -464,7 +461,7 @@ td:last-child button,
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, var(--accent-soft) 0%, color-mix(in srgb, var(--chart-7) 15%, transparent) 100%);
+  background: var(--accent-soft);
   border: 1px solid var(--accent-border);
   color: var(--accent);
   font-weight: 700;
@@ -880,8 +877,7 @@ td:last-child button,
 /* ── Login page — hero enterprise ─────────────────────────── */
 
 .login-screen {
-  background: radial-gradient(ellipse at 60% 20%, color-mix(in srgb, var(--accent) 8%, transparent) 0%, transparent 60%),
-              radial-gradient(ellipse at 20% 80%, color-mix(in srgb, var(--chart-7) 6%, transparent) 0%, transparent 50%),
+  background: radial-gradient(ellipse at 60% 20%, color-mix(in srgb, var(--accent) 7%, transparent) 0%, transparent 60%),
               var(--bg-main);
 }
 
@@ -1109,10 +1105,7 @@ kbd {
   font-size: 1.0625rem;
   font-weight: 800;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #60a5fa 0%, #818cf8 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--sidebar-brand-text);
 }
 
 .sidebar-brand .brand-subtitle {
@@ -1208,7 +1201,7 @@ kbd {
   width: 2rem;
   height: 2rem;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent-soft) 0%, color-mix(in srgb, var(--chart-7) 15%, transparent) 100%);
+  background: var(--accent-soft);
   border: 1px solid var(--accent-border);
   color: var(--accent);
   font-size: 0.6875rem;

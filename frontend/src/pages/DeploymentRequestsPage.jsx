@@ -9,12 +9,115 @@ import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { usePermission } from "../hooks/usePermission.js";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
-import RequestsTable from "../components/clusters/RequestsTable.jsx";
+import RequestsTable, {
+  ClusterTag,
+  IconCheck,
+  IconClock,
+  formatDate,
+  initialsOf,
+  waitingFor,
+} from "../components/clusters/RequestsTable.jsx";
 
 const TABS = [
   { key: "active", label: "Active Requests" },
   { key: "history", label: "Request History" },
 ];
+
+/* Decision card for one pending request (Signal "Approvals" anatomy).
+   Real fields only: cluster, requester, free-text message, optional
+   requested window, quorum votes. Approve/decline reuse the existing
+   handlers passed down from the page. */
+function RequestDecisionCard({ row, canManage, decide, busy }) {
+  const required = row.requiredApprovals ?? 1;
+  const approvals = row.approvals ?? 0;
+  const declines = row.declines ?? 0;
+  const votes = row.votes || [];
+  const pendingSlots = Math.max(0, required - approvals);
+
+  const note =
+    votes.length === 0
+      ? `Waiting on ${required} approver${required === 1 ? "" : "s"}`
+      : `${approvals} of ${required} approved${declines ? ` · ${declines} declined` : ""}`;
+
+  return (
+    <article className="sg-rq">
+      <header>
+        <div className="sg-rq-head-tags">
+          <b>Deploy request #{row.id}</b>
+          <ClusterTag name={row.clusterName} />
+          <span className={`status-pill ${approvals > 0 ? "warn" : "info"}`}>
+            {approvals} of {required} approvals
+          </span>
+        </div>
+        <span className="sg-rq-wait" title={`Created ${formatDate(row.createdAt)}`}>
+          <IconClock />
+          {waitingFor(row.createdAt)}
+        </span>
+      </header>
+
+      <div className="sg-rq-meta">
+        <span className="sg-avatar sg-avatar--sm">{initialsOf(row.requesterName)}</span>
+        <span>
+          Requested by <b>{row.requesterName}</b>
+          {row.requesterUsername ? ` · ${row.requesterUsername}` : ""}
+        </span>
+      </div>
+
+      {row.message ? <p className="sg-rq-msg">{row.message}</p> : null}
+
+      {row.requestedWindowLabel ? (
+        <div className="sg-rq-diff">
+          <span className="sg-dchip">
+            window <b>{row.requestedWindowLabel}</b>
+          </span>
+        </div>
+      ) : null}
+
+      <footer>
+        <div className="sg-rq-approvers">
+          {votes.map((vote) => (
+            <span
+              key={vote.email}
+              className={`sg-avatar sg-avatar--sm ${
+                vote.decision === "approve" ? "sg-vote--approve" : "sg-vote--decline"
+              }`}
+              title={`${vote.email} · ${vote.decision === "approve" ? "approved" : "declined"}${
+                vote.at ? ` · ${formatDate(vote.at)}` : ""
+              }`}
+            >
+              {initialsOf(vote.email)}
+            </span>
+          ))}
+          {Array.from({ length: pendingSlots }).map((_, i) => (
+            <span key={`slot-${i}`} className="sg-avatar sg-avatar--sm sg-vote--empty" aria-hidden="true" />
+          ))}
+          <span className="sg-rq-approvers-note">{note}</span>
+        </div>
+        {canManage ? (
+          <div className="sg-rq-actions">
+            <button
+              type="button"
+              className="btn-danger-outline btn-compact"
+              onClick={() => decide(row, "decline")}
+              disabled={busy}
+            >
+              Decline
+            </button>
+            <button
+              type="button"
+              className="primary btn-compact"
+              onClick={() => decide(row, "approve")}
+              disabled={busy}
+            >
+              <IconCheck className="sg-btn-ic" />
+              Approve
+            </button>
+          </div>
+        ) : null}
+      </footer>
+    </article>
+  );
+}
 
 export default function DeploymentRequestsPage() {
   const { hasPermission } = usePermission();
@@ -116,18 +219,20 @@ export default function DeploymentRequestsPage() {
   return (
     <div className="ops-page">
       <section className="card ops-section">
-        <div className="card-header-row" style={{ marginBottom: "var(--space-2)" }}>
+        <div className="sg-ph">
           <div>
             <h2>Deployment Requests</h2>
-            <p className="muted">
+            <p className="sg-ph-sub">
               Requests to deploy or change clusters, routed to the management team for approval.
             </p>
           </div>
-          {!isAccessDeniedError(error) ? (
-            <button type="button" className="btn-outline btn-compact" onClick={load} disabled={loading}>
-              Refresh
-            </button>
-          ) : null}
+          <div className="sg-ph-actions">
+            {!isAccessDeniedError(error) ? (
+              <button type="button" className="btn-outline btn-compact" onClick={load} disabled={loading}>
+                Refresh
+              </button>
+            ) : null}
+          </div>
         </div>
 
         <nav className="tab-bar" aria-label="Deployment request views">
@@ -139,7 +244,11 @@ export default function DeploymentRequestsPage() {
               onClick={() => setActiveTab(tab.key)}
             >
               {tab.label}
-              {tab.key === "active" ? ` (${activeRequests.length})` : ""}
+              {tab.key === "active" ? (
+                <span className={`sg-cnt${activeRequests.length === 0 ? " sg-cnt--zero" : ""}`}>
+                  {activeRequests.length}
+                </span>
+              ) : null}
             </button>
           ))}
         </nav>
@@ -153,13 +262,21 @@ export default function DeploymentRequestsPage() {
         ) : formatAccessError(error) ? (
           <ErrorBanner message={error} suppressAccessDenied={false} />
         ) : activeTab === "active" ? (
-          <RequestsTable
-            rows={activeRequests}
-            canManage={canManage}
-            decide={decide}
-            busyId={busyId}
-            emptyLabel="No active requests awaiting a decision."
-          />
+          activeRequests.length === 0 ? (
+            <p className="muted">No active requests awaiting a decision.</p>
+          ) : (
+            <div className="sg-rq-list">
+              {activeRequests.map((row) => (
+                <RequestDecisionCard
+                  key={row.id}
+                  row={row}
+                  canManage={canManage}
+                  decide={decide}
+                  busy={busyId === row.id}
+                />
+              ))}
+            </div>
+          )
         ) : (
           <>
             <div className="user-filters" style={{ marginBottom: "var(--space-3)" }}>

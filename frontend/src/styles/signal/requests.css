@@ -1,0 +1,90 @@
+/* Signal page-specific styles — requests (owned by its page rework; shared vocabulary lives in screens.css) */
+
+/* ── Decision-card list (approver view, active tab) ─────────────── */
+.sg-rq-list {
+  display: grid;
+  gap: var(--space-4);
+  max-width: 62rem;
+}
+
+/* Requester's free-text ask inside a decision card. */
+.sg-rq-msg {
+  font-size: 0.8125rem;
+  color: var(--text-main);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-bottom: 0.9rem;
+}
+
+/* Vote avatars in the approver stack. */
+.sg-rq-approvers .sg-vote--approve {
+  background: var(--ok);
+  color: var(--bg-panel);
+}
+.sg-rq-approvers .sg-vote--decline {
+  background: var(--danger);
+  color: var(--bg-panel);
+}
+.sg-rq-approvers .sg-vote--empty {
+  background: var(--bg-panel-strong);
+  color: var(--text-muted);
+  border-style: dashed;
+  border-color: var(--border-strong);
+}
+
+/* Inline check icon inside pill action buttons. */
+.sg-btn-ic {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex: none;
+}
+
+/* ── Tab count badge ────────────────────────────────────────────── */
+.ops-page .tab-bar .sg-cnt {
+  margin-left: 0.45rem;
+}
+.sg-cnt--zero {
+  background: var(--bg-interactive);
+  color: var(--text-muted);
+}
+
+/* ── Requests table (approver history + requester view) ─────────── */
+.sg-req-cell {
+  max-width: 26rem;
+}
+.sg-req-title {
+  display: block;
+  font-weight: 650;
+  font-size: 0.8125rem;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sg-req-sub {
+  display: block;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sg-req-window {
+  font-family: var(--font-mono);
+}
+.sg-req-age {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.sg-req-actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+.sg-req-decided {
+  font-size: 0.75rem;
+  white-space: nowrap;
+}

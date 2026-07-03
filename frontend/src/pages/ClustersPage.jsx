@@ -1,12 +1,96 @@
 import { useState } from "react";
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
-import PageTitle from "../components/common/PageTitle.jsx";
-import DataTable from "../components/common/DataTable.jsx";
 import RequestDeploymentModal from "../components/clusters/RequestDeploymentModal.jsx";
 import ConfigureRecipientsModal from "../components/clusters/ConfigureRecipientsModal.jsx";
 import { useAuth } from "../context/AuthContext";
 import { createDeploymentRequest } from "../api";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
+
+// Cluster list statuses from the API are healthy / warning / unknown; keep the
+// same tone mapping the old DataTable pill used so colours don't shift.
+const STATUS_TONES = {
+  healthy: "ok",
+  warning: "warn",
+  critical: "danger",
+  error: "danger",
+  unknown: "info",
+};
+
+const statusTone = (status) => STATUS_TONES[String(status).toLowerCase()] || "info";
+
+const barFillClass = (value) => {
+  if (value >= 95) return "sg-bar-fill sg-bar-fill--danger";
+  if (value >= 85) return "sg-bar-fill sg-bar-fill--warn";
+  return "sg-bar-fill";
+};
+
+function UsageBar({ label, value }) {
+  const pct = Math.min(100, Math.max(0, value));
+  return (
+    <div className="sg-cs">
+      <span>{label}</span>
+      <div className="sg-bar-track">
+        <div className={barFillClass(pct)} style={{ width: `${pct}%` }} />
+      </div>
+      <b>{Math.round(pct)}%</b>
+    </div>
+  );
+}
+
+function ActivityIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M22 12h-4l-3 8-6-16-3 8H2" />
+    </svg>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m22 2-7 20-4-9-9-4Z" />
+      <path d="M22 2 11 13" />
+    </svg>
+  );
+}
+
+function MailIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m3 7.5 9 6 9-6" />
+    </svg>
+  );
+}
+
+// "6 clusters · 94 nodes · Kubernetes v1.29.9 – v1.31.2" — only from real data;
+// segments without backing values are dropped.
+function buildSubtitle(clusters) {
+  if (!clusters.length) {
+    return "Track cluster lifecycle, availability, and capacity at a glance.";
+  }
+  const segments = [`${clusters.length} cluster${clusters.length === 1 ? "" : "s"}`];
+  const totalNodes = clusters.reduce(
+    (sum, cluster) => (typeof cluster.nodes === "number" ? sum + cluster.nodes : sum),
+    0
+  );
+  if (totalNodes > 0) {
+    segments.push(`${totalNodes} node${totalNodes === 1 ? "" : "s"}`);
+  }
+  const versions = [
+    ...new Set(
+      clusters
+        .map((cluster) => cluster.k8sVersion || cluster.version)
+        .filter((version) => version && version !== "unknown")
+    ),
+  ].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  if (versions.length === 1) {
+    segments.push(`Kubernetes ${versions[0]}`);
+  } else if (versions.length > 1) {
+    segments.push(`Kubernetes ${versions[0]} – ${versions[versions.length - 1]}`);
+  }
+  return segments.join(" · ");
+}
 
 export default function ClustersPage({ data, hasClusters, coreLoading = false, accessError = "" }) {
   const { user, hasPermission } = useAuth();
@@ -70,54 +154,25 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
     }
   };
 
-  const header = (
-    <PageTitle
-      title="Clusters"
-      subtitle="Track cluster lifecycle, availability, and capacity at a glance."
-    />
-  );
+  const clusters = (data?.clusters || []).filter((cluster) => cluster?.name || cluster?.id);
+  const contentReady = !coreLoading && !accessError && hasClusters;
 
-  const columns = [
-    { key: "name", label: "Cluster" },
-    { key: "status", label: "Status" },
-    { key: "version", label: "Version" },
-    { key: "nodes", label: "Nodes" },
-    { key: "cpuUsage", label: "CPU Usage" },
-    { key: "memoryUsage", label: "Memory Usage" },
-    { key: "action", label: "Action" },
-  ];
-  const rows = (data?.clusters || [])
-    .filter((cluster) => cluster?.name || cluster?.id)
-    .map((cluster) => {
-      const clusterRef = { id: cluster.id || cluster.name, name: cluster.name || cluster.id };
-      return {
-        name: clusterRef.name,
-        status: cluster.status || "unknown",
-        version: cluster.k8sVersion || cluster.version || "-",
-        nodes: cluster.nodes ?? "-",
-        cpuUsage: cluster.cpuUsage != null ? `${cluster.cpuUsage}%` : "-",
-        memoryUsage: cluster.memoryUsage != null ? `${cluster.memoryUsage}%` : "-",
-        action: canManageRecipients ? (
-          <button
-            type="button"
-            className="btn-outline btn-compact"
-            onClick={() => setConfigureOpen(true)}
-          >
-            Configure Recipients
+  const header = (
+    <div className="sg-ph">
+      <div>
+        <h2>Clusters</h2>
+        <p className="sg-ph-sub">{buildSubtitle(contentReady ? clusters : [])}</p>
+      </div>
+      {contentReady && canManageRecipients ? (
+        <div className="sg-ph-actions">
+          <button type="button" className="primary" onClick={() => setConfigureOpen(true)}>
+            <MailIcon />
+            Configure recipients
           </button>
-        ) : canRequest ? (
-          <button
-            type="button"
-            className="btn-outline btn-compact"
-            onClick={() => openRequest(clusterRef)}
-          >
-            Request
-          </button>
-        ) : (
-          "-"
-        ),
-      };
-    });
+        </div>
+      ) : null}
+    </div>
+  );
 
   return (
     <AccessScopeView
@@ -133,7 +188,64 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
           {notice}
         </p>
       ) : null}
-      <DataTable columns={columns} rows={rows} />
+      <div className="sg-card-grid">
+        {clusters.map((cluster) => {
+          const clusterRef = { id: cluster.id || cluster.name, name: cluster.name || cluster.id };
+          const status = cluster.status || "unknown";
+          const version = cluster.k8sVersion || cluster.version || "";
+          const nodeCount = typeof cluster.nodes === "number" ? cluster.nodes : null;
+          const headerSub = [
+            version && version !== "unknown" ? version : null,
+            nodeCount != null ? `${nodeCount} node${nodeCount === 1 ? "" : "s"}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          const cpu = typeof cluster.cpuUsage === "number" ? cluster.cpuUsage : null;
+          const memory = typeof cluster.memoryUsage === "number" ? cluster.memoryUsage : null;
+          const hasUsage = cpu != null || memory != null;
+
+          return (
+            <article key={clusterRef.id} className="sg-ccard">
+              <header>
+                <div>
+                  <b>{clusterRef.name}</b>
+                  {headerSub ? <span className="sg-ccard-sub">{headerSub}</span> : null}
+                </div>
+                <span className={`status-pill ${statusTone(status)}`}>{status}</span>
+              </header>
+              {hasUsage ? (
+                <div className="sg-ccard-body">
+                  <div className="sg-cstats">
+                    {cpu != null ? <UsageBar label="CPU" value={cpu} /> : null}
+                    {memory != null ? <UsageBar label="Memory" value={memory} /> : null}
+                  </div>
+                </div>
+              ) : (
+                <p className="sg-cnote sg-cnote--muted">
+                  <ActivityIcon />
+                  Usage metrics unavailable for this cluster.
+                </p>
+              )}
+              <footer>
+                {cluster.provider ? <span className="sg-tag">{cluster.provider}</span> : null}
+                {cluster.region && cluster.region !== "unknown" ? (
+                  <span className="sg-tag">{cluster.region}</span>
+                ) : null}
+                {!canManageRecipients && canRequest ? (
+                  <button
+                    type="button"
+                    className="sg-clusters-request"
+                    onClick={() => openRequest(clusterRef)}
+                  >
+                    Request
+                    <SendIcon />
+                  </button>
+                ) : null}
+              </footer>
+            </article>
+          );
+        })}
+      </div>
       <RequestDeploymentModal
         open={Boolean(activeCluster)}
         clusterName={activeCluster?.name || ""}

@@ -1,0 +1,20 @@
+/* Signal page-specific styles — topology (owned by its page rework; shared vocabulary lives in screens.css) */
+
+/* Canvas: inset well with the Signal dot grid (overrides the flat panel bg
+   from index.css — this sheet loads after it, same specificity). */
+.topo-viewer {
+  background-color: var(--bg-inset);
+  background-image: radial-gradient(circle, var(--border-strong) 1px, transparent 1px);
+  background-size: 22px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 0.5rem);
+}
+
+/* Node cards: hover = darker border (concept .tnode:hover). The viewer is
+   read-only, so hover only reinforces the tooltip affordance. */
+.topo-viewer .topo-node .topo-node-card {
+  transition: stroke var(--dur-fast, 120ms) var(--ease, ease);
+}
+.topo-viewer .topo-node:hover .topo-node-card {
+  stroke: var(--text-muted);
+}

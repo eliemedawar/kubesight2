@@ -4,7 +4,7 @@ import { useMemo } from "react";
 // view and the Client Service Access Topology overlay. The layout helpers are
 // exported so the interactive Topology editor can reuse the same geometry.
 
-// Component health → topology node indicator color.
+// Component health → topology node indicator color (kept as a public export).
 export const TOPO_STATUS_COLOR = {
   healthy: "var(--ok)",
   degraded: "var(--warn)",
@@ -12,14 +12,30 @@ export const TOPO_STATUS_COLOR = {
   unknown: "var(--text-muted)",
 };
 
-// Accent colors for the client-access overlay node types.
-const OVERLAY_ACCENT = {
-  client: "var(--info)",
-  transport: "var(--ai)",
-  service: "var(--ok)",
-  origin: "var(--ok)",
-  // Components the client-access connection attaches to (client↔transport↔target).
-  target: "var(--ok)",
+// Component health → Signal status tone (drives the node status bar, the icon
+// chip tint and — via the worst endpoint — the edge stroke).
+const STATUS_TONE = {
+  healthy: "ok",
+  degraded: "warn",
+  unhealthy: "danger",
+  unknown: "muted",
+};
+
+// Status bar fills (3px inset bar on the card's left, per the Signal topo skin).
+const BAR_FILL = {
+  ok: "var(--ok)",
+  warn: "var(--warn)",
+  danger: "var(--danger)",
+  muted: "var(--border-strong)",
+};
+
+// Icon chip tints (mirrors .sg-ico--* in styles/signal/screens.css).
+const CHIP_COLORS = {
+  ok: { bg: "var(--ok-soft)", fg: "var(--ok)" },
+  warn: { bg: "var(--warn-soft)", fg: "var(--warn)" },
+  danger: { bg: "var(--danger-soft)", fg: "var(--danger)" },
+  accent: { bg: "var(--accent-soft)", fg: "var(--accent-strong)" },
+  muted: { bg: "var(--bg-interactive)", fg: "var(--text-subtle)" },
 };
 
 export const NODE_W = 160;
@@ -158,15 +174,81 @@ export function computeLayout(nodes, edges) {
   };
 }
 
+// Icon chip glyph per node kind: users for clients, shield for transports,
+// cube for service components. Inline SVG strokes only (no emoji).
+function NodeGlyph({ kind, cx, cy, color }) {
+  const common = {
+    fill: "none",
+    stroke: color,
+    strokeWidth: 1.4,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+  };
+  if (kind === "client") {
+    return (
+      <g transform={`translate(${cx},${cy})`} aria-hidden="true">
+        <circle cx={0} cy={-2.1} r={2.2} {...common} />
+        <path d="M -4 4.4 C -4 0.9 4 0.9 4 4.4" {...common} />
+      </g>
+    );
+  }
+  if (kind === "transport") {
+    return (
+      <g transform={`translate(${cx},${cy})`} aria-hidden="true">
+        <path d="M 0 -4.8 L 4 -3.2 V 0.4 C 4 2.6 2.2 4.2 0 4.9 C -2.2 4.2 -4 2.6 -4 0.4 V -3.2 Z" {...common} />
+      </g>
+    );
+  }
+  return (
+    <g transform={`translate(${cx},${cy})`} aria-hidden="true">
+      <path d="M -4.2 -2.4 L 0 -4.6 L 4.2 -2.4 V 2.4 L 0 4.6 L -4.2 2.4 Z" {...common} />
+      <path d="M -4.2 -2.4 L 0 -0.4 L 4.2 -2.4 M 0 -0.4 V 4.6" {...common} />
+    </g>
+  );
+}
+
+// Chip tint: overlay kind wins for client/transport (identity chips per the
+// Signal concept); everything else is tinted by its real component health.
+function chipToneFor(node) {
+  if (node.overlay === "client") return "muted";
+  if (node.overlay === "transport") return "accent";
+  return STATUS_TONE[node.componentStatus] || "muted";
+}
+
+function truncate(str, max) {
+  if (!str) return "";
+  return str.length > max ? str.slice(0, max - 1) + "…" : str;
+}
+
 export default function TopologyViewer({ nodes, edges, compact = false, fillWidth = false }) {
   const { positions, svgW, svgH } = useMemo(
     () => computeLayout(nodes || [], edges || []),
     [nodes, edges]
   );
 
+  const nodeById = useMemo(() => {
+    const map = {};
+    (nodes || []).forEach((n) => { map[String(n.id)] = n; });
+    return map;
+  }, [nodes]);
+
   if (!nodes || nodes.length === 0) {
     return <p className="muted" style={{ fontSize: "0.875rem", fontStyle: "italic" }}>No topology defined yet.</p>;
   }
+
+  // Edge tone from real data: worst endpoint component health first (unhealthy
+  // → danger, degraded → warn), then the existing scope encoding (external →
+  // warn dashed, as before), nominal green only when both endpoints report
+  // healthy, muted otherwise (no health data).
+  const edgeToneFor = (edge) => {
+    const s = nodeById[String(edge.sourceNodeId)]?.componentStatus;
+    const t = nodeById[String(edge.targetNodeId)]?.componentStatus;
+    if (s === "unhealthy" || t === "unhealthy") return "danger";
+    if (s === "degraded" || t === "degraded") return "warn";
+    if (edge.scope === "external") return "warn";
+    if (s === "healthy" && t === "healthy") return "ok";
+    return "muted";
+  };
 
   // Zoom out a touch by padding the viewBox with extra margin around the
   // content, so the topology renders smaller and centered in its container.
@@ -192,11 +274,17 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
           <filter id="topo-shadow" x="-30%" y="-30%" width="160%" height="160%">
             <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="rgba(0,0,0,0.5)" />
           </filter>
-          <marker id="topo-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="var(--text-muted)" />
+          <marker id="topo-arrow-ok" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="var(--ok)" />
           </marker>
-          <marker id="topo-arrow-ext" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <marker id="topo-arrow-warn" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="var(--warn)" />
+          </marker>
+          <marker id="topo-arrow-danger" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="var(--danger)" />
+          </marker>
+          <marker id="topo-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="var(--text-muted)" />
           </marker>
         </defs>
 
@@ -232,15 +320,23 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
               d = `M ${p1.x},${p1.y} Q ${mx},${my} ${p2.x},${p2.y}`;
               labelX = mx; labelY = my;
             } else {
-              d = `M ${p1.x},${p1.y} L ${p2.x},${p2.y}`;
-              labelX = (p1.x + p2.x) / 2; labelY = (p1.y + p2.y) / 2;
+              // Smooth cubic bezier along the dominant axis (Signal skin); the
+              // curve's midpoint is exactly the straight-line midpoint, so
+              // label anchoring is unchanged.
+              const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+              d = Math.abs(dy) >= Math.abs(dx)
+                ? `M ${p1.x},${p1.y} C ${p1.x},${my} ${p2.x},${my} ${p2.x},${p2.y}`
+                : `M ${p1.x},${p1.y} C ${mx},${p1.y} ${mx},${p2.y} ${p2.x},${p2.y}`;
+              labelX = mx; labelY = my;
             }
 
-            const isExternal = edge.scope === "external";
-            const stroke = isExternal ? "var(--warn)" : "var(--border-strong)";
+            const tone = edgeToneFor(edge);
             const protocol = edge.protocol || "";
             const description = edge.description || "";
             const descLabel = description.length > 32 ? description.slice(0, 31) + "…" : description;
+            const labelFill = tone === "danger"
+              ? "var(--danger)"
+              : tone === "warn" ? "var(--warn)" : "var(--text-muted)";
 
             const edgeTip = [protocol, edge.scope, edge.description].filter(Boolean).join(" · ");
 
@@ -248,12 +344,11 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
               <g key={edge.id ?? `e${idx}`}>
                 {edgeTip ? <title>{edgeTip}</title> : null}
                 <path d={d}
-                  fill="none" stroke={stroke} strokeWidth={1.5}
-                  strokeDasharray={isExternal ? "6 4" : undefined}
-                  markerEnd={`url(#${isExternal ? "topo-arrow-ext" : "topo-arrow"})`} />
+                  className={`sg-edge${tone === "ok" ? "" : ` sg-edge--${tone}`}`}
+                  markerEnd={`url(#topo-arrow-${tone})`} />
                 {protocol ? (
                   <text x={labelX} y={labelY - 5} textAnchor="middle"
-                    fill={isExternal ? "var(--warn)" : "var(--text-muted)"} fontSize={10} fontWeight={600}
+                    fill={labelFill} fontSize={10} fontWeight={600}
                     style={{ paintOrder: "stroke" }} stroke="var(--bg-inset)" strokeWidth={3}>
                     {protocol}
                   </text>
@@ -269,44 +364,57 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
             );
           })}
 
-          {/* Nodes */}
+          {/* Nodes — white rounded cards: 3px status bar, tinted icon chip,
+              bold name + tiny mono sub-line (Signal topo skin). */}
           {(nodes || []).map((node) => {
             const pos = positions[String(node.id)];
             if (!pos) return null;
-            const hasType = Boolean(node.type);
-            const nameY = hasType ? pos.y + 31 : pos.y + NODE_H / 2 + 1;
-            const typeY = pos.y + 14;
-            const label = node.name.length > 17 ? node.name.slice(0, 16) + "…" : node.name;
-            const typeLabel = node.type && node.type.length > 16 ? node.type.slice(0, 15) + "…" : node.type;
+            const sub = node.overlay === "transport"
+              ? (node.transportName || node.type || "")
+              : (node.type || "");
+            const hasSub = Boolean(sub);
+            const label = truncate(node.name, 15);
+            const subLabel = truncate(sub, 20);
 
-            const overlayAccent = node.overlay ? OVERLAY_ACCENT[node.overlay] : null;
-            const statusColor = node.componentStatus ? TOPO_STATUS_COLOR[node.componentStatus] : null;
-            const strokeColor = overlayAccent || statusColor || "var(--border-strong)";
+            const barTone = node.componentStatus
+              ? (STATUS_TONE[node.componentStatus] || "muted")
+              : "muted";
+            const chip = CHIP_COLORS[chipToneFor(node)];
+            const glyphKind = node.overlay === "client" || node.overlay === "transport"
+              ? node.overlay
+              : "component";
+
+            const chipCX = pos.x + 27, chipCY = pos.y + NODE_H / 2;
+            const textX = pos.x + 46;
+            const nameY = hasSub ? pos.y + 19 : pos.y + NODE_H / 2 + 1;
 
             return (
-              <g key={node.id} title={node.description || node.name}>
+              <g key={node.id} className="topo-node" title={node.description || node.name}>
                 {node.description ? <title>{node.description}</title> : null}
-                <rect x={pos.x} y={pos.y} width={NODE_W} height={NODE_H}
-                  rx={8} ry={8}
-                  fill={overlayAccent ? "var(--bg-panel-strong)" : "var(--bg-panel)"} stroke={strokeColor} strokeWidth={overlayAccent || statusColor ? 2 : 1.5}
+                <rect className="topo-node-card" x={pos.x} y={pos.y} width={NODE_W} height={NODE_H}
+                  rx={14} ry={14}
+                  fill="var(--bg-panel)" stroke="var(--border-strong)" strokeWidth={1}
                   filter="url(#topo-shadow)" />
-                {statusColor && !overlayAccent && (
-                  <circle cx={pos.x + NODE_W - 11} cy={pos.y + 11} r={4} fill={statusColor}>
+                <rect x={pos.x + 6} y={pos.y + 9} width={3} height={NODE_H - 18} rx={1.5}
+                  fill={BAR_FILL[barTone]}>
+                  {node.componentStatus ? (
                     <title>{`Component health: ${node.componentStatus}`}</title>
-                  </circle>
-                )}
-                {hasType && (
-                  <text x={pos.x + NODE_W / 2} y={typeY}
-                    textAnchor="middle" dominantBaseline="middle"
-                    fill={overlayAccent || "var(--text-muted)"} fontSize={10} fontWeight={500} letterSpacing="0.06em">
-                    {typeLabel?.toUpperCase()}
-                  </text>
-                )}
-                <text x={pos.x + NODE_W / 2} y={nameY}
-                  textAnchor="middle" dominantBaseline="middle"
-                  fill="var(--text-main)" fontSize={13} fontWeight={600}>
+                  ) : null}
+                </rect>
+                <circle cx={chipCX} cy={chipCY} r={13} fill={chip.bg} />
+                <NodeGlyph kind={glyphKind} cx={chipCX} cy={chipCY} color={chip.fg} />
+                <text x={textX} y={nameY}
+                  textAnchor="start" dominantBaseline="middle"
+                  fill="var(--text-strong)" fontSize={12} fontWeight={700}>
                   {label}
                 </text>
+                {hasSub && (
+                  <text x={textX} y={pos.y + 33}
+                    textAnchor="start" dominantBaseline="middle"
+                    fill="var(--text-muted)" fontSize={8.5} fontFamily="var(--font-mono)">
+                    {subLabel}
+                  </text>
+                )}
               </g>
             );
           })}

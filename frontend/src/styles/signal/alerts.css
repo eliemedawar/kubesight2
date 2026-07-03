@@ -1,0 +1,104 @@
+/* Signal page-specific styles — alerts (owned by its page rework; shared vocabulary lives in screens.css) */
+
+/* Page header — .ops-page already provides the vertical rhythm via --page-gap */
+.alerts-page .sg-ph {
+  margin-bottom: 0;
+}
+
+/* ── Severity KPI strip (3 tiles: Critical / Warning / Info) ────── */
+.alerts-page .sg-alerts-kpis {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/* Critical tile speaks in the danger voice — value AND icon, never color alone
+   (the word "Critical" is right there). Warning tints its label only, per concept. */
+.alerts-page .sg-alerts-kpi--critical .sg-kpi-label {
+  color: var(--danger);
+}
+
+.alerts-page .sg-alerts-kpi--critical .sg-kpi-value b {
+  color: var(--danger);
+}
+
+.alerts-page .sg-alerts-kpi--warning .sg-kpi-label {
+  color: var(--warn);
+}
+
+/* ── Open alerts card ───────────────────────────────────────────── */
+.alerts-page .sg-alerts-card {
+  overflow: hidden;
+}
+
+.alerts-page .sg-alerts-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.95rem 1.25rem 0.7rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.alerts-page .sg-alerts-card-head h3 {
+  font-size: var(--font-size-md);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+}
+
+.alerts-page .sg-alerts-card-sub {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* Severity pill column stays fixed-width-ish so titles align */
+.alerts-page .sg-al .status-pill {
+  flex: none;
+}
+
+/* Critical rows: the pill dot pulses — reuses the app's status-dot-pulse
+   keyframes (index.css); the inset danger bar comes from sg-al--critical. */
+.alerts-page .sg-al--critical .status-pill::before {
+  animation: status-dot-pulse 2s ease-in-out infinite;
+}
+
+/* Row actions — base <button> is already a pill secondary; just compact it */
+.alerts-page .sg-al-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex: none;
+}
+
+.alerts-page .sg-al-btn {
+  font-size: 0.75rem;
+  padding: 0.3rem 0.85rem;
+  white-space: nowrap;
+}
+
+/* Scope card — namespaces / resources as mono tags (machine truth wears mono) */
+.alerts-page .alerts-scope-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+@media (max-width: 760px) {
+  .alerts-page .sg-alerts-kpis {
+    grid-template-columns: 1fr;
+  }
+
+  .alerts-page .sg-al {
+    flex-wrap: wrap;
+  }
+
+  .alerts-page .sg-al-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .alerts-page .sg-al--critical .status-pill::before {
+    animation: none;
+  }
+}

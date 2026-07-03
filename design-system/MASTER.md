@@ -1,135 +1,159 @@
-# KubeSight Design System — MASTER (v2 "Mission Control")
+# KubeSight Design System — MASTER (v3 "Signal")
 
-Global source of truth for the premium enterprise redesign. Every page and component follows
-these rules. Page-specific overrides live in `design-system/pages/<page>.md` (none yet).
+Global source of truth. Built on the areeba identity: white space as the ground, ink text,
+hairline borders, and **one confident red used as the instrument of attention**. Page-specific
+overrides live in `design-system/pages/<page>.md` (none yet).
+
+Interactive concept reference (9 mocked screens): the "Signal" artifact —
+https://claude.ai/code/artifact/76be5afd-9f0f-4a87-8bb6-3ef5c437be96
 
 ## 1. Identity
 
-- **Feel:** mission-control console — calm, dense-but-breathable, precise. Grafana/Datadog/Linear tier.
-- **Dark-first.** Deep blue-slate canvas, layered lighter panels, hairline borders, restrained glow.
-- **Light theme** is a first-class citizen: white panels on `#f6f8fb` canvas, slate hairlines, soft shadows.
-- Red is **only** for danger/error. Blue = interactive/brand. Green = healthy. Amber = warning.
-  Cyan = info. Violet = AI (Hermes) only.
+- **Feel:** premium enterprise control plane in broad daylight — calm, dense-but-breathable, precise.
+- **Light-first.** Warm paper canvas, white panels, warm-ink text, hairline borders, soft warm shadows.
+- **Dark theme** is a first-class citizen: warm neutral ink surfaces (no blue cast), same red voice.
+- **Red is the brand accent** (#FF2929): identity, THE primary action, active navigation, unread-critical
+  counts. Semantic status stays separate — green = healthy, amber = degraded, crimson = danger — so a
+  red button never reads as an outage and an outage never looks like a button.
+- **The circle is the brand:** pill buttons, full-round tags/status, round dots and avatars, ring gauges.
+- Violet = AI (Hermes) only. Info = cyan-teal.
 
 ## 2. Fonts
 
-Loaded via Google Fonts `<link>` in `index.html` (graceful system fallback for air-gapped installs):
+Self-hosted via `src/styles/fonts.css` (no CDN):
 
 - `--font-sans`: `"Inter"` — UI text (body, tables, forms). Weights 400/500/600/700.
 - `--font-display`: `"Plus Jakarta Sans"` — page titles, stat values, brand. Weights 600/700/800.
-- `--font-mono`: `"IBM Plex Mono"` — YAML, logs, IDs, versions, namespaces, kbd.
+- `--font-mono`: `"IBM Plex Mono"` — machine truth ONLY: image tags, namespaces, versions, crons, IDs, kbd.
 
 Numeric data in tables/stats: `font-variant-numeric: tabular-nums`.
 
 ## 3. Color tokens (CSS variables in `frontend/src/index.css`)
 
-### Dark (default, `:root`)
+### Light (default, `:root`)
 | Token | Value | Use |
 |---|---|---|
-| `--bg-main` | `#0a0f1c` | app canvas |
-| `--bg-panel` | `#111927` | cards, table shells, topbar |
-| `--bg-panel-strong` | `#16202f` | nested panels, table header |
-| `--bg-elevated` | `#1c2839` | modals, dropdowns, popovers |
-| `--bg-interactive` | `#243146` | hover fills, inputs hover |
-| `--bg-inset` | `#070b13` | code/log wells, YAML editors |
-| `--text-strong` | `#f8fafc` | stat values, headings emphasis |
-| `--text-main` | `#e6ecf4` | primary text |
-| `--text-subtle` | `#b6c2d4` | secondary text |
-| `--text-muted` | `#7c8ba1` | hints, labels, timestamps |
-| `--accent` | `#3b82f6` (hover `#2f6fe0`, text-on-dark `--accent-strong: #71a5f9`) | interactive |
-| `--ok` | `#26c165` | healthy |
-| `--warn` | `#f5a623` | degraded |
-| `--danger` | `#f04444` (hover `#d63333`) | error/destructive |
-| `--info` | `#22b8dd` | informational |
-| `--ai` | `#8b5cf6` (+ `--ai-soft`) | Hermes AI accents only |
-| `--border` | `rgba(148,163,199,0.16)` | default hairline |
-| `--border-soft` | `rgba(148,163,199,0.09)` | dividers |
-| `--border-strong` | `rgba(148,163,199,0.28)` | inputs, focused edges |
+| `--bg-main` | `#f8f7f5` | app canvas (warm paper) |
+| `--bg-panel` | `#ffffff` | cards, table shells, topbar, sidebar |
+| `--bg-panel-strong` | `#faf9f7` | nested panels, table header |
+| `--bg-elevated` | `#ffffff` | modals, dropdowns, popovers |
+| `--bg-interactive` | `#f3f2ef` | hover fills, inputs hover |
+| `--bg-inset` | `#f4f3f0` | code/log wells, YAML editors |
+| `--text-strong` | `#131417` | stat values, headings emphasis |
+| `--text-main` | `#1a1b1e` | primary text |
+| `--text-subtle` | `#494b52` | secondary text |
+| `--text-muted` | `#6e7076` | hints, labels, timestamps |
+| `--accent` | `#ff2929` (hover `#e31b1b`) | brand red — fills, active states |
+| `--accent-strong` | `#d71f1f` | red as TEXT on white (5:1 AA) |
+| `--ok` | `#178a45` | healthy |
+| `--warn` | `#a66104` | degraded |
+| `--danger` | `#d71f1f` (hover `#b31212`) | error/destructive |
+| `--info` | `#0e7490` | informational |
+| `--ai` | `#7c3aed` (+ `--ai-soft`) | Hermes AI accents only |
+| `--border` | `#e9e7e3` | default hairline (warm) |
+| `--border-soft` | `#f0efeb` | dividers |
+| `--border-strong` | `#d8d6d0` | inputs, focused edges |
 
-Each status color has `-soft` (12% alpha fill) and `-border` (30% alpha) variants.
-`--highlight: inset 0 1px 0 rgba(255,255,255,0.045)` — top inner highlight on panels/modals (dark only, `none` in light).
-Chart palette `--chart-1..8`: blue `#3b82f6`, cyan `#22d3ee`, violet `#8b5cf6`, green `#34d399`, amber `#fbbf24`, rose `#fb7185`, indigo `#818cf8`, teal `#2dd4bf`.
+Each accent/status color has `-soft` (~10% alpha fill) and `-border` (~30% alpha) variants.
+Shadows are warm-tinted (`rgba(26,27,30,…)`), `--highlight: none` in light.
+Focus `--ring: 0 0 0 3px rgba(255,41,41,0.15)`.
 
-### Light (`[data-theme="light"]`)
-Canvas `#f4f6fa`, panel `#ffffff`, panel-strong `#f8fafc`, elevated `#ffffff`, interactive `#eef2f7`,
-inset `#f1f5f9`; text strong `#0b1324` main `#1a2436` subtle `#42506a` muted `#64748b`;
-accent `#2563eb`; borders `rgba(15,23,42,0.10/0.06/0.20)`; shadows slate-tinted, soft.
+Chart palette `--chart-1..8` (fixed categorical order, CVD-validated, red first):
+`#ff2929`, `#2563eb`, `#d97706`, `#0d9488`, `#7c3aed`, `#059669`, `#4f46e5`, `#0891b2`.
+
+### Dark (`[data-theme="dark"]`)
+Warm neutral ink — canvas `#101112`, panel `#17181a`, panel-strong `#1c1d20`, elevated `#222327`,
+interactive `#2a2b30`, inset `#0b0c0d`; text strong `#fafaf9` main `#ececea` subtle `#b9bab6`
+muted `#85868c`; accent `#ff3b3b` (text-on-dark `--accent-strong: #ff7a70`); status colors
+dark-tuned (`--ok #2fbe6b`, `--warn #f0a32b`, `--danger #ff4d4d`, `--info #2cb8dc`); borders
+warm-white alphas; `--highlight` restored; charts brightened (`#ff5a52`, `#5b8df8`, …).
+Sidebar tokens are overridden here (dark `#141416` surface, red-soft active).
+
+### Sidebar (light default — white brand surface)
+White bg, hairline border, muted ink nav text; hover = `#f3f2ef` fill; **active = `#fff1ef`
+red-soft pill + `#d71f1f` text + `#ff2929` left bar**. Brand mark: red circle (red→red-ink
+gradient) with white mark; brand wordmark solid `--sidebar-brand-text` (never gradient text).
 
 ## 4. Shape, depth, motion
 
-- Radius: `--radius-sm .375rem` (inputs, tags), `--radius-md .5rem` (buttons, rows), `--radius-lg .75rem` (cards, modals), `--radius-xl 1rem` (hero/login card), `--radius-full 999px` (pills, dots, avatar).
-- Shadows (dark): `sm` = subtle 1-2px; `md` = dropdowns/hover-lift; `lg` = modals/drawers. Always pair panels with `--highlight`.
-- Focus: `--ring: 0 0 0 3px var(--accent-soft)` + `border-color: var(--accent)`. `:focus-visible` on EVERY interactive element; never remove outlines without replacement.
-- Motion: `--ease: cubic-bezier(.16,1,.3,1)`; durations `--dur-fast 120ms`, `--dur 200ms`, `--dur-slow 320ms`. Hover = color/border/shadow only (no layout shift, no scale on rows). Modals/dropdowns animate in with 6-8px translate + fade at `--dur`. Respect `prefers-reduced-motion` (kill all transitions/animations).
+- Radius: `--radius-sm .5rem` (tags, small wells), `--radius-md .75rem` (inputs, rows),
+  `--radius-lg 1.125rem` (cards, modals — the 18px signature), `--radius-xl 1.375rem` (login/hero),
+  `--radius-full 999px` (**all buttons**, pills, dots, avatars).
+- **Buttons are pills** (`border-radius: var(--radius-full)`) — base border is `--border-strong`.
+- Shadows: `sm` subtle 1px; `md` dropdowns/hover-lift; `lg` modals/drawers. Warm-tinted, soft.
+- `.primary` carries a red glow: `0 2px 10px -2px rgba(255,41,41,0.45)`.
+- Focus: red `--ring` + `border-color: var(--accent)`. `:focus-visible` on EVERY interactive element.
+- Motion: `--ease: cubic-bezier(.16,1,.3,1)`; durations 120/200/320ms. Hover = color/border/shadow
+  only (no layout shift, no scale). Respect `prefers-reduced-motion`.
 
 ## 5. Type scale
 
-`--font-size-xs .75rem` meta/labels · `sm .8125rem` table body, nav · `base .875rem` body ·
+Unchanged from v2: `xs .75rem` meta · `sm .8125rem` table body/nav · `base .875rem` body ·
 `md .9375rem` card titles · `lg 1.125rem` section headings · `xl 1.5rem` page titles ·
-`2xl 1.875rem` stat values/login. Page titles: display font, weight 700, `letter-spacing -0.025em`.
-Uppercase labels (eyebrow, section labels, table headers): `xs`/`0.6875rem`, weight 600, `letter-spacing .07em`, muted.
+`2xl 1.875rem` stat values. Page titles: display font, 700–800, `letter-spacing -0.025em`.
+Uppercase labels: xs, weight 600–700, `letter-spacing .07em+`, muted.
 
 ## 6. Component rules
 
-### Buttons
-- Base: `--radius-md`, `0.5rem 0.95rem`, weight 600, `--font-size-sm`, inline-flex + `gap .45rem`, `cursor: pointer`, transition `--dur-fast`.
-- `.primary`: accent fill, white text, subtle shadow `0 1px 2px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.12)`; hover = `--accent-hover` (never scale).
-- default/secondary: panel bg + `--border`, hover `--bg-interactive` + `--border-strong`.
-- `.btn-outline`: transparent, accent border+text, hover `--accent-soft`.
-- `.btn-ghost`: borderless muted, hover interactive fill.
-- `.btn-danger`: danger fill (destructive confirm only); ghost-danger for row deletes.
-- Disabled: `opacity .5`, `cursor: not-allowed`. Async: disable + spinner, keep label.
+### Attention model (three tiers)
+1. **Act now** — brand red: one primary action per view, critical counters, active nav.
+2. **Read this** — ink: headings, key values, row titles. Emphasis via weight/size, never color.
+3. **Ambient** — muted grays: metadata, timestamps, hints.
 
-### Cards (`.card`, InfoCard, stat cards, every box)
-- `--bg-panel`, 1px `--border`, `--radius-lg`, `--shadow-sm` + `--highlight`, padding `--space-5`.
-- Card header: title `--font-size-md`/600 + optional muted sub; actions right-aligned; hairline divider `--border-soft` below when body follows.
+### Buttons
+- All pill-shaped. `.primary`: red fill, white text, red glow; hover `--accent-hover`. **One
+  primary per view.** Secondary: white + `--border-strong`. `.btn-outline`: red border/text, hover
+  red-soft. `.btn-ghost`: borderless muted. `.btn-danger`: crimson fill (destructive confirm only).
+- Disabled: `opacity .5`. Async: disable + spinner, keep label.
+
+### Cards
+- White panel, 1px warm hairline, `--radius-lg` (18px), `--shadow-sm`, padding `--space-5`.
 - Interactive cards: hover → `--border-strong` + `--shadow-md`; no transform.
-- Stat cards: label = uppercase eyebrow; value = display font `--font-size-2xl`/700 tabular; delta/trend chip right; tone expressed by a 3px left inset bar or icon chip, not full-bleed background.
+- Stat cards: uppercase eyebrow label; display-font tabular value; tone via 3px left bar or icon
+  chip (soft fill + status color), never full-bleed background.
 
 ### Tables
-- Wrap in `.table-shell` card (flush padding). Sticky header: `--bg-panel-strong`, uppercase xs muted labels, `border-bottom: 1px solid var(--border)`.
-- Rows: `--font-size-sm`, 44px min height, divider `--border-soft`, hover `--bg-interactive` (fast), clickable rows get `cursor:pointer`.
-- Toolbar above: search input (with icon) + filters left, count + actions right.
-- Numeric cells tabular + right-aligned. IDs/versions in mono. Pagination: ghost buttons + `Page x of y` muted.
-- Empty table → EmptyState component, never a bare "No data" row.
+- `.table-shell` card (flush). Sticky header `--bg-panel-strong` + uppercase xs muted labels.
+- Rows ≥44px, hairline dividers, hover `--bg-interactive`, clickable rows `cursor:pointer`.
+- Numeric cells tabular + right-aligned; IDs/images/versions in mono; empty → EmptyState.
 
 ### Status
-- `.status-pill`: soft fill + border + colored dot, `--radius-full`, xs/600. `.status-dot--ok/warn/danger/unknown` 8px, optional pulse for live/critical.
-- Severity always icon/dot + word, never color alone.
+- `.status-pill`: soft fill + border + colored dot, full-round, xs/600–650. Severity always
+  dot/icon + word — never color alone. Pulse animation reserved for live/critical.
 
 ### Forms
-- Inputs/selects/textareas: `--bg-panel` (inset well for code), 1px `--border-strong`, `--radius-md`, padding `.5rem .75rem`, placeholder muted; focus = accent border + `--ring`.
-- Labels above, `--font-size-sm`/600; hint xs muted below; error = danger border + xs danger message with icon near field.
-- Section grouping inside long forms: eyebrow + divider. Danger zones: danger-soft panel + danger border.
+- Inputs: white bg, `--border-strong` hairline, `--radius-md`, focus = red border + red ring.
+- Labels above (sm/600); hints xs muted; errors = danger border + xs danger message with icon.
 
 ### Modals / drawers
-- Backdrop `rgba(4,8,16,.62)` + `backdrop-filter: blur(4px)`. Panel: `--bg-elevated`, `--radius-lg`, `--shadow-lg` + highlight, max-height 85vh with internal scroll.
-- Header: title md/700 + close ghost icon-button; footer right-aligned actions (primary rightmost), hairline dividers.
-- Wizards: numbered stepper — active step accent fill circle, done = ok check, upcoming = muted outline; connector lines hairline.
+- Backdrop warm `rgba(23,21,18,.42)` + blur. Panel `--bg-elevated`, `--radius-lg`, `--shadow-lg`.
+- Wizards: numbered stepper — active = red fill circle, done = ok check, upcoming = muted outline.
 
 ### Navigation
-- Sidebar: `--sidebar-bg #0a0e18` (both themes dark — brand surface), width `15rem`. Brand block: logo mark + "KubeSight" in display font + env subtitle. Section labels: uppercase xs. Links: icon 18px + label sm/500, `--radius-md`, hover soft white fill, active = `--accent-soft` fill + `--accent-strong` text + 2px accent left bar. Footer: version, muted.
-- Topbar: flat bar on canvas (border-bottom hairline only, no floating card): context selectors (cluster/namespace) as compact labeled fields, right: notifications bell + theme toggle + user block with avatar.
+- Sidebar: white (see §3); section labels uppercase xs; links icon + label, radius-md,
+  active = red-soft pill + red text + red left bar.
+- Topbar: flat white bar, hairline bottom border; context selectors as compact pill fields;
+  right: notifications bell (red badge), theme toggle, user block.
 
-### Feedback
-- Skeletons: `--bg-interactive` base with shimmer sweep 1.6s; provided `.skeleton`, `.skeleton-text`, `.skeleton-row`; reserve layout space (no jumps).
-- EmptyState: centered icon in soft circle, title md/600, description sm muted, optional primary action. Always actionable when user can create the missing thing.
-- Errors: `ErrorBanner` danger-soft fill + danger border + icon + retry where applicable.
-- Loading >300ms → skeleton or spinner with label.
+### Terminals / logs
+- Pod-exec terminal stays dark in BOTH themes (`#101113` well) — it is a terminal.
+- Log/YAML wells elsewhere use `--bg-inset` (theme-aware), mono sm, severity-tinted prefixes.
 
-### Topology
-- Nodes: panel fill, 1px border, `--radius-md`, status = 3px left bar + dot; selected = accent border + ring. Edges `--border-strong`, animated dash for active flows only. Canvas bg `--bg-inset` with subtle dot-grid.
-
-### Logs / code
-- `--bg-inset` well, mono sm, line-height 1.65; severity-tinted line prefixes; sticky log toolbar.
+### Charts
+- Colors read from `--chart-*` via `getComputedStyle` (chartDraw.js) — never hardcoded.
+- Categorical hues assigned in fixed order (red is chart-1 = the brand voice); status colors in
+  charts only for status meanings.
 
 ## 7. Hard rules
 
-1. **No hardcoded colors in JSX/CSS** — tokens only (SVG `currentColor` where possible). Canvas/JS chart code reads tokens via `getComputedStyle` helper or `lib/colors.js` constants that mirror tokens.
-2. No emoji as icons — inline SVG (Lucide-style, 1.5px stroke, 24 viewBox).
-3. `cursor: pointer` + hover feedback + `:focus-visible` ring on everything clickable.
-4. No layout-shifting hovers, no scale transforms on rows/cards.
-5. Both themes verified for every change (contrast ≥ 4.5:1 body text).
-6. Transitions 120–320ms with `--ease`; honor `prefers-reduced-motion`.
+1. **No hardcoded colors in JSX/CSS** — tokens only. Charts read tokens at draw time.
+2. **Red is budgeted.** Brand red = identity, one primary action, active nav, critical counts.
+   If red starts appearing anywhere else, the screen loses its siren.
+3. No emoji as icons — inline SVG only.
+4. `cursor: pointer` + hover feedback + `:focus-visible` ring on everything clickable.
+5. No layout-shifting hovers, no scale transforms on rows/cards.
+6. Both themes verified for every change (body text contrast ≥ 4.5:1; red text on white uses
+   `--accent-strong`, never raw `#ff2929`).
 7. Tables must not break page width — scroll inside `.table-shell`.
 8. Touch targets ≥ 40px in toolbars, ≥ 44px on mobile.
+9. Machine truth wears mono: image tags, namespaces, crons, node names, build numbers.

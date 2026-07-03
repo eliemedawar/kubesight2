@@ -95,18 +95,20 @@ export default function MyRequestsPage() {
   return (
     <div className="ops-page">
       <section className="card ops-section">
-        <div className="card-header-row" style={{ marginBottom: "var(--space-2)" }}>
+        <div className="sg-ph">
           <div>
             <h2>My Requests</h2>
-            <p className="muted">
+            <p className="sg-ph-sub">
               Track the status of deployment requests you've submitted.
             </p>
           </div>
-          {!isAccessDeniedError(error) ? (
-            <button type="button" className="btn-outline btn-compact" onClick={load} disabled={loading}>
-              Refresh
-            </button>
-          ) : null}
+          <div className="sg-ph-actions">
+            {!isAccessDeniedError(error) ? (
+              <button type="button" className="btn-outline btn-compact" onClick={load} disabled={loading}>
+                Refresh
+              </button>
+            ) : null}
+          </div>
         </div>
 
         <nav className="tab-bar" aria-label="My request views">
@@ -118,7 +120,11 @@ export default function MyRequestsPage() {
               onClick={() => setActiveTab(tab.key)}
             >
               {tab.label}
-              {tab.key === "active" ? ` (${activeRequests.length})` : ""}
+              {tab.key === "active" ? (
+                <span className={`sg-cnt${activeRequests.length === 0 ? " sg-cnt--zero" : ""}`}>
+                  {activeRequests.length}
+                </span>
+              ) : null}
             </button>
           ))}
         </nav>

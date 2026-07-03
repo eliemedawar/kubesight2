@@ -1,0 +1,32 @@
+/* Signal page-specific styles — clusters (owned by its page rework; shared vocabulary lives in screens.css) */
+
+/* Footer "Request" action on a cluster card — link-style, right-aligned,
+   overrides the app's base <button> chrome. */
+.sg-clusters-request {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 0.1rem 0.15rem;
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1.2;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.sg-clusters-request:hover {
+  background: none;
+  border-color: transparent;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.sg-clusters-request svg {
+  width: 0.8125rem;
+  height: 0.8125rem;
+}

@@ -1,0 +1,440 @@
+/* Signal page-specific styles — overview (owned by its page rework; shared vocabulary lives in screens.css) */
+
+/* ── page scaffold ──────────────────────────────────────────────── */
+.ov-dash {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.ov-mono {
+  font-family: var(--font-mono);
+}
+
+.sg-ph-sub .ov-mono {
+  color: var(--text-subtle);
+}
+
+/* Title keeps the page's h1 semantics; style it like the Signal sg-ph h2. */
+.ov-title-line {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.ov-dash .sg-ph h1 {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 750;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  color: var(--text-strong);
+  margin: 0;
+}
+
+/* ── time-range segmented pill ──────────────────────────────────── */
+.ov-range {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-interactive);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+}
+
+.ov-range-pill {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0.28rem 0.7rem;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.ov-range-pill:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-subtle);
+}
+
+.ov-range-pill.is-active,
+.ov-range-pill.is-active:hover {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* ghost refresh button needs room for its label */
+.btn-ghost.ov-ghost {
+  padding: 0.4rem 0.85rem;
+}
+
+/* ── KPI tile extras (on top of sg-kpi) ─────────────────────────── */
+.ov-kpi-sub {
+  margin-top: 0.55rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* status word value — slightly smaller than numeric KPIs, tone-colored */
+.sg-kpi-value b.ov-kpi-word {
+  font-size: 1.4rem;
+}
+
+.sg-kpi-value b.ov-kpi-word--ok { color: var(--ok); }
+.sg-kpi-value b.ov-kpi-word--warn { color: var(--warn); }
+.sg-kpi-value b.ov-kpi-word--danger { color: var(--danger); }
+.sg-kpi-value b.ov-kpi-word--muted { color: var(--text-subtle); }
+
+.ov-kpi-reasons {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.ov-kpi-reasons li {
+  position: relative;
+  padding-left: 0.8rem;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-subtle);
+}
+
+.ov-kpi-reasons li::before {
+  content: "•";
+  position: absolute;
+  left: 0.1rem;
+  top: 0;
+}
+
+.ov-kpi-reasons--warn li::before { color: var(--warn); }
+.ov-kpi-reasons--danger li::before { color: var(--danger); }
+.ov-kpi-reasons--muted li::before { color: var(--text-muted); }
+
+/* warn-tone delta chip (screens.css only ships up/down/flat) */
+.ov-delta--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* sparklines fill the tile */
+.sg-spark .sparkline-canvas {
+  display: block;
+  width: 100%;
+}
+
+/* ── Signal cards (flush shell + card header) ───────────────────── */
+.ov-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm), var(--highlight);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ov-card-h {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.95rem 1.25rem;
+  border-bottom: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+
+.ov-card-h h3 {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+}
+
+.ov-card-sub {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-card-r {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.ov-card-foot {
+  margin-top: auto;
+  padding: 0.35rem 1.25rem 1rem;
+}
+
+/* chart legends in card headers */
+.ov-legend {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font-size: 0.75rem;
+  color: var(--text-subtle);
+  flex-wrap: wrap;
+}
+
+.ov-legend i {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.ov-legend b {
+  font-weight: 650;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-sq {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 3px;
+  flex: none;
+}
+
+.ov-dashline {
+  width: 0.9rem;
+  border-top: 2px dashed var(--warn);
+  flex: none;
+}
+
+.ov-sample {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-sm);
+  padding: 0.1rem 0.45rem;
+  white-space: nowrap;
+}
+
+/* chart canvases */
+.ov-chart-wrap {
+  padding: 0.9rem 1.25rem 1.1rem;
+}
+
+.ov-chart {
+  display: block;
+  width: 100%;
+  height: 150px;
+}
+
+.ov-chart--tall {
+  height: 210px;
+}
+
+/* skeleton placeholder mirroring the canvas region */
+.ov-chart-skeleton {
+  width: 100%;
+  height: 150px;
+  border-radius: var(--radius-md);
+}
+
+.ov-chart-skeleton--tall {
+  height: 210px;
+}
+
+/* scrollable list/feed bodies (fleet list, events) */
+.ov-scroll {
+  max-height: 21rem;
+  overflow-y: auto;
+}
+
+/* ── status dots (tone-driven, token colors) ────────────────────── */
+.ov-dot--ok { background: var(--ok); }
+.ov-dot--warn { background: var(--warn); }
+.ov-dot--danger { background: var(--danger); }
+.ov-dot--muted { background: var(--text-muted); }
+
+/* dot + word status cell */
+.ov-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.ov-status--ok { color: var(--ok); }
+.ov-status--warn { color: var(--warn); }
+.ov-status--danger { color: var(--danger); }
+.ov-status--muted { color: var(--text-subtle); }
+
+/* ── node health table ──────────────────────────────────────────── */
+.ov-nt-head,
+.ov-nt-row {
+  display: grid;
+  grid-template-columns: 1.5fr 0.9fr 1.5fr 0.8fr 1.2fr;
+  gap: 0.7rem;
+  align-items: center;
+  padding: 0.65rem 1.25rem;
+  min-width: 0;
+}
+
+.ov-nt-head {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.ov-nt-row {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.ov-nt-row:last-child {
+  border-bottom: 0;
+}
+
+.ov-nt-name {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ov-nt-mono {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .ov-nt-head,
+  .ov-nt-row {
+    grid-template-columns: 1.4fr 1fr 1.4fr;
+  }
+
+  .ov-nt-sm {
+    display: none;
+  }
+}
+
+/* usage bar renders as a span inside the grid row — needs block display */
+.ov-nt-row .sg-bar-fill {
+  display: block;
+}
+
+/* feed meta timestamps in mono keep their muted size from sg-fe */
+.sg-fe .ov-mono {
+  font-size: 0.6875rem;
+}
+
+/* long unbroken event messages must wrap instead of overflowing the card */
+.ov-dash .sg-fe > div {
+  min-width: 0;
+}
+
+.ov-dash .sg-fe p {
+  overflow-wrap: anywhere;
+}
+
+/* ── key/value rows (version + cluster info) ────────────────────── */
+.ov-kv {
+  padding: 0.35rem 1.25rem 0.6rem;
+}
+
+.ov-kv-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.78rem;
+}
+
+.ov-kv-row:last-child {
+  border-bottom: 0;
+}
+
+.ov-kv-key {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ov-kv-val {
+  font-weight: 600;
+  color: var(--text-main);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.ov-kv-val--mono {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.ov-kv-val--ok { color: var(--ok); }
+.ov-kv-val--warn { color: var(--warn); }
+
+/* ── red text links (concept .lnk) ──────────────────────────────── */
+.ov-lnk {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: var(--accent-strong);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.ov-lnk:hover {
+  background: none;
+  border-color: transparent;
+  text-decoration: underline;
+}
+
+.ov-lnk svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  flex: none;
+}
+
+/* ── empty states inside cards ──────────────────────────────────── */
+.ov-empty {
+  padding: 1.1rem 1.25rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}

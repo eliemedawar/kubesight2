@@ -5,14 +5,21 @@ import { cssVar, drawArea, drawLines, drawStacked } from "./charts/chartDraw.js"
 import { TIME_RANGES } from "./useDashboardSeries.js";
 import { formatDashboardTime, formatLatestVersion } from "../utils/dashboardStatus.js";
 
-// Per-status accent for dots / pills / bars — resolved from design tokens at
-// call time so the palette tracks the active theme.
-function statusColor(status) {
+// ── status helpers ─────────────────────────────────────────────────
+// Tone name for pills / dots / bars, derived from the status word so all
+// colors stay token-driven (status-pill + ov-dot/sg-bar-fill modifiers).
+function pillTone(status) {
   const s = String(status || "").toLowerCase();
-  if (s === "critical" || s === "failed" || s === "fail") return cssVar("--danger", "#f04444");
-  if (s === "warning" || s === "warn") return cssVar("--warn", "#f5a623");
-  if (s === "healthy" || s === "passed" || s === "pass" || s === "ready") return cssVar("--ok", "#26c165");
-  return cssVar("--text-muted", "#7c8ba1");
+  if (s === "critical" || s === "failed" || s === "fail") return "danger";
+  if (s === "warning" || s === "warn") return "warn";
+  if (s === "healthy" || s === "passed" || s === "pass" || s === "ready") return "ok";
+  return "unknown";
+}
+
+// Dot/bar tone: same mapping but "muted" for unknown (dots need a color).
+function dotTone(status) {
+  const tone = pillTone(status);
+  return tone === "unknown" ? "muted" : tone;
 }
 
 function statusLabel(status) {
@@ -43,20 +50,140 @@ function trend(arr) {
   return { dir: last >= prev ? "up" : "down", delta };
 }
 
-function KvRow({ label, value, valueColor, last }) {
+// Presentation tone for a feed entry, matched on its message/action text.
+function eventTone(event) {
+  const text = `${event.action || ""} ${event.message || ""}`;
+  if (/fail|error|critical/i.test(text)) return "danger";
+  if (/warn/i.test(text)) return "warn";
+  if (/success|passed|completed|resolved|healthy/i.test(text)) return "ok";
+  return "muted";
+}
+
+// ── inline icons (stroke-based, Signal style) ──────────────────────
+function Ic({ children, size = 14, strokeWidth = 1.8 }) {
   return (
-    <div className={`ops-kv-row${last ? " is-last" : ""}`}>
-      <span className="ops-kv-key">{label}</span>
-      <span className="ops-kv-val" style={valueColor ? { color: valueColor } : undefined}>
-        {value}
-      </span>
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  );
+}
+
+const IcServer = () => (
+  <Ic>
+    <rect x="3" y="4" width="18" height="7" rx="2.5" />
+    <rect x="3" y="13" width="18" height="7" rx="2.5" />
+    <path d="M7 7.5h.01M7 16.5h.01" />
+  </Ic>
+);
+
+const IcCpu = () => (
+  <Ic>
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <rect x="9" y="9" width="6" height="6" />
+    <path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2" />
+  </Ic>
+);
+
+const IcMemory = () => (
+  <Ic>
+    <rect x="3" y="5" width="18" height="11" rx="2" />
+    <path d="M7 19v-3M12 19v-3M17 19v-3" />
+  </Ic>
+);
+
+const IcNodes = () => (
+  <Ic>
+    <circle cx="6" cy="12" r="2.6" />
+    <circle cx="18" cy="5" r="2.6" />
+    <circle cx="18" cy="19" r="2.6" />
+    <path d="m8.4 10.7 7.2-4.5M8.4 13.3l7.2 4.5" />
+  </Ic>
+);
+
+const IcBox = () => (
+  <Ic>
+    <path d="M21 8v8a2 2 0 0 1-1 1.73l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.73l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8Z" />
+    <path d="M3.3 7 12 12l8.7-5M12 12v10" />
+  </Ic>
+);
+
+const IcAlert = () => (
+  <Ic>
+    <path d="m21.7 18-8-14a2 2 0 0 0-3.5 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z" />
+    <path d="M12 9v4M12 17h.01" />
+  </Ic>
+);
+
+const IcRefresh = () => (
+  <Ic>
+    <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8" />
+    <path d="M21 3v5h-5" />
+  </Ic>
+);
+
+const IcRocket = () => (
+  <Ic>
+    <path d="M4.5 16.5c-1.5 1.3-2 5-2 5s3.7-.5 5-2c.7-.8.7-2.1-.1-2.9a2.18 2.18 0 0 0-2.9-.1Z" />
+    <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2Z" />
+    <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
+  </Ic>
+);
+
+const IcArrow = () => (
+  <Ic strokeWidth={2}>
+    <path d="M7 17 17 7M8 7h9v9" />
+  </Ic>
+);
+
+const IcCheck = () => (
+  <Ic strokeWidth={2.2}>
+    <path d="M20 6 9 17l-5-5" />
+  </Ic>
+);
+
+const IcInfo = () => (
+  <Ic>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 8h.01M12 12v5" />
+  </Ic>
+);
+
+// ── small building blocks ──────────────────────────────────────────
+function KvRow({ label, value, mono, tone }) {
+  const valClass = [
+    "ov-kv-val",
+    mono ? "ov-kv-val--mono" : "",
+    tone ? `ov-kv-val--${tone}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <div className="ov-kv-row">
+      <span className="ov-kv-key">{label}</span>
+      <span className={valClass}>{value}</span>
     </div>
   );
 }
 
-// Faithful rebuild of the KubeSight Operations Dashboard reference, fed by the
-// real dashboard summary + the rolling series hook. The reference's own
-// header/sidebar are omitted — the app's AppShell already provides those.
+function DeltaChip({ tone = "flat", children }) {
+  return <span className={`sg-delta sg-delta--${tone}`}>{children}</span>;
+}
+
+// KubeSight Operations Dashboard, restructured to the Signal concept's
+// Overview screen: sg-ph page header, sg-kpi tiles with sparklines, Signal
+// card headers on the chart panels, an sg-flist namespace card and an
+// sg-feed events card. Fed by the real dashboard summary + the rolling
+// series hook; the app's AppShell provides the surrounding chrome.
 export default function OpsDashboard({
   summary,
   series,
@@ -84,53 +211,55 @@ export default function OpsDashboard({
     [summary?.operationalEvents, summary?.recentActivity]
   );
 
+  // Canvas charts need resolved colors; these are read from design tokens at
+  // render time (theme-aware) — never hardcoded.
   const accent = cssVar("--accent", "#3b82f6");
-  // Chart palette from design tokens (theme-aware), resolved per render.
   const TEAL = cssVar("--chart-8", "#2dd4bf");
   const PURPLE = cssVar("--chart-3", "#8b5cf6");
-  const AMBER = cssVar("--warn", "#f5a623");
-  const DANGER = cssVar("--danger", "#f04444");
   const bands = series?.cpuBands || [];
   const bandColors = bands.map((_, i) => (i === 0 ? accent : i === 1 ? TEAL : PURPLE));
+  // Same palette as var() names for DOM legend dots (no resolved hex in JSX).
+  const bandTokens = ["--accent", "--chart-8", "--chart-3"];
   const cpuPeak = series?.cpu?.length ? Math.round(Math.max(...series.cpu)) : null;
   const netIn = series?.netIn || [];
   const netOut = series?.netOut || [];
 
   const cpuTrend = trend(series?.cpu);
   const memTrend = trend(series?.mem);
-  const healthColor = statusColor(health);
+  const healthTone = pillTone(health);
+  const notReady = Math.max((nodes.total ?? 0) - (nodes.ready ?? 0), 0);
 
   const versionUpToDate = version.status === "up_to_date";
 
+  const dateLine = new Date().toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
+
   return (
-    <div className="ops-dash">
-      {/* ── Title row ─────────────────────────────────────────── */}
-      <div className="ops-titlerow">
+    <div className="ov-dash">
+      {/* ── Page header ───────────────────────────────────────── */}
+      <header className="sg-ph">
         <div>
-          <div className="ops-title-line">
-            <h1 className="ops-title">Operations Dashboard</h1>
-            <span className="ops-pill" style={{ "--pill": healthColor }}>
-              <span className="ops-dot" />
-              {statusLabel(health)}
-            </span>
+          <div className="ov-title-line">
+            <h1>Operations Dashboard</h1>
+            <span className={`status-pill ${healthTone}`}>{statusLabel(health)}</span>
           </div>
-          <p className="ops-subtitle">
-            {clusterInfo.name || summary?.clusterId || "cluster"} · live operational view ·{" "}
-            <span className="ops-mono">{version.current || clusterInfo.version || "—"}</span>
+          <p className="sg-ph-sub">
+            {dateLine} · {clusterInfo.name || summary?.clusterId || "cluster"} ·{" "}
+            <span className="ov-mono">{version.current || clusterInfo.version || "—"}</span> · updated{" "}
+            <span className="ov-mono">{formatDashboardTime(lastRefreshedAt || summary?.lastUpdated)}</span>
           </p>
         </div>
-        <div className="ops-titlerow-actions">
-          <span className="ops-updated">
-            <span className="ops-dot ops-dot--teal" />
-            Last updated{" "}
-            <span className="ops-mono">{formatDashboardTime(lastRefreshedAt || summary?.lastUpdated)}</span>
-          </span>
-          <div className="ops-range" role="group" aria-label="Chart time range">
+        <div className="sg-ph-actions">
+          <div className="ov-range" role="group" aria-label="Chart time range">
             {TIME_RANGES.map((range) => (
               <button
                 key={range}
                 type="button"
-                className={`ops-range-pill${timeRange === range ? " is-active" : ""}`}
+                className={`ov-range-pill${timeRange === range ? " is-active" : ""}`}
                 aria-pressed={timeRange === range}
                 onClick={() => onTimeRangeChange?.(range)}
               >
@@ -138,27 +267,34 @@ export default function OpsDashboard({
               </button>
             ))}
           </div>
-          <button type="button" className="ops-refresh" onClick={onRefresh}>
+          <button type="button" className="btn-ghost ov-ghost" onClick={onRefresh}>
+            <IcRefresh />
             Refresh
           </button>
+          {canOpenUpgrade ? (
+            <button type="button" className="primary" onClick={onNavigateToUpgrade}>
+              <IcRocket />
+              Upgrade Safe Mode
+            </button>
+          ) : null}
         </div>
-      </div>
+      </header>
 
-      {/* ── KPI strip ─────────────────────────────────────────── */}
-      <div className="ops-kpi-grid">
-        <div className="ops-kpi">
-          <div className="ops-kpi-head">
-            <span className="ops-kpi-label">CLUSTER HEALTH</span>
-            <span className="ops-kpi-indicator" style={{ "--pill": healthColor }} />
+      {/* ── KPI tiles ─────────────────────────────────────────── */}
+      <div className="sg-kpi-grid">
+        <div className="sg-kpi">
+          <p className="sg-kpi-label">
+            <IcServer />
+            Cluster health
+          </p>
+          <div className="sg-kpi-value">
+            <b className={`ov-kpi-word ov-kpi-word--${dotTone(health)}`}>{statusLabel(health)}</b>
           </div>
-          <div className="ops-kpi-value ops-kpi-value--word" style={{ color: healthColor }}>
-            {statusLabel(health)}
-          </div>
-          <div className="ops-kpi-sub">
+          <div className="ov-kpi-sub">
             {nodes.ready}/{nodes.total} nodes · {clusterInfo.podCount ?? pods.running} pods
           </div>
           {health !== "healthy" && healthReasons.length ? (
-            <ul className="ops-kpi-reasons" style={{ "--reason-color": healthColor }}>
+            <ul className={`ov-kpi-reasons ov-kpi-reasons--${dotTone(health)}`}>
               {healthReasons.map((reason) => (
                 <li key={reason}>{reason}</li>
               ))}
@@ -166,299 +302,361 @@ export default function OpsDashboard({
           ) : null}
         </div>
 
-        <div className="ops-kpi">
-          <div className="ops-kpi-head">
-            <span className="ops-kpi-label">CPU USAGE</span>
+        <div className="sg-kpi">
+          <p className="sg-kpi-label">
+            <IcCpu />
+            CPU usage
+          </p>
+          <div className="sg-kpi-value">
+            <b>{cpu.available ? `${cpu.percent}%` : "—"}</b>
             {cpuTrend ? (
-              <span className="ops-delta" style={{ color: TEAL }}>
+              <DeltaChip tone="flat">
                 {cpuTrend.dir === "up" ? "▲" : "▼"} {cpuTrend.delta}%
-              </span>
+              </DeltaChip>
             ) : null}
           </div>
-          <div className="ops-kpi-value">
-            {cpu.available ? cpu.percent : "—"}
-            <span className="ops-kpi-unit">%</span>
+          <div className="sg-spark">
+            <Sparkline data={series?.cpu} color="--chart-2" height={34} />
           </div>
-          <Sparkline data={series?.cpu} color="--accent" />
-          <div className="ops-kpi-sub">of {cpu.allocatableDisplay || "cluster vCPU"}</div>
+          <div className="ov-kpi-sub">of {cpu.allocatableDisplay || "cluster vCPU"}</div>
         </div>
 
-        <div className="ops-kpi">
-          <div className="ops-kpi-head">
-            <span className="ops-kpi-label">MEMORY USAGE</span>
+        <div className="sg-kpi">
+          <p className="sg-kpi-label">
+            <IcMemory />
+            Memory usage
+          </p>
+          <div className="sg-kpi-value">
+            <b>{mem.available ? `${mem.percent}%` : "—"}</b>
             {memTrend ? (
-              <span className="ops-delta" style={{ color: AMBER }}>
+              <DeltaChip tone="flat">
                 {memTrend.dir === "up" ? "▲" : "▼"} {memTrend.delta}%
-              </span>
+              </DeltaChip>
             ) : null}
           </div>
-          <div className="ops-kpi-value">
-            {mem.available ? mem.percent : "—"}
-            <span className="ops-kpi-unit">%</span>
+          <div className="sg-spark">
+            <Sparkline data={series?.mem} color="--chart-4" height={34} />
           </div>
-          <Sparkline data={series?.mem} color={PURPLE} />
-          <div className="ops-kpi-sub">of {mem.allocatableDisplay || "allocatable"}</div>
+          <div className="ov-kpi-sub">of {mem.allocatableDisplay || "allocatable"}</div>
         </div>
 
-        <div className="ops-kpi">
-          <div className="ops-kpi-head">
-            <span className="ops-kpi-label">NODES</span>
+        <div className="sg-kpi">
+          <p className="sg-kpi-label">
+            <IcNodes />
+            Nodes
+          </p>
+          <div className="sg-kpi-value">
+            <b>
+              {nodes.ready} / {nodes.total}
+            </b>
+            {notReady > 0 ? <DeltaChip tone="down">{notReady} not ready</DeltaChip> : null}
           </div>
-          <div className="ops-kpi-value">
-            {nodes.ready} / {nodes.total}
-          </div>
-          <div className="ops-kpi-sub" style={{ color: statusColor(nodes.status) }}>
+          <div className="ov-kpi-sub">
             {nodes.ready === nodes.total && nodes.total > 0 ? "All ready" : statusLabel(nodes.status)}
           </div>
         </div>
 
-        <div className="ops-kpi">
-          <div className="ops-kpi-head">
-            <span className="ops-kpi-label">RUNNING PODS</span>
+        <div className="sg-kpi">
+          <p className="sg-kpi-label">
+            <IcBox />
+            Running pods
+          </p>
+          <div className="sg-kpi-value">
+            <b>{pods.running}</b>
+            {pods.failed > 0 ? (
+              <DeltaChip tone="down">{pods.failed} failed</DeltaChip>
+            ) : pods.pending > 0 ? (
+              <DeltaChip tone="flat">{pods.pending} pending</DeltaChip>
+            ) : null}
           </div>
-          <div className="ops-kpi-value">{pods.running}</div>
-          <div className="ops-kpi-sub">
+          <div className="ov-kpi-sub">
             Pending {pods.pending} · Failed {pods.failed}
           </div>
         </div>
 
-        <div className="ops-kpi">
-          <div className="ops-kpi-head">
-            <span className="ops-kpi-label">ACTIVE ALERTS</span>
+        <div className="sg-kpi">
+          <p className="sg-kpi-label">
+            <IcAlert />
+            Active alerts
+          </p>
+          <div className="sg-kpi-value">
+            <b>{alerts.total}</b>
+            {alerts.critical > 0 ? (
+              <DeltaChip tone="down">{alerts.critical} critical</DeltaChip>
+            ) : alerts.warning > 0 ? (
+              <span className="sg-delta ov-delta--warn">{alerts.warning} warning</span>
+            ) : null}
           </div>
-          <div className="ops-kpi-value" style={{ color: alerts.total > 0 ? AMBER : undefined }}>
-            {alerts.total}
-          </div>
-          <div className="ops-kpi-sub">
+          <div className="ov-kpi-sub">
             Critical {alerts.critical} · Warning {alerts.warning}
           </div>
         </div>
       </div>
 
-      {/* ── CPU + Memory charts ───────────────────────────────── */}
-      <div className="ops-chart-row">
-        <section className="ops-panel">
-          <div className="ops-panel-head">
-            <div>
-              <div className="ops-panel-title">CPU Utilization</div>
-              <div className="ops-panel-subtitle">By namespace · % of cluster</div>
-            </div>
-            <div className="ops-panel-metric">
-              <div className="ops-mono ops-panel-metric-value">{cpu.available ? `${cpu.percent}%` : "—"}</div>
-              {cpuPeak != null ? <div className="ops-panel-metric-sub">peak {cpuPeak}%</div> : null}
+      {/* ── CPU chart + namespace fleet list ──────────────────── */}
+      <div className="sg-row-2">
+        <section className="ov-card">
+          <div className="ov-card-h">
+            <h3>CPU Utilization</h3>
+            <span className="ov-card-sub">
+              By namespace · % of cluster
+              {cpuPeak != null ? ` · peak ${cpuPeak}%` : ""}
+            </span>
+            <div className="ov-card-r">
+              <div className="ov-legend">
+                {bands.map((band, i) => (
+                  <i key={band.label}>
+                    <span
+                      className="ov-sq"
+                      style={{ background: `var(${bandTokens[i] || "--chart-5"})` }}
+                    />
+                    {band.label}
+                  </i>
+                ))}
+              </div>
+              {!series?.cpuReal ? <span className="ov-sample">sample split</span> : null}
             </div>
           </div>
-          <div className="ops-legend">
-            {bands.map((band, i) => (
-              <span className="ops-legend-item" key={band.label}>
-                <span className="ops-legend-dot" style={{ background: bandColors[i] }} />
-                {band.label}
-              </span>
-            ))}
-            {!series?.cpuReal ? <span className="ops-sample-tag">sample split</span> : null}
+          <div className="ov-chart-wrap">
+            <ChartCanvas
+              className="ov-chart ov-chart--tall"
+              draw={(ctx, { width, height }) => {
+                if (!bands.length) return;
+                drawStacked(ctx, width, height, bands.map((b) => b.data), bandColors, 100, "%");
+              }}
+              deps={[bands, accent]}
+            />
           </div>
-          <ChartCanvas
-            className="ops-chart-canvas ops-chart-canvas--tall"
-            draw={(ctx, { width, height }) => {
-              if (!bands.length) return;
-              drawStacked(ctx, width, height, bands.map((b) => b.data), bandColors, 100, "%");
-            }}
-            deps={[bands, accent]}
-          />
         </section>
 
-        <section className="ops-panel">
-          <div className="ops-panel-head">
-            <div>
-              <div className="ops-panel-title">Memory Utilization</div>
-              <div className="ops-panel-subtitle">Working set · % of allocatable</div>
-            </div>
-            <div className="ops-panel-metric">
-              <div className="ops-mono ops-panel-metric-value">{mem.available ? `${mem.percent}%` : "—"}</div>
-              {mem.usedDisplay && mem.allocatableDisplay ? (
-                <div className="ops-panel-metric-sub">
-                  {mem.usedDisplay} / {mem.allocatableDisplay}
+        <section className="ov-card">
+          <div className="ov-card-h">
+            <h3>Namespaces</h3>
+            <span className="ov-card-sub">{namespaces.length} total</span>
+          </div>
+          {namespaces.length ? (
+            <div className="sg-flist ov-scroll">
+              {namespaces.map((ns) => (
+                <div className="sg-fl" key={ns.name}>
+                  <span className={`sg-fl-dot ov-dot--${dotTone(ns.status)}`} />
+                  <span className="sg-fl-name ov-mono" title={ns.name}>
+                    {ns.name}
+                  </span>
+                  <span className="sg-fl-meta">{ns.pods} pods</span>
+                  <span className={`status-pill status-pill--compact ${pillTone(ns.status)}`}>
+                    {statusLabel(ns.status)}
+                  </span>
                 </div>
-              ) : null}
+              ))}
             </div>
-          </div>
-          <div className="ops-legend">
-            <span className="ops-legend-item">
-              <span className="ops-legend-dot" style={{ background: PURPLE }} />
-              used
-            </span>
-            <span className="ops-legend-item">
-              <span className="ops-legend-dash" />
-              limit {series?.memLimit || 85}%
-            </span>
-          </div>
-          <ChartCanvas
-            className="ops-chart-canvas ops-chart-canvas--tall"
-            draw={(ctx, { width, height }) => {
-              if (!series?.mem?.length) return;
-              drawArea(ctx, width, height, series.mem, PURPLE, 100, series.memLimit || 85, "%");
-            }}
-            deps={[series?.mem, series?.memLimit]}
-          />
+          ) : (
+            <div className="ov-empty">No namespaces available for this cluster.</div>
+          )}
         </section>
       </div>
 
-      {/* ── Network (full width) ──────────────────────────────── */}
-      <section className="ops-panel">
-        <div className="ops-panel-head">
-          <div>
-            <div className="ops-panel-title">Network I/O</div>
-            <div className="ops-panel-subtitle">Cluster-wide throughput</div>
-          </div>
-          <div className="ops-net-metrics">
-            <div className="ops-net-metric">
-              <div className="ops-net-legend">
-                <span className="ops-legend-dot" style={{ background: accent }} />
-                Ingress
+      {/* ── Memory + network charts ───────────────────────────── */}
+      <div className="sg-row-11">
+        <section className="ov-card">
+          <div className="ov-card-h">
+            <h3>Memory Utilization</h3>
+            <span className="ov-card-sub">
+              Working set · % of allocatable
+              {mem.usedDisplay && mem.allocatableDisplay
+                ? ` · ${mem.usedDisplay} / ${mem.allocatableDisplay}`
+                : ""}
+            </span>
+            <div className="ov-card-r">
+              <div className="ov-legend">
+                <i>
+                  <span className="ov-sq" style={{ background: "var(--chart-3)" }} />
+                  used
+                </i>
+                <i>
+                  <span className="ov-dashline" />
+                  limit {series?.memLimit || 85}%
+                </i>
               </div>
-              <div className="ops-mono ops-net-value">{fmtThroughput(netIn[netIn.length - 1])}</div>
             </div>
-            <div className="ops-net-metric">
-              <div className="ops-net-legend">
-                <span className="ops-legend-dot" style={{ background: TEAL }} />
-                Egress
-              </div>
-              <div className="ops-mono ops-net-value">{fmtThroughput(netOut[netOut.length - 1])}</div>
-            </div>
-            {!series?.netReal ? <span className="ops-sample-tag">sample</span> : null}
           </div>
-        </div>
-        <ChartCanvas
-          className="ops-chart-canvas"
-          draw={(ctx, { width, height }) => {
-            if (!netIn.length || !netOut.length) return;
-            drawLines(ctx, width, height, [netIn, netOut], [accent, TEAL], 1600, " KB");
-          }}
-          deps={[netIn, netOut, accent]}
-        />
-      </section>
+          <div className="ov-chart-wrap">
+            <ChartCanvas
+              className="ov-chart"
+              draw={(ctx, { width, height }) => {
+                if (!series?.mem?.length) return;
+                drawArea(ctx, width, height, series.mem, PURPLE, 100, series.memLimit || 85, "%");
+              }}
+              deps={[series?.mem, series?.memLimit]}
+            />
+          </div>
+        </section>
 
-      {/* ── Node health + events ──────────────────────────────── */}
-      <div className="ops-grid ops-grid--wide-left">
-        <section className="ops-panel ops-panel--flush">
-          <div className="ops-panel-bar">
-            <div className="ops-panel-title">Node Health</div>
-            <span className="ops-panel-count">{nodeHealth.length} nodes</span>
+        <section className="ov-card">
+          <div className="ov-card-h">
+            <h3>Network I/O</h3>
+            <span className="ov-card-sub">Cluster-wide throughput</span>
+            <div className="ov-card-r">
+              <div className="ov-legend">
+                <i>
+                  <span className="ov-sq" style={{ background: "var(--accent)" }} />
+                  Ingress <b className="ov-mono">{fmtThroughput(netIn[netIn.length - 1])}</b>
+                </i>
+                <i>
+                  <span className="ov-sq" style={{ background: "var(--chart-8)" }} />
+                  Egress <b className="ov-mono">{fmtThroughput(netOut[netOut.length - 1])}</b>
+                </i>
+              </div>
+              {!series?.netReal ? <span className="ov-sample">sample</span> : null}
+            </div>
           </div>
-          <div className="ops-table-head ops-table-head--nodes">
-            <span>NODE</span>
-            <span>STATUS</span>
-            <span>MEMORY (USED / TOTAL)</span>
-            <span>FREE</span>
-            <span>USAGE</span>
+          <div className="ov-chart-wrap">
+            <ChartCanvas
+              className="ov-chart"
+              draw={(ctx, { width, height }) => {
+                if (!netIn.length || !netOut.length) return;
+                drawLines(ctx, width, height, [netIn, netOut], [accent, TEAL], 1600, " KB");
+              }}
+              deps={[netIn, netOut, accent]}
+            />
+          </div>
+        </section>
+      </div>
+
+      {/* ── Node health + events feed ─────────────────────────── */}
+      <div className="sg-row-2">
+        <section className="ov-card">
+          <div className="ov-card-h">
+            <h3>Node Health</h3>
+            <span className="ov-card-sub">{nodeHealth.length} nodes</span>
           </div>
           {nodeHealth.length ? (
-            nodeHealth.map((node) => (
-              <div className="ops-table-row ops-table-row--nodes" key={node.name}>
-                <span className="ops-mono ops-table-name" title={node.name}>
-                  {node.name}
-                </span>
-                <span className="ops-status" style={{ color: statusColor(node.status) }}>
-                  <span className="ops-dot" style={{ "--pill": statusColor(node.status) }} />
-                  {statusLabel(node.status)}
-                </span>
-                <span className="ops-mono ops-table-mem">
-                  {formatGiB(node.memoryUsedMiB)} / {formatGiB(node.memoryTotalMiB)}
-                  {node.memoryPercent != null ? ` · ${node.memoryPercent}%` : ""}
-                </span>
-                <span className="ops-mono ops-table-free">{formatGiB(node.memoryAvailableMiB)}</span>
-                <span className="ops-bar">
-                  <span
-                    className="ops-bar-fill"
-                    style={{
-                      width: `${Math.min(node.memoryPercent ?? 0, 100)}%`,
-                      background: statusColor(node.status),
-                    }}
-                  />
-                </span>
+            <>
+              <div className="ov-nt-head">
+                <span>Node</span>
+                <span>Status</span>
+                <span>Memory (used / total)</span>
+                <span className="ov-nt-sm">Free</span>
+                <span className="ov-nt-sm">Usage</span>
               </div>
-            ))
+              {nodeHealth.map((node) => {
+                const tone = dotTone(node.status);
+                return (
+                  <div className="ov-nt-row" key={node.name}>
+                    <span className="ov-nt-name" title={node.name}>
+                      {node.name}
+                    </span>
+                    <span className={`ov-status ov-status--${tone}`}>
+                      <span className={`sg-fl-dot ov-dot--${tone}`} />
+                      {statusLabel(node.status)}
+                    </span>
+                    <span className="ov-nt-mono">
+                      {formatGiB(node.memoryUsedMiB)} / {formatGiB(node.memoryTotalMiB)}
+                      {node.memoryPercent != null ? ` · ${node.memoryPercent}%` : ""}
+                    </span>
+                    <span className="ov-nt-mono ov-nt-sm">{formatGiB(node.memoryAvailableMiB)}</span>
+                    <span className="sg-bar-track ov-nt-sm">
+                      <span
+                        className={`sg-bar-fill${tone !== "muted" ? ` sg-bar-fill--${tone}` : ""}`}
+                        style={{ width: `${Math.min(node.memoryPercent ?? 0, 100)}%` }}
+                      />
+                    </span>
+                  </div>
+                );
+              })}
+            </>
           ) : (
-            <div className="ops-empty">No node metrics available for this cluster.</div>
+            <div className="ov-empty">No node metrics available for this cluster.</div>
           )}
         </section>
 
-        <section className="ops-panel ops-panel--flush ops-panel--col">
-          <div className="ops-panel-bar">
-            <div className="ops-panel-title">Events &amp; Alerts</div>
-            <button type="button" className="ops-link" onClick={onViewAllEvents}>
-              View all →
-            </button>
+        <section className="ov-card">
+          <div className="ov-card-h">
+            <h3>Events &amp; Alerts</h3>
+            <div className="ov-card-r">
+              <button type="button" className="ov-lnk" onClick={onViewAllEvents}>
+                View all
+                <IcArrow />
+              </button>
+            </div>
           </div>
-          <div className="ops-events">
-            {events.length ? (
-              events.map((event, i) => {
-                const tone = /fail|error|critical/i.test(event.action || event.message || "")
-                  ? DANGER
-                  : /warn/i.test(event.action || event.message || "")
-                    ? AMBER
-                    : accent;
+          {events.length ? (
+            <div className="sg-feed ov-scroll">
+              {events.map((event, i) => {
+                const tone = eventTone(event);
                 return (
-                  <div className="ops-event" key={`${event.createdAt || event.time}-${i}`}>
-                    <span className="ops-event-dot" style={{ "--pill": tone }} />
-                    <div className="ops-event-body">
-                      <div className="ops-event-msg">{event.message}</div>
-                      <div className="ops-event-meta ops-mono">
+                  <div className="sg-fe" key={`${event.createdAt || event.time}-${i}`}>
+                    <span className={`sg-fic sg-fic--${tone}`}>
+                      {tone === "danger" || tone === "warn" ? (
+                        <IcAlert />
+                      ) : tone === "ok" ? (
+                        <IcCheck />
+                      ) : (
+                        <IcInfo />
+                      )}
+                    </span>
+                    <div>
+                      <p>{event.message}</p>
+                      <span className="ov-mono">
                         {event.time}
                         {event.action ? ` · ${event.action}` : ""}
-                      </div>
+                      </span>
                     </div>
                   </div>
                 );
-              })
-            ) : (
-              <div className="ops-empty">No operational events recorded.</div>
-            )}
-          </div>
+              })}
+            </div>
+          ) : (
+            <div className="ov-empty">No operational events recorded.</div>
+          )}
         </section>
       </div>
 
       {/* ── Version + cluster info ────────────────────────────── */}
-      <div className="ops-grid ops-grid--even">
-        <section className="ops-panel">
-          <div className="ops-panel-head">
-            <div className="ops-panel-title">Version Status</div>
-            <span
-              className="ops-pill ops-pill--sm"
-              style={{ "--pill": versionUpToDate ? TEAL : AMBER }}
-            >
-              {version.statusMessage || version.statusLabel || "Unknown"}
-            </span>
+      <div className="sg-row-11">
+        <section className="ov-card">
+          <div className="ov-card-h">
+            <h3>Version Status</h3>
+            <div className="ov-card-r">
+              <span className={`status-pill ${versionUpToDate ? "ok" : "warn"}`}>
+                {version.statusMessage || version.statusLabel || "Unknown"}
+              </span>
+            </div>
           </div>
-          <div className="ops-kv">
-            <KvRow label="PROVIDER" value={version.provider || clusterInfo.provider || "—"} />
-            <KvRow label="CURRENT" value={version.current || "—"} />
-            <KvRow label="LATEST STABLE" value={formatLatestVersion(version.latest || version.latestAvailable)} />
+          <div className="ov-kv">
+            <KvRow label="Provider" value={version.provider || clusterInfo.provider || "—"} />
+            <KvRow label="Current" value={version.current || "—"} mono />
             <KvRow
-              label="UPGRADE SUPPORT"
+              label="Latest stable"
+              value={formatLatestVersion(version.latest || version.latestAvailable)}
+              mono
+            />
+            <KvRow
+              label="Upgrade support"
               value={version.upgradeSupported ? "Supported" : "Not supported"}
-              valueColor={version.upgradeSupported ? TEAL : AMBER}
-              last
+              tone={version.upgradeSupported ? "ok" : "warn"}
             />
           </div>
           {canOpenUpgrade ? (
-            <button type="button" className="ops-upgrade-btn" onClick={onNavigateToUpgrade}>
-              Open Upgrade Safe Mode →
-            </button>
+            <div className="ov-card-foot">
+              <button type="button" className="ov-lnk" onClick={onNavigateToUpgrade}>
+                Open Upgrade Safe Mode
+                <IcArrow />
+              </button>
+            </div>
           ) : null}
         </section>
 
-        <section className="ops-panel">
-          <div className="ops-panel-head">
-            <div className="ops-panel-title">Cluster Information</div>
+        <section className="ov-card">
+          <div className="ov-card-h">
+            <h3>Cluster Information</h3>
           </div>
-          <div className="ops-kv">
-            <KvRow label="PROVIDER" value={clusterInfo.provider || "—"} />
-            <KvRow label="CLUSTER NAME" value={clusterInfo.name || "—"} />
-            <KvRow label="CONTEXT" value={clusterInfo.contextName || "—"} />
-            <KvRow label="NODES" value={clusterInfo.nodeCount ?? nodes.total} />
-            <KvRow label="NAMESPACES" value={clusterInfo.namespaceCount ?? namespaces.length} />
-            <KvRow label="PODS" value={clusterInfo.podCount ?? pods.running} last />
+          <div className="ov-kv">
+            <KvRow label="Provider" value={clusterInfo.provider || "—"} />
+            <KvRow label="Cluster name" value={clusterInfo.name || "—"} mono />
+            <KvRow label="Context" value={clusterInfo.contextName || "—"} mono />
+            <KvRow label="Nodes" value={clusterInfo.nodeCount ?? nodes.total} />
+            <KvRow label="Namespaces" value={clusterInfo.namespaceCount ?? namespaces.length} />
+            <KvRow label="Pods" value={clusterInfo.podCount ?? pods.running} />
           </div>
         </section>
       </div>
