@@ -744,7 +744,11 @@ def _slack_alert_payload(alert: Dict[str, Any]) -> Dict[str, Any]:
         severity = str(alert.get("severity", "warning")).upper()
         service_name = alert.get("serviceName") or "Application service"
         detail = alert.get("description") or alert.get("title") or ""
-        return {"text": f"*{severity}* service health alert — {service_name}\n{detail}"}
+        clients = [str(name) for name in (alert.get("affectedClients") or []) if str(name).strip()]
+        text = f"*{severity}* service health alert — {service_name}\n{detail}"
+        if clients:
+            text += f"\nAffected clients: {', '.join(clients)}"
+        return {"text": text}
 
     namespace = alert.get("namespace") or "default"
     title = alert.get("title") or "Alert"

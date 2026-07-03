@@ -741,6 +741,15 @@ _COMPONENT_TO_SERVICE_HEALTH = {
     "unknown": "unknown",
 }
 
+# Inverse direction for topology nodes: a linked workload's live status
+# (healthy/warning/critical) rendered in the node-health vocabulary the
+# topology viewer colors by. "unknown" intentionally maps to nothing.
+_WORKLOAD_TO_NODE_HEALTH = {
+    "healthy": "healthy",
+    "warning": "degraded",
+    "critical": "unhealthy",
+}
+
 
 def _service_to_dict(
     svc: ApplicationService,
@@ -765,6 +774,25 @@ def _service_to_dict(
     # no component on this service has a DR counterpart linked.
     dr_statuses = [d.get("drStatus") for d in deps if d.get("drStatus")]
     dr_health = _aggregate_health(dr_statuses) if dr_statuses else None
+
+    # Stamp linked-workload health onto topology nodes so every consumer of the
+    # topology (service detail, service list, composed client topology) colors
+    # deployment/pod nodes the same way predefined-component nodes are colored.
+    # Only live deployment details carry "status"; plain rows leave nodes unset
+    # (the viewer renders those muted rather than pretending they are healthy).
+    dep_status_by_key = {
+        (d.get("clusterId"), d.get("namespace"), d.get("deploymentName")): d.get("status")
+        for d in deps
+        if "status" in d
+    }
+    for node in topology["nodes"]:
+        if node.get("componentStatus"):
+            continue
+        key = (node.get("linkedClusterId"), node.get("linkedNamespace"), node.get("linkedDeployment"))
+        node_health = _WORKLOAD_TO_NODE_HEALTH.get(dep_status_by_key.get(key))
+        if node_health:
+            node["componentStatus"] = node_health
+
     return {
         "id": svc.id,
         "name": svc.name,

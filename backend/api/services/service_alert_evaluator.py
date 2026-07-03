@@ -153,7 +153,17 @@ def _db_service_snapshot(svc: ApplicationService) -> Dict[str, Any]:
             }
         )
 
-    return {"id": svc.id, "name": svc.name, "workloads": workloads, "components": components}
+    # Clients consuming this service — carried on every alert so notifications
+    # can say who is affected by the outage.
+    clients = sorted({link.client.name for link in svc.client_links if link.client})
+
+    return {
+        "id": svc.id,
+        "name": svc.name,
+        "clients": clients,
+        "workloads": workloads,
+        "components": components,
+    }
 
 
 def _mock_service_snapshot(service_id: Optional[int]) -> List[Dict[str, Any]]:
@@ -179,7 +189,9 @@ def _mock_service_snapshot(service_id: Optional[int]) -> List[Dict[str, Any]]:
                     **replicas,
                 }
             )
-        snapshots.append({"id": svc["id"], "name": svc["name"], "workloads": workloads, "components": []})
+        snapshots.append(
+            {"id": svc["id"], "name": svc["name"], "clients": [], "workloads": workloads, "components": []}
+        )
     return snapshots
 
 
@@ -288,6 +300,7 @@ def _history_to_service_alert_dict(row: AlertHistory) -> Dict[str, Any]:
         "resourceName": row.resource_name,
         "serviceId": snapshot.get("serviceId"),
         "serviceName": snapshot.get("serviceName"),
+        "affectedClients": snapshot.get("affectedClients") or [],
         "title": row.title,
         "description": row.description,
         "policyId": row.policy_id,
@@ -415,6 +428,7 @@ def evaluate_service_policy(
                 snapshot={
                     "serviceId": service_id,
                     "serviceName": service_name,
+                    "affectedClients": snap.get("clients") or [],
                     "itemType": "workload",
                     "workload": item,
                 },
@@ -447,6 +461,7 @@ def evaluate_service_policy(
                 snapshot={
                     "serviceId": service_id,
                     "serviceName": service_name,
+                    "affectedClients": snap.get("clients") or [],
                     "itemType": "component",
                     "component": item,
                 },

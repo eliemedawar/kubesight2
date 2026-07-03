@@ -265,6 +265,85 @@ def test_switching_service_policy_to_metric_requires_cluster(client, admin_token
     assert updated["alertType"] == "metric"
 
 
+def test_service_alert_includes_affected_clients(client, admin_token, app):
+    from api.models import Client, ClientApplicationService
+
+    svc = _make_service("QR Service", [("cluster-x", "ns1", "qr-api")])
+    acme = Client(name="Acme Corp")
+    beta = Client(name="Beta Bank")
+    db.session.add_all([acme, beta])
+    db.session.flush()
+    db.session.add_all(
+        [
+            ClientApplicationService(client_id=acme.id, service_id=svc.id),
+            ClientApplicationService(client_id=beta.id, service_id=svc.id),
+        ]
+    )
+    db.session.commit()
+
+    down = {("cluster-x", "ns1", "qr-api"): {"desired": 1, "available": 0, "ready": 0}}
+    with patch.dict(MOCK_HEALTH_PATH, down):
+        response = client.post(
+            "/api/alert-policies",
+            headers=auth_headers(admin_token),
+            json=_service_policy_payload(
+                serviceConfig={"serviceId": svc.id, "triggerOn": "critical"}
+            ),
+        )
+        assert response.status_code in (200, 201)
+        policy_id = response.get_json()["data"]["id"]
+
+        row = AlertHistory.query.filter_by(policy_id=policy_id, status="active").one()
+        assert row.metric_snapshot["affectedClients"] == ["Acme Corp", "Beta Bank"]
+
+        from api.services.service_alert_evaluator import _history_to_service_alert_dict
+
+        payload = _history_to_service_alert_dict(row)
+        assert payload["affectedClients"] == ["Acme Corp", "Beta Bank"]
+
+        from api.email_delivery import _build_alert_body, _build_alert_html
+
+        body = _build_alert_body(payload)
+        assert "Affected clients:" in body
+        assert "Acme Corp, Beta Bank" in body
+        assert _build_alert_html(payload).count("Acme Corp, Beta Bank") == 1
+
+
+def test_service_alert_email_rendering():
+    from api.email_delivery import _build_alert_body, _build_alert_html, _build_alert_subject
+
+    alert = {
+        "id": "history-8",
+        "alertType": "service",
+        "severity": "warning",
+        "status": "firing",
+        "clusterId": "__app_services__",
+        "namespace": None,
+        "resourceType": "component",
+        "resourceName": "WAF",
+        "serviceName": "QR SERVICE",
+        "affectedClients": ["Acme Corp"],
+        "policyName": "Service Test",
+        "title": "Service Test triggered",
+        "description": "Service 'QR SERVICE': component 'WAF' is unhealthy — Health check failed",
+        "firedAt": "2026-07-03T14:32:23.903372+00:00",
+    }
+
+    assert _build_alert_subject(alert) == "[KubeSight][WARNING] QR SERVICE — component 'WAF' unhealthy"
+
+    body = _build_alert_body(alert)
+    assert "Acme Corp" in body
+    assert "component 'WAF' is unhealthy" in body
+    assert "2026-07-03 14:32:23 UTC" in body
+    # The sentinel cluster id and the empty namespace must not leak into the email.
+    assert "__app_services__" not in body
+    assert "Namespace" not in body
+
+    html = _build_alert_html(alert)
+    assert "Acme Corp" in html
+    assert "__app_services__" not in html
+
+
 def test_refresh_stale_component_healths_checks_webhook_components(app):
     now = datetime.now(timezone.utc)
     fresh_heartbeat = TopologyComponent(

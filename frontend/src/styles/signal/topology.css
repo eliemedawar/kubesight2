@@ -18,3 +18,49 @@
 .topo-viewer .topo-node:hover .topo-node-card {
   stroke: var(--text-muted);
 }
+
+/* Fullscreen toggle — round ghost button pinned to the canvas corner. */
+.topo-viewer {
+  position: relative;
+}
+.topo-fs-btn {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  z-index: 2;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text-subtle);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: color var(--dur-fast, 120ms) var(--ease, ease), border-color var(--dur-fast, 120ms) var(--ease, ease);
+}
+.topo-fs-btn:hover {
+  color: var(--text-strong);
+  border-color: var(--text-muted);
+}
+
+/* Fullscreen mode: the viewer becomes a viewport-filling layer above any modal
+   (same z tier as the maximized log viewer). Same dot-grid ground; the SVG
+   letterboxes into the space with its aspect preserved. */
+.topo-viewer--fs {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  border-radius: 0;
+  border: none;
+  padding: 2.5rem;
+}
+.topo-viewer--fs .topo-fs-btn {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  width: 2.4rem;
+  height: 2.4rem;
+}

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 // Shared, read-only topology renderer used by the Application Services detail
 // view and the Client Service Access Topology overlay. The layout helpers are
@@ -220,7 +220,7 @@ function truncate(str, max) {
   return str.length > max ? str.slice(0, max - 1) + "…" : str;
 }
 
-export default function TopologyViewer({ nodes, edges, compact = false, fillWidth = false }) {
+export default function TopologyViewer({ nodes, edges, compact = false, fillWidth = false, allowFullscreen = true }) {
   const { positions, svgW, svgH } = useMemo(
     () => computeLayout(nodes || [], edges || []),
     [nodes, edges]
@@ -231,6 +231,23 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
     (nodes || []).forEach((n) => { map[String(n.id)] = n; });
     return map;
   }, [nodes]);
+
+  const [fullscreen, setFullscreen] = useState(false);
+
+  // Exit fullscreen on Escape. Capture phase + stopPropagation so the parent
+  // modal's own Escape-to-close handler (service/client detail) doesn't also
+  // fire — one Escape closes only the fullscreen layer.
+  useEffect(() => {
+    if (!fullscreen) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setFullscreen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [fullscreen]);
 
   if (!nodes || nodes.length === 0) {
     return <p className="muted" style={{ fontSize: "0.875rem", fontStyle: "italic" }}>No topology defined yet.</p>;
@@ -265,11 +282,41 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
   // the graph uses the full available width.
   const naturalWidth = Math.round(svgW + zoomMx * 2);
 
+  // In fullscreen the SVG fills the viewport (aspect preserved by the viewBox);
+  // inline the sizing switch so the same mounted SVG works in both modes.
+  const svgStyle = fullscreen
+    ? { display: "block", width: "100%", height: "100%" }
+    : { display: "block", width: "100%", maxWidth: fillWidth ? "100%" : `${naturalWidth}px`, height: "auto", margin: "0 auto" };
+
   return (
-    <div className={`topo-viewer${compact ? " topo-viewer--compact" : ""}`}>
+    <div
+      className={`topo-viewer${compact ? " topo-viewer--compact" : ""}${fullscreen ? " topo-viewer--fs" : ""}`}
+      role={fullscreen ? "dialog" : undefined}
+      aria-modal={fullscreen ? "true" : undefined}
+      aria-label={fullscreen ? "Topology fullscreen view" : undefined}
+    >
+      {allowFullscreen ? (
+        <button
+          type="button"
+          className="topo-fs-btn"
+          onClick={() => setFullscreen((v) => !v)}
+          aria-label={fullscreen ? "Exit fullscreen" : "View topology fullscreen"}
+          title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
+        >
+          {fullscreen ? (
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" />
+            </svg>
+          )}
+        </button>
+      ) : null}
       <svg viewBox={`${-zoomMx} ${-zoomMy} ${svgW + zoomMx * 2} ${svgH + zoomMy * 2}`}
         preserveAspectRatio="xMidYMid meet"
-        style={{ display: "block", width: "100%", maxWidth: fillWidth ? "100%" : `${naturalWidth}px`, height: "auto", margin: "0 auto" }}>
+        style={svgStyle}>
         <defs>
           <filter id="topo-shadow" x="-30%" y="-30%" width="160%" height="160%">
             <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="rgba(0,0,0,0.5)" />

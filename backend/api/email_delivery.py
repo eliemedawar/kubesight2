@@ -62,59 +62,215 @@ def _smtp_settings() -> Dict[str, Any]:
     return _smtp_from_db() or _smtp_from_env()
 
 
+# Sentinel cluster id used by service alert policies (Application Services span
+# clusters); never show it as a cluster name in notifications.
+_SERVICE_ALERT_CLUSTER_ID = "__app_services__"
+
+_SEVERITY_STYLES = {
+    "critical": {"label": "Critical", "color": "#b91c1c", "bg": "#fef2f2", "border": "#fecaca"},
+    "warning": {"label": "Warning", "color": "#b45309", "bg": "#fffbeb", "border": "#fde68a"},
+    "info": {"label": "Info", "color": "#1d4ed8", "bg": "#eff6ff", "border": "#bfdbfe"},
+}
+
+
+def _severity_style(alert: Dict[str, Any]) -> Dict[str, str]:
+    severity = str(alert.get("severity") or "").strip().lower()
+    return _SEVERITY_STYLES.get(severity, _SEVERITY_STYLES["warning"])
+
+
+def _format_alert_timestamp(value: Any) -> str:
+    """Render an ISO timestamp as '2026-07-03 14:32:23 UTC' (fall back to raw)."""
+    if not value:
+        return ""
+    from datetime import datetime, timezone
+
+    raw = str(value)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _alert_cluster_display(alert: Dict[str, Any]) -> str:
+    cluster = str(alert.get("clusterId") or "").strip()
+    if not cluster or cluster == _SERVICE_ALERT_CLUSTER_ID:
+        return ""
+    return cluster
+
+
+def _alert_headline(alert: Dict[str, Any]) -> str:
+    alert_type = alert.get("alertType") or "metric"
+    if alert_type == "log":
+        workload = alert.get("deployment") or alert.get("pod") or alert.get("resourceName")
+        return f"Error detected in logs — {workload}" if workload else "Error detected in logs"
+    if alert_type == "service":
+        service = alert.get("serviceName") or "Application service"
+        resource = str(alert.get("resourceName") or "").strip()
+        resource_type = str(alert.get("resourceType") or "component").strip()
+        if resource:
+            return f"{service} — {resource_type} '{resource}' unhealthy"
+        return f"{service} — service health alert"
+    return alert.get("title") or "KubeSight alert"
+
+
 def _build_alert_subject(alert: Dict[str, Any]) -> str:
-    if alert.get("alertType") == "log":
-        severity = str(alert.get("severity", "alert")).upper()
-        return f"[KubeSight][{severity}] Error detected in logs"
     severity = str(alert.get("severity", "alert")).upper()
-    title = alert.get("title") or "KubeSight alert"
-    return f"[KubeSight][{severity}] {title}"
+    return f"[KubeSight][{severity}] {_alert_headline(alert)}"
 
 
-def _build_log_alert_body(alert: Dict[str, Any]) -> str:
-    lines = [
-        f"Cluster: {alert.get('clusterId', '-')}",
-        f"Namespace: {alert.get('namespace', '-')}",
-    ]
-    if alert.get("deployment"):
-        lines.append(f"Deployment: {alert.get('deployment')}")
-    lines.extend(
-        [
-            f"Pod: {alert.get('pod', '-')}",
-            "",
-            f"Matched Pattern:",
-            str(alert.get("matchedPattern") or "-"),
-            "",
-            f"Detected At:",
-            str(alert.get("detectedAt") or alert.get("firedAt") or "-"),
-            "",
-            "Log Snippet:",
-            "",
-            str(alert.get("logSnippet") or "-"),
-        ]
-    )
-    return "\n".join(lines)
+def _metric_conditions_summary(alert: Dict[str, Any]) -> str:
+    parts = []
+    for item in alert.get("triggeredConditions") or []:
+        if not isinstance(item, dict) or item.get("matched") is False:
+            continue
+        label = item.get("metricLabel") or item.get("metricKey") or "metric"
+        operator = str(item.get("operator") or "").strip()
+        threshold = item.get("threshold")
+        observed = item.get("observedValue")
+        text = f"{label} {operator} {threshold}".strip()
+        if observed is not None:
+            text += f" (observed {observed})"
+        parts.append(text)
+    return "; ".join(parts)
+
+
+def _alert_detail_rows(alert: Dict[str, Any]) -> list:
+    """Ordered (label, value) pairs for the email, skipping empty fields."""
+    alert_type = alert.get("alertType") or "metric"
+    rows: list = []
+
+    def add(label: str, value: Any) -> None:
+        text = str(value).strip() if value is not None else ""
+        if text:
+            rows.append((label, text))
+
+    if alert_type == "service":
+        add("Service", alert.get("serviceName"))
+        clients = [str(name) for name in (alert.get("affectedClients") or []) if str(name).strip()]
+        add("Affected clients", ", ".join(clients) if clients else "None linked")
+        resource_type = str(alert.get("resourceType") or "").strip().lower()
+        resource_label = "Component" if resource_type == "component" else (resource_type.capitalize() or "Resource")
+        add(resource_label, alert.get("resourceName"))
+        add("Cluster", _alert_cluster_display(alert))
+        add("Namespace", alert.get("namespace"))
+    elif alert_type == "log":
+        add("Cluster", _alert_cluster_display(alert))
+        add("Namespace", alert.get("namespace"))
+        add("Deployment", alert.get("deployment"))
+        add("Pod", alert.get("pod"))
+        add("Container", alert.get("container"))
+        add("Matched pattern", alert.get("matchedPattern"))
+        add("Detected at", _format_alert_timestamp(alert.get("detectedAt")))
+    else:
+        add("Cluster", _alert_cluster_display(alert))
+        add("Namespace", alert.get("namespace"))
+        resource = " / ".join(
+            part
+            for part in (
+                str(alert.get("resourceType") or "").strip(),
+                str(alert.get("resourceName") or "").strip(),
+            )
+            if part
+        )
+        add("Resource", resource)
+        add("Triggered conditions", _metric_conditions_summary(alert))
+
+    add("Policy", alert.get("policyName"))
+    add("Severity", _severity_style(alert)["label"])
+    add("Status", str(alert.get("status") or "").capitalize())
+    add("Fired at", _format_alert_timestamp(alert.get("firedAt")))
+    add("Alert ID", alert.get("id"))
+    return rows
+
+
+def _log_snippet_text(alert: Dict[str, Any]) -> str:
+    log_lines = alert.get("logLines") or []
+    if log_lines:
+        return "\n".join(str(line) for line in log_lines[:20])
+    return str(alert.get("logSnippet") or "").strip()
 
 
 def _build_alert_body(alert: Dict[str, Any]) -> str:
-    if alert.get("alertType") == "log":
-        return _build_log_alert_body(alert)
-    lines = [
-        "KubeSight alert notification",
-        "",
-        f"Title: {alert.get('title', '-')}",
-        f"Severity: {alert.get('severity', '-')}",
-        f"Status: {alert.get('status', '-')}",
-        f"Cluster: {alert.get('clusterId', '-')}",
-        f"Namespace: {alert.get('namespace', '-')}",
-        f"Resource type: {alert.get('resourceType', '-')}",
-        f"Description: {alert.get('description', '-')}",
-        f"Fired at: {alert.get('firedAt', '-')}",
-        f"Alert ID: {alert.get('id', '-')}",
-        "",
-        "This message was sent by KubeSight alert routing.",
-    ]
+    style = _severity_style(alert)
+    status = str(alert.get("status") or "").capitalize()
+    header = f"KubeSight alert — {style['label']}" + (f" ({status})" if status else "")
+    lines = [header, "", _alert_headline(alert)]
+
+    description = str(alert.get("description") or "").strip()
+    if description and description != _alert_headline(alert):
+        lines += ["", description]
+
+    rows = _alert_detail_rows(alert)
+    if rows:
+        width = max(len(label) for label, _ in rows) + 1
+        lines += [""] + [f"{(label + ':').ljust(width + 1)}{value}" for label, value in rows]
+
+    if (alert.get("alertType") or "metric") == "log":
+        snippet = _log_snippet_text(alert)
+        if snippet:
+            lines += ["", "Log snippet:", "", snippet]
+
+    lines += ["", "Sent by KubeSight alert routing."]
     return "\n".join(lines)
+
+
+def _build_alert_html(alert: Dict[str, Any]) -> str:
+    from html import escape
+
+    style = _severity_style(alert)
+    status = str(alert.get("status") or "").capitalize()
+    headline = _alert_headline(alert)
+    description = str(alert.get("description") or "").strip()
+
+    rows_html = "".join(
+        '<tr>'
+        f'<td style="padding:5px 16px 5px 0;color:#6b7280;font-size:13px;white-space:nowrap;vertical-align:top;">{escape(label)}</td>'
+        f'<td style="padding:5px 0;color:#111827;font-size:13px;">{escape(value)}</td>'
+        "</tr>"
+        for label, value in _alert_detail_rows(alert)
+    )
+
+    description_html = ""
+    if description and description != headline:
+        description_html = (
+            f'<p style="margin:0 0 16px;color:#374151;font-size:14px;line-height:1.5;">{escape(description)}</p>'
+        )
+
+    snippet_html = ""
+    if (alert.get("alertType") or "metric") == "log":
+        snippet = _log_snippet_text(alert)
+        if snippet:
+            snippet_html = (
+                '<pre style="margin:16px 0 0;padding:12px;background:#111827;color:#e5e7eb;'
+                'border-radius:6px;font-size:12px;line-height:1.5;overflow-x:auto;white-space:pre-wrap;">'
+                f"{escape(snippet)}</pre>"
+            )
+
+    return f"""\
+<div style="margin:0;padding:24px;background:#f3f4f6;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <div style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+    <div style="padding:14px 24px;background:{style['bg']};border-bottom:1px solid {style['border']};">
+      <span style="display:inline-block;padding:2px 10px;border-radius:999px;background:{style['color']};color:#ffffff;font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">{escape(style['label'])}</span>
+      <span style="margin-left:8px;color:{style['color']};font-size:12px;font-weight:600;">{escape(status)}</span>
+    </div>
+    <div style="padding:20px 24px;">
+      <h2 style="margin:0 0 12px;color:#111827;font-size:17px;line-height:1.4;">{escape(headline)}</h2>
+      {description_html}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        {rows_html}
+      </table>
+      {snippet_html}
+    </div>
+    <div style="padding:12px 24px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#9ca3af;font-size:12px;">
+      Sent by KubeSight alert routing.
+    </div>
+  </div>
+</div>
+"""
 
 
 def send_email(to_address: str, subject: str, body: str, *, html_body: Optional[str] = None) -> None:
@@ -317,6 +473,12 @@ def send_alert_email(to_address: str, alert: Dict[str, Any], *, test: bool = Fal
         if test
         else _build_alert_body(alert)
     )
+    if not test:
+        try:
+            message.add_alternative(_build_alert_html(alert), subtype="html")
+        except Exception:
+            # The plain-text part is always present; never fail delivery over HTML rendering.
+            pass
 
     try:
         if settings["use_ssl"]:
