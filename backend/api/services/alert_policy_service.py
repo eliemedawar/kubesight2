@@ -10,17 +10,21 @@ logger = logging.getLogger(__name__)
 
 from ..access_engine import can_access_cluster, is_admin
 from ..alert_policy_catalog import (
+    ALL_SERVICES_ID,
     CONDITION_LOGIC,
     DEFAULT_EVALUATION_INTERVAL_SECONDS,
+    SERVICE_ALERT_CLUSTER_ID,
     SEVERITY_LEVELS,
     catalog_payload,
     evaluation_interval_display,
     normalize_alert_type,
     normalize_evaluation_interval_seconds,
     normalize_log_config,
+    normalize_service_config,
     validate_condition,
     validate_evaluation_interval,
     validate_log_config,
+    validate_service_config,
     normalize_scope,
     validate_scope,
 )
@@ -54,6 +58,31 @@ def _trigger_policy_evaluation(policy: AlertPolicy, user: Optional[User] = None)
             policy.id,
             policy.cluster_id,
         )
+
+
+def _user_can_access_policy_cluster(user: Optional[User], cluster_id: str) -> bool:
+    """Cluster-level RBAC for a policy. Service alert policies live under a
+    sentinel cluster id (Application Services span clusters), so they are gated
+    only by the route-level alerts:view/manage permission."""
+    if not user or is_admin(user):
+        return True
+    if cluster_id == SERVICE_ALERT_CLUSTER_ID:
+        return True
+    return can_access_cluster(user, cluster_id)
+
+
+def _service_name_for_config(config: Dict[str, Any]) -> Optional[str]:
+    service_id = config.get("serviceId")
+    if service_id == ALL_SERVICES_ID:
+        return "All services"
+    from ..models import ApplicationService
+
+    service = ApplicationService.query.get(service_id)
+    if service:
+        return service.name
+    from .service_alert_evaluator import mock_service_name
+
+    return mock_service_name(service_id)
 
 
 def policy_show_on_dashboard(policy: AlertPolicy) -> bool:
@@ -196,17 +225,21 @@ def _sync_policy_receivers(policy: AlertPolicy, receiver_ids: List[int]) -> None
 def _policy_dict(policy: AlertPolicy) -> Dict[str, Any]:
     receivers = list(policy.notification_receivers or [])
     groups = list(policy.notification_receiver_groups or [])
+    alert_type = normalize_alert_type(getattr(policy, "alert_type", "metric"))
+    service_config = normalize_service_config(getattr(policy, "service_config", None))
     return {
         "id": policy.id,
         "name": policy.name,
         "clusterId": policy.cluster_id,
         "description": policy.description,
         "enabled": policy.enabled,
-        "alertType": normalize_alert_type(getattr(policy, "alert_type", "metric")),
+        "alertType": alert_type,
         "severity": policy.severity,
         "conditionLogic": policy.condition_logic,
         "conditions": policy.conditions or [],
         "logConfig": normalize_log_config(policy.log_config),
+        "serviceConfig": service_config,
+        "serviceName": _service_name_for_config(service_config) if alert_type == "service" else None,
         "scope": normalize_scope(policy.scope),
         "showOnDashboard": policy_show_on_dashboard(policy),
         "receiverIds": [receiver.id for receiver in receivers],
@@ -244,8 +277,16 @@ def _validate_payload(
     if not partial or "name" in payload:
         if not str(payload.get("name") or "").strip():
             return "Policy name is required"
-    if not partial or "clusterId" in payload:
-        if not str(payload.get("clusterId") or "").strip():
+    if alert_type != "service":
+        # Service policies target Application Services (sentinel cluster id),
+        # so no cluster selection is required for them.
+        cluster_in_payload = str(payload.get("clusterId") or "").strip()
+        if not partial or "clusterId" in payload:
+            if not cluster_in_payload or cluster_in_payload == SERVICE_ALERT_CLUSTER_ID:
+                return "Cluster is required"
+        elif existing is not None and existing.cluster_id == SERVICE_ALERT_CLUSTER_ID:
+            # Switching an existing service policy back to metric/log needs a
+            # real cluster; its stored cluster id is the sentinel.
             return "Cluster is required"
     if "severity" in payload or not partial:
         severity = str(payload.get("severity") or "warning").lower()
@@ -269,7 +310,12 @@ def _validate_payload(
             error = validate_log_config(payload.get("logConfig") or {})
             if error:
                 return error
-    if "scope" in payload or not partial:
+    elif alert_type == "service":
+        if "serviceConfig" in payload or not partial:
+            error = validate_service_config(payload.get("serviceConfig"))
+            if error:
+                return error
+    if alert_type != "service" and ("scope" in payload or not partial):
         error = validate_scope(payload.get("scope") or {})
         if error:
             return error
@@ -315,21 +361,25 @@ def list_policies(user: Optional[User], cluster_id: Optional[str] = None) -> Lis
         from .alert_policy_evaluator import evaluate_policies_for_cluster
 
         evaluate_policies_for_cluster(cluster_id, user=user, persist=True)
+        # Service policies are cluster-agnostic; keep them fresh and visible in
+        # cluster-filtered views too (evaluation is due-gated, so this is cheap).
+        if cluster_id != SERVICE_ALERT_CLUSTER_ID:
+            evaluate_policies_for_cluster(SERVICE_ALERT_CLUSTER_ID, user=user, persist=True)
 
     query = AlertPolicy.query.order_by(AlertPolicy.name.asc())
     if cluster_id:
-        query = query.filter_by(cluster_id=cluster_id)
+        query = query.filter(AlertPolicy.cluster_id.in_((cluster_id, SERVICE_ALERT_CLUSTER_ID)))
     policies = query.all()
     if not user or is_admin(user):
         return [_policy_dict(p) for p in policies]
-    return [_policy_dict(p) for p in policies if can_access_cluster(user, p.cluster_id)]
+    return [_policy_dict(p) for p in policies if _user_can_access_policy_cluster(user, p.cluster_id)]
 
 
 def get_policy(user: Optional[User], policy_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     policy = AlertPolicy.query.get(policy_id)
     if not policy:
         return None, "Policy not found", 404
-    if user and not is_admin(user) and not can_access_cluster(user, policy.cluster_id):
+    if not _user_can_access_policy_cluster(user, policy.cluster_id):
         return None, "Forbidden", 403
     return _policy_dict(policy), None, 200
 
@@ -338,12 +388,15 @@ def create_policy(user: Optional[User], payload: Dict[str, Any]) -> Tuple[Option
     error = _validate_payload(payload)
     if error:
         return None, error, 400
-    cluster_id = str(payload.get("clusterId")).strip()
-    if user and not is_admin(user) and not can_access_cluster(user, cluster_id):
+    alert_type = normalize_alert_type(payload.get("alertType", "metric"))
+    if alert_type == "service":
+        cluster_id = SERVICE_ALERT_CLUSTER_ID
+    else:
+        cluster_id = str(payload.get("clusterId")).strip()
+    if not _user_can_access_policy_cluster(user, cluster_id):
         return None, "Forbidden", 403
 
     now = datetime.now(timezone.utc)
-    alert_type = normalize_alert_type(payload.get("alertType", "metric"))
     policy = AlertPolicy(
         name=str(payload.get("name")).strip(),
         cluster_id=cluster_id,
@@ -354,6 +407,7 @@ def create_policy(user: Optional[User], payload: Dict[str, Any]) -> Tuple[Option
         condition_logic=str(payload.get("conditionLogic") or "any").lower(),
         conditions=(payload.get("conditions") or []) if alert_type == "metric" else [],
         log_config=normalize_log_config(payload.get("logConfig")) if alert_type == "log" else None,
+        service_config=normalize_service_config(payload.get("serviceConfig")) if alert_type == "service" else None,
         scope=normalize_scope(payload.get("scope")),
         notification_channels=_dashboard_channels_from_payload(payload),
         evaluation_interval_seconds=normalize_evaluation_interval_seconds(
@@ -382,7 +436,7 @@ def update_policy(
     policy = AlertPolicy.query.get(policy_id)
     if not policy:
         return None, "Policy not found", 404
-    if user and not is_admin(user) and not can_access_cluster(user, policy.cluster_id):
+    if not _user_can_access_policy_cluster(user, policy.cluster_id):
         return None, "Forbidden", 403
 
     error = _validate_payload(payload, partial=True, existing=policy)
@@ -393,7 +447,7 @@ def update_policy(
         policy.name = str(payload.get("name")).strip()
     if "clusterId" in payload:
         cluster_id = str(payload.get("clusterId")).strip()
-        if user and not is_admin(user) and not can_access_cluster(user, cluster_id):
+        if not _user_can_access_policy_cluster(user, cluster_id):
             return None, "Forbidden", 403
         policy.cluster_id = cluster_id
     if "description" in payload:
@@ -411,13 +465,25 @@ def update_policy(
             policy.conditions = payload.get("conditions") or []
         if "alertType" in payload:
             policy.log_config = None
-    else:
+            policy.service_config = None
+    elif policy.alert_type == "log":
         if "logConfig" in payload:
             policy.log_config = normalize_log_config(payload.get("logConfig"))
         elif "alertType" in payload and not policy.log_config:
             policy.log_config = normalize_log_config({})
         if "alertType" in payload:
             policy.conditions = []
+            policy.service_config = None
+    else:
+        if "serviceConfig" in payload:
+            policy.service_config = normalize_service_config(payload.get("serviceConfig"))
+        elif "alertType" in payload and not policy.service_config:
+            policy.service_config = normalize_service_config({})
+        if "alertType" in payload:
+            policy.conditions = []
+            policy.log_config = None
+    if policy.alert_type == "service":
+        policy.cluster_id = SERVICE_ALERT_CLUSTER_ID
     if "scope" in payload:
         policy.scope = normalize_scope(payload.get("scope"))
     if "showOnDashboard" in payload or "notificationChannels" in payload:
@@ -449,7 +515,7 @@ def set_policy_enabled(
     policy = AlertPolicy.query.get(policy_id)
     if not policy:
         return None, "Policy not found", 404
-    if user and not is_admin(user) and not can_access_cluster(user, policy.cluster_id):
+    if not _user_can_access_policy_cluster(user, policy.cluster_id):
         return None, "Forbidden", 403
     policy.enabled = bool(enabled)
     policy.updated_at = datetime.now(timezone.utc)
@@ -468,7 +534,7 @@ def delete_policy(user: Optional[User], policy_id: int) -> Tuple[Optional[Dict[s
     policy = AlertPolicy.query.get(policy_id)
     if not policy:
         return None, "Policy not found", 404
-    if user and not is_admin(user) and not can_access_cluster(user, policy.cluster_id):
+    if not _user_can_access_policy_cluster(user, policy.cluster_id):
         return None, "Forbidden", 403
     AlertHistory.query.filter_by(policy_id=policy.id).delete()
     LogAlertSeen.query.filter_by(policy_id=policy.id).delete()
@@ -514,8 +580,15 @@ def policy_stats(cluster_id: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
+def _list_application_services_for_catalog() -> List[Dict[str, Any]]:
+    from .service_alert_evaluator import list_alertable_services
+
+    return list_alertable_services()
+
+
 def get_catalog() -> Dict[str, Any]:
     return catalog_payload(
         receivers=list_receivers_for_policy_catalog(),
         receiver_groups=list_receiver_groups_for_policy_catalog(),
+        application_services=_list_application_services_for_catalog(),
     )

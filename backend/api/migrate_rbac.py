@@ -174,6 +174,11 @@ def _migrate_app_catalog_helm_columns() -> None:
         _add_column_if_missing("app_catalog_entries", col, sql_type)
 
 
+def _migrate_service_alert_columns() -> None:
+    if "alert_policies" in inspect(db.engine).get_table_names():
+        _add_column_if_missing("alert_policies", "service_config", "JSON")
+
+
 def _migrate_log_alert_columns() -> None:
     if "alert_policies" in inspect(db.engine).get_table_names():
         _add_column_if_missing("alert_policies", "alert_type", "VARCHAR(16) DEFAULT 'metric'")
@@ -513,6 +518,7 @@ def run_migrations() -> None:
     _migrate_alert_policy_evaluation_columns()
     _migrate_alert_delivery_log_group_column()
     _migrate_log_alert_columns()
+    _migrate_service_alert_columns()
     _migrate_legacy_users()
     _migrate_app_service_deployments()
     _migrate_app_service_topology_positions()

@@ -1097,8 +1097,39 @@ function DRSheet({ service, clusterNameById }) {
   );
 }
 
+// Live workload status (healthy | warning | critical) → the topology node
+// health vocabulary the viewer colors by (green / amber / red).
+const WORKLOAD_STATUS_TO_NODE_HEALTH = {
+  healthy: "healthy",
+  warning: "degraded",
+  critical: "unhealthy",
+};
+
+// Resolve a topology node's linked workload in the service's deployment
+// details and return its live health, or null when the node is unlinked or
+// the workload has no status (e.g. cluster unreachable).
+function linkedWorkloadHealth(node, deployments) {
+  if (!node.linkedDeployment) return null;
+  const match = (deployments || []).find(
+    (d) =>
+      d.deploymentName === node.linkedDeployment &&
+      (d.namespace || "") === (node.linkedNamespace || "") &&
+      (d.clusterId || "") === (node.linkedClusterId || "")
+  );
+  return WORKLOAD_STATUS_TO_NODE_HEALTH[match?.status] || null;
+}
+
 function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdit, canDelete, onClose }) {
-  const topo = service.topology || { nodes: [], edges: [] };
+  // Enrich topology nodes with live health: predefined components already carry
+  // componentStatus; linked deployments/pods inherit their workload's status so
+  // they get the same green/amber/red bar, chip, and edge treatment.
+  const topo = useMemo(() => {
+    const base = service.topology || { nodes: [], edges: [] };
+    const nodes = (base.nodes || []).map((n) =>
+      n.componentStatus ? n : { ...n, componentStatus: linkedWorkloadHealth(n, service.deployments) }
+    );
+    return { ...base, nodes };
+  }, [service]);
   const [tab, setTab] = useState("overview");
 
   // Close on Escape.
@@ -1222,6 +1253,22 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
   };
 
   useEffect(() => { loadServices(); }, []);
+
+  // Component and workload health refresh automatically on the backend; poll so
+  // the list and topology badges stay current. Silent — no loading flicker, and
+  // paused while the edit modal is open so a refresh can't clobber a draft.
+  useEffect(() => {
+    if (modalOpen) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const svcRes = await listApplicationServices();
+        setServices(svcRes.items || []);
+      } catch {
+        // Keep showing the last known health if a poll fails.
+      }
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [modalOpen]);
 
   const openCreate = () => { setEditingService(null); setSaveError(""); setModalOpen(true); };
   const openEdit = (svc) => { setEditingService(svc); setSaveError(""); setModalOpen(true); };

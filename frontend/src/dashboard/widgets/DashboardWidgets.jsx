@@ -338,9 +338,11 @@ export function AlertsByClusterWidget({ summary }) {
           {clusters.map((entry) => (
             <li key={entry.clusterId} className="dashboard-rank-item">
               <span>
-                {entry.clusterId === clusterInfo.name || entry.clusterId === clusterInfo.contextName
-                  ? clusterInfo.name || entry.clusterId
-                  : entry.clusterId}
+                {entry.clusterId === "__app_services__"
+                  ? "App Services"
+                  : entry.clusterId === clusterInfo.name || entry.clusterId === clusterInfo.contextName
+                    ? clusterInfo.name || entry.clusterId
+                    : entry.clusterId}
               </span>
               <strong>{entry.count}</strong>
             </li>

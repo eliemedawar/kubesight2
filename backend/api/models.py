@@ -558,6 +558,7 @@ class AlertPolicy(db.Model):
     condition_logic = db.Column(db.String(8), nullable=False, default="any")
     conditions = db.Column(db.JSON, nullable=False, default=list)
     log_config = db.Column(db.JSON, nullable=True)
+    service_config = db.Column(db.JSON, nullable=True)
     scope = db.Column(db.JSON, nullable=False, default=dict)
     notification_channels = db.Column(db.JSON, nullable=False, default=list)
     evaluation_interval_seconds = db.Column(db.Integer, nullable=False, default=300)

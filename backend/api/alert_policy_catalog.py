@@ -94,8 +94,23 @@ CONDITION_LOGIC = ("any", "all")
 
 DEFAULT_EVALUATION_INTERVAL_SECONDS = 300
 
-ALERT_TYPES = ("metric", "log")
+ALERT_TYPES = ("metric", "log", "service")
 DEFAULT_ALERT_TYPE = "metric"
+
+# Service alert policies watch Application Services, which span clusters, so the
+# policy's mandatory cluster_id is set to this sentinel instead of a real cluster.
+SERVICE_ALERT_CLUSTER_ID = "__app_services__"
+
+ALL_SERVICES_ID = "*"
+
+# What component/deployment state fires a service alert: "critical" only fires
+# when something is down; "degraded" also fires on partial availability.
+SERVICE_ALERT_TRIGGER_LEVELS: List[Dict[str, Any]] = [
+    {"key": "critical", "label": "Down (critical only)"},
+    {"key": "degraded", "label": "Degraded or down"},
+]
+SERVICE_ALERT_TRIGGER_KEYS = {item["key"] for item in SERVICE_ALERT_TRIGGER_LEVELS}
+DEFAULT_SERVICE_TRIGGER = "critical"
 
 LOG_MATCH_TYPES = ("contains", "regex")
 DEFAULT_LOG_MATCH_TYPE = "contains"
@@ -156,6 +171,7 @@ def catalog_payload(
     *,
     receivers: Optional[List[Dict[str, Any]]] = None,
     receiver_groups: Optional[List[Dict[str, Any]]] = None,
+    application_services: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     return {
         "metrics": METRIC_DEFINITIONS,
@@ -168,11 +184,55 @@ def catalog_payload(
         "logMatchTypes": list(LOG_MATCH_TYPES),
         "logWindowOptions": LOG_WINDOW_SECONDS_OPTIONS,
         "defaultLogConfig": default_log_config(),
+        "serviceAlertClusterId": SERVICE_ALERT_CLUSTER_ID,
+        "serviceAlertTriggerLevels": SERVICE_ALERT_TRIGGER_LEVELS,
+        "defaultServiceConfig": default_service_config(),
+        "applicationServices": application_services or [],
         "evaluationIntervals": EVALUATION_INTERVALS,
         "defaultEvaluationIntervalSeconds": DEFAULT_EVALUATION_INTERVAL_SECONDS,
         "receivers": receivers or [],
         "receiverGroups": receiver_groups or [],
     }
+
+
+def default_service_config() -> Dict[str, Any]:
+    return {
+        "serviceId": ALL_SERVICES_ID,
+        "triggerOn": DEFAULT_SERVICE_TRIGGER,
+    }
+
+
+def normalize_service_config(raw: Any) -> Dict[str, Any]:
+    defaults = default_service_config()
+    if not isinstance(raw, dict):
+        return defaults
+    service_id: Any = raw.get("serviceId", defaults["serviceId"])
+    if service_id != ALL_SERVICES_ID:
+        try:
+            service_id = int(service_id)
+        except (TypeError, ValueError):
+            service_id = ALL_SERVICES_ID
+    trigger = str(raw.get("triggerOn") or defaults["triggerOn"]).strip().lower()
+    if trigger not in SERVICE_ALERT_TRIGGER_KEYS:
+        trigger = defaults["triggerOn"]
+    return {"serviceId": service_id, "triggerOn": trigger}
+
+
+def validate_service_config(config: Any) -> Optional[str]:
+    if config is not None and not isinstance(config, dict):
+        return "Invalid service alert configuration"
+    raw = config or {}
+    service_id = raw.get("serviceId", ALL_SERVICES_ID)
+    if service_id != ALL_SERVICES_ID:
+        try:
+            if int(service_id) <= 0:
+                return "Invalid application service selection"
+        except (TypeError, ValueError):
+            return "Invalid application service selection"
+    trigger = str(raw.get("triggerOn") or DEFAULT_SERVICE_TRIGGER).strip().lower()
+    if trigger not in SERVICE_ALERT_TRIGGER_KEYS:
+        return "Invalid service alert trigger level"
+    return None
 
 
 def default_log_config() -> Dict[str, Any]:

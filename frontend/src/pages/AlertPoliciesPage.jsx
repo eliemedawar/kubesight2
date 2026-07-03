@@ -153,6 +153,22 @@ const DEFAULT_LOG_CONFIG = {
   maxLines: 20,
 };
 
+const DEFAULT_SERVICE_CONFIG = {
+  serviceId: "*",
+  triggerOn: "critical",
+};
+
+const SERVICE_TRIGGER_FALLBACK = [
+  { key: "critical", label: "Down (critical only)" },
+  { key: "degraded", label: "Degraded or down" },
+];
+
+const APP_SERVICES_CLUSTER_LABEL = "App Services";
+
+function isServicePolicyRow(policy) {
+  return policy?.alertType === "service";
+}
+
 const EMPTY_POLICY = {
   name: "",
   clusterId: "",
@@ -163,6 +179,7 @@ const EMPTY_POLICY = {
   conditionLogic: "any",
   conditions: [{ metricKey: "cpu_usage_percent", operator: ">", threshold: 70 }],
   logConfig: { ...DEFAULT_LOG_CONFIG },
+  serviceConfig: { ...DEFAULT_SERVICE_CONFIG },
   scope: { type: "deployment", namespace: "", resourceName: ALL_RESOURCES_VALUE },
   showOnDashboard: true,
   receiverIds: [],
@@ -218,7 +235,12 @@ function PolicyFormModal({
     setForm((previous) => ({
       ...previous,
       alertType: nextType,
+      // A service policy stores the sentinel cluster id; switching back to a
+      // cluster-scoped type must force a real cluster selection.
+      clusterId:
+        nextType !== "service" && previous.clusterId === "__app_services__" ? "" : previous.clusterId,
       logConfig: previous.logConfig || { ...DEFAULT_LOG_CONFIG },
+      serviceConfig: previous.serviceConfig || { ...DEFAULT_SERVICE_CONFIG },
     }));
   };
 
@@ -247,6 +269,12 @@ function PolicyFormModal({
 
   const metrics = catalog?.metrics || [];
   const isLogPolicy = form.alertType === "log";
+  const isServicePolicy = form.alertType === "service";
+  const serviceConfig = form.serviceConfig || catalog?.defaultServiceConfig || DEFAULT_SERVICE_CONFIG;
+  const applicationServices = catalog?.applicationServices || [];
+  const serviceTriggerLevels = catalog?.serviceAlertTriggerLevels?.length
+    ? catalog.serviceAlertTriggerLevels
+    : SERVICE_TRIGGER_FALLBACK;
   const logConfig = form.logConfig || catalog?.defaultLogConfig || DEFAULT_LOG_CONFIG;
   const logWindowOptions = catalog?.logWindowOptions || [
     { seconds: 60, label: "Last 1 minute" },
@@ -324,7 +352,10 @@ function PolicyFormModal({
       >
         <header className="modal-header">
           <h2>{mode === "edit" ? "Edit Alert Policy" : "Create Alert Policy"}</h2>
-          <p className="muted">Define when alerts should fire based on metrics or pod log patterns.</p>
+          <p className="muted">
+            Define when alerts should fire based on metrics, pod log patterns, or application service
+            health.
+          </p>
         </header>
 
         {error ? <ErrorBanner message={error} /> : null}
@@ -338,32 +369,58 @@ function PolicyFormModal({
               required
             />
           </label>
-          <label>
-            Cluster
-            <SearchableSelect
-              value={form.clusterId}
-              onChange={(e) => {
-                touch(LOG_TOUCH_KEYS.scope);
-                setForm((p) => ({
-                  ...p,
-                  clusterId: e.target.value,
-                  scope: {
-                    ...normalizeScope(p.scope),
-                    namespace: "",
-                    resourceName: ALL_RESOURCES_VALUE,
-                  },
-                }));
-              }}
-              required
-            >
-              <option value="">Select cluster</option>
-              {clusterOptions.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </SearchableSelect>
-          </label>
+          {!isServicePolicy ? (
+            <label>
+              Cluster
+              <SearchableSelect
+                value={form.clusterId}
+                onChange={(e) => {
+                  touch(LOG_TOUCH_KEYS.scope);
+                  setForm((p) => ({
+                    ...p,
+                    clusterId: e.target.value,
+                    scope: {
+                      ...normalizeScope(p.scope),
+                      namespace: "",
+                      resourceName: ALL_RESOURCES_VALUE,
+                    },
+                  }));
+                }}
+                required
+              >
+                <option value="">Select cluster</option>
+                {clusterOptions.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </SearchableSelect>
+            </label>
+          ) : (
+            <label>
+              Application Service
+              <SearchableSelect
+                value={String(serviceConfig.serviceId ?? "*")}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setForm((p) => ({
+                    ...p,
+                    serviceConfig: {
+                      ...(p.serviceConfig || DEFAULT_SERVICE_CONFIG),
+                      serviceId: value === "*" ? "*" : Number(value),
+                    },
+                  }));
+                }}
+              >
+                <option value="*">All services</option>
+                {applicationServices.map((svc) => (
+                  <option key={svc.id} value={String(svc.id)}>
+                    {svc.name}
+                  </option>
+                ))}
+              </SearchableSelect>
+            </label>
+          )}
           <label className="full-width">
             Description
             <textarea
@@ -380,6 +437,7 @@ function PolicyFormModal({
             >
               <option value="metric">Metric</option>
               <option value="log">Log</option>
+              <option value="service">Service Health</option>
             </SearchableSelect>
           </label>
           <label>
@@ -418,6 +476,7 @@ function PolicyFormModal({
           </label>
         </div>
 
+        {!isServicePolicy ? (
         <section className="alert-policy-section">
           <h3>Scope</h3>
           <p className="muted alert-policy-routing-hint">
@@ -433,8 +492,38 @@ function PolicyFormModal({
             }}
           />
         </section>
+        ) : null}
 
-        {!isLogPolicy ? (
+        {isServicePolicy ? (
+        <section className="alert-policy-section">
+          <h3>Trigger</h3>
+          <p className="muted alert-policy-routing-hint">
+            Fires one alert per linked deployment or topology component of the selected application
+            service that is down or unhealthy. Alerts resolve automatically when the resource recovers.
+          </p>
+          <label>
+            Alert when a component is
+            <SearchableSelect
+              value={serviceConfig.triggerOn || "critical"}
+              onChange={(e) =>
+                setForm((p) => ({
+                  ...p,
+                  serviceConfig: {
+                    ...(p.serviceConfig || DEFAULT_SERVICE_CONFIG),
+                    triggerOn: e.target.value,
+                  },
+                }))
+              }
+            >
+              {serviceTriggerLevels.map((level) => (
+                <option key={level.key} value={level.key}>
+                  {level.label}
+                </option>
+              ))}
+            </SearchableSelect>
+          </label>
+        </section>
+        ) : !isLogPolicy ? (
         <section className="alert-policy-section">
           <div className="alert-policy-section-header">
             <h3>Conditions</h3>
@@ -799,6 +888,7 @@ export default function AlertPoliciesPage({
       ...policy,
       alertType: policy.alertType || "metric",
       logConfig: policy.logConfig || { ...DEFAULT_LOG_CONFIG },
+      serviceConfig: policy.serviceConfig || { ...DEFAULT_SERVICE_CONFIG },
       scope: normalizeScope(policy.scope),
       showOnDashboard: policy.showOnDashboard !== false,
       receiverIds: policy.receiverIds || [],
@@ -854,13 +944,16 @@ export default function AlertPoliciesPage({
       policies.map((policy) => ({
         id: policy.id,
         name: policy.name,
-        cluster: policy.clusterId,
-        alertType: policy.alertType === "log" ? "Log" : "Metric",
+        cluster: isServicePolicyRow(policy) ? APP_SERVICES_CLUSTER_LABEL : policy.clusterId,
+        alertType: isServicePolicyRow(policy) ? "Service" : policy.alertType === "log" ? "Log" : "Metric",
         severity: policy.severity,
         status: policy.enabled ? "Enabled" : "Disabled",
         logic: policy.alertType === "log" ? "—" : policy.conditionLogic === "all" ? "ALL" : "ANY",
-        conditions:
-          policy.alertType === "log"
+        conditions: isServicePolicyRow(policy)
+          ? `${policy.serviceName || "All services"} · ${
+              policy.serviceConfig?.triggerOn === "degraded" ? "degraded or down" : "down"
+            }`
+          : policy.alertType === "log"
             ? policy.logConfig?.pattern || "—"
             : `${(policy.conditions || []).length} rule(s)`,
         receivers: formatNotificationDestinations(policy),
@@ -894,7 +987,7 @@ export default function AlertPoliciesPage({
       history.map((row) => ({
         id: row.id,
         time: row.firedAt ? new Date(row.firedAt).toLocaleString() : "—",
-        cluster: row.clusterId,
+        cluster: row.clusterId === "__app_services__" ? APP_SERVICES_CLUSTER_LABEL : row.clusterId,
         namespace: row.namespace || "—",
         resource: [row.resourceType, row.resourceName].filter(Boolean).join("/") || "—",
         policy: row.policyName || "—",
@@ -902,10 +995,12 @@ export default function AlertPoliciesPage({
         status: row.status === "active" ? "Active" : "Resolved",
         conditions: row.alertType === "log"
           ? row.matchedPattern || "—"
-          : (row.triggeredConditions || [])
-              .filter((c) => c.matched)
-              .map((c) => `${c.metricLabel || c.metricKey} ${c.operator} ${c.threshold}`)
-              .join("; ") || "—",
+          : row.alertType === "service"
+            ? row.description || "—"
+            : (row.triggeredConditions || [])
+                .filter((c) => c.matched)
+                .map((c) => `${c.metricLabel || c.metricKey} ${c.operator} ${c.threshold}`)
+                .join("; ") || "—",
       })),
     [history]
   );

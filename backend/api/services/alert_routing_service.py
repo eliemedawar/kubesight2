@@ -740,6 +740,12 @@ def _slack_alert_payload(alert: Dict[str, Any]) -> Dict[str, Any]:
         )
         return {"text": text}
 
+    if alert.get("alertType") == "service":
+        severity = str(alert.get("severity", "warning")).upper()
+        service_name = alert.get("serviceName") or "Application service"
+        detail = alert.get("description") or alert.get("title") or ""
+        return {"text": f"*{severity}* service health alert — {service_name}\n{detail}"}
+
     namespace = alert.get("namespace") or "default"
     title = alert.get("title") or "Alert"
     text = f"KubeSight Alert: {title} in namespace {namespace}"

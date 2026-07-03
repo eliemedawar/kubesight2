@@ -13,11 +13,13 @@ optional health check:
 
 from __future__ import annotations
 
+import os
 import secrets
 import socket
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,6 +32,15 @@ STATUSES = ("healthy", "degraded", "unhealthy", "unknown")
 _HTTP_TIMEOUT_SECONDS = 5
 _TCP_TIMEOUT_SECONDS = 5
 _DEFAULT_HEARTBEAT_INTERVAL = 300
+
+
+def component_health_refresh_seconds() -> int:
+    """How stale a component's last check may be before auto-refresh re-runs it."""
+    raw = os.getenv("COMPONENT_HEALTH_REFRESH_SECONDS", "60").strip()
+    try:
+        return max(10, int(raw))
+    except ValueError:
+        return 60
 
 
 # ---------------------------------------------------------------------------
@@ -253,17 +264,110 @@ def _check_tcp(host: str, port: int) -> Tuple[str, str]:
         return "unhealthy", f"Cannot connect to {host}:{port}: {exc}."
 
 
-def _check_webhook(component: TopologyComponent) -> Tuple[str, str]:
-    if not component.last_heartbeat_at:
+def _check_webhook_freshness(
+    last_heartbeat_at: Optional[datetime],
+    heartbeat_interval_seconds: Optional[int],
+) -> Tuple[str, str]:
+    if not last_heartbeat_at:
         return "unknown", "No heartbeat received yet."
-    interval = component.heartbeat_interval_seconds or _DEFAULT_HEARTBEAT_INTERVAL
-    last = component.last_heartbeat_at
+    interval = heartbeat_interval_seconds or _DEFAULT_HEARTBEAT_INTERVAL
+    last = last_heartbeat_at
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
     age = (datetime.now(timezone.utc) - last).total_seconds()
     if age <= interval:
         return "healthy", f"Heartbeat {int(age)}s ago."
     return "unhealthy", f"No heartbeat for {int(age)}s (limit {interval}s)."
+
+
+def _check_webhook(component: TopologyComponent) -> Tuple[str, str]:
+    return _check_webhook_freshness(component.last_heartbeat_at, component.heartbeat_interval_seconds)
+
+
+def _execute_check(
+    check_type: str,
+    *,
+    url: Optional[str] = None,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    last_heartbeat_at: Optional[datetime] = None,
+    heartbeat_interval_seconds: Optional[int] = None,
+) -> Tuple[str, str]:
+    """Run one health check from plain values. Network/time only — no DB access,
+    safe in worker threads."""
+    if check_type == "http":
+        return _check_http(url)
+    if check_type == "tcp":
+        return _check_tcp(host, port)
+    if check_type == "webhook":
+        return _check_webhook_freshness(last_heartbeat_at, heartbeat_interval_seconds)
+    return "unknown", "No health check configured."
+
+
+def refresh_stale_component_healths(
+    component_ids: Optional[List[int]] = None,
+    older_than_seconds: Optional[int] = None,
+) -> int:
+    """Re-run health checks for every checkable component whose last check is
+    stale (or has never run). Returns the number of components re-checked.
+
+    Called by the alert policy scheduler on every tick and by the service alert
+    evaluator before reading component statuses, so component health no longer
+    depends on someone pressing "Check now" in the UI. Network probes run in
+    worker threads; ORM access stays on the calling thread.
+    """
+    threshold = older_than_seconds if older_than_seconds is not None else component_health_refresh_seconds()
+    query = TopologyComponent.query.filter(TopologyComponent.check_type.in_(("http", "tcp", "webhook")))
+    if component_ids:
+        query = query.filter(TopologyComponent.id.in_(component_ids))
+    now = datetime.now(timezone.utc)
+
+    stale: List[TopologyComponent] = []
+    for component in query.all():
+        checked_at = component.last_checked_at
+        if checked_at is not None and checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=timezone.utc)
+        if checked_at is None or (now - checked_at).total_seconds() >= threshold:
+            stale.append(component)
+    if not stale:
+        return 0
+
+    # Extract plain values before fanning out so worker threads never touch the ORM.
+    tasks = [
+        (
+            component.id,
+            {
+                "check_type": component.check_type,
+                "url": component.health_check_url,
+                "host": component.tcp_host,
+                "port": component.tcp_port,
+                "last_heartbeat_at": component.last_heartbeat_at,
+                "heartbeat_interval_seconds": component.heartbeat_interval_seconds,
+            },
+        )
+        for component in stale
+    ]
+
+    results: Dict[int, Tuple[str, str]] = {}
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as pool:
+        futures = {
+            pool.submit(_execute_check, spec.pop("check_type"), **spec): component_id
+            for component_id, spec in tasks
+        }
+        for future, component_id in futures.items():
+            try:
+                results[component_id] = future.result()
+            except Exception as exc:
+                results[component_id] = ("unhealthy", f"Health check failed: {exc}.")
+
+    checked_at = datetime.now(timezone.utc)
+    for component in stale:
+        status, message = results.get(component.id, ("unknown", "Health check did not run."))
+        component.last_status = status
+        component.last_message = message
+        component.last_checked_at = checked_at
+    db.session.commit()
+    return len(stale)
 
 
 def run_health_check(component_id: int, actor_user_id: Optional[int] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:

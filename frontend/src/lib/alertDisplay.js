@@ -48,16 +48,31 @@ export function getAlertPolicyLabel(alert) {
 
 export function getAlertTypeLabel(alert) {
   const type = alert?.alertType || "metric";
-  return type === "log" ? "Log" : "Metric";
+  if (type === "log") {
+    return "Log";
+  }
+  if (type === "service") {
+    return "Service";
+  }
+  return "Metric";
 }
 
 export function isLogAlert(alert) {
   return alert?.alertType === "log";
 }
 
+export function isServiceAlert(alert) {
+  return alert?.alertType === "service";
+}
+
 export function formatTriggeredConditions(alert) {
   if (isLogAlert(alert)) {
     return alert?.matchedPattern ? `Pattern: ${alert.matchedPattern}` : alert?.description || "—";
+  }
+  if (isServiceAlert(alert)) {
+    // Service alert descriptions are already a full sentence naming the
+    // service and the unhealthy component/deployment.
+    return alert?.description || "—";
   }
   const conditions = alert?.triggeredConditions;
   if (!Array.isArray(conditions) || !conditions.length) {

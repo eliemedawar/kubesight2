@@ -33,6 +33,15 @@ def _scheduler_enabled() -> bool:
     }
 
 
+def _component_health_refresh_enabled() -> bool:
+    return os.getenv("COMPONENT_HEALTH_AUTO_REFRESH", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def _should_start_in_process() -> bool:
     """Avoid duplicate schedulers under Flask/Werkzeug debug reloader parent process."""
     if os.environ.get("WERKZEU_RUN_MAIN") == "true":
@@ -46,6 +55,17 @@ def _scheduler_loop(app: Flask) -> None:
     tick = _scheduler_tick_seconds()
     while True:
         time.sleep(tick)
+        # Auto-refresh component health first so the policy evaluation below
+        # (and the UI) sees current statuses without manual "Check now" clicks.
+        # Self-gating: only components whose last check is stale are re-checked.
+        if _component_health_refresh_enabled():
+            try:
+                with app.app_context():
+                    from .topology_component_service import refresh_stale_component_healths
+
+                    refresh_stale_component_healths()
+            except Exception:
+                logger.exception("Component health auto-refresh tick failed")
         try:
             with app.app_context():
                 from .alert_policy_evaluator import evaluate_all_enabled_policies

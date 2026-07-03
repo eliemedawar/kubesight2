@@ -550,6 +550,10 @@ def _history_to_alert_dict(row: AlertHistory) -> Dict[str, Any]:
         from .log_alert_evaluator import _history_to_log_alert_dict
 
         return _history_to_log_alert_dict(row)
+    if getattr(row, "alert_type", "metric") == "service":
+        from .service_alert_evaluator import _history_to_service_alert_dict
+
+        return _history_to_service_alert_dict(row)
     return {
         "id": f"history-{row.id}",
         "alertType": "metric",
@@ -636,7 +640,13 @@ def evaluate_policies_for_cluster(
     *,
     persist: bool = True,
 ) -> List[AlertHistory]:
-    if user and not is_admin(user) and not can_access_cluster(user, cluster_id):
+    from ..alert_policy_catalog import SERVICE_ALERT_CLUSTER_ID
+
+    # Service alert policies live under a sentinel cluster id (Application
+    # Services span clusters); no cluster access resolution or RBAC applies.
+    is_service_cluster = cluster_id == SERVICE_ALERT_CLUSTER_ID
+
+    if user and not is_admin(user) and not is_service_cluster and not can_access_cluster(user, cluster_id):
         return []
 
     policies = (
@@ -647,7 +657,11 @@ def evaluate_policies_for_cluster(
     if not policies:
         return []
 
-    access = resolve_cluster_access(cluster_id) if should_use_real_k8s(cluster_id) else None
+    access = (
+        resolve_cluster_access(cluster_id)
+        if not is_service_cluster and should_use_real_k8s(cluster_id)
+        else None
+    )
     updated_rows: List[AlertHistory] = []
     policies_evaluated = False
     now = datetime.now(timezone.utc)
@@ -657,6 +671,34 @@ def evaluate_policies_for_cluster(
             continue
 
         alert_type = getattr(policy, "alert_type", "metric") or "metric"
+        if alert_type == "service":
+            policies_evaluated = True
+            eval_error: Optional[str] = None
+            measured_value: Optional[str] = None
+            result = "not_met"
+            try:
+                from .service_alert_evaluator import evaluate_service_policy
+
+                rows, measured_value, eval_error = evaluate_service_policy(
+                    policy,
+                    user=user,
+                    persist=persist,
+                )
+                updated_rows.extend(rows)
+                result = "met" if any(r.status == "active" for r in rows) else "not_met"
+            except Exception as exc:
+                eval_error = str(exc)
+                logger.exception(
+                    "Service alert policy evaluation failed: policy_id=%s name=%r",
+                    policy.id,
+                    policy.name,
+                )
+            if eval_error:
+                _record_policy_evaluation(policy, now, "error", None, None, eval_error)
+            else:
+                _record_policy_evaluation(policy, now, result, measured_value, None, None)
+            continue
+
         if alert_type == "log":
             policies_evaluated = True
             eval_error: Optional[str] = None

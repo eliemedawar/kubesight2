@@ -240,6 +240,20 @@ export default function ComponentsPage() {
 
   useEffect(() => { load(); }, []);
 
+  // Health checks now auto-run on the backend; poll so statuses stay current
+  // without pressing "Check now". Silent refresh — no loading spinner flicker.
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await listComponents();
+        setComponents(res.items || []);
+      } catch {
+        // Keep showing the last known statuses if a poll fails.
+      }
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const stats = useMemo(() => {
     const s = { total: components.length, healthy: 0, degraded: 0, unhealthy: 0, unknown: 0 };
     components.forEach((c) => { s[STATUS_BADGE[c.lastStatus] ? c.lastStatus : "unknown"] += 1; });

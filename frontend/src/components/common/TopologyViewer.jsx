@@ -398,7 +398,7 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
                 <rect x={pos.x + 6} y={pos.y + 9} width={3} height={NODE_H - 18} rx={1.5}
                   fill={BAR_FILL[barTone]}>
                   {node.componentStatus ? (
-                    <title>{`Component health: ${node.componentStatus}`}</title>
+                    <title>{`Health: ${node.componentStatus}`}</title>
                   ) : null}
                 </rect>
                 <circle cx={chipCX} cy={chipCY} r={13} fill={chip.bg} />
