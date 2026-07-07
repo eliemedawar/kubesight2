@@ -22,7 +22,23 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
+from ..ttl_cache import TTLCache
+
 _TIMEOUT_SECONDS = 20
+
+# Layout reads back the whole DevOps Request layout from Zoho over the internet
+# (~0.5-3s) and the tab reads it on every open, so cache it briefly with
+# single-flight + stale-while-revalidate. Every field mutation invalidates it.
+# The compute closure is pure urllib (no Flask/app context), so the background
+# stale refresh is safe.
+_LAYOUT_CACHE = TTLCache("zoho-layout")
+_LAYOUT_TTL_SECONDS = int(os.getenv("ZOHO_LAYOUT_CACHE_TTL_SECONDS", "60"))
+_LAYOUT_STALE_SERVE_SECONDS = int(os.getenv("ZOHO_LAYOUT_CACHE_STALE_SECONDS", "600"))
+
+
+def invalidate_layout_cache() -> None:
+    """Drop cached layout reads — call after any write that changes the layout."""
+    _LAYOUT_CACHE.invalidate("layout:")
 
 
 class ZohoError(Exception):
@@ -223,9 +239,25 @@ def get_field(cfg: ZohoConfig) -> Dict[str, Any]:
     return field
 
 
-def get_layout(cfg: ZohoConfig) -> Dict[str, Any]:
-    """Return the whole layout object (sections[] -> fields[]). Guarded + 401 retry."""
+def get_layout(cfg: ZohoConfig, fresh: bool = False) -> Dict[str, Any]:
+    """Return the whole layout object (sections[] -> fields[]). Guarded + 401 retry.
+
+    Served from a short TTL cache (see ``_LAYOUT_CACHE``); ``fresh=True`` bypasses
+    and repopulates it.
+    """
     _assert_layout_allowed(cfg)
+    key = f"layout:{cfg.api_base}:{cfg.layout_id}"
+    if fresh:
+        _LAYOUT_CACHE.invalidate(key)
+    return _LAYOUT_CACHE.get_or_compute(
+        key,
+        _LAYOUT_TTL_SECONDS,
+        lambda: _get_layout_uncached(cfg),
+        stale_ttl=_LAYOUT_STALE_SERVE_SECONDS,
+    )
+
+
+def _get_layout_uncached(cfg: ZohoConfig) -> Dict[str, Any]:
     token = get_access_token(cfg)
     status, payload = _get_layout_once(cfg, token)
     if status == 401:
@@ -272,6 +304,7 @@ def _mutate_org_field(cfg: ZohoConfig, method: str, body: Dict[str, Any],
         status, payload = _do(token)
     if status not in (200, 201):
         raise ZohoError(_error_detail(f"{method} organizationFields failed", status, payload), status)
+    invalidate_layout_cache()
     return payload
 
 
@@ -343,6 +376,7 @@ def set_allowed_values(
         status, payload = _do(token)
     if status not in (200, 201):
         raise ZohoError(_error_detail("Updating the Zoho field failed", status, payload), status)
+    invalidate_layout_cache()
     return payload
 
 

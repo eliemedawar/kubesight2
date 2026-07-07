@@ -96,6 +96,35 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optio
     return None, None
 
 
+def _capture_diff(item: ChangeBundleItem, mode: str) -> Optional[str]:
+    """Best-effort diff snapshot taken just before the item is applied.
+
+    Stored on the item so reviewers can still see what a bundle changed after it
+    has run — a live ``kubectl diff`` is empty once the change is applied. Never
+    raises: a diff problem must not block the apply itself.
+    """
+    if not should_use_real_k8s(item.cluster_id):
+        return None
+    try:
+        if mode == "apply":
+            from .deployment_service import diff_yaml
+
+            data, err, _ = diff_yaml(None, item.cluster_id, item.namespace, item.yaml_preview or "")
+            if err:
+                return None
+            return (data or {}).get("diff") or "No differences from the cluster state at execution time."
+        if mode == "scale":
+            current = _run_kubectl_for_cluster(
+                item.cluster_id,
+                ["get", _resource_arg(item), "-n", item.namespace, "-o", "jsonpath={.spec.replicas}"],
+            ).strip()
+            target = (item.new_payload_json or {}).get("execution", {}).get("replicas")
+            return f"{_resource_arg(item)} spec.replicas\n- replicas: {current or '?'}\n+ replicas: {target}\n"
+    except Exception:  # noqa: BLE001 — diff capture is informational only
+        logger.exception("Diff capture failed for bundle item #%s", item.id)
+    return None
+
+
 def _apply_item(item: ChangeBundleItem, mode: str) -> str:
     """Execute one item against the cluster. Returns kubectl output (or mock note)."""
     if not should_use_real_k8s(item.cluster_id):
@@ -183,17 +212,22 @@ def execute_bundle(bundle: ChangeBundle) -> str:
                 stopped = True
             continue
 
+        diff_text = _capture_diff(item, mode)
         try:
             output = _apply_item(item, mode)
             succeeded += 1
             item.status = "succeeded"
             item.execution_result = {"ok": True, "output": output, "mode": mode}
+            if diff_text:
+                item.execution_result["diff"] = diff_text
             db.session.commit()
             _audit_item(ACTION_ITEM_APPLIED, bundle, item, {"mode": mode})
         except (K8sCommandError, Exception) as exc:  # noqa: BLE001 — record any failure
             failed += 1
             item.status = "failed"
             item.execution_result = {"ok": False, "error": str(exc), "mode": mode}
+            if diff_text:
+                item.execution_result["diff"] = diff_text
             db.session.commit()
             _audit_item(ACTION_ITEM_FAILED, bundle, item, {"error": str(exc)})
             if bundle.stop_on_failure:

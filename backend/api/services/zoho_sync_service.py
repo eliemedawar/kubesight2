@@ -30,6 +30,7 @@ import hmac
 import json
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -425,10 +426,11 @@ def list_source_clusters() -> List[Dict[str, str]]:
 
 def preview_source_deployments(cluster_id: str, namespaces: List[str]) -> Dict[str, Any]:
     """Live deployments per namespace for the picker — read-only, no snapshot/DB write."""
+    per_ns = _list_deployments_by_namespace(cluster_id, list(namespaces or []))
     groups = []
     total = 0
     for ns in namespaces or []:
-        deps = list_source_deployments(cluster_id, ns)
+        deps = per_ns.get(ns, [])
         total += len(deps)
         groups.append({"namespace": ns, "deployments": deps})
     return {"clusterId": cluster_id, "groups": groups, "count": total}
@@ -463,9 +465,31 @@ def list_source_namespaces(cluster_id: str) -> List[str]:
 
 def list_source_deployments(cluster_id: str, namespace: str) -> List[str]:
     """Deployment names in one namespace of the source cluster (live or mock)."""
-    cluster_id = (cluster_id or "").strip()
-    if not cluster_id or not namespace:
+    if not namespace:
         return []
+    return _list_deployments_by_namespace(cluster_id, [namespace]).get(namespace, [])
+
+
+# Each namespace read is its own kubectl subprocess (~0.5-3s against a remote
+# cluster on a cold cache), so a serial loop makes the preview/sync cost scale
+# with the namespace count. Bounded fan-out keeps wall-clock at ~one call.
+_SOURCE_READ_WORKERS = 6
+
+
+def _list_deployments_by_namespace(
+    cluster_id: str, namespaces: List[str], fresh: bool = False
+) -> Dict[str, List[str]]:
+    """``{namespace: [deployment names]}`` for the source cluster, read concurrently.
+
+    Cluster access is resolved once on the request thread (it may hit the DB,
+    which needs the Flask app context); only the raw per-namespace reads — pure
+    kubectl subprocesses — fan out to worker threads. Raises ValueError on an
+    unknown cluster or a failed read, matching the old per-namespace behavior.
+    ``fresh=True`` (manual refresh) bypasses the k8s read cache.
+    """
+    cluster_id = (cluster_id or "").strip()
+    if not cluster_id or not namespaces:
+        return {}
     from ..k8s_provider import (
         K8sCommandError,
         namespace_resource_list_from_k8s,
@@ -473,21 +497,31 @@ def list_source_deployments(cluster_id: str, namespace: str) -> List[str]:
         should_use_real_k8s,
     )
 
-    if should_use_real_k8s(cluster_id):
-        access = resolve_cluster_access(cluster_id)
-        if not access:
-            raise ValueError(f"Cluster '{cluster_id}' was not found.")
+    if not should_use_real_k8s(cluster_id):
+        from ..mock_data import NAMESPACE_RESOURCES
+
+        out: Dict[str, List[str]] = {}
+        for ns in namespaces:
+            ns_res = (NAMESPACE_RESOURCES.get(cluster_id) or {}).get(ns) or {}
+            out[ns] = [d.get("name") for d in ns_res.get("deployments", []) if d.get("name")]
+        return out
+
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        raise ValueError(f"Cluster '{cluster_id}' was not found.")
+
+    def _fetch(ns: str) -> List[str]:
         try:
-            data = namespace_resource_list_from_k8s(access, namespace, "deployments")
+            data = namespace_resource_list_from_k8s(access, ns, "deployments", fresh=fresh)
         except K8sCommandError as exc:
-            raise ValueError(f"Could not read deployments in '{namespace}': {exc}")
+            raise ValueError(f"Could not read deployments in '{ns}': {exc}")
         # The single-list reader keys items under the resource name, not "items".
         return [d.get("name") for d in data.get("deployments", []) if d.get("name")]
 
-    from ..mock_data import NAMESPACE_RESOURCES
-
-    ns_res = (NAMESPACE_RESOURCES.get(cluster_id) or {}).get(namespace) or {}
-    return [d.get("name") for d in ns_res.get("deployments", []) if d.get("name")]
+    if len(namespaces) == 1:
+        return {namespaces[0]: _fetch(namespaces[0])}
+    with ThreadPoolExecutor(max_workers=min(_SOURCE_READ_WORKERS, len(namespaces))) as pool:
+        return dict(zip(namespaces, pool.map(_fetch, namespaces)))
 
 
 def _get_or_create_snapshot(cluster_id: str, namespace: str, name: str) -> ZohoDeploymentSnapshot:
@@ -511,7 +545,7 @@ def _get_or_create_snapshot(cluster_id: str, namespace: str, name: str) -> ZohoD
     return snap
 
 
-def _source_entries(row: ZohoIntegration) -> List[Dict[str, Any]]:
+def _source_entries(row: ZohoIntegration, fresh: bool = False) -> List[Dict[str, Any]]:
     """The live deployments to publish: [{id, namespace, name, label}], snapshotted.
 
     Raises ValueError when no cluster is configured or a cluster read fails, so the
@@ -521,18 +555,22 @@ def _source_entries(row: ZohoIntegration) -> List[Dict[str, Any]]:
     if not cluster_id:
         raise ValueError("No source cluster selected. Pick a cluster and namespaces first.")
     selection = _deployment_selection(row)
+    namespaces = _namespace_list(row)
+    # All cluster reads fan out up front; the DB snapshot work below stays on the
+    # request thread (it needs the app-context session).
+    per_ns = _list_deployments_by_namespace(cluster_id, namespaces, fresh=fresh)
     entries: List[Dict[str, Any]] = []
     # One entry per (namespace, deployment) — NOT de-duplicated here, because the
     # same app name can live in several namespaces and each pairing is needed for
     # the cascade + snapshot resolution. The Application picklist itself is
     # de-duplicated later (see _application_values).
-    for ns in _namespace_list(row):
+    for ns in namespaces:
         ns_sel = selection.get(ns)
         # No entry for the namespace => publish all (dynamic default).
         explicit_names = None
         if isinstance(ns_sel, dict) and not ns_sel.get("all", True):
             explicit_names = set(ns_sel.get("names") or [])
-        for name in list_source_deployments(cluster_id, ns):
+        for name in per_ns.get(ns, []):
             if explicit_names is not None and name not in explicit_names:
                 continue
             snap = _get_or_create_snapshot(cluster_id, ns, name)
@@ -586,14 +624,14 @@ def _namespace_to_labels(entries: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     return grouped
 
 
-def build_preview() -> Dict[str, Any]:
+def build_preview(fresh: bool = False) -> Dict[str, Any]:
     """What the next sync would publish (both dropdowns) — for the UI, no Zoho write."""
     row = get_or_create_config()
     env_values = build_environment_values(row)
     error: Optional[str] = None
     entries: List[Dict[str, Any]] = []
     try:
-        entries = _source_entries(row)
+        entries = _source_entries(row, fresh=fresh)
     except ValueError as exc:
         error = str(exc)
     items = [
@@ -986,19 +1024,49 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def delete_inbound_ticket(record_id: int) -> Optional[Dict[str, Any]]:
+    """Remove one inbound-ticket record from the log. Returns its summary, or
+    None when the id is unknown. The log is KubeSight's own delivery record —
+    Zoho never tells us about ticket deletions, so operators prune it here."""
+    try:
+        row = ZohoInboundTicket.query.get(int(record_id))
+    except (TypeError, ValueError):
+        return None
+    if row is None:
+        return None
+    info = {
+        "id": row.id,
+        "ticketId": row.ticket_id,
+        "ticketNumber": row.ticket_number,
+        "resolved": bool(row.resolved),
+    }
+    db.session.delete(row)
+    db.session.commit()
+    return info
+
+
 def list_inbound_tickets(limit: int = 50) -> List[Dict[str, Any]]:
     rows = (
         ZohoInboundTicket.query.order_by(ZohoInboundTicket.received_at.desc())
         .limit(max(1, min(int(limit or 50), 200)))
         .all()
     )
+    # r.app_service_id holds the resolved snapshot id; re-resolve so the UI can
+    # show the deployment/namespace even as records age. One IN query, not N.
+    snapshot_ids = {r.app_service_id for r in rows if r.app_service_id}
+    snapshots = (
+        {
+            s.id: s
+            for s in ZohoDeploymentSnapshot.query.filter(
+                ZohoDeploymentSnapshot.id.in_(snapshot_ids)
+            ).all()
+        }
+        if snapshot_ids
+        else {}
+    )
     out: List[Dict[str, Any]] = []
     for r in rows:
-        # r.app_service_id holds the resolved snapshot id; re-resolve so the UI can
-        # show the deployment/namespace even as records age.
-        snapshot = (
-            ZohoDeploymentSnapshot.query.get(r.app_service_id) if r.app_service_id else None
-        )
+        snapshot = snapshots.get(r.app_service_id) if r.app_service_id else None
         out.append(
             {
                 "id": r.id,

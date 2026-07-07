@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useChangeBundle } from "../../context/ChangeBundleContext";
 import { diffBundleItem } from "../../api/changeBundlesApi";
+import DiffBlock from "./DiffBlock.jsx";
 
 const ACTION_OPTIONS = [
   { value: "edit_deployment", label: "Edit deployment (YAML)", needs: ["yaml"] },
@@ -242,23 +243,7 @@ export default function ChangeBundleDrawer() {
                     </pre>
                   ) : null}
                   {diffOpen === item.id ? (
-                    <pre
-                      style={{
-                        marginTop: 8,
-                        maxHeight: 240,
-                        overflow: "auto",
-                        background: "var(--bg-inset)",
-                        color: "var(--text-main)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 8,
-                        padding: 10,
-                        fontSize: "0.72rem",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {diffCache[item.id] ?? "Loading diff…"}
-                    </pre>
+                    <DiffBlock text={diffCache[item.id] ?? "Loading diff…"} style={{ maxHeight: 240 }} />
                   ) : null}
                 </li>
               ))}

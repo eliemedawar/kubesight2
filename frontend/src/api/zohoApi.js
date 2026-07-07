@@ -10,13 +10,19 @@ export const testZohoConnection = () =>
 
 export const syncZohoNow = () => request("/api/zoho/sync", { method: "POST" });
 
-export const getZohoPreview = () => request("/api/zoho/preview");
+// `fresh` (manual refresh) bypasses the server-side read caches.
+export const getZohoPreview = (fresh = false) =>
+  request("/api/zoho/preview", { query: fresh ? { fresh: 1 } : undefined });
 
 export const listZohoInboundTickets = (limit = 50) =>
   request("/api/zoho/inbound-tickets", { query: { limit } });
 
+export const deleteZohoInboundTicket = (recordId) =>
+  request(`/api/zoho/inbound-tickets/${encodeURIComponent(recordId)}`, { method: "DELETE" });
+
 // --- Layout field editor ---
-export const getZohoLayout = () => request("/api/zoho/layout");
+export const getZohoLayout = (fresh = false) =>
+  request("/api/zoho/layout", { query: fresh ? { fresh: 1 } : undefined });
 
 export const setZohoFieldOptions = (fieldId, payload) =>
   request(`/api/zoho/fields/${fieldId}/options`, { method: "PUT", body: payload });

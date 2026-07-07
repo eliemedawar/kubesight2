@@ -1,0 +1,405 @@
+/* Signal page-specific styles — Zoho integration (shared vocabulary lives in screens.css) */
+
+.zoho-page > .card { margin-bottom: var(--space-4); }
+.zoho-page > .card:last-child { margin-bottom: 0; }
+.zoho-page .table-shell { margin-top: 0.75rem; }
+
+/* ── KPI strip ──────────────────────────────────────────────────── */
+.sg-zh-kpis { margin-bottom: var(--space-4); }
+
+.sg-zh-kpi-sub {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+/* Neutral variant for the shared status pill (Disabled / Pending / Never). */
+.status-pill.muted {
+  color: var(--text-muted);
+  background: var(--bg-interactive);
+  border-color: var(--border);
+}
+
+/* Informational count pill (not the red .sg-cnt — these are not alerts). */
+.sg-zh-count {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem 0.6rem;
+  border-radius: var(--radius-full);
+  background: var(--bg-interactive);
+  border: 1px solid var(--border);
+  color: var(--text-subtle);
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── Sync health rows ───────────────────────────────────────────── */
+.sg-zh-health { margin-top: 0.35rem; }
+
+.sg-zh-hrow {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--border-soft);
+  min-width: 0;
+}
+.sg-zh-hrow:last-child { border-bottom: 0; padding-bottom: 0.25rem; }
+.sg-zh-hrow .sg-ico { margin-top: 1px; }
+
+.sg-zh-hbody { flex: 1; min-width: 0; }
+.sg-zh-hbody b {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 650;
+  color: var(--text-main);
+  line-height: 1.35;
+}
+.sg-zh-hbody .sg-zh-hmsg {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  margin-top: 0.1rem;
+}
+.sg-zh-hbody .sg-zh-tags { margin-top: 0.4rem; }
+
+.sg-zh-hstat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.3rem;
+  flex: none;
+}
+.sg-zh-htime {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── Tag rows (namespaces, picklist values) ─────────────────────── */
+.sg-zh-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.sg-zh-more { font-size: 0.6875rem; color: var(--text-muted); align-self: center; }
+
+/* Cap tall preview tables so the sections below stay reachable; the sticky
+   header (global th rules) keeps column labels visible while scrolling. */
+.sg-zh-tscroll {
+  max-height: 27rem;
+  overflow-y: auto;
+}
+
+/* Header-row tools: filter input + count pill side by side. */
+.sg-zh-head-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.sg-zh-filter {
+  width: 15rem;
+  max-width: 100%;
+  font-size: 0.8125rem;
+  padding: 0.35rem 0.75rem;
+}
+
+/* Refresh icon spins while a manual refresh is in flight. */
+.sg-zh-spin {
+  animation: sg-zh-rotate 0.9s linear infinite;
+}
+@keyframes sg-zh-rotate {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sg-zh-spin { animation: none; }
+}
+
+/* Inbound-ticket delete: compact icon-only ghost button, danger on hover. */
+.sg-zh-tactions { width: 2.5rem; text-align: right; }
+.sg-zh-tdel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem 0.45rem;
+  color: var(--text-muted);
+}
+.sg-zh-tdel:hover { color: var(--danger); background: var(--danger-soft); }
+.sg-zh-tdel svg { width: 0.9rem; height: 0.9rem; }
+
+.sg-zh-inline-error {
+  margin-top: 0.6rem;
+  font-size: 0.78rem;
+  color: var(--danger);
+  line-height: 1.45;
+}
+
+/* ── Webhook URL copy row ───────────────────────────────────────── */
+.sg-zh-url {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+  margin: 0.65rem 0 0.5rem;
+  flex-wrap: wrap;
+}
+.sg-zh-url input {
+  flex: 1 1 20rem;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  background: var(--bg-inset);
+}
+.sg-zh-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+.sg-zh-copy svg { width: 0.85rem; height: 0.85rem; flex: none; }
+
+/* ── Layout editor ──────────────────────────────────────────────── */
+.sg-zh-src {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  padding: 0.6rem 0.8rem;
+  margin: 0.85rem 0 0.35rem;
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  font-size: 0.75rem;
+  color: var(--text-subtle);
+  line-height: 1.5;
+}
+.sg-zh-src-label {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-right: 0.15rem;
+}
+.sg-zh-src-sep { color: var(--border-strong); }
+
+.sg-zh-sect {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 1.35rem 0 0.7rem;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.sg-zh-sect::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+
+.sg-zh-fgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
+  gap: var(--space-3);
+}
+
+.sg-zh-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--dur-fast) var(--ease);
+}
+.sg-zh-field:hover { border-color: var(--border-strong); }
+
+.sg-zh-field > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+.sg-zh-fname { min-width: 0; }
+.sg-zh-fname b {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--text-strong);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.sg-zh-fapi {
+  display: block;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 0.1rem;
+  overflow-wrap: anywhere;
+}
+.sg-zh-req { color: var(--danger); margin-left: 0.15rem; }
+.sg-zh-fbadges {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.3rem;
+  flex: none;
+}
+
+.sg-zh-fvals { margin-top: 0.65rem; }
+.sg-zh-fhint {
+  margin-top: 0.5rem;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.sg-zh-field > footer {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 0.7rem;
+}
+.sg-zh-field > footer button { font-size: 0.75rem; padding: 0.3rem 0.8rem; }
+
+/* Warning note inside modals (auto-managed fields). */
+.sg-zh-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  margin-bottom: 0.75rem;
+  border-radius: var(--radius-md);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+.sg-zh-note svg { width: 0.9rem; height: 0.9rem; flex: none; margin-top: 1px; }
+
+/* ── Configuration + field modals ───────────────────────────────── */
+.sg-zh-config { width: min(52rem, 100%); }
+.zoho-page .settings-form h4,
+.zoho-page .settings-form .field-hint,
+.zoho-page .settings-form .checkbox-label,
+.zoho-page .settings-form .field-span,
+.zoho-page .settings-form .modal-actions { grid-column: 1 / -1; }
+.zoho-page .settings-form h4 {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.9rem 0 0.1rem;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.zoho-page .settings-form h4::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+
+/* ── Source picker modal ────────────────────────────────────────── */
+.sg-zh-picker { width: min(60rem, 100%); }
+
+.sg-zh-pick-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 0.3rem;
+}
+.sg-zh-pick-cluster select { width: 100%; }
+
+.sg-zh-pick-grid {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+  margin-top: var(--space-3);
+}
+@media (max-width: 760px) {
+  .sg-zh-pick-grid { grid-template-columns: 1fr; }
+}
+
+.sg-zh-pick-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.45rem;
+  flex-wrap: wrap;
+}
+.sg-zh-pick-head b { font-size: 0.8125rem; font-weight: 700; color: var(--text-strong); }
+.sg-zh-pick-links { display: flex; gap: 0.7rem; }
+
+.sg-zh-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.sg-zh-pick-list .checkbox-label,
+.sg-zh-dep-grid .checkbox-label { margin: 0; padding: 0.28rem 0.45rem; border-radius: var(--radius-sm); }
+.sg-zh-pick-list .checkbox-label:hover,
+.sg-zh-dep-grid .checkbox-label:hover { background: var(--bg-interactive); }
+
+.sg-zh-pick-filter { width: 100%; margin-bottom: 0.45rem; }
+
+.sg-zh-pick-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 4px;
+  margin-top: 0.55rem;
+}
+
+.sg-zh-pick-group {
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.sg-zh-pick-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.sg-zh-pick-group-head .sg-zh-gcount { color: var(--text-muted); font-weight: 400; }
+
+.sg-zh-dep-tools {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.55rem;
+  flex-wrap: wrap;
+}
+.sg-zh-dep-tools input { flex: 1 1 160px; min-width: 0; }
+
+.sg-zh-dep-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 0.15rem;
+  margin-top: 0.55rem;
+  max-height: 220px;
+  overflow-y: auto;
+}

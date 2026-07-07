@@ -212,11 +212,10 @@ export default function ZohoSourcePicker({
   return (
     <div className="modal-overlay" role="presentation" onClick={onClose}>
       <section
-        className="card modal-panel"
+        className="card modal-panel sg-zh-picker"
         role="dialog"
         aria-label="Choose dropdown source"
         onClick={(e) => e.stopPropagation()}
-        style={{ width: "min(60rem, 100%)" }}
       >
         <header className="modal-header">
           <div>
@@ -234,276 +233,185 @@ export default function ZohoSourcePicker({
 
         {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {/* Cluster ------------------------------------------------------- */}
-          <div>
-            <span
-              style={{
-                fontSize: "0.8rem",
-                color: "var(--text-muted)",
-                fontWeight: 600,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Cluster
-            </span>
-            <select
-              value={clusterId}
-              onChange={(e) => changeCluster(e.target.value)}
-              disabled={loadingClusters}
-              style={{ width: "100%" }}
-            >
-              <option value="">{loadingClusters ? "Loading clusters…" : "Select a cluster…"}</option>
-              {clusters.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
+        {/* Cluster --------------------------------------------------------- */}
+        <div className="sg-zh-pick-cluster">
+          <span className="sg-zh-pick-label">Cluster</span>
+          <select
+            value={clusterId}
+            onChange={(e) => changeCluster(e.target.value)}
+            disabled={loadingClusters}
+          >
+            <option value="">{loadingClusters ? "Loading clusters…" : "Select a cluster…"}</option>
+            {clusters.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </div>
 
-          {clusterId ? (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "minmax(200px, 260px) minmax(0, 1fr)",
-                gap: 16,
-                alignItems: "start",
-              }}
-            >
-              {/* Namespaces column --------------------------------------- */}
-              <div>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "baseline",
-                    gap: 8,
-                    marginBottom: 6,
-                  }}
-                >
-                  <strong style={{ fontSize: "0.9rem" }}>
-                    Namespaces {selected.size ? `(${selected.size})` : ""}
-                  </strong>
-                  {namespaces.length ? (
-                    <span style={{ display: "flex", gap: 10 }}>
-                      <button
-                        type="button"
-                        className="link-button"
-                        onClick={() => setSelected(new Set(namespaces))}
-                      >
-                        All
-                      </button>
-                      <button
-                        type="button"
-                        className="link-button"
-                        onClick={() => setSelected(new Set())}
-                      >
-                        Clear
-                      </button>
-                    </span>
-                  ) : null}
-                </div>
-                {loadingNs ? (
-                  <p className="muted">Loading namespaces…</p>
-                ) : namespaces.length === 0 ? (
-                  <p className="muted">No namespaces found in this cluster.</p>
-                ) : (
-                  <>
-                    {namespaces.length > 8 ? (
-                      <input
-                        type="text"
-                        value={nsFilter}
-                        onChange={(e) => setNsFilter(e.target.value)}
-                        placeholder="Filter namespaces…"
-                        style={{ width: "100%", marginBottom: 6 }}
-                      />
-                    ) : null}
-                    <div
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 2,
-                        maxHeight: 340,
-                        overflowY: "auto",
-                        padding: 8,
-                        border: "1px solid var(--border, #e5e7eb)",
-                        borderRadius: 10,
-                      }}
+        {clusterId ? (
+          <div className="sg-zh-pick-grid">
+            {/* Namespaces column ------------------------------------------- */}
+            <div>
+              <div className="sg-zh-pick-head">
+                <b>Namespaces {selected.size ? `(${selected.size})` : ""}</b>
+                {namespaces.length ? (
+                  <span className="sg-zh-pick-links">
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setSelected(new Set(namespaces))}
                     >
-                      {namespaces
-                        .filter((ns) => ns.toLowerCase().includes(nsFilter.trim().toLowerCase()))
-                        .map((ns) => (
-                          <label
-                            key={ns}
-                            className="checkbox-label"
-                            style={{ margin: 0, padding: "3px 4px" }}
-                          >
+                      All
+                    </button>
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setSelected(new Set())}
+                    >
+                      Clear
+                    </button>
+                  </span>
+                ) : null}
+              </div>
+              {loadingNs ? (
+                <p className="muted">Loading namespaces…</p>
+              ) : namespaces.length === 0 ? (
+                <p className="muted">No namespaces found in this cluster.</p>
+              ) : (
+                <>
+                  {namespaces.length > 8 ? (
+                    <input
+                      type="text"
+                      className="sg-zh-pick-filter"
+                      value={nsFilter}
+                      onChange={(e) => setNsFilter(e.target.value)}
+                      placeholder="Filter namespaces…"
+                    />
+                  ) : null}
+                  <div className="sg-zh-pick-list">
+                    {namespaces
+                      .filter((ns) => ns.toLowerCase().includes(nsFilter.trim().toLowerCase()))
+                      .map((ns) => (
+                        <label key={ns} className="checkbox-label">
+                          <input
+                            type="checkbox"
+                            checked={selected.has(ns)}
+                            onChange={() => toggleNamespace(ns)}
+                          />
+                          <span className="mono">{ns}</span>
+                        </label>
+                      ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Deployments column ------------------------------------------ */}
+            <div>
+              <div className="sg-zh-pick-head">
+                <b>
+                  Application deployments{" "}
+                  {loadingPreview ? "(loading…)" : `(${totalSelected} selected)`}
+                </b>
+              </div>
+              <p className="field-hint">
+                These become the <code>Application</code> options, filtered per namespace by the cascade.
+              </p>
+              {selected.size === 0 ? (
+                <p className="muted">Select one or more namespaces to choose deployments.</p>
+              ) : (
+                <div className="sg-zh-pick-scroll">
+                  {groups.map((g) => {
+                    const sel = deploySel[g.namespace] || { all: true, names: new Set() };
+                    const deps = g.deployments || [];
+                    const shown = sel.all ? deps : filterDeps(g.namespace, deps);
+                    const CHIP_CAP = 30;
+                    return (
+                      <div key={g.namespace} className="sg-zh-pick-group">
+                        <div className="sg-zh-pick-group-head">
+                          <span className="mono">
+                            <b>{g.namespace}</b>{" "}
+                            <span className="sg-zh-gcount">
+                              ({nsSelectedCount(g)}/{deps.length})
+                            </span>
+                          </span>
+                          <label className="checkbox-label">
                             <input
                               type="checkbox"
-                              checked={selected.has(ns)}
-                              onChange={() => toggleNamespace(ns)}
+                              checked={sel.all}
+                              disabled={deps.length === 0}
+                              onChange={(e) => setAllForNs(g.namespace, e.target.checked, deps)}
                             />
-                            <span className="mono">{ns}</span>
+                            All (include future)
                           </label>
-                        ))}
-                    </div>
-                  </>
-                )}
-              </div>
+                        </div>
 
-              {/* Deployments column -------------------------------------- */}
-              <div style={{ minWidth: 0 }}>
-                <strong style={{ fontSize: "0.9rem" }}>
-                  Application deployments {loadingPreview ? "(loading…)" : `(${totalSelected} selected)`}
-                </strong>
-                <p className="field-hint" style={{ marginTop: 2, marginBottom: 8 }}>
-                  These become the <code>Application</code> options, filtered per namespace by the cascade.
-                </p>
-                {selected.size === 0 ? (
-                  <p className="muted">Select one or more namespaces to choose deployments.</p>
-                ) : (
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 10,
-                      maxHeight: 360,
-                      overflowY: "auto",
-                      paddingRight: 4,
-                    }}
-                  >
-                    {groups.map((g) => {
-                      const sel = deploySel[g.namespace] || { all: true, names: new Set() };
-                      const deps = g.deployments || [];
-                      const shown = sel.all ? deps : filterDeps(g.namespace, deps);
-                      const CHIP_CAP = 30;
-                      return (
-                        <div
-                          key={g.namespace}
-                          style={{
-                            padding: "10px 12px",
-                            border: "1px solid var(--border, #e5e7eb)",
-                            borderRadius: 10,
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              alignItems: "center",
-                              gap: 8,
-                              flexWrap: "wrap",
-                            }}
-                          >
-                            <span className="mono" style={{ fontWeight: 600 }}>
-                              {g.namespace}{" "}
-                              <span className="muted" style={{ fontWeight: 400 }}>
-                                ({nsSelectedCount(g)}/{deps.length})
-                              </span>
-                            </span>
-                            <label
-                              className="checkbox-label"
-                              style={{ margin: 0, fontSize: "0.8rem" }}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={sel.all}
-                                disabled={deps.length === 0}
-                                onChange={(e) => setAllForNs(g.namespace, e.target.checked, deps)}
-                              />
-                              All (include future)
-                            </label>
+                        {deps.length === 0 ? (
+                          <div className="sg-zh-fhint">no deployments</div>
+                        ) : sel.all ? (
+                          <div className="sg-zh-tags sg-zh-fvals">
+                            {deps.slice(0, CHIP_CAP).map((d) => (
+                              <span key={d} className="sg-tag">{d}</span>
+                            ))}
+                            {deps.length > CHIP_CAP ? (
+                              <span className="sg-zh-more">+{deps.length - CHIP_CAP} more</span>
+                            ) : null}
                           </div>
-
-                          {deps.length === 0 ? (
-                            <div className="muted" style={{ marginTop: 8 }}>
-                              no deployments
+                        ) : (
+                          <>
+                            <div className="sg-zh-dep-tools">
+                              <input
+                                type="text"
+                                value={depFilters[g.namespace] || ""}
+                                onChange={(e) =>
+                                  setDepFilters((p) => ({ ...p, [g.namespace]: e.target.value }))
+                                }
+                                placeholder={`Filter ${deps.length} deployments…`}
+                              />
+                              <button
+                                type="button"
+                                className="link-button"
+                                onClick={() => bulkSetNames(g.namespace, shown, true)}
+                              >
+                                Select shown{shown.length !== deps.length ? ` (${shown.length})` : ""}
+                              </button>
+                              <button
+                                type="button"
+                                className="link-button"
+                                onClick={() => bulkSetNames(g.namespace, deps, false)}
+                              >
+                                Clear
+                              </button>
                             </div>
-                          ) : sel.all ? (
-                            <div className="chip-row" style={{ marginTop: 8 }}>
-                              {deps.slice(0, CHIP_CAP).map((d) => (
-                                <span key={d} className="badge status-muted mono">
-                                  {d}
-                                </span>
+                            <div className="sg-zh-dep-grid">
+                              {shown.map((d) => (
+                                <label key={d} className="checkbox-label">
+                                  <input
+                                    type="checkbox"
+                                    checked={sel.names.has(d)}
+                                    onChange={() => toggleDeployment(g.namespace, d)}
+                                  />
+                                  <span className="mono">{d}</span>
+                                </label>
                               ))}
-                              {deps.length > CHIP_CAP ? (
-                                <span className="muted">+{deps.length - CHIP_CAP} more</span>
+                              {shown.length === 0 ? (
+                                <span className="muted">no matches</span>
                               ) : null}
                             </div>
-                          ) : (
-                            <>
-                              <div
-                                style={{
-                                  display: "flex",
-                                  gap: 8,
-                                  alignItems: "center",
-                                  marginTop: 8,
-                                  flexWrap: "wrap",
-                                }}
-                              >
-                                <input
-                                  type="text"
-                                  value={depFilters[g.namespace] || ""}
-                                  onChange={(e) =>
-                                    setDepFilters((p) => ({ ...p, [g.namespace]: e.target.value }))
-                                  }
-                                  placeholder={`Filter ${deps.length} deployments…`}
-                                  style={{ flex: "1 1 160px", minWidth: 0 }}
-                                />
-                                <button
-                                  type="button"
-                                  className="link-button"
-                                  onClick={() => bulkSetNames(g.namespace, shown, true)}
-                                >
-                                  Select shown{shown.length !== deps.length ? ` (${shown.length})` : ""}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="link-button"
-                                  onClick={() => bulkSetNames(g.namespace, deps, false)}
-                                >
-                                  Clear
-                                </button>
-                              </div>
-                              <div
-                                style={{
-                                  display: "grid",
-                                  gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
-                                  gap: 4,
-                                  marginTop: 8,
-                                  maxHeight: 220,
-                                  overflowY: "auto",
-                                }}
-                              >
-                                {shown.map((d) => (
-                                  <label key={d} className="checkbox-label" style={{ margin: 0 }}>
-                                    <input
-                                      type="checkbox"
-                                      checked={sel.names.has(d)}
-                                      onChange={() => toggleDeployment(g.namespace, d)}
-                                    />
-                                    <span className="mono">{d}</span>
-                                  </label>
-                                ))}
-                                {shown.length === 0 ? (
-                                  <span className="muted">no matches</span>
-                                ) : null}
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
-          ) : (
-            <p className="muted">Select a cluster to choose namespaces and deployments.</p>
-          )}
-        </div>
+          </div>
+        ) : (
+          <p className="muted">Select a cluster to choose namespaces and deployments.</p>
+        )}
 
         <div className="modal-actions">
           <button type="button" className="secondary" onClick={onClose}>

@@ -97,6 +97,7 @@ def remove_item(bundle_id: int, item_id: int):
 def diff_item(bundle_id: int, item_id: int):
     user = get_current_user()
     try:
+        _assert_can_read(svc.get_bundle_or_error(bundle_id))
         return success_response(svc.diff_item(user, bundle_id, item_id))
     except svc.ChangeBundleError as exc:
         return error_response(str(exc), exc.status_code)

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import EmptyState from "../common/EmptyState.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import ZohoSourcePicker from "./ZohoSourcePicker.jsx";
+import { IconAlert } from "./icons.jsx";
 import {
   createZohoField,
   getZohoLayout,
@@ -17,7 +18,14 @@ const linesToValues = (text) =>
 const valuesToLines = (values) =>
   (values || []).filter((v) => v !== "-None-").join("\n");
 
-export default function ZohoLayoutEditor({ canManage = false, config = {}, onSourceSaved }) {
+const VALUE_CHIP_CAP = 8;
+
+export default function ZohoLayoutEditor({
+  canManage = false,
+  config = {},
+  reloadKey = 0,
+  onSourceSaved,
+}) {
   const envFieldId = String(config.environmentFieldId || "");
   const appFieldId = String(config.appFieldId || "");
   const selectedNamespaces = config.selectedNamespaces || [];
@@ -31,11 +39,11 @@ export default function ZohoLayoutEditor({ canManage = false, config = {}, onSou
   const [saving, setSaving] = useState(false);
   const [modalError, setModalError] = useState("");
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (fresh = false) => {
     setLoading(true);
     setError("");
     try {
-      setLayout(await getZohoLayout());
+      setLayout(await getZohoLayout(fresh));
     } catch (err) {
       setError(err.message || "Failed to read the Zoho layout.");
     } finally {
@@ -43,9 +51,11 @@ export default function ZohoLayoutEditor({ canManage = false, config = {}, onSou
     }
   }, []);
 
+  // Initial mount reads via the server cache; a page-level Refresh (reloadKey
+  // bump) re-reads straight from Zoho.
   useEffect(() => {
-    load();
-  }, [load]);
+    load(reloadKey > 0);
+  }, [load, reloadKey]);
 
   const closeModal = () => {
     setModal(null);
@@ -56,7 +66,7 @@ export default function ZohoLayoutEditor({ canManage = false, config = {}, onSou
   const afterSave = async (msg) => {
     setNotice(msg);
     closeModal();
-    await load();
+    await load(true);
   };
 
   const saveOptions = async (form) => {
@@ -115,7 +125,7 @@ export default function ZohoLayoutEditor({ canManage = false, config = {}, onSou
       <section className="card">
         <h3>DevOps Request layout</h3>
         <ErrorBanner message={error} onDismiss={() => setError("")} />
-        <button type="button" className="secondary" onClick={load}>
+        <button type="button" className="secondary" onClick={() => load(true)}>
           Retry
         </button>
       </section>
@@ -133,49 +143,46 @@ export default function ZohoLayoutEditor({ canManage = false, config = {}, onSou
           </p>
         </div>
         {canManage ? (
-          <button type="button" className="primary" onClick={() => setModal({ mode: "addField" })}>
+          <button type="button" className="secondary" onClick={() => setModal({ mode: "addField" })}>
             Add field
           </button>
         ) : null}
       </div>
 
       {/* Source + cascade summary */}
-      <p className="field-hint" style={{ marginTop: 0 }}>
-        Dropdown source:{" "}
+      <div className="sg-zh-src">
+        <span className="sg-zh-src-label">Source</span>
         {config.sourceClusterId ? (
           <>
-            cluster <span className="mono">{config.sourceClusterId}</span> ·{" "}
-            {selectedNamespaces.length
-              ? `${selectedNamespaces.length} namespace(s): `
-              : "no namespaces selected "}
-            {selectedNamespaces.map((ns) => (
-              <span key={ns} className="badge status-muted mono" style={{ marginRight: 4 }}>
-                {ns}
-              </span>
-            ))}
+            <span className="sg-tag">{config.sourceClusterId}</span>
+            {selectedNamespaces.length ? (
+              selectedNamespaces.map((ns) => (
+                <span key={ns} className="sg-tag">{ns}</span>
+              ))
+            ) : (
+              <span>no namespaces selected</span>
+            )}
           </>
         ) : (
-          "not set — use “Choose namespaces” on the Environment field below."
+          <span>not set — use “Choose namespaces” on the Environment field below.</span>
         )}
-        {" · "}
-        Cascade Env→App:{" "}
+        <span className="sg-zh-src-sep">·</span>
+        <span className="sg-zh-src-label">Cascade Env→App</span>
         <span
-          className={`badge ${
+          className={`status-pill ${
             config.lastDependencyStatus === "ok"
-              ? "status-ok"
+              ? "ok"
               : config.lastDependencyStatus === "error"
-              ? "status-error"
-              : "status-muted"
+              ? "danger"
+              : "muted"
           }`}
         >
-          {config.cascadeEnabled === false
-            ? "off"
-            : config.lastDependencyStatus || "pending"}
+          {config.cascadeEnabled === false ? "Off" : config.lastDependencyStatus || "Pending"}
         </span>
         {config.lastDependencyStatus === "error" && config.lastDependencyMessage ? (
-          <span className="muted"> — {config.lastDependencyMessage}</span>
+          <span className="muted">— {config.lastDependencyMessage}</span>
         ) : null}
-      </p>
+      </div>
 
       {notice ? (
         <div className="banner banner-success" role="status">
@@ -187,119 +194,110 @@ export default function ZohoLayoutEditor({ canManage = false, config = {}, onSou
       ) : null}
 
       {(layout?.sections || []).map((section) => (
-        <div key={section.name} className="zoho-section">
-          <h4 className="zoho-section__title">{section.name}</h4>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-              gap: "12px",
-            }}
-          >
-            {section.fields.map((field) => (
-              <div
-                key={field.id || field.apiName}
-                className="card"
-                style={{ padding: "12px 14px", margin: 0 }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                  <div>
-                    <strong>
-                      {field.label}
-                      {field.required ? <span className="status-error"> *</span> : null}
-                    </strong>
-                    <div className="muted mono" style={{ fontSize: "0.8em" }}>
-                      {field.apiName}
+        <div key={section.name}>
+          <h4 className="sg-zh-sect">{section.name}</h4>
+          <div className="sg-zh-fgrid">
+            {section.fields.map((field) => {
+              const values = (field.allowedValues || []).filter((v) => v !== "-None-");
+              return (
+                <div key={field.id || field.apiName} className="sg-zh-field">
+                  <header>
+                    <div className="sg-zh-fname">
+                      <b>
+                        {field.label}
+                        {field.required ? (
+                          <span className="sg-zh-req" title="Required">*</span>
+                        ) : null}
+                      </b>
+                      <span className="sg-zh-fapi">{field.apiName}</span>
                     </div>
-                  </div>
-                  <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                    <span className="badge status-muted">{field.type}</span>
-                    {field.autoManaged ? (
-                      <div className="badge status-ok" style={{ marginTop: 4 }} title="Published by the KubeSight sync (deployments / namespaces). Manual edits here are overwritten on the next sync.">
-                        auto-synced
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-
-                {field.isPicklist ? (
-                  <div style={{ marginTop: 8 }}>
-                    <div className="chip-row">
-                      {(field.allowedValues || [])
-                        .filter((v) => v !== "-None-")
-                        .slice(0, 8)
-                        .map((v) => (
-                          <span key={v} className="badge status-muted mono">
-                            {v}
-                          </span>
-                        ))}
-                      {(field.allowedValues || []).filter((v) => v !== "-None-").length === 0 ? (
-                        <span className="muted">no options</span>
-                      ) : null}
-                      {(field.allowedValues || []).filter((v) => v !== "-None-").length > 8 ? (
-                        <span className="muted">
-                          +{(field.allowedValues || []).filter((v) => v !== "-None-").length - 8} more
+                    <div className="sg-zh-fbadges">
+                      <span className="sg-tag">{field.type}</span>
+                      {field.autoManaged ? (
+                        <span
+                          className="status-pill ok"
+                          title="Published by the KubeSight sync (deployments / namespaces). Manual edits here are overwritten on the next sync."
+                        >
+                          auto-synced
                         </span>
                       ) : null}
                     </div>
-                    {String(field.id) === appFieldId ? (
-                      <div className="field-hint" style={{ marginTop: 4 }}>
-                        Auto-derived live from the selected namespaces' deployments — manage it via
-                        “Choose namespaces” on the Environment field.
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
+                  </header>
 
-                {canManage ? (
-                  <div className="actions" style={{ marginTop: 10 }}>
-                    {field.isPicklist && String(field.id) === envFieldId ? (
+                  {field.isPicklist ? (
+                    <>
+                      <div className="sg-zh-tags sg-zh-fvals">
+                        {values.slice(0, VALUE_CHIP_CAP).map((v) => (
+                          <span key={v} className="sg-tag">{v}</span>
+                        ))}
+                        {values.length === 0 ? <span className="muted">no options</span> : null}
+                        {values.length > VALUE_CHIP_CAP ? (
+                          <span className="sg-zh-more">+{values.length - VALUE_CHIP_CAP} more</span>
+                        ) : null}
+                      </div>
+                      {String(field.id) === appFieldId ? (
+                        <div className="sg-zh-fhint">
+                          Auto-derived live from the selected namespaces' deployments — manage it via
+                          “Choose namespaces” on the Environment field.
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
+
+                  {canManage ? (
+                    <footer>
+                      {field.isPicklist && String(field.id) === envFieldId ? (
+                        <button
+                          type="button"
+                          className="btn-outline"
+                          onClick={() => setModal({ mode: "source" })}
+                        >
+                          Choose namespaces
+                        </button>
+                      ) : field.isPicklist && String(field.id) === appFieldId ? null : field.isPicklist ? (
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          onClick={() =>
+                            setModal({
+                              mode: "options",
+                              field,
+                              initial: {
+                                values: valuesToLines(field.allowedValues),
+                                defaultValue: field.defaultValue || "-None-",
+                                required: field.required,
+                              },
+                            })
+                          }
+                        >
+                          Manage options
+                        </button>
+                      ) : null}
                       <button
                         type="button"
-                        className="link-button"
-                        onClick={() => setModal({ mode: "source" })}
-                      >
-                        Choose namespaces
-                      </button>
-                    ) : field.isPicklist && String(field.id) === appFieldId ? null : field.isPicklist ? (
-                      <button
-                        type="button"
-                        className="link-button"
+                        className="btn-ghost"
                         onClick={() =>
                           setModal({
-                            mode: "options",
+                            mode: "editField",
                             field,
-                            initial: {
-                              values: valuesToLines(field.allowedValues),
-                              defaultValue: field.defaultValue || "-None-",
-                              required: field.required,
-                            },
+                            initial: { label: field.label, required: field.required },
                           })
                         }
                       >
-                        Manage options
+                        Edit
                       </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={() =>
-                        setModal({
-                          mode: "editField",
-                          field,
-                          initial: { label: field.label, required: field.required },
-                        })
-                      }
-                    >
-                      Edit
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            ))}
+                    </footer>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         </div>
       ))}
+
+      {(layout?.sections || []).length === 0 ? (
+        <EmptyState message="No sections found on this layout." />
+      ) : null}
 
       {modal?.mode === "source" ? (
         <ZohoSourcePicker
@@ -369,9 +367,12 @@ function FieldModal({ modal, saving, error, onClose, onSaveOptions, onSaveEdit, 
         </header>
 
         {modal.field?.autoManaged ? (
-          <p className="field-hint">
-            ⚠️ This field is auto-published by the KubeSight sync — manual changes here will be
-            overwritten on the next sync.
+          <p className="sg-zh-note">
+            <IconAlert />
+            <span>
+              This field is auto-published by the KubeSight sync — manual changes here will be
+              overwritten on the next sync.
+            </span>
           </p>
         ) : null}
         {error ? <ErrorBanner message={error} onDismiss={() => {}} /> : null}
@@ -405,7 +406,7 @@ function FieldModal({ modal, saving, error, onClose, onSaveOptions, onSaveEdit, 
 
           {(modal.mode === "options" || isPicklistCreate) ? (
             <>
-              <label>
+              <label className="field-span">
                 Dropdown options (one per line)
                 <textarea
                   rows={8}
@@ -431,16 +432,14 @@ function FieldModal({ modal, saving, error, onClose, onSaveOptions, onSaveEdit, 
             </>
           ) : null}
 
-          {modal.mode !== "addField" || true ? (
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={Boolean(form.required)}
-                onChange={(e) => set("required", e.target.checked)}
-              />
-              Required field
-            </label>
-          ) : null}
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={Boolean(form.required)}
+              onChange={(e) => set("required", e.target.checked)}
+            />
+            Required field
+          </label>
 
           <div className="modal-actions">
             <button type="button" className="secondary" onClick={onClose}>

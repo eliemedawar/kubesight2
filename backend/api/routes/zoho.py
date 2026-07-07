@@ -70,7 +70,8 @@ def sync_now():
 @zoho_bp.route("/preview", methods=["GET"])
 @require_permission("zoho:view")
 def preview():
-    return success_response(svc.build_preview())
+    fresh = request.args.get("fresh") in ("1", "true")
+    return success_response(svc.build_preview(fresh=fresh))
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +159,9 @@ def source_deployments():
 @zoho_bp.route("/layout", methods=["GET"])
 @require_permission("zoho:view")
 def get_layout():
+    fresh = request.args.get("fresh") in ("1", "true")
     try:
-        return success_response(fields_svc.get_layout_structure())
+        return success_response(fields_svc.get_layout_structure(fresh=fresh))
     except ZohoError as exc:
         return error_response(str(exc), 502)
 
@@ -234,6 +236,22 @@ def create_field():
 def inbound_tickets():
     limit = request.args.get("limit", 50)
     return success_response({"items": svc.list_inbound_tickets(limit=limit)})
+
+
+@zoho_bp.route("/inbound-tickets/<int:record_id>", methods=["DELETE"])
+@require_permission("zoho:manage")
+def delete_inbound_ticket(record_id: int):
+    info = svc.delete_inbound_ticket(record_id)
+    if info is None:
+        return error_response("Inbound ticket not found.", 404)
+    log_audit(
+        "zoho_inbound_ticket_deleted",
+        actor=get_current_user(),
+        target_type="zoho_inbound_ticket",
+        target_id=str(record_id),
+        details=info,
+    )
+    return success_response({"deleted": True, **info})
 
 
 @zoho_bp.route("/inbound", methods=["POST"])

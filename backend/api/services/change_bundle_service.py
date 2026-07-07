@@ -656,6 +656,20 @@ def diff_item(user: Optional[User], bundle_id: int, item_id: int) -> Dict[str, A
         raise ChangeBundleError("Change item not found.", 404)
 
     mode = (item.new_payload_json or {}).get("execution", {}).get("mode", "apply")
+
+    # Items that already ran return the diff snapshot captured at execution time —
+    # a live kubectl diff after the change is applied would show nothing.
+    if item.status != "pending":
+        stored = (item.execution_result or {}).get("diff")
+        if stored:
+            return {"mode": mode, "diff": stored, "capturedAt": "execution"}
+        if mode == "apply":
+            return {
+                "mode": mode,
+                "diff": "No diff snapshot was captured when this change ran. "
+                "The applied manifest is available under \"View preview\".",
+            }
+
     if mode != "apply":
         return {"mode": mode, "diff": (item.yaml_preview or "").strip() or "No diff available."}
 

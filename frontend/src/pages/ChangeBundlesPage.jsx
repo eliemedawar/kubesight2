@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   approveChangeBundle,
   deleteChangeBundle,
+  diffBundleItem,
   getChangeBundle,
   listChangeBundles,
   listMyBundles,
   rejectChangeBundle,
 } from "../api/changeBundlesApi";
+import DiffBlock from "../components/changes/DiffBlock.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { usePermission } from "../hooks/usePermission.js";
 import { useChangeBundle } from "../context/ChangeBundleContext";
@@ -42,8 +44,26 @@ function StatusBadge({ status }) {
   );
 }
 
-function ItemRow({ item }) {
-  const [open, setOpen] = useState(false);
+function ItemRow({ bundleId, item }) {
+  const [view, setView] = useState(null); // null | "preview" | "diff"
+  const [diff, setDiff] = useState(null);
+
+  const toggleDiff = async () => {
+    if (view === "diff") {
+      setView(null);
+      return;
+    }
+    setView("diff");
+    if (diff === null) {
+      try {
+        const res = await diffBundleItem(bundleId, item.id);
+        setDiff(res.diff || "No differences.");
+      } catch (err) {
+        setDiff(`Diff failed: ${err.message}`);
+      }
+    }
+  };
+
   return (
     <li className="card" style={{ padding: "var(--space-2) var(--space-3)" }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
@@ -60,17 +80,23 @@ function ItemRow({ item }) {
           {item.executionResult.error}
         </p>
       ) : null}
-      {item.yamlPreview ? (
-        <button
-          type="button"
-          className="btn-text"
-          style={{ padding: 0, fontSize: "0.78rem", marginTop: 4 }}
-          onClick={() => setOpen((v) => !v)}
-        >
-          {open ? "Hide preview" : "View preview"}
+      <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
+        <button type="button" className="btn-text" style={{ padding: 0, fontSize: "0.78rem" }} onClick={toggleDiff}>
+          {view === "diff" ? "Hide diff" : "View diff"}
         </button>
-      ) : null}
-      {open ? (
+        {item.yamlPreview ? (
+          <button
+            type="button"
+            className="btn-text"
+            style={{ padding: 0, fontSize: "0.78rem" }}
+            onClick={() => setView((v) => (v === "preview" ? null : "preview"))}
+          >
+            {view === "preview" ? "Hide preview" : "View preview"}
+          </button>
+        ) : null}
+      </div>
+      {view === "diff" ? <DiffBlock text={diff ?? "Loading diff…"} /> : null}
+      {view === "preview" ? (
         <pre
           style={{
             marginTop: 8,
@@ -199,7 +225,7 @@ function BundleCard({ bundle, canManage, onApprove, onReject, onDelete, busy }) 
         ) : (
           <ul style={{ listStyle: "none", margin: "12px 0 0", padding: 0, display: "grid", gap: 8 }}>
             {items.map((item) => (
-              <ItemRow key={item.id} item={item} />
+              <ItemRow key={item.id} bundleId={bundle.id} item={item} />
             ))}
           </ul>
         )

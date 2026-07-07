@@ -17,6 +17,7 @@ import "./styles/signal/catalog.css";
 import "./styles/signal/alerts.css";
 import "./styles/signal/requests.css";
 import "./styles/signal/topology.css";
+import "./styles/signal/zoho.css";
 
 async function bootstrap() {
   await loadRuntimeConfig();

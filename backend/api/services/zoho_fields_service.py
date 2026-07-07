@@ -70,11 +70,14 @@ def _auto_managed_ids(row) -> set:
     return ids
 
 
-def get_layout_structure() -> Dict[str, Any]:
-    """Read the pinned layout and return its sections + fields for the editor UI."""
+def get_layout_structure(fresh: bool = False) -> Dict[str, Any]:
+    """Read the pinned layout and return its sections + fields for the editor UI.
+
+    ``fresh=True`` (manual refresh) bypasses the layout read cache.
+    """
     row, cfg = _config_and_cfg()
     auto = _auto_managed_ids(row)
-    layout = zoho_client.get_layout(cfg)
+    layout = zoho_client.get_layout(cfg, fresh=fresh)
     sections = []
     for sec in layout.get("sections") or []:
         sections.append(
