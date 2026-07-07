@@ -168,6 +168,8 @@ def create_field(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError(f"Unsupported field type '{field_type}'.")
 
     body: Dict[str, Any] = {
+        # Zoho Desk requires the module; the DevOps Request layout is a Tickets layout.
+        "module": "tickets",
         "displayLabel": label,
         "type": field_type,
         "isMandatory": bool(payload.get("required", False)),
