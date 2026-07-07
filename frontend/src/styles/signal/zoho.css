@@ -41,6 +41,15 @@
 }
 
 /* ── Sync health rows ───────────────────────────────────────────── */
+/* div.actions has no global layout (only td.actions does) — without this the
+   icon Refresh button baseline-drifts against its text-only siblings. */
+.zoho-page .card-header-row .actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
 .sg-zh-health { margin-top: 0.35rem; }
 
 .sg-zh-hrow {
