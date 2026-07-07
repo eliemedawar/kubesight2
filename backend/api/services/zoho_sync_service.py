@@ -331,17 +331,18 @@ def _to_client_config(row: ZohoIntegration) -> ZohoConfig:
 # ---------------------------------------------------------------------------
 # Dropdown source — a live cluster + a chosen set of namespaces:
 #   * Environment field -> the operator's selected namespaces.
-#   * Application field  -> the LIVE deployments running in those namespaces
-#     (read via kubectl through k8s_provider), one entry per deployment as
-#     "{deployment} - {namespace}". No id is shown; an inbound ticket resolves
-#     back to the exact deployment via (source cluster, namespace, deployment),
-#     which is unique in Kubernetes. The namespace is also the parent value the
-#     Application<-Environment cascade maps on.
+#   * Application field  -> the LIVE deployments running in those namespaces, shown
+#     as the bare deployment name (e.g. "aims-ui"). Values are DE-DUPLICATED across
+#     namespaces (Zoho picklists require unique values, and the same app usually
+#     runs in several namespaces). An inbound ticket therefore resolves via the
+#     Environment field (namespace) + the Application name -> (cluster, namespace,
+#     deployment). The namespace is the parent value the Application<-Environment
+#     cascade maps on, so picking an Environment narrows the Application list.
 # ---------------------------------------------------------------------------
 
-# Separator between the deployment name and its namespace in a picklist value.
-# K8s names are DNS-1123 (no spaces), so " - " never occurs inside a name and a
-# single rsplit cleanly recovers (deployment, namespace).
+# Legacy separator: older published values were "{deployment} - {namespace}".
+# K8s names are DNS-1123 (no spaces), so " - " never occurs inside a name — used
+# only to parse those older values on inbound.
 _LABEL_SEP = " - "
 
 
@@ -352,24 +353,16 @@ def _sanitize_value(text: str) -> str:
 
 
 def compose_deployment_label(namespace: str, name: str, snapshot_id: Optional[int] = None) -> str:
-    """Application-dropdown value: ``{deployment} - {namespace}`` (no id shown).
+    """Application-dropdown value: just the bare deployment name (e.g. ``aims-ui``).
 
-    Zoho-safe chars only (no ``/`` or ``#``). Unique because a namespace can't hold
-    two deployments of the same name; inbound resolves via (cluster, namespace,
-    deployment). Truncated to Zoho's value limit while always preserving the
-    ``- namespace`` suffix. ``snapshot_id`` is accepted for signature stability but
-    no longer embedded.
+    Zoho-safe chars only, truncated to Zoho's value limit. The namespace is NOT
+    included (the operator wants clean names); uniqueness across namespaces is
+    handled by de-duplication when the list is built, and inbound resolution uses
+    the ticket's Environment (namespace) field alongside this name. ``namespace`` /
+    ``snapshot_id`` are accepted for signature stability but not embedded.
     """
-    ns = _sanitize_value(namespace) or "ns"
     dep = _sanitize_value(name) or (f"workload-{snapshot_id}" if snapshot_id else "workload")
-    suffix = f"{_LABEL_SEP}{ns}"
-    budget = _MAX_VALUE_LEN - len(suffix)
-    if budget < 1:
-        # Pathological: the namespace alone blows the budget — keep a trimmed name.
-        return dep[:_MAX_VALUE_LEN].rstrip()
-    if len(dep) > budget:
-        dep = dep[:budget].rstrip()
-    return f"{dep}{suffix}"
+    return dep[:_MAX_VALUE_LEN].rstrip()
 
 
 def parse_label(value: str) -> tuple:
@@ -529,7 +522,10 @@ def _source_entries(row: ZohoIntegration) -> List[Dict[str, Any]]:
         raise ValueError("No source cluster selected. Pick a cluster and namespaces first.")
     selection = _deployment_selection(row)
     entries: List[Dict[str, Any]] = []
-    seen_labels = set()
+    # One entry per (namespace, deployment) — NOT de-duplicated here, because the
+    # same app name can live in several namespaces and each pairing is needed for
+    # the cascade + snapshot resolution. The Application picklist itself is
+    # de-duplicated later (see _application_values).
     for ns in _namespace_list(row):
         ns_sel = selection.get(ns)
         # No entry for the namespace => publish all (dynamic default).
@@ -541,9 +537,6 @@ def _source_entries(row: ZohoIntegration) -> List[Dict[str, Any]]:
                 continue
             snap = _get_or_create_snapshot(cluster_id, ns, name)
             label = compose_deployment_label(ns, name, snap.id)
-            if label in seen_labels:
-                continue
-            seen_labels.add(label)
             entries.append({"id": snap.id, "namespace": ns, "name": name, "label": label})
     db.session.commit()
     return entries
@@ -561,17 +554,35 @@ def build_environment_values(row: ZohoIntegration) -> List[str]:
     return values
 
 
+def _application_values(entries: List[Dict[str, Any]]) -> List[str]:
+    """Application dropdown: ``-None-`` + unique deployment names (order-stable)."""
+    values = [NONE_VALUE]
+    seen = {NONE_VALUE}
+    for e in entries:
+        if e["label"] not in seen:
+            seen.add(e["label"])
+            values.append(e["label"])
+    return values
+
+
 def build_application_values(row: ZohoIntegration) -> List[str]:
-    """Application dropdown: ``-None-`` + one label per live deployment."""
-    return [NONE_VALUE] + [e["label"] for e in _source_entries(row)]
+    """Application dropdown: ``-None-`` + unique deployment names."""
+    return _application_values(_source_entries(row))
 
 
 def _namespace_to_labels(entries: List[Dict[str, Any]]) -> Dict[str, List[str]]:
-    """Group Application labels by their (sanitized) namespace — the cascade map."""
+    """Group Application names by their (sanitized) namespace — the cascade map.
+
+    De-dupes within each namespace so the child list per parent value is unique.
+    """
     grouped: Dict[str, List[str]] = {}
+    seen_per_ns: Dict[str, set] = {}
     for e in entries:
         key = _sanitize_value(e["namespace"])
-        grouped.setdefault(key, []).append(e["label"])
+        s = seen_per_ns.setdefault(key, set())
+        if e["label"] not in s:
+            s.add(e["label"])
+            grouped.setdefault(key, []).append(e["label"])
     return grouped
 
 
@@ -595,12 +606,12 @@ def build_preview() -> Dict[str, Any]:
         }
         for e in entries
     ]
-    app_values = [NONE_VALUE] + [e["label"] for e in entries]
+    app_values = _application_values(entries)
     return {
         "sourceClusterId": row.source_cluster_id or "",
         "selectedNamespaces": _namespace_list(row),
         "selectedDeployments": _deployment_selection(row),
-        "count": len(items),
+        "count": max(0, len(app_values) - 1),
         "manageApplication": bool(row.sync_application and row.app_field_id),
         "manageEnvironment": bool(row.sync_environment and row.environment_field_id),
         "cascadeEnabled": bool(row.cascade_enabled),
@@ -636,44 +647,40 @@ def _record_dependency(row: ZohoIntegration, status: str, message: str) -> None:
 def _sync_dependency_mapping(
     cfg: ZohoConfig, row: ZohoIntegration, grouped: Dict[str, List[str]]
 ) -> Dict[str, Any]:
-    """Create/update the Environment(namespace) -> Application(deployments) mapping.
+    """Create/replace the Environment(namespace) -> Application(deployments) mapping.
 
-    The Desk dependency-mapping body schema is not publicly documented, so we read
-    the "possible mappings" first (advisory) and build a defensively-shaped body,
-    reusing ``dependency_mapping_id`` to update in place. May raise ZohoError (e.g.
-    a 403 when the token lacks Desk.settings.CREATE) — the caller degrades softly.
+    Verified Zoho Desk schema (2026-07-07): ``POST /dependencyMappings`` with
+    ``{layoutId, parentId, childId, mappings:{parentValue:[childValues]}}`` — the
+    ``mappings`` value is an OBJECT keyed by namespace (an array yields HTTP 415).
+    Create-or-replace: delete any existing mapping for this field pair (values go
+    stale as deployments change), then POST fresh. May raise ZohoError (e.g. 403
+    without Desk.settings.CREATE) — the caller degrades softly.
     """
-    # Schema discovery (advisory) — surfaces the mappable field pairs / body shape.
-    try:
-        zoho_client.get_possible_dependency_mapping(cfg)
-    except ZohoError:
-        pass
-
-    mappings = [
-        {"parentValue": ns, "childValues": labels}
-        for ns, labels in grouped.items()
-        if ns and labels
-    ]
+    mappings = {ns: labels for ns, labels in grouped.items() if ns and labels}
     if not mappings:
         return {"message": "No namespace/deployment pairs to map."}
+
+    # Remove any prior mapping(s) for this parent/child pair so we replace cleanly.
+    try:
+        existing = zoho_client.list_dependency_mappings(cfg)
+        for m in existing.get("data") or []:
+            if str(m.get("parentId")) == str(row.environment_field_id) and str(
+                m.get("childId")
+            ) == str(row.app_field_id):
+                mid = m.get("id")
+                if mid:
+                    zoho_client.delete_dependency_mapping(cfg, str(mid))
+    except ZohoError:
+        pass  # best-effort cleanup; the create below is what matters
+
     body = {
-        "parentFieldId": str(row.environment_field_id),
-        "childFieldId": str(row.app_field_id),
+        "layoutId": cfg.layout_id,
+        "parentId": str(row.environment_field_id),
+        "childId": str(row.app_field_id),
         "mappings": mappings,
     }
-
-    if row.dependency_mapping_id:
-        try:
-            zoho_client.update_dependency_mapping(cfg, row.dependency_mapping_id, body)
-            return {"message": f"Cascade updated for {len(mappings)} namespace(s)."}
-        except ZohoError as exc:
-            # A stale/absent mapping id → recreate; anything else is a real failure.
-            if getattr(exc, "status", None) not in (400, 404):
-                raise
-            row.dependency_mapping_id = None
-
     created = zoho_client.create_dependency_mapping(cfg, body)
-    new_id = created.get("id") or (created.get("dependencyMapping") or {}).get("id")
+    new_id = created.get("id")
     if new_id:
         row.dependency_mapping_id = str(new_id)
     return {"message": f"Cascade configured for {len(mappings)} namespace(s)."}
@@ -727,7 +734,7 @@ def sync_now() -> Dict[str, Any]:
             _record_sync(row, "error", str(exc), None)
             return {"status": "error", "message": str(exc), **serialize(row)}
 
-        app_values = [NONE_VALUE] + [e["label"] for e in entries]
+        app_values = _application_values(entries)
         env_values = build_environment_values(row)
         try:
             parts = []
@@ -866,14 +873,16 @@ def _snapshot_display(snap: ZohoDeploymentSnapshot) -> str:
 def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Parse the target deployment from a Zoho ticket, resolve, and record.
 
-    The Application value is ``{deployment} - {namespace}``, so resolution is an
-    exact lookup on (source cluster, namespace, deployment) — unique in Kubernetes,
-    no fuzzy matching. An explicit id field (or a legacy trailing `` - id`` value)
-    still resolves too. Idempotent per ``ticketId``: a repeated delivery updates the
-    existing row.
+    The Application value is the bare deployment name (e.g. ``aims-ui``), which can
+    repeat across namespaces, so resolution uses the ticket's Environment
+    (namespace) field too: (source cluster, namespace, deployment) — unique in
+    Kubernetes. Falls back to (a) an explicit id, (b) a legacy ``{deployment} -
+    {namespace}`` value, and (c) name-only when it's unambiguous. Idempotent per
+    ``ticketId``.
     """
     row = get_or_create_config()
     app_field = row.app_field_api_name or "cf_application"
+    env_field = row.environment_field_api_name or "cf_environment"
     tag_field = row.tag_field_api_name or "cf_tag"
     source_cluster = (row.source_cluster_id or "").strip()
 
@@ -881,10 +890,19 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     ticket_number = _extract(payload, "ticketNumber", "number", "ticket_number")
     subject = _extract(payload, "subject", "title")
     raw_app_value = _extract(payload, app_field, "deployment", "app_service", "application", "cf_application")
+    raw_env_value = _extract(payload, env_field, "environment", "namespace", "cf_environment")
     tag = _extract(payload, tag_field, "tag", "cf_tag", "version")
 
     error: Optional[str] = None
     snapshot: Optional[ZohoDeploymentSnapshot] = None
+
+    def _by_ns_name(ns: Optional[str], name: Optional[str]) -> Optional[ZohoDeploymentSnapshot]:
+        if not (ns and name):
+            return None
+        q = ZohoDeploymentSnapshot.query.filter_by(namespace=ns, deployment_name=name)
+        if source_cluster:
+            q = q.filter_by(cluster_id=source_cluster)
+        return q.order_by(ZohoDeploymentSnapshot.id.desc()).first()
 
     # 1) An explicit id field wins if present.
     explicit_id = _extract(
@@ -896,26 +914,43 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             snapshot = None
 
-    # 2) Otherwise resolve the label "{deployment} - {namespace}" against the
-    #    configured source cluster (deployment+namespace is unique in K8s).
-    if snapshot is None and raw_app_value is not None:
-        dep_name, ns_name = parse_label(str(raw_app_value))
-        if dep_name and ns_name:
-            query = ZohoDeploymentSnapshot.query.filter_by(
-                namespace=ns_name, deployment_name=dep_name
-            )
-            if source_cluster:
-                query = query.filter_by(cluster_id=source_cluster)
-            snapshot = query.order_by(ZohoDeploymentSnapshot.id.desc()).first()
+    # Work out the deployment name + namespace from the app value / env field.
+    dep_name = ns_name = None
+    if raw_app_value is not None:
+        s = str(raw_app_value).strip()
+        if _LABEL_SEP in s:  # legacy "{deployment} - {namespace}" value
+            dep_name, ns_name = parse_label(s)
+        else:  # current bare-name value
+            dep_name = s or None
+    if ns_name is None and raw_env_value is not None:
+        ns_name = str(raw_env_value).strip() or None
 
-    # 3) Legacy fallback: an older value that still carries a trailing id.
-    if snapshot is None and raw_app_value is not None:
+    # 2) Resolve on (namespace, deployment) — the normal path.
+    if snapshot is None:
+        snapshot = _by_ns_name(ns_name, dep_name)
+
+    # 3) Name-only, but only when it's unambiguous across namespaces.
+    if snapshot is None and dep_name and not ns_name:
+        q = ZohoDeploymentSnapshot.query.filter_by(deployment_name=dep_name)
+        if source_cluster:
+            q = q.filter_by(cluster_id=source_cluster)
+        matches = q.all()
+        if len(matches) == 1:
+            snapshot = matches[0]
+        elif len(matches) > 1:
+            error = (
+                f"'{dep_name}' exists in multiple namespaces — include the Environment "
+                "(namespace) field on the ticket to resolve it."
+            )
+
+    # 4) Legacy fallback: an older value that still carried a trailing id.
+    if snapshot is None and error is None and raw_app_value is not None:
         legacy_id = parse_workload_id(str(raw_app_value))
         if legacy_id is not None:
             snapshot = ZohoDeploymentSnapshot.query.get(legacy_id)
 
     snapshot_id: Optional[int] = snapshot.id if snapshot else None
-    if snapshot is None:
+    if snapshot is None and error is None:
         error = "Could not resolve the ticket's Application value to a known deployment."
 
     existing = None

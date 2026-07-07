@@ -349,16 +349,21 @@ def set_allowed_values(
 # ---------------------------------------------------------------------------
 # Field dependency mapping (Application <- Environment cascade)
 #
-# Zoho Desk exposes dependency-mapping endpoints under a layout (List / Get
-# possible / Create / Update / Delete). The exact request-body schema is not
-# publicly documented, so the caller (``zoho_sync_service``) first reads the
-# "possible" mappings to learn the shape, then builds the body defensively and
-# is prepared for a 4xx (e.g. the token may lack ``Desk.settings.CREATE``). These
-# helpers just do the transport + layout guard + 401 retry, like the picklist ops.
+# Verified against Areeba's live Zoho Desk (2026-07-07). The resource is
+# TOP-LEVEL ``/dependencyMappings`` (NOT ``/layouts/{id}/...`` — that 404s), with
+# ``layoutId`` in the body/query and ``orgId`` in the header. The create body is::
+#
+#     { "layoutId": ..., "parentId": <parent field id>, "childId": <child field id>,
+#       "mappings": { "<parentValue>": ["<childValue>", ...], ... } }
+#
+# ``mappings`` MUST be a JSON OBJECT — an array/string yields a misleading
+# HTTP 415 "unsupported media type". Parent/child values must already exist on the
+# layout's picklists (publish them first). These helpers do transport + layout
+# guard + one 401 retry, like the picklist ops.
 # ---------------------------------------------------------------------------
 
 def _dependency_base(cfg: ZohoConfig) -> str:
-    return f"{cfg.api_base.rstrip('/')}/layouts/{cfg.layout_id}/dependencyMapping"
+    return f"{cfg.api_base.rstrip('/')}/dependencyMappings"
 
 
 def _layout_dependency_request(
@@ -384,31 +389,24 @@ def _layout_dependency_request(
     return payload if isinstance(payload, dict) else {}
 
 
-def get_possible_dependency_mapping(cfg: ZohoConfig) -> Dict[str, Any]:
-    """Read the field pairs that can be mapped on this layout (schema discovery)."""
-    return _layout_dependency_request(cfg, "GET", f"{_dependency_base(cfg)}/possibleMappings?orgId={cfg.org_id}")
-
-
 def list_dependency_mappings(cfg: ZohoConfig) -> Dict[str, Any]:
-    """List the dependency mappings currently configured on this layout."""
-    return _layout_dependency_request(cfg, "GET", f"{_dependency_base(cfg)}?orgId={cfg.org_id}")
+    """List the dependency mappings on this layout (204/empty -> {})."""
+    return _layout_dependency_request(cfg, "GET", f"{_dependency_base(cfg)}?layoutId={cfg.layout_id}")
 
 
 def create_dependency_mapping(cfg: ZohoConfig, body: Dict[str, Any]) -> Dict[str, Any]:
-    """Create a parent->child dependency mapping (may need Desk.settings.CREATE)."""
-    return _layout_dependency_request(cfg, "POST", f"{_dependency_base(cfg)}?orgId={cfg.org_id}", body)
+    """Create a parent->child dependency mapping (needs Desk.settings.CREATE)."""
+    return _layout_dependency_request(cfg, "POST", _dependency_base(cfg), body)
 
 
 def update_dependency_mapping(cfg: ZohoConfig, mapping_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
     """Replace an existing dependency mapping's value pairs (needs Desk.settings.UPDATE)."""
-    url = f"{_dependency_base(cfg)}/{mapping_id}?orgId={cfg.org_id}"
-    return _layout_dependency_request(cfg, "PUT", url, body)
+    return _layout_dependency_request(cfg, "PUT", f"{_dependency_base(cfg)}/{mapping_id}", body)
 
 
 def delete_dependency_mapping(cfg: ZohoConfig, mapping_id: str) -> Dict[str, Any]:
     """Remove a dependency mapping (needs Desk.settings.DELETE)."""
-    url = f"{_dependency_base(cfg)}/{mapping_id}?orgId={cfg.org_id}"
-    return _layout_dependency_request(cfg, "DELETE", url)
+    return _layout_dependency_request(cfg, "DELETE", f"{_dependency_base(cfg)}/{mapping_id}")
 
 
 def _error_detail(prefix: str, status: int, payload: Dict[str, Any]) -> str:

@@ -35,6 +35,10 @@ export default function ZohoSourcePicker({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  // Search filters to tame long lists.
+  const [nsFilter, setNsFilter] = useState("");
+  const [depFilters, setDepFilters] = useState({}); // { [ns]: query }
+
   // 1) Load selectable clusters once.
   useEffect(() => {
     let cancelled = false;
@@ -157,6 +161,21 @@ export default function ZohoSourcePicker({
       // Editing individual boxes implies an explicit subset.
       return { ...prev, [ns]: { all: false, names } };
     });
+  };
+
+  // Bulk add/remove a set of names for a namespace (used by "Select shown" / "Clear").
+  const bulkSetNames = (ns, names, add) => {
+    setDeploySel((prev) => {
+      const cur = prev[ns] || { all: false, names: new Set() };
+      const next = new Set(cur.names);
+      names.forEach((n) => (add ? next.add(n) : next.delete(n)));
+      return { ...prev, [ns]: { all: false, names: next } };
+    });
+  };
+
+  const filterDeps = (ns, deps) => {
+    const q = (depFilters[ns] || "").trim().toLowerCase();
+    return q ? deps.filter((d) => d.toLowerCase().includes(q)) : deps;
   };
 
   const nsSelectedCount = (g) => {
@@ -291,33 +310,46 @@ export default function ZohoSourcePicker({
                 ) : namespaces.length === 0 ? (
                   <p className="muted">No namespaces found in this cluster.</p>
                 ) : (
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 2,
-                      maxHeight: 360,
-                      overflowY: "auto",
-                      padding: 8,
-                      border: "1px solid var(--border, #e5e7eb)",
-                      borderRadius: 10,
-                    }}
-                  >
-                    {namespaces.map((ns) => (
-                      <label
-                        key={ns}
-                        className="checkbox-label"
-                        style={{ margin: 0, padding: "3px 4px" }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={selected.has(ns)}
-                          onChange={() => toggleNamespace(ns)}
-                        />
-                        <span className="mono">{ns}</span>
-                      </label>
-                    ))}
-                  </div>
+                  <>
+                    {namespaces.length > 8 ? (
+                      <input
+                        type="text"
+                        value={nsFilter}
+                        onChange={(e) => setNsFilter(e.target.value)}
+                        placeholder="Filter namespaces…"
+                        style={{ width: "100%", marginBottom: 6 }}
+                      />
+                    ) : null}
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 2,
+                        maxHeight: 340,
+                        overflowY: "auto",
+                        padding: 8,
+                        border: "1px solid var(--border, #e5e7eb)",
+                        borderRadius: 10,
+                      }}
+                    >
+                      {namespaces
+                        .filter((ns) => ns.toLowerCase().includes(nsFilter.trim().toLowerCase()))
+                        .map((ns) => (
+                          <label
+                            key={ns}
+                            className="checkbox-label"
+                            style={{ margin: 0, padding: "3px 4px" }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selected.has(ns)}
+                              onChange={() => toggleNamespace(ns)}
+                            />
+                            <span className="mono">{ns}</span>
+                          </label>
+                        ))}
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -345,6 +377,8 @@ export default function ZohoSourcePicker({
                     {groups.map((g) => {
                       const sel = deploySel[g.namespace] || { all: true, names: new Set() };
                       const deps = g.deployments || [];
+                      const shown = sel.all ? deps : filterDeps(g.namespace, deps);
+                      const CHIP_CAP = 30;
                       return (
                         <div
                           key={g.namespace}
@@ -389,32 +423,75 @@ export default function ZohoSourcePicker({
                             </div>
                           ) : sel.all ? (
                             <div className="chip-row" style={{ marginTop: 8 }}>
-                              {deps.map((d) => (
+                              {deps.slice(0, CHIP_CAP).map((d) => (
                                 <span key={d} className="badge status-muted mono">
                                   {d}
                                 </span>
                               ))}
+                              {deps.length > CHIP_CAP ? (
+                                <span className="muted">+{deps.length - CHIP_CAP} more</span>
+                              ) : null}
                             </div>
                           ) : (
-                            <div
-                              style={{
-                                display: "grid",
-                                gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
-                                gap: 4,
-                                marginTop: 8,
-                              }}
-                            >
-                              {deps.map((d) => (
-                                <label key={d} className="checkbox-label" style={{ margin: 0 }}>
-                                  <input
-                                    type="checkbox"
-                                    checked={sel.names.has(d)}
-                                    onChange={() => toggleDeployment(g.namespace, d)}
-                                  />
-                                  <span className="mono">{d}</span>
-                                </label>
-                              ))}
-                            </div>
+                            <>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 8,
+                                  alignItems: "center",
+                                  marginTop: 8,
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <input
+                                  type="text"
+                                  value={depFilters[g.namespace] || ""}
+                                  onChange={(e) =>
+                                    setDepFilters((p) => ({ ...p, [g.namespace]: e.target.value }))
+                                  }
+                                  placeholder={`Filter ${deps.length} deployments…`}
+                                  style={{ flex: "1 1 160px", minWidth: 0 }}
+                                />
+                                <button
+                                  type="button"
+                                  className="link-button"
+                                  onClick={() => bulkSetNames(g.namespace, shown, true)}
+                                >
+                                  Select shown{shown.length !== deps.length ? ` (${shown.length})` : ""}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="link-button"
+                                  onClick={() => bulkSetNames(g.namespace, deps, false)}
+                                >
+                                  Clear
+                                </button>
+                              </div>
+                              <div
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
+                                  gap: 4,
+                                  marginTop: 8,
+                                  maxHeight: 220,
+                                  overflowY: "auto",
+                                }}
+                              >
+                                {shown.map((d) => (
+                                  <label key={d} className="checkbox-label" style={{ margin: 0 }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={sel.names.has(d)}
+                                      onChange={() => toggleDeployment(g.namespace, d)}
+                                    />
+                                    <span className="mono">{d}</span>
+                                  </label>
+                                ))}
+                                {shown.length === 0 ? (
+                                  <span className="muted">no matches</span>
+                                ) : null}
+                              </div>
+                            </>
                           )}
                         </div>
                       );

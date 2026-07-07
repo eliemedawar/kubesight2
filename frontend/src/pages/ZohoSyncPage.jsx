@@ -337,8 +337,9 @@ export default function ZohoSyncPage({ canManage = false }) {
         <h3>Inbound webhook</h3>
         <p className="muted">
           Configure a Zoho Desk workflow rule to POST new DevOps Request tickets to this URL. KubeSight
-          reads the selected Application value's trailing deployment id (or a <code>deployment_id</code> field)
-          plus the tag field, and resolves the exact deployment.
+          reads the selected <code>Application</code> (deployment name) and <code>Environment</code>
+          (namespace) values plus the tag field, and resolves the exact deployment. Send both fields —
+          the app name alone can repeat across namespaces.
         </p>
         <div className="inline-form">
           <input readOnly value={webhookUrl} onFocus={(e) => e.target.select()} className="mono" />
@@ -363,15 +364,16 @@ export default function ZohoSyncPage({ canManage = false }) {
 
       {/* -------------------------------------------------- Preview -------- */}
       <section className="card">
-        <h3>Application dropdown — live deployments ({previewCount})</h3>
+        <h3>Application dropdown — live deployments ({previewCount} unique)</h3>
         <p className="muted">
           The live deployments of your selected namespaces
           {preview?.sourceClusterId ? (
             <> on cluster <code>{preview.sourceClusterId}</code></>
           ) : null}
-          . Each is published into the Zoho <code>Application</code> field on the next sync and carries
-          a stable id; a ticket resolves to that exact deployment. Inside Zoho the list is filtered by
-          the selected Environment (namespace) via the cascade.
+          , published into the Zoho <code>Application</code> field by <strong>name</strong> (e.g.{" "}
+          <code>aims-ui</code>). Names shared across namespaces appear once; inside Zoho the list is
+          filtered by the selected Environment (namespace) via the cascade, and a ticket resolves by
+          Application name + Environment. The rows below show each name/namespace pairing.
         </p>
         {preview?.error ? (
           <div className="field-hint status-error">{preview.error}</div>
