@@ -1757,3 +1757,178 @@ class RegistryConnection(db.Model):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class ZohoIntegration(db.Model):
+    """Configuration for the Zoho Desk "DevOps Request" field-sync integration.
+
+    A single-row config (id is always 1). KubeSight is the source of truth for
+    deployed services: a background job publishes the AppService list into a Zoho
+    Desk picklist as composite labels ("Client / Application / Environment · #id"),
+    each carrying its AppService primary key so an inbound ticket resolves to an
+    exact service instead of fuzzy-matching a free-text name. See
+    DEVOPS-REQUEST-FIELD-SYNC-CONFIG.md for the Zoho-side field/layout IDs.
+
+    OAuth is a server-to-server "Self Client" acting as the zagent service
+    account; the client secret + refresh token are Fernet-encrypted at rest (same
+    treatment as registry/SMTP secrets). The inbound webhook is authenticated by a
+    shared secret, also encrypted at rest.
+    """
+
+    __tablename__ = "zoho_integration"
+
+    id = db.Column(db.Integer, primary_key=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=False)
+
+    # --- Zoho connection (non-secret; see the field-sync spec for real values) ---
+    api_base = db.Column(db.String(255), nullable=False, default="https://desk.zoho.com/api/v1")
+    accounts_base = db.Column(db.String(255), nullable=False, default="https://accounts.zoho.com")
+    org_id = db.Column(db.String(64), nullable=False, default="")
+    department_id = db.Column(db.String(64), nullable=True)
+    layout_id = db.Column(db.String(64), nullable=False, default="")
+    # The picklist field this integration publishes DEPLOYMENT names into (cf_application).
+    app_field_id = db.Column(db.String(64), nullable=False, default="")
+    app_field_api_name = db.Column(db.String(120), nullable=False, default="cf_application")
+    # Optional second picklist we publish the NAMESPACE list into (cf_environment).
+    # When blank, the environment/namespace dropdown is not managed.
+    environment_field_id = db.Column(db.String(64), nullable=True)
+    environment_field_api_name = db.Column(db.String(120), nullable=False, default="cf_environment")
+    # Which inbound-ticket field carries the version/tag (free text, e.g. cf_tag).
+    tag_field_api_name = db.Column(db.String(120), nullable=False, default="cf_tag")
+
+    # --- OAuth (server-to-server Self Client) ---
+    client_id = db.Column(db.String(255), nullable=False, default="")
+    client_secret_encrypted = db.Column(db.Text, nullable=True)
+    refresh_token_encrypted = db.Column(db.Text, nullable=True)
+    token_endpoint = db.Column(
+        db.String(255), nullable=False, default="https://accounts.zoho.com/oauth/v2/token"
+    )
+
+    # --- Inbound webhook ---
+    inbound_secret_encrypted = db.Column(db.Text, nullable=True)
+
+    # --- Sync behaviour ---
+    # Comma-separated AppService statuses to publish (default: active,degraded).
+    status_filter = db.Column(db.String(120), nullable=False, default="active,degraded")
+    sync_interval_minutes = db.Column(db.Integer, nullable=False, default=30)
+    # Per-field sync switches: whether the sync publishes deployments into the
+    # Application field / namespaces into the Environment field. When off, that
+    # field is left for manual editing and never overwritten by the sync.
+    sync_application = db.Column(db.Boolean, nullable=False, default=True)
+    sync_environment = db.Column(db.Boolean, nullable=False, default=True)
+
+    # --- Dropdown source: a live cluster + a chosen set of namespaces ---
+    # The Environment picklist is fed by these selected namespaces; the Application
+    # picklist is fed by the LIVE deployments running in those namespaces (read via
+    # kubectl through k8s_provider). This replaces the older status-filtered
+    # AppService source. ``selected_namespaces`` is a JSON-encoded list of names.
+    source_cluster_id = db.Column(db.String(120), nullable=True)
+    selected_namespaces = db.Column(db.Text, nullable=True)
+    # Per-namespace deployment selection (JSON): {namespace: {"all": bool, "names": [...]}}.
+    # A namespace absent from the map (or {"all": true}) publishes ALL its live
+    # deployments (dynamic — future ones auto-included); {"all": false, "names": [...]}
+    # publishes only that subset. Lets the operator curate exactly what Zoho shows.
+    selected_deployments = db.Column(db.Text, nullable=True)
+
+    # --- Application <- Environment cascade (Zoho field dependency mapping) ---
+    # When on, after publishing both picklists the sync configures a Zoho Desk
+    # dependency mapping so that picking an Environment (namespace) on a ticket
+    # filters the Application options to that namespace's deployments.
+    cascade_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    dependency_mapping_id = db.Column(db.String(64), nullable=True)
+    last_dependency_status = db.Column(db.String(16), nullable=True)  # ok | error | skipped
+    last_dependency_message = db.Column(db.Text, nullable=True)
+
+    # --- Last-run bookkeeping (mirrors RegistryConnection.last_test_*) ---
+    last_sync_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_sync_status = db.Column(db.String(16), nullable=True)  # ok | error
+    last_sync_message = db.Column(db.Text, nullable=True)
+    last_synced_count = db.Column(db.Integer, nullable=True)
+    last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_test_status = db.Column(db.String(16), nullable=True)
+    last_test_message = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ZohoInboundTicket(db.Model):
+    """Audit log of DevOps Request tickets Zoho pushed to KubeSight's webhook.
+
+    Each row records the raw picklist value, the parsed AppService id + tag, and
+    whether it resolved to a live AppService. This is the intake precursor to the
+    (later) deploy-automation state machine — for now it captures and resolves,
+    nothing more. ``ticket_id`` is unique so duplicate webhook deliveries for the
+    same ticket coalesce instead of stacking.
+    """
+
+    __tablename__ = "zoho_inbound_tickets"
+    __table_args__ = (
+        db.Index("ix_zoho_inbound_app_service", "app_service_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    ticket_id = db.Column(db.String(64), nullable=True, unique=True, index=True)
+    ticket_number = db.Column(db.String(64), nullable=True)
+    subject = db.Column(db.Text, nullable=True)
+    # The raw picklist string as received (e.g. "Areeba / Payment Gateway / Prod · #42").
+    raw_app_value = db.Column(db.Text, nullable=True)
+    # Parsed out of the picklist value / payload.
+    app_service_id = db.Column(db.Integer, nullable=True)
+    app_service_name = db.Column(db.String(180), nullable=True)
+    tag = db.Column(db.String(200), nullable=True)
+    resolved = db.Column(db.Boolean, nullable=False, default=False)
+    error = db.Column(db.Text, nullable=True)
+    payload = db.Column(db.JSON, nullable=True)
+    received_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+
+
+class ZohoDeploymentSnapshot(db.Model):
+    """Stable id for a live deployment the Zoho Application picklist publishes.
+
+    The Application dropdown is driven by *live* cluster deployments (read via
+    kubectl), which have no database primary key. To resolve an inbound ticket back
+    to an exact deployment, each ``(cluster_id, namespace, deployment_name)`` tuple
+    is assigned a stable synthetic id here (get-or-create on every sync/preview) and
+    that id is embedded as the trailing ``- <id>`` of the picklist value — the same
+    role ``AppServiceComponentMapping.id`` played for the old curated source. Rows
+    persist so an old ticket referencing a since-deleted deployment still resolves
+    to its name/namespace (flagged possibly-stale by ``last_seen_at``).
+    """
+
+    __tablename__ = "zoho_deployment_snapshots"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "cluster_id", "namespace", "deployment_name", name="uq_zoho_snapshot_identity"
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    cluster_id = db.Column(db.String(120), nullable=False)
+    namespace = db.Column(db.String(253), nullable=False)
+    deployment_name = db.Column(db.String(253), nullable=False)
+    first_seen_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    last_seen_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )

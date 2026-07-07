@@ -87,6 +87,15 @@ def _scheduler_loop(app: Flask) -> None:
                 process_due_bundles()
         except Exception:
             logger.exception("Change bundle execution tick failed")
+        try:
+            with app.app_context():
+                from .zoho_sync_service import run_due_sync
+
+                # Self-gating: only runs when the integration is enabled and its
+                # configured interval has elapsed since the last sync.
+                run_due_sync()
+        except Exception:
+            logger.exception("Zoho field-sync tick failed")
 
 
 _scheduler_started = False

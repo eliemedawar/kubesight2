@@ -76,6 +76,8 @@ PERMISSIONS = [
     ("components:check", "Run topology component health checks"),
     ("registries:view", "View linked image registries"),
     ("registries:manage", "Add, edit, and remove linked image registries"),
+    ("zoho:view", "View the Zoho Desk integration status and config"),
+    ("zoho:manage", "Configure the Zoho Desk integration and trigger a sync"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -161,6 +163,7 @@ PERMISSION_GROUPS = [
             "users:view", "users:manage", "users:create", "users:update", "users:disable", "users:delete",
             "roles:view", "roles:manage", "settings:view", "settings:manage",
             "audit:view", "api_tokens:manage", "registries:view", "registries:manage",
+            "zoho:view", "zoho:manage",
         ],
     },
 ]

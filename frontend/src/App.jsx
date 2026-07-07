@@ -77,6 +77,7 @@ const MyRequestsPage = lazy(() => import("./pages/MyRequestsPage.jsx"));
 const ChangeBundlesPage = lazy(() => import("./pages/ChangeBundlesPage.jsx"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
 const ImageRegistriesPage = lazy(() => import("./pages/ImageRegistriesPage.jsx"));
+const ZohoSyncPage = lazy(() => import("./pages/ZohoSyncPage.jsx"));
 const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
@@ -1532,6 +1533,8 @@ export default function App() {
         return <AlertRoutingPage />;
       case "imageRegistries":
         return <ImageRegistriesPage canManage={hasPermission("registries:manage")} />;
+      case "zohoSync":
+        return <ZohoSyncPage canManage={hasPermission("zoho:manage")} />;
       case "upgrade":
         return (
           <UpgradeSafeModePage

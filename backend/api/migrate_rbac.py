@@ -507,8 +507,34 @@ def _migrate_user_onboarding_columns() -> None:
         _add_column_if_missing("users", col, sql_type)
 
 
+def _migrate_zoho_integration_columns() -> None:
+    """Forward-compatible column adds for the Zoho integration config (single-row).
+
+    The table is created by ``db.create_all()``; this backfills the Environment
+    picklist columns added when the dropdown was split into deployments + namespaces.
+    Must not recreate the table — it holds the encrypted OAuth secrets.
+    """
+    if "zoho_integration" in inspect(db.engine).get_table_names():
+        _add_column_if_missing("zoho_integration", "environment_field_id", "VARCHAR(64)")
+        _add_column_if_missing(
+            "zoho_integration", "environment_field_api_name", "VARCHAR(120) DEFAULT 'cf_environment'"
+        )
+        _add_column_if_missing("zoho_integration", "sync_application", "BOOLEAN DEFAULT true")
+        _add_column_if_missing("zoho_integration", "sync_environment", "BOOLEAN DEFAULT true")
+        # Live-cluster dropdown source (namespaces picked from a cluster) + the
+        # Application<-Environment cascade added when the source moved off AppServices.
+        _add_column_if_missing("zoho_integration", "source_cluster_id", "VARCHAR(120)")
+        _add_column_if_missing("zoho_integration", "selected_namespaces", "TEXT")
+        _add_column_if_missing("zoho_integration", "selected_deployments", "TEXT")
+        _add_column_if_missing("zoho_integration", "cascade_enabled", "BOOLEAN DEFAULT true")
+        _add_column_if_missing("zoho_integration", "dependency_mapping_id", "VARCHAR(64)")
+        _add_column_if_missing("zoho_integration", "last_dependency_status", "VARCHAR(16)")
+        _add_column_if_missing("zoho_integration", "last_dependency_message", "TEXT")
+
+
 def run_migrations() -> None:
     db.create_all()
+    _migrate_zoho_integration_columns()
     _migrate_user_onboarding_columns()
     _migrate_deployment_request_columns()
     _migrate_change_bundle_columns()
