@@ -112,6 +112,7 @@ def serialize_jenkins(row: JenkinsConnection) -> Dict[str, Any]:
         "queueTimeoutMinutes": int(row.queue_timeout_minutes or 10),
         "bundleWindowHours": int(row.bundle_window_hours or 24),
         "rolloutTimeoutMinutes": int(row.rollout_timeout_minutes or 15),
+        "rollbackOnFailure": bool(row.rollback_on_failure),
         "lastTestAt": _iso(row.last_test_at),
         "lastTestStatus": row.last_test_status,
         "lastTestMessage": row.last_test_message,
@@ -141,6 +142,8 @@ def update_jenkins(payload: Dict[str, Any]) -> Dict[str, Any]:
         row.verify_tls = bool(payload.get("verifyTls"))
     if "autoRunTickets" in payload:
         row.auto_run_tickets = bool(payload.get("autoRunTickets"))
+    if "rollbackOnFailure" in payload:
+        row.rollback_on_failure = bool(payload.get("rollbackOnFailure"))
     if "autoRunClusters" in payload:
         # Per-cluster overrides: {clusterId: "auto"|"manual"}. Anything else is
         # dropped — an absent cluster inherits the global autoRunTickets default.
@@ -979,14 +982,137 @@ def _do_check_pods(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
         detail = f"could not read pod status — retrying: {exc}"
 
     if now - started > timedelta(minutes=timeout_min):
-        _fail(
-            run, "pods",
-            f"The image was applied but the pods did not become ready within {timeout_min} min"
-            + (f" (last seen: {detail})." if detail else "."),
-        )
+        _handle_rollout_failure(run, jrow, detail, timeout_min)
         return
     elapsed = int((now - started).total_seconds() // 60)
     _set_step(run, "pods", "run", f"{detail} — waiting ({elapsed}/{timeout_min} min)")
+
+
+def _handle_rollout_failure(
+    run: DeployAutomationRun, jrow: JenkinsConnection, last_seen: str, timeout_min: int
+) -> None:
+    """Rollout timed out: optionally roll back to the previous revision, fail
+    the run, and email every administrator.
+
+    ``kubectl rollout undo`` re-activates the previous ReplicaSet — the version
+    that was serving before this run — so the rollback itself is non-disruptive;
+    with RollingUpdate semantics the old pods were still carrying traffic while
+    the new ones failed readiness.
+    """
+    from ..k8s_provider import K8sCommandError
+    from .deployment_service import _run_kubectl_for_cluster
+
+    message = (
+        f"The image was applied but the pods did not become ready within {timeout_min} min"
+        + (f" (last seen: {last_seen})." if last_seen else ".")
+    )
+
+    rollback_note = ""
+    if jrow.rollback_on_failure:
+        try:
+            _run_kubectl_for_cluster(
+                run.cluster_id,
+                ["rollout", "undo", f"deployment/{run.deployment_name}", "-n", run.namespace],
+            )
+            rollback_note = "Rolled back to the previous version."
+        except K8sCommandError as exc:
+            rollback_note = f"Automatic rollback FAILED: {exc}"
+        log_audit(
+            "automation_rollback",
+            actor=None,
+            target_type="deploy_automation_run",
+            target_id=str(run.id),
+            details={
+                "ticket": run.ticket_number,
+                "deployment": run.deployment_name,
+                "namespace": run.namespace,
+                "clusterId": run.cluster_id,
+                "image": _target_image(run),
+                "result": rollback_note,
+            },
+            commit=False,
+        )
+    else:
+        rollback_note = "Auto-rollback is disabled — the deployment was left as-is."
+
+    _fail(run, "pods", f"{message} {rollback_note}")
+    _notify_admins_rollout_failure(run, message, rollback_note)
+
+
+def _admin_emails() -> List[str]:
+    """Email addresses of every active administrator (shared admin convention)."""
+    from ..access_engine import is_admin
+    from ..models import User
+
+    out = set()
+    for user in User.query.filter_by(is_active=True).all():
+        try:
+            if (user.email or "").strip() and is_admin(user):
+                out.add(user.email.strip())
+        except Exception:
+            continue
+    return sorted(out)
+
+
+def _notify_admins_rollout_failure(run: DeployAutomationRun, message: str, rollback_note: str) -> None:
+    """Best-effort email to all admins — sent off-thread so the scheduler tick
+    (or webhook request) never waits on SMTP. Failures are swallowed."""
+    import threading
+
+    from flask import current_app
+
+    from ..email_delivery import send_email, smtp_is_configured
+
+    try:
+        if not smtp_is_configured():
+            return
+        recipients = _admin_emails()
+        if not recipients:
+            return
+        subject = f"KubeSight: rollout failed — {run.deployment_name} ({run.ticket_number or f'run #{run.id}'})"
+        body = "\n".join(
+            [
+                "A ticket-driven deployment failed its rollout health check.",
+                "",
+                f"Ticket:       {run.ticket_number or '-'}",
+                f"Deployment:   {run.deployment_name}",
+                f"Namespace:    {run.namespace}",
+                f"Cluster:      {run.cluster_id}",
+                f"Image:        {_target_image(run)}",
+                "",
+                message,
+                rollback_note,
+                "",
+                "Details: KubeSight → Zoho Integration → Deploy automation.",
+            ]
+        )
+        app = current_app._get_current_object()
+
+        def _send_all() -> None:
+            for address in recipients:
+                try:
+                    send_email(address, subject, body)
+                except Exception:
+                    continue
+
+        if app.config.get("TESTING"):
+            _send_all()
+            return
+        threading.Thread(
+            target=lambda: _run_in_app_context(app, _send_all),
+            name="automation-failure-mail",
+            daemon=True,
+        ).start()
+    except Exception:
+        pass  # notification must never break the run handling
+
+
+def _run_in_app_context(app, task) -> None:
+    with app.app_context():
+        try:
+            task()
+        except Exception:
+            pass
 
 
 def _do_watch_bundle(run: DeployAutomationRun) -> None:

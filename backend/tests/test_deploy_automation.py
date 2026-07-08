@@ -6,7 +6,8 @@ their module attributes — the service imports them function-locally, so the
 patch is picked up at call time.
 """
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -304,6 +305,62 @@ def test_image_tag_template_resolution(app):
     assert resolve_image_tag(None, "1.2.3") == "1.2.3"
     row.image_tag_template = "{tag}"
     assert resolve_image_tag(row, "1.2.3") == "1.2.3"
+
+
+def test_rollout_failure_rolls_back_and_emails_admins(client, admin_token, app, monkeypatch):
+    """Pods never come up ⇒ rollout undo + failed run + admin notification."""
+    from api.models import JenkinsConnection, User
+    from api.services import deploy_automation_service as svc
+
+    admin = User.query.filter_by(username="admin").first()
+    admin.email = "admins@areeba.com"
+    db.session.add(JenkinsConnection(id=1, rollback_on_failure=True))
+    run = DeployAutomationRun(
+        cluster_id=CLUSTER,
+        namespace=NAMESPACE,
+        deployment_name=DEPLOYMENT,
+        image_tag="v9.9.9-prod",
+        ticket_tag="9.9.9",
+        ticket_number="DR-9002",
+        status="verifying_rollout",
+        steps=[],
+        rollout_started_at=datetime.now(timezone.utc) - timedelta(minutes=60),
+    )
+    db.session.add(run)
+    db.session.commit()
+
+    # Pretend the cluster is real and permanently reports 1/3 ready.
+    monkeypatch.setattr("api.k8s_provider.should_use_real_k8s", lambda cid=None: True)
+    monkeypatch.setattr("api.k8s_provider.resolve_cluster_access", lambda cid: object())
+    monkeypatch.setattr(
+        "api.k8s_provider._run_for_access",
+        lambda access, args: json.dumps(
+            {"spec": {"replicas": 3}, "status": {"readyReplicas": 1, "updatedReplicas": 3}}
+        ),
+    )
+    undo_calls = []
+    monkeypatch.setattr(
+        "api.services.deployment_service._run_kubectl_for_cluster",
+        lambda cid, args: undo_calls.append((cid, args)) or "deployment.apps rolled back",
+    )
+    sent = []
+    monkeypatch.setattr("api.email_delivery.smtp_is_configured", lambda: True)
+    monkeypatch.setattr(
+        "api.email_delivery.send_email",
+        lambda to, subject, body, **kw: sent.append((to, subject, body)),
+    )
+
+    svc.advance_runs()
+
+    row = db.session.get(DeployAutomationRun, run.id)
+    assert row.status == "failed"
+    assert "Rolled back to the previous version" in row.error
+    assert undo_calls and undo_calls[0][1][:2] == ["rollout", "undo"]
+    assert undo_calls[0][1][2] == f"deployment/{DEPLOYMENT}"
+    assert sent, "admins should be emailed on rollout failure"
+    assert sent[0][0] == "admins@areeba.com"
+    assert "rollout failed" in sent[0][1]
+    assert "DR-9002" in sent[0][1]
 
 
 def test_viewer_cannot_start_or_configure(client, viewer_token, app):

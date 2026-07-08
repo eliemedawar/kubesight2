@@ -546,6 +546,7 @@ def _migrate_deploy_automation_columns() -> None:
             "jenkins_connection", "image_tag_template", "VARCHAR(120) DEFAULT '{tag}'"
         )
         _add_column_if_missing("jenkins_connection", "build_token_encrypted", "TEXT")
+        _add_column_if_missing("jenkins_connection", "rollback_on_failure", "BOOLEAN DEFAULT true")
     if "deploy_automation_runs" in tables:
         _add_column_if_missing("deploy_automation_runs", "rollout_started_at", "DATETIME")
         _add_column_if_missing("deploy_automation_runs", "ticket_tag", "VARCHAR(200)")

@@ -251,6 +251,7 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
     queueTimeoutMinutes: jenkins?.queueTimeoutMinutes || 10,
     bundleWindowHours: jenkins?.bundleWindowHours || 24,
     rolloutTimeoutMinutes: jenkins?.rolloutTimeoutMinutes || 15,
+    rollbackOnFailure: jenkins?.rollbackOnFailure !== false,
   }));
   const [error, setError] = useState("");
   const [clusters, setClusters] = useState([]);
@@ -294,6 +295,7 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
       queueTimeoutMinutes: Number(form.queueTimeoutMinutes) || 10,
       bundleWindowHours: Number(form.bundleWindowHours) || 24,
       rolloutTimeoutMinutes: Number(form.rolloutTimeoutMinutes) || 15,
+      rollbackOnFailure: form.rollbackOnFailure,
     };
     payload.autoRunClusters = form.autoRunClusters;
     payload.imageTagTemplate = form.imageTagTemplate.trim() || "{tag}";
@@ -497,6 +499,15 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
               After the image is applied, how long to wait for the pods to report ready before the
               run is marked failed.
             </span>
+          </label>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={form.rollbackOnFailure}
+              onChange={(e) => set("rollbackOnFailure", e.target.checked)}
+            />
+            Auto-rollback on rollout failure (<code>rollout undo</code> to the previous version).
+            Administrators are emailed on every rollout failure either way.
           </label>
 
           <div className="modal-actions">
