@@ -1954,16 +1954,29 @@ class JenkinsConnection(db.Model):
     base_url = db.Column(db.String(255), nullable=False, default="")
     username = db.Column(db.String(120), nullable=False, default="")
     api_token_encrypted = db.Column(db.Text, nullable=True)
+    # Optional job-level remote-trigger token ("Trigger builds remotely") sent
+    # as the `token` form field on buildWithParameters.
+    build_token_encrypted = db.Column(db.Text, nullable=True)
     # Router job path, folder-style: "folder/router" -> /job/folder/job/router.
     router_job_path = db.Column(db.String(255), nullable=False, default="")
     verify_tls = db.Column(db.Boolean, nullable=False, default=True)
 
-    # Automation behaviour.
+    # Automation behaviour. ``auto_run_tickets`` is the DEFAULT for clusters not
+    # listed in ``auto_run_clusters`` — a per-cluster override map
+    # ``{cluster_id: "auto" | "manual"}`` (public id strings, like the
+    # per-cluster approval map on DeploymentRequestSetting).
     auto_run_tickets = db.Column(db.Boolean, nullable=False, default=False)
+    auto_run_clusters = db.Column(db.JSON, nullable=True)
+    # How a ticket's raw tag becomes the registry/deploy tag: "{tag}" is the
+    # ticket value, e.g. "v{tag}-prod" turns "1.72.1" into "v1.72.1-prod". The
+    # Jenkins router always receives the RAW ticket tag (it owns its own naming).
+    image_tag_template = db.Column(db.String(120), nullable=False, default="{tag}")
     build_timeout_minutes = db.Column(db.Integer, nullable=False, default=45)
     queue_timeout_minutes = db.Column(db.Integer, nullable=False, default=10)
     # How long the auto-created Change Bundle's deployment window stays open.
     bundle_window_hours = db.Column(db.Integer, nullable=False, default=24)
+    # How long to wait for the rolled-out pods to become ready before failing.
+    rollout_timeout_minutes = db.Column(db.Integer, nullable=False, default=15)
 
     last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
     last_test_status = db.Column(db.String(16), nullable=True)
@@ -2009,7 +2022,10 @@ class DeployAutomationRun(db.Model):
     container_name = db.Column(db.String(253), nullable=True)
     # Registry host + repository WITHOUT a tag (e.g. "nexus.areeba.com/areeba/aims-ui").
     image_repo = db.Column(db.Text, nullable=True)
+    # The RESOLVED tag used for registry checks + deploy (tag template applied).
     image_tag = db.Column(db.String(200), nullable=False)
+    # The raw tag as it arrived on the ticket — sent to the Jenkins router as-is.
+    ticket_tag = db.Column(db.String(200), nullable=True)
 
     status = db.Column(db.String(24), nullable=False, default="queued")
     error = db.Column(db.Text, nullable=True)
@@ -2021,6 +2037,8 @@ class DeployAutomationRun(db.Model):
     jenkins_build_url = db.Column(db.Text, nullable=True)
     jenkins_build_number = db.Column(db.Integer, nullable=True)
     build_triggered_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # When the post-deploy pod-health wait began (anchors the rollout timeout).
+    rollout_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
     # Change Bundle the approval path created (plain id, not a FK — bundles have
     # their own lifecycle and may be pruned independently).

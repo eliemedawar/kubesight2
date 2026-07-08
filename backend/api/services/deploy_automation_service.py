@@ -25,6 +25,7 @@ convention for scheduler-driven work).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -44,10 +45,17 @@ from ..secret_encryption import decrypt_secret, encrypt_secret
 from . import jenkins_client
 from .jenkins_client import JenkinsConfig, JenkinsError
 
-ACTIVE_STATUSES = ("queued", "checking_image", "building", "verifying_image", "awaiting_approval")
+ACTIVE_STATUSES = (
+    "queued",
+    "checking_image",
+    "building",
+    "verifying_image",
+    "awaiting_approval",
+    "verifying_rollout",
+)
 TERMINAL_STATUSES = ("deployed", "failed", "cancelled")
 
-STEP_KEYS = ("image_check", "build", "verify", "approval", "deploy")
+STEP_KEYS = ("image_check", "build", "verify", "approval", "deploy", "pods")
 
 # Transient registry/Jenkins hiccups are retried this many ticks before failing.
 _MAX_TRANSIENT_RETRIES = 4
@@ -94,12 +102,16 @@ def serialize_jenkins(row: JenkinsConnection) -> Dict[str, Any]:
         "baseUrl": row.base_url or "",
         "username": row.username or "",
         "apiTokenConfigured": bool(row.api_token_encrypted),
+        "buildTokenConfigured": bool(row.build_token_encrypted),
         "routerJobPath": row.router_job_path or "",
         "verifyTls": bool(row.verify_tls),
         "autoRunTickets": bool(row.auto_run_tickets),
+        "autoRunClusters": row.auto_run_clusters or {},
+        "imageTagTemplate": row.image_tag_template or "{tag}",
         "buildTimeoutMinutes": int(row.build_timeout_minutes or 45),
         "queueTimeoutMinutes": int(row.queue_timeout_minutes or 10),
         "bundleWindowHours": int(row.bundle_window_hours or 24),
+        "rolloutTimeoutMinutes": int(row.rollout_timeout_minutes or 15),
         "lastTestAt": _iso(row.last_test_at),
         "lastTestStatus": row.last_test_status,
         "lastTestMessage": row.last_test_message,
@@ -129,11 +141,30 @@ def update_jenkins(payload: Dict[str, Any]) -> Dict[str, Any]:
         row.verify_tls = bool(payload.get("verifyTls"))
     if "autoRunTickets" in payload:
         row.auto_run_tickets = bool(payload.get("autoRunTickets"))
+    if "autoRunClusters" in payload:
+        # Per-cluster overrides: {clusterId: "auto"|"manual"}. Anything else is
+        # dropped — an absent cluster inherits the global autoRunTickets default.
+        raw = payload.get("autoRunClusters")
+        overrides = {}
+        if isinstance(raw, dict):
+            for cluster_id, mode in raw.items():
+                key = str(cluster_id).strip()
+                value = str(mode).strip().lower()
+                if key and value in ("auto", "manual"):
+                    overrides[key] = value
+        row.auto_run_clusters = overrides
+    if "imageTagTemplate" in payload:
+        template = str(payload.get("imageTagTemplate") or "").strip() or "{tag}"
+        if "{tag}" not in template:
+            errors.append("The image tag template must contain {tag}.")
+        else:
+            row.image_tag_template = template
 
     for key, attr, lo, hi in (
         ("buildTimeoutMinutes", "build_timeout_minutes", 1, 24 * 60),
         ("queueTimeoutMinutes", "queue_timeout_minutes", 1, 24 * 60),
         ("bundleWindowHours", "bundle_window_hours", 1, 24 * 14),
+        ("rolloutTimeoutMinutes", "rollout_timeout_minutes", 1, 24 * 60),
     ):
         if key in payload:
             try:
@@ -141,13 +172,19 @@ def update_jenkins(payload: Dict[str, Any]) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 errors.append(f"{key} must be a whole number.")
 
-    # API token: write-only — blank keeps the current value; an explicit clear wipes.
+    # Tokens: write-only — blank keeps the current value; an explicit clear wipes.
     if payload.get("clearApiToken"):
         row.api_token_encrypted = None
     else:
         token = payload.get("apiToken")
         if token is not None and str(token).strip():
             row.api_token_encrypted = encrypt_secret(str(token).strip())
+    if payload.get("clearBuildToken"):
+        row.build_token_encrypted = None
+    else:
+        build_token = payload.get("buildToken")
+        if build_token is not None and str(build_token).strip():
+            row.build_token_encrypted = encrypt_secret(str(build_token).strip())
 
     if row.enabled:
         for label, value in (
@@ -176,6 +213,7 @@ def _to_client_config(row: JenkinsConnection) -> JenkinsConfig:
         api_token=decrypt_secret(row.api_token_encrypted or ""),
         router_job_path=row.router_job_path or "",
         verify_tls=bool(row.verify_tls),
+        build_token=decrypt_secret(row.build_token_encrypted or ""),
     )
 
 
@@ -239,6 +277,27 @@ def _fail(run: DeployAutomationRun, step_key: str, message: str) -> None:
 # Run lifecycle
 # ---------------------------------------------------------------------------
 
+def resolve_image_tag(row: Optional[JenkinsConnection], raw_tag: str) -> str:
+    """Apply the image tag template to a ticket's raw tag.
+
+    ``"1.72.1"`` with template ``"v{tag}-prod"`` → ``"v1.72.1-prod"``. If the
+    operator already typed the full registry form (the raw value matches the
+    template's shape, case-insensitively), it is used as-is instead of being
+    templated twice ("vV1.72.1-prod-prod").
+    """
+    raw = (raw_tag or "").strip()
+    template = ((row.image_tag_template if row else None) or "{tag}").strip()
+    if template == "{tag}" or "{tag}" not in template:
+        return raw
+    prefix, _, suffix = template.partition("{tag}")
+    already = re.fullmatch(
+        re.escape(prefix) + r".+" + re.escape(suffix), raw, flags=re.IGNORECASE
+    )
+    if already:
+        return raw
+    return template.replace("{tag}", raw)
+
+
 def _active_conflict(ticket_record_id: int, cluster_id: str, namespace: str, name: str):
     return (
         DeployAutomationRun.query.filter(
@@ -280,6 +339,7 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
             409,
         )
 
+    jrow = get_or_create_jenkins()
     run = DeployAutomationRun(
         ticket_record_id=ticket.id,
         ticket_number=ticket.ticket_number or ticket.ticket_id,
@@ -287,7 +347,9 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
         cluster_id=snapshot.cluster_id,
         namespace=snapshot.namespace,
         deployment_name=snapshot.deployment_name,
-        image_tag=tag,
+        # Registry/deploy tag = template applied; the router gets the raw tag.
+        image_tag=resolve_image_tag(jrow, tag),
+        ticket_tag=tag,
         status="queued",
         steps=_initial_steps(),
         auto=bool(auto),
@@ -307,6 +369,7 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
             "namespace": run.namespace,
             "clusterId": run.cluster_id,
             "tag": run.image_tag,
+            "ticketTag": run.ticket_tag,
             "auto": bool(auto),
         },
     )
@@ -314,7 +377,7 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
     # Advance immediately so a manual Run gives instant feedback (the first
     # stages are seconds); errors are recorded on the run, never raised.
     try:
-        _advance(run, get_or_create_jenkins())
+        _advance(run, jrow)
         db.session.commit()
     except Exception:  # pragma: no cover — advance already isolates per-step errors
         db.session.rollback()
@@ -363,6 +426,7 @@ def serialize_run(run: DeployAutomationRun) -> Dict[str, Any]:
         "containerName": run.container_name,
         "imageRepo": run.image_repo,
         "imageTag": run.image_tag,
+        "ticketTag": run.ticket_tag,
         "status": run.status,
         "error": run.error,
         "steps": run.steps or [],
@@ -428,6 +492,7 @@ def _current_step_key(run: DeployAutomationRun) -> str:
         "building": "build",
         "verifying_image": "verify",
         "awaiting_approval": "approval",
+        "verifying_rollout": "pods",
     }.get(run.status, "deploy")
 
 
@@ -445,6 +510,8 @@ def _advance(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
             _do_verify(run)
         elif run.status == "awaiting_approval":
             _do_watch_bundle(run)
+        elif run.status == "verifying_rollout":
+            _do_check_pods(run, jrow)
         if run.status == before or run.status in TERMINAL_STATUSES:
             break
 
@@ -561,13 +628,15 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
         return
 
     try:
+        # The verified router contract (2026-07-08): APP / TAG / NAMESPACE, with
+        # the job-level `token` appended by the client. TAG is the RAW ticket
+        # tag — the router owns the naming convention (e.g. v{tag}-prod).
         queue_url = jenkins_client.trigger_build(
             _to_client_config(jrow),
             {
-                "APP_NAME": run.deployment_name,
+                "APP": run.deployment_name,
+                "TAG": run.ticket_tag or run.image_tag,
                 "NAMESPACE": run.namespace,
-                "IMAGE_TAG": run.image_tag,
-                "TICKET": run.ticket_number or "",
             },
         )
     except JenkinsError as exc:
@@ -825,9 +894,26 @@ def _handoff_direct(run: DeployAutomationRun) -> None:
     else:
         detail = f"[mock] {run.container_name} → {target}"
 
+    _set_step(run, "deploy", "done", detail)
+    _begin_rollout_watch(run)
+
+
+def _begin_rollout_watch(run: DeployAutomationRun) -> None:
+    """The image change is applied — now wait for the pods to actually come up.
+
+    A run only counts as deployed once the deployment reports ready (e.g. 1/1);
+    ``verifying_rollout`` is advanced by ``_do_check_pods`` on every tick.
+    """
+    run.status = "verifying_rollout"
+    run.rollout_started_at = datetime.now(timezone.utc)
+    run.retry_count = 0
+    _set_step(run, "pods", "run", "waiting for the pods to become ready")
+
+
+def _complete_deployed(run: DeployAutomationRun, pods_detail: str) -> None:
     run.status = "deployed"
     run.finished_at = datetime.now(timezone.utc)
-    _set_step(run, "deploy", "done", detail)
+    _set_step(run, "pods", "done", pods_detail)
     log_audit(
         "automation_run_deployed",
         actor=None,
@@ -838,11 +924,69 @@ def _handoff_direct(run: DeployAutomationRun) -> None:
             "deployment": run.deployment_name,
             "namespace": run.namespace,
             "clusterId": run.cluster_id,
-            "image": target,
-            "mode": "direct",
+            "image": _target_image(run),
+            "mode": "bundle" if run.bundle_id else "direct",
+            "pods": pods_detail,
         },
         commit=False,
     )
+
+
+def _do_check_pods(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
+    """verifying_rollout → deployed once readyReplicas covers the desired count.
+
+    Read errors during a rollout are treated as "still waiting" (pods churn,
+    apiservers hiccup) — only the rollout timeout fails the run.
+    """
+    from ..k8s_provider import (
+        K8sCommandError,
+        _run_for_access,
+        resolve_cluster_access,
+        should_use_real_k8s,
+    )
+
+    if not should_use_real_k8s(run.cluster_id):
+        _complete_deployed(run, "[mock] 1/1 ready")
+        return
+
+    started = _aware(run.rollout_started_at) or datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    timeout_min = int(jrow.rollout_timeout_minutes or 15)
+
+    detail = ""
+    try:
+        access = resolve_cluster_access(run.cluster_id)
+        if not access:
+            raise K8sCommandError(f"Cluster '{run.cluster_id}' was not found.")
+        raw = _run_for_access(
+            access,
+            ["get", "deployment", run.deployment_name, "-n", run.namespace, "-o", "json"],
+        )
+        spec = json.loads(raw)
+        desired = int((spec.get("spec") or {}).get("replicas") or 0)
+        status = spec.get("status") or {}
+        ready = int(status.get("readyReplicas") or 0)
+        updated = int(status.get("updatedReplicas") or 0)
+
+        if desired == 0:
+            _complete_deployed(run, "deployment is scaled to 0 — no pods expected")
+            return
+        if ready >= desired and updated >= desired:
+            _complete_deployed(run, f"{ready}/{desired} ready")
+            return
+        detail = f"{ready}/{desired} ready ({updated}/{desired} on the new image)"
+    except (K8sCommandError, ValueError) as exc:
+        detail = f"could not read pod status — retrying: {exc}"
+
+    if now - started > timedelta(minutes=timeout_min):
+        _fail(
+            run, "pods",
+            f"The image was applied but the pods did not become ready within {timeout_min} min"
+            + (f" (last seen: {detail})." if detail else "."),
+        )
+        return
+    elapsed = int((now - started).total_seconds() // 60)
+    _set_step(run, "pods", "run", f"{detail} — waiting ({elapsed}/{timeout_min} min)")
 
 
 def _do_watch_bundle(run: DeployAutomationRun) -> None:
@@ -864,24 +1008,9 @@ def _do_watch_bundle(run: DeployAutomationRun) -> None:
         _set_step(run, "deploy", "run", "bundle executing")
         return
     if status == "completed":
-        run.status = "deployed"
-        run.finished_at = datetime.now(timezone.utc)
         _set_step(run, "approval", "done", f"bundle #{bundle.id} approved")
-        _set_step(run, "deploy", "done", f"deployed by bundle #{bundle.id}")
-        log_audit(
-            "automation_run_deployed",
-            actor=None,
-            target_type="deploy_automation_run",
-            target_id=str(run.id),
-            details={
-                "ticket": run.ticket_number,
-                "deployment": run.deployment_name,
-                "bundleId": bundle.id,
-                "image": _target_image(run),
-                "mode": "bundle",
-            },
-            commit=False,
-        )
+        _set_step(run, "deploy", "done", f"applied by bundle #{bundle.id}")
+        _begin_rollout_watch(run)
         return
     if status == "rejected":
         _fail(run, "approval", f"Change bundle #{bundle.id} was rejected" +
@@ -899,15 +1028,34 @@ def _do_watch_bundle(run: DeployAutomationRun) -> None:
 # Auto-trigger hook (called from the Zoho webhook path — must never raise)
 # ---------------------------------------------------------------------------
 
+def auto_run_enabled_for(row: Optional[JenkinsConnection], cluster_id: str) -> bool:
+    """Per-cluster auto-start decision: the override map wins, else the global default."""
+    if row is None:
+        return False
+    override = (row.auto_run_clusters or {}).get(str(cluster_id))
+    if override == "auto":
+        return True
+    if override == "manual":
+        return False
+    return bool(row.auto_run_tickets)
+
+
 def maybe_auto_run(ticket_record_id: int) -> Optional[Dict[str, Any]]:
-    """Start a run for a freshly-resolved webhook ticket when auto-run is on.
+    """Start a run for a freshly-resolved webhook ticket when the target
+    cluster is set to auto-start (per-cluster override, else the global toggle).
 
     Called from ``resolve_inbound`` — swallows every error (the webhook response
     to Zoho must never depend on automation health).
     """
     try:
         row = JenkinsConnection.query.get(1)
-        if not row or not row.auto_run_tickets:
+        ticket = ZohoInboundTicket.query.get(int(ticket_record_id))
+        if ticket is None or not ticket.app_service_id:
+            return None
+        snapshot = ZohoDeploymentSnapshot.query.get(ticket.app_service_id)
+        if snapshot is None:
+            return None
+        if not auto_run_enabled_for(row, snapshot.cluster_id):
             return None
         return start_run(ticket_record_id, user=None, auto=True)
     except AutomationError:

@@ -22,19 +22,25 @@ design.
 | Registry gating | **Build only if missing.** HEAD-check Nexus for the image tag first; already there → skip Jenkins entirely. Missing → trigger router, then **re-check Nexus after the build** (registry is the source of truth, a green build is not enough). |
 | Handoff after image is ready | **Respect the cluster's approval config**: `cluster_required_approvals(cluster_id) > 0` → create a Change Bundle (normal quorum approval + window); `== 0` → apply the image change directly, immediately. |
 
-### Jenkins router contract (KubeSight → Jenkins)
+### Jenkins router contract (KubeSight → Jenkins) — VERIFIED LIVE 2026-07-08
 
 ```
 POST {jenkins}/job/{router_job_path}/buildWithParameters
-  APP_NAME  = <deployment name>     e.g. aims-ui
-  NAMESPACE = <namespace>           from ticket cf_environment
-  IMAGE_TAG = <tag>                 from ticket cf_tag
-  TICKET    = <ticket number>       traceability, e.g. DR-1042
+  --user <username>:<api token>       HTTP Basic
+  token     = <build token>           job's "Trigger builds remotely" token (optional field)
+  APP       = <deployment name>       e.g. processing-issuing
+  TAG       = <RAW ticket tag>        e.g. 1.73.13 — router owns the naming convention
+  NAMESPACE = <namespace>             from ticket cf_environment, e.g. verto-uat
 ```
 
-- Auth: Jenkins user + **API token** via HTTP Basic (no CSRF crumb needed with token auth).
-- KubeSight follows the `Location` header (queue item) → queue item's `executable` → build number/URL → polls `{build}/api/json` for `building`/`result`.
+- Auth: Jenkins user + **API token** via HTTP Basic (no CSRF crumb needed with token auth),
+  plus the optional job-level `token` form field.
+- KubeSight follows the `Location` header (queue item) → queue item's `executable` → build
+  number/URL → polls `{build}/api/json` for `building`/`result`.
 - **Router requirement:** it must block on the child job and mirror its result (`SUCCESS`/`FAILURE`).
+- Registry/deploy tags differ from ticket tags: the **image tag template** config (e.g.
+  `v{tag}-prod`) maps `1.72.1` → `v1.72.1-prod` for Nexus checks + deploys; the router always
+  receives the raw ticket tag.
 
 ---
 

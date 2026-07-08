@@ -1,11 +1,16 @@
 """Minimal Jenkins client for the deploy-automation ROUTER pipeline.
 
 KubeSight only ever talks to ONE Jenkins job: a router pipeline (maintained by
-the DevOps team) that receives APP_NAME / NAMESPACE / IMAGE_TAG / TICKET,
-dispatches to the correct downstream build job, waits on it and propagates its
-result. KubeSight therefore needs just three operations: trigger the router
+the DevOps team) that receives ``APP`` / ``TAG`` / ``NAMESPACE``, dispatches to
+the correct downstream build job, waits on it and propagates its result.
+KubeSight therefore needs just three operations: trigger the router
 (``buildWithParameters``), resolve the returned queue item to a build, and poll
-that build's result. See DEPLOY-AUTOMATION-PLAN.md §1 for the contract.
+that build's result. Verified live contract (2026-07-08)::
+
+    POST {base}/job/{router}/buildWithParameters
+      --user <user>:<api token>          (HTTP Basic)
+      token=<remote-trigger token>       (job-level, optional)
+      APP=processing-issuing  TAG=1.73.13  NAMESPACE=verto-uat
 
 Auth is a Jenkins user + API token over HTTP Basic — token auth is exempt from
 Jenkins CSRF crumbs, so no crumb dance is needed. Only the standard library is
@@ -40,13 +45,15 @@ class JenkinsError(Exception):
 
 @dataclass
 class JenkinsConfig:
-    """Everything a router call needs, with the API token already decrypted."""
+    """Everything a router call needs, with the tokens already decrypted."""
 
     base_url: str
     username: str
     api_token: str
     router_job_path: str
     verify_tls: bool = True
+    # Job-level "Trigger builds remotely" token, sent as the `token` form field.
+    build_token: str = ""
 
 
 def job_url(cfg: JenkinsConfig) -> str:
@@ -127,7 +134,10 @@ def test_connection(cfg: JenkinsConfig) -> Dict[str, Any]:
 
 def trigger_build(cfg: JenkinsConfig, params: Dict[str, str]) -> str:
     """POST buildWithParameters on the router. Returns the queue item URL."""
-    body = urlencode({k: str(v) for k, v in params.items()}).encode("ascii")
+    fields = {k: str(v) for k, v in params.items()}
+    if cfg.build_token:
+        fields["token"] = cfg.build_token
+    body = urlencode(fields).encode("utf-8")
     url = f"{job_url(cfg)}/buildWithParameters"
     req = urllib.request.Request(
         url,
@@ -144,7 +154,7 @@ def trigger_build(cfg: JenkinsConfig, params: Dict[str, str]) -> str:
         if exc.code == 400:
             raise JenkinsError(
                 "Jenkins rejected the parameters (400) — the router job may not be parameterized "
-                "with APP_NAME/NAMESPACE/IMAGE_TAG/TICKET yet.",
+                "with APP/TAG/NAMESPACE yet.",
                 400,
             ) from exc
         raise JenkinsError(f"Triggering the router build failed (HTTP {exc.code}).", exc.code) from exc

@@ -141,6 +141,10 @@
   display: grid;
   gap: 0.65rem;
   margin-top: 0.75rem;
+  /* History can grow unbounded — cap it and scroll inside the card. */
+  max-height: 30rem;
+  overflow-y: auto;
+  padding-right: 0.25rem;
 }
 
 .sg-zh-run {
@@ -179,6 +183,29 @@
 .sg-zh-pstep-skip { opacity: 0.65; }
 
 .sg-zh-run .sg-zh-fhint a { color: var(--accent-strong); }
+
+/* Per-cluster auto-start overrides in the Jenkins config modal. */
+.sg-zh-cluster-modes {
+  display: grid;
+  gap: 0.35rem;
+  max-height: 14rem;
+  overflow-y: auto;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.sg-zh-cluster-mode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.25rem 0.35rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+}
+.sg-zh-cluster-mode:hover { background: var(--bg-interactive); }
+.sg-zh-cluster-mode select { flex: 0 1 14rem; min-width: 9rem; }
 
 /* Inbound-ticket actions: run (play) + delete, compact icon-only ghosts. */
 .sg-zh-tactions { width: 4.5rem; text-align: right; white-space: nowrap; }

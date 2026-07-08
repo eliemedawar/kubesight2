@@ -91,13 +91,19 @@ def test_jenkins_config_roundtrip(client, admin_token):
     # Partial save while disabled is fine; the token is write-only.
     response = client.put(
         "/api/zoho/jenkins",
-        json={"baseUrl": "https://jenkins.example.com", "username": "bot", "apiToken": "s3cret"},
+        json={
+            "baseUrl": "https://jenkins.example.com",
+            "username": "bot",
+            "apiToken": "s3cret",
+            "buildToken": "trigger-t0ken",
+        },
         headers=auth_headers(admin_token),
     )
     assert response.status_code == 200
     data = response.get_json()["data"]
     assert data["apiTokenConfigured"] is True
-    assert "apiToken" not in data and "s3cret" not in str(data)
+    assert data["buildTokenConfigured"] is True
+    assert "s3cret" not in str(data) and "trigger-t0ken" not in str(data)
 
     # Enabling requires the router job path.
     response = client.put(
@@ -183,23 +189,121 @@ def test_run_bundle_path_when_cluster_requires_approval(client, admin_token, app
     advance_runs()
     row = DeployAutomationRun.query.get(run["id"])
     assert row.status == "deployed"
+    # Bundle completion also passes through the pod-health gate (instant in mock).
+    pods = next(s for s in row.steps if s["key"] == "pods")
+    assert pods["status"] == "done"
+
+
+def test_auto_run_respects_per_cluster_overrides(client, admin_token, app):
+    from api.models import JenkinsConnection
+    from api.services.deploy_automation_service import maybe_auto_run
+
+    # Global default OFF, but this cluster is overridden to auto-start.
+    row = JenkinsConnection(id=1, auto_run_tickets=False, auto_run_clusters={CLUSTER: "auto"})
+    db.session.add(row)
+    db.session.commit()
+
+    ticket = _make_ticket(tag="v1.0.0")
+    started = maybe_auto_run(ticket.id)
+    assert started is not None and started["auto"] is True
+
+    # Flip: global ON but the cluster is overridden to manual — nothing starts.
+    row = JenkinsConnection.query.get(1)
+    row.auto_run_tickets = True
+    row.auto_run_clusters = {CLUSTER: "manual"}
+    db.session.commit()
+
+    before = DeployAutomationRun.query.count()
+    ticket2 = _make_ticket(tag="v1.0.1")
+    assert maybe_auto_run(ticket2.id) is None
+    assert DeployAutomationRun.query.count() == before
 
 
 def test_run_direct_path_when_no_approval_required(client, admin_token, app, monkeypatch):
-    """Approval-free cluster ⇒ image applied immediately (mock mode)."""
+    """Approval-free cluster ⇒ image applied immediately (mock mode), with the
+    ticket's raw tag resolved through the image tag template."""
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
         lambda image: {"status": "found", "image": image},
     )
     _set_cluster_approvals(0)
-    ticket = _make_ticket(tag="v8.0.0")
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={"imageTagTemplate": "v{tag}-prod"},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    ticket = _make_ticket(tag="8.0.0")
 
     run = _start(client, admin_token, ticket.id)
     assert run["status"] == "deployed", run
+    assert run["imageTag"] == "v8.0.0-prod"
+    assert run["ticketTag"] == "8.0.0"
     assert _step(run, "approval")["status"] == "skip"
     assert _step(run, "deploy")["status"] == "done"
-    assert "ghcr.io/mock/payments:v8.0.0" in _step(run, "deploy")["detail"]
+    assert "ghcr.io/mock/payments:v8.0.0-prod" in _step(run, "deploy")["detail"]
+    # Completion requires the pod-health step to pass (instant in mock mode).
+    assert _step(run, "pods")["status"] == "done"
     assert run["bundleId"] is None
+
+
+def test_router_trigger_contract(client, admin_token, app, monkeypatch):
+    """The router gets exactly APP/TAG/NAMESPACE with the RAW ticket tag; the
+    client appends the job-level token; the run's own tag is template-resolved."""
+    captured = {}
+
+    def fake_trigger(cfg, params):
+        captured["params"] = params
+        captured["build_token"] = cfg.build_token
+        return "http://jenkins/queue/item/1"
+
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image: {"status": "not_found", "image": image},
+    )
+    monkeypatch.setattr("api.services.jenkins_client.trigger_build", fake_trigger)
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={
+            "enabled": True,
+            "baseUrl": "http://10.43.17.16:8080",
+            "username": "admin",
+            "apiToken": "api-t0ken",
+            "buildToken": "kubesightareeba",
+            "routerJobPath": "georgio-testing",
+            "imageTagTemplate": "v{tag}-prod",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+
+    ticket = _make_ticket(tag="1.73.13")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "building", run
+    assert captured["params"] == {
+        "APP": DEPLOYMENT,
+        "TAG": "1.73.13",
+        "NAMESPACE": NAMESPACE,
+    }
+    assert captured["build_token"] == "kubesightareeba"
+    # Registry/deploy side uses the templated tag.
+    assert run["imageTag"] == "v1.73.13-prod"
+    assert run["ticketTag"] == "1.73.13"
+
+
+def test_image_tag_template_resolution(app):
+    from api.models import JenkinsConnection
+    from api.services.deploy_automation_service import resolve_image_tag
+
+    row = JenkinsConnection(id=1, image_tag_template="v{tag}-prod")
+    assert resolve_image_tag(row, "1.72.1") == "v1.72.1-prod"
+    # Operator already typed the full registry form (any case) → used as-is.
+    assert resolve_image_tag(row, "V1.72.5-prod") == "V1.72.5-prod"
+    assert resolve_image_tag(row, "v2.0.0-prod") == "v2.0.0-prod"
+    # No template configured → raw passthrough.
+    assert resolve_image_tag(None, "1.2.3") == "1.2.3"
+    row.image_tag_template = "{tag}"
+    assert resolve_image_tag(row, "1.2.3") == "1.2.3"
 
 
 def test_viewer_cannot_start_or_configure(client, viewer_token, app):

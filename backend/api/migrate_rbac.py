@@ -532,9 +532,29 @@ def _migrate_zoho_integration_columns() -> None:
         _add_column_if_missing("zoho_integration", "last_dependency_message", "TEXT")
 
 
+def _migrate_deploy_automation_columns() -> None:
+    """Column adds for the deploy-automation tables (created 2026-07-08).
+
+    The post-deploy pod-health step added a rollout timeout on the Jenkins
+    config and a rollout-start anchor on runs; both tables may already exist.
+    """
+    tables = inspect(db.engine).get_table_names()
+    if "jenkins_connection" in tables:
+        _add_column_if_missing("jenkins_connection", "rollout_timeout_minutes", "INTEGER DEFAULT 15")
+        _add_column_if_missing("jenkins_connection", "auto_run_clusters", "JSON")
+        _add_column_if_missing(
+            "jenkins_connection", "image_tag_template", "VARCHAR(120) DEFAULT '{tag}'"
+        )
+        _add_column_if_missing("jenkins_connection", "build_token_encrypted", "TEXT")
+    if "deploy_automation_runs" in tables:
+        _add_column_if_missing("deploy_automation_runs", "rollout_started_at", "DATETIME")
+        _add_column_if_missing("deploy_automation_runs", "ticket_tag", "VARCHAR(200)")
+
+
 def run_migrations() -> None:
     db.create_all()
     _migrate_zoho_integration_columns()
+    _migrate_deploy_automation_columns()
     _migrate_user_onboarding_columns()
     _migrate_deployment_request_columns()
     _migrate_change_bundle_columns()

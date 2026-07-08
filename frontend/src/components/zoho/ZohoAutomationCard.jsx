@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import EmptyState from "../common/EmptyState.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
+import { getZohoSourceClusters } from "../../api/zohoApi.js";
 import { IconCheck } from "./icons.jsx";
 
 // Display order + labels for the run step chips (mirrors the backend STEP_KEYS).
@@ -10,6 +11,7 @@ const STEPS = [
   { key: "verify", label: "Verify" },
   { key: "approval", label: "Approval" },
   { key: "deploy", label: "Deploy" },
+  { key: "pods", label: "Pod health" },
 ];
 
 const STEP_CHIP_CLASS = {
@@ -26,6 +28,7 @@ const RUN_STATUS_PILL = {
   building: ["info", "Building"],
   verifying_image: ["info", "Verifying"],
   awaiting_approval: ["warn", "Awaiting approval"],
+  verifying_rollout: ["info", "Rolling out"],
   deployed: ["ok", "Deployed"],
   failed: ["danger", "Failed"],
   cancelled: ["muted", "Cancelled"],
@@ -37,6 +40,7 @@ export const ACTIVE_RUN_STATUSES = new Set([
   "building",
   "verifying_image",
   "awaiting_approval",
+  "verifying_rollout",
 ]);
 
 export function RunStatusPill({ status }) {
@@ -53,7 +57,16 @@ function RunRow({ run, canManage, cancelling, onCancel }) {
         <b>{run.ticketNumber || `run #${run.id}`}</b>
         <span className="mono sg-zh-run-target">{run.deploymentName}</span>
         <span className="sg-tag">{run.namespace}</span>
-        <span className="sg-tag">{run.imageTag}</span>
+        <span
+          className="sg-tag"
+          title={
+            run.ticketTag && run.ticketTag !== run.imageTag
+              ? `ticket tag: ${run.ticketTag}`
+              : undefined
+          }
+        >
+          {run.imageTag}
+        </span>
         {run.auto ? <span className="sg-zh-count">auto</span> : null}
         <span className="sg-zh-run-spacer" />
         <span className="sg-zh-htime">
@@ -74,7 +87,12 @@ function RunRow({ run, canManage, cancelling, onCancel }) {
 
       <div className="sg-pipe sg-zh-run-pipe">
         {STEPS.map((step, index) => {
-          const state = steps.get(step.key) || { status: "wait", detail: "" };
+          let state = steps.get(step.key) || { status: "wait", detail: "" };
+          // Runs that finished before the pod-health step existed have no
+          // "pods" entry — show it as skipped rather than eternally waiting.
+          if (step.key === "pods" && run.status === "deployed" && state.status === "wait") {
+            state = { status: "skip", detail: "not checked (older run)" };
+          }
           const chip = (
             <span
               key={step.key}
@@ -144,8 +162,20 @@ export default function ZohoAutomationCard({
           <span className={`status-pill ${enabled ? "ok" : "muted"}`}>
             {enabled ? "Jenkins connected" : "Jenkins off"}
           </span>
-          <span className={`status-pill ${jenkins?.autoRunTickets ? "ok" : "muted"}`}>
-            {jenkins?.autoRunTickets ? "Auto-run on" : "Auto-run off"}
+          <span
+            className={`status-pill ${jenkins?.autoRunTickets ? "ok" : "muted"}`}
+            title={
+              Object.keys(jenkins?.autoRunClusters || {}).length
+                ? Object.entries(jenkins.autoRunClusters)
+                    .map(([c, m]) => `${c}: ${m}`)
+                    .join(", ")
+                : "No per-cluster overrides"
+            }
+          >
+            {jenkins?.autoRunTickets ? "Auto-start on" : "Auto-start off"}
+            {Object.keys(jenkins?.autoRunClusters || {}).length
+              ? ` · ${Object.keys(jenkins.autoRunClusters).length} override(s)`
+              : ""}
           </span>
           {canManage ? (
             <>
@@ -211,15 +241,44 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
     baseUrl: jenkins?.baseUrl || "",
     username: jenkins?.username || "",
     apiToken: "",
+    buildToken: "",
     routerJobPath: jenkins?.routerJobPath || "",
     verifyTls: jenkins?.verifyTls !== false,
     autoRunTickets: Boolean(jenkins?.autoRunTickets),
+    autoRunClusters: { ...(jenkins?.autoRunClusters || {}) },
+    imageTagTemplate: jenkins?.imageTagTemplate || "{tag}",
     buildTimeoutMinutes: jenkins?.buildTimeoutMinutes || 45,
     queueTimeoutMinutes: jenkins?.queueTimeoutMinutes || 10,
     bundleWindowHours: jenkins?.bundleWindowHours || 24,
+    rolloutTimeoutMinutes: jenkins?.rolloutTimeoutMinutes || 15,
   }));
   const [error, setError] = useState("");
+  const [clusters, setClusters] = useState([]);
   const set = (k, v) => setForm((prev) => ({ ...prev, [k]: v }));
+
+  // Per-cluster auto-start overrides need the selectable cluster list.
+  useEffect(() => {
+    let cancelled = false;
+    getZohoSourceClusters()
+      .then((res) => {
+        if (!cancelled) setClusters(res?.items || []);
+      })
+      .catch(() => {
+        /* section simply stays empty */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const setClusterMode = (clusterId, mode) => {
+    setForm((prev) => {
+      const next = { ...prev.autoRunClusters };
+      if (mode === "default") delete next[clusterId];
+      else next[clusterId] = mode;
+      return { ...prev, autoRunClusters: next };
+    });
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -234,8 +293,12 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
       buildTimeoutMinutes: Number(form.buildTimeoutMinutes) || 45,
       queueTimeoutMinutes: Number(form.queueTimeoutMinutes) || 10,
       bundleWindowHours: Number(form.bundleWindowHours) || 24,
+      rolloutTimeoutMinutes: Number(form.rolloutTimeoutMinutes) || 15,
     };
+    payload.autoRunClusters = form.autoRunClusters;
+    payload.imageTagTemplate = form.imageTagTemplate.trim() || "{tag}";
     if (form.apiToken.trim()) payload.apiToken = form.apiToken.trim();
+    if (form.buildToken.trim()) payload.buildToken = form.buildToken.trim();
     try {
       await onSave(payload);
     } catch (err) {
@@ -255,9 +318,9 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
           <div>
             <h3>Jenkins router connection</h3>
             <p className="muted">
-              KubeSight triggers ONE router pipeline with <code>APP_NAME</code>,{" "}
-              <code>NAMESPACE</code>, <code>IMAGE_TAG</code> and <code>TICKET</code>; the router
-              maps the app to the right job, waits on it and propagates its result.
+              KubeSight triggers ONE router pipeline with <code>APP</code>, <code>TAG</code> and{" "}
+              <code>NAMESPACE</code> (plus the job's remote-trigger <code>token</code> when set);
+              the router maps the app to the right job, waits on it and propagates its result.
             </p>
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
@@ -316,6 +379,20 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
               autoComplete="new-password"
             />
           </label>
+          <label>
+            Build token (optional)
+            <input
+              type="password"
+              value={form.buildToken}
+              onChange={(e) => set("buildToken", e.target.value)}
+              placeholder={jenkins?.buildTokenConfigured ? "•••• (leave blank to keep)" : ""}
+              autoComplete="new-password"
+            />
+            <span className="field-hint">
+              The job's “Trigger builds remotely” token — sent as the <code>token</code> field on
+              every build request.
+            </span>
+          </label>
           <label className="checkbox-label">
             <input
               type="checkbox"
@@ -326,14 +403,58 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
           </label>
 
           <h4>Automation behaviour</h4>
+          <label>
+            Image tag template
+            <input
+              value={form.imageTagTemplate}
+              onChange={(e) => set("imageTagTemplate", e.target.value)}
+              placeholder="{tag}"
+              className="mono"
+            />
+            <span className="field-hint">
+              How a ticket's tag becomes the registry tag. <code>{"{tag}"}</code> is the ticket
+              value — e.g. <code>{"v{tag}-prod"}</code> turns <code>1.72.1</code> into{" "}
+              <code>v1.72.1-prod</code> for the Nexus check and the deploy. The Jenkins router
+              always receives the raw ticket tag. Tickets already carrying the full form are used
+              as-is.
+            </span>
+          </label>
           <label className="checkbox-label">
             <input
               type="checkbox"
               checked={form.autoRunTickets}
               onChange={(e) => set("autoRunTickets", e.target.checked)}
             />
-            Auto-run: start a run for every resolved inbound ticket that carries a tag
+            Auto-start by default: run automation for every resolved inbound ticket with a tag
           </label>
+          <div className="field-span">
+            <span className="sg-zh-pick-label">Auto-start per cluster</span>
+            <p className="field-hint">
+              Overrides the default above for the ticket's target cluster. On a cluster set to
+              auto-start that also requires no approvals, tickets deploy fully hands-off.
+            </p>
+            {clusters.length === 0 ? (
+              <p className="muted">No clusters available.</p>
+            ) : (
+              <div className="sg-zh-cluster-modes">
+                {clusters.map((c) => (
+                  <label key={c.id} className="sg-zh-cluster-mode">
+                    <span className="mono">{c.name || c.id}</span>
+                    <select
+                      value={form.autoRunClusters[c.id] || "default"}
+                      onChange={(e) => setClusterMode(c.id, e.target.value)}
+                    >
+                      <option value="default">
+                        Default ({form.autoRunTickets ? "auto-start" : "manual"})
+                      </option>
+                      <option value="auto">Auto-start</option>
+                      <option value="manual">Manual start</option>
+                    </select>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
           <label>
             Build timeout (minutes)
             <input
@@ -362,6 +483,19 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
             />
             <span className="field-hint">
               How long an auto-created Change Bundle stays deployable while approvals come in.
+            </span>
+          </label>
+          <label>
+            Rollout timeout (minutes)
+            <input
+              type="number"
+              min="1"
+              value={form.rolloutTimeoutMinutes}
+              onChange={(e) => set("rolloutTimeoutMinutes", e.target.value)}
+            />
+            <span className="field-hint">
+              After the image is applied, how long to wait for the pods to report ready before the
+              run is marked failed.
             </span>
           </label>
 
