@@ -91,6 +91,21 @@ export const NAV_PAGES = [
   // Monitoring
   { key: "logs", label: "Logs", permission: "logs:view", section: "Monitoring" },
 
+  // Alerts (their own section — observability, kept out of Administration)
+  { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Alerts" },
+  {
+    key: "alertPolicies",
+    label: "Alert Policies",
+    permission: "alerts:view",
+    section: "Alerts",
+  },
+  {
+    key: "alertRouting",
+    label: "Alert Routing",
+    adminOnly: true,
+    section: "Alerts",
+  },
+
   // Services
   {
     key: "serviceCatalog",
@@ -129,19 +144,6 @@ export const NAV_PAGES = [
     key: "deploymentRequests",
     label: "Deployment Requests",
     permission: "deployment_requests:view",
-    section: "Administration",
-  },
-  { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Administration" },
-  {
-    key: "alertPolicies",
-    label: "Alert Policies",
-    permission: "alerts:view",
-    section: "Administration",
-  },
-  {
-    key: "alertRouting",
-    label: "Alert Routing",
-    adminOnly: true,
     section: "Administration",
   },
   {
