@@ -20,6 +20,24 @@ export const listZohoInboundTickets = (limit = 50) =>
 export const deleteZohoInboundTicket = (recordId) =>
   request(`/api/zoho/inbound-tickets/${encodeURIComponent(recordId)}`, { method: "DELETE" });
 
+// --- Deploy automation (Jenkins router + per-ticket runs) ---
+export const getJenkinsConfig = () => request("/api/zoho/jenkins");
+
+export const updateJenkinsConfig = (payload) =>
+  request("/api/zoho/jenkins", { method: "PUT", body: payload });
+
+export const testJenkinsConnection = () =>
+  request("/api/zoho/jenkins/test", { method: "POST" });
+
+export const listAutomationRuns = (limit = 50) =>
+  request("/api/zoho/automation/runs", { query: { limit } });
+
+export const startAutomationRun = (ticketRecordId) =>
+  request("/api/zoho/automation/runs", { method: "POST", body: { ticketRecordId } });
+
+export const cancelAutomationRun = (runId) =>
+  request(`/api/zoho/automation/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+
 // --- Layout field editor ---
 export const getZohoLayout = (fresh = false) =>
   request("/api/zoho/layout", { query: fresh ? { fresh: 1 } : undefined });

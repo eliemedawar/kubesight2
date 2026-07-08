@@ -13,8 +13,10 @@ from ..audit import log_audit
 from ..auth_utils import get_current_user
 from ..decorators import require_permission
 from ..response import error_response, success_response
+from ..services import deploy_automation_service as automation_svc
 from ..services import zoho_fields_service as fields_svc
 from ..services import zoho_sync_service as svc
+from ..services.deploy_automation_service import AutomationError
 from ..services.zoho_client import ZohoError
 
 zoho_bp = Blueprint("zoho", __name__, url_prefix="/api/zoho")
@@ -236,6 +238,73 @@ def create_field():
 def inbound_tickets():
     limit = request.args.get("limit", 50)
     return success_response({"items": svc.list_inbound_tickets(limit=limit)})
+
+
+# ---------------------------------------------------------------------------
+# Deploy automation — Jenkins router connection + per-ticket automation runs.
+# ---------------------------------------------------------------------------
+
+@zoho_bp.route("/jenkins", methods=["GET"])
+@require_permission("zoho:view")
+def get_jenkins():
+    return success_response(automation_svc.get_jenkins_dict())
+
+
+@zoho_bp.route("/jenkins", methods=["PUT"])
+@require_permission("zoho:manage")
+def update_jenkins():
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = automation_svc.update_jenkins(payload)
+    except AutomationError as exc:
+        return error_response(str(exc), exc.status)
+    log_audit(
+        "jenkins_connection_updated",
+        actor=get_current_user(),
+        target_type="jenkins_connection",
+        target_id="1",
+        details={"enabled": data.get("enabled"), "routerJobPath": data.get("routerJobPath")},
+    )
+    return success_response(data)
+
+
+@zoho_bp.route("/jenkins/test", methods=["POST"])
+@require_permission("zoho:manage")
+def test_jenkins():
+    return success_response(automation_svc.test_jenkins())
+
+
+@zoho_bp.route("/automation/runs", methods=["GET"])
+@require_permission("zoho:view")
+def list_automation_runs():
+    limit = request.args.get("limit", 50)
+    return success_response({"items": automation_svc.list_runs(limit=limit)})
+
+
+@zoho_bp.route("/automation/runs", methods=["POST"])
+@require_permission("zoho:manage")
+def start_automation_run():
+    payload = request.get_json(silent=True) or {}
+    ticket_record_id = payload.get("ticketRecordId")
+    if not ticket_record_id:
+        return error_response("ticketRecordId is required.", 400)
+    try:
+        data = automation_svc.start_run(int(ticket_record_id), user=get_current_user(), auto=False)
+    except (TypeError, ValueError):
+        return error_response("ticketRecordId must be a number.", 400)
+    except AutomationError as exc:
+        return error_response(str(exc), exc.status)
+    return success_response(data, status_code=201)
+
+
+@zoho_bp.route("/automation/runs/<int:run_id>/cancel", methods=["POST"])
+@require_permission("zoho:manage")
+def cancel_automation_run(run_id: int):
+    try:
+        data = automation_svc.cancel_run(run_id, user=get_current_user())
+    except AutomationError as exc:
+        return error_response(str(exc), exc.status)
+    return success_response(data)
 
 
 @zoho_bp.route("/inbound-tickets/<int:record_id>", methods=["DELETE"])

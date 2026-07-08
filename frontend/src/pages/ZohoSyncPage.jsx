@@ -9,18 +9,29 @@ import {
   IconGlobe,
   IconInbox,
   IconLayers,
+  IconPlay,
   IconRefresh,
   IconTrash,
   IconZap,
 } from "../components/zoho/icons.jsx";
 import { HealthRow, healthTone } from "../components/zoho/ZohoHealthRow.jsx";
+import ZohoAutomationCard, {
+  ACTIVE_RUN_STATUSES,
+  RunStatusPill,
+} from "../components/zoho/ZohoAutomationCard.jsx";
 import {
+  cancelAutomationRun,
   deleteZohoInboundTicket,
+  getJenkinsConfig,
   getZohoConfig,
   getZohoPreview,
+  listAutomationRuns,
   listZohoInboundTickets,
+  startAutomationRun,
   syncZohoNow,
+  testJenkinsConnection,
   testZohoConnection,
+  updateJenkinsConfig,
   updateZohoConfig,
 } from "../api/zohoApi.js";
 
@@ -106,6 +117,15 @@ export default function ZohoSyncPage({ canManage = false }) {
   const [previewFilter, setPreviewFilter] = useState("");
   const [deletingTicketId, setDeletingTicketId] = useState(null);
 
+  // Deploy automation (Jenkins router + per-ticket runs).
+  const [jenkins, setJenkins] = useState(null);
+  const [runs, setRuns] = useState([]);
+  const [runsLoading, setRunsLoading] = useState(true);
+  const [savingJenkins, setSavingJenkins] = useState(false);
+  const [testingJenkins, setTestingJenkins] = useState(false);
+  const [startingTicketId, setStartingTicketId] = useState(null);
+  const [cancellingRunId, setCancellingRunId] = useState(null);
+
   const webhookUrl =
     typeof window !== "undefined"
       ? `${window.location.origin.replace(/\/$/, "")}/api/zoho/inbound`
@@ -122,6 +142,8 @@ export default function ZohoSyncPage({ canManage = false }) {
     // mounts the layout editor, so its Zoho read runs in parallel too.
     const previewPromise = getZohoPreview(fresh).catch(() => null);
     const ticketsPromise = listZohoInboundTickets(50).catch(() => ({ items: [] }));
+    const jenkinsPromise = getJenkinsConfig().catch(() => null);
+    const runsPromise = listAutomationRuns(50).catch(() => ({ items: [] }));
     try {
       const cfg = await getZohoConfig();
       setConfig(cfg);
@@ -139,6 +161,11 @@ export default function ZohoSyncPage({ canManage = false }) {
       setTickets(inbound?.items || []);
       setTicketsLoading(false);
     });
+    jenkinsPromise.then((jk) => setJenkins(jk));
+    runsPromise.then((res) => {
+      setRuns(res?.items || []);
+      setRunsLoading(false);
+    });
   }, []);
 
   useEffect(() => {
@@ -155,6 +182,93 @@ export default function ZohoSyncPage({ canManage = false }) {
       await load(true);
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  // Poll active automation runs every 10s so the pipeline chips move without a
+  // manual refresh; stops on its own once every run is terminal.
+  const hasActiveRun = runs.some((r) => ACTIVE_RUN_STATUSES.has(r.status));
+  useEffect(() => {
+    if (!hasActiveRun) return undefined;
+    const timer = setInterval(async () => {
+      try {
+        const res = await listAutomationRuns(50);
+        setRuns(res?.items || []);
+      } catch {
+        /* transient — next poll retries */
+      }
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [hasActiveRun]);
+
+  const refreshRuns = async () => {
+    try {
+      const res = await listAutomationRuns(50);
+      setRuns(res?.items || []);
+    } catch {
+      /* best-effort */
+    }
+  };
+
+  const saveJenkins = async (payload) => {
+    setSavingJenkins(true);
+    try {
+      const updated = await updateJenkinsConfig(payload);
+      setJenkins(updated);
+      setNotice("Jenkins connection saved.");
+      return true;
+    } finally {
+      setSavingJenkins(false);
+    }
+  };
+
+  const runJenkinsTest = async () => {
+    setTestingJenkins(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await testJenkinsConnection();
+      setJenkins((prev) => ({ ...(prev || {}), ...result }));
+      if (result.status === "ok") {
+        setNotice(result.message || "Jenkins connection OK.");
+      } else {
+        setError(result.message || "Jenkins connection test failed.");
+      }
+    } catch (err) {
+      setError(err.message || "Jenkins connection test failed.");
+    } finally {
+      setTestingJenkins(false);
+    }
+  };
+
+  const runTicketAutomation = async (ticket) => {
+    setError("");
+    setNotice("");
+    setStartingTicketId(ticket.id);
+    try {
+      await startAutomationRun(ticket.id);
+      setNotice(`Automation started for ${ticket.ticketNumber || ticket.ticketId || "the ticket"}.`);
+      await refreshRuns();
+    } catch (err) {
+      setError(err.message || "Failed to start the automation run.");
+    } finally {
+      setStartingTicketId(null);
+    }
+  };
+
+  const cancelRun = async (run) => {
+    if (!window.confirm(`Cancel automation run for ${run.ticketNumber || `#${run.id}`}?`)) {
+      return;
+    }
+    setError("");
+    setCancellingRunId(run.id);
+    try {
+      await cancelAutomationRun(run.id);
+      await refreshRuns();
+    } catch (err) {
+      setError(err.message || "Failed to cancel the run.");
+    } finally {
+      setCancellingRunId(null);
     }
   };
 
@@ -302,6 +416,14 @@ export default function ZohoSyncPage({ canManage = false }) {
   const namespaceCount = (preview?.namespaces || []).length;
   const resolvedCount = tickets.filter((t) => t.resolved).length;
   const unresolvedCount = tickets.length - resolvedCount;
+
+  // Latest automation run per ticket (runs arrive newest-first).
+  const latestRunByTicket = new Map();
+  for (const r of runs) {
+    if (r.ticketRecordId != null && !latestRunByTicket.has(r.ticketRecordId)) {
+      latestRunByTicket.set(r.ticketRecordId, r);
+    }
+  }
 
   const previewItems = preview?.items || [];
   const filterQuery = previewFilter.trim().toLowerCase();
@@ -488,6 +610,20 @@ export default function ZohoSyncPage({ canManage = false }) {
         </div>
       </section>
 
+      {/* -------------------------------------------------- Automation ----- */}
+      <ZohoAutomationCard
+        canManage={canManage}
+        jenkins={jenkins}
+        runs={runs}
+        runsLoading={runsLoading}
+        onSaveJenkins={saveJenkins}
+        onTestJenkins={runJenkinsTest}
+        onCancelRun={cancelRun}
+        testing={testingJenkins}
+        saving={savingJenkins}
+        cancellingRunId={cancellingRunId}
+      />
+
       {/* -------------------------------------------------- Inbound hint --- */}
       <section className="card">
         <div className="card-header-row">
@@ -653,6 +789,7 @@ export default function ZohoSyncPage({ canManage = false }) {
                   <th>Resolved deployment</th>
                   <th>Tag</th>
                   <th>Result</th>
+                  <th>Automation</th>
                   {canManage ? <th aria-label="Actions" /> : null}
                 </tr>
               </thead>
@@ -683,8 +820,29 @@ export default function ZohoSyncPage({ canManage = false }) {
                         </span>
                       )}
                     </td>
+                    <td>
+                      {latestRunByTicket.has(t.id) ? (
+                        <RunStatusPill status={latestRunByTicket.get(t.id).status} />
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
                     {canManage ? (
                       <td className="sg-zh-tactions">
+                        {t.resolved &&
+                        (t.tag || "").trim() &&
+                        !ACTIVE_RUN_STATUSES.has(latestRunByTicket.get(t.id)?.status) ? (
+                          <button
+                            type="button"
+                            className="btn-ghost sg-zh-trun"
+                            onClick={() => runTicketAutomation(t)}
+                            disabled={startingTicketId === t.id}
+                            title="Run deploy automation for this ticket"
+                            aria-label={`Run automation for ticket ${t.ticketNumber || t.ticketId || t.id}`}
+                          >
+                            <IconPlay />
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           className="btn-ghost sg-zh-tdel"

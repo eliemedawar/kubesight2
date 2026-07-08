@@ -96,6 +96,16 @@ def _scheduler_loop(app: Flask) -> None:
                 run_due_sync()
         except Exception:
             logger.exception("Zoho field-sync tick failed")
+        try:
+            with app.app_context():
+                from .deploy_automation_service import advance_runs
+
+                # Ticket-driven deploy automation: advance every active run one
+                # step (registry gate → Jenkins build poll → verify → handoff).
+                # No-ops instantly when there are no active runs.
+                advance_runs()
+        except Exception:
+            logger.exception("Deploy automation tick failed")
 
 
 _scheduler_started = False

@@ -136,8 +136,61 @@
   .sg-zh-spin { animation: none; }
 }
 
-/* Inbound-ticket delete: compact icon-only ghost button, danger on hover. */
-.sg-zh-tactions { width: 2.5rem; text-align: right; }
+/* ── Deploy automation runs ─────────────────────────────────────── */
+.sg-zh-runs {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 0.75rem;
+}
+
+.sg-zh-run {
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  min-width: 0;
+}
+
+.sg-zh-run-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+.sg-zh-run-head > b {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--text-strong);
+  white-space: nowrap;
+}
+.sg-zh-run-target {
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+  overflow-wrap: anywhere;
+}
+.sg-zh-run-spacer { flex: 1; }
+.sg-zh-run-cancel { font-size: 0.72rem; padding: 0.2rem 0.7rem; color: var(--text-muted); }
+.sg-zh-run-cancel:hover { color: var(--danger); background: var(--danger-soft); }
+
+.sg-zh-run-pipe { gap: 0; }
+.sg-zh-pipe-seg { display: inline-flex; align-items: center; }
+.sg-zh-run-pipe .sg-pstep svg { width: 0.56rem; height: 0.56rem; }
+.sg-zh-pstep-skip { opacity: 0.65; }
+
+.sg-zh-run .sg-zh-fhint a { color: var(--accent-strong); }
+
+/* Inbound-ticket actions: run (play) + delete, compact icon-only ghosts. */
+.sg-zh-tactions { width: 4.5rem; text-align: right; white-space: nowrap; }
+.sg-zh-trun {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem 0.45rem;
+  color: var(--text-muted);
+}
+.sg-zh-trun:hover { color: var(--ok); background: var(--ok-soft); }
+.sg-zh-trun svg { width: 0.9rem; height: 0.9rem; }
 .sg-zh-tdel {
   display: inline-flex;
   align-items: center;

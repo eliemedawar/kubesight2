@@ -59,6 +59,12 @@ export const IconMinusCircle = (props) => (
   </svg>
 );
 
+export const IconPlay = (props) => (
+  <svg {...base} {...props}>
+    <path d="m6 3 14 9-14 9V3z" />
+  </svg>
+);
+
 export const IconRefresh = (props) => (
   <svg {...base} {...props}>
     <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />

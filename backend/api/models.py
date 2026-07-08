@@ -1932,3 +1932,113 @@ class ZohoDeploymentSnapshot(db.Model):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class JenkinsConnection(db.Model):
+    """Connection to the Jenkins ROUTER pipeline for ticket-driven deploy automation.
+
+    Single-row config (id=1), same pattern as :class:`ZohoIntegration`. KubeSight
+    only ever triggers ONE Jenkins job — a router pipeline (maintained outside
+    KubeSight) that owns the app→job mapping, waits on the routed child job and
+    propagates its result. Contract: ``buildWithParameters`` with APP_NAME /
+    NAMESPACE / IMAGE_TAG / TICKET (see DEPLOY-AUTOMATION-PLAN.md §1). Auth is a
+    Jenkins user + API token over HTTP Basic (no CSRF crumb needed with a token);
+    the token is Fernet-encrypted at rest like every other integration secret.
+    """
+
+    __tablename__ = "jenkins_connection"
+
+    id = db.Column(db.Integer, primary_key=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=False)
+
+    base_url = db.Column(db.String(255), nullable=False, default="")
+    username = db.Column(db.String(120), nullable=False, default="")
+    api_token_encrypted = db.Column(db.Text, nullable=True)
+    # Router job path, folder-style: "folder/router" -> /job/folder/job/router.
+    router_job_path = db.Column(db.String(255), nullable=False, default="")
+    verify_tls = db.Column(db.Boolean, nullable=False, default=True)
+
+    # Automation behaviour.
+    auto_run_tickets = db.Column(db.Boolean, nullable=False, default=False)
+    build_timeout_minutes = db.Column(db.Integer, nullable=False, default=45)
+    queue_timeout_minutes = db.Column(db.Integer, nullable=False, default=10)
+    # How long the auto-created Change Bundle's deployment window stays open.
+    bundle_window_hours = db.Column(db.Integer, nullable=False, default=24)
+
+    last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_test_status = db.Column(db.String(16), nullable=True)
+    last_test_message = db.Column(db.Text, nullable=True)
+
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class DeployAutomationRun(db.Model):
+    """One automation run for one inbound Zoho ticket: registry gate → optional
+    Jenkins router build → registry verify → Change Bundle or direct image apply.
+
+    The run is a DB-persisted state machine advanced by the scheduler tick, so it
+    survives restarts mid-build. ``status`` values: active = queued /
+    checking_image / building / verifying_image / awaiting_approval; terminal =
+    deployed / failed / cancelled. ``steps`` is the display log the UI renders as
+    pipeline chips: a JSON list of ``{key, status, detail, at}`` where key ∈
+    image_check | build | verify | approval | deploy and status ∈ wait | run |
+    done | fail | skip.
+    """
+
+    __tablename__ = "deploy_automation_runs"
+    __table_args__ = (
+        db.Index("ix_automation_run_status", "status"),
+        db.Index("ix_automation_run_ticket", "ticket_record_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    ticket_record_id = db.Column(
+        db.Integer, db.ForeignKey("zoho_inbound_tickets.id", ondelete="SET NULL"), nullable=True
+    )
+    ticket_number = db.Column(db.String(64), nullable=True)
+
+    snapshot_id = db.Column(db.Integer, nullable=True)
+    cluster_id = db.Column(db.String(120), nullable=False)
+    namespace = db.Column(db.String(253), nullable=False)
+    deployment_name = db.Column(db.String(253), nullable=False)
+    container_name = db.Column(db.String(253), nullable=True)
+    # Registry host + repository WITHOUT a tag (e.g. "nexus.areeba.com/areeba/aims-ui").
+    image_repo = db.Column(db.Text, nullable=True)
+    image_tag = db.Column(db.String(200), nullable=False)
+
+    status = db.Column(db.String(24), nullable=False, default="queued")
+    error = db.Column(db.Text, nullable=True)
+    steps = db.Column(db.JSON, nullable=True)
+    # Transient retry counter for flaky registry reads (unreachable → retry a few ticks).
+    retry_count = db.Column(db.Integer, nullable=False, default=0)
+
+    jenkins_queue_url = db.Column(db.Text, nullable=True)
+    jenkins_build_url = db.Column(db.Text, nullable=True)
+    jenkins_build_number = db.Column(db.Integer, nullable=True)
+    build_triggered_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # Change Bundle the approval path created (plain id, not a FK — bundles have
+    # their own lifecycle and may be pruned independently).
+    bundle_id = db.Column(db.Integer, nullable=True)
+
+    auto = db.Column(db.Boolean, nullable=False, default=False)
+    triggered_by = db.Column(db.String(120), nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    finished_at = db.Column(db.DateTime(timezone=True), nullable=True)

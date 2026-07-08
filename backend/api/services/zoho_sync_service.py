@@ -1011,6 +1011,14 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     db.session.add(record)
     db.session.commit()
 
+    # Deploy automation: when auto-run is enabled, a freshly-resolved ticket with
+    # a tag starts its run immediately. Never lets automation break the webhook
+    # response to Zoho (maybe_auto_run swallows every error).
+    if record.resolved and (record.tag or "").strip():
+        from .deploy_automation_service import maybe_auto_run
+
+        maybe_auto_run(record.id)
+
     return {
         "resolved": record.resolved,
         "targetId": snapshot_id,
