@@ -28,7 +28,8 @@ design.
 POST {jenkins}/job/{router_job_path}/buildWithParameters
   --user <username>:<api token>       HTTP Basic
   token     = <build token>           job's "Trigger builds remotely" token (optional field)
-  APP       = <deployment name>       e.g. processing-issuing
+  APP       = <IMAGE name>            last repo segment of the deployment's live image,
+                                      e.g. processing-issuing (NOT the K8s deployment name)
   TAG       = <RAW ticket tag>        e.g. 1.73.13 — router owns the naming convention
   NAMESPACE = <namespace>             from ticket cf_environment, e.g. verto-uat
 ```

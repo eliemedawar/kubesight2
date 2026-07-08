@@ -523,6 +523,21 @@ def _target_image(run: DeployAutomationRun) -> str:
     return f"{run.image_repo}:{run.image_tag}"
 
 
+def _app_param(run: DeployAutomationRun) -> str:
+    """The ``APP`` value sent to the Jenkins router.
+
+    The router keys its build jobs on the IMAGE name — the last path segment of
+    the deployment's image repository (e.g. ``nexus/areeba/processing-issuing``
+    → ``processing-issuing``), which frequently differs from the Kubernetes
+    deployment name (``processing-ms``). Falls back to the deployment name if the
+    image repo could not be resolved.
+    """
+    repo = (run.image_repo or "").strip()
+    if repo:
+        return repo.rsplit("/", 1)[-1]
+    return run.deployment_name
+
+
 def _do_resolve(run: DeployAutomationRun) -> None:
     """queued → checking_image: read the live deployment's image, derive the repo."""
     from ..k8s_provider import (
@@ -632,12 +647,14 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
 
     try:
         # The verified router contract (2026-07-08): APP / TAG / NAMESPACE, with
-        # the job-level `token` appended by the client. TAG is the RAW ticket
-        # tag — the router owns the naming convention (e.g. v{tag}-prod).
+        # the job-level `token` appended by the client. APP is the IMAGE name
+        # (not the K8s deployment name — the router keys jobs on the image). TAG
+        # is the RAW ticket tag — the router owns the naming (e.g. v{tag}-prod).
+        app = _app_param(run)
         queue_url = jenkins_client.trigger_build(
             _to_client_config(jrow),
             {
-                "APP": run.deployment_name,
+                "APP": app,
                 "TAG": run.ticket_tag or run.image_tag,
                 "NAMESPACE": run.namespace,
             },
@@ -650,7 +667,7 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     run.build_triggered_at = datetime.now(timezone.utc)
     run.retry_count = 0
     run.status = "building"
-    _set_step(run, "build", "run", "router build queued")
+    _set_step(run, "build", "run", f"router build queued (APP={app})")
     log_audit(
         "automation_build_triggered",
         actor=None,
@@ -659,7 +676,8 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
         details={
             "ticket": run.ticket_number,
             "deployment": run.deployment_name,
-            "tag": run.image_tag,
+            "app": app,
+            "tag": run.ticket_tag or run.image_tag,
             "queueUrl": queue_url,
         },
         commit=False,

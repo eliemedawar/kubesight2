@@ -281,8 +281,10 @@ def test_router_trigger_contract(client, admin_token, app, monkeypatch):
     ticket = _make_ticket(tag="1.73.13")
     run = _start(client, admin_token, ticket.id)
     assert run["status"] == "building", run
+    # APP is the IMAGE name (last segment of the repo), not the deployment name.
+    # Mock payments-api runs ghcr.io/mock/payments:v2.8.1 → image name "payments".
     assert captured["params"] == {
-        "APP": DEPLOYMENT,
+        "APP": "payments",
         "TAG": "1.73.13",
         "NAMESPACE": NAMESPACE,
     }

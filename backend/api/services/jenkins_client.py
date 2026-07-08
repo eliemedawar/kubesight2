@@ -151,13 +151,36 @@ def trigger_build(cfg: JenkinsConfig, params: Dict[str, str]) -> str:
                 raise JenkinsError(f"Jenkins did not accept the build (HTTP {resp.status}).", resp.status)
             location = resp.headers.get("Location") or ""
     except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            raw = (exc.read() or b"").decode("utf-8", "replace")
+            # Jenkins 403s are HTML pages; the useful part is the <h1>/title text
+            # ("No valid crumb…", "…is missing the Build permission").
+            import re as _re
+
+            text = _re.sub(r"<[^>]+>", " ", raw)
+            detail = " ".join(text.split())[:220]
+        except Exception:
+            pass
         if exc.code == 400:
             raise JenkinsError(
                 "Jenkins rejected the parameters (400) — the router job may not be parameterized "
                 "with APP/TAG/NAMESPACE yet.",
                 400,
             ) from exc
-        raise JenkinsError(f"Triggering the router build failed (HTTP {exc.code}).", exc.code) from exc
+        if exc.code == 403:
+            raise JenkinsError(
+                "Triggering the router build failed (HTTP 403). "
+                + (f"Jenkins said: {detail} " if detail else "")
+                + "(Usual causes: the gateway strips the Authorization header, the credential is a "
+                "password instead of an API token, or the user lacks Build permission on the job.)",
+                403,
+            ) from exc
+        raise JenkinsError(
+            f"Triggering the router build failed (HTTP {exc.code})."
+            + (f" Jenkins said: {detail}" if detail else ""),
+            exc.code,
+        ) from exc
     except urllib.error.URLError as exc:
         raise JenkinsError(f"Could not reach Jenkins ({exc.reason}).") from exc
 
