@@ -26,9 +26,38 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 _TIMEOUT_SECONDS = 15
+
+
+class _NoFollowRedirect(urllib.request.HTTPRedirectHandler):
+    """Never auto-follow redirects. ``buildWithParameters`` returns 201 (modern
+    Jenkins) or a 30x whose ``Location`` we read ourselves — if a proxy (Tyk)
+    answers with a 307/308, urllib's default handler would transparently re-POST
+    it and queue the build TWICE. Returning None here disables that."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _rebase(cfg: "JenkinsConfig", url: str) -> str:
+    """Re-point a Jenkins-returned absolute URL onto the configured base URL when
+    its host differs from ours.
+
+    Jenkins builds queue/build URLs from its own configured root URL, which is
+    often an internal address the backend can't reach through the gateway →
+    polling times out. We keep only the path and re-attach it to ``base_url``
+    (the endpoint we already reached for the trigger). Same-host absolute URLs
+    are returned unchanged so a correctly-set external root URL keeps working and
+    the gateway path prefix isn't doubled."""
+    if not url:
+        return url
+    u = urlsplit(url)
+    b = urlsplit(cfg.base_url)
+    if u.netloc and u.netloc == b.netloc:
+        return url
+    return f"{cfg.base_url.rstrip('/')}{u.path}"
 
 # Router build results KubeSight treats as success / failure. ABORTED and
 # UNSTABLE both count as failure — the image must provably exist afterwards.
@@ -145,48 +174,62 @@ def trigger_build(cfg: JenkinsConfig, params: Dict[str, str]) -> str:
         headers={**_headers(cfg), "Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
+    # A no-redirect opener: the trigger must be a SINGLE POST. If a proxy answers
+    # with a 30x, we read its Location instead of letting urllib re-POST (which
+    # would queue the build twice).
+    handlers = [_NoFollowRedirect()]
+    ctx = _ssl_context(cfg)
+    if ctx is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    opener = urllib.request.build_opener(*handlers)
+
+    location = ""
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT_SECONDS, context=_ssl_context(cfg)) as resp:
+        with opener.open(req, timeout=_TIMEOUT_SECONDS) as resp:
             if resp.status not in (200, 201):
                 raise JenkinsError(f"Jenkins did not accept the build (HTTP {resp.status}).", resp.status)
             location = resp.headers.get("Location") or ""
     except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            raw = (exc.read() or b"").decode("utf-8", "replace")
-            # Jenkins 403s are HTML pages; the useful part is the <h1>/title text
-            # ("No valid crumb…", "…is missing the Build permission").
-            import re as _re
+        if 300 <= exc.code < 400:
+            # A redirect we deliberately did not follow — the queue Location is here.
+            location = exc.headers.get("Location") or ""
+        else:
+            detail = ""
+            try:
+                raw = (exc.read() or b"").decode("utf-8", "replace")
+                # Jenkins error pages are HTML; the useful part is the title text
+                # ("No valid crumb…", "…is missing the Build permission").
+                import re as _re
 
-            text = _re.sub(r"<[^>]+>", " ", raw)
-            detail = " ".join(text.split())[:220]
-        except Exception:
-            pass
-        if exc.code == 400:
+                text = _re.sub(r"<[^>]+>", " ", raw)
+                detail = " ".join(text.split())[:220]
+            except Exception:
+                pass
+            if exc.code == 400:
+                raise JenkinsError(
+                    "Jenkins rejected the parameters (400) — the router job may not be parameterized "
+                    "with APP/TAG/NAMESPACE yet.",
+                    400,
+                ) from exc
+            if exc.code == 403:
+                raise JenkinsError(
+                    "Triggering the router build failed (HTTP 403). "
+                    + (f"Jenkins said: {detail} " if detail else "")
+                    + "(Usual causes: the gateway strips the Authorization header, the credential is a "
+                    "password instead of an API token, or the user lacks Build permission on the job.)",
+                    403,
+                ) from exc
             raise JenkinsError(
-                "Jenkins rejected the parameters (400) — the router job may not be parameterized "
-                "with APP/TAG/NAMESPACE yet.",
-                400,
+                f"Triggering the router build failed (HTTP {exc.code})."
+                + (f" Jenkins said: {detail}" if detail else ""),
+                exc.code,
             ) from exc
-        if exc.code == 403:
-            raise JenkinsError(
-                "Triggering the router build failed (HTTP 403). "
-                + (f"Jenkins said: {detail} " if detail else "")
-                + "(Usual causes: the gateway strips the Authorization header, the credential is a "
-                "password instead of an API token, or the user lacks Build permission on the job.)",
-                403,
-            ) from exc
-        raise JenkinsError(
-            f"Triggering the router build failed (HTTP {exc.code})."
-            + (f" Jenkins said: {detail}" if detail else ""),
-            exc.code,
-        ) from exc
     except urllib.error.URLError as exc:
         raise JenkinsError(f"Could not reach Jenkins ({exc.reason}).") from exc
 
     if not location:
         raise JenkinsError("Jenkins accepted the build but returned no queue location header.")
-    return location.rstrip("/")
+    return _rebase(cfg, location.rstrip("/"))
 
 
 def queue_state(cfg: JenkinsConfig, queue_url: str) -> Dict[str, Any]:
@@ -196,7 +239,7 @@ def queue_state(cfg: JenkinsConfig, queue_url: str) -> Dict[str, Any]:
     - ``{"state": "cancelled"}`` — removed from the queue without building
     - ``{"state": "building", "buildNumber": int, "buildUrl": str}``
     """
-    _, _, payload = _request(cfg, "GET", f"{queue_url}/api/json")
+    _, _, payload = _request(cfg, "GET", f"{_rebase(cfg, queue_url).rstrip('/')}/api/json")
     if payload.get("cancelled"):
         return {"state": "cancelled"}
     executable = payload.get("executable") or {}
@@ -204,14 +247,15 @@ def queue_state(cfg: JenkinsConfig, queue_url: str) -> Dict[str, Any]:
         return {
             "state": "building",
             "buildNumber": int(executable["number"]),
-            "buildUrl": str(executable.get("url") or "").rstrip("/"),
+            "buildUrl": _rebase(cfg, str(executable.get("url") or "")).rstrip("/"),
         }
     return {"state": "pending", "why": payload.get("why") or ""}
 
 
 def build_state(cfg: JenkinsConfig, build_url: str) -> Dict[str, Any]:
     """Result of a build: ``{"building": bool, "result": str|None, "durationMs": int}``."""
-    _, _, payload = _request(cfg, "GET", f"{build_url}/api/json?tree=building,result,duration,url")
+    url = f"{_rebase(cfg, build_url).rstrip('/')}/api/json?tree=building,result,duration,url"
+    _, _, payload = _request(cfg, "GET", url)
     return {
         "building": bool(payload.get("building")),
         "result": payload.get("result"),

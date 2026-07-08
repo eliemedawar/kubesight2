@@ -364,6 +364,91 @@ def test_rollout_failure_rolls_back_and_emails_admins(client, admin_token, app, 
     assert "DR-9002" in sent[0][1]
 
 
+def test_auto_run_is_idempotent_per_ticket(client, admin_token, app, monkeypatch):
+    """A re-delivered webhook for the same ticket must not spawn a second run."""
+    from api.models import JenkinsConnection
+    from api.services.deploy_automation_service import maybe_auto_run
+
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image: {"status": "found", "image": image},
+    )
+    _set_cluster_approvals(0)  # direct path, no bundle needed
+    db.session.add(
+        JenkinsConnection(id=1, auto_run_tickets=True, image_tag_template="{tag}")
+    )
+    db.session.commit()
+    ticket = _make_ticket(tag="1.0.0")
+
+    first = maybe_auto_run(ticket.id)
+    assert first is not None
+    # Second delivery of the SAME ticket → no new run.
+    second = maybe_auto_run(ticket.id)
+    assert second is None
+    assert DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).count() == 1
+
+
+def test_manager_reject_is_authoritative(client, admin_token, app, monkeypatch):
+    """One manager reject finalizes the bundle even when the recipient pool is
+    larger than the required-approval count (the old quorum needed 2 declines)."""
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image: {"status": "found", "image": image},
+    )
+    monkeypatch.setattr(
+        "api.services.resource_actions_service.get_resource_yaml",
+        lambda user, cluster_id, namespace, kind, name: (
+            {"yaml": LIVE_DEPLOYMENT_YAML},
+            None,
+            200,
+        ),
+    )
+    _set_cluster_approvals(1)
+    ticket = _make_ticket(tag="v2.2.2")
+    run = _start(client, admin_token, ticket.id)
+    bundle_id = run["bundleId"]
+    assert bundle_id
+
+    response = client.post(
+        f"/api/change-bundles/{bundle_id}/reject",
+        json={"reason": "not now"},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["data"]["status"] == "rejected"
+
+    # The run mirrors the rejection on the next tick.
+    from api.services.deploy_automation_service import advance_runs
+
+    advance_runs()
+    row = db.session.get(DeployAutomationRun, run["id"])
+    assert row.status == "failed"
+    assert "rejected" in (row.error or "").lower()
+
+
+def test_automation_bundle_requester_label(client, admin_token, app, monkeypatch):
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image: {"status": "found", "image": image},
+    )
+    monkeypatch.setattr(
+        "api.services.resource_actions_service.get_resource_yaml",
+        lambda user, cluster_id, namespace, kind, name: (
+            {"yaml": LIVE_DEPLOYMENT_YAML},
+            None,
+            200,
+        ),
+    )
+    _set_cluster_approvals(1)
+    ticket = _make_ticket(tag="v3.3.3")
+    run = _start(client, admin_token, ticket.id)
+    response = client.get(
+        f"/api/change-bundles/{run['bundleId']}", headers=auth_headers(admin_token)
+    )
+    assert response.status_code == 200
+    assert response.get_json()["data"]["requesterName"] == "KubeSight automation"
+
+
 def test_viewer_cannot_start_or_configure(client, viewer_token, app):
     ticket = _make_ticket()
     response = client.post(

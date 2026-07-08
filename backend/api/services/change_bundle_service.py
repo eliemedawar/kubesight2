@@ -211,7 +211,11 @@ def serialize_bundle(row: ChangeBundle, *, include_items: bool = True) -> Dict[s
         "status": row.status,
         "note": row.note,
         "requesterId": row.requester_user_id,
-        "requesterName": (requester.full_name or requester.username) if requester else "Unknown",
+        # A null requester means the bundle was authored by the deploy-automation
+        # system (users always have an identity), so label it as such.
+        "requesterName": (
+            (requester.full_name or requester.username) if requester else "KubeSight automation"
+        ),
         "requestedStartTime": _iso(row.requested_start_time),
         "requestedEndTime": _iso(row.requested_end_time),
         "requestedWindowTimezone": row.requested_window_timezone,
@@ -863,10 +867,40 @@ def record_vote(
 def decide_bundle(
     bundle_id: int, action: str, *, actor: Optional[User] = None, reason: Optional[str] = None
 ) -> Dict[str, Any]:
-    """In-app approve/reject by a management user (counts toward quorum)."""
+    """In-app approve/reject by a management user.
+
+    A **reject** is authoritative: one ``change_bundles:manage`` user declining
+    stops the deploy immediately — a manager clicking Reject means reject, not
+    "cast one vote in a pool" (which, with more recipients than required
+    approvals, could otherwise leave the bundle pending). Approvals still go
+    through the normal quorum so multi-approver policies are honoured. Email-link
+    votes keep the pooled veto behaviour via ``record_vote``.
+    """
     if action not in VALID_ACTIONS:
         raise ChangeBundleError("Unsupported action.", 400)
     actor_email = (getattr(actor, "email", "") or "").strip().lower() if actor else ""
+
+    if action == "decline":
+        bundle = get_bundle_or_error(bundle_id)
+        if bundle.status != "pending_approval":
+            raise ChangeBundleError(
+                f"This bundle is already {bundle.status.replace('_', ' ')}.", 409
+            )
+        # Record the decline as a vote for the audit trail, then finalize.
+        if actor_email:
+            existing = ChangeBundleVote.query.filter_by(
+                bundle_id=bundle.id, voter_email=actor_email
+            ).first()
+            if existing:
+                existing.decision = "decline"
+            else:
+                db.session.add(
+                    ChangeBundleVote(bundle_id=bundle.id, voter_email=actor_email, decision="decline")
+                )
+            db.session.commit()
+        _finalize(bundle, "rejected", actor=actor, reason=reason)
+        return serialize_bundle(bundle)
+
     return record_vote(bundle_id, action, voter_email=actor_email, actor=actor, reason=reason)
 
 

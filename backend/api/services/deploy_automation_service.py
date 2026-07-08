@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -54,6 +55,13 @@ ACTIVE_STATUSES = (
     "verifying_rollout",
 )
 TERMINAL_STATUSES = ("deployed", "failed", "cancelled")
+
+# Serializes run advancement. The inline advance in start_run (web/webhook
+# thread) and the scheduler tick (its own thread) must never advance the same
+# run concurrently — otherwise both could pass the trigger step and fire the
+# Jenkins build twice for one run. Whoever holds the lock advances to completion
+# and commits; the other re-reads the committed status before proceeding.
+_advance_lock = threading.RLock()
 
 STEP_KEYS = ("image_check", "build", "verify", "approval", "deploy", "pods")
 
@@ -378,10 +386,15 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
     )
 
     # Advance immediately so a manual Run gives instant feedback (the first
-    # stages are seconds); errors are recorded on the run, never raised.
+    # stages are seconds); errors are recorded on the run, never raised. Under
+    # the advance lock + a refresh so a concurrent scheduler tick can't have
+    # already moved this run past the trigger (which would double-fire the build).
     try:
-        _advance(run, jrow)
-        db.session.commit()
+        with _advance_lock:
+            db.session.refresh(run)
+            if run.status in ACTIVE_STATUSES:
+                _advance(run, jrow)
+                db.session.commit()
     except Exception:  # pragma: no cover — advance already isolates per-step errors
         db.session.rollback()
     return serialize_run(run)
@@ -464,28 +477,31 @@ def advance_runs() -> int:
     Each run is isolated in try/except so one broken run can't stall the rest;
     an unexpected exception fails that run with the error recorded.
     """
-    runs = (
-        DeployAutomationRun.query.filter(DeployAutomationRun.status.in_(ACTIVE_STATUSES))
-        .order_by(DeployAutomationRun.id.asc())
-        .all()
-    )
-    if not runs:
-        return 0
-    jrow = get_or_create_jenkins()
-    advanced = 0
-    for run in runs:
-        try:
-            _advance(run, jrow)
-            db.session.commit()
-            advanced += 1
-        except Exception as exc:  # defensive: never let one run break the tick
-            db.session.rollback()
+    # Hold the advance lock for the whole batch and query INSIDE it, so an inline
+    # advance from start_run can't interleave and re-trigger a run mid-flight.
+    with _advance_lock:
+        runs = (
+            DeployAutomationRun.query.filter(DeployAutomationRun.status.in_(ACTIVE_STATUSES))
+            .order_by(DeployAutomationRun.id.asc())
+            .all()
+        )
+        if not runs:
+            return 0
+        jrow = get_or_create_jenkins()
+        advanced = 0
+        for run in runs:
             try:
-                _fail(run, _current_step_key(run), f"Unexpected automation error: {exc}")
+                _advance(run, jrow)
                 db.session.commit()
-            except Exception:
+                advanced += 1
+            except Exception as exc:  # defensive: never let one run break the tick
                 db.session.rollback()
-    return advanced
+                try:
+                    _fail(run, _current_step_key(run), f"Unexpected automation error: {exc}")
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+        return advanced
 
 
 def _current_step_key(run: DeployAutomationRun) -> str:
@@ -1185,6 +1201,12 @@ def maybe_auto_run(ticket_record_id: int) -> Optional[Dict[str, Any]]:
         if snapshot is None:
             return None
         if not auto_run_enabled_for(row, snapshot.cluster_id):
+            return None
+        # Idempotent per ticket: Zoho re-delivers webhooks (retries, edits), and
+        # each delivery reuses the SAME inbound-ticket row. Auto-start is a
+        # one-shot per ticket — if any run already exists for it, don't spawn
+        # another. (An operator can still manually re-run via start_run.)
+        if DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).first():
             return None
         return start_run(ticket_record_id, user=None, auto=True)
     except AutomationError:
