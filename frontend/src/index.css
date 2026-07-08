@@ -3819,15 +3819,17 @@ button:focus-visible {
 }
 
 .exec-pod-modal__terminal {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: var(--font-size-sm);
   background: #101113;
   color: #e6edf3;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-bottom: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
   padding: var(--space-3);
   height: min(24rem, 50vh);
   overflow: auto;
+  cursor: text;
 }
 
 .exec-pod-modal__hint {
@@ -3866,29 +3868,68 @@ button:focus-visible {
   font-weight: 600;
 }
 
+/* The prompt row reads as the terminal's own input line — same well, joined
+   to the scrollback above by a hairline divider instead of a separate box. */
 .exec-pod-modal__form {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin-top: var(--space-3);
+  margin-top: 0;
   background: #101113;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-top: 1px solid #23262b;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
   padding: var(--space-2) var(--space-3);
 }
 
-.exec-pod-modal__input {
+/* High-specificity + focus overrides so the global input skin (white bg,
+   hairline border, red focus ring) never leaks into the terminal. */
+.exec-pod-modal__form input.exec-pod-modal__input,
+.exec-pod-modal__form input.exec-pod-modal__input:focus,
+.exec-pod-modal__form input.exec-pod-modal__input:focus-visible {
   flex: 1;
+  min-width: 0;
   border: none;
   outline: none;
+  box-shadow: none;
   background: transparent;
   color: #e6edf3;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  caret-color: #3fb950;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: var(--font-size-sm);
+  padding: 0.3rem 0;
+  border-radius: 0;
 }
 
 .exec-pod-modal__input::placeholder {
   color: #6b7a8d;
+}
+
+.exec-pod-modal__running {
+  color: #6b7a8d;
+  animation: sg-pulse 1.8s infinite;
+}
+
+/* Dark pill Run button that lives inside the terminal bar (btn-ghost keeps
+   the global light button skin away). */
+.btn-ghost.exec-pod-modal__run {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e6edf3;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius-full, 999px);
+  padding: 0.3rem 0.95rem;
+  font-size: 0.75rem;
+  font-weight: 650;
+  flex: none;
+}
+
+.btn-ghost.exec-pod-modal__run:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.btn-ghost.exec-pod-modal__run:disabled {
+  opacity: 0.45;
 }
 
 .dashboard-my-access-first {

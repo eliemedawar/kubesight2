@@ -184,6 +184,32 @@
 
 .sg-zh-run .sg-zh-fhint a { color: var(--accent-strong); }
 
+/* Jenkins config modal: fixed two-column layout — the generic auto-fit grid
+   misaligned fields whose hints differ in height. */
+.zoho-page .sg-zh-jform.settings-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.sg-zh-jform .field-hint { line-height: 1.45; }
+/* Checkboxes read as their own rows. */
+.zoho-page .sg-zh-jform .sg-zh-jcheck { margin-top: 0.15rem; }
+/* The four timing fields share one aligned row. */
+.sg-zh-jrow4 {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.sg-zh-jrow4 label {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+@media (max-width: 700px) {
+  .zoho-page .sg-zh-jform.settings-form { grid-template-columns: 1fr; }
+  .sg-zh-jrow4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* Per-cluster auto-start overrides in the Jenkins config modal. */
 .sg-zh-cluster-modes {
   display: grid;

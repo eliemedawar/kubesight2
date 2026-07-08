@@ -320,9 +320,8 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
           <div>
             <h3>Jenkins router connection</h3>
             <p className="muted">
-              KubeSight triggers ONE router pipeline with <code>APP</code>, <code>TAG</code> and{" "}
-              <code>NAMESPACE</code> (plus the job's remote-trigger <code>token</code> when set);
-              the router maps the app to the right job, waits on it and propagates its result.
+              Triggers the router job with <code>APP</code>, <code>TAG</code> and{" "}
+              <code>NAMESPACE</code> — the router runs the right build and reports back.
             </p>
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
@@ -332,14 +331,14 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
 
         {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
 
-        <form className="settings-form" onSubmit={submit}>
+        <form className="settings-form sg-zh-jform" onSubmit={submit}>
           <label className="checkbox-label">
             <input
               type="checkbox"
               checked={form.enabled}
               onChange={(e) => set("enabled", e.target.checked)}
             />
-            Enabled (allows automation runs to trigger builds)
+            Enabled
           </label>
 
           <h4>Connection</h4>
@@ -356,12 +355,8 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
             <input
               value={form.routerJobPath}
               onChange={(e) => set("routerJobPath", e.target.value)}
-              placeholder="kubesight/deploy-router"
+              placeholder="folder/job-name"
             />
-            <span className="field-hint">
-              Folder-style path — <code>folder/job-name</code> becomes{" "}
-              <code>/job/folder/job/job-name</code>.
-            </span>
           </label>
           <label>
             Username
@@ -381,7 +376,7 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
               autoComplete="new-password"
             />
           </label>
-          <label>
+          <label title="The job's “Trigger builds remotely” token, sent as the token field">
             Build token (optional)
             <input
               type="password"
@@ -390,12 +385,8 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
               placeholder={jenkins?.buildTokenConfigured ? "•••• (leave blank to keep)" : ""}
               autoComplete="new-password"
             />
-            <span className="field-hint">
-              The job's “Trigger builds remotely” token — sent as the <code>token</code> field on
-              every build request.
-            </span>
           </label>
-          <label className="checkbox-label">
+          <label className="checkbox-label sg-zh-jcheck">
             <input
               type="checkbox"
               checked={form.verifyTls}
@@ -404,7 +395,7 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
             Verify TLS certificates
           </label>
 
-          <h4>Automation behaviour</h4>
+          <h4>Automation</h4>
           <label>
             Image tag template
             <input
@@ -414,27 +405,20 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
               className="mono"
             />
             <span className="field-hint">
-              How a ticket's tag becomes the registry tag. <code>{"{tag}"}</code> is the ticket
-              value — e.g. <code>{"v{tag}-prod"}</code> turns <code>1.72.1</code> into{" "}
-              <code>v1.72.1-prod</code> for the Nexus check and the deploy. The Jenkins router
-              always receives the raw ticket tag. Tickets already carrying the full form are used
-              as-is.
+              <code>{"v{tag}-prod"}</code> ⇒ ticket <code>1.72.1</code> checks/deploys{" "}
+              <code>v1.72.1-prod</code>; Jenkins always gets the raw tag.
             </span>
           </label>
-          <label className="checkbox-label">
+          <label className="checkbox-label sg-zh-jcheck">
             <input
               type="checkbox"
               checked={form.autoRunTickets}
               onChange={(e) => set("autoRunTickets", e.target.checked)}
             />
-            Auto-start by default: run automation for every resolved inbound ticket with a tag
+            Auto-start new tickets by default
           </label>
           <div className="field-span">
             <span className="sg-zh-pick-label">Auto-start per cluster</span>
-            <p className="field-hint">
-              Overrides the default above for the ticket's target cluster. On a cluster set to
-              auto-start that also requires no approvals, tickets deploy fully hands-off.
-            </p>
             {clusters.length === 0 ? (
               <p className="muted">No clusters available.</p>
             ) : (
@@ -457,57 +441,51 @@ function JenkinsConfigModal({ jenkins, saving, onClose, onSave }) {
               </div>
             )}
           </div>
-          <label>
-            Build timeout (minutes)
-            <input
-              type="number"
-              min="1"
-              value={form.buildTimeoutMinutes}
-              onChange={(e) => set("buildTimeoutMinutes", e.target.value)}
-            />
-          </label>
-          <label>
-            Queue timeout (minutes)
-            <input
-              type="number"
-              min="1"
-              value={form.queueTimeoutMinutes}
-              onChange={(e) => set("queueTimeoutMinutes", e.target.value)}
-            />
-          </label>
-          <label>
-            Approval window (hours)
-            <input
-              type="number"
-              min="1"
-              value={form.bundleWindowHours}
-              onChange={(e) => set("bundleWindowHours", e.target.value)}
-            />
-            <span className="field-hint">
-              How long an auto-created Change Bundle stays deployable while approvals come in.
-            </span>
-          </label>
-          <label>
-            Rollout timeout (minutes)
-            <input
-              type="number"
-              min="1"
-              value={form.rolloutTimeoutMinutes}
-              onChange={(e) => set("rolloutTimeoutMinutes", e.target.value)}
-            />
-            <span className="field-hint">
-              After the image is applied, how long to wait for the pods to report ready before the
-              run is marked failed.
-            </span>
-          </label>
-          <label className="checkbox-label">
+          <div className="sg-zh-jrow4">
+            <label>
+              Build timeout (min)
+              <input
+                type="number"
+                min="1"
+                value={form.buildTimeoutMinutes}
+                onChange={(e) => set("buildTimeoutMinutes", e.target.value)}
+              />
+            </label>
+            <label>
+              Queue timeout (min)
+              <input
+                type="number"
+                min="1"
+                value={form.queueTimeoutMinutes}
+                onChange={(e) => set("queueTimeoutMinutes", e.target.value)}
+              />
+            </label>
+            <label title="How long an auto-created Change Bundle stays deployable while approvals come in">
+              Approval window (h)
+              <input
+                type="number"
+                min="1"
+                value={form.bundleWindowHours}
+                onChange={(e) => set("bundleWindowHours", e.target.value)}
+              />
+            </label>
+            <label title="How long to wait for pods to report ready before the run fails">
+              Rollout timeout (min)
+              <input
+                type="number"
+                min="1"
+                value={form.rolloutTimeoutMinutes}
+                onChange={(e) => set("rolloutTimeoutMinutes", e.target.value)}
+              />
+            </label>
+          </div>
+          <label className="checkbox-label sg-zh-jcheck">
             <input
               type="checkbox"
               checked={form.rollbackOnFailure}
               onChange={(e) => set("rollbackOnFailure", e.target.checked)}
             />
-            Auto-rollback on rollout failure (<code>rollout undo</code> to the previous version).
-            Administrators are emailed on every rollout failure either way.
+            Auto-rollback on rollout failure — admins are emailed on every failure either way
           </label>
 
           <div className="modal-actions">

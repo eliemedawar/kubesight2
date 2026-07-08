@@ -11,6 +11,10 @@ export default function ExecPodModal({ open, clusterId, namespace, pod, containe
   const [command, setCommand] = useState("");
   const [running, setRunning] = useState(false);
   const [history, setHistory] = useState([]);
+  // Shell-style recall: submitted commands (oldest first) + cursor. -1 = live draft.
+  const [cmdHistory, setCmdHistory] = useState([]);
+  const [histIndex, setHistIndex] = useState(-1);
+  const draftRef = useRef("");
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -18,16 +22,20 @@ export default function ExecPodModal({ open, clusterId, namespace, pod, containe
     if (open) {
       setHistory([]);
       setCommand("");
+      setCmdHistory([]);
+      setHistIndex(-1);
       setContainer(containerList[0] || "");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, pod]);
 
+  // Keep the caret in the command box: on open, and again whenever a run
+  // finishes (a Run-button click moves focus to the button; take it back).
   useEffect(() => {
-    if (open) {
+    if (open && !running) {
       inputRef.current?.focus();
     }
-  }, [open]);
+  }, [open, running]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -48,6 +56,9 @@ export default function ExecPodModal({ open, clusterId, namespace, pod, containe
       return;
     }
     setHistory((prev) => [...prev, { type: "command", text: trimmed, prompt: promptLabel }]);
+    setCmdHistory((prev) => (prev[prev.length - 1] === trimmed ? prev : [...prev, trimmed]));
+    setHistIndex(-1);
+    draftRef.current = "";
     setCommand("");
     setRunning(true);
     try {
@@ -67,6 +78,40 @@ export default function ExecPodModal({ open, clusterId, namespace, pod, containe
       ]);
     } finally {
       setRunning(false);
+      inputRef.current?.focus();
+    }
+  };
+
+  // ArrowUp/ArrowDown recall previous commands, like a real shell prompt.
+  const handleKeyDown = (event) => {
+    if (event.key === "ArrowUp") {
+      if (!cmdHistory.length) return;
+      event.preventDefault();
+      const next = histIndex === -1 ? cmdHistory.length - 1 : Math.max(0, histIndex - 1);
+      if (histIndex === -1) {
+        draftRef.current = command;
+      }
+      setHistIndex(next);
+      setCommand(cmdHistory[next]);
+    } else if (event.key === "ArrowDown") {
+      if (histIndex === -1) return;
+      event.preventDefault();
+      const next = histIndex + 1;
+      if (next >= cmdHistory.length) {
+        setHistIndex(-1);
+        setCommand(draftRef.current);
+      } else {
+        setHistIndex(next);
+        setCommand(cmdHistory[next]);
+      }
+    }
+  };
+
+  // Clicking the scrollback focuses the prompt (terminal convention) — unless
+  // the user is selecting output text to copy.
+  const focusPrompt = () => {
+    const selection = window.getSelection?.();
+    if (!selection || selection.isCollapsed) {
       inputRef.current?.focus();
     }
   };
@@ -99,11 +144,12 @@ export default function ExecPodModal({ open, clusterId, namespace, pod, containe
           </label>
         ) : null}
 
-        <div className="exec-pod-modal__terminal" ref={scrollRef}>
+        <div className="exec-pod-modal__terminal" ref={scrollRef} onClick={focusPrompt}>
           {history.length === 0 ? (
             <p className="exec-pod-modal__hint muted">
               Each command runs in a fresh shell (no persistent state). Try{" "}
-              <code>ls</code>, <code>env</code>, or <code>cat /etc/hostname</code>.
+              <code>ls</code>, <code>env</code>, or <code>cat /etc/hostname</code>. Use ↑/↓ to
+              recall previous commands.
             </p>
           ) : null}
           {history.map((entry, index) => {
@@ -123,27 +169,41 @@ export default function ExecPodModal({ open, clusterId, namespace, pod, containe
               </pre>
             );
           })}
-          {running ? <div className="exec-pod-modal__line muted">Running…</div> : null}
+          {running ? (
+            <div className="exec-pod-modal__line exec-pod-modal__running">Running…</div>
+          ) : null}
         </div>
 
         <form className="exec-pod-modal__form" onSubmit={runCommand}>
           <span className="exec-pod-modal__prompt" aria-hidden="true">
             {promptLabel}
           </span>
+          {/* Never disabled: disabling on submit kicks focus out of the field,
+              which is exactly the "click the box again" annoyance. Double-submit
+              is guarded inside runCommand instead; you can type the next command
+              while the previous one runs. */}
           <input
             ref={inputRef}
             type="text"
             className="exec-pod-modal__input"
             value={command}
-            onChange={(event) => setCommand(event.target.value)}
-            placeholder="Type a command and press Enter…"
+            onChange={(event) => {
+              setCommand(event.target.value);
+              setHistIndex(-1);
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder="Type a command — Enter runs, ↑ recalls…"
             aria-label="Command to run in pod"
             autoComplete="off"
             spellCheck="false"
-            disabled={running}
+            enterKeyHint="send"
           />
-          <button type="submit" className="btn-primary btn-sm" disabled={running || !command.trim()}>
-            Run
+          <button
+            type="submit"
+            className="btn-ghost exec-pod-modal__run"
+            disabled={running || !command.trim()}
+          >
+            {running ? "…" : "Run"}
           </button>
         </form>
 
