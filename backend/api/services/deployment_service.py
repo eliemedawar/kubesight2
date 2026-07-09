@@ -140,6 +140,37 @@ def _run_kubectl_for_cluster(cluster_id: str, args: List[str]) -> str:
     return output
 
 
+def rollout_health(cluster_id: str, namespace: str, name: str) -> Dict[str, Any]:
+    """Read a deployment's live rollout health, generation-guarded.
+
+    Returns ``{"observedCurrent": bool, "desired": int, "ready": int,
+    "updated": int}``. ``observedCurrent`` is False while the deployment
+    controller has not yet observed the latest spec — the replica counters then
+    still describe the PREVIOUS template and must not be trusted (the same
+    guard ``kubectl rollout status`` applies). Raises ``K8sCommandError`` /
+    ``ValueError`` when the deployment can't be read.
+    """
+    import json
+
+    from ..k8s_provider import _run_for_access
+    from ..k8s_provider import resolve_cluster_access as _resolve
+
+    access = _resolve(cluster_id)
+    if not access:
+        raise K8sCommandError(f"Cluster '{cluster_id}' was not found.")
+    raw = _run_for_access(access, ["get", "deployment", name, "-n", namespace, "-o", "json"])
+    doc = json.loads(raw)
+    status = doc.get("status") or {}
+    generation = int((doc.get("metadata") or {}).get("generation") or 0)
+    observed = int(status.get("observedGeneration") or 0)
+    return {
+        "observedCurrent": observed >= generation,
+        "desired": int((doc.get("spec") or {}).get("replicas") or 0),
+        "ready": int(status.get("readyReplicas") or 0),
+        "updated": int(status.get("updatedReplicas") or 0),
+    }
+
+
 def parse_yaml_documents(yaml_content: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     if not yaml_content or not yaml_content.strip():
         return [], "YAML content is empty"

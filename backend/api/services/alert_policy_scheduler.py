@@ -89,6 +89,15 @@ def _scheduler_loop(app: Flask) -> None:
             logger.exception("Change bundle execution tick failed")
         try:
             with app.app_context():
+                from .change_bundle_executor import watch_bundle_rollouts
+
+                # Post-execution pod-health watches on bundle-applied
+                # deployments (rollback + notify on rollout failure).
+                watch_bundle_rollouts()
+        except Exception:
+            logger.exception("Bundle rollout watch tick failed")
+        try:
+            with app.app_context():
                 from .zoho_sync_service import run_due_sync
 
                 # Self-gating: only runs when the integration is enabled and its

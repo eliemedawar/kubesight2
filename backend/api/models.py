@@ -1096,6 +1096,11 @@ class DeploymentRequestSetting(db.Model):
     # Per-cluster overrides: map of clusterId -> required approvals (0 = none).
     # Unset clusters fall back to ``required_approvals``.
     cluster_required_approvals = db.Column(db.JSON, nullable=False, default=dict)
+    # Post-execution pod-health watch on bundle-applied deployments: how long
+    # pods get to become ready, and whether a timeout triggers `rollout undo`
+    # (mirrors the deploy-automation safety net).
+    rollout_timeout_minutes = db.Column(db.Integer, nullable=False, default=15)
+    rollback_on_failure = db.Column(db.Boolean, nullable=False, default=True)
     updated_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
@@ -1247,6 +1252,39 @@ class ChangeBundleVote(db.Model):
     )
 
     bundle = db.relationship("ChangeBundle", back_populates="votes")
+
+
+class BundleRolloutWatch(db.Model):
+    """Post-execution pod-health watch for one deployment a Change Bundle applied.
+
+    Created by the bundle executor for every successfully-applied Deployment
+    item (unless a deploy-automation run already watches that bundle) and
+    advanced on the scheduler tick: the deployment must report ready within the
+    configured timeout or the watch fails — optionally ``kubectl rollout undo``
+    — and the requester + admins are emailed. Status: ``watching`` (active) →
+    ``healthy`` | ``failed``.
+    """
+
+    __tablename__ = "bundle_rollout_watches"
+    __table_args__ = (db.Index("ix_bundle_watch_status", "status"),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    bundle_id = db.Column(db.Integer, nullable=False, index=True)
+    item_id = db.Column(db.Integer, nullable=True)
+    cluster_id = db.Column(db.String(120), nullable=False)
+    namespace = db.Column(db.String(253), nullable=False)
+    deployment_name = db.Column(db.String(253), nullable=False)
+
+    status = db.Column(db.String(16), nullable=False, default="watching")
+    detail = db.Column(db.Text, nullable=True)
+    rolled_back = db.Column(db.Boolean, nullable=False, default=False)
+
+    started_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
 
 class ApiToken(db.Model):

@@ -310,6 +310,12 @@ def _migrate_deployment_request_columns() -> None:
         _add_column_if_missing("deployment_request_settings", "group_ids", "JSON")
         _add_column_if_missing("deployment_request_settings", "required_approvals", "INTEGER DEFAULT 1")
         _add_column_if_missing("deployment_request_settings", "cluster_required_approvals", "JSON")
+        _add_column_if_missing(
+            "deployment_request_settings", "rollout_timeout_minutes", "INTEGER DEFAULT 15"
+        )
+        _add_column_if_missing(
+            "deployment_request_settings", "rollback_on_failure", "BOOLEAN DEFAULT true"
+        )
 
 
 def _migrate_change_bundle_columns() -> None:

@@ -816,6 +816,7 @@ def _finalize(bundle: ChangeBundle, status: str, *, actor: Optional[User] = None
         bundle,
         extra={"reason": reason} if reason else None,
     )
+    notify_requester_outcome(bundle, status, detail=reason or "")
 
 
 def record_vote(
@@ -1019,3 +1020,92 @@ def _notify_approvers(bundle: ChangeBundle, requester_name: str, recipients: Lis
         except EmailDeliveryError as exc:
             errors.append(f"{address}: {exc}")
     return {"sent": sent, "recipients": recipients, "errors": errors}
+
+
+# status -> (subject label, color for the HTML status line, one-line explanation)
+_OUTCOME_MESSAGES = {
+    "approved": ("approved", "#16a34a", "It will be deployed automatically when its window opens."),
+    "rejected": ("rejected", "#dc2626", "It will not be deployed."),
+    "expired": ("expired", "#fbbf24", "Its deployment window passed before it could run."),
+    "completed": ("deployed", "#16a34a", "Every change was applied to the cluster."),
+    "failed": ("failed", "#dc2626", "No changes could be applied — see the bundle for per-item errors."),
+    "partially_failed": (
+        "partially failed", "#fbbf24",
+        "Some changes were applied and some failed — see the bundle for per-item results.",
+    ),
+}
+
+
+def notify_requester_outcome(bundle: ChangeBundle, status: Optional[str] = None, detail: str = "") -> None:
+    """Best-effort email to the bundle's requester when its lifecycle lands on an
+    outcome they need to know about (approved / rejected / expired and the
+    execution results). Automation-authored bundles have no requester → no-op;
+    a delivery problem must never disturb the lifecycle transition itself.
+    """
+    try:
+        status = status or bundle.status
+        outcome = _OUTCOME_MESSAGES.get(status)
+        requester = bundle.requester
+        address = (getattr(requester, "email", "") or "").strip()
+        if outcome is None or not address or not smtp_is_configured():
+            return
+        label, color, explanation = outcome
+
+        items = sorted(bundle.items, key=lambda x: x.position)
+        item_lines = []
+        for i in items:
+            line = (
+                f"  - [{i.action_type}] {i.cluster_name or i.cluster_id}/{i.namespace} "
+                f"{i.resource_kind}/{i.resource_name}".rstrip("/")
+            )
+            if (i.status or "pending") != "pending":
+                line += f" — {i.status}"
+            item_lines.append(line)
+
+        reason = detail or (bundle.rejection_reason if status == "rejected" else "")
+        lines = [f"Your change bundle #{bundle.id} is now {label.upper()}.", explanation]
+        if reason:
+            lines += ["", f"Reason: {reason}"]
+        if bundle.note:
+            lines += ["", "Note:", bundle.note]
+        lines += ["", "Changes:", *item_lines]
+        text_body = "\n".join(lines)
+
+        items_html = "".join(
+            f'<li style="margin:4px 0;color:#e2e8f0;font-size:13px;">'
+            f'<span style="color:#38bdf8;">{_html_escape(i.action_type)}</span> — '
+            f"{_html_escape(i.cluster_name or i.cluster_id)}/{_html_escape(i.namespace)} "
+            f"{_html_escape(i.resource_kind)}/{_html_escape(i.resource_name)}"
+            + (f' <span style="color:#94a3b8;">({_html_escape(i.status)})</span>'
+               if (i.status or "pending") != "pending" else "")
+            + "</li>"
+            for i in items
+        )
+        reason_html = (
+            f'<div style="margin-top:14px;padding:12px 14px;background:#0f172a;border:1px solid #334155;'
+            f'border-radius:8px;color:#e2e8f0;font-size:13px;">{_html_escape(reason)}</div>'
+            if reason
+            else ""
+        )
+        html_body = f"""<!DOCTYPE html>
+<html><body style="margin:0;padding:24px;background:#0f172a;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+  <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:600px;margin:0 auto;background:#1e293b;border:1px solid #334155;border-radius:12px;">
+    <tr><td style="padding:28px 32px;">
+      <div style="color:#38bdf8;font-weight:600;letter-spacing:.05em;text-transform:uppercase;font-size:12px;">KubeSight</div>
+      <h1 style="color:#e2e8f0;font-size:18px;margin:6px 0 10px;">Change Bundle #{bundle.id} —
+        <span style="color:{color};">{_html_escape(label)}</span></h1>
+      <p style="color:#e2e8f0;font-size:14px;margin:0 0 4px;">{_html_escape(explanation)}</p>
+      {reason_html}
+      <div style="margin-top:16px;color:#94a3b8;font-size:13px;">Changes</div>
+      <ul style="margin:6px 0 0;padding-left:18px;">{items_html}</ul>
+    </td></tr>
+  </table>
+</body></html>"""
+        send_email(
+            address,
+            f"KubeSight Change Bundle #{bundle.id} — {label}",
+            text_body,
+            html_body=html_body,
+        )
+    except Exception:  # noqa: BLE001 — outcome mail is best-effort by design
+        pass

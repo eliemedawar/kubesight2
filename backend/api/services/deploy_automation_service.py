@@ -1006,12 +1006,8 @@ def _do_check_pods(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     Read errors during a rollout are treated as "still waiting" (pods churn,
     apiservers hiccup) — only the rollout timeout fails the run.
     """
-    from ..k8s_provider import (
-        K8sCommandError,
-        _run_for_access,
-        resolve_cluster_access,
-        should_use_real_k8s,
-    )
+    from ..k8s_provider import K8sCommandError, should_use_real_k8s
+    from .deployment_service import rollout_health
 
     if not should_use_real_k8s(run.cluster_id):
         _complete_deployed(run, "[mock] 1/1 ready")
@@ -1023,27 +1019,14 @@ def _do_check_pods(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
 
     detail = ""
     try:
-        access = resolve_cluster_access(run.cluster_id)
-        if not access:
-            raise K8sCommandError(f"Cluster '{run.cluster_id}' was not found.")
-        raw = _run_for_access(
-            access,
-            ["get", "deployment", run.deployment_name, "-n", run.namespace, "-o", "json"],
-        )
-        spec = json.loads(raw)
-        status = spec.get("status") or {}
-        generation = int((spec.get("metadata") or {}).get("generation") or 0)
-        observed = int(status.get("observedGeneration") or 0)
-        if observed < generation:
+        health = rollout_health(run.cluster_id, run.namespace, run.deployment_name)
+        if not health["observedCurrent"]:
             # Right after `set image` the controller may not have reconciled
-            # yet — the counters below would still describe the OLD template
-            # and read fully ready (`kubectl rollout status` uses this guard).
+            # yet — the counters would still describe the OLD template and
+            # read fully ready (`kubectl rollout status` uses this guard).
             detail = "waiting for the controller to observe the new spec"
         else:
-            desired = int((spec.get("spec") or {}).get("replicas") or 0)
-            ready = int(status.get("readyReplicas") or 0)
-            updated = int(status.get("updatedReplicas") or 0)
-
+            desired, ready, updated = health["desired"], health["ready"], health["updated"]
             if desired == 0:
                 _complete_deployed(run, "deployment is scaled to 0 — no pods expected")
                 return

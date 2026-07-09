@@ -10,7 +10,7 @@ bundle was approved.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..audit import log_audit
@@ -35,6 +35,9 @@ ACTION_COMPLETED = "BUNDLE_COMPLETED"
 ACTION_FAILED = "BUNDLE_FAILED"
 ACTION_PARTIAL = "BUNDLE_PARTIALLY_FAILED"
 ACTION_EXPIRED = "BUNDLE_EXPIRED"
+ACTION_ROLLOUT_HEALTHY = "BUNDLE_ROLLOUT_HEALTHY"
+ACTION_ROLLOUT_FAILED = "BUNDLE_ROLLOUT_FAILED"
+ACTION_ROLLBACK = "BUNDLE_ROLLBACK"
 
 
 def _now() -> datetime:
@@ -250,6 +253,13 @@ def execute_bundle(bundle: ChangeBundle) -> str:
         target_id=str(bundle.id),
         details={"bundleId": bundle.id, "succeeded": succeeded, "failed": failed},
     )
+
+    from .change_bundle_service import notify_requester_outcome
+
+    notify_requester_outcome(
+        bundle, final, detail=f"{succeeded} change(s) applied, {failed} failed." if failed else ""
+    )
+    _start_rollout_watches(bundle)
     return final
 
 
@@ -317,7 +327,220 @@ def _mark_expired(bundle: ChangeBundle) -> str:
         target_id=str(bundle.id),
         details={"bundleId": bundle.id},
     )
+    from .change_bundle_service import notify_requester_outcome
+
+    notify_requester_outcome(bundle, "expired")
     return "expired"
+
+
+# ---------------------------------------------------------------------------
+# Post-execution pod-health watch — the deploy-automation safety net, applied
+# to manually-authored bundles: an applied Deployment must actually roll out.
+# ---------------------------------------------------------------------------
+
+def _start_rollout_watches(bundle: ChangeBundle) -> None:
+    """Queue a pod-health watch for every Deployment this bundle applied.
+
+    Deploy-automation bundles are skipped — their run already watches the same
+    deployment (with its own rollback + notification path), and two watchers
+    would race to `rollout undo` twice. Best-effort: a watch problem must never
+    disturb the just-finished execution.
+    """
+    try:
+        from ..models import BundleRolloutWatch, DeployAutomationRun
+
+        if DeployAutomationRun.query.filter_by(bundle_id=bundle.id).first():
+            return
+        created = 0
+        for item in bundle.items:
+            mode = (item.new_payload_json or {}).get("execution", {}).get("mode", "apply")
+            if item.status != "succeeded" or mode != "apply":
+                continue
+            if (item.resource_kind or "").lower() != "deployment":
+                continue
+            db.session.add(
+                BundleRolloutWatch(
+                    bundle_id=bundle.id,
+                    item_id=item.id,
+                    cluster_id=item.cluster_id,
+                    namespace=item.namespace,
+                    deployment_name=item.resource_name,
+                )
+            )
+            created += 1
+        if created:
+            db.session.commit()
+    except Exception:  # noqa: BLE001 — watch setup must not fail the execution
+        logger.exception("Could not start rollout watches for bundle #%s", bundle.id)
+        db.session.rollback()
+
+
+def _watch_settings() -> Tuple[int, bool]:
+    """(timeout minutes, rollback enabled) from the bundle-workflow settings row."""
+    from ..models import DeploymentRequestSetting
+
+    row = DeploymentRequestSetting.query.first()
+    timeout = int((getattr(row, "rollout_timeout_minutes", None) or 15))
+    rollback = row.rollback_on_failure if row is not None else True
+    return timeout, (True if rollback is None else bool(rollback))
+
+
+def watch_bundle_rollouts() -> int:
+    """Advance every active post-execution watch one step (scheduler tick).
+
+    Each watch is isolated in try/except so one broken watch can't stall the
+    rest. Returns how many watches were looked at.
+    """
+    from ..models import BundleRolloutWatch
+
+    watches = BundleRolloutWatch.query.filter_by(status="watching").all()
+    for watch in watches:
+        try:
+            _advance_watch(watch)
+            db.session.commit()
+        except Exception:  # noqa: BLE001 — defensive; next tick retries
+            logger.exception("Bundle rollout watch #%s failed to advance", watch.id)
+            db.session.rollback()
+    return len(watches)
+
+
+def _advance_watch(watch) -> None:
+    from .deployment_service import rollout_health
+
+    if not should_use_real_k8s(watch.cluster_id):
+        _finish_watch(watch, "healthy", "[mock] 1/1 ready")
+        return
+
+    timeout_min, rollback_enabled = _watch_settings()
+    detail = ""
+    try:
+        health = rollout_health(watch.cluster_id, watch.namespace, watch.deployment_name)
+        if not health["observedCurrent"]:
+            # Stale status — the controller hasn't reconciled the applied spec
+            # yet, so the counters still describe the previous template.
+            detail = "waiting for the controller to observe the new spec"
+        else:
+            desired, ready, updated = health["desired"], health["ready"], health["updated"]
+            if desired == 0:
+                _finish_watch(watch, "healthy", "deployment is scaled to 0 — no pods expected")
+                return
+            if ready >= desired and updated >= desired:
+                _finish_watch(watch, "healthy", f"{ready}/{desired} ready")
+                return
+            detail = f"{ready}/{desired} ready ({updated}/{desired} on the new spec)"
+    except (K8sCommandError, ValueError) as exc:
+        # Read errors during a rollout are "still waiting" — pods churn,
+        # apiservers hiccup; only the timeout fails the watch.
+        detail = f"could not read pod status — retrying: {exc}"
+
+    started = _aware(watch.started_at) or _now()
+    if _now() - started > timedelta(minutes=timeout_min):
+        _fail_watch(watch, detail, timeout_min, rollback_enabled)
+        return
+    watch.detail = detail
+
+
+def _finish_watch(watch, status: str, detail: str) -> None:
+    watch.status = status
+    watch.detail = detail
+    watch.finished_at = _now()
+    log_audit(
+        ACTION_ROLLOUT_HEALTHY if status == "healthy" else ACTION_ROLLOUT_FAILED,
+        actor=None,
+        target_type="change_bundle",
+        target_id=str(watch.bundle_id),
+        details={
+            "bundleId": watch.bundle_id,
+            "deployment": watch.deployment_name,
+            "namespace": watch.namespace,
+            "clusterId": watch.cluster_id,
+            "detail": detail,
+        },
+    )
+
+
+def _fail_watch(watch, last_seen: str, timeout_min: int, rollback_enabled: bool) -> None:
+    """Rollout timed out: optionally roll back, mark the watch failed, and email
+    the requester + admins (mirrors the deploy-automation failure handling)."""
+    message = (
+        f"Change bundle #{watch.bundle_id} applied {watch.deployment_name} in "
+        f"{watch.namespace}, but the pods did not become ready within {timeout_min} min"
+        + (f" (last seen: {last_seen})." if last_seen else ".")
+    )
+
+    if rollback_enabled:
+        try:
+            _run_kubectl_for_cluster(
+                watch.cluster_id,
+                ["rollout", "undo", f"deployment/{watch.deployment_name}", "-n", watch.namespace],
+            )
+            rollback_note = "Rolled back to the previous version."
+            watch.rolled_back = True
+        except K8sCommandError as exc:
+            rollback_note = f"Automatic rollback FAILED: {exc}"
+        log_audit(
+            ACTION_ROLLBACK,
+            actor=None,
+            target_type="change_bundle",
+            target_id=str(watch.bundle_id),
+            details={
+                "bundleId": watch.bundle_id,
+                "deployment": watch.deployment_name,
+                "namespace": watch.namespace,
+                "clusterId": watch.cluster_id,
+                "result": rollback_note,
+            },
+        )
+    else:
+        rollback_note = "Auto-rollback is disabled — the deployment was left as-is."
+
+    _finish_watch(watch, "failed", f"{message} {rollback_note}")
+    _notify_rollout_failure(watch, message, rollback_note)
+
+
+def _notify_rollout_failure(watch, message: str, rollback_note: str) -> None:
+    """Best-effort email to the bundle's requester and every admin."""
+    try:
+        from ..email_delivery import send_email, smtp_is_configured
+
+        # Shared admin-audience convention with the deploy-automation failures.
+        from .deploy_automation_service import _admin_emails
+
+        if not smtp_is_configured():
+            return
+        bundle = ChangeBundle.query.get(watch.bundle_id)
+        recipients = set(_admin_emails())
+        requester_email = (getattr(getattr(bundle, "requester", None), "email", "") or "").strip()
+        if requester_email:
+            recipients.add(requester_email)
+        if not recipients:
+            return
+        subject = (
+            f"KubeSight: rollout failed — {watch.deployment_name} "
+            f"(change bundle #{watch.bundle_id})"
+        )
+        body = "\n".join(
+            [
+                "A change-bundle deployment failed its post-apply health check.",
+                "",
+                f"Bundle:       #{watch.bundle_id}",
+                f"Deployment:   {watch.deployment_name}",
+                f"Namespace:    {watch.namespace}",
+                f"Cluster:      {watch.cluster_id}",
+                "",
+                message,
+                rollback_note,
+                "",
+                "Details: KubeSight → Change Bundles.",
+            ]
+        )
+        for address in sorted(recipients):
+            try:
+                send_email(address, subject, body)
+            except Exception:  # noqa: BLE001 — keep sending to the rest
+                continue
+    except Exception:  # noqa: BLE001 — notification must never break the tick
+        logger.exception("Rollout-failure notification failed for bundle #%s", watch.bundle_id)
 
 
 def process_due_bundles(now: Optional[datetime] = None) -> Dict[str, int]:
