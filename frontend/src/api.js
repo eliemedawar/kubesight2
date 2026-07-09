@@ -33,6 +33,7 @@ export {
   listPermissions,
   updateRolePermissions,
   listAuditLogs,
+  exportAuditLogs,
 } from "./api/usersApi";
 export {
   listClusters,

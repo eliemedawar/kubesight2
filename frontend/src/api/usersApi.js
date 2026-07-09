@@ -1,4 +1,5 @@
-import { request } from "./client";
+import { getBaseUrl, request } from "./client";
+import { getStoredToken } from "../authStorage";
 
 export const listUsers = () => request("/api/users");
 export const getUser = (id) => request(`/api/users/${id}`);
@@ -47,3 +48,32 @@ export const updateRolePermissions = (roleId, permissions) =>
   request(`/api/roles/${roleId}/permissions`, { method: "PUT", body: { permissions } });
 
 export const listAuditLogs = (query = {}) => request("/api/audit-logs", { query });
+
+// Downloads a filtered CSV of audit entries. Uses a raw fetch (not `request`,
+// which parses JSON) so the response comes back as a Blob, and carries the
+// bearer token since the download isn't a plain navigation.
+export const exportAuditLogs = async (query = {}) => {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && String(value) !== "") {
+      params.append(key, String(value));
+    }
+  });
+  const qs = params.toString();
+  const token = getStoredToken();
+  const response = await fetch(
+    `${getBaseUrl()}/api/audit-logs/export${qs ? `?${qs}` : ""}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+  );
+  if (!response.ok) {
+    let message = `Export failed (${response.status})`;
+    try {
+      const payload = await response.json();
+      message = payload.error || payload.message || message;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(message);
+  }
+  return response.blob();
+};

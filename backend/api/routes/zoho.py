@@ -277,7 +277,7 @@ def test_jenkins():
 @zoho_bp.route("/automation/runs", methods=["GET"])
 @require_permission("zoho:view")
 def list_automation_runs():
-    limit = request.args.get("limit", 50)
+    limit = request.args.get("limit", 50, type=int)
     return success_response({"items": automation_svc.list_runs(limit=limit)})
 
 

@@ -364,6 +364,118 @@ def test_rollout_failure_rolls_back_and_emails_admins(client, admin_token, app, 
     assert "DR-9002" in sent[0][1]
 
 
+def test_rollout_watch_ignores_stale_status(client, admin_token, app, monkeypatch):
+    """Counters from before the controller observed the new spec (stale
+    observedGeneration) must not mark the run deployed — otherwise the check
+    that runs milliseconds after `kubectl set image` reads the OLD template's
+    3/3-ready status and goes green before the rollout even starts."""
+    from api.models import JenkinsConnection
+    from api.services import deploy_automation_service as svc
+
+    db.session.add(JenkinsConnection(id=1))
+    run = DeployAutomationRun(
+        cluster_id=CLUSTER,
+        namespace=NAMESPACE,
+        deployment_name=DEPLOYMENT,
+        image_tag="v5.5.5",
+        status="verifying_rollout",
+        steps=[],
+        rollout_started_at=datetime.now(timezone.utc),
+    )
+    db.session.add(run)
+    db.session.commit()
+
+    payloads = {
+        # Fully "ready" — but the controller hasn't seen generation 7 yet.
+        "stale": {
+            "metadata": {"generation": 7},
+            "spec": {"replicas": 3},
+            "status": {"observedGeneration": 6, "readyReplicas": 3, "updatedReplicas": 3},
+        },
+        "fresh": {
+            "metadata": {"generation": 7},
+            "spec": {"replicas": 3},
+            "status": {"observedGeneration": 7, "readyReplicas": 3, "updatedReplicas": 3},
+        },
+    }
+    current = {"key": "stale"}
+    monkeypatch.setattr("api.k8s_provider.should_use_real_k8s", lambda cid=None: True)
+    monkeypatch.setattr("api.k8s_provider.resolve_cluster_access", lambda cid: object())
+    monkeypatch.setattr(
+        "api.k8s_provider._run_for_access",
+        lambda access, args: json.dumps(payloads[current["key"]]),
+    )
+
+    svc.advance_runs()
+    row = db.session.get(DeployAutomationRun, run.id)
+    assert row.status == "verifying_rollout", "stale status must not complete the run"
+    pods = next(s for s in row.steps if s["key"] == "pods")
+    assert "observe" in pods["detail"]
+
+    # The controller catches up → the same counters now count.
+    current["key"] = "fresh"
+    svc.advance_runs()
+    row = db.session.get(DeployAutomationRun, run.id)
+    assert row.status == "deployed"
+
+
+def test_cancel_withdraws_pending_and_approved_bundles(client, admin_token, app, monkeypatch):
+    """Cancelling a run must stop its Change Bundle too — a bundle that outlives
+    the run would deploy later with no run watching the rollout."""
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image: {"status": "found", "image": image},
+    )
+    monkeypatch.setattr(
+        "api.services.resource_actions_service.get_resource_yaml",
+        lambda user, cluster_id, namespace, kind, name: (
+            {"yaml": LIVE_DEPLOYMENT_YAML},
+            None,
+            200,
+        ),
+    )
+    _set_cluster_approvals(1)
+
+    # Bundle still pending approval → rejected via the normal decide path.
+    ticket = _make_ticket(tag="v4.4.4")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "awaiting_approval" and run["bundleId"]
+    response = client.post(
+        f"/api/zoho/automation/runs/{run['id']}/cancel", headers=auth_headers(admin_token)
+    )
+    assert response.status_code == 200
+    data = response.get_json()["data"]
+    assert data["status"] == "cancelled"
+    assert f"bundle #{run['bundleId']}" in data["error"].lower()
+    bundle = ChangeBundle.query.get(run["bundleId"])
+    assert bundle.status == "rejected"
+    assert "cancelled" in (bundle.rejection_reason or "").lower()
+
+    # Bundle already approved (executor hasn't started) → withdrawn directly.
+    ticket2 = _make_ticket(tag="v4.4.5")
+    run2 = _start(client, admin_token, ticket2.id)
+    bundle2 = ChangeBundle.query.get(run2["bundleId"])
+    bundle2.status = "approved"
+    db.session.commit()
+    response = client.post(
+        f"/api/zoho/automation/runs/{run2['id']}/cancel", headers=auth_headers(admin_token)
+    )
+    assert response.status_code == 200
+    data = response.get_json()["data"]
+    assert data["status"] == "cancelled"
+    assert "withdrawn" in data["error"]
+    bundle2 = ChangeBundle.query.get(run2["bundleId"])
+    assert bundle2.status == "rejected"
+
+
+def test_list_runs_tolerates_bad_limit(client, admin_token, app):
+    response = client.get(
+        "/api/zoho/automation/runs?limit=abc", headers=auth_headers(admin_token)
+    )
+    assert response.status_code == 200
+    assert isinstance(response.get_json()["data"]["items"], list)
+
+
 def test_auto_run_is_idempotent_per_ticket(client, admin_token, app, monkeypatch):
     """A re-delivered webhook for the same ticket must not spawn a second run."""
     from api.models import JenkinsConnection

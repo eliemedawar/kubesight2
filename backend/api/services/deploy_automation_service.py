@@ -400,6 +400,45 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
     return serialize_run(run)
 
 
+def _withdraw_bundle(run: DeployAutomationRun, user) -> str:
+    """Stop the run's Change Bundle so a cancelled run can't deploy later.
+
+    Without this, a pending or approved bundle would outlive the cancelled run:
+    the executor would still apply it, with no run watching the rollout (no
+    pod-health gate, no rollback). A ``deploying`` bundle can't be stopped.
+    Returns a sentence for the cancel note ("" when there is no bundle or it is
+    already terminal).
+    """
+    from .change_bundle_service import ChangeBundleError, decide_bundle
+
+    bundle = ChangeBundle.query.get(run.bundle_id) if run.bundle_id else None
+    if bundle is None:
+        return ""
+    reason = f"Automation run #{run.id} was cancelled."
+    if bundle.status == "pending_approval":
+        try:
+            decide_bundle(bundle.id, "decline", actor=user, reason=reason)
+            return f"Change bundle #{bundle.id} was rejected."
+        except ChangeBundleError:
+            # The bundle moved on concurrently (approved/expired/…) — re-read
+            # and fall through to the state it is in now.
+            db.session.rollback()
+            bundle = ChangeBundle.query.get(run.bundle_id)
+            if bundle is None:
+                return ""
+    if bundle.status in ("approved", "scheduled"):
+        # Approved but not yet picked up by the executor. decide_bundle only
+        # handles pending bundles, so withdraw directly — the executor skips
+        # anything that is no longer approved/scheduled.
+        bundle.status = "rejected"
+        bundle.rejection_reason = reason
+        db.session.commit()
+        return f"Change bundle #{bundle.id} was withdrawn before execution."
+    if bundle.status == "deploying":
+        return f"Change bundle #{bundle.id} is already executing and cannot be stopped."
+    return ""
+
+
 def cancel_run(run_id: int, user=None) -> Dict[str, Any]:
     run = DeployAutomationRun.query.get(int(run_id))
     if run is None:
@@ -409,6 +448,9 @@ def cancel_run(run_id: int, user=None) -> Dict[str, Any]:
     note = "Cancelled by operator."
     if run.status == "building":
         note = "Cancelled by operator — the Jenkins build itself keeps running."
+    bundle_note = _withdraw_bundle(run, user)
+    if bundle_note:
+        note = f"{note} {bundle_note}"
     for step in ("image_check", "build", "verify", "approval", "deploy"):
         current = next((s for s in (run.steps or []) if s.get("key") == step), None)
         if current and current.get("status") in ("run", "wait"):
@@ -417,12 +459,16 @@ def cancel_run(run_id: int, user=None) -> Dict[str, Any]:
     run.error = note
     run.finished_at = datetime.now(timezone.utc)
     db.session.commit()
+    details = {"ticket": run.ticket_number, "deployment": run.deployment_name}
+    if run.bundle_id:
+        details["bundleId"] = run.bundle_id
+        details["bundleOutcome"] = bundle_note or "already terminal"
     log_audit(
         "automation_run_cancelled",
         actor=user,
         target_type="deploy_automation_run",
         target_id=str(run.id),
-        details={"ticket": run.ticket_number, "deployment": run.deployment_name},
+        details=details,
     )
     return serialize_run(run)
 
@@ -985,18 +1031,26 @@ def _do_check_pods(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
             ["get", "deployment", run.deployment_name, "-n", run.namespace, "-o", "json"],
         )
         spec = json.loads(raw)
-        desired = int((spec.get("spec") or {}).get("replicas") or 0)
         status = spec.get("status") or {}
-        ready = int(status.get("readyReplicas") or 0)
-        updated = int(status.get("updatedReplicas") or 0)
+        generation = int((spec.get("metadata") or {}).get("generation") or 0)
+        observed = int(status.get("observedGeneration") or 0)
+        if observed < generation:
+            # Right after `set image` the controller may not have reconciled
+            # yet — the counters below would still describe the OLD template
+            # and read fully ready (`kubectl rollout status` uses this guard).
+            detail = "waiting for the controller to observe the new spec"
+        else:
+            desired = int((spec.get("spec") or {}).get("replicas") or 0)
+            ready = int(status.get("readyReplicas") or 0)
+            updated = int(status.get("updatedReplicas") or 0)
 
-        if desired == 0:
-            _complete_deployed(run, "deployment is scaled to 0 — no pods expected")
-            return
-        if ready >= desired and updated >= desired:
-            _complete_deployed(run, f"{ready}/{desired} ready")
-            return
-        detail = f"{ready}/{desired} ready ({updated}/{desired} on the new image)"
+            if desired == 0:
+                _complete_deployed(run, "deployment is scaled to 0 — no pods expected")
+                return
+            if ready >= desired and updated >= desired:
+                _complete_deployed(run, f"{ready}/{desired} ready")
+                return
+            detail = f"{ready}/{desired} ready ({updated}/{desired} on the new image)"
     except (K8sCommandError, ValueError) as exc:
         detail = f"could not read pod status — retrying: {exc}"
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { listAuditLogs, listClusters } from "../api";
+import { exportAuditLogs, listAuditLogs, listClusters } from "../api";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
@@ -9,6 +9,14 @@ import SearchableSelect from "../components/common/SearchableSelect.jsx";
 // deployment requests store it in details.clusterId; cluster/namespace/resource
 // targets encode it in targetId (e.g. "cluster" or "cluster/namespace/name").
 const CLUSTER_PREFIXED_TARGETS = ["namespace", "pod", "deployment", "service", "resource"];
+
+// System-initiated actions (scheduler, webhook, deploy automation) have no
+// human actor — shown, filtered and exported under this label.
+const AUTOMATION_ACTOR = "KubeSight automation";
+
+function displayActor(entry) {
+  return entry.actorUsername || entry.actorUserId || AUTOMATION_ACTOR;
+}
 
 function clusterOf(entry) {
   const details = entry.details || {};
@@ -30,6 +38,8 @@ export default function AuditLogsPage() {
   const [actionFilter, setActionFilter] = useState("");
   const [clusterFilter, setClusterFilter] = useState("");
   const [clusterNameById, setClusterNameById] = useState({});
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
 
   useEffect(() => {
     const load = async () => {
@@ -59,10 +69,7 @@ export default function AuditLogsPage() {
 
   const uniqueActors = useMemo(() => {
     const seen = new Set();
-    entries.forEach((e) => {
-      const actor = e.actorUsername || e.actorUserId;
-      if (actor) seen.add(actor);
-    });
+    entries.forEach((e) => seen.add(displayActor(e)));
     return [...seen].sort();
   }, [entries]);
 
@@ -93,7 +100,7 @@ export default function AuditLogsPage() {
 
   const filtered = useMemo(() => {
     return entries.filter((e) => {
-      const actor = (e.actorUsername || e.actorUserId || "").toLowerCase();
+      const actor = displayActor(e).toLowerCase();
       const action = (e.action || "").toLowerCase();
       if (actorFilter && actor !== actorFilter.toLowerCase()) return false;
       if (actionFilter && !action.includes(actionFilter.toLowerCase())) return false;
@@ -101,6 +108,32 @@ export default function AuditLogsPage() {
       return true;
     });
   }, [entries, actorFilter, actionFilter, clusterFilter]);
+
+  const runExport = async () => {
+    setExporting(true);
+    setExportError("");
+    try {
+      const blob = await exportAuditLogs({
+        actor: actorFilter,
+        action: actionFilter,
+        cluster: clusterFilter,
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const scope = actorFilter || actionFilter || clusterFilter ? "-filtered" : "";
+      link.href = url;
+      link.download = `audit-logs${scope}-${stamp}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(err.message || "Export failed.");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <div className="ops-page">
@@ -153,8 +186,28 @@ export default function AuditLogsPage() {
                 Clear
               </button>
             )}
+            <button
+              type="button"
+              className="btn-primary btn-compact"
+              style={{ alignSelf: "flex-end" }}
+              onClick={runExport}
+              disabled={exporting}
+              title={
+                actorFilter || actionFilter || clusterFilter
+                  ? "Export the entries matching the current filters as CSV"
+                  : "Export all audit entries as CSV"
+              }
+            >
+              {exporting
+                ? "Exporting…"
+                : actorFilter || actionFilter || clusterFilter
+                ? "Export filtered"
+                : "Export CSV"}
+            </button>
           </div>
         )}
+
+        {exportError ? <ErrorBanner message={exportError} onDismiss={() => setExportError("")} /> : null}
 
         {loading ? (
           <p className="muted">Loading audit logs...</p>
@@ -189,7 +242,7 @@ export default function AuditLogsPage() {
                     filtered.map((entry) => (
                       <tr key={entry.id}>
                         <td>{entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "—"}</td>
-                        <td>{entry.actorUsername || entry.actorUserId || "—"}</td>
+                        <td>{displayActor(entry)}</td>
                         <td>{entry.action}</td>
                         <td>
                           {entry.targetType}

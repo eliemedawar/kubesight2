@@ -780,7 +780,7 @@ export default function ZohoSyncPage({ canManage = false }) {
         ) : tickets.length === 0 ? (
           <EmptyState message="No tickets received yet." />
         ) : (
-          <div className="table-wrap">
+          <div className="table-wrap sg-zh-tscroll">
             <table className="data-table">
               <thead>
                 <tr>
