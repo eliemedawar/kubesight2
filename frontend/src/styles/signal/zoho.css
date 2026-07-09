@@ -1,21 +1,221 @@
-/* Signal page-specific styles — Zoho integration (shared vocabulary lives in screens.css) */
+/* Signal page-specific styles — Zoho integration (shared vocabulary lives in screens.css).
+   Structure: command bar → flow strip → sub-tabs → one room at a time
+   (Overview / Field sync / Tickets & runs / Settings). */
 
 .zoho-page > .card { margin-bottom: var(--space-4); }
 .zoho-page > .card:last-child { margin-bottom: 0; }
 .zoho-page .table-shell { margin-top: 0.75rem; }
 
-/* ── KPI strip ──────────────────────────────────────────────────── */
-.sg-zh-kpis { margin-bottom: var(--space-4); }
-
-.sg-zh-kpi-sub {
+/* ── Command bar ────────────────────────────────────────────────── */
+.sg-zh-cmdbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-4);
+}
+.sg-zh-cmdtitle {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  margin-top: 0.45rem;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  min-width: 0;
+  gap: 0.6rem;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--font-size-xl);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+}
+.sg-zh-cmdsub {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
   flex-wrap: wrap;
+  margin: 0.3rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.sg-zh-cmdsep { color: var(--border-strong); }
+.sg-zh-cmdactions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ── Flow strip — the integration drawn as its pipeline ─────────── */
+.sg-zh-flow {
+  display: flex;
+  align-items: stretch;
+  margin-bottom: var(--space-4);
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+.sg-zh-fseg {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.sg-zh-fnode {
+  flex: 1 1 0;
+  min-width: 9.75rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font: inherit;
+  text-align: left;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.sg-zh-fnode:hover { border-color: var(--border-strong); box-shadow: var(--shadow-sm); background: var(--bg-panel); }
+.sg-zh-fnode:focus-visible { outline: none; box-shadow: var(--ring); }
+.sg-zh-fnode--warn { border-color: var(--warn-border); }
+.sg-zh-fnode--warn:hover { border-color: var(--warn); }
+.sg-zh-fnode--danger { border-color: var(--danger-border); }
+.sg-zh-fnode--danger:hover { border-color: var(--danger); }
+
+.sg-zh-fnode-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+.sg-zh-fnode-head svg { width: 0.95rem; height: 0.95rem; color: var(--text-muted); flex: none; }
+.sg-zh-fnode-head b {
+  font-size: 0.75rem;
+  font-weight: 750;
+  color: var(--text-strong);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.sg-zh-fnode-metric {
+  font-size: 0.9375rem;
+  font-weight: 750;
+  color: var(--text-main);
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.sg-zh-fnode-sub {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.sg-zh-fnode .status-pill { margin-top: auto; }
+.sg-zh-fnode-dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: currentColor;
+  margin-right: 0.32rem;
+  flex: none;
+}
+
+/* connector: hairline + arrow, tinted by the worse of its two nodes */
+.sg-zh-flink {
+  flex: 0 0 1.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  color: var(--text-muted);
+}
+.sg-zh-flink::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  border-top: 2px solid var(--border);
+}
+.sg-zh-flink svg {
+  position: relative;
+  width: 0.8rem;
+  height: 0.8rem;
+  background: var(--bg-main);
+}
+.sg-zh-flink--ok { color: var(--ok); }
+.sg-zh-flink--ok::before { border-top-color: var(--ok-border); }
+.sg-zh-flink--info { color: var(--info); }
+.sg-zh-flink--info::before { border-top-color: var(--info-border); }
+.sg-zh-flink--warn { color: var(--warn); }
+.sg-zh-flink--warn::before { border-top-color: var(--warn-border); }
+.sg-zh-flink--danger { color: var(--danger); }
+.sg-zh-flink--danger::before { border-top-color: var(--danger-border); }
+
+/* ── Sub-tabs (same segmented-pill pattern as the Overview range) ─ */
+.sg-zh-subtabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-interactive);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  margin-bottom: var(--space-4);
+  max-width: 100%;
+  overflow-x: auto;
+}
+.sg-zh-subtab {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 650;
+  padding: 0.32rem 1rem;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+.sg-zh-subtab:hover { background: transparent; border-color: transparent; color: var(--text-main); }
+.sg-zh-subtab:focus-visible { outline: none; box-shadow: var(--ring); }
+.sg-zh-subtab--on,
+.sg-zh-subtab--on:hover {
+  background: var(--bg-panel);
+  color: var(--text-strong);
+  box-shadow: var(--shadow-sm);
+}
+.sg-zh-tabcnt {
+  font-size: 0.64rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-radius: var(--radius-full);
+  padding: 0.05rem 0.45rem;
+}
+
+/* ── Two-column rooms ───────────────────────────────────────────── */
+.sg-zh-col2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+  margin-bottom: var(--space-4);
+}
+.sg-zh-col2--fieldsync { grid-template-columns: 1.2fr 0.9fr; }
+.sg-zh-colmain { min-width: 0; }
+.sg-zh-colside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.sg-zh-col2 .card { margin: 0; }
+@media (max-width: 1100px) {
+  .sg-zh-col2, .sg-zh-col2--fieldsync { grid-template-columns: 1fr; }
 }
 
 /* Neutral variant for the shared status pill (Disabled / Pending / Never). */
@@ -40,9 +240,9 @@
   white-space: nowrap;
 }
 
-/* ── Sync health rows ───────────────────────────────────────────── */
+/* ── Health rows (Overview) ─────────────────────────────────────── */
 /* div.actions has no global layout (only td.actions does) — without this the
-   icon Refresh button baseline-drifts against its text-only siblings. */
+   icon buttons baseline-drift against their text-only siblings. */
 .zoho-page .card-header-row .actions {
   display: flex;
   align-items: center;
@@ -95,6 +295,39 @@
   white-space: nowrap;
 }
 
+/* ── Activity feed (Overview) ───────────────────────────────────── */
+.sg-zh-feed { list-style: none; margin: 0.35rem 0 0; padding: 0; }
+.sg-zh-feed li {
+  display: flex;
+  gap: 0.7rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.sg-zh-feed li:last-child { border-bottom: 0; }
+.sg-zh-ftime {
+  width: 5.5rem;
+  flex: none;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  padding-top: 0.15rem;
+}
+.sg-zh-fled {
+  margin-top: 0.42rem;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  flex: none;
+}
+.sg-zh-fbody {
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+  line-height: 1.5;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sg-zh-fbody b { color: var(--text-main); font-weight: 650; }
+
 /* ── Tag rows (namespaces, picklist values) ─────────────────────── */
 .sg-zh-tags {
   display: flex;
@@ -104,7 +337,7 @@
 }
 .sg-zh-more { font-size: 0.6875rem; color: var(--text-muted); align-self: center; }
 
-/* Cap tall preview tables so the sections below stay reachable; the sticky
+/* Cap tall tables so the sections below stay reachable; the sticky
    header (global th rules) keeps column labels visible while scrolling. */
 .sg-zh-tscroll {
   max-height: 27rem;
@@ -136,7 +369,97 @@
   .sg-zh-spin { animation: none; }
 }
 
-/* ── Deploy automation runs ─────────────────────────────────────── */
+/* ── Webhook setup strip (Tickets & runs) ───────────────────────── */
+.sg-zh-hookstrip {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.85rem;
+  margin-bottom: var(--space-4);
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.sg-zh-hookurl {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-full);
+  padding: 0.18rem 0.7rem;
+  font-size: 0.72rem;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.sg-zh-hookcopy { font-size: 0.72rem; padding: 0.25rem 0.75rem; margin-left: auto; }
+
+/* ── Triage filter pills ────────────────────────────────────────── */
+.sg-zh-tfilters {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.85rem;
+}
+.sg-zh-fpill {
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 650;
+  padding: 0.24rem 0.85rem;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.sg-zh-fpill:hover { border-color: var(--border-strong); background: var(--bg-panel); color: var(--text-main); }
+.sg-zh-fpill:focus-visible { outline: none; box-shadow: var(--ring); }
+.sg-zh-fpill--on,
+.sg-zh-fpill--on:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+}
+.sg-zh-fpill-n { font-size: 0.68rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.sg-zh-tsearch { margin-left: auto; }
+
+/* ── Tickets table: a ticket owns its runs ──────────────────────── */
+.sg-zh-thchev { width: 2rem; }
+.sg-zh-trow--exp { cursor: pointer; }
+.sg-zh-tdchev { white-space: nowrap; }
+.sg-zh-chev {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.15rem 0.3rem;
+  color: var(--text-muted);
+}
+.sg-zh-chev svg { width: 0.85rem; height: 0.85rem; transition: transform var(--dur-fast) var(--ease); }
+.sg-zh-trow--open .sg-zh-chev svg { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .sg-zh-chev svg { transition: none; }
+}
+.sg-zh-runcount {
+  margin-left: 0.35rem;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sg-zh-tdetail td {
+  background: var(--bg-panel-strong);
+  padding: 0.4rem 0.8rem 0.85rem;
+}
+.sg-zh-tdetail-runs { display: grid; gap: 0.6rem; }
+
+/* ── Run detail blocks (expanded rows + orphan runs) ────────────── */
 .sg-zh-runs {
   display: grid;
   gap: 0.65rem;
@@ -184,7 +507,7 @@
 
 .sg-zh-run .sg-zh-fhint a { color: var(--accent-strong); }
 
-/* Jenkins config modal: fixed two-column layout — the generic auto-fit grid
+/* Jenkins form: fixed two-column layout — the generic auto-fit grid
    misaligned fields whose hints differ in height. */
 .zoho-page .sg-zh-jform.settings-form {
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -210,7 +533,7 @@
   .sg-zh-jrow4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* Per-cluster auto-start overrides in the Jenkins config modal. */
+/* Per-cluster auto-start overrides in the Jenkins section. */
 .sg-zh-cluster-modes {
   display: grid;
   gap: 0.35rem;
@@ -261,7 +584,7 @@
   line-height: 1.45;
 }
 
-/* ── Webhook URL copy row ───────────────────────────────────────── */
+/* ── Webhook URL copy row (Settings) ────────────────────────────── */
 .sg-zh-url {
   display: flex;
   gap: 0.5rem;
@@ -283,6 +606,61 @@
   white-space: nowrap;
 }
 .sg-zh-copy svg { width: 0.85rem; height: 0.85rem; flex: none; }
+
+/* ── Agent's view — simulated Zoho ticket form (Field sync) ─────── */
+.sg-zh-zform {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel-strong);
+  padding: 0.9rem 1rem 1rem;
+}
+.sg-zh-zform-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.sg-zh-zform-title::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+.sg-zh-zfield {
+  display: block;
+  margin-bottom: 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.sg-zh-zfield select { display: block; width: 100%; margin-top: 0.3rem; }
+.sg-zh-zfield-label { display: block; }
+.sg-zh-zoptions {
+  margin-top: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.sg-zh-zopt {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.74rem;
+  color: var(--text-subtle);
+  border-bottom: 1px solid var(--border-soft);
+  font-weight: 500;
+}
+.sg-zh-zopt:last-child { border-bottom: 0; }
+.sg-zh-zopt--more { color: var(--text-muted); font-style: italic; }
+.sg-zh-zcaption {
+  margin: 0.65rem 0 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.sg-zh-zcaption b { color: var(--text-subtle); }
 
 /* ── Layout editor ──────────────────────────────────────────────── */
 .sg-zh-src {
@@ -324,7 +702,7 @@
 
 .sg-zh-fgrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
   gap: var(--space-3);
 }
 
@@ -404,8 +782,61 @@
 }
 .sg-zh-note svg { width: 0.9rem; height: 0.9rem; flex: none; margin-top: 1px; }
 
-/* ── Configuration + field modals ───────────────────────────────── */
-.sg-zh-config { width: min(52rem, 100%); }
+/* ── Settings room: completeness rail + grouped sections ────────── */
+.sg-zh-setgrid {
+  display: grid;
+  grid-template-columns: 13.5rem minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+  margin-bottom: var(--space-4);
+}
+.sg-zh-setrail {
+  position: sticky;
+  top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.sg-zh-setitem {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.45rem 0.8rem;
+  border-radius: var(--radius-full);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.sg-zh-setitem:hover { background: var(--bg-interactive); border-color: transparent; color: var(--text-main); }
+.sg-zh-setitem:focus-visible { outline: none; box-shadow: var(--ring); }
+.sg-zh-setitem--on,
+.sg-zh-setitem--on:hover {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: var(--accent-border);
+}
+.sg-zh-setstate { margin-left: auto; display: inline-flex; flex: none; }
+.sg-zh-setstate svg { width: 0.85rem; height: 0.85rem; }
+.sg-zh-setstate--done { color: var(--ok); }
+.sg-zh-setstate--todo { color: var(--warn); }
+.sg-zh-setro {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding: 0.5rem 0.8rem 0;
+  line-height: 1.5;
+}
+
+.sg-zh-setmain { min-width: 0; }
+.sg-zh-setmain .card { margin-bottom: var(--space-4); }
+.sg-zh-setsec { scroll-margin-top: 0.75rem; }
+.sg-zh-setform { margin-top: 0.5rem; }
+
 .zoho-page .settings-form h4,
 .zoho-page .settings-form .field-hint,
 .zoho-page .settings-form .checkbox-label,
@@ -423,6 +854,32 @@
   color: var(--text-muted);
 }
 .zoho-page .settings-form h4::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+
+/* Contextual save bar — appears only when the config form is dirty. */
+.sg-zh-savebar {
+  position: sticky;
+  bottom: 0.75rem;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 1rem;
+  margin-bottom: var(--space-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+.sg-zh-savebar-actions { display: flex; gap: 0.5rem; }
+
+@media (max-width: 900px) {
+  .sg-zh-setgrid { grid-template-columns: 1fr; }
+  .sg-zh-setrail { position: static; flex-direction: row; flex-wrap: wrap; }
+}
 
 /* ── Source picker modal ────────────────────────────────────────── */
 .sg-zh-picker { width: min(60rem, 100%); }

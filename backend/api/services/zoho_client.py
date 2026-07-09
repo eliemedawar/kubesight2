@@ -443,6 +443,92 @@ def delete_dependency_mapping(cfg: ZohoConfig, mapping_id: str) -> Dict[str, Any
     return _layout_dependency_request(cfg, "DELETE", f"{_dependency_base(cfg)}/{mapping_id}")
 
 
+# ---------------------------------------------------------------------------
+# Ticket write-back — update status/owner/resolution + post a comment. Needs the
+# token minted with Desk.tickets.ALL (or tickets.UPDATE + tickets.CREATE for
+# comments). NOT layout-guarded: these act on a specific ticket by id, which the
+# inbound webhook gave us. All do one 401-refresh retry like the other calls.
+# ---------------------------------------------------------------------------
+
+# email(lowercased) -> agentId, cached per process. Agents rarely change and a
+# miss just re-fetches; never persisted.
+_AGENT_ID_CACHE: Dict[str, str] = {}
+
+
+def _ticket_request(
+    cfg: ZohoConfig, method: str, url: str, body: Optional[Dict[str, Any]] = None
+) -> Tuple[int, Dict[str, Any]]:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+
+    def _do(tok: str) -> Tuple[int, Dict[str, Any]]:
+        headers = _auth_headers(cfg, tok)
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        return _request(method, url, headers=headers, body=data)
+
+    token = get_access_token(cfg)
+    status, payload = _do(token)
+    if status == 401:
+        token = get_access_token(cfg, force=True)
+        status, payload = _do(token)
+    return status, (payload if isinstance(payload, dict) else {})
+
+
+def resolve_agent_id(cfg: ZohoConfig, email: str) -> Optional[str]:
+    """Agent id for an email (e.g. the zagent service account), cached.
+
+    Pages through ``/agents`` matching ``emailId`` case-insensitively. Returns
+    None if not found; the caller then just skips the owner reassignment.
+    """
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    key = f"{cfg.org_id}:{email}"
+    if key in _AGENT_ID_CACHE:
+        return _AGENT_ID_CACHE[key]
+
+    base = cfg.api_base.rstrip("/")
+    from_index = 1
+    for _ in range(20):  # up to 20 pages of 100 = 2000 agents
+        status, payload = _ticket_request(
+            cfg, "GET", f"{base}/agents?from={from_index}&limit=100"
+        )
+        if status != 200:
+            break
+        rows = payload.get("data") or []
+        for agent in rows:
+            if str(agent.get("emailId") or "").strip().lower() == email and agent.get("id"):
+                _AGENT_ID_CACHE[key] = str(agent["id"])
+                return _AGENT_ID_CACHE[key]
+        if len(rows) < 100:
+            break
+        from_index += 100
+    return None
+
+
+def update_ticket(cfg: ZohoConfig, ticket_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """PATCH a ticket's fields (e.g. ``status``, ``assigneeId``, ``resolution``)."""
+    if not fields:
+        return {}
+    url = f"{cfg.api_base.rstrip('/')}/tickets/{ticket_id}"
+    status, payload = _ticket_request(cfg, "PATCH", url, fields)
+    if status not in (200, 201):
+        raise ZohoError(_error_detail("Updating the Zoho ticket failed", status, payload), status)
+    return payload
+
+
+def add_ticket_comment(
+    cfg: ZohoConfig, ticket_id: str, content: str, *, is_public: bool = False
+) -> Dict[str, Any]:
+    """Post a comment on a ticket (private by default)."""
+    url = f"{cfg.api_base.rstrip('/')}/tickets/{ticket_id}/comments"
+    body = {"content": content or "", "isPublic": bool(is_public), "contentType": "plainText"}
+    status, payload = _ticket_request(cfg, "POST", url, body)
+    if status not in (200, 201):
+        raise ZohoError(_error_detail("Posting the Zoho comment failed", status, payload), status)
+    return payload
+
+
 def _error_detail(prefix: str, status: int, payload: Dict[str, Any]) -> str:
     detail = ""
     if isinstance(payload, dict):

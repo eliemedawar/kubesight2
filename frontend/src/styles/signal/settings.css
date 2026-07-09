@@ -1,0 +1,688 @@
+/* ═══ Settings page — Signal v3 ═══
+   Two-pane settings workspace: sticky in-page section rail (sidebar pill
+   language) + narrow content column of scoped cards. Personal vs Workspace
+   scope is explicit on every card; saving happens through a floating bar
+   that appears only when something changed. */
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 45rem);
+  gap: 2rem;
+  align-items: start;
+}
+
+/* ─── Read-only banner ─── */
+.settings-viewer-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--info-soft);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.9rem;
+  color: var(--text-subtle);
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-5);
+}
+.settings-viewer-banner svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--info);
+}
+.settings-viewer-banner strong {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+/* ─── Section rail ─── */
+.settings-rail {
+  position: sticky;
+  top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.settings-rail-link {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.65rem;
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-md);
+  color: var(--sidebar-nav-text);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  position: relative;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.settings-rail-link:hover {
+  background: var(--bg-interactive);
+  color: var(--text-main);
+}
+.settings-rail-link.active {
+  background: var(--sidebar-nav-active-bg);
+  color: var(--sidebar-nav-active-text);
+  font-weight: 600;
+}
+.settings-rail-link.active::before {
+  content: "";
+  position: absolute;
+  left: -0.6rem;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+.settings-rail-link svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  opacity: 0.85;
+}
+.settings-rail-divider {
+  margin: 0.85rem 0.65rem 0.3rem;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--sidebar-section-label);
+}
+.settings-rail-ext {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.65rem;
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.settings-rail-ext:hover {
+  background: var(--bg-interactive);
+  color: var(--text-main);
+}
+.settings-rail-ext svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-left: auto;
+  opacity: 0.7;
+}
+
+/* ─── Section cards ─── */
+.settings-sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.settings-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-5);
+  scroll-margin-top: var(--space-4);
+}
+.settings-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+.settings-card-head h3 {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.settings-card-chips {
+  margin-left: auto;
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.settings-card-sub {
+  margin: 0 0 var(--space-4);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  max-width: 60ch;
+}
+
+/* Scope chips */
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: var(--radius-full);
+  padding: 0.14rem 0.6rem;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.scope-chip svg {
+  width: 11px;
+  height: 11px;
+  flex: none;
+}
+.scope-chip--personal {
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.scope-chip--workspace {
+  background: var(--info-soft);
+  color: var(--info);
+  border: 1px solid var(--info-border);
+}
+.scope-chip--locked {
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+/* Locked (view-only) card state */
+.settings-card.is-locked .settings-lockable {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* ─── Profile ─── */
+.settings-profile-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.settings-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border: 1px solid var(--accent-border);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
+  flex: none;
+}
+.settings-profile-name {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.settings-profile-name strong {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+}
+.settings-profile-meta {
+  margin-top: 0.15rem;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  display: flex;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+.settings-profile-meta .mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+.settings-card-footnote {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: var(--space-4) 0 0;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-soft);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+.settings-card-footnote svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+/* ─── Appearance: theme tiles ─── */
+.theme-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+}
+.theme-tile {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  padding: 0.5rem;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.theme-tile:hover {
+  border-color: var(--text-muted);
+  box-shadow: var(--shadow-md);
+}
+.theme-tile[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+.theme-tile-preview {
+  border-radius: var(--radius-sm);
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  display: flex;
+  margin-bottom: 0.5rem;
+}
+.theme-tile-preview .tp-side {
+  width: 26%;
+  border-right: 1px solid rgba(128, 128, 128, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 4px;
+}
+.theme-tile-preview .tp-line {
+  height: 4px;
+  border-radius: var(--radius-full);
+}
+.theme-tile-preview .tp-body {
+  flex: 1;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.theme-tile-preview .tp-card {
+  border-radius: 4px;
+  flex: 1;
+}
+/* Theme swatches — fixed hexes by design: each tile depicts one theme
+   regardless of the active theme (same exception as the exec terminal). */
+.theme-tile-preview--light {
+  background: #f8f7f5;
+}
+.theme-tile-preview--light .tp-side {
+  background: #ffffff;
+}
+.theme-tile-preview--light .tp-line {
+  background: #e9e7e3;
+}
+.theme-tile-preview--light .tp-line-active {
+  background: #ffd9d5;
+}
+.theme-tile-preview--light .tp-card {
+  background: #ffffff;
+  border: 1px solid #e9e7e3;
+}
+.theme-tile-preview--dark {
+  background: #101112;
+}
+.theme-tile-preview--dark .tp-side {
+  background: #141416;
+}
+.theme-tile-preview--dark .tp-line {
+  background: #2a2b30;
+}
+.theme-tile-preview--dark .tp-line-active {
+  background: rgba(255, 59, 59, 0.35);
+}
+.theme-tile-preview--dark .tp-card {
+  background: #17181a;
+  border: 1px solid #2a2b30;
+}
+.theme-tile-preview--system {
+  background: linear-gradient(105deg, #f8f7f5 49.8%, #101112 50.2%);
+}
+.theme-tile-preview--system .tp-side {
+  background: linear-gradient(105deg, #ffffff 60%, #141416 61%);
+}
+.theme-tile-preview--system .tp-line {
+  background: #d8d6d0;
+}
+.theme-tile-preview--system .tp-line-active {
+  background: #ffd9d5;
+}
+.theme-tile-preview--system .tp-card {
+  background: linear-gradient(105deg, #ffffff 45%, #17181a 55%);
+  border: 1px solid rgba(128, 128, 128, 0.35);
+}
+
+.theme-tile-label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-subtle);
+  padding: 0 0.15rem 0.15rem;
+}
+.theme-tile-radio {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  border: 1.5px solid var(--border-strong);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.theme-tile[aria-checked="true"] .theme-tile-radio {
+  border-color: var(--accent);
+}
+.theme-tile[aria-checked="true"] .theme-tile-radio::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+.theme-tile-hint {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  padding: 0 0.15rem;
+  margin: 0;
+}
+
+/* ─── Fields ─── */
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: var(--space-4);
+}
+.settings-field:first-child {
+  margin-top: 0;
+}
+.settings-field > label,
+.settings-field > .settings-field-label {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-main);
+}
+.settings-field .settings-field-hint {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin: 0;
+  max-width: 58ch;
+}
+.settings-field .ss-wrap,
+.settings-field select {
+  max-width: 22rem;
+}
+
+/* Neutral role pill (identity, not status) */
+.status-pill.settings-role-pill {
+  color: var(--text-subtle);
+  background: var(--bg-inset);
+  border-color: var(--border);
+}
+
+/* Segmented pill group (refresh interval) */
+.settings-segmented {
+  display: inline-flex;
+  align-self: flex-start;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 3px;
+  gap: 2px;
+}
+.settings-segmented button {
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: var(--radius-full);
+  padding: 0.3rem 0.85rem;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+.settings-segmented button:hover {
+  color: var(--text-main);
+}
+.settings-segmented button[aria-pressed="true"] {
+  background: var(--bg-panel);
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+  box-shadow: var(--shadow-sm);
+}
+.settings-segmented button:disabled {
+  cursor: default;
+}
+
+/* ─── Notification rows + switches ─── */
+.settings-toggle-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: 0.8rem 0;
+  border-top: 1px solid var(--border-soft);
+}
+.settings-toggle-row:first-child {
+  border-top: 0;
+  padding-top: 0.2rem;
+}
+.settings-toggle-text {
+  min-width: 0;
+}
+.settings-toggle-title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-main);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.settings-toggle-desc {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin: 0.1rem 0 0;
+  max-width: 52ch;
+}
+.settings-toggle-row.child {
+  margin-left: 1.1rem;
+  padding-left: 1rem;
+  border-left: 2px solid var(--border-soft);
+  border-top: 0;
+}
+.settings-toggle-row.child.dimmed {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.settings-switch {
+  margin-left: auto;
+  flex: none;
+  width: 36px;
+  height: 21px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-inset);
+  position: relative;
+  padding: 0;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.settings-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: var(--radius-full);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: translate var(--dur) var(--ease);
+}
+.settings-switch[aria-checked="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.settings-switch[aria-checked="true"]::after {
+  translate: 15px 0;
+}
+.settings-switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Chevron link-row (Alert Routing) */
+.settings-link-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  margin-top: 0.6rem;
+  padding: 0.7rem 0.85rem;
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+.settings-link-row:hover {
+  background: var(--bg-interactive);
+  border-color: var(--border-strong);
+}
+.settings-link-row > svg:first-child {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--text-muted);
+}
+.settings-link-row .lr-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-main);
+}
+.settings-link-row .lr-desc {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+.settings-link-row .lr-chevron {
+  margin-left: auto;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--text-muted);
+}
+
+/* ─── Security rows ─── */
+.settings-info-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0.8rem 0;
+  border-top: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+.settings-info-row:first-child {
+  border-top: 0;
+  padding-top: 0.2rem;
+}
+.settings-info-row .mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+/* ─── Floating save bar ─── */
+.settings-savebar {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  translate: -50% 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-lg);
+  padding: 0.5rem 0.6rem 0.5rem 1.1rem;
+  max-width: min(92vw, 40rem);
+}
+.settings-savebar-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--warn);
+  flex: none;
+}
+.settings-savebar-text {
+  font-size: var(--font-size-sm);
+  color: var(--text-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.settings-savebar-text strong {
+  color: var(--text-main);
+  font-weight: 600;
+}
+.settings-savebar .btn-ghost {
+  white-space: nowrap;
+}
+.settings-savebar .primary {
+  white-space: nowrap;
+}
+
+/* ─── Responsive ─── */
+@media (max-width: 900px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+  .settings-rail {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+  }
+  .settings-rail-link {
+    white-space: nowrap;
+  }
+  .settings-rail-link.active::before {
+    display: none;
+  }
+  .settings-rail-divider,
+  .settings-rail-ext {
+    display: none;
+  }
+  .theme-tiles {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-switch,
+  .settings-switch::after,
+  .theme-tile,
+  .settings-rail-link,
+  .settings-segmented button {
+    transition: none;
+  }
+}

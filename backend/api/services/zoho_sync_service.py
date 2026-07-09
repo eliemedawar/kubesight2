@@ -28,11 +28,14 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from ..db import db
 from ..models import ZohoDeploymentSnapshot, ZohoInboundTicket, ZohoIntegration
@@ -107,6 +110,13 @@ def serialize(row: ZohoIntegration) -> Dict[str, Any]:
         "dependencyMappingId": row.dependency_mapping_id or "",
         "lastDependencyStatus": row.last_dependency_status,
         "lastDependencyMessage": row.last_dependency_message,
+        # Ticket write-back.
+        "ticketWritebackEnabled": bool(row.ticket_writeback_enabled),
+        "ticketStatusStarted": row.ticket_status_started or "Open",
+        "ticketStatusDeployed": row.ticket_status_deployed or "Closed",
+        "ticketStatusFailed": row.ticket_status_failed or "Failed",
+        "ticketStatusCancelled": row.ticket_status_cancelled or "Canceled",
+        "ticketOwnerEmail": row.ticket_owner_email or "",
         "lastSyncAt": _iso(row.last_sync_at),
         "lastSyncStatus": row.last_sync_status,
         "lastSyncMessage": row.last_sync_message,
@@ -233,9 +243,17 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         ("environmentFieldApiName", "environment_field_api_name"),
         ("tagFieldApiName", "tag_field_api_name"),
         ("clientId", "client_id"),
+        ("ticketStatusStarted", "ticket_status_started"),
+        ("ticketStatusDeployed", "ticket_status_deployed"),
+        ("ticketStatusFailed", "ticket_status_failed"),
+        ("ticketStatusCancelled", "ticket_status_cancelled"),
+        ("ticketOwnerEmail", "ticket_owner_email"),
     ):
         if key in payload and payload.get(key) is not None:
             setattr(row, attr, str(payload.get(key)).strip())
+
+    if "ticketWritebackEnabled" in payload:
+        row.ticket_writeback_enabled = bool(payload.get("ticketWritebackEnabled"))
 
     if "statusFilter" in payload:
         value = payload.get("statusFilter")
@@ -1094,3 +1112,93 @@ def list_inbound_tickets(limit: int = 50) -> List[Dict[str, Any]]:
             }
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Ticket write-back — deploy automation reports its outcome back to the Desk
+# ticket (status + comment + resolution + owner reassignment). Best-effort and
+# dispatched off the caller's thread so it never blocks a webhook/manual Run or
+# a scheduler tick, and never raises.
+# ---------------------------------------------------------------------------
+
+# Automation outcome → which configured status column drives the label.
+_OUTCOME_STATUS_ATTR = {
+    "started": "ticket_status_started",
+    "deployed": "ticket_status_deployed",
+    "failed": "ticket_status_failed",
+    "cancelled": "ticket_status_cancelled",
+}
+
+
+def _dispatch_ticket_work(work) -> None:
+    """Run ``work`` (pure HTTP against Zoho, no DB) off-thread — inline under
+    TESTING so tests stay deterministic. Errors are swallowed by ``work``."""
+    from flask import current_app
+
+    try:
+        testing = bool(current_app and current_app.config.get("TESTING"))
+    except Exception:
+        testing = False
+    if testing:
+        work()
+        return
+    threading.Thread(target=work, name="zoho-ticket-writeback", daemon=True).start()
+
+
+def report_ticket_outcome(
+    ticket_id: Optional[str],
+    outcome: str,
+    *,
+    comment: Optional[str] = None,
+    resolution: Optional[str] = None,
+) -> None:
+    """Write a finished automation run's result back to its Desk ticket.
+
+    Sets the mapped status, reassigns the ticket to the configured owner
+    (zagent), posts a comment, and (for terminal outcomes) a resolution. No-op
+    when write-back is disabled or OAuth isn't configured. Never raises.
+    """
+    if not ticket_id:
+        return
+    row = get_or_create_config()
+    if not row.ticket_writeback_enabled:
+        return
+    if not (row.refresh_token_encrypted and row.client_id and row.org_id):
+        return
+
+    status_label = getattr(row, _OUTCOME_STATUS_ATTR.get(outcome, ""), "") or None
+    owner_email = (row.ticket_owner_email or "").strip()
+    cfg = _to_client_config(row)
+    ticket_id = str(ticket_id)
+
+    def _work() -> None:
+        # Status + owner in one PATCH (both are core, well-known ticket fields).
+        core: Dict[str, Any] = {}
+        if status_label:
+            core["status"] = status_label
+        if owner_email:
+            try:
+                agent_id = zoho_client.resolve_agent_id(cfg, owner_email)
+                if agent_id:
+                    core["assigneeId"] = agent_id
+            except Exception:
+                logger.warning("Zoho ticket owner resolve failed", exc_info=True)
+        if core:
+            try:
+                zoho_client.update_ticket(cfg, ticket_id, core)
+            except Exception:
+                logger.warning("Zoho ticket status/owner update failed (%s)", ticket_id, exc_info=True)
+        # Resolution goes in its OWN PATCH — if 'resolution' isn't writable in
+        # this Desk it must not take the status/owner change down with it.
+        if resolution:
+            try:
+                zoho_client.update_ticket(cfg, ticket_id, {"resolution": resolution})
+            except Exception:
+                logger.warning("Zoho ticket resolution update failed (%s)", ticket_id, exc_info=True)
+        if comment:
+            try:
+                zoho_client.add_ticket_comment(cfg, ticket_id, comment)
+            except Exception:
+                logger.warning("Zoho ticket comment failed (%s)", ticket_id, exc_info=True)
+
+    _dispatch_ticket_work(_work)

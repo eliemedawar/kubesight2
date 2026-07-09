@@ -50,7 +50,12 @@ import {
   resolveDisplayUser,
   getUserInitials,
 } from "./utils/formatters.js";
-import { applyTheme, storeThemePreference } from "./utils/theme.js";
+import { applyTheme, readThemePreference, storeThemePreference } from "./utils/theme.js";
+
+// Theme is a per-browser preference: the locally stored choice always wins
+// over the workspace value returned by the API, so one user's theme never
+// changes what teammates see.
+const withLocalTheme = (settings) => ({ ...settings, theme: readThemePreference() });
 
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const OnboardingPage = lazy(() => import("./pages/OnboardingPage.jsx"));
@@ -360,7 +365,7 @@ export default function App() {
     const { firstCluster } = applyClusterList(clusters, settingsRes.defaultCluster);
     setData((prev) => ({
       ...prev,
-      settings: normalizeSettings({ ...settingsRes, defaultCluster: firstCluster }),
+      settings: withLocalTheme(normalizeSettings({ ...settingsRes, defaultCluster: firstCluster })),
     }));
   };
 
@@ -401,10 +406,12 @@ export default function App() {
 
         const clusters = clustersRes.items || [];
         const { filtered, firstCluster } = applyClusterList(clusters, settingsRes.defaultCluster);
-        const normalizedSettings = normalizeSettings({
-          ...settingsRes,
-          defaultCluster: firstCluster,
-        });
+        const normalizedSettings = withLocalTheme(
+          normalizeSettings({
+            ...settingsRes,
+            defaultCluster: firstCluster,
+          })
+        );
         setData((prev) => ({
           ...prev,
           clusters: filtered,
@@ -1248,7 +1255,7 @@ export default function App() {
         alerts: hasEnabledChannel,
       };
       await updateSettings({ notifications });
-      const refreshedSettings = normalizeSettings(await getSettings());
+      const refreshedSettings = withLocalTheme(normalizeSettings(await getSettings()));
       setData((prev) => ({
         ...prev,
         settings: refreshedSettings,
@@ -1272,7 +1279,7 @@ export default function App() {
         refreshIntervalSeconds: Number(settingsDraft.refreshIntervalSeconds) || 30,
       };
       await updateSettings(payload);
-      const refreshedSettings = normalizeSettings(await getSettings());
+      const refreshedSettings = withLocalTheme(normalizeSettings(await getSettings()));
       setData((prev) => ({
         ...prev,
         settings: refreshedSettings,
@@ -1288,6 +1295,13 @@ export default function App() {
     } finally {
       setLoadingState((prev) => ({ ...prev, page: false }));
     }
+  };
+
+  // Revert unsaved draft edits back to the last saved settings. The theme is
+  // kept: it is a per-browser preference that applies immediately and is not
+  // part of the dirty/save flow.
+  const discardSettingsDraft = () => {
+    setSettingsDraft((prev) => ({ ...normalizeSettings(data.settings), theme: prev.theme }));
   };
 
   const handleSettingsDraftChange = (key, value) => {
@@ -1580,10 +1594,12 @@ export default function App() {
             settingsDraft={settingsDraft}
             onSettingsChange={handleSettingsDraftChange}
             onSave={saveSettings}
+            onDiscard={discardSettingsDraft}
             saving={loadingState.page}
             canManage={hasPermission("settings:manage")}
-            canManageAlertRouting={isAdmin}
-            onNavigateToAlertRouting={() => handleNavigate("alertRouting")}
+            authUser={authUser}
+            onNavigate={handleNavigate}
+            isPageAllowed={isPageAllowed}
           />
         );
       default:

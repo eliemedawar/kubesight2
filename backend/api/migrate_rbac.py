@@ -536,6 +536,15 @@ def _migrate_zoho_integration_columns() -> None:
         _add_column_if_missing("zoho_integration", "dependency_mapping_id", "VARCHAR(64)")
         _add_column_if_missing("zoho_integration", "last_dependency_status", "VARCHAR(16)")
         _add_column_if_missing("zoho_integration", "last_dependency_message", "TEXT")
+        # Ticket write-back (deploy automation → Desk ticket status/comment/owner).
+        _add_column_if_missing("zoho_integration", "ticket_writeback_enabled", "BOOLEAN DEFAULT false")
+        _add_column_if_missing("zoho_integration", "ticket_status_started", "VARCHAR(120) DEFAULT 'Open'")
+        _add_column_if_missing("zoho_integration", "ticket_status_deployed", "VARCHAR(120) DEFAULT 'Closed'")
+        _add_column_if_missing("zoho_integration", "ticket_status_failed", "VARCHAR(120) DEFAULT 'Failed'")
+        _add_column_if_missing("zoho_integration", "ticket_status_cancelled", "VARCHAR(120) DEFAULT 'Canceled'")
+        _add_column_if_missing(
+            "zoho_integration", "ticket_owner_email", "VARCHAR(255) DEFAULT 'zagent@areeba.com'"
+        )
 
 
 def _migrate_deploy_automation_columns() -> None:

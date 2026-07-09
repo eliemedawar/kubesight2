@@ -195,6 +195,71 @@ def test_run_bundle_path_when_cluster_requires_approval(client, admin_token, app
     assert pods["status"] == "done"
 
 
+def test_ticket_writeback_on_deploy(client, admin_token, app, monkeypatch):
+    """A finished run writes status + owner + comment back to its Desk ticket."""
+    from api.models import ZohoIntegration
+    from api.secret_encryption import encrypt_secret
+
+    zi = ZohoIntegration.query.get(1) or ZohoIntegration(id=1)
+    zi.enabled = True
+    zi.org_id = "854214247"
+    zi.client_id = "1000.abc"
+    zi.refresh_token_encrypted = encrypt_secret("rt")
+    zi.client_secret_encrypted = encrypt_secret("cs")
+    zi.ticket_writeback_enabled = True
+    zi.ticket_owner_email = "zagent@areeba.com"
+    zi.ticket_status_deployed = "Closed"
+    db.session.add(zi)
+    db.session.commit()
+
+    calls = {"update": [], "comment": []}
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image: {"status": "found", "image": image},
+    )
+    monkeypatch.setattr(
+        "api.services.zoho_client.resolve_agent_id",
+        lambda cfg, email: "999149000003619001",
+    )
+    monkeypatch.setattr(
+        "api.services.zoho_client.update_ticket",
+        lambda cfg, tid, fields: calls["update"].append((tid, fields)) or {},
+    )
+    monkeypatch.setattr(
+        "api.services.zoho_client.add_ticket_comment",
+        lambda cfg, tid, content, **kw: calls["comment"].append((tid, content)) or {},
+    )
+    _set_cluster_approvals(0)
+    ticket = _make_ticket(tag="v8.0.0")
+
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "deployed"
+    # Owner reassigned, deployed status set, comment posted — all on the Desk id.
+    assert any(f.get("assigneeId") == "999149000003619001" for _, f in calls["update"])
+    assert any(f.get("status") == "Closed" for _, f in calls["update"])
+    assert any(f.get("resolution") for _, f in calls["update"])
+    assert calls["comment"], "a comment should be posted"
+    assert all(tid == ticket.ticket_id for tid, _ in calls["update"])
+
+
+def test_ticket_writeback_off_makes_no_calls(client, admin_token, app, monkeypatch):
+    """With write-back disabled (default), no Zoho ticket calls are made."""
+    hit = []
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image: {"status": "found", "image": image},
+    )
+    monkeypatch.setattr(
+        "api.services.zoho_client.update_ticket",
+        lambda *a, **k: hit.append(1) or {},
+    )
+    _set_cluster_approvals(0)
+    ticket = _make_ticket(tag="v8.0.1")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "deployed"
+    assert hit == []
+
+
 def test_auto_run_respects_per_cluster_overrides(client, admin_token, app):
     from api.models import JenkinsConnection
     from api.services.deploy_automation_service import maybe_auto_run

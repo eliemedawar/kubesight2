@@ -282,6 +282,7 @@ def _fail(run: DeployAutomationRun, step_key: str, message: str) -> None:
         details={"ticket": run.ticket_number, "deployment": run.deployment_name, "error": message},
         commit=False,
     )
+    _report_outcome(run, "failed")
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +385,8 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
             "auto": bool(auto),
         },
     )
+    # Mark the ticket as picked up (status → started/Open, owner → zagent).
+    _report_outcome(run, "started")
 
     # Advance immediately so a manual Run gives instant feedback (the first
     # stages are seconds); errors are recorded on the run, never raised. Under
@@ -470,6 +473,7 @@ def cancel_run(run_id: int, user=None) -> Dict[str, Any]:
         target_id=str(run.id),
         details=details,
     )
+    _report_outcome(run, "cancelled")
     return serialize_run(run)
 
 
@@ -583,6 +587,62 @@ def _advance(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
 
 def _target_image(run: DeployAutomationRun) -> str:
     return f"{run.image_repo}:{run.image_tag}"
+
+
+def _zoho_ticket_id(run: DeployAutomationRun) -> Optional[str]:
+    """The Desk ticket id (not KubeSight's row id) for write-back, if any."""
+    if not run.ticket_record_id:
+        return None
+    rec = ZohoInboundTicket.query.get(run.ticket_record_id)
+    return rec.ticket_id if rec else None
+
+
+def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
+    """Write this run's result back to its Desk ticket (best-effort, off-thread).
+
+    ``outcome`` ∈ started | deployed | failed | cancelled — maps to the operator's
+    configured status label, with a plain-text comment (and a resolution on
+    terminal outcomes) describing what happened.
+    """
+    from .zoho_sync_service import report_ticket_outcome
+
+    ticket_id = _zoho_ticket_id(run)
+    if not ticket_id:
+        return
+    who = run.ticket_number or f"run #{run.id}"
+    target = _target_image(run)
+    comment = None
+    resolution = None
+    if outcome == "started":
+        comment = (
+            f"KubeSight automation started for {run.deployment_name} -> {run.image_tag} "
+            f"in {run.namespace} ({who})."
+        )
+    elif outcome == "deployed":
+        mode = "change bundle" if run.bundle_id else "direct apply"
+        comment = (
+            f"Deployment succeeded: {run.deployment_name} is now running {target} "
+            f"in {run.namespace} (via {mode})."
+        )
+        resolution = (
+            f"KubeSight deployed {run.deployment_name} to {run.namespace} at tag "
+            f"{run.image_tag}; pods reported healthy. ({who})"
+        )
+    elif outcome == "failed":
+        comment = (
+            f"Automation failed for {run.deployment_name} -> {run.image_tag} in "
+            f"{run.namespace}: {run.error or 'unknown error'}"
+        )
+        resolution = f"KubeSight automation did not complete: {run.error or 'unknown error'}"
+    elif outcome == "cancelled":
+        comment = (
+            f"Automation cancelled for {run.deployment_name} -> {run.image_tag} in "
+            f"{run.namespace}. {run.error or ''}".strip()
+        )
+    try:
+        report_ticket_outcome(ticket_id, outcome, comment=comment, resolution=resolution)
+    except Exception:  # write-back must never affect the run
+        pass
 
 
 def _do_resolve(run: DeployAutomationRun) -> None:
@@ -998,6 +1058,7 @@ def _complete_deployed(run: DeployAutomationRun, pods_detail: str) -> None:
         },
         commit=False,
     )
+    _report_outcome(run, "deployed")
 
 
 def _do_check_pods(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:

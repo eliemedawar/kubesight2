@@ -1877,6 +1877,21 @@ class ZohoIntegration(db.Model):
     last_dependency_status = db.Column(db.String(16), nullable=True)  # ok | error | skipped
     last_dependency_message = db.Column(db.Text, nullable=True)
 
+    # --- Ticket write-back (deploy automation → Zoho ticket) ---
+    # When on, a finished automation run updates its originating Desk ticket:
+    # sets the status, posts a comment + resolution describing the outcome, and
+    # reassigns the ticket to the service account (zagent). Needs the token
+    # minted with Desk.tickets.ALL. Status labels are operator-editable because
+    # Zoho matches them exactly and "Failed"/"Canceled" are custom statuses.
+    ticket_writeback_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    ticket_status_started = db.Column(db.String(120), nullable=False, default="Open")
+    ticket_status_deployed = db.Column(db.String(120), nullable=False, default="Closed")
+    ticket_status_failed = db.Column(db.String(120), nullable=False, default="Failed")
+    ticket_status_cancelled = db.Column(db.String(120), nullable=False, default="Canceled")
+    # Email of the agent tickets are reassigned to (resolved to an agent id at
+    # call time and cached). Defaults to the zagent service account.
+    ticket_owner_email = db.Column(db.String(255), nullable=False, default="zagent@areeba.com")
+
     # --- Last-run bookkeeping (mirrors RegistryConnection.last_test_*) ---
     last_sync_at = db.Column(db.DateTime(timezone=True), nullable=True)
     last_sync_status = db.Column(db.String(16), nullable=True)  # ok | error
