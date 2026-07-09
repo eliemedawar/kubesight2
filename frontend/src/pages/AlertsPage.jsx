@@ -1,198 +1,174 @@
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
+import TriageTiles from "../components/alerts/TriageTiles.jsx";
+import ActivityStrip from "../components/alerts/ActivityStrip.jsx";
+import AlertFeed from "../components/alerts/AlertFeed.jsx";
+import AlertDetailDrawer from "../components/alerts/AlertDetailDrawer.jsx";
+import AlertHistoryTab from "../components/alerts/AlertHistoryTab.jsx";
+import { listAlertHistory } from "../api/alertPoliciesApi.js";
 import { isNamespaceScopeLoading, SCOPE_LOADING_HINT } from "../utils/accessViewState.js";
-import InfoCard from "../components/common/InfoCard.jsx";
 import {
   buildAlertsScopeSummary,
-  formatAlertTime,
-  formatTriggeredConditions,
-  getAlertPolicyLabel,
-  getAlertResourceName,
-  getAlertTypeLabel,
+  consumeAlertsTabHint,
   hasAlertMonitoringScope,
-  isLogAlert,
 } from "../lib/alertDisplay.js";
+import {
+  bucketAlertHistory,
+  formatDurationShort,
+  groupAlerts,
+  resolvedStats,
+  severitySeries,
+} from "../lib/alertFeed.js";
 import { EMPTY_MESSAGES, isAccessDeniedError } from "../utils/authz.js";
 
-const AlertLogContextModal = lazy(() => import("../components/alerts/AlertLogContextModal.jsx"));
+const AlertPoliciesPage = lazy(() => import("./AlertPoliciesPage.jsx"));
+const AlertRoutingPage = lazy(() => import("./AlertRoutingPage.jsx"));
 
-function IconAlertTriangle(props) {
+const HISTORY_LIMIT = 300;
+const HISTORY_REFRESH_MS = 60000;
+
+const TYPE_FILTERS = [
+  { key: "all", label: "All" },
+  { key: "metric", label: "Metric" },
+  { key: "log", label: "Log" },
+  { key: "service", label: "Service" },
+];
+
+function IconSearch(props) {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      width="14"
-      height="14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-      {...props}
-    >
-      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-      <line x1="12" y1="9" x2="12" y2="13" />
-      <line x1="12" y1="17" x2="12.01" y2="17" />
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false" {...props}>
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
   );
 }
 
-function IconBell(props) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="14"
-      height="14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-      {...props}
-    >
-      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-    </svg>
-  );
+function alertMatchesQuery(alert, query) {
+  const haystack = [
+    alert.title,
+    alert.policyName,
+    alert.namespace,
+    alert.pod,
+    alert.resourceName,
+    alert.serviceName,
+    alert.matchedPattern,
+    alert.description,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(query);
 }
 
-function IconHistory(props) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="14"
-      height="14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-      {...props}
-    >
-      <circle cx="12" cy="12" r="9" />
-      <polyline points="12 7 12 12 15 14" />
-    </svg>
-  );
-}
-
-/* Display-only severity mapping: critical → danger, warning → warn, everything else → info. */
-function severityInfo(severity) {
-  const value = String(severity || "info").toLowerCase();
-  if (value === "critical") {
-    return { rank: 0, tone: "danger", label: value };
-  }
-  if (value === "warning") {
-    return { rank: 1, tone: "warn", label: value };
-  }
-  return { rank: 2, tone: "info", label: value };
-}
-
-function formatFiringDuration(firedAt) {
-  if (!firedAt) {
-    return "";
-  }
-  const ts = Date.parse(firedAt);
-  if (Number.isNaN(ts)) {
-    return "";
-  }
-  const totalMinutes = Math.floor((Date.now() - ts) / 60000);
-  if (totalMinutes < 0) {
-    return "";
-  }
-  if (totalMinutes < 1) {
-    return "under 1 min";
-  }
-  if (totalMinutes < 60) {
-    return `${totalMinutes} min`;
-  }
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (hours < 24) {
-    return minutes ? `${hours} h ${String(minutes).padStart(2, "0")}` : `${hours} h`;
-  }
-  const days = Math.floor(hours / 24);
-  const remHours = hours % 24;
-  return remHours ? `${days} d ${remHours} h` : `${days} d`;
-}
-
-function AlertScopeCard({ scope }) {
+function ScopeChips({ scope, resourceCount }) {
   if (!scope.clusterId) {
     return null;
   }
   return (
-    <section className="card alerts-scope-card">
-      <h3>Showing alerts for</h3>
-      <dl className="alerts-scope-list">
-        <div>
-          <dt>Cluster</dt>
-          <dd>{scope.clusterLabel}</dd>
-        </div>
-        {scope.namespaces.length ? (
-          <div>
-            <dt>Namespaces</dt>
-            <dd>
-              <span className="alerts-scope-tags">
-                {scope.namespaces.map((ns) => (
-                  <span key={ns} className="sg-tag">
-                    {ns}
-                  </span>
-                ))}
-              </span>
-            </dd>
-          </div>
-        ) : (
-          <div>
-            <dt>Namespaces</dt>
-            <dd className="muted">All namespaces you can access in this cluster</dd>
-          </div>
-        )}
-        {scope.resources.length ? (
-          <div>
-            <dt>Resources</dt>
-            <dd>
-              <span className="alerts-scope-tags">
-                {scope.resources.map((resource) => (
-                  <span key={resource} className="sg-tag">
-                    {resource}
-                  </span>
-                ))}
-              </span>
-            </dd>
-          </div>
-        ) : null}
-      </dl>
+    <div className="al-scope">
+      <span className="al-scope-chip">
+        <span className="al-scope-k">cluster</span>
+        <span className="al-mono">{scope.clusterLabel}</span>
+      </span>
+      {scope.namespaces.length ? (
+        <span className="al-scope-chip" title={scope.namespaces.join(", ")}>
+          <span className="al-scope-k">namespaces</span>
+          <span className="al-mono">
+            {scope.namespaces.length <= 3
+              ? scope.namespaces.join(" · ")
+              : `${scope.namespaces.slice(0, 2).join(" · ")} +${scope.namespaces.length - 2}`}
+          </span>
+        </span>
+      ) : (
+        <span className="al-scope-chip">
+          <span className="al-scope-k">namespaces</span>all accessible
+        </span>
+      )}
+      {resourceCount ? (
+        <span className="al-scope-chip" title={`${resourceCount} assigned resources in scope`}>
+          <span className="al-scope-k">resources</span>
+          <span className="al-mono">{resourceCount}</span>
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function AllClear({ clusterLabel, lastResolved, nowTs, onOpenHistory }) {
+  return (
+    <section className="card al-clear">
+      <div className="al-ring" aria-hidden="true">
+        <svg width="88" height="88" viewBox="0 0 88 88">
+          <circle cx="44" cy="44" r="38" fill="none" className="al-ring-track" strokeWidth="8" />
+          <circle cx="44" cy="44" r="38" fill="none" className="al-ring-arc" strokeWidth="8" strokeLinecap="round" transform="rotate(-90 44 44)" />
+        </svg>
+        <span className="al-ring-check">
+          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
+        </span>
+      </div>
+      <h4>All clear in {clusterLabel}</h4>
+      {lastResolved ? (
+        <p>
+          Everything in your scope is healthy. Last alert resolved{" "}
+          <b>{formatDurationShort(nowTs - lastResolved.resolvedTs) || "just now"} ago</b> —{" "}
+          <span className="al-mono">
+            {lastResolved.title}
+            {lastResolved.resourceName ? ` · ${lastResolved.resourceName}` : ""}
+          </span>
+          {lastResolved.durationMs != null ? `, after ${formatDurationShort(lastResolved.durationMs)}` : ""}.
+        </p>
+      ) : (
+        <p>Everything you have access to is currently operating normally.</p>
+      )}
+      <button type="button" className="al-ghostlink" onClick={onOpenHistory}>
+        Review the last 24 hours →
+      </button>
     </section>
   );
 }
 
+/**
+ * The Alerts section: Open (triage feed) · History · Policies · Routing.
+ * Consolidates the former Alerts / Alert Policies / Alert Routing pages under
+ * one address with the same RBAC gates each page had.
+ */
 export default function AlertsPage({
   data,
   selectedClusterId,
   allowedClusters,
   allowedNamespaces,
   allowedResources,
-  canManageRouting,
-  onNavigateToAlertRouting,
-  canManageAlerts,
+  selectedNamespace = "",
+  canManageAlerts = false,
+  canViewRouting = false,
   hasClusters,
   authUser,
   coreLoading = false,
   namespacesLoading = false,
   accessError = "",
-  onNavigateToAlertPolicies,
 }) {
   const alerts = data.alerts || [];
-  const hasAlerts = alerts.length > 0;
-  const [selectedAlert, setSelectedAlert] = useState(null);
-  const [logModalOpen, setLogModalOpen] = useState(false);
+  const [tab, setTab] = useState(() => {
+    const hint = consumeAlertsTabHint();
+    if (hint === "history" || hint === "policies") {
+      return hint;
+    }
+    if (hint === "routing" && canViewRouting) {
+      return hint;
+    }
+    return "open";
+  });
+  const [severityFilter, setSeverityFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [query, setQuery] = useState("");
+  const [collapsedGroups, setCollapsedGroups] = useState(() => new Set());
+  const [drawerAlert, setDrawerAlert] = useState(null);
+  const [history, setHistory] = useState({ items: [], loading: false, error: "", loaded: false });
+
+  const nowTs = Date.now();
 
   const hasScope = hasAlertMonitoringScope({
     hasClusters,
@@ -212,12 +188,36 @@ export default function AlertsPage({
     [selectedClusterId, allowedClusters, allowedNamespaces, allowedResources]
   );
 
-  const openLogContext = (alert) => {
-    setSelectedAlert(alert);
-    setLogModalOpen(true);
-  };
+  /* ── history feed (activity strip, sparklines, resolved stats, History tab) ── */
+  const fetchHistory = useCallback(async () => {
+    if (!selectedClusterId || !hasClusters) {
+      return;
+    }
+    setHistory((prev) => ({ ...prev, loading: !prev.loaded }));
+    try {
+      const response = await listAlertHistory({ cluster: selectedClusterId, limit: HISTORY_LIMIT });
+      setHistory({ items: response.items || [], loading: false, error: "", loaded: true });
+    } catch (historyError) {
+      setHistory((prev) => ({
+        items: prev.items,
+        loading: false,
+        error: historyError.message || "Failed to load alert history.",
+        loaded: true,
+      }));
+    }
+  }, [selectedClusterId, hasClusters]);
 
-  /* Severity KPI counts — computed from the already-loaded list, no extra fetches. */
+  useEffect(() => {
+    setHistory({ items: [], loading: false, error: "", loaded: false });
+    if (!selectedClusterId || !hasClusters || accessError) {
+      return undefined;
+    }
+    fetchHistory();
+    const timer = window.setInterval(fetchHistory, HISTORY_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [fetchHistory, selectedClusterId, hasClusters, accessError]);
+
+  /* ── derived feed data ── */
   const severityCounts = useMemo(() => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const alert of alerts) {
@@ -233,53 +233,82 @@ export default function AlertsPage({
     return counts;
   }, [alerts]);
 
-  /* Display-level ordering: severity first (critical → warning → info), then age (newest fired first). */
-  const displayAlerts = useMemo(() => {
-    const decorated = alerts.map((alert) => {
-      const severity = severityInfo(alert.severity);
-      const firedTs = Date.parse(alert.firedAt);
-      const resource = getAlertResourceName(alert);
-      const policy = getAlertPolicyLabel(alert);
-      const status = String(alert.status || "active").toLowerCase();
-      const duration = formatFiringDuration(alert.firedAt);
-
-      const metaParts = [getAlertTypeLabel(alert).toLowerCase(), scope.clusterLabel];
-      if (alert.namespace) {
-        metaParts.push(`ns/${alert.namespace}`);
+  const filteredAlerts = useMemo(() => {
+    const trimmedQuery = query.trim().toLowerCase();
+    return alerts.filter((alert) => {
+      if (severityFilter) {
+        const value = String(alert.severity || "").toLowerCase();
+        const normalized = value === "critical" || value === "warning" ? value : "info";
+        if (normalized !== severityFilter) {
+          return false;
+        }
       }
-      if (resource && resource !== "—") {
-        metaParts.push(resource);
+      if (typeFilter !== "all" && (alert.alertType || "metric") !== typeFilter) {
+        return false;
       }
-      if (policy && policy !== "—") {
-        metaParts.push(policy);
+      if (trimmedQuery && !alertMatchesQuery(alert, trimmedQuery)) {
+        return false;
       }
-      if (isLogAlert(alert) && alert.matchedPattern) {
-        metaParts.push(`pattern ${alert.matchedPattern}`);
-      }
-      if (status === "active") {
-        metaParts.push(duration ? `firing ${duration}` : `fired ${formatAlertTime(alert.firedAt)}`);
-      } else {
-        metaParts.push(alert.status);
-        metaParts.push(`fired ${formatAlertTime(alert.firedAt)}`);
-      }
-
-      return {
-        alert,
-        severity,
-        firedTs: Number.isNaN(firedTs) ? 0 : firedTs,
-        summary: alert.title || formatTriggeredConditions(alert) || alert.description || "—",
-        metaLine: metaParts.filter(Boolean).join(" · "),
-        firedAtLabel: formatAlertTime(alert.firedAt),
-      };
+      return true;
     });
-    decorated.sort((a, b) => a.severity.rank - b.severity.rank || b.firedTs - a.firedTs);
-    return decorated;
-  }, [alerts, scope.clusterLabel]);
+  }, [alerts, severityFilter, typeFilter, query]);
 
-  const scopeLoading = isNamespaceScopeLoading({
-    coreLoading,
-    namespacesLoading,
-  });
+  const feedEntries = useMemo(() => groupAlerts(filteredAlerts), [filteredAlerts]);
+
+  /* nowTs is intentionally excluded from deps: history refetches every 60s,
+     so buckets realign at worst one minute late instead of on every render. */
+  const activity = useMemo(
+    () => bucketAlertHistory(history.items, { nowTs }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [history.items]
+  );
+
+  const resolvedInfo = useMemo(
+    () => (history.loaded && !history.error ? resolvedStats(history.items, { nowTs }) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [history.items, history.loaded, history.error]
+  );
+
+  const sparks = useMemo(() => {
+    if (!history.loaded || history.error) {
+      return null;
+    }
+    const resolvedActivity = bucketAlertHistory(
+      history.items
+        .filter((row) => String(row.status || "").toLowerCase() === "resolved" && row.resolvedAt)
+        .map((row) => ({ severity: row.severity, firedAt: row.resolvedAt })),
+      { nowTs }
+    );
+    return {
+      critical: severitySeries(activity.buckets, "critical"),
+      warning: severitySeries(activity.buckets, "warning"),
+      info: severitySeries(activity.buckets, "info"),
+      resolved: resolvedActivity.buckets.map((bucket) => bucket.total),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activity, history.items, history.loaded, history.error]);
+
+  const toggleGroup = (key) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const openHistoryTab = () => setTab("history");
+
+  const handleViewPolicy = () => {
+    setDrawerAlert(null);
+    setTab("policies");
+  };
+
+  /* ── scope gates (Open + History tabs share these) ── */
+  const scopeLoading = isNamespaceScopeLoading({ coreLoading, namespacesLoading });
 
   let gateContent = null;
   if (scopeLoading) {
@@ -300,135 +329,169 @@ export default function AlertsPage({
     );
   }
 
-  const showAlertsContent = !gateContent;
+  const hasFilters = Boolean(severityFilter || typeFilter !== "all" || query.trim());
+  const clearFilters = () => {
+    setSeverityFilter("");
+    setTypeFilter("all");
+    setQuery("");
+  };
 
-  let headerSubtitle;
-  if (!hasClusters) {
-    headerSubtitle = "Monitor workload alerts within your assigned scope.";
-  } else if (!showAlertsContent) {
-    headerSubtitle = `Monitoring ${scope.clusterLabel}`;
-  } else {
-    const parts = [`${alerts.length} open`, `monitoring ${scope.clusterLabel}`];
-    if (scope.namespaces.length) {
-      parts.push(`${scope.namespaces.length} namespace${scope.namespaces.length === 1 ? "" : "s"}`);
-    }
-    headerSubtitle = parts.join(" · ");
-  }
+  const tabs = [
+    { key: "open", label: "Open", count: alerts.length },
+    { key: "history", label: "History" },
+    { key: "policies", label: "Policies" },
+    ...(canViewRouting ? [{ key: "routing", label: "Routing" }] : []),
+  ];
 
   return (
     <div className="ops-page alerts-page">
-      <header className="sg-ph">
-        <div>
+      <header className="sg-ph al-ph">
+        <div className="al-ph-main">
           <h2>Alerts</h2>
-          <p className="sg-ph-sub">{headerSubtitle}</p>
+          <ScopeChips scope={scope} resourceCount={scope.resources.length} />
         </div>
-        {showAlertsContent && hasAlerts && onNavigateToAlertPolicies ? (
-          <div className="sg-ph-actions">
-            <button type="button" className="btn-outline" onClick={() => onNavigateToAlertPolicies("history")}>
-              <IconHistory />
-              View alert history
+        <div className="al-tabs" role="tablist" aria-label="Alerts section">
+          {tabs.map((entry) => (
+            <button
+              key={entry.key}
+              type="button"
+              role="tab"
+              aria-selected={tab === entry.key}
+              onClick={() => setTab(entry.key)}
+            >
+              {entry.label}
+              {entry.key === "open" ? (
+                <span className="al-tab-n">{entry.count}</span>
+              ) : null}
             </button>
-          </div>
-        ) : null}
+          ))}
+        </div>
       </header>
 
-      {gateContent}
+      {tab === "open" ? (
+        gateContent || (
+          <>
+            <TriageTiles
+              counts={severityCounts}
+              sparks={sparks}
+              resolved={resolvedInfo}
+              activeSeverity={severityFilter}
+              onToggleSeverity={(severity) =>
+                setSeverityFilter((prev) => (prev === severity ? "" : severity))
+              }
+              onOpenHistory={openHistoryTab}
+            />
 
-      {showAlertsContent && hasAlerts ? (
-        <div className="sg-kpi-grid sg-alerts-kpis">
-          <div className="sg-kpi sg-alerts-kpi--critical">
-            <p className="sg-kpi-label">
-              <IconAlertTriangle />
-              Critical
-            </p>
-            <div className="sg-kpi-value">
-              <b>{severityCounts.critical}</b>
-            </div>
-          </div>
-          <div className="sg-kpi sg-alerts-kpi--warning">
-            <p className="sg-kpi-label">
-              <IconAlertTriangle />
-              Warning
-            </p>
-            <div className="sg-kpi-value">
-              <b>{severityCounts.warning}</b>
-            </div>
-          </div>
-          <div className="sg-kpi">
-            <p className="sg-kpi-label">
-              <IconBell />
-              Info
-            </p>
-            <div className="sg-kpi-value">
-              <b>{severityCounts.info}</b>
-            </div>
-          </div>
-        </div>
-      ) : null}
+            {!history.error ? (
+              <ActivityStrip
+                buckets={activity.buckets}
+                maxTotal={activity.maxTotal}
+                total={activity.total}
+                loading={!history.loaded && history.loading}
+              />
+            ) : null}
 
-      {showAlertsContent && hasAlerts ? (
-        <section className="card compact sg-alerts-card">
-          <div className="sg-alerts-card-head">
-            <h3>Open alerts</h3>
-            <span className="sg-alerts-card-sub">severity first, then age</span>
-          </div>
-          <div className="sg-alist">
-            {displayAlerts.map(({ alert, severity, summary, metaLine, firedAtLabel }) => (
-              <div
-                key={alert.id}
-                className={`sg-al${severity.tone === "danger" ? " sg-al--critical" : ""}`}
-              >
-                <span className={`status-pill ${severity.tone}`}>{severity.label}</span>
-                <div className="sg-al-grow">
-                  <b>{summary}</b>
-                  <span title={firedAtLabel}>{metaLine}</span>
-                </div>
-                {isLogAlert(alert) ? (
-                  <div className="sg-al-actions">
-                    <button type="button" className="sg-al-btn" onClick={() => openLogContext(alert)}>
-                      View Log Context
-                    </button>
+            {alerts.length ? (
+              <>
+                <div className="al-toolbar">
+                  <div className="al-search">
+                    <IconSearch />
+                    <input
+                      type="search"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="Filter by resource, policy, pattern…"
+                      aria-label="Filter alerts"
+                    />
                   </div>
-                ) : null}
-              </div>
-            ))}
-          </div>
-        </section>
+                  <div className="al-seg" role="group" aria-label="Alert type">
+                    {TYPE_FILTERS.map((entry) => (
+                      <button
+                        key={entry.key}
+                        type="button"
+                        aria-pressed={typeFilter === entry.key}
+                        onClick={() => setTypeFilter(entry.key)}
+                      >
+                        {entry.label}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="al-count">
+                    {hasFilters
+                      ? `${filteredAlerts.length} of ${alerts.length} shown`
+                      : `${alerts.length} open · ${feedEntries.length} item${feedEntries.length === 1 ? "" : "s"} after grouping`}
+                  </span>
+                </div>
+
+                {feedEntries.length ? (
+                  <AlertFeed
+                    entries={feedEntries}
+                    nowTs={nowTs}
+                    collapsedGroups={collapsedGroups}
+                    onToggleGroup={toggleGroup}
+                    onOpenAlert={setDrawerAlert}
+                  />
+                ) : (
+                  <section className="card al-filter-empty">
+                    <p className="muted">No alerts match the current filters.</p>
+                    <button type="button" className="al-ghostlink" onClick={clearFilters}>
+                      Clear filters
+                    </button>
+                  </section>
+                )}
+              </>
+            ) : (
+              <AllClear
+                clusterLabel={scope.clusterLabel}
+                lastResolved={resolvedInfo?.lastResolved || null}
+                nowTs={nowTs}
+                onOpenHistory={openHistoryTab}
+              />
+            )}
+          </>
+        )
       ) : null}
 
-      {showAlertsContent && !hasAlerts ? (
-        <section className="card alerts-empty-card">
-          <h3>No active alerts in your assigned resources</h3>
-          <p className="muted">Everything you have access to is currently operating normally.</p>
-        </section>
+      {tab === "history" ? (
+        gateContent || (
+          <AlertHistoryTab
+            items={history.items}
+            loading={history.loading}
+            error={history.error}
+            nowTs={nowTs}
+            onOpenAlert={setDrawerAlert}
+          />
+        )
       ) : null}
 
-      {showAlertsContent ? <AlertScopeCard scope={scope} /> : null}
-
-      {showAlertsContent && canManageRouting ? (
-        <InfoCard
-          title="Notification Channels"
-          actionLabel="Configure routing"
-          onAction={onNavigateToAlertRouting}
-        >
-          <p className="muted">
-            Manage SMTP and notification receivers in Administration → Alert Routing. Assign receivers on each Alert Policy.
-          </p>
-        </InfoCard>
-      ) : null}
-
-      {logModalOpen ? (
-        <Suspense fallback={null}>
-          <AlertLogContextModal
-            open={logModalOpen}
-            alert={selectedAlert}
-            onClose={() => {
-              setLogModalOpen(false);
-              setSelectedAlert(null);
-            }}
+      {tab === "policies" ? (
+        <Suspense fallback={<LoadingState label="Loading alert policies..." />}>
+          <AlertPoliciesPage
+            embedded
+            clusterId={selectedClusterId}
+            clusterOptions={allowedClusters}
+            selectedNamespace={selectedNamespace}
+            allowedNamespaces={allowedNamespaces}
+            hasClusters={hasClusters}
+            canManage={canManageAlerts}
+            coreLoading={coreLoading}
+            accessError={accessError}
           />
         </Suspense>
       ) : null}
+
+      {tab === "routing" && canViewRouting ? (
+        <Suspense fallback={<LoadingState label="Loading alert routing..." />}>
+          <AlertRoutingPage embedded />
+        </Suspense>
+      ) : null}
+
+      <AlertDetailDrawer
+        alert={drawerAlert}
+        clusterLabel={scope.clusterLabel}
+        onClose={() => setDrawerAlert(null)}
+        onViewPolicy={handleViewPolicy}
+      />
     </div>
   );
 }

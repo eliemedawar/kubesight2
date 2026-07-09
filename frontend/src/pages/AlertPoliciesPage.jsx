@@ -9,7 +9,6 @@ import {
   createAlertPolicy,
   deleteAlertPolicy,
   getAlertPolicyCatalog,
-  listAlertHistory,
   listAlertPolicies,
   setAlertPolicyEnabled,
   updateAlertPolicy,
@@ -824,11 +823,10 @@ export default function AlertPoliciesPage({
   canManage = false,
   coreLoading = false,
   accessError = "",
+  embedded = false,
 }) {
   const [catalog, setCatalog] = useState(null);
   const [policies, setPolicies] = useState([]);
-  const [history, setHistory] = useState([]);
-  const [activeTab, setActiveTab] = useState("policies");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
@@ -841,18 +839,15 @@ export default function AlertPoliciesPage({
     setLoading(true);
     setError("");
     try {
-      const [catalogRes, policiesRes, historyRes] = await Promise.all([
+      const [catalogRes, policiesRes] = await Promise.all([
         getAlertPolicyCatalog(),
         listAlertPolicies(clusterId ? { cluster: clusterId } : {}),
-        listAlertHistory(clusterId ? { cluster: clusterId, limit: 100 } : { limit: 100 }),
       ]);
       setCatalog(catalogRes);
       setPolicies(policiesRes.items || []);
-      setHistory(historyRes.items || []);
     } catch (loadError) {
       setError(loadError.message);
       setPolicies([]);
-      setHistory([]);
     } finally {
       setLoading(false);
     }
@@ -863,14 +858,14 @@ export default function AlertPoliciesPage({
   }, [loadData]);
 
   useEffect(() => {
-    if (activeTab !== "policies" || !clusterId) {
+    if (!clusterId) {
       return undefined;
     }
     const timer = window.setInterval(() => {
       loadData();
     }, 30000);
     return () => window.clearInterval(timer);
-  }, [activeTab, clusterId, loadData]);
+  }, [clusterId, loadData]);
 
   const openCreate = () => {
     setModalMode("create");
@@ -982,30 +977,15 @@ export default function AlertPoliciesPage({
     return columns;
   }, [canManage, clusterId]);
 
-  const historyRows = useMemo(
-    () =>
-      history.map((row) => ({
-        id: row.id,
-        time: row.firedAt ? new Date(row.firedAt).toLocaleString() : "—",
-        cluster: row.clusterId === "__app_services__" ? APP_SERVICES_CLUSTER_LABEL : row.clusterId,
-        namespace: row.namespace || "—",
-        resource: [row.resourceType, row.resourceName].filter(Boolean).join("/") || "—",
-        policy: row.policyName || "—",
-        severity: row.severity,
-        status: row.status === "active" ? "Active" : "Resolved",
-        conditions: row.alertType === "log"
-          ? row.matchedPattern || "—"
-          : row.alertType === "service"
-            ? row.description || "—"
-            : (row.triggeredConditions || [])
-                .filter((c) => c.matched)
-                .map((c) => `${c.metricLabel || c.metricKey} ${c.operator} ${c.threshold}`)
-                .join("; ") || "—",
-      })),
-    [history]
-  );
-
-  const header = (
+  const header = embedded ? (
+    canManage ? (
+      <div className="al-embed-head">
+        <button type="button" className="primary" onClick={openCreate} disabled={!hasClusters}>
+          Create Policy
+        </button>
+      </div>
+    ) : null
+  ) : (
     <div className="card-header-row">
       <PageTitle
         title="Alert Policies"
@@ -1029,63 +1009,27 @@ export default function AlertPoliciesPage({
         emptyMessage={EMPTY_MESSAGES.noClusters}
         header={header}
       >
-        <nav className="tab-bar" aria-label="alert-policy-tabs">
-          <button
-            type="button"
-            className={activeTab === "policies" ? "active" : ""}
-            onClick={() => setActiveTab("policies")}
-          >
-            Policies
-          </button>
-          <button
-            type="button"
-            className={activeTab === "history" ? "active" : ""}
-            onClick={() => setActiveTab("history")}
-          >
-            Alert History
-          </button>
-        </nav>
-
-        {activeTab === "policies" ? (
-          policyRows.length ? (
-            <DataTable
-              tableClassName="alert-policies-table"
-              columns={policyTableColumns}
-              rows={policyRows.map((row) => ({
-                ...row,
-                actions: canManage ? (
-                  <PolicyRowActions
-                    policy={row.actions}
-                    onEdit={openEdit}
-                    onToggle={handleToggle}
-                    onDelete={handleDelete}
-                  />
-                ) : null,
-              }))}
-            />
-          ) : (
-            <EmptyState
-              message="No alert policies configured yet."
-              hint={canManage ? "Create a policy to start monitoring cluster metrics and workload health." : undefined}
-            />
-          )
-        ) : historyRows.length ? (
+        {policyRows.length ? (
           <DataTable
-            tableClassName="alert-history-table"
-            columns={[
-              { key: "time", label: "Time" },
-              { key: "cluster", label: "Cluster" },
-              { key: "namespace", label: "Namespace" },
-              { key: "resource", label: "Resource" },
-              { key: "policy", label: "Policy" },
-              { key: "conditions", label: "Triggered Conditions" },
-              { key: "severity", label: "Severity" },
-              { key: "status", label: "Status" },
-            ]}
-            rows={historyRows}
+            tableClassName="alert-policies-table"
+            columns={policyTableColumns}
+            rows={policyRows.map((row) => ({
+              ...row,
+              actions: canManage ? (
+                <PolicyRowActions
+                  policy={row.actions}
+                  onEdit={openEdit}
+                  onToggle={handleToggle}
+                  onDelete={handleDelete}
+                />
+              ) : null,
+            }))}
           />
         ) : (
-          <EmptyState message="No alert history yet." hint="Triggered policies will appear here." />
+          <EmptyState
+            message="No alert policies configured yet."
+            hint={canManage ? "Create a policy to start monitoring cluster metrics and workload health." : undefined}
+          />
         )}
       </AccessScopeView>
 

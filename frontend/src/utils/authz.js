@@ -90,21 +90,8 @@ export const NAV_PAGES = [
 
   // Monitoring
   { key: "logs", label: "Logs", permission: "logs:view", section: "Monitoring" },
-
-  // Alerts (their own section — observability, kept out of Administration)
-  { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Alerts" },
-  {
-    key: "alertPolicies",
-    label: "Alert Policies",
-    permission: "alerts:view",
-    section: "Alerts",
-  },
-  {
-    key: "alertRouting",
-    label: "Alert Routing",
-    adminOnly: true,
-    section: "Alerts",
-  },
+  // One Alerts address: History / Policies / Routing live as RBAC-gated tabs inside.
+  { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Monitoring" },
 
   // Services
   {
@@ -192,7 +179,6 @@ export const CLUSTER_CONTEXT_PAGE_KEYS = new Set([
   "resources",
   "logs",
   "alerts",
-  "alertPolicies",
   "upgrade",
 ]);
 
@@ -1003,7 +989,6 @@ export function pageAllowed(user, pageKey) {
     case "logs":
       return canAccessLogsPage(user);
     case "alerts":
-    case "alertPolicies":
       return (
         hasPermission(user, "alerts:view") &&
         (isAdminUser(user) ||
@@ -1021,8 +1006,6 @@ export function pageAllowed(user, pageKey) {
       return hasPermission(user, "registries:view");
     case "zohoSync":
       return hasPermission(user, "zoho:view");
-    case "alertRouting":
-      return isAdminUser(user);
     case "userManagement":
       return hasPermission(user, "users:view");
     case "auditLogs":

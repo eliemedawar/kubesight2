@@ -380,7 +380,7 @@ export default function ZohoSettingsTab({
               account. Needs the token minted with <code>Desk.tickets.ALL</code>. Status labels must
               match your Desk config exactly (they're matched literally).
             </p>
-            <div className="settings-form sg-zh-setform">
+            <div className="settings-form sg-zh-jform sg-zh-setform">
               <label className="checkbox-label">
                 <input
                   type="checkbox"
@@ -390,52 +390,53 @@ export default function ZohoSettingsTab({
                 />
                 Update the ticket when a run finishes
               </label>
-              <label>
-                Owner email (ticket reassigned to)
+              <label title="The agent every updated ticket is reassigned to">
+                Owner email
                 <input
                   value={form.ticketOwnerEmail}
                   onChange={(e) => setField("ticketOwnerEmail", e.target.value)}
                   placeholder="zagent@areeba.com"
                   disabled={ro}
                 />
-                <span className="field-hint">The agent tickets are assigned to on every update.</span>
               </label>
-              <label>
-                Status — run started
-                <input
-                  value={form.ticketStatusStarted}
-                  onChange={(e) => setField("ticketStatusStarted", e.target.value)}
-                  placeholder="Open"
-                  disabled={ro}
-                />
-              </label>
-              <label>
-                Status — deployed
-                <input
-                  value={form.ticketStatusDeployed}
-                  onChange={(e) => setField("ticketStatusDeployed", e.target.value)}
-                  placeholder="Closed"
-                  disabled={ro}
-                />
-              </label>
-              <label>
-                Status — failed
-                <input
-                  value={form.ticketStatusFailed}
-                  onChange={(e) => setField("ticketStatusFailed", e.target.value)}
-                  placeholder="Failed"
-                  disabled={ro}
-                />
-              </label>
-              <label>
-                Status — canceled
-                <input
-                  value={form.ticketStatusCancelled}
-                  onChange={(e) => setField("ticketStatusCancelled", e.target.value)}
-                  placeholder="Canceled"
-                  disabled={ro}
-                />
-              </label>
+              <div className="sg-zh-jrow4">
+                <label>
+                  Status — started
+                  <input
+                    value={form.ticketStatusStarted}
+                    onChange={(e) => setField("ticketStatusStarted", e.target.value)}
+                    placeholder="Open"
+                    disabled={ro}
+                  />
+                </label>
+                <label>
+                  Status — deployed
+                  <input
+                    value={form.ticketStatusDeployed}
+                    onChange={(e) => setField("ticketStatusDeployed", e.target.value)}
+                    placeholder="Closed"
+                    disabled={ro}
+                  />
+                </label>
+                <label>
+                  Status — failed
+                  <input
+                    value={form.ticketStatusFailed}
+                    onChange={(e) => setField("ticketStatusFailed", e.target.value)}
+                    placeholder="Failed"
+                    disabled={ro}
+                  />
+                </label>
+                <label>
+                  Status — canceled
+                  <input
+                    value={form.ticketStatusCancelled}
+                    onChange={(e) => setField("ticketStatusCancelled", e.target.value)}
+                    placeholder="Canceled"
+                    disabled={ro}
+                  />
+                </label>
+              </div>
             </div>
           </SettingsCard>
 

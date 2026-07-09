@@ -12,8 +12,6 @@ const PAGE_LABELS = {
   resources: "Loading resources...",
   logs: "Loading logs...",
   alerts: "Loading alerts...",
-  alertPolicies: "Loading alert policies...",
-  alertRouting: "Loading alert routing...",
   upgrade: "Loading upgrade center...",
   userManagement: "Loading user management...",
   auditLogs: "Loading audit logs...",

@@ -1,104 +1,1068 @@
-/* Signal page-specific styles — alerts (owned by its page rework; shared vocabulary lives in screens.css) */
+/* ═══════════════════════════════════════════════════════════════════
+   Signal — Alerts section (triage redesign).
+   One address, four tabs: Open · History · Policies · Routing.
+   Shared vocabulary (sg-kpi, status-pill, table-shell) lives in
+   screens.css / index.css; everything here is scoped to .alerts-page.
+   ═══════════════════════════════════════════════════════════════════ */
 
-/* Page header — .ops-page already provides the vertical rhythm via --page-gap */
-.alerts-page .sg-ph {
+/* ── Page head: title + scope chips + section tabs ──────────────── */
+.alerts-page .al-ph {
   margin-bottom: 0;
+  align-items: center;
 }
 
-/* ── Severity KPI strip (3 tiles: Critical / Warning / Info) ────── */
-.alerts-page .sg-alerts-kpis {
-  grid-template-columns: repeat(3, 1fr);
+.alerts-page .al-ph-main {
+  min-width: 0;
 }
 
-/* Critical tile speaks in the danger voice — value AND icon, never color alone
-   (the word "Critical" is right there). Warning tints its label only, per concept. */
-.alerts-page .sg-alerts-kpi--critical .sg-kpi-label {
-  color: var(--danger);
+.alerts-page .al-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
 }
 
-.alerts-page .sg-alerts-kpi--critical .sg-kpi-value b {
-  color: var(--danger);
+.alerts-page .al-scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.71875rem;
+  font-weight: 600;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 0.18rem 0.65rem;
+  color: var(--text-subtle);
+  max-width: 100%;
 }
 
-.alerts-page .sg-alerts-kpi--warning .sg-kpi-label {
-  color: var(--warn);
+.alerts-page .al-scope-k {
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
-/* ── Open alerts card ───────────────────────────────────────────── */
-.alerts-page .sg-alerts-card {
-  overflow: hidden;
+.alerts-page .al-mono {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
 }
 
-.alerts-page .sg-alerts-card-head {
+/* Section tabs — pill segmented control, red-soft active (Signal nav voice) */
+.alerts-page .al-tabs {
+  margin-left: auto;
+  display: flex;
+  gap: 0.3rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 0.22rem;
+}
+
+.alerts-page .al-tabs button {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-subtle);
+  border-radius: var(--radius-full);
+  padding: 0.34rem 0.95rem;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+
+.alerts-page .al-tabs button:hover {
+  background: var(--bg-interactive);
+  color: var(--text-main);
+}
+
+.alerts-page .al-tabs button[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.alerts-page .al-tab-n {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  margin-left: 0.35rem;
+  background: var(--bg-interactive);
+  border-radius: var(--radius-full);
+  padding: 0.05rem 0.38rem;
+  color: var(--text-muted);
+}
+
+.alerts-page .al-tabs button[aria-selected="true"] .al-tab-n {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ── Triage tiles (severity filters + resolved doorway) ─────────── */
+.alerts-page .al-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-4);
+}
+
+/* Global button styles are inline-flex pills — restore stat-card stacking. */
+.alerts-page .al-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-weight: 400;
+  line-height: 1.5;
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+
+.alerts-page .al-tile .sg-kpi-label {
+  margin: 0;
+}
+
+.alerts-page .al-tile:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-md), var(--highlight);
+}
+
+.alerts-page .al-tile:focus-visible {
+  outline: none;
+  box-shadow: var(--ring), var(--shadow-sm);
+  border-color: var(--accent);
+}
+
+.alerts-page .al-tile[aria-pressed="true"] {
+  border-color: var(--accent-border);
+  box-shadow: var(--ring), var(--shadow-sm);
+}
+
+.alerts-page .al-tile-flag {
+  position: absolute;
+  top: 0.8rem;
+  right: 0.9rem;
+  font-size: 0.59375rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+  display: none;
+}
+
+.alerts-page .al-tile[aria-pressed="true"] .al-tile-flag {
+  display: block;
+}
+
+.alerts-page .al-tile-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  margin-top: 0.4rem;
+  min-height: 2rem;
+}
+
+.alerts-page .al-tile-value {
+  font-family: var(--font-display);
+  font-size: 1.7rem;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.alerts-page .al-tile-sub {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  padding-bottom: 0.15rem;
+  min-width: 0;
+}
+
+/* Critical speaks the danger voice — label AND value (word is adjacent). */
+.alerts-page .al-tile--critical .sg-kpi-label,
+.alerts-page .al-tile--critical .al-tile-value { color: var(--danger); }
+.alerts-page .al-tile--warning .sg-kpi-label { color: var(--warn); }
+.alerts-page .al-tile--info .sg-kpi-label { color: var(--info); }
+.alerts-page .al-tile--resolved .sg-kpi-label { color: var(--ok); }
+
+/* Sparkline — single series in the tile's status color via currentColor */
+.alerts-page .al-spark {
+  margin-left: auto;
+  flex: none;
+  line-height: 0;
+}
+
+.alerts-page .al-tile--critical .al-spark { color: var(--danger); }
+.alerts-page .al-tile--warning .al-spark { color: var(--warn); }
+.alerts-page .al-tile--info .al-spark { color: var(--info); }
+.alerts-page .al-tile--resolved .al-spark { color: var(--ok); }
+
+.alerts-page .al-spark-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.alerts-page .al-spark-area {
+  fill: currentColor;
+  opacity: 0.12;
+}
+
+.alerts-page .al-spark-dot {
+  fill: currentColor;
+}
+
+/* ── Activity strip ─────────────────────────────────────────────── */
+.alerts-page .al-activity {
+  padding: 0.85rem 1.15rem 0.65rem;
+}
+
+.alerts-page .al-activity-head {
   display: flex;
   align-items: baseline;
   gap: 0.6rem;
   flex-wrap: wrap;
-  padding: 0.95rem 1.25rem 0.7rem;
-  border-bottom: 1px solid var(--border-soft);
 }
 
-.alerts-page .sg-alerts-card-head h3 {
-  font-size: var(--font-size-md);
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  color: var(--text-strong);
+.alerts-page .al-activity-head h4 {
+  font-size: 0.71875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0;
 }
 
-.alerts-page .sg-alerts-card-sub {
+.alerts-page .al-legend {
+  margin-left: auto;
+  display: flex;
+  gap: 0.9rem;
+  font-size: 0.6875rem;
+  color: var(--text-subtle);
+}
+
+.alerts-page .al-legend span,
+.alerts-page .al-tip-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+}
+
+.alerts-page .al-legend i,
+.alerts-page .al-tip-row i {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  display: inline-block;
+  flex: none;
+}
+
+.alerts-page .al-legend-dot--critical { background: var(--danger); }
+.alerts-page .al-legend-dot--warning { background: var(--warn); }
+.alerts-page .al-legend-dot--info { background: var(--info); }
+
+.alerts-page .al-strip-wrap {
+  position: relative;
+}
+
+.alerts-page .al-strip {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 3px;
+  height: 72px;
+  margin-top: 0.6rem;
+}
+
+/* Severity is stack POSITION, not hue: critical always grows from the
+   baseline, warning above it, info on top (column-reverse). */
+.alerts-page .al-col {
+  flex: 1;
+  max-width: 20px;
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-start;
+  gap: 2px;
+  height: 100%;
+  border-radius: 3px;
+  position: relative;
+}
+
+.alerts-page .al-col:hover {
+  background: var(--bg-interactive);
+}
+
+.alerts-page .al-bar {
+  display: block;
+  border-radius: 2px 2px 0 0;
+  min-height: 4px;
+}
+
+.alerts-page .al-bar--critical { background: var(--danger); }
+.alerts-page .al-bar--warning { background: var(--warn); }
+.alerts-page .al-bar--info { background: var(--info); }
+
+/* Brand red marks TIME (the current hour), never severity. */
+.alerts-page .al-col--now::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -7px 0;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+
+.alerts-page .al-strip-x {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.625rem;
+  color: var(--text-muted);
+  margin-top: 0.6rem;
+  font-family: var(--font-mono);
+}
+
+.alerts-page .al-strip-empty {
+  position: absolute;
+  inset: 0 0 1.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 0.75rem;
+  color: var(--text-muted);
+  margin: 0;
+  pointer-events: none;
+}
+
+.alerts-page .al-tip {
+  position: absolute;
+  bottom: calc(100% + 2px);
+  transform: translateX(-50%);
+  z-index: 30;
+  pointer-events: none;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: 0.45rem 0.7rem;
+  font-size: 0.71875rem;
+  color: var(--text-subtle);
+  white-space: nowrap;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.alerts-page .al-tip b {
+  color: var(--text-strong);
+  font-weight: 650;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+}
+
+.alerts-page .al-strip-loading {
+  height: 72px;
+  margin-top: 0.6rem;
+  display: flex;
+  align-items: flex-end;
+}
+
+.alerts-page .al-skeleton {
+  display: block;
+  width: 100%;
+  height: 40%;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--bg-inset), var(--bg-interactive), var(--bg-inset));
+  background-size: 200% 100%;
+  animation: al-skeleton 1.6s linear infinite;
+}
+
+@keyframes al-skeleton {
+  to { background-position: -200% 0; }
+}
+
+/* ── Toolbar: search + type segments + count ────────────────────── */
+.alerts-page .al-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.alerts-page .al-search {
+  position: relative;
+  flex: 1;
+  min-width: 200px;
+  max-width: 320px;
+}
+
+.alerts-page .al-search svg {
+  position: absolute;
+  left: 0.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.alerts-page .al-search input {
+  width: 100%;
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+  color: var(--text-main);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  padding: 0.42rem 0.9rem 0.42rem 2.1rem;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.alerts-page .al-search input::placeholder {
   color: var(--text-muted);
 }
 
-/* Severity pill column stays fixed-width-ish so titles align */
-.alerts-page .sg-al .status-pill {
+.alerts-page .al-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.alerts-page .al-seg {
+  display: flex;
+  gap: 0.25rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 0.18rem;
+}
+
+.alerts-page .al-seg button {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-subtle);
+  border-radius: var(--radius-full);
+  padding: 0.26rem 0.8rem;
+}
+
+.alerts-page .al-seg button:hover {
+  background: var(--bg-interactive);
+  color: var(--text-main);
+}
+
+.alerts-page .al-seg button[aria-pressed="true"] {
+  background: var(--text-strong);
+  color: var(--bg-panel);
+}
+
+.alerts-page .al-count {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Feed: groups + flat rows ───────────────────────────────────── */
+.alerts-page .al-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.alerts-page .al-group,
+.alerts-page .al-flat {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm), var(--highlight);
+  overflow: hidden;
+}
+
+.alerts-page .al-critical {
+  box-shadow: inset 3px 0 var(--danger), var(--shadow-sm), var(--highlight);
+}
+
+.alerts-page .al-ghead,
+.alerts-page .al-flat-btn,
+.alerts-page .al-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0.72rem 1rem;
+  text-align: left;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.alerts-page .al-ghead:hover,
+.alerts-page .al-flat-btn:hover,
+.alerts-page .al-row:hover {
+  background: var(--bg-interactive);
+}
+
+.alerts-page .al-ghead:focus-visible,
+.alerts-page .al-flat-btn:focus-visible,
+.alerts-page .al-row:focus-visible {
+  outline: none;
+  box-shadow: inset var(--ring);
+}
+
+.alerts-page .al-feed .status-pill {
   flex: none;
 }
 
-/* Critical rows: the pill dot pulses — reuses the app's status-dot-pulse
-   keyframes (index.css); the inset danger bar comes from sg-al--critical. */
-.alerts-page .sg-al--critical .status-pill::before {
+/* Critical pill dot pulses — live/critical only (Signal rule). */
+.alerts-page .al-critical .status-pill.danger::before {
   animation: status-dot-pulse 2s ease-in-out infinite;
 }
 
-/* Row actions — base <button> is already a pill secondary; just compact it */
-.alerts-page .sg-al-actions {
+.alerts-page .al-ghead-main,
+.alerts-page .al-flat-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.alerts-page .al-ghead-main b,
+.alerts-page .al-flat-main b {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.alerts-page .al-ghead-main > span,
+.alerts-page .al-flat-main > span {
+  display: block;
+  font-size: 0.71875rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.alerts-page .al-type {
+  flex: none;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 0.1rem 0.5rem;
+  color: var(--text-muted);
+  background: var(--bg-panel-strong);
+}
+
+.alerts-page .al-dur {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.alerts-page .al-chev {
+  flex: none;
+  color: var(--text-muted);
+  transition: transform 0.2s var(--ease);
+}
+
+.alerts-page .al-chev--closed {
+  transform: rotate(-90deg);
+}
+
+.alerts-page .al-grows {
+  border-top: 1px solid var(--border-soft);
+}
+
+.alerts-page .al-row {
+  border-top: 1px solid var(--border-soft);
+  padding-left: 1.35rem;
+}
+
+.alerts-page .al-row:first-child {
+  border-top: 0;
+}
+
+.alerts-page .al-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+}
+
+.alerts-page .al-dot--critical { background: var(--danger); }
+.alerts-page .al-dot--warning { background: var(--warn); }
+.alerts-page .al-dot--info { background: var(--info); }
+
+.alerts-page .al-row-res {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.71875rem;
+  color: var(--text-main);
+}
+
+.alerts-page .al-row-what {
+  min-width: 0;
+  flex: 1;
+  font-size: 0.78125rem;
+  color: var(--text-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.alerts-page .al-row-ns {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  margin-right: 0.5rem;
+}
+
+.alerts-page .al-open-hint {
+  flex: none;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+}
+
+.alerts-page .al-ghead:hover .al-open-hint,
+.alerts-page .al-row:hover .al-open-hint,
+.alerts-page .al-flat-btn:hover .al-open-hint,
+.alerts-page .al-ghead:focus-visible .al-open-hint,
+.alerts-page .al-row:focus-visible .al-open-hint,
+.alerts-page .al-flat-btn:focus-visible .al-open-hint {
+  opacity: 1;
+}
+
+/* Filter-empty card */
+.alerts-page .al-filter-empty {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.8rem;
+  justify-content: center;
+  padding: 1.6rem;
+}
+
+.alerts-page .al-filter-empty p {
+  margin: 0;
+}
+
+/* ── All-clear state ────────────────────────────────────────────── */
+.alerts-page .al-clear {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 2.6rem 1.5rem;
+}
+
+.alerts-page .al-ring {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  margin-bottom: 1.1rem;
+}
+
+.alerts-page .al-ring-track {
+  stroke: var(--ok-soft);
+}
+
+.alerts-page .al-ring-arc {
+  stroke: var(--ok);
+}
+
+.alerts-page .al-ring-check {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ok);
+}
+
+.alerts-page .al-clear h4 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.125rem;
+  letter-spacing: -0.015em;
+  color: var(--text-strong);
+  margin: 0 0 0.3rem;
+}
+
+.alerts-page .al-clear p {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  margin: 0 0 0.9rem;
+  max-width: 46rem;
+}
+
+.alerts-page .al-ghostlink {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--accent-strong);
+  padding: 0.3rem 0.8rem;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+
+.alerts-page .al-ghostlink:hover {
+  background: var(--accent-soft);
+}
+
+/* ── History tab ────────────────────────────────────────────────── */
+.alerts-page .al-history {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.alerts-page .al-hist-title b {
+  display: block;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.alerts-page .al-hist-title span {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+}
+
+.alerts-page .alert-history-table .col-ttr,
+.alerts-page .alert-history-table td.col-ttr {
+  text-align: right;
+}
+
+/* ── Detail drawer (slide-over) ─────────────────────────────────── */
+.al-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop, rgba(23, 21, 18, 0.42));
+  backdrop-filter: blur(2px);
+  z-index: 50;
+}
+
+.al-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(420px, 94vw);
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  z-index: 51;
+  display: flex;
+  flex-direction: column;
+  animation: al-drawer-in 0.32s var(--ease);
+}
+
+@keyframes al-drawer-in {
+  from { transform: translateX(105%); }
+  to { transform: translateX(0); }
+}
+
+.al-dr-head {
+  padding: 1.05rem 1.2rem 0.9rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.al-dr-top {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.al-dr-close {
+  margin-left: auto;
   flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 
-.alerts-page .sg-al-btn {
+.al-dr-close:hover {
+  background: var(--bg-interactive);
+}
+
+/* Pin the icon explicitly: the global `svg { max-width:100% }` reset clamps
+   against the flex content box, so min-width guards against collapse. */
+.al-dr-close svg {
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  min-height: 12px;
+}
+
+.al-dr-head h4 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.03125rem;
+  letter-spacing: -0.015em;
+  color: var(--text-strong);
+  margin: 0.65rem 0 0.2rem;
+  overflow-wrap: anywhere;
+}
+
+.al-dr-meta {
+  font-size: 0.71875rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.al-dr-meta b {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.al-dr-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.05rem 1.2rem 1.2rem;
+}
+
+.al-dr-sec {
+  margin-bottom: 1.35rem;
+}
+
+.al-dr-sec h5 {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 0.5rem;
+}
+
+.al-dr-desc {
+  font-size: 0.8125rem;
+  color: var(--text-subtle);
+  margin: 0.4rem 0 0;
+}
+
+.al-cond {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+
+.al-cond table {
+  width: 100%;
+  border-collapse: collapse;
   font-size: 0.75rem;
-  padding: 0.3rem 0.85rem;
-  white-space: nowrap;
 }
 
-/* Scope card — namespaces / resources as mono tags (machine truth wears mono) */
-.alerts-page .alerts-scope-tags {
+.al-cond th {
+  text-align: left;
+  font-size: 0.59375rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--bg-panel-strong);
+  padding: 0.4rem 0.7rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.al-cond td {
+  padding: 0.5rem 0.7rem;
+  color: var(--text-subtle);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.al-cond tr:last-child td {
+  border-bottom: 0;
+}
+
+.al-cond .al-mono {
+  font-family: var(--font-mono);
+  font-size: 0.71875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.al-cond .al-over {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.al-cond--miss td {
+  color: var(--text-muted);
+}
+
+.al-kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.3rem 1rem;
+  font-size: 0.78125rem;
+  margin: 0;
+}
+
+.al-kv dt {
+  color: var(--text-muted);
+}
+
+.al-kv dd {
+  margin: 0;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+
+.al-kv .al-mono,
+.al-drawer .al-mono {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.al-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
 }
 
+.al-chip {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.14rem 0.5rem;
+  color: var(--text-subtle);
+}
+
+/* Log well — terminals stay dark in BOTH themes (Signal rule) */
+.al-logwell {
+  background: #101113;
+  border-radius: var(--radius-md);
+  padding: 0.7rem 0.85rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  line-height: 1.75;
+  color: #b9bab6;
+  overflow-x: auto;
+}
+
+.al-logwell .al-ln {
+  display: block;
+  white-space: pre;
+}
+
+.al-logwell .al-ln--hit {
+  color: #ffb3ad;
+  background: rgba(255, 77, 77, 0.13);
+  box-shadow: inset 2px 0 0 #ff4d4d;
+  padding-left: 0.4rem;
+  margin-left: -0.4rem;
+}
+
+.al-dr-logbtn {
+  margin-top: 0.55rem;
+  font-size: 0.71875rem;
+  padding: 0.3rem 0.8rem;
+}
+
+.al-dr-foot {
+  border-top: 1px solid var(--border-soft);
+  padding: 0.85rem 1.2rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  background: var(--bg-panel-strong);
+}
+
+/* ── Embedded pages (Policies / Routing as tabs) ────────────────── */
+.al-embed-head {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 0;
+}
+
+.al-embed-head:empty {
+  display: none;
+}
+
+.alerts-page .alert-routing-embed {
+  display: grid;
+  gap: var(--space-4);
+}
+
+/* Embedded pages bring their own .ops-page wrapper — flatten its padding
+   so tab content aligns with the section, not nested page gutters. */
+.alerts-page .ops-page {
+  padding: 0;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  .alerts-page .al-tiles {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 @media (max-width: 760px) {
-  .alerts-page .sg-alerts-kpis {
+  .alerts-page .al-tiles {
     grid-template-columns: 1fr;
   }
 
-  .alerts-page .sg-al {
+  .alerts-page .al-tabs {
+    margin-left: 0;
     flex-wrap: wrap;
   }
 
-  .alerts-page .sg-al-actions {
+  .alerts-page .al-ghead,
+  .alerts-page .al-flat-btn,
+  .alerts-page .al-row {
+    flex-wrap: wrap;
+    min-height: 48px;
+  }
+
+  .alerts-page .al-count {
+    margin-left: 0;
     width: 100%;
-    justify-content: flex-end;
+  }
+
+  .alerts-page .al-col {
+    max-width: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .alerts-page .sg-al--critical .status-pill::before {
+  .alerts-page .al-critical .status-pill.danger::before,
+  .alerts-page .al-skeleton {
     animation: none;
+  }
+
+  .al-drawer {
+    animation: none;
+  }
+
+  .alerts-page .al-chev {
+    transition: none;
   }
 }

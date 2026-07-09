@@ -72,8 +72,6 @@ const NamespacesPage = lazy(() => import("./pages/NamespacesPage.jsx"));
 const ResourcesPage = lazy(() => import("./pages/ResourcesPage.jsx"));
 const LogsPage = lazy(() => import("./pages/LogsPage.jsx"));
 const AlertsPage = lazy(() => import("./pages/AlertsPage.jsx"));
-const AlertPoliciesPage = lazy(() => import("./pages/AlertPoliciesPage.jsx"));
-const AlertRoutingPage = lazy(() => import("./pages/AlertRoutingPage.jsx"));
 const UpgradeSafeModePage = lazy(() => import("./pages/UpgradeSafeModePage.jsx"));
 const UserManagementPage = lazy(() => import("./pages/UserManagementPage.jsx"));
 const AuditLogsPage = lazy(() => import("./pages/AuditLogsPage.jsx"));
@@ -142,7 +140,11 @@ export default function App() {
   const [editCatalogOpen, setEditCatalogOpen] = useState(false);
   const [editCatalogSaving, setEditCatalogSaving] = useState(false);
   const [editCatalogError, setEditCatalogError] = useState("");
-  const [settingsDraft, setSettingsDraft] = useState(normalizeSettings(emptyAppData.settings));
+  // withLocalTheme here too — otherwise the theme effect below persists the
+  // "system" default over the user's stored preference before settings load.
+  const [settingsDraft, setSettingsDraft] = useState(() =>
+    withLocalTheme(normalizeSettings(emptyAppData.settings))
+  );
   const [savingRouting, setSavingRouting] = useState(false);
   const [routingError, setRoutingError] = useState("");
   const [testingEmail, setTestingEmail] = useState(false);
@@ -1511,19 +1513,6 @@ export default function App() {
             accessError={pageAccessError}
           />
         );
-      case "alertPolicies":
-        return (
-          <AlertPoliciesPage
-            clusterId={selectedClusterId}
-            clusterOptions={allowedClusters}
-            selectedNamespace={selectedNamespace}
-            allowedNamespaces={allowedNamespaces}
-            hasClusters={hasClusters}
-            canManage={hasPermission("alerts:manage")}
-            coreLoading={loadingState.core}
-            accessError={pageAccessError}
-          />
-        );
       case "alerts":
         return (
           <AlertsPage
@@ -1532,19 +1521,16 @@ export default function App() {
             allowedClusters={allowedClusters}
             allowedNamespaces={allowedNamespaces}
             allowedResources={allowedResources}
-            canManageRouting={isAdmin}
-            onNavigateToAlertRouting={() => handleNavigate("alertRouting")}
+            selectedNamespace={selectedNamespace}
             canManageAlerts={hasPermission("alerts:manage")}
+            canViewRouting={isAdmin}
             hasClusters={hasClusters}
             authUser={authUser}
-            onNavigateToAlertPolicies={() => handleNavigate("alertPolicies")}
             coreLoading={loadingState.core}
             namespacesLoading={namespacesLoading}
             accessError={pageAccessError}
           />
         );
-      case "alertRouting":
-        return <AlertRoutingPage />;
       case "imageRegistries":
         return <ImageRegistriesPage canManage={hasPermission("registries:manage")} />;
       case "zohoSync":
@@ -1699,7 +1685,6 @@ export default function App() {
     activePage !== "userManagement" &&
     activePage !== "auditLogs" &&
     activePage !== "settings" &&
-    activePage !== "alertRouting" &&
     activePage !== "imageRegistries"
       ? EMPTY_MESSAGES.noClusters
       : "";

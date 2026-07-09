@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import PageTitle from "../components/common/PageTitle.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import { getUserInitials, normalizeSettings } from "../utils/formatters.js";
+import { setAlertsTabHint } from "../lib/alertDisplay.js";
+import { isAdminUser } from "../utils/authz.js";
 
 const REFRESH_PRESETS = [
   { value: 15, label: "15s" },
@@ -73,7 +75,8 @@ const SECTIONS = [
 ];
 
 const ADMIN_LINKS = [
-  { key: "alertRouting", label: "Alert Routing" },
+  // Alert Routing lives as an admin-gated tab inside the Alerts section.
+  { key: "alerts", label: "Alert Routing", adminOnly: true, alertsTab: "routing" },
   { key: "userManagement", label: "User Management" },
   { key: "imageRegistries", label: "Image Registries" },
 ];
@@ -226,8 +229,10 @@ export default function SettingsPage({
       );
 
   const alertsEnabled = Boolean(settingsDraft.notifications.alerts);
-  const canOpenAlertRouting = isPageAllowed?.("alertRouting");
-  const adminLinks = ADMIN_LINKS.filter((link) => isPageAllowed?.(link.key));
+  const canOpenAlertRouting = isAdminUser(authUser) && isPageAllowed?.("alerts");
+  const adminLinks = ADMIN_LINKS.filter(
+    (link) => isPageAllowed?.(link.key) && (!link.adminOnly || isAdminUser(authUser))
+  );
   const mfaEnabled = Boolean(authUser?.mfaEnabled);
 
   return (
@@ -265,10 +270,15 @@ export default function SettingsPage({
               <p className="settings-rail-divider" aria-hidden="true">Administration</p>
               {adminLinks.map((link) => (
                 <button
-                  key={link.key}
+                  key={`${link.key}-${link.label}`}
                   type="button"
                   className="settings-rail-ext"
-                  onClick={() => onNavigate?.(link.key)}
+                  onClick={() => {
+                    if (link.alertsTab) {
+                      setAlertsTabHint(link.alertsTab);
+                    }
+                    onNavigate?.(link.key);
+                  }}
                 >
                   {link.label}
                   {ICONS.external}
@@ -443,7 +453,10 @@ export default function SettingsPage({
               <button
                 type="button"
                 className="settings-link-row"
-                onClick={() => onNavigate?.("alertRouting")}
+                onClick={() => {
+                  setAlertsTabHint("routing");
+                  onNavigate?.("alerts");
+                }}
               >
                 {ICONS.routing}
                 <span>

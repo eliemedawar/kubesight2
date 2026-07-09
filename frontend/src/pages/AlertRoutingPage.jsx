@@ -872,7 +872,7 @@ function LogsTab({ logs, onRefresh, loading }) {
   );
 }
 
-export default function AlertRoutingPage() {
+export default function AlertRoutingPage({ embedded = false }) {
   const [activeTab, setActiveTab] = useState("smtp");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -937,11 +937,13 @@ export default function AlertRoutingPage() {
   };
 
   return (
-    <div className="ops-page">
-      <PageTitle
-        title="Alert Routing"
-        subtitle="Configure SMTP, notification receivers, and review delivery logs."
-      />
+    <div className={embedded ? "alert-routing-embed" : "ops-page"}>
+      {!embedded ? (
+        <PageTitle
+          title="Alert Routing"
+          subtitle="Configure SMTP, notification receivers, and review delivery logs."
+        />
+      ) : null}
 
       <nav className="alert-routing-tabs" aria-label="Alert routing sections">
         {TABS.map((tab) => (
