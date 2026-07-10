@@ -228,7 +228,7 @@ export default function ZohoSettingsTab({
               Field IDs come from DEVOPS-REQUEST-FIELD-SYNC-CONFIG.md — they bind the sync to the
               exact dropdowns on the DevOps Request layout.
             </p>
-            <div className="settings-form sg-zh-setform">
+            <div className="settings-form sg-zh-setform sg-zh-fieldmap">
               <label>
                 Application field ID (deployments dropdown)
                 <input

@@ -28,6 +28,9 @@ export default function ZohoLayoutEditor({
 }) {
   const envFieldId = String(config.environmentFieldId || "");
   const appFieldId = String(config.appFieldId || "");
+  // Only special-cased while the variable sync owns the field — with the sync
+  // off, its options stay manually manageable like any other picklist.
+  const variableFieldId = config.syncVariables ? String(config.variableFieldId || "") : "";
   const selectedNamespaces = config.selectedNamespaces || [];
   const [layout, setLayout] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -241,6 +244,14 @@ export default function ZohoLayoutEditor({
                           “Choose namespaces” on the Environment field.
                         </div>
                       ) : null}
+                      {String(field.id) === variableFieldId ? (
+                        <div className="sg-zh-fhint">
+                          Auto-derived live from the chosen deployments' env variables — the same
+                          name across deployments becomes one option, and picking an Application on
+                          the ticket narrows the list to that app's variables. Populates on the
+                          next sync.
+                        </div>
+                      ) : null}
                     </>
                   ) : null}
 
@@ -254,7 +265,9 @@ export default function ZohoLayoutEditor({
                         >
                           Choose namespaces
                         </button>
-                      ) : field.isPicklist && String(field.id) === appFieldId ? null : field.isPicklist ? (
+                      ) : field.isPicklist &&
+                        (String(field.id) === appFieldId ||
+                          String(field.id) === variableFieldId) ? null : field.isPicklist ? (
                         <button
                           type="button"
                           className="btn-ghost"

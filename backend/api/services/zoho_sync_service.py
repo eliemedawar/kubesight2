@@ -1113,7 +1113,7 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_app_value = _extract(payload, app_field, "deployment", "app_service", "application", "cf_application")
     raw_env_value = _extract(payload, env_field, "environment", "namespace", "cf_environment")
     tag = _extract(payload, tag_field, "tag", "cf_tag", "version")
-    variable = _extract(payload, variable_field, "variable", "cf_variable")
+    variable = _extract(payload, variable_field, "variable", "cf_variable", "cf_env_variable")
     variable_value = _extract(payload, value_field, "variable_value", "cf_value")
     # The Zoho picklist placeholder is not a real choice.
     if variable is not None and str(variable).strip() in ("", NONE_VALUE):
