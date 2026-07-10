@@ -16,6 +16,12 @@ Flow per run (DEPLOY-AUTOMATION-PLAN.md):
    author + submit a Change Bundle (normal quorum approval + window; the bundle
    executor deploys it); ``0`` → ``kubectl set image`` immediately.
 
+Variable-change runs (``change_type == "env_var"``, ticket carries a variable +
+value instead of a tag) skip the registry/Jenkins stages entirely: queued →
+validate the variable against the live spec → the SAME handoff (bundle with the
+env value edited in the live YAML, or direct ``kubectl set env``) → the same
+pod-health rollout watch + rollback.
+
 Every run is a DB row advanced by the 15s scheduler tick — fully resumable
 across restarts. One active run per ticket and per (cluster, namespace,
 deployment). System actions audit with ``actor=None`` (the established
@@ -329,15 +335,30 @@ def _active_conflict(ticket_record_id: int, cluster_id: str, namespace: str, nam
 
 
 def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str, Any]:
-    """Create a run for one inbound ticket. Raises AutomationError on bad input."""
+    """Create a run for one inbound ticket. Raises AutomationError on bad input.
+
+    A ticket carries exactly ONE change: an image tag (deploy flow) or a
+    variable + value (env-var change flow) — the run's ``change_type`` follows.
+    """
     ticket = ZohoInboundTicket.query.get(int(ticket_record_id))
     if ticket is None:
         raise AutomationError("Inbound ticket not found.", 404)
     if not ticket.resolved or not ticket.app_service_id:
         raise AutomationError("This ticket did not resolve to a deployment — nothing to run.", 400)
     tag = (ticket.tag or "").strip()
-    if not tag:
-        raise AutomationError("This ticket has no image tag — automation needs one.", 400)
+    variable = (ticket.variable_name or "").strip()
+    value = (ticket.variable_value or "").strip()
+    if tag and variable:
+        raise AutomationError(
+            "This ticket has both an image tag and a variable — automation needs exactly one change.",
+            400,
+        )
+    if not tag and not variable:
+        raise AutomationError(
+            "This ticket has no image tag and no variable — automation needs one change.", 400
+        )
+    if variable and not value:
+        raise AutomationError("This ticket picks a variable but has no value to set it to.", 400)
     snapshot = ZohoDeploymentSnapshot.query.get(ticket.app_service_id)
     if snapshot is None:
         raise AutomationError("The ticket's deployment snapshot no longer exists.", 404)
@@ -359,14 +380,22 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
         cluster_id=snapshot.cluster_id,
         namespace=snapshot.namespace,
         deployment_name=snapshot.deployment_name,
+        change_type="env_var" if variable else "image",
+        variable_name=variable or None,
+        variable_value=value if variable else None,
         # Registry/deploy tag = template applied; the router gets the raw tag.
-        image_tag=resolve_image_tag(jrow, tag),
-        ticket_tag=tag,
+        image_tag=resolve_image_tag(jrow, tag) if tag else "",
+        ticket_tag=tag or None,
         status="queued",
         steps=_initial_steps(),
         auto=bool(auto),
         triggered_by=(getattr(user, "username", None) or ("auto" if auto else None)),
     )
+    if variable:
+        # No registry/Jenkins stages for a variable change — the image_check
+        # slot doubles as the "variable check" validation step.
+        _set_step(run, "build", "skip", "not needed for a variable change")
+        _set_step(run, "verify", "skip", "not needed for a variable change")
     db.session.add(run)
     db.session.commit()
 
@@ -380,8 +409,11 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
             "deployment": run.deployment_name,
             "namespace": run.namespace,
             "clusterId": run.cluster_id,
+            "changeType": run.change_type,
             "tag": run.image_tag,
             "ticketTag": run.ticket_tag,
+            "variable": run.variable_name,
+            "value": run.variable_value,
             "auto": bool(auto),
         },
     )
@@ -490,6 +522,9 @@ def serialize_run(run: DeployAutomationRun) -> Dict[str, Any]:
         "namespace": run.namespace,
         "deploymentName": run.deployment_name,
         "containerName": run.container_name,
+        "changeType": run.change_type or "image",
+        "variableName": run.variable_name,
+        "variableValue": run.variable_value,
         "imageRepo": run.image_repo,
         "imageTag": run.image_tag,
         "ticketTag": run.ticket_tag,
@@ -570,7 +605,9 @@ def _advance(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     for _ in range(_MAX_CHAIN_PER_TICK):
         before = run.status
         if run.status == "queued":
-            _do_resolve(run)
+            # Variable changes skip the registry/Jenkins stages: validate the
+            # variable against the live spec, then hand off straight away.
+            _do_resolve_variable(run) if _is_env_run(run) else _do_resolve(run)
         elif run.status == "checking_image":
             _do_check(run, jrow)
         elif run.status == "building":
@@ -587,6 +624,22 @@ def _advance(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
 
 def _target_image(run: DeployAutomationRun) -> str:
     return f"{run.image_repo}:{run.image_tag}"
+
+
+def _is_env_run(run: DeployAutomationRun) -> bool:
+    return (run.change_type or "image") == "env_var"
+
+
+def _change_summary(run: DeployAutomationRun) -> str:
+    """Human one-liner of what this run changes — used in messages/emails/audit."""
+    if _is_env_run(run):
+        return f"{run.variable_name}={run.variable_value}"
+    return _target_image(run)
+
+
+def _container_names(run: DeployAutomationRun) -> List[str]:
+    """The container_name column holds a comma-joined list for env-var runs."""
+    return [c.strip() for c in (run.container_name or "").split(",") if c.strip()]
 
 
 def _zoho_ticket_id(run: DeployAutomationRun) -> Optional[str]:
@@ -610,33 +663,45 @@ def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
     if not ticket_id:
         return
     who = run.ticket_number or f"run #{run.id}"
-    target = _target_image(run)
+    env_run = _is_env_run(run)
+    # What the ticket asked for, phrased per change type.
+    change = _change_summary(run) if env_run else run.image_tag
     comment = None
     resolution = None
     if outcome == "started":
         comment = (
-            f"KubeSight automation started for {run.deployment_name} -> {run.image_tag} "
+            f"KubeSight automation started for {run.deployment_name} -> {change} "
             f"in {run.namespace} ({who})."
         )
     elif outcome == "deployed":
         mode = "change bundle" if run.bundle_id else "direct apply"
-        comment = (
-            f"Deployment succeeded: {run.deployment_name} is now running {target} "
-            f"in {run.namespace} (via {mode})."
-        )
-        resolution = (
-            f"KubeSight deployed {run.deployment_name} to {run.namespace} at tag "
-            f"{run.image_tag}; pods reported healthy. ({who})"
-        )
+        if env_run:
+            comment = (
+                f"Variable change applied: {change} on {run.deployment_name} "
+                f"in {run.namespace} (via {mode}); pods reported healthy."
+            )
+            resolution = (
+                f"KubeSight set {change} on {run.deployment_name} in {run.namespace}; "
+                f"pods reported healthy. ({who})"
+            )
+        else:
+            comment = (
+                f"Deployment succeeded: {run.deployment_name} is now running {_target_image(run)} "
+                f"in {run.namespace} (via {mode})."
+            )
+            resolution = (
+                f"KubeSight deployed {run.deployment_name} to {run.namespace} at tag "
+                f"{run.image_tag}; pods reported healthy. ({who})"
+            )
     elif outcome == "failed":
         comment = (
-            f"Automation failed for {run.deployment_name} -> {run.image_tag} in "
+            f"Automation failed for {run.deployment_name} -> {change} in "
             f"{run.namespace}: {run.error or 'unknown error'}"
         )
         resolution = f"KubeSight automation did not complete: {run.error or 'unknown error'}"
     elif outcome == "cancelled":
         comment = (
-            f"Automation cancelled for {run.deployment_name} -> {run.image_tag} in "
+            f"Automation cancelled for {run.deployment_name} -> {change} in "
             f"{run.namespace}. {run.error or ''}".strip()
         )
     try:
@@ -707,6 +772,86 @@ def _do_resolve(run: DeployAutomationRun) -> None:
     _set_step(run, "image_check", "run", note)
     run.retry_count = 0
     run.status = "checking_image"
+
+
+def _do_resolve_variable(run: DeployAutomationRun) -> None:
+    """queued → handoff for env-var runs.
+
+    Confirms the ticket's variable exists as a LITERAL value on the live
+    deployment (a ``valueFrom`` ConfigMap/Secret reference can't be set to a
+    literal safely) and records which containers define it — the apply targets
+    exactly those containers.
+    """
+    from ..k8s_provider import (
+        K8sCommandError,
+        _run_for_access,
+        resolve_cluster_access,
+        should_use_real_k8s,
+    )
+
+    var = run.variable_name or ""
+    _set_step(run, "image_check", "run", f"checking {var} on the live deployment")
+
+    if not should_use_real_k8s(run.cluster_id):
+        run.container_name = run.deployment_name
+        _set_step(run, "image_check", "done", f"[mock] {var} accepted")
+        _do_handoff(run)
+        return
+
+    access = resolve_cluster_access(run.cluster_id)
+    if not access:
+        _fail(run, "image_check", f"Cluster '{run.cluster_id}' was not found.")
+        return
+    try:
+        raw = _run_for_access(
+            access,
+            ["get", "deployment", run.deployment_name, "-n", run.namespace, "-o", "json"],
+        )
+        spec = json.loads(raw)
+    except (K8sCommandError, ValueError) as exc:
+        _fail(run, "image_check", f"Could not read deployment '{run.deployment_name}': {exc}")
+        return
+
+    containers = (
+        (((spec.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
+    )
+    literal: List[str] = []
+    referenced = False
+    available: List[str] = []
+    for c in containers:
+        for entry in c.get("env") or []:
+            name = entry.get("name")
+            if not name:
+                continue
+            if name == var:
+                if "valueFrom" in entry:
+                    referenced = True
+                elif c.get("name"):
+                    literal.append(c["name"])
+            if "valueFrom" not in entry and name not in available:
+                available.append(name)
+
+    if literal:
+        run.container_name = ",".join(literal)
+        _set_step(run, "image_check", "done", f"{var} found on container(s) {run.container_name}")
+        run.retry_count = 0
+        _do_handoff(run)
+        return
+    if referenced:
+        _fail(
+            run,
+            "image_check",
+            f"'{var}' on '{run.deployment_name}' comes from a ConfigMap/Secret reference "
+            "(valueFrom) — change it at its source instead of on the Deployment.",
+        )
+        return
+    hint = ", ".join(sorted(available)[:15]) or "none"
+    _fail(
+        run,
+        "image_check",
+        f"Deployment '{run.deployment_name}' in '{run.namespace}' has no environment "
+        f"variable '{var}'. Changeable variables: {hint}.",
+    )
 
 
 def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
@@ -913,6 +1058,31 @@ def _swap_image_in_yaml(yaml_text: str, deployment_name: str, container_name: st
     return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
 
 
+def _set_env_in_yaml(yaml_text: str, variable: str, value: str) -> str:
+    """Return the manifest with ONLY the named literal env var's value replaced.
+
+    Every container that defines ``variable`` as a plain value gets the new
+    value (mirrors what the direct ``kubectl set env -c`` apply targets);
+    ``valueFrom`` entries are left untouched — the resolve step already refused
+    those runs.
+    """
+    doc = yaml.safe_load(yaml_text)
+    if not isinstance(doc, dict) or (doc.get("kind") or "").lower() != "deployment":
+        raise AutomationError("The live manifest is not a Deployment.", 500)
+    containers = (((doc.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
+    hit = False
+    for container in containers:
+        for entry in container.get("env") or []:
+            if entry.get("name") == variable and "valueFrom" not in entry:
+                entry["value"] = str(value)
+                hit = True
+    if not hit:
+        raise AutomationError(
+            f"The live manifest defines no literal environment variable '{variable}'.", 500
+        )
+    return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+
+
 def _handoff_bundle(run: DeployAutomationRun, required: int) -> None:
     """Author + submit a Change Bundle with an edit_deployment item (image swap only).
 
@@ -935,11 +1105,14 @@ def _handoff_bundle(run: DeployAutomationRun, required: int) -> None:
         return
 
     try:
-        swapped = _swap_image_in_yaml(
-            data["yaml"], run.deployment_name, run.container_name or "", _target_image(run)
-        )
+        if _is_env_run(run):
+            swapped = _set_env_in_yaml(data["yaml"], run.variable_name or "", run.variable_value or "")
+        else:
+            swapped = _swap_image_in_yaml(
+                data["yaml"], run.deployment_name, run.container_name or "", _target_image(run)
+            )
     except (AutomationError, yaml.YAMLError) as exc:
-        _fail(run, "approval", f"Could not prepare the image change: {exc}")
+        _fail(run, "approval", f"Could not prepare the {'variable' if _is_env_run(run) else 'image'} change: {exc}")
         return
 
     now = datetime.now(timezone.utc)
@@ -956,13 +1129,15 @@ def _handoff_bundle(run: DeployAutomationRun, required: int) -> None:
                 "yaml": swapped,
             },
         )
+        change_note = (
+            f"{run.variable_name}={run.variable_value} (automated variable change)"
+            if _is_env_run(run)
+            else f"{run.image_tag} (automated deploy request)"
+        )
         submitted = submit_bundle(
             None,
             bundle.id,
-            note=(
-                f"Zoho {run.ticket_number or 'ticket'} — {run.deployment_name} → "
-                f"{run.image_tag} (automated deploy request)"
-            ),
+            note=f"Zoho {run.ticket_number or 'ticket'} — {run.deployment_name} → {change_note}",
             window_start=(now + timedelta(minutes=2)).isoformat(),
             window_end=(now + timedelta(hours=int(jrow.bundle_window_hours or 24))).isoformat(),
             window_timezone="UTC",
@@ -987,20 +1162,49 @@ def _handoff_bundle(run: DeployAutomationRun, required: int) -> None:
             "ticket": run.ticket_number,
             "bundleId": bundle.id,
             "deployment": run.deployment_name,
-            "tag": run.image_tag,
+            "changeType": run.change_type or "image",
+            "change": _change_summary(run),
         },
         commit=False,
     )
 
 
 def _handoff_direct(run: DeployAutomationRun) -> None:
-    """No approval required on this cluster → apply the image change immediately."""
+    """No approval required on this cluster → apply the change immediately."""
     from ..k8s_provider import K8sCommandError, should_use_real_k8s
     from .deployment_service import _run_kubectl_for_cluster
 
     _set_step(run, "approval", "skip", "cluster requires no approvals")
-    _set_step(run, "deploy", "run", "applying the image change")
 
+    if _is_env_run(run):
+        _set_step(run, "deploy", "run", "applying the variable change")
+        containers = _container_names(run)
+        args = [
+            "set",
+            "env",
+            f"deployment/{run.deployment_name}",
+            f"{run.variable_name}={run.variable_value}",
+            "-n",
+            run.namespace,
+        ]
+        # Target only the containers that define the var — a bare `set env`
+        # would ADD it to every container (sidecars included).
+        if containers:
+            args += ["-c", ",".join(containers)]
+        if should_use_real_k8s(run.cluster_id):
+            try:
+                _run_kubectl_for_cluster(run.cluster_id, args)
+            except K8sCommandError as exc:
+                _fail(run, "deploy", f"kubectl set env failed: {exc}")
+                return
+            detail = f"{_change_summary(run)} on {run.container_name or 'deployment'}"
+        else:
+            detail = f"[mock] {_change_summary(run)} on {run.container_name or 'deployment'}"
+        _set_step(run, "deploy", "done", detail)
+        _begin_rollout_watch(run)
+        return
+
+    _set_step(run, "deploy", "run", "applying the image change")
     target = _target_image(run)
     if should_use_real_k8s(run.cluster_id):
         try:
@@ -1052,7 +1256,8 @@ def _complete_deployed(run: DeployAutomationRun, pods_detail: str) -> None:
             "deployment": run.deployment_name,
             "namespace": run.namespace,
             "clusterId": run.cluster_id,
-            "image": _target_image(run),
+            "changeType": run.change_type or "image",
+            "change": _change_summary(run),
             "mode": "bundle" if run.bundle_id else "direct",
             "pods": pods_detail,
         },
@@ -1119,8 +1324,9 @@ def _handle_rollout_failure(
     from ..k8s_provider import K8sCommandError
     from .deployment_service import _run_kubectl_for_cluster
 
+    what = "variable change" if _is_env_run(run) else "image"
     message = (
-        f"The image was applied but the pods did not become ready within {timeout_min} min"
+        f"The {what} was applied but the pods did not become ready within {timeout_min} min"
         + (f" (last seen: {last_seen})." if last_seen else ".")
     )
 
@@ -1144,7 +1350,8 @@ def _handle_rollout_failure(
                 "deployment": run.deployment_name,
                 "namespace": run.namespace,
                 "clusterId": run.cluster_id,
-                "image": _target_image(run),
+                "changeType": run.change_type or "image",
+                "change": _change_summary(run),
                 "result": rollback_note,
             },
             commit=False,
@@ -1195,7 +1402,7 @@ def _notify_admins_rollout_failure(run: DeployAutomationRun, message: str, rollb
                 f"Deployment:   {run.deployment_name}",
                 f"Namespace:    {run.namespace}",
                 f"Cluster:      {run.cluster_id}",
-                f"Image:        {_target_image(run)}",
+                f"Change:       {_change_summary(run)}",
                 "",
                 message,
                 rollback_note,

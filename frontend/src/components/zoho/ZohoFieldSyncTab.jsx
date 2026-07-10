@@ -9,13 +9,26 @@ const AGENT_LIST_CAP = 6;
 function AgentPreview({ preview, previewLoading, cascadeOn }) {
   const namespaces = preview?.namespaces || [];
   const items = preview?.items || [];
+  const manageVariables = Boolean(preview?.manageVariables);
   const [env, setEnv] = useState("");
+  const [app, setApp] = useState("");
   const activeEnv = env || namespaces[0] || "";
 
   const apps = useMemo(() => {
     const source = cascadeOn && activeEnv ? items.filter((r) => r.namespace === activeEnv) : items;
     return [...new Set(source.map((r) => r.label))].sort();
   }, [items, activeEnv, cascadeOn]);
+
+  const activeApp = apps.includes(app) ? app : apps[0] || "";
+
+  // Variable options for the picked app — the App→Variable cascade preview.
+  const variables = useMemo(() => {
+    if (!manageVariables || !activeApp) return [];
+    const source = items.filter(
+      (r) => r.label === activeApp && (!cascadeOn || !activeEnv || r.namespace === activeEnv)
+    );
+    return [...new Set(source.flatMap((r) => r.variables || []))].sort();
+  }, [items, activeApp, activeEnv, cascadeOn, manageVariables]);
 
   return (
     <section className="card">
@@ -40,30 +53,69 @@ function AgentPreview({ preview, previewLoading, cascadeOn }) {
               ))}
             </select>
           </label>
-          <div className="sg-zh-zfield">
-            <span className="sg-zh-zfield-label">Application</span>
-            <div className="sg-zh-zoptions" role="listbox" aria-label="Application options">
-              {apps.slice(0, AGENT_LIST_CAP).map((app) => (
-                <span key={app} className="sg-zh-zopt mono">
-                  {app}
-                </span>
-              ))}
-              {apps.length > AGENT_LIST_CAP ? (
-                <span className="sg-zh-zopt sg-zh-zopt--more">
-                  +{apps.length - AGENT_LIST_CAP} more
-                </span>
-              ) : null}
-              {apps.length === 0 ? (
-                <span className="sg-zh-zopt sg-zh-zopt--more">no applications here</span>
-              ) : null}
+          {manageVariables ? (
+            <label className="sg-zh-zfield">
+              Application
+              <select value={activeApp} onChange={(e) => setApp(e.target.value)}>
+                {apps.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <div className="sg-zh-zfield">
+              <span className="sg-zh-zfield-label">Application</span>
+              <div className="sg-zh-zoptions" role="listbox" aria-label="Application options">
+                {apps.slice(0, AGENT_LIST_CAP).map((app) => (
+                  <span key={app} className="sg-zh-zopt mono">
+                    {app}
+                  </span>
+                ))}
+                {apps.length > AGENT_LIST_CAP ? (
+                  <span className="sg-zh-zopt sg-zh-zopt--more">
+                    +{apps.length - AGENT_LIST_CAP} more
+                  </span>
+                ) : null}
+                {apps.length === 0 ? (
+                  <span className="sg-zh-zopt sg-zh-zopt--more">no applications here</span>
+                ) : null}
+              </div>
             </div>
-          </div>
+          )}
+          {manageVariables ? (
+            <div className="sg-zh-zfield">
+              <span className="sg-zh-zfield-label">Variable</span>
+              <div className="sg-zh-zoptions" role="listbox" aria-label="Variable options">
+                {variables.slice(0, AGENT_LIST_CAP).map((v) => (
+                  <span key={v} className="sg-zh-zopt mono">
+                    {v}
+                  </span>
+                ))}
+                {variables.length > AGENT_LIST_CAP ? (
+                  <span className="sg-zh-zopt sg-zh-zopt--more">
+                    +{variables.length - AGENT_LIST_CAP} more
+                  </span>
+                ) : null}
+                {variables.length === 0 ? (
+                  <span className="sg-zh-zopt sg-zh-zopt--more">no changeable variables</span>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           <p className="sg-zh-zcaption">
             {cascadeOn ? (
               <>
                 <b>Cascade in action:</b> choosing <span className="mono">{activeEnv}</span> narrows
-                Application to the {apps.length} app(s) deployed there. A ticket resolves by
-                Application + Environment.
+                Application to the {apps.length} app(s) deployed there
+                {manageVariables && activeApp ? (
+                  <>
+                    ; picking <span className="mono">{activeApp}</span> narrows Variable to its{" "}
+                    {variables.length} changeable env var(s)
+                  </>
+                ) : null}
+                . A ticket resolves by Application + Environment.
               </>
             ) : (
               <>

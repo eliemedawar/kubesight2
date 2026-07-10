@@ -1833,6 +1833,13 @@ class ZohoIntegration(db.Model):
     environment_field_api_name = db.Column(db.String(120), nullable=False, default="cf_environment")
     # Which inbound-ticket field carries the version/tag (free text, e.g. cf_tag).
     tag_field_api_name = db.Column(db.String(120), nullable=False, default="cf_tag")
+    # Optional third picklist we publish deployment ENV-VAR NAMES into (cf_variable).
+    # A ticket carrying a variable + value (instead of a tag) becomes a
+    # variable-change automation run. When blank, the field is not managed.
+    variable_field_id = db.Column(db.String(64), nullable=True)
+    variable_field_api_name = db.Column(db.String(120), nullable=False, default="cf_variable")
+    # Which inbound-ticket field carries the variable's new value (free text).
+    value_field_api_name = db.Column(db.String(120), nullable=False, default="cf_value")
 
     # --- OAuth (server-to-server Self Client) ---
     client_id = db.Column(db.String(255), nullable=False, default="")
@@ -1854,6 +1861,10 @@ class ZohoIntegration(db.Model):
     # field is left for manual editing and never overwritten by the sync.
     sync_application = db.Column(db.Boolean, nullable=False, default=True)
     sync_environment = db.Column(db.Boolean, nullable=False, default=True)
+    # Publishing env-var names is opt-in: it reads every published deployment's
+    # full spec and can produce a large picklist, so the operator turns it on
+    # deliberately (and must set variable_field_id).
+    sync_variables = db.Column(db.Boolean, nullable=False, default=False)
 
     # --- Dropdown source: a live cluster + a chosen set of namespaces ---
     # The Environment picklist is fed by these selected namespaces; the Application
@@ -1874,6 +1885,8 @@ class ZohoIntegration(db.Model):
     # filters the Application options to that namespace's deployments.
     cascade_enabled = db.Column(db.Boolean, nullable=False, default=True)
     dependency_mapping_id = db.Column(db.String(64), nullable=True)
+    # Second cascade: Application -> Variable (env-var names of the picked app).
+    variable_mapping_id = db.Column(db.String(64), nullable=True)
     last_dependency_status = db.Column(db.String(16), nullable=True)  # ok | error | skipped
     last_dependency_message = db.Column(db.Text, nullable=True)
 
@@ -1939,6 +1952,10 @@ class ZohoInboundTicket(db.Model):
     app_service_id = db.Column(db.Integer, nullable=True)
     app_service_name = db.Column(db.String(180), nullable=True)
     tag = db.Column(db.String(200), nullable=True)
+    # A variable-change request: the env-var name picked on the ticket plus its
+    # desired new value. A ticket carries EITHER a tag OR a variable+value.
+    variable_name = db.Column(db.Text, nullable=True)
+    variable_value = db.Column(db.Text, nullable=True)
     resolved = db.Column(db.Boolean, nullable=False, default=False)
     error = db.Column(db.Text, nullable=True)
     payload = db.Column(db.JSON, nullable=True)
@@ -2081,6 +2098,13 @@ class DeployAutomationRun(db.Model):
     image_tag = db.Column(db.String(200), nullable=False)
     # The raw tag as it arrived on the ticket — sent to the Jenkins router as-is.
     ticket_tag = db.Column(db.String(200), nullable=True)
+
+    # What kind of change this run applies: "image" (tag deploy, the original
+    # flow) or "env_var" (set one container env var to a new value — skips the
+    # registry/Jenkins stages entirely). image_tag is "" for env_var runs.
+    change_type = db.Column(db.String(16), nullable=False, default="image")
+    variable_name = db.Column(db.Text, nullable=True)
+    variable_value = db.Column(db.Text, nullable=True)
 
     status = db.Column(db.String(24), nullable=False, default="queued")
     error = db.Column(db.Text, nullable=True)

@@ -1800,6 +1800,49 @@ def _namespace_resource_list_from_k8s_uncached(
     return {"namespace": namespace, list_key: items}
 
 
+def namespace_deployment_env_names_from_k8s(
+    access: ClusterAccess, namespace: str, fresh: bool = False
+) -> Dict[str, List[str]]:
+    """``{deployment_name: [literal env-var names]}`` for one namespace, cached briefly.
+
+    Feeds the Zoho Variable picklist sync: only plain ``value`` env entries are
+    listed — ``valueFrom`` (ConfigMap/Secret/field refs) vars can't be set to a
+    literal safely, so they are not offered as changeable. Read failures degrade
+    to an empty map (the picklist sync is additive/best-effort).
+    """
+    key = f"res:{access.cluster_id}:{namespace}:deployment-env-names"
+    if fresh:
+        _K8S_READ_CACHE.invalidate(key)
+    return _K8S_READ_CACHE.get_or_compute(
+        key,
+        _RESOURCE_LIST_TTL_SECONDS,
+        lambda: _deployment_env_names_uncached(access, namespace),
+        stale_ttl=_STALE_SERVE_TTL_SECONDS,
+    )
+
+
+def _deployment_env_names_uncached(access: ClusterAccess, namespace: str) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    for item in _get_namespace_items(access, "deployments", namespace):
+        name = (item.get("metadata") or {}).get("name")
+        if not name:
+            continue
+        seen: set = set()
+        names: List[str] = []
+        containers = (
+            (((item.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers")
+            or []
+        )
+        for container in containers:
+            for entry in container.get("env") or []:
+                var = entry.get("name")
+                if var and "valueFrom" not in entry and var not in seen:
+                    seen.add(var)
+                    names.append(var)
+        out[name] = names
+    return out
+
+
 def cluster_pod_issues_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
     """Pods across *all* namespaces whose display status indicates a problem.
 

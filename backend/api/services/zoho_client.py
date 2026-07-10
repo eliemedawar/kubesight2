@@ -533,4 +533,19 @@ def _error_detail(prefix: str, status: int, payload: Dict[str, Any]) -> str:
     detail = ""
     if isinstance(payload, dict):
         detail = payload.get("message") or payload.get("errorCode") or payload.get("raw") or ""
+        # Desk's 422s name the offending property in errors[] — the top-level
+        # message alone is just "data is invalid due to validation restrictions".
+        errors = payload.get("errors")
+        specifics = []
+        for err in errors if isinstance(errors, list) else []:
+            if not isinstance(err, dict):
+                continue
+            name = str(err.get("fieldName") or "").lstrip("/")
+            reason = str(err.get("errorMessage") or err.get("errorType") or "")
+            piece = ": ".join(p for p in (name, reason) if p)
+            if piece:
+                specifics.append(piece)
+        if specifics:
+            joined = "; ".join(specifics)
+            detail = f"{detail} ({joined})" if detail else joined
     return f"{prefix} (HTTP {status}){f': {detail}' if detail else ''}."

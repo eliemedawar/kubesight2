@@ -545,6 +545,19 @@ def _migrate_zoho_integration_columns() -> None:
         _add_column_if_missing(
             "zoho_integration", "ticket_owner_email", "VARCHAR(255) DEFAULT 'zagent@areeba.com'"
         )
+        # Variable-change automation (Variable picklist + Value field + App->Variable cascade).
+        _add_column_if_missing("zoho_integration", "variable_field_id", "VARCHAR(64)")
+        _add_column_if_missing(
+            "zoho_integration", "variable_field_api_name", "VARCHAR(120) DEFAULT 'cf_variable'"
+        )
+        _add_column_if_missing(
+            "zoho_integration", "value_field_api_name", "VARCHAR(120) DEFAULT 'cf_value'"
+        )
+        _add_column_if_missing("zoho_integration", "sync_variables", "BOOLEAN DEFAULT false")
+        _add_column_if_missing("zoho_integration", "variable_mapping_id", "VARCHAR(64)")
+    if "zoho_inbound_tickets" in inspect(db.engine).get_table_names():
+        _add_column_if_missing("zoho_inbound_tickets", "variable_name", "TEXT")
+        _add_column_if_missing("zoho_inbound_tickets", "variable_value", "TEXT")
 
 
 def _migrate_deploy_automation_columns() -> None:
@@ -565,6 +578,12 @@ def _migrate_deploy_automation_columns() -> None:
     if "deploy_automation_runs" in tables:
         _add_column_if_missing("deploy_automation_runs", "rollout_started_at", "DATETIME")
         _add_column_if_missing("deploy_automation_runs", "ticket_tag", "VARCHAR(200)")
+        # Variable-change runs (change_type "env_var").
+        _add_column_if_missing(
+            "deploy_automation_runs", "change_type", "VARCHAR(16) DEFAULT 'image'"
+        )
+        _add_column_if_missing("deploy_automation_runs", "variable_name", "TEXT")
+        _add_column_if_missing("deploy_automation_runs", "variable_value", "TEXT")
 
 
 def run_migrations() -> None:

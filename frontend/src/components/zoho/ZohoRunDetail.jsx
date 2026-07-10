@@ -10,6 +10,15 @@ const STEPS = [
   { key: "pods", label: "Pod health" },
 ];
 
+// Variable-change runs skip the registry/Jenkins stages; the image_check slot
+// is their "variable check" validation step.
+const ENV_STEPS = [
+  { key: "image_check", label: "Variable check" },
+  { key: "approval", label: "Approval" },
+  { key: "deploy", label: "Apply" },
+  { key: "pods", label: "Pod health" },
+];
+
 const STEP_CHIP_CLASS = {
   done: "sg-pstep--done",
   run: "sg-pstep--run",
@@ -46,9 +55,10 @@ export function RunStatusPill({ status }) {
 
 export function RunPipeline({ run }) {
   const steps = new Map((run.steps || []).map((s) => [s.key, s]));
+  const stepList = run.changeType === "env_var" ? ENV_STEPS : STEPS;
   return (
     <div className="sg-pipe sg-zh-run-pipe">
-      {STEPS.map((step, index) => {
+      {stepList.map((step, index) => {
         let state = steps.get(step.key) || { status: "wait", detail: "" };
         // Runs that finished before the pod-health step existed have no
         // "pods" entry — show it as skipped rather than eternally waiting.
@@ -90,16 +100,22 @@ export function RunDetail({ run, canManage, cancelling, onCancel, showHead = tru
           <b>{run.ticketNumber || `run #${run.id}`}</b>
           <span className="mono sg-zh-run-target">{run.deploymentName}</span>
           <span className="sg-tag">{run.namespace}</span>
-          <span
-            className="sg-tag"
-            title={
-              run.ticketTag && run.ticketTag !== run.imageTag
-                ? `ticket tag: ${run.ticketTag}`
-                : undefined
-            }
-          >
-            {run.imageTag}
-          </span>
+          {run.changeType === "env_var" ? (
+            <span className="sg-tag mono" title={`set ${run.variableName} to ${run.variableValue}`}>
+              {run.variableName}={run.variableValue}
+            </span>
+          ) : (
+            <span
+              className="sg-tag"
+              title={
+                run.ticketTag && run.ticketTag !== run.imageTag
+                  ? `ticket tag: ${run.ticketTag}`
+                  : undefined
+              }
+            >
+              {run.imageTag}
+            </span>
+          )}
           {run.auto ? <span className="sg-zh-count">auto</span> : null}
           <span className="sg-zh-run-spacer" />
           <span className="sg-zh-htime">

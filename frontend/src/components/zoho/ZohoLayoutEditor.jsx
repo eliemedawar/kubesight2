@@ -370,8 +370,9 @@ function FieldModal({ modal, saving, error, onClose, onSaveOptions, onSaveEdit, 
           <p className="sg-zh-note">
             <IconAlert />
             <span>
-              This field is auto-published by the KubeSight sync — manual changes here will be
-              overwritten on the next sync.
+              {modal.mode === "options"
+                ? "This field's options are auto-published by the KubeSight sync — manual changes to the option list will be overwritten on the next sync."
+                : "This field's options are auto-published by the KubeSight sync. Label and required changes made here are kept."}
             </span>
           </p>
         ) : null}

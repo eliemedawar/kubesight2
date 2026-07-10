@@ -275,6 +275,35 @@ export default function ZohoSettingsTab({
                   disabled={ro}
                 />
               </label>
+              <label>
+                Variable field ID (env-var picklist — optional)
+                <input
+                  value={form.variableFieldId}
+                  onChange={(e) => setField("variableFieldId", e.target.value)}
+                  disabled={ro}
+                />
+                <span className="field-hint">
+                  Must be a Picklist field on the layout. Leave blank to not manage it.
+                </span>
+              </label>
+              <label>
+                Variable field API name
+                <input
+                  value={form.variableFieldApiName}
+                  onChange={(e) => setField("variableFieldApiName", e.target.value)}
+                  placeholder="cf_variable"
+                  disabled={ro}
+                />
+              </label>
+              <label>
+                Value field API name (inbound variable value)
+                <input
+                  value={form.valueFieldApiName}
+                  onChange={(e) => setField("valueFieldApiName", e.target.value)}
+                  placeholder="cf_value"
+                  disabled={ro}
+                />
+              </label>
             </div>
           </SettingsCard>
 
@@ -309,12 +338,23 @@ export default function ZohoSettingsTab({
               <label className="checkbox-label">
                 <input
                   type="checkbox"
+                  checked={form.syncVariables}
+                  onChange={(e) => setField("syncVariables", e.target.checked)}
+                  disabled={ro}
+                />
+                Publish deployment env-var names → Variable field (needs the Variable field ID;
+                tickets carrying a Variable + Value become variable-change runs)
+              </label>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
                   checked={form.cascadeEnabled}
                   onChange={(e) => setField("cascadeEnabled", e.target.checked)}
                   disabled={ro}
                 />
-                Cascade: filter Application by the selected Environment (needs both fields
-                published; requires <code>Desk.settings.CREATE</code> on the Zoho token)
+                Cascade: filter Application by the selected Environment — and, when variables are
+                published, filter Variable by the selected Application (needs the fields published;
+                requires <code>Desk.settings.CREATE</code> on the Zoho token)
               </label>
               <label>
                 Auto-sync interval (minutes)

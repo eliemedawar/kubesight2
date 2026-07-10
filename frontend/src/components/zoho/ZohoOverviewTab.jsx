@@ -22,7 +22,12 @@ function buildFeed({ config, tickets, runs }) {
       text: (
         <>
           <b>Run for {run.ticketNumber || `#${run.id}`}</b> {verb} — {run.deploymentName}{" "}
-          <span className="mono">{run.imageTag}</span> to {run.namespace}
+          <span className="mono">
+            {run.changeType === "env_var"
+              ? `${run.variableName}=${run.variableValue}`
+              : run.imageTag}
+          </span>{" "}
+          to {run.namespace}
         </>
       ),
     });

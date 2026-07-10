@@ -67,6 +67,8 @@ def _auto_managed_ids(row) -> set:
         ids.add(str(row.app_field_id))
     if row.sync_environment and row.environment_field_id:
         ids.add(str(row.environment_field_id))
+    if row.sync_variables and row.variable_field_id:
+        ids.add(str(row.variable_field_id))
     return ids
 
 
@@ -143,15 +145,40 @@ def update_field(field_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if field is None:
         raise LookupError("That field is not on the DevOps Request layout.")
 
-    body: Dict[str, Any] = {}
-    if payload.get("label") is not None and str(payload.get("label")).strip():
-        body["displayLabel"] = str(payload.get("label")).strip()
-    if "required" in payload:
-        body["isMandatory"] = bool(payload.get("required"))
-    if not body:
+    label = str(payload.get("label") or "").strip()
+    if not label and "required" not in payload:
         raise ValueError("Nothing to update (send a label and/or required flag).")
 
-    zoho_client.update_org_field(cfg, str(field_id), body)
+    required_change: Optional[bool] = None
+    if "required" in payload:
+        required = bool(payload.get("required"))
+        if required != bool(field.get("isMandatory")):
+            required_change = required
+
+    body: Dict[str, Any] = {}
+    current_label = field.get("displayLabel") or field.get("label") or ""
+    if label and label != current_label:
+        body["displayLabel"] = label
+    if required_change is not None and field.get("type") != "Picklist":
+        body["isMandatory"] = required_change
+    if body:
+        zoho_client.update_org_field(cfg, str(field_id), body)
+
+    if required_change is not None and field.get("type") == "Picklist":
+        # Desk 422s a bare isMandatory flip on a picklist via organizationFields —
+        # it must go through the layout-field endpoint with the full value list.
+        values = _allowed_values(field) or [NONE_VALUE]
+        default = str(field.get("defaultValue") or NONE_VALUE)
+        if default not in values:
+            default = NONE_VALUE
+        zoho_client.set_allowed_values(
+            cfg,
+            values,
+            field_id=str(field_id),
+            default_value=default,
+            is_mandatory=required_change,
+        )
+
     auto = _auto_managed_ids(row)
     updated = zoho_client.field_on_layout(cfg, str(field_id)) or field
     return _field_dict(updated, auto)

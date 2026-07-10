@@ -44,7 +44,7 @@ spec:
 """
 
 
-def _make_ticket(resolved=True, tag="v9.9.9"):
+def _make_ticket(resolved=True, tag="v9.9.9", variable=None, value=None):
     snapshot = ZohoDeploymentSnapshot.query.filter_by(
         cluster_id=CLUSTER, namespace=NAMESPACE, deployment_name=DEPLOYMENT
     ).first()
@@ -60,6 +60,8 @@ def _make_ticket(resolved=True, tag="v9.9.9"):
         resolved=resolved,
         app_service_id=snapshot.id if resolved else None,
         tag=tag,
+        variable_name=variable,
+        variable_value=value,
         received_at=datetime.now(timezone.utc),
     )
     db.session.add(ticket)
@@ -624,6 +626,226 @@ def test_automation_bundle_requester_label(client, admin_token, app, monkeypatch
     )
     assert response.status_code == 200
     assert response.get_json()["data"]["requesterName"] == "KubeSight automation"
+
+
+LIVE_ENV_DEPLOYMENT_YAML = """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: payments
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: payments-api
+          image: ghcr.io/mock/payments:v2.8.1
+          env:
+            - name: LOG_LEVEL
+              value: info
+            - name: DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db
+                  key: url
+"""
+
+
+def test_variable_run_validations(client, admin_token, app):
+    """A ticket carries exactly one change: tag XOR variable(+value)."""
+    both = _make_ticket(tag="v1.0.0", variable="LOG_LEVEL", value="debug")
+    body = _start(client, admin_token, both.id, expect=400)
+    assert "exactly one" in body["error"]
+
+    no_value = _make_ticket(tag="", variable="LOG_LEVEL", value="")
+    body = _start(client, admin_token, no_value.id, expect=400)
+    assert "no value" in body["error"]
+
+
+def test_variable_run_direct_path(client, admin_token, app):
+    """Approval-free cluster ⇒ the variable change applies immediately (mock
+    mode) with the registry/Jenkins stages skipped."""
+    _set_cluster_approvals(0)
+    ticket = _make_ticket(tag="", variable="LOG_LEVEL", value="debug")
+
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "deployed", run
+    assert run["changeType"] == "env_var"
+    assert run["variableName"] == "LOG_LEVEL" and run["variableValue"] == "debug"
+    assert _step(run, "build")["status"] == "skip"
+    assert _step(run, "verify")["status"] == "skip"
+    assert _step(run, "approval")["status"] == "skip"
+    assert _step(run, "deploy")["status"] == "done"
+    assert "LOG_LEVEL=debug" in _step(run, "deploy")["detail"]
+    assert _step(run, "pods")["status"] == "done"
+    assert run["bundleId"] is None
+
+
+def test_variable_run_bundle_path(client, admin_token, app, monkeypatch):
+    """Approval cluster ⇒ a Change Bundle carrying the live YAML with ONLY the
+    variable's value edited (valueFrom refs + the rest of the spec untouched)."""
+    monkeypatch.setattr(
+        "api.services.resource_actions_service.get_resource_yaml",
+        lambda user, cluster_id, namespace, kind, name: (
+            {"yaml": LIVE_ENV_DEPLOYMENT_YAML},
+            None,
+            200,
+        ),
+    )
+    _set_cluster_approvals(1)
+    ticket = _make_ticket(tag="", variable="LOG_LEVEL", value="debug")
+
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "awaiting_approval", run
+    assert run["bundleId"]
+    bundle = ChangeBundle.query.get(run["bundleId"])
+    assert bundle.status == "pending_approval"
+    item = bundle.items[0]
+    assert item.action_type == "edit_deployment"
+    assert "value: debug" in item.yaml_preview
+    assert "value: info" not in item.yaml_preview
+    # Everything else is preserved: replicas, image, the secret reference.
+    assert "replicas: 3" in item.yaml_preview
+    assert "secretKeyRef" in item.yaml_preview
+    assert "ghcr.io/mock/payments:v2.8.1" in item.yaml_preview
+    assert "LOG_LEVEL=debug" in (bundle.note or "")
+
+
+def test_variable_run_missing_var_fails_bundle_prep(client, admin_token, app, monkeypatch):
+    """The live YAML has no such literal var ⇒ the bundle prep fails clearly."""
+    monkeypatch.setattr(
+        "api.services.resource_actions_service.get_resource_yaml",
+        lambda user, cluster_id, namespace, kind, name: (
+            {"yaml": LIVE_ENV_DEPLOYMENT_YAML},
+            None,
+            200,
+        ),
+    )
+    _set_cluster_approvals(1)
+    ticket = _make_ticket(tag="", variable="NOT_A_VAR", value="x")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "failed"
+    assert "NOT_A_VAR" in run["error"]
+
+
+def test_variable_resolve_validates_against_live_spec(client, admin_token, app, monkeypatch):
+    """Against a (fake) real cluster: valueFrom vars are refused, unknown vars
+    list the changeable ones, and a literal var applies via `kubectl set env`
+    targeting exactly the containers that define it."""
+    live_deployment = {
+        "metadata": {"generation": 1},
+        "spec": {
+            "replicas": 1,
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "payments-api",
+                            "image": "ghcr.io/mock/payments:v2.8.1",
+                            "env": [
+                                {"name": "LOG_LEVEL", "value": "info"},
+                                {"name": "DB_URL", "valueFrom": {"secretKeyRef": {"name": "db", "key": "url"}}},
+                            ],
+                        },
+                        {"name": "sidecar", "image": "ghcr.io/mock/sidecar:v1"},
+                    ]
+                }
+            },
+        },
+        "status": {"observedGeneration": 1, "readyReplicas": 1, "updatedReplicas": 1},
+    }
+    monkeypatch.setattr("api.k8s_provider.should_use_real_k8s", lambda cid=None: True)
+    monkeypatch.setattr("api.k8s_provider.resolve_cluster_access", lambda cid: object())
+    monkeypatch.setattr(
+        "api.k8s_provider._run_for_access", lambda access, args: json.dumps(live_deployment)
+    )
+    kubectl_calls = []
+    monkeypatch.setattr(
+        "api.services.deployment_service._run_kubectl_for_cluster",
+        lambda cid, args: kubectl_calls.append((cid, args)) or "deployment.apps env updated",
+    )
+    _set_cluster_approvals(0)
+
+    # valueFrom var → refused with a pointer to the source.
+    ticket = _make_ticket(tag="", variable="DB_URL", value="postgres://x")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "failed"
+    assert "valueFrom" in run["error"]
+
+    # Unknown var → failure lists the changeable variables.
+    ticket = _make_ticket(tag="", variable="NOPE", value="1")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "failed"
+    assert "LOG_LEVEL" in run["error"]
+
+    # Literal var → applied, targeting only the defining container.
+    ticket = _make_ticket(tag="", variable="LOG_LEVEL", value="debug")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "deployed", run
+    assert kubectl_calls, "kubectl set env should have been invoked"
+    _, args = kubectl_calls[0]
+    assert args[:2] == ["set", "env"]
+    assert f"deployment/{DEPLOYMENT}" in args
+    assert "LOG_LEVEL=debug" in args
+    assert "-c" in args and args[args.index("-c") + 1] == "payments-api"
+
+
+def test_resolve_inbound_parses_variable_change(client, admin_token, app):
+    """The webhook parses cf_variable/cf_value, and flags tag+variable tickets."""
+    from api.services.zoho_sync_service import resolve_inbound
+
+    _make_ticket()  # ensures the snapshot exists
+    result = resolve_inbound(
+        {
+            "ticketId": "vt-1",
+            "ticketNumber": "DR-7001",
+            "cf_application": DEPLOYMENT,
+            "cf_environment": NAMESPACE,
+            "cf_variable": "LOG_LEVEL",
+            "cf_value": "debug",
+        }
+    )
+    assert result["resolved"] is True
+    assert result["variableName"] == "LOG_LEVEL"
+    assert result["variableValue"] == "debug"
+    assert result["error"] is None
+
+    # The -None- picklist placeholder is not a variable.
+    result = resolve_inbound(
+        {
+            "ticketId": "vt-2",
+            "cf_application": DEPLOYMENT,
+            "cf_environment": NAMESPACE,
+            "cf_tag": "v1.2.3",
+            "cf_variable": "-None-",
+        }
+    )
+    assert result["error"] is None and result["variableName"] is None
+
+    # Both a tag and a variable → flagged, automation refuses to guess.
+    result = resolve_inbound(
+        {
+            "ticketId": "vt-3",
+            "cf_application": DEPLOYMENT,
+            "cf_environment": NAMESPACE,
+            "cf_tag": "v1.2.3",
+            "cf_variable": "LOG_LEVEL",
+            "cf_value": "debug",
+        }
+    )
+    assert result["resolved"] is True
+    assert "exactly one" in result["error"]
+
+    # Variable without a value → flagged too.
+    result = resolve_inbound(
+        {
+            "ticketId": "vt-4",
+            "cf_application": DEPLOYMENT,
+            "cf_environment": NAMESPACE,
+            "cf_variable": "LOG_LEVEL",
+        }
+    )
+    assert "no Value" in result["error"]
 
 
 def test_viewer_cannot_start_or_configure(client, viewer_token, app):

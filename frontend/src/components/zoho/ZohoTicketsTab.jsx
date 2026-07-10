@@ -66,8 +66,16 @@ export default function ZohoTicketsTab({
     if (filter === "active" && !ACTIVE_RUN_STATUSES.has(latest?.status)) return false;
     if (filter === "approval" && latest?.status !== "awaiting_approval") return false;
     if (!query) return true;
-    return [t.ticketNumber, t.ticketId, t.deploymentName, t.targetName, t.rawAppValue, t.namespace, t.tag]
-      .some((v) => (v || "").toString().toLowerCase().includes(query));
+    return [
+      t.ticketNumber,
+      t.ticketId,
+      t.deploymentName,
+      t.targetName,
+      t.rawAppValue,
+      t.namespace,
+      t.tag,
+      t.variableName,
+    ].some((v) => (v || "").toString().toLowerCase().includes(query));
   });
 
   const toggle = (id) => {
@@ -79,11 +87,18 @@ export default function ZohoTicketsTab({
     });
   };
 
+  // A runnable ticket carries exactly one change: a tag OR a variable+value.
+  const ticketChange = (t) => {
+    const tag = (t.tag || "").trim();
+    const variable = (t.variableName || "").trim();
+    const value = (t.variableValue || "").trim();
+    if (tag && !variable) return { kind: "image", label: tag };
+    if (variable && value && !tag) return { kind: "env_var", label: `${variable}=${value}` };
+    return null;
+  };
+
   const canRun = (ticket, latest) =>
-    canManage &&
-    ticket.resolved &&
-    (ticket.tag || "").trim() &&
-    !ACTIVE_RUN_STATUSES.has(latest?.status);
+    canManage && ticket.resolved && ticketChange(ticket) && !ACTIVE_RUN_STATUSES.has(latest?.status);
 
   return (
     <>
@@ -135,7 +150,7 @@ export default function ZohoTicketsTab({
                   <th>Ticket</th>
                   <th>Received</th>
                   <th>Deployment</th>
-                  <th>Tag</th>
+                  <th>Change</th>
                   <th>Resolution</th>
                   <th>Automation</th>
                   {canManage ? <th aria-label="Actions" /> : null}
@@ -187,9 +202,34 @@ export default function ZohoTicketsTab({
                           <span className="muted">{t.rawAppValue || "—"}</span>
                         )}
                       </td>
-                      <td>{t.tag ? <span className="sg-tag">{t.tag}</span> : "—"}</td>
                       <td>
-                        {t.resolved ? (
+                        {(() => {
+                          const change = ticketChange(t);
+                          if (change) {
+                            return (
+                              <span
+                                className={`sg-tag ${change.kind === "env_var" ? "mono" : ""}`}
+                                title={change.kind === "env_var" ? "variable change" : "image tag"}
+                              >
+                                {change.label}
+                              </span>
+                            );
+                          }
+                          return t.tag || t.variableName ? (
+                            <span className="muted" title={t.error || ""}>
+                              {[t.tag, t.variableName].filter(Boolean).join(" / ")}
+                            </span>
+                          ) : (
+                            "—"
+                          );
+                        })()}
+                      </td>
+                      <td>
+                        {t.resolved && t.error ? (
+                          <span className="status-pill warn" title={t.error}>
+                            Needs attention
+                          </span>
+                        ) : t.resolved ? (
                           <span className="status-pill ok">Resolved</span>
                         ) : (
                           <span className="status-pill danger" title={t.error || ""}>

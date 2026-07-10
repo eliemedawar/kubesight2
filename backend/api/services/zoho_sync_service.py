@@ -94,12 +94,16 @@ def serialize(row: ZohoIntegration) -> Dict[str, Any]:
         "environmentFieldId": row.environment_field_id or "",
         "environmentFieldApiName": row.environment_field_api_name or "cf_environment",
         "tagFieldApiName": row.tag_field_api_name or "cf_tag",
+        "variableFieldId": row.variable_field_id or "",
+        "variableFieldApiName": row.variable_field_api_name or "cf_variable",
+        "valueFieldApiName": row.value_field_api_name or "cf_value",
         "clientId": row.client_id or "",
         "clientSecretConfigured": bool(row.client_secret_encrypted),
         "refreshTokenConfigured": bool(row.refresh_token_encrypted),
         "inboundSecretConfigured": bool(row.inbound_secret_encrypted),
         "syncApplication": bool(row.sync_application),
         "syncEnvironment": bool(row.sync_environment),
+        "syncVariables": bool(row.sync_variables),
         "statusFilter": _status_list(row),
         "syncIntervalMinutes": int(row.sync_interval_minutes or 30),
         # Live-cluster dropdown source + cascade.
@@ -242,6 +246,9 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         ("environmentFieldId", "environment_field_id"),
         ("environmentFieldApiName", "environment_field_api_name"),
         ("tagFieldApiName", "tag_field_api_name"),
+        ("variableFieldId", "variable_field_id"),
+        ("variableFieldApiName", "variable_field_api_name"),
+        ("valueFieldApiName", "value_field_api_name"),
         ("clientId", "client_id"),
         ("ticketStatusStarted", "ticket_status_started"),
         ("ticketStatusDeployed", "ticket_status_deployed"),
@@ -273,6 +280,8 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         row.sync_application = bool(payload.get("syncApplication"))
     if "syncEnvironment" in payload:
         row.sync_environment = bool(payload.get("syncEnvironment"))
+    if "syncVariables" in payload:
+        row.sync_variables = bool(payload.get("syncVariables"))
     if "cascadeEnabled" in payload:
         row.cascade_enabled = bool(payload.get("cascadeEnabled"))
 
@@ -642,6 +651,90 @@ def _namespace_to_labels(entries: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     return grouped
 
 
+def _variables_for_entries(
+    row: ZohoIntegration, entries: List[Dict[str, Any]], fresh: bool = False
+) -> Dict[str, Dict[str, List[str]]]:
+    """``{namespace: {deployment: [env-var names]}}`` for the published entries.
+
+    Only literal-valued env vars are listed (``valueFrom`` refs are not offered
+    for change). Best-effort: read failures degrade to an empty map per
+    namespace — variables are additive on top of an otherwise-good sync.
+    """
+    cluster_id = (row.source_cluster_id or "").strip()
+    namespaces = sorted({e["namespace"] for e in entries})
+    if not cluster_id or not namespaces:
+        return {}
+    from ..k8s_provider import (
+        namespace_deployment_env_names_from_k8s,
+        resolve_cluster_access,
+        should_use_real_k8s,
+    )
+
+    if not should_use_real_k8s(cluster_id):
+        from ..mock_data import NAMESPACE_RESOURCES
+
+        out: Dict[str, Dict[str, List[str]]] = {}
+        for ns in namespaces:
+            ns_res = (NAMESPACE_RESOURCES.get(cluster_id) or {}).get(ns) or {}
+            out[ns] = {
+                d["name"]: list(d.get("env") or [])
+                for d in ns_res.get("deployments", [])
+                if d.get("name")
+            }
+        return out
+
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return {}
+
+    def _fetch(ns: str) -> Dict[str, List[str]]:
+        try:
+            return namespace_deployment_env_names_from_k8s(access, ns, fresh=fresh)
+        except Exception:
+            return {}
+
+    if len(namespaces) == 1:
+        return {namespaces[0]: _fetch(namespaces[0])}
+    with ThreadPoolExecutor(max_workers=min(_SOURCE_READ_WORKERS, len(namespaces))) as pool:
+        return dict(zip(namespaces, pool.map(_fetch, namespaces)))
+
+
+def _entry_variables(
+    entry: Dict[str, Any], vars_by_ns: Dict[str, Dict[str, List[str]]]
+) -> List[str]:
+    return list((vars_by_ns.get(entry["namespace"]) or {}).get(entry["name"]) or [])
+
+
+def build_variable_values(
+    entries: List[Dict[str, Any]], vars_by_ns: Dict[str, Dict[str, List[str]]]
+) -> List[str]:
+    """Variable dropdown: ``-None-`` + the sorted union of env-var names."""
+    names = set()
+    for e in entries:
+        for var in _entry_variables(e, vars_by_ns):
+            s = _sanitize_value(var)
+            if s:
+                names.add(s)
+    return [NONE_VALUE] + sorted(names)
+
+
+def _app_to_variables(
+    entries: List[Dict[str, Any]], vars_by_ns: Dict[str, Dict[str, List[str]]]
+) -> Dict[str, List[str]]:
+    """Group env-var names by Application value — the App→Variable cascade map.
+
+    Application values are de-duplicated bare names, so an app living in several
+    namespaces maps to the UNION of its env vars across them.
+    """
+    grouped: Dict[str, set] = {}
+    for e in entries:
+        variables = {_sanitize_value(v) for v in _entry_variables(e, vars_by_ns)}
+        variables.discard("")
+        if variables:
+            grouped.setdefault(e["label"], set()).update(variables)
+    return {label: sorted(vars_) for label, vars_ in grouped.items()}
+
+
 def build_preview(fresh: bool = False) -> Dict[str, Any]:
     """What the next sync would publish (both dropdowns) — for the UI, no Zoho write."""
     row = get_or_create_config()
@@ -652,6 +745,8 @@ def build_preview(fresh: bool = False) -> Dict[str, Any]:
         entries = _source_entries(row, fresh=fresh)
     except ValueError as exc:
         error = str(exc)
+    manage_variables = bool(row.sync_variables and row.variable_field_id)
+    vars_by_ns = _variables_for_entries(row, entries, fresh=fresh) if manage_variables else {}
     items = [
         {
             "id": e["id"],
@@ -659,10 +754,12 @@ def build_preview(fresh: bool = False) -> Dict[str, Any]:
             "deploymentName": e["name"],
             "namespace": e["namespace"],
             "clusterId": row.source_cluster_id or "",
+            "variables": _entry_variables(e, vars_by_ns) if manage_variables else [],
         }
         for e in entries
     ]
     app_values = _application_values(entries)
+    variable_values = build_variable_values(entries, vars_by_ns) if manage_variables else [NONE_VALUE]
     return {
         "sourceClusterId": row.source_cluster_id or "",
         "selectedNamespaces": _namespace_list(row),
@@ -670,9 +767,11 @@ def build_preview(fresh: bool = False) -> Dict[str, Any]:
         "count": max(0, len(app_values) - 1),
         "manageApplication": bool(row.sync_application and row.app_field_id),
         "manageEnvironment": bool(row.sync_environment and row.environment_field_id),
+        "manageVariables": manage_variables,
         "cascadeEnabled": bool(row.cascade_enabled),
         "applicationValues": app_values,
         "environmentValues": env_values,
+        "variableValues": variable_values,
         "namespaces": [v for v in env_values if v != NONE_VALUE],
         "items": items,
         "error": error,
@@ -701,28 +800,26 @@ def _record_dependency(row: ZohoIntegration, status: str, message: str) -> None:
 
 
 def _sync_dependency_mapping(
-    cfg: ZohoConfig, row: ZohoIntegration, grouped: Dict[str, List[str]]
-) -> Dict[str, Any]:
-    """Create/replace the Environment(namespace) -> Application(deployments) mapping.
+    cfg: ZohoConfig, parent_id: str, child_id: str, mappings: Dict[str, List[str]]
+) -> Optional[str]:
+    """Create/replace one parent→child dependency mapping; returns the new id.
 
     Verified Zoho Desk schema (2026-07-07): ``POST /dependencyMappings`` with
     ``{layoutId, parentId, childId, mappings:{parentValue:[childValues]}}`` — the
-    ``mappings`` value is an OBJECT keyed by namespace (an array yields HTTP 415).
-    Create-or-replace: delete any existing mapping for this field pair (values go
-    stale as deployments change), then POST fresh. May raise ZohoError (e.g. 403
-    without Desk.settings.CREATE) — the caller degrades softly.
+    ``mappings`` value is an OBJECT keyed by parent value (an array yields HTTP
+    415). Create-or-replace: delete any existing mapping for this field pair
+    (values go stale as deployments change), then POST fresh. May raise
+    ZohoError (e.g. 403 without Desk.settings.CREATE) — the caller degrades softly.
     """
-    mappings = {ns: labels for ns, labels in grouped.items() if ns and labels}
+    mappings = {parent: children for parent, children in mappings.items() if parent and children}
     if not mappings:
-        return {"message": "No namespace/deployment pairs to map."}
+        return None
 
     # Remove any prior mapping(s) for this parent/child pair so we replace cleanly.
     try:
         existing = zoho_client.list_dependency_mappings(cfg)
         for m in existing.get("data") or []:
-            if str(m.get("parentId")) == str(row.environment_field_id) and str(
-                m.get("childId")
-            ) == str(row.app_field_id):
+            if str(m.get("parentId")) == str(parent_id) and str(m.get("childId")) == str(child_id):
                 mid = m.get("id")
                 if mid:
                     zoho_client.delete_dependency_mapping(cfg, str(mid))
@@ -731,21 +828,25 @@ def _sync_dependency_mapping(
 
     body = {
         "layoutId": cfg.layout_id,
-        "parentId": str(row.environment_field_id),
-        "childId": str(row.app_field_id),
+        "parentId": str(parent_id),
+        "childId": str(child_id),
         "mappings": mappings,
     }
     created = zoho_client.create_dependency_mapping(cfg, body)
     new_id = created.get("id")
-    if new_id:
-        row.dependency_mapping_id = str(new_id)
-    return {"message": f"Cascade configured for {len(mappings)} namespace(s)."}
+    return str(new_id) if new_id else None
 
 
 def _maybe_sync_cascade(
-    row: ZohoIntegration, cfg: ZohoConfig, entries: List[Dict[str, Any]]
+    row: ZohoIntegration,
+    cfg: ZohoConfig,
+    entries: List[Dict[str, Any]],
+    vars_by_ns: Optional[Dict[str, Dict[str, List[str]]]] = None,
 ) -> Dict[str, Any]:
-    """Best-effort cascade sync. Never raises — records the outcome + returns a dict."""
+    """Best-effort cascade sync (Environment→Application, then Application→Variable).
+
+    Never raises — records the combined outcome + returns a dict.
+    """
     if not row.cascade_enabled:
         _record_dependency(row, "skipped", "Cascade disabled in configuration.")
         return {"status": "skipped", "message": "Cascade disabled."}
@@ -754,9 +855,27 @@ def _maybe_sync_cascade(
         _record_dependency(row, "skipped", msg)
         return {"status": "skipped", "message": msg}
     try:
-        result = _sync_dependency_mapping(cfg, row, _namespace_to_labels(entries))
-        _record_dependency(row, "ok", result.get("message") or "Cascade configured.")
-        return {"status": "ok", **result}
+        env_map = _namespace_to_labels(entries)
+        new_id = _sync_dependency_mapping(
+            cfg, str(row.environment_field_id), str(row.app_field_id), env_map
+        )
+        if new_id:
+            row.dependency_mapping_id = new_id
+        parts = [f"Cascade configured for {len(env_map)} namespace(s)."]
+
+        # Second level: Application → Variable (only when variables are published).
+        if row.sync_variables and row.variable_field_id and vars_by_ns is not None:
+            var_map = _app_to_variables(entries, vars_by_ns)
+            var_id = _sync_dependency_mapping(
+                cfg, str(row.app_field_id), str(row.variable_field_id), var_map
+            )
+            if var_id:
+                row.variable_mapping_id = var_id
+            parts.append(f"Variable lists mapped for {len(var_map)} application(s).")
+
+        message = " ".join(parts)
+        _record_dependency(row, "ok", message)
+        return {"status": "ok", "message": message}
     except ZohoError as exc:
         hint = ""
         if getattr(exc, "status", None) == 403:
@@ -770,12 +889,31 @@ def _maybe_sync_cascade(
         return {"status": "error", "message": msg}
 
 
+def _preserved_field_attrs(cfg: ZohoConfig, field_id: str, new_values: List[str]) -> Dict[str, Any]:
+    """The field's current default + required flag, for republishing its values.
+
+    Desk requires ``defaultValue``/``isMandatory`` in the value-list PATCH body,
+    but the sync only owns the option list — resetting them would silently
+    un-require a field someone marked mandatory. Best-effort: a token without
+    read scope falls back to the old write-only defaults.
+    """
+    try:
+        field = zoho_client.field_on_layout(cfg, str(field_id)) or {}
+    except ZohoError:
+        field = {}
+    default = str(field.get("defaultValue") or NONE_VALUE)
+    if default not in new_values:
+        default = NONE_VALUE
+    return {"default_value": default, "is_mandatory": bool(field.get("isMandatory"))}
+
+
 def sync_now() -> Dict[str, Any]:
     """Publish deployments -> Application field and namespaces -> Environment field,
     then (best-effort) wire the Environment -> Application cascade.
 
-    KubeSight is the source of truth and always PATCHes the full list (write-only),
-    so no read scope is required. Serialized behind the lock.
+    KubeSight is the source of truth for the option lists and always PATCHes the
+    full list. Each field's own default + required flag are read back first (best
+    effort) so publishing values does not reset them. Serialized behind the lock.
     """
     with _sync_lock:
         row = get_or_create_config()
@@ -792,38 +930,63 @@ def sync_now() -> Dict[str, Any]:
 
         app_values = _application_values(entries)
         env_values = build_environment_values(row)
+        sync_vars = bool(row.sync_variables and row.variable_field_id)
+        vars_by_ns = _variables_for_entries(row, entries) if sync_vars else {}
+        variable_values = build_variable_values(entries, vars_by_ns) if sync_vars else []
         try:
+            # Read the fields' preserved attrs up front: one cached layout GET
+            # serves them all, and each publish invalidates the layout cache.
+            sync_app = bool(row.sync_application and cfg.app_field_id)
+            sync_env = bool(row.sync_environment and row.environment_field_id)
+            app_attrs = _preserved_field_attrs(cfg, cfg.app_field_id, app_values) if sync_app else {}
+            env_attrs = _preserved_field_attrs(cfg, row.environment_field_id, env_values) if sync_env else {}
+            var_attrs = (
+                _preserved_field_attrs(cfg, row.variable_field_id, variable_values)
+                if sync_vars
+                else {}
+            )
+
             parts = []
             # Application field <- live deployments (only when the toggle is on).
             deployments = 0
-            if row.sync_application and cfg.app_field_id:
-                zoho_client.set_allowed_values(cfg, app_values, field_id=cfg.app_field_id)
+            if sync_app:
+                zoho_client.set_allowed_values(cfg, app_values, field_id=cfg.app_field_id, **app_attrs)
                 deployments = max(0, len(app_values) - 1)  # exclude -None-
                 parts.append(f"{deployments} deployment(s) -> Application")
 
             # Environment field <- selected namespaces (only when toggled on + configured).
             namespaces = 0
-            if row.sync_environment and row.environment_field_id:
-                zoho_client.set_allowed_values(cfg, env_values, field_id=row.environment_field_id)
+            if sync_env:
+                zoho_client.set_allowed_values(cfg, env_values, field_id=row.environment_field_id, **env_attrs)
                 namespaces = max(0, len(env_values) - 1)
                 parts.append(f"{namespaces} namespace(s) -> Environment")
+
+            # Variable field <- env-var names of the published deployments.
+            variables = 0
+            if sync_vars:
+                zoho_client.set_allowed_values(
+                    cfg, variable_values, field_id=row.variable_field_id, **var_attrs
+                )
+                variables = max(0, len(variable_values) - 1)
+                parts.append(f"{variables} variable name(s) -> Variable")
 
             if parts:
                 message = "Published " + "; ".join(parts) + " to Zoho."
             else:
-                message = "Nothing published — both field syncs are turned off."
+                message = "Nothing published — all field syncs are turned off."
             _record_sync(row, "ok", message, deployments)
         except (ZohoError, ValueError) as exc:
             _record_sync(row, "error", str(exc), None)
             return {"status": "error", "message": str(exc), **serialize(row)}
 
         # Cascade is best-effort and layered on top of the (already published) lists.
-        cascade = _maybe_sync_cascade(row, cfg, entries)
+        cascade = _maybe_sync_cascade(row, cfg, entries, vars_by_ns if sync_vars else None)
         return {
             "status": "ok",
             "message": message,
             "deployments": deployments,
             "namespaces": namespaces,
+            "variables": variables,
             "count": deployments,
             "cascade": cascade,
             **serialize(row),
@@ -940,6 +1103,8 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     app_field = row.app_field_api_name or "cf_application"
     env_field = row.environment_field_api_name or "cf_environment"
     tag_field = row.tag_field_api_name or "cf_tag"
+    variable_field = row.variable_field_api_name or "cf_variable"
+    value_field = row.value_field_api_name or "cf_value"
     source_cluster = (row.source_cluster_id or "").strip()
 
     ticket_id = _extract(payload, "ticketId", "id", "ticket_id")
@@ -948,6 +1113,11 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_app_value = _extract(payload, app_field, "deployment", "app_service", "application", "cf_application")
     raw_env_value = _extract(payload, env_field, "environment", "namespace", "cf_environment")
     tag = _extract(payload, tag_field, "tag", "cf_tag", "version")
+    variable = _extract(payload, variable_field, "variable", "cf_variable")
+    variable_value = _extract(payload, value_field, "variable_value", "cf_value")
+    # The Zoho picklist placeholder is not a real choice.
+    if variable is not None and str(variable).strip() in ("", NONE_VALUE):
+        variable = None
 
     error: Optional[str] = None
     snapshot: Optional[ZohoDeploymentSnapshot] = None
@@ -1022,17 +1192,33 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     record.app_service_id = snapshot_id
     record.app_service_name = _snapshot_display(snapshot) if snapshot else None
     record.tag = str(tag) if tag is not None else None
+    record.variable_name = str(variable).strip() if variable is not None else None
+    record.variable_value = str(variable_value) if variable_value is not None else None
     record.resolved = snapshot is not None
+
+    # A ticket asks for exactly ONE change: an image tag OR a variable+value.
+    # These are request-shape problems (not resolution failures), so the
+    # deployment resolution above still stands — but automation won't start.
+    has_tag = bool((record.tag or "").strip())
+    has_variable = bool((record.variable_name or "").strip())
+    has_value = bool((record.variable_value or "").strip())
+    if error is None:
+        if has_tag and has_variable:
+            error = "The ticket has both a Tag and a Variable — automation needs exactly one change."
+        elif has_variable and not has_value:
+            error = "The ticket picks a Variable but has no Value to set it to."
+
     record.error = error
     record.payload = payload if isinstance(payload, dict) else {"raw": payload}
     record.received_at = datetime.now(timezone.utc)
     db.session.add(record)
     db.session.commit()
 
-    # Deploy automation: when auto-run is enabled, a freshly-resolved ticket with
-    # a tag starts its run immediately. Never lets automation break the webhook
-    # response to Zoho (maybe_auto_run swallows every error).
-    if record.resolved and (record.tag or "").strip():
+    # Deploy automation: when auto-run is enabled, a freshly-resolved ticket
+    # carrying one valid change (tag OR variable+value) starts its run
+    # immediately. Never lets automation break the webhook response to Zoho
+    # (maybe_auto_run swallows every error).
+    if record.resolved and error is None and (has_tag or (has_variable and has_value)):
         from .deploy_automation_service import maybe_auto_run
 
         maybe_auto_run(record.id)
@@ -1045,6 +1231,8 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
         "namespace": snapshot.namespace if snapshot else None,
         "clusterId": snapshot.cluster_id if snapshot else None,
         "tag": record.tag,
+        "variableName": record.variable_name,
+        "variableValue": record.variable_value,
         "error": error,
         "recordId": record.id,
     }
@@ -1106,6 +1294,8 @@ def list_inbound_tickets(limit: int = 50) -> List[Dict[str, Any]]:
                 "namespace": snapshot.namespace if snapshot else None,
                 "clusterId": snapshot.cluster_id if snapshot else None,
                 "tag": r.tag,
+                "variableName": r.variable_name,
+                "variableValue": r.variable_value,
                 "resolved": bool(r.resolved),
                 "error": r.error,
                 "receivedAt": _iso(r.received_at),
