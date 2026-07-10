@@ -705,17 +705,37 @@ def _entry_variables(
     return list((vars_by_ns.get(entry["namespace"]) or {}).get(entry["name"]) or [])
 
 
+def _variable_option(var: str) -> str:
+    """One env-var name as a Zoho-safe picklist value (sanitized + truncated)."""
+    return _sanitize_value(var)[:_MAX_VALUE_LEN].rstrip()
+
+
+def _variable_option_map(
+    entries: List[Dict[str, Any]], vars_by_ns: Dict[str, Dict[str, List[str]]]
+) -> Dict[str, str]:
+    """Casefolded collision key → the canonical (first-seen) published spelling.
+
+    Zoho compares picklist values case-insensitively — publishing both
+    ``encryption_key`` and ``ENCRYPTION_KEY`` fails the whole PATCH with
+    HTTP 400 "The allowed values has duplicate value". Every variable list
+    (the picklist AND the cascade's child values) must go through this map so
+    they reference exactly the spellings that were published.
+    """
+    canon: Dict[str, str] = {}
+    for e in entries:
+        for var in _entry_variables(e, vars_by_ns):
+            s = _variable_option(var)
+            if s and s != NONE_VALUE:
+                canon.setdefault(s.casefold(), s)
+    return canon
+
+
 def build_variable_values(
     entries: List[Dict[str, Any]], vars_by_ns: Dict[str, Dict[str, List[str]]]
 ) -> List[str]:
-    """Variable dropdown: ``-None-`` + the sorted union of env-var names."""
-    names = set()
-    for e in entries:
-        for var in _entry_variables(e, vars_by_ns):
-            s = _sanitize_value(var)
-            if s:
-                names.add(s)
-    return [NONE_VALUE] + sorted(names)
+    """Variable dropdown: ``-None-`` + the case-insensitively deduped union."""
+    canon = _variable_option_map(entries, vars_by_ns)
+    return [NONE_VALUE] + sorted(canon.values(), key=str.casefold)
 
 
 def _app_to_variables(
@@ -724,15 +744,21 @@ def _app_to_variables(
     """Group env-var names by Application value — the App→Variable cascade map.
 
     Application values are de-duplicated bare names, so an app living in several
-    namespaces maps to the UNION of its env vars across them.
+    namespaces maps to the UNION of its env vars across them. Child values are
+    the canonical published spellings (see :func:`_variable_option_map`).
     """
+    canon = _variable_option_map(entries, vars_by_ns)
     grouped: Dict[str, set] = {}
     for e in entries:
-        variables = {_sanitize_value(v) for v in _entry_variables(e, vars_by_ns)}
-        variables.discard("")
+        variables = set()
+        for var in _entry_variables(e, vars_by_ns):
+            s = _variable_option(var)
+            canonical = canon.get(s.casefold()) if s else None
+            if canonical:
+                variables.add(canonical)
         if variables:
             grouped.setdefault(e["label"], set()).update(variables)
-    return {label: sorted(vars_) for label, vars_ in grouped.items()}
+    return {label: sorted(vars_, key=str.casefold) for label, vars_ in grouped.items()}
 
 
 def build_preview(fresh: bool = False) -> Dict[str, Any]:
@@ -946,27 +972,33 @@ def sync_now() -> Dict[str, Any]:
                 else {}
             )
 
+            def _publish(label: str, values: List[str], field_id: str, attrs: Dict[str, Any]) -> None:
+                # Name the failing field — "duplicate value" style rejections
+                # are meaningless without knowing which list Zoho refused.
+                try:
+                    zoho_client.set_allowed_values(cfg, values, field_id=field_id, **attrs)
+                except ZohoError as exc:
+                    raise ValueError(f"Publishing the {label} field: {exc}") from exc
+
             parts = []
             # Application field <- live deployments (only when the toggle is on).
             deployments = 0
             if sync_app:
-                zoho_client.set_allowed_values(cfg, app_values, field_id=cfg.app_field_id, **app_attrs)
+                _publish("Application", app_values, cfg.app_field_id, app_attrs)
                 deployments = max(0, len(app_values) - 1)  # exclude -None-
                 parts.append(f"{deployments} deployment(s) -> Application")
 
             # Environment field <- selected namespaces (only when toggled on + configured).
             namespaces = 0
             if sync_env:
-                zoho_client.set_allowed_values(cfg, env_values, field_id=row.environment_field_id, **env_attrs)
+                _publish("Environment", env_values, row.environment_field_id, env_attrs)
                 namespaces = max(0, len(env_values) - 1)
                 parts.append(f"{namespaces} namespace(s) -> Environment")
 
             # Variable field <- env-var names of the published deployments.
             variables = 0
             if sync_vars:
-                zoho_client.set_allowed_values(
-                    cfg, variable_values, field_id=row.variable_field_id, **var_attrs
-                )
+                _publish("Variable", variable_values, row.variable_field_id, var_attrs)
                 variables = max(0, len(variable_values) - 1)
                 parts.append(f"{variables} variable name(s) -> Variable")
 

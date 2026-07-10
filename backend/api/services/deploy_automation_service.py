@@ -815,7 +815,10 @@ def _do_resolve_variable(run: DeployAutomationRun) -> None:
     containers = (
         (((spec.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
     )
-    literal: List[str] = []
+    # The Zoho picklist merges names case-insensitively, so the ticket's value
+    # may not match the deployment's exact spelling — match loosely, then apply
+    # with the ACTUAL live name (kubectl/env names are case-sensitive).
+    by_actual: Dict[str, List[str]] = {}
     referenced = False
     available: List[str] = []
     for c in containers:
@@ -823,17 +826,30 @@ def _do_resolve_variable(run: DeployAutomationRun) -> None:
             name = entry.get("name")
             if not name:
                 continue
-            if name == var:
+            if name.casefold() == var.casefold():
                 if "valueFrom" in entry:
                     referenced = True
                 elif c.get("name"):
-                    literal.append(c["name"])
+                    by_actual.setdefault(name, []).append(c["name"])
             if "valueFrom" not in entry and name not in available:
                 available.append(name)
 
-    if literal:
-        run.container_name = ",".join(literal)
-        _set_step(run, "image_check", "done", f"{var} found on container(s) {run.container_name}")
+    if by_actual:
+        if var in by_actual:
+            actual = var
+        elif len(by_actual) == 1:
+            actual = next(iter(by_actual))
+        else:
+            _fail(
+                run,
+                "image_check",
+                f"'{var}' matches several differently-cased variables on "
+                f"'{run.deployment_name}' ({', '.join(sorted(by_actual))}) — use the exact name.",
+            )
+            return
+        run.variable_name = actual
+        run.container_name = ",".join(by_actual[actual])
+        _set_step(run, "image_check", "done", f"{actual} found on container(s) {run.container_name}")
         run.retry_count = 0
         _do_handoff(run)
         return

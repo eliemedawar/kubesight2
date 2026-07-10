@@ -790,6 +790,78 @@ def test_variable_resolve_validates_against_live_spec(client, admin_token, app, 
     assert "-c" in args and args[args.index("-c") + 1] == "payments-api"
 
 
+def test_variable_values_dedupe_case_insensitively(app):
+    """Zoho compares picklist values case-insensitively — 'encryption_key' and
+    'ENCRYPTION_KEY' must publish as ONE option (HTTP 400 'duplicate value'
+    otherwise), and the App→Variable cascade must reference exactly the
+    published spellings."""
+    from api.services.zoho_sync_service import _app_to_variables, build_variable_values
+
+    entries = [
+        {"id": 1, "namespace": "ns1", "name": "svc-a", "label": "svc-a"},
+        {"id": 2, "namespace": "ns2", "name": "svc-b", "label": "svc-b"},
+    ]
+    vars_by_ns = {
+        "ns1": {"svc-a": ["ENCRYPTION_KEY", "log_level"]},
+        "ns2": {"svc-b": ["encryption_key", "LOG_LEVEL", "EXTRA"]},
+    }
+    values = build_variable_values(entries, vars_by_ns)
+    assert values[0] == "-None-"
+    lowered = [v.lower() for v in values[1:]]
+    assert sorted(lowered) == ["encryption_key", "extra", "log_level"]
+    assert len(lowered) == len(set(lowered)), "no Zoho-level duplicates"
+
+    mapping = _app_to_variables(entries, vars_by_ns)
+    published = set(values)
+    for child_values in mapping.values():
+        assert set(child_values) <= published, "cascade children must be published spellings"
+    # Both apps expose the SAME canonical spelling for the shared variable.
+    shared_a = {v for v in mapping["svc-a"] if v.lower() == "encryption_key"}
+    shared_b = {v for v in mapping["svc-b"] if v.lower() == "encryption_key"}
+    assert shared_a == shared_b
+
+
+def test_variable_resolve_matches_case_insensitively(client, admin_token, app, monkeypatch):
+    """A ticket carrying the merged picklist spelling still applies with the
+    deployment's ACTUAL env-var name (env names are case-sensitive)."""
+    live_deployment = {
+        "metadata": {"generation": 1},
+        "spec": {
+            "replicas": 1,
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "payments-api",
+                            "image": "ghcr.io/mock/payments:v2.8.1",
+                            "env": [{"name": "LOG_LEVEL", "value": "info"}],
+                        }
+                    ]
+                }
+            },
+        },
+        "status": {"observedGeneration": 1, "readyReplicas": 1, "updatedReplicas": 1},
+    }
+    monkeypatch.setattr("api.k8s_provider.should_use_real_k8s", lambda cid=None: True)
+    monkeypatch.setattr("api.k8s_provider.resolve_cluster_access", lambda cid: object())
+    monkeypatch.setattr(
+        "api.k8s_provider._run_for_access", lambda access, args: json.dumps(live_deployment)
+    )
+    kubectl_calls = []
+    monkeypatch.setattr(
+        "api.services.deployment_service._run_kubectl_for_cluster",
+        lambda cid, args: kubectl_calls.append(args) or "deployment.apps env updated",
+    )
+    _set_cluster_approvals(0)
+
+    ticket = _make_ticket(tag="", variable="log_level", value="warn")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "deployed", run
+    # Applied with the live spelling, not the ticket's.
+    assert run["variableName"] == "LOG_LEVEL"
+    assert "LOG_LEVEL=warn" in kubectl_calls[0]
+
+
 def test_resolve_inbound_parses_variable_change(client, admin_token, app):
     """The webhook parses cf_variable/cf_value, and flags tag+variable tickets."""
     from api.services.zoho_sync_service import resolve_inbound
