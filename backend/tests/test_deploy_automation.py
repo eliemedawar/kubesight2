@@ -848,6 +848,67 @@ def test_resolve_inbound_parses_variable_change(client, admin_token, app):
     assert "no Value" in result["error"]
 
 
+def test_inbound_log_pruned_to_newest_10(client, admin_token, app):
+    """Every webhook delivery trims the inbound log to the 10 newest tickets,
+    deleting pruned tickets' finished runs — but never a ticket whose run is
+    still active (write-back + duplicate-delivery guard need the row)."""
+    from api.services.zoho_sync_service import resolve_inbound
+
+    protected = _make_ticket(tag="v0.0.1")
+    db.session.add(
+        DeployAutomationRun(
+            ticket_record_id=protected.id,
+            cluster_id=CLUSTER,
+            namespace=NAMESPACE,
+            deployment_name=DEPLOYMENT,
+            image_tag="v0.0.1",
+            status="awaiting_approval",
+            steps=[],
+        )
+    )
+    finished = _make_ticket(tag="v0.0.2")
+    db.session.add(
+        DeployAutomationRun(
+            ticket_record_id=finished.id,
+            cluster_id=CLUSTER,
+            namespace=NAMESPACE,
+            deployment_name=DEPLOYMENT,
+            image_tag="v0.0.2",
+            status="deployed",
+            steps=[],
+        )
+    )
+    for i in range(12):
+        db.session.add(
+            ZohoInboundTicket(
+                ticket_id=f"prune-fill-{i}",
+                resolved=True,
+                tag="v1.0.0",
+                received_at=datetime.now(timezone.utc),
+            )
+        )
+    db.session.commit()
+
+    # The webhook path is the intake choke point — it triggers the prune.
+    resolve_inbound(
+        {
+            "ticketId": "prune-new",
+            "cf_application": DEPLOYMENT,
+            "cf_environment": NAMESPACE,
+            "cf_tag": "v2.0.0",
+        }
+    )
+
+    remaining = {t.id for t in ZohoInboundTicket.query.all()}
+    assert protected.id in remaining, "a ticket with an active run must survive"
+    assert finished.id not in remaining
+    # The 10 newest + the protected straggler.
+    assert len(remaining) == 11
+    # The pruned ticket's runs went with it; the active run is untouched.
+    assert DeployAutomationRun.query.filter_by(ticket_record_id=finished.id).count() == 0
+    assert DeployAutomationRun.query.filter_by(ticket_record_id=protected.id).count() == 1
+
+
 def test_viewer_cannot_start_or_configure(client, viewer_token, app):
     ticket = _make_ticket()
     response = client.post(

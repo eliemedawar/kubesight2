@@ -1223,6 +1223,13 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         maybe_auto_run(record.id)
 
+    # Retention: the intake is the only place rows are created, so prune here.
+    # Keeps the table bounded no matter how many tickets Zoho sends.
+    try:
+        _prune_inbound_tickets()
+    except Exception:  # pruning must never break the webhook response
+        db.session.rollback()
+
     return {
         "resolved": record.resolved,
         "targetId": snapshot_id,
@@ -1236,6 +1243,45 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
         "error": error,
         "recordId": record.id,
     }
+
+
+# How many inbound tickets the log keeps. Every webhook delivery lands here, so
+# without a cap the table (and each ticket's runs) grows forever.
+INBOUND_TICKET_RETENTION = 10
+
+
+def _prune_inbound_tickets(keep: int = INBOUND_TICKET_RETENTION) -> int:
+    """Trim the inbound-ticket log to the newest ``keep`` rows. Returns how many
+    were deleted.
+
+    A ticket's finished automation runs are deleted with it (the durable trail
+    is the audit log; keeping runs would just orphan them in the UI). Tickets
+    with an ACTIVE run are never pruned — the run's ticket write-back and the
+    duplicate-webhook guard both need the row — so the table can briefly hold a
+    few more than ``keep`` while old runs finish.
+    """
+    from ..models import DeployAutomationRun
+    from .deploy_automation_service import ACTIVE_STATUSES
+
+    overflow = (
+        ZohoInboundTicket.query.order_by(
+            ZohoInboundTicket.received_at.desc(), ZohoInboundTicket.id.desc()
+        )
+        .offset(max(1, int(keep)))
+        .all()
+    )
+    deleted = 0
+    for row in overflow:
+        runs = DeployAutomationRun.query.filter_by(ticket_record_id=row.id).all()
+        if any(r.status in ACTIVE_STATUSES for r in runs):
+            continue
+        for run in runs:
+            db.session.delete(run)
+        db.session.delete(row)
+        deleted += 1
+    if deleted:
+        db.session.commit()
+    return deleted
 
 
 def delete_inbound_ticket(record_id: int) -> Optional[Dict[str, Any]]:

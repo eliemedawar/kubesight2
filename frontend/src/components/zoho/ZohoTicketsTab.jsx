@@ -310,7 +310,8 @@ export default function ZohoTicketsTab({
             <span className="sg-zh-count">{orphanRuns.length}</span>
           </div>
           <p className="muted">
-            Automation runs whose inbound-log entry was deleted (only the last 50 tickets are kept).
+            Automation runs whose inbound-log entry was deleted (only the 10 newest tickets are
+            kept — older ones are pruned automatically with their finished runs).
           </p>
           <div className="sg-zh-runs">
             {orphanRuns.map((run) => (

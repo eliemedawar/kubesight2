@@ -146,7 +146,9 @@ export default function ZohoSyncPage({ canManage = false }) {
     // fast DB read). The preview (live cluster reads) and the ticket log stream
     // into their sections when they arrive.
     const previewPromise = getZohoPreview(fresh).catch(() => null);
-    const ticketsPromise = listZohoInboundTickets(50).catch(() => ({ items: [] }));
+    // The backend prunes the inbound log to the 10 newest tickets on every
+    // webhook delivery — ask for exactly that window.
+    const ticketsPromise = listZohoInboundTickets(10).catch(() => ({ items: [] }));
     const jenkinsPromise = getJenkinsConfig().catch(() => null);
     const runsPromise = listAutomationRuns(50).catch(() => ({ items: [] }));
     try {
