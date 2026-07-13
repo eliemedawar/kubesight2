@@ -1,3 +1,5 @@
+import BrandMark from "../BrandMark.jsx";
+
 const NAV_ICONS = {
   dashboard: (
     <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -93,20 +95,6 @@ const NAV_ICONS = {
   ),
 };
 
-const K8S_LOGO = (
-  <svg viewBox="0 0 32 32" fill="none" aria-hidden="true" className="sidebar-brand-logo">
-    <circle cx="16" cy="16" r="16" fill="url(#k8s-grad)" />
-    <path d="M16 5.5c-.4 0-.78.16-1.06.44L9.06 12H7a1.5 1.5 0 00-1.5 1.5v2A1.5 1.5 0 007 17h.15l-.12.47A6.5 6.5 0 0016 24.5a6.5 6.5 0 008.97-7.03L24.85 17H25a1.5 1.5 0 001.5-1.5v-2A1.5 1.5 0 0025 12h-2.06l-5.88-6.06A1.5 1.5 0 0016 5.5z" fill="rgba(255,255,255,0.15)" />
-    <path d="M16 8l-1.2 4.8H11l3.6 2.8-1.2 4.4 2.6-2 2.6 2-1.2-4.4L21 12.8h-3.8L16 8z" fill="white" />
-    <defs>
-      <linearGradient id="k8s-grad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-        <stop stopColor="#ff2929" />
-        <stop offset="1" stopColor="#d71f1f" />
-      </linearGradient>
-    </defs>
-  </svg>
-);
-
 export default function Sidebar({ pages, activePage, onNavigate, open = false }) {
   const sections = [];
   const sectionIndex = new Map();
@@ -124,7 +112,7 @@ export default function Sidebar({ pages, activePage, onNavigate, open = false })
     <aside className={`sidebar${open ? " sidebar--open" : ""}`} aria-label="Primary navigation">
       <div className="sidebar-brand">
         <div className="sidebar-brand-inner">
-          {K8S_LOGO}
+          <BrandMark className="sidebar-brand-logo" />
           <div>
             <h1>KubeSight</h1>
             <p className="brand-subtitle">Control Plane</p>

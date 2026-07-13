@@ -1460,6 +1460,24 @@ body.has-bundle-fab .page-content.ops-layout {
   border: 1px solid color-mix(in srgb, var(--pill, var(--od-teal)) 30%, transparent);
   padding: 4px 10px; border-radius: var(--radius-full);
 }
+
+/* ── KubeSight brand logo (cube-with-eye mark, red wordmark) ─── */
+.sidebar-brand h1,
+.login-card h1 {
+  color: var(--accent-strong);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.login-logo {
+  width: 2.75rem;
+  height: 2.75rem;
+  flex-shrink: 0;
+}
 .ops-pill--sm { padding: 3px 10px; border: none; }
 .ops-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pill, var(--od-teal)); flex: none; }
 .ops-dot--teal { background: var(--od-teal); }

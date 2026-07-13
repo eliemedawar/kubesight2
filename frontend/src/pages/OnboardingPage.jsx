@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../context/AuthContext";
+import BrandMark from "../components/BrandMark.jsx";
 
 const PASSWORD_RULES = [
   { key: "length", label: "At least 12 characters", test: (v) => v.length >= 12 },
@@ -107,7 +108,10 @@ export default function OnboardingPage() {
   return (
     <div className="login-screen">
       <div className="login-card onboarding-card">
-        <h1>Welcome to KubeSight</h1>
+        <div className="login-brand">
+          <BrandMark className="login-logo" />
+          <h1>Welcome to KubeSight</h1>
+        </div>
         <p className="brand-subtitle">Finish setting up your account</p>
 
         <ol className="onboarding-steps">

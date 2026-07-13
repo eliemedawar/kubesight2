@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAuth } from "../context/AuthContext";
+import BrandMark from "../components/BrandMark.jsx";
 
 export default function LoginPage() {
   const {
@@ -52,7 +53,10 @@ export default function LoginPage() {
     return (
       <div className="login-screen">
         <form className="login-card" onSubmit={handleMfaSubmit}>
-          <h1>KubeSight</h1>
+          <div className="login-brand">
+            <BrandMark className="login-logo" />
+            <h1>KubeSight</h1>
+          </div>
           <p className="brand-subtitle">Two-factor authentication</p>
           <p className="muted">
             Enter the 6-digit code from your authenticator app
@@ -87,7 +91,10 @@ export default function LoginPage() {
   return (
     <div className="login-screen">
       <form className="login-card" onSubmit={handleSubmit}>
-        <h1>KubeSight</h1>
+        <div className="login-brand">
+          <BrandMark className="login-logo" />
+          <h1>KubeSight</h1>
+        </div>
         <p className="brand-subtitle">Control Plane Sign In</p>
         {error ? <p className="banner-message error">{error}</p> : null}
         <label>
