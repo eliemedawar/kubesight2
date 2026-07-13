@@ -94,12 +94,18 @@ CONDITION_LOGIC = ("any", "all")
 
 DEFAULT_EVALUATION_INTERVAL_SECONDS = 300
 
-ALERT_TYPES = ("metric", "log", "service")
+ALERT_TYPES = ("metric", "log", "service", "automation")
 DEFAULT_ALERT_TYPE = "metric"
 
 # Service alert policies watch Application Services, which span clusters, so the
 # policy's mandatory cluster_id is set to this sentinel instead of a real cluster.
 SERVICE_ALERT_CLUSTER_ID = "__app_services__"
+
+# Automation alert policies fire when a ticket-driven deploy automation run
+# fails (any cluster), so they use a sentinel cluster id too. They are
+# event-driven — deploy_automation_service fires/resolves them directly instead
+# of the scheduled evaluator.
+AUTOMATION_ALERT_CLUSTER_ID = "__deploy_automation__"
 
 ALL_SERVICES_ID = "*"
 
@@ -185,6 +191,7 @@ def catalog_payload(
         "logWindowOptions": LOG_WINDOW_SECONDS_OPTIONS,
         "defaultLogConfig": default_log_config(),
         "serviceAlertClusterId": SERVICE_ALERT_CLUSTER_ID,
+        "automationAlertClusterId": AUTOMATION_ALERT_CLUSTER_ID,
         "serviceAlertTriggerLevels": SERVICE_ALERT_TRIGGER_LEVELS,
         "defaultServiceConfig": default_service_config(),
         "applicationServices": application_services or [],

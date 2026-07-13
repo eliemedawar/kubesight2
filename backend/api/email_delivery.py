@@ -114,6 +114,9 @@ def _alert_headline(alert: Dict[str, Any]) -> str:
         if resource:
             return f"{service} — {resource_type} '{resource}' unhealthy"
         return f"{service} — service health alert"
+    if alert_type == "automation":
+        target = str(alert.get("ticketNumber") or alert.get("resourceName") or "").strip()
+        return f"Deploy automation failed — {target}" if target else "Deploy automation failed"
     return alert.get("title") or "KubeSight alert"
 
 
@@ -165,6 +168,15 @@ def _alert_detail_rows(alert: Dict[str, Any]) -> list:
         add("Container", alert.get("container"))
         add("Matched pattern", alert.get("matchedPattern"))
         add("Detected at", _format_alert_timestamp(alert.get("detectedAt")))
+    elif alert_type == "automation":
+        add("Ticket", alert.get("ticketNumber"))
+        add("Deployment", alert.get("resourceName"))
+        add("Change", alert.get("changeSummary"))
+        add("Cluster", _alert_cluster_display(alert))
+        add("Namespace", alert.get("namespace"))
+        add("Failed step", alert.get("failedStep"))
+        add("Error", alert.get("error"))
+        add("Jenkins build", alert.get("jenkinsBuildUrl"))
     else:
         add("Cluster", _alert_cluster_display(alert))
         add("Namespace", alert.get("namespace"))

@@ -393,6 +393,56 @@ def test_router_trigger_contract(client, admin_token, app, monkeypatch):
     assert run["ticketTag"] == "1.73.13"
 
 
+def test_router_param_toggles(client, admin_token, app, monkeypatch):
+    """Unticked router parameters are left out of buildWithParameters; saving
+    with all three off is rejected."""
+    captured = {}
+
+    def fake_trigger(cfg, params):
+        captured["params"] = params
+        return "http://jenkins/queue/item/2"
+
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "not_found", "image": image},
+    )
+    monkeypatch.setattr("api.services.jenkins_client.trigger_build", fake_trigger)
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={
+            "enabled": True,
+            "baseUrl": "http://10.43.17.16:8080",
+            "username": "admin",
+            "apiToken": "api-t0ken",
+            "routerJobPath": "georgio-testing",
+            "sendParamNamespace": False,
+            "sendParamTag": False,
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    data = response.get_json()["data"]
+    assert data["sendParamApp"] is True
+    assert data["sendParamNamespace"] is False
+    assert data["sendParamTag"] is False
+
+    ticket = _make_ticket(tag="1.73.13")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "building", run
+    assert captured["params"] == {"APP": DEPLOYMENT}
+
+    # All three off is a misconfiguration â€” rejected, config left untouched.
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={"sendParamApp": False},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 400
+    assert "At least one router parameter" in response.get_json()["error"]
+    response = client.get("/api/zoho/jenkins", headers=auth_headers(admin_token))
+    assert response.get_json()["data"]["sendParamApp"] is True
+
+
 def test_image_tag_template_resolution(app):
     from api.models import JenkinsConnection
     from api.services.deploy_automation_service import resolve_image_tag
@@ -490,12 +540,24 @@ def test_rollout_watch_ignores_stale_status(client, admin_token, app, monkeypatc
         "stale": {
             "metadata": {"generation": 7},
             "spec": {"replicas": 3},
-            "status": {"observedGeneration": 6, "readyReplicas": 3, "updatedReplicas": 3},
+            "status": {
+                "observedGeneration": 6,
+                "replicas": 3,
+                "readyReplicas": 3,
+                "updatedReplicas": 3,
+                "availableReplicas": 3,
+            },
         },
         "fresh": {
             "metadata": {"generation": 7},
             "spec": {"replicas": 3},
-            "status": {"observedGeneration": 7, "readyReplicas": 3, "updatedReplicas": 3},
+            "status": {
+                "observedGeneration": 7,
+                "replicas": 3,
+                "readyReplicas": 3,
+                "updatedReplicas": 3,
+                "availableReplicas": 3,
+            },
         },
     }
     current = {"key": "stale"}
@@ -514,6 +576,74 @@ def test_rollout_watch_ignores_stale_status(client, admin_token, app, monkeypatc
 
     # The controller catches up â†’ the same counters now count.
     current["key"] = "fresh"
+    svc.advance_runs()
+    row = db.session.get(DeployAutomationRun, run.id)
+    assert row.status == "deployed"
+
+
+def test_rollout_watch_not_fooled_by_stuck_rolling_update(client, admin_token, app, monkeypatch):
+    """A stuck rolling update reads ready=1 (the OLD pod, still serving) and
+    updated=1 (the NEW pod, crashlooping) with desired=1: readyReplicas counts
+    every ReplicaSet and updatedReplicas ignores readiness, so those two alone
+    go green while the new pod crashloops. The run must only complete once the
+    old pod is gone and the new one is available."""
+    from api.models import JenkinsConnection
+    from api.services import deploy_automation_service as svc
+
+    db.session.add(JenkinsConnection(id=1))
+    run = DeployAutomationRun(
+        cluster_id=CLUSTER,
+        namespace=NAMESPACE,
+        deployment_name=DEPLOYMENT,
+        image_tag="v6.6.6",
+        status="verifying_rollout",
+        steps=[],
+        rollout_started_at=datetime.now(timezone.utc),
+    )
+    db.session.add(run)
+    db.session.commit()
+
+    payloads = {
+        # Old-RS pod ready + new-RS pod crashlooping: 2 pods total, 1 ready.
+        "stuck": {
+            "metadata": {"generation": 2},
+            "spec": {"replicas": 1},
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 2,
+                "readyReplicas": 1,
+                "updatedReplicas": 1,
+                "availableReplicas": 1,
+            },
+        },
+        # New pod recovered, old ReplicaSet scaled down.
+        "rolled": {
+            "metadata": {"generation": 2},
+            "spec": {"replicas": 1},
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 1,
+                "readyReplicas": 1,
+                "updatedReplicas": 1,
+                "availableReplicas": 1,
+            },
+        },
+    }
+    current = {"key": "stuck"}
+    monkeypatch.setattr("api.k8s_provider.should_use_real_k8s", lambda cid=None: True)
+    monkeypatch.setattr("api.k8s_provider.resolve_cluster_access", lambda cid: object())
+    monkeypatch.setattr(
+        "api.k8s_provider._run_for_access",
+        lambda access, args: json.dumps(payloads[current["key"]]),
+    )
+
+    svc.advance_runs()
+    row = db.session.get(DeployAutomationRun, run.id)
+    assert row.status == "verifying_rollout", "the old pod's readiness must not complete the run"
+    pods = next(s for s in row.steps if s["key"] == "pods")
+    assert "old pod" in pods["detail"]
+
+    current["key"] = "rolled"
     svc.advance_runs()
     row = db.session.get(DeployAutomationRun, run.id)
     assert row.status == "deployed"
@@ -737,7 +867,13 @@ def test_variable_run_blocks_when_running_image_missing(client, admin_token, app
                 }
             },
         },
-        "status": {"observedGeneration": 1, "readyReplicas": 1, "updatedReplicas": 1},
+        "status": {
+            "observedGeneration": 1,
+            "replicas": 1,
+            "readyReplicas": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+        },
     }
     monkeypatch.setattr("api.k8s_provider.should_use_real_k8s", lambda cid=None: True)
     monkeypatch.setattr("api.k8s_provider.resolve_cluster_access", lambda cid: object())
@@ -834,7 +970,13 @@ def test_variable_resolve_validates_against_live_spec(client, admin_token, app, 
                 }
             },
         },
-        "status": {"observedGeneration": 1, "readyReplicas": 1, "updatedReplicas": 1},
+        "status": {
+            "observedGeneration": 1,
+            "replicas": 1,
+            "readyReplicas": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+        },
     }
     monkeypatch.setattr("api.k8s_provider.should_use_real_k8s", lambda cid=None: True)
     monkeypatch.setattr("api.k8s_provider.resolve_cluster_access", lambda cid: object())
@@ -999,7 +1141,13 @@ def test_variable_resolve_matches_case_insensitively(client, admin_token, app, m
                 }
             },
         },
-        "status": {"observedGeneration": 1, "readyReplicas": 1, "updatedReplicas": 1},
+        "status": {
+            "observedGeneration": 1,
+            "replicas": 1,
+            "readyReplicas": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+        },
     }
     monkeypatch.setattr("api.k8s_provider.should_use_real_k8s", lambda cid=None: True)
     monkeypatch.setattr("api.k8s_provider.resolve_cluster_access", lambda cid: object())

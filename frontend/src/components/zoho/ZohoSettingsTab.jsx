@@ -521,6 +521,9 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
     buildToken: "",
     routerJobPath: jenkins?.routerJobPath || "",
     verifyTls: jenkins?.verifyTls !== false,
+    sendParamApp: jenkins?.sendParamApp !== false,
+    sendParamNamespace: jenkins?.sendParamNamespace !== false,
+    sendParamTag: jenkins?.sendParamTag !== false,
     autoRunTickets: Boolean(jenkins?.autoRunTickets),
     autoRunClusters: { ...(jenkins?.autoRunClusters || {}) },
     imageTagTemplate: jenkins?.imageTagTemplate || "{tag}",
@@ -548,6 +551,9 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
         username: jenkins.username || "",
         routerJobPath: jenkins.routerJobPath || "",
         verifyTls: jenkins.verifyTls !== false,
+        sendParamApp: jenkins.sendParamApp !== false,
+        sendParamNamespace: jenkins.sendParamNamespace !== false,
+        sendParamTag: jenkins.sendParamTag !== false,
         autoRunTickets: Boolean(jenkins.autoRunTickets),
         autoRunClusters: { ...(jenkins.autoRunClusters || {}) },
         imageTagTemplate: jenkins.imageTagTemplate || "{tag}",
@@ -601,6 +607,9 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
       username: form.username,
       routerJobPath: form.routerJobPath,
       verifyTls: form.verifyTls,
+      sendParamApp: form.sendParamApp,
+      sendParamNamespace: form.sendParamNamespace,
+      sendParamTag: form.sendParamTag,
       autoRunTickets: form.autoRunTickets,
       buildTimeoutMinutes: Number(form.buildTimeoutMinutes) || 45,
       queueTimeoutMinutes: Number(form.queueTimeoutMinutes) || 10,
@@ -624,7 +633,8 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
           <h3>Jenkins router</h3>
           <p className="muted">
             Triggers the router job with <code>APP</code>, <code>TAG</code> and{" "}
-            <code>NAMESPACE</code> — the router runs the right build and reports back.
+            <code>NAMESPACE</code> (each optional below) — the router runs the right build and
+            reports back.
           </p>
         </div>
         <div className="actions">
@@ -720,6 +730,39 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
             disabled={ro}
           />
           Verify TLS certificates
+        </label>
+
+        <h4>Router parameters</h4>
+        <p className="muted field-span">
+          Only the ticked parameters are sent on <code>buildWithParameters</code> — untick one if
+          the router job isn't parameterized with it. At least one must stay on.
+        </p>
+        <label className="checkbox-label sg-zh-jcheck">
+          <input
+            type="checkbox"
+            checked={form.sendParamApp}
+            onChange={(e) => set("sendParamApp", e.target.checked)}
+            disabled={ro}
+          />
+          Send <code>APP</code> — the Kubernetes deployment name
+        </label>
+        <label className="checkbox-label sg-zh-jcheck">
+          <input
+            type="checkbox"
+            checked={form.sendParamNamespace}
+            onChange={(e) => set("sendParamNamespace", e.target.checked)}
+            disabled={ro}
+          />
+          Send <code>NAMESPACE</code> — the target namespace
+        </label>
+        <label className="checkbox-label sg-zh-jcheck">
+          <input
+            type="checkbox"
+            checked={form.sendParamTag}
+            onChange={(e) => set("sendParamTag", e.target.checked)}
+            disabled={ro}
+          />
+          Send <code>TAG</code> — the raw ticket tag
         </label>
 
         <h4>Automation</h4>
@@ -840,7 +883,8 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
             onChange={(e) => set("rollbackOnFailure", e.target.checked)}
             disabled={ro}
           />
-          Auto-rollback on rollout failure — admins are emailed on every failure either way
+          Auto-rollback on rollout failure — admins are emailed on every failure either way; to
+          notify others, add a Deploy Automation policy under Alerts → Policies
         </label>
 
         {canManage ? (

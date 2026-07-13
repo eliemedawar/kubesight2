@@ -420,14 +420,25 @@ def _advance_watch(watch) -> None:
             # yet, so the counters still describe the previous template.
             detail = "waiting for the controller to observe the new spec"
         else:
-            desired, ready, updated = health["desired"], health["ready"], health["updated"]
+            desired, updated = health["desired"], health["updated"]
+            total, available = health["total"], health["available"]
             if desired == 0:
                 _finish_watch(watch, "healthy", "deployment is scaled to 0 — no pods expected")
                 return
-            if ready >= desired and updated >= desired:
-                _finish_watch(watch, "healthy", f"{ready}/{desired} ready")
+            # ready/updated alone are not enough: during a rolling update the
+            # OLD pod keeps readyReplicas satisfied while the crashlooping NEW
+            # pod counts as updated. Healthy = the full `kubectl rollout
+            # status` condition: all pods on the new template, no old pods
+            # left, and the new pods available.
+            if updated >= desired and total <= updated and available >= updated:
+                _finish_watch(watch, "healthy", f"{available}/{desired} ready")
                 return
-            detail = f"{ready}/{desired} ready ({updated}/{desired} on the new spec)"
+            if updated < desired:
+                detail = f"{updated}/{desired} pods updated to the new spec"
+            elif total > updated:
+                detail = f"waiting for {total - updated} old pod(s) to terminate"
+            else:
+                detail = f"{available}/{updated} new pods available"
     except (K8sCommandError, ValueError) as exc:
         # Read errors during a rollout are "still waiting" — pods churn,
         # apiservers hiccup; only the timeout fails the watch.

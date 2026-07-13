@@ -554,6 +554,10 @@ def _history_to_alert_dict(row: AlertHistory) -> Dict[str, Any]:
         from .service_alert_evaluator import _history_to_service_alert_dict
 
         return _history_to_service_alert_dict(row)
+    if getattr(row, "alert_type", "metric") == "automation":
+        from .automation_alert_service import _history_to_automation_alert_dict
+
+        return _history_to_automation_alert_dict(row)
     return {
         "id": f"history-{row.id}",
         "alertType": "metric",
@@ -640,13 +644,13 @@ def evaluate_policies_for_cluster(
     *,
     persist: bool = True,
 ) -> List[AlertHistory]:
-    from ..alert_policy_catalog import SERVICE_ALERT_CLUSTER_ID
+    from ..alert_policy_catalog import AUTOMATION_ALERT_CLUSTER_ID, SERVICE_ALERT_CLUSTER_ID
 
-    # Service alert policies live under a sentinel cluster id (Application
-    # Services span clusters); no cluster access resolution or RBAC applies.
-    is_service_cluster = cluster_id == SERVICE_ALERT_CLUSTER_ID
+    # Service/automation alert policies live under sentinel cluster ids (they
+    # span clusters); no cluster access resolution or RBAC applies.
+    is_sentinel_cluster = cluster_id in (SERVICE_ALERT_CLUSTER_ID, AUTOMATION_ALERT_CLUSTER_ID)
 
-    if user and not is_admin(user) and not is_service_cluster and not can_access_cluster(user, cluster_id):
+    if user and not is_admin(user) and not is_sentinel_cluster and not can_access_cluster(user, cluster_id):
         return []
 
     policies = (
@@ -659,7 +663,7 @@ def evaluate_policies_for_cluster(
 
     access = (
         resolve_cluster_access(cluster_id)
-        if not is_service_cluster and should_use_real_k8s(cluster_id)
+        if not is_sentinel_cluster and should_use_real_k8s(cluster_id)
         else None
     )
     updated_rows: List[AlertHistory] = []
@@ -671,6 +675,14 @@ def evaluate_policies_for_cluster(
             continue
 
         alert_type = getattr(policy, "alert_type", "metric") or "metric"
+        if alert_type == "automation":
+            # Event-driven: deploy_automation_service fires/resolves these when
+            # runs fail/succeed. Nothing to evaluate on a schedule — just keep
+            # the policy's bookkeeping fresh so the UI shows it's alive.
+            policies_evaluated = True
+            _record_policy_evaluation(policy, now, "event_driven", None, None, None)
+            continue
+
         if alert_type == "service":
             policies_evaluated = True
             eval_error: Optional[str] = None

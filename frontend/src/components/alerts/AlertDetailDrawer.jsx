@@ -3,6 +3,7 @@ import {
   formatAlertTime,
   getAlertResourceName,
   getAlertTypeLabel,
+  isAutomationAlert,
   isLogAlert,
   isServiceAlert,
 } from "../../lib/alertDisplay.js";
@@ -134,6 +135,49 @@ function ServiceSection({ alert }) {
   );
 }
 
+function AutomationSection({ alert }) {
+  return (
+    <section className="al-dr-sec">
+      <h5>Deploy automation</h5>
+      <dl className="al-kv">
+        {alert.ticketNumber ? (
+          <>
+            <dt>Ticket</dt>
+            <dd className="al-mono">{alert.ticketNumber}</dd>
+          </>
+        ) : null}
+        <dt>Deployment</dt>
+        <dd className="al-mono">{getAlertResourceName(alert)}</dd>
+        {alert.changeSummary ? (
+          <>
+            <dt>Change</dt>
+            <dd className="al-mono">{alert.changeSummary}</dd>
+          </>
+        ) : null}
+        {alert.failedStep ? (
+          <>
+            <dt>Failed step</dt>
+            <dd className="al-mono">{alert.failedStep}</dd>
+          </>
+        ) : null}
+        {alert.jenkinsBuildUrl ? (
+          <>
+            <dt>Jenkins build</dt>
+            <dd>
+              <a href={alert.jenkinsBuildUrl} target="_blank" rel="noreferrer">
+                Open build
+              </a>
+            </dd>
+          </>
+        ) : null}
+      </dl>
+      {alert.error || alert.description ? (
+        <p className="al-dr-desc">{alert.error || alert.description}</p>
+      ) : null}
+    </section>
+  );
+}
+
 /**
  * Slide-over detail drawer for a single alert: why it fired, log/service
  * context, and scope. Works for both firing feed rows and resolved history
@@ -179,7 +223,8 @@ export default function AlertDetailDrawer({ alert, clusterLabel, onClose, onView
       })()
     : formatFiringDuration(alert.firedAt);
   const conditions = Array.isArray(alert.triggeredConditions) ? alert.triggeredConditions : [];
-  const showConditions = !isLogAlert(alert) && !isServiceAlert(alert) && conditions.length > 0;
+  const showConditions =
+    !isLogAlert(alert) && !isServiceAlert(alert) && !isAutomationAlert(alert) && conditions.length > 0;
 
   return (
     <div className="al-drawer-root" role="presentation">
@@ -221,7 +266,11 @@ export default function AlertDetailDrawer({ alert, clusterLabel, onClose, onView
               <ConditionsTable conditions={conditions} />
             </section>
           ) : null}
-          {!showConditions && !isLogAlert(alert) && !isServiceAlert(alert) && alert.description ? (
+          {!showConditions &&
+          !isLogAlert(alert) &&
+          !isServiceAlert(alert) &&
+          !isAutomationAlert(alert) &&
+          alert.description ? (
             <section className="al-dr-sec">
               <h5>Why it fired</h5>
               <p className="al-dr-desc">{alert.description}</p>
@@ -230,6 +279,7 @@ export default function AlertDetailDrawer({ alert, clusterLabel, onClose, onView
 
           {isLogAlert(alert) ? <LogSection alert={alert} /> : null}
           {isServiceAlert(alert) ? <ServiceSection alert={alert} /> : null}
+          {isAutomationAlert(alert) ? <AutomationSection alert={alert} /> : null}
 
           <section className="al-dr-sec">
             <h5>Scope</h5>

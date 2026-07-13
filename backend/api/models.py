@@ -2031,6 +2031,13 @@ class JenkinsConnection(db.Model):
     router_job_path = db.Column(db.String(255), nullable=False, default="")
     verify_tls = db.Column(db.Boolean, nullable=False, default=True)
 
+    # Which parameters buildWithParameters carries. Routers that aren't
+    # parameterized with all of APP/NAMESPACE/TAG can have the extras turned
+    # off (Jenkins drops-or-rejects undeclared parameters depending on setup).
+    send_param_app = db.Column(db.Boolean, nullable=False, default=True)
+    send_param_namespace = db.Column(db.Boolean, nullable=False, default=True)
+    send_param_tag = db.Column(db.Boolean, nullable=False, default=True)
+
     # Automation behaviour. ``auto_run_tickets`` is the DEFAULT for clusters not
     # listed in ``auto_run_clusters`` — a per-cluster override map
     # ``{cluster_id: "auto" | "manual"}`` (public id strings, like the

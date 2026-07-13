@@ -144,11 +144,17 @@ def rollout_health(cluster_id: str, namespace: str, name: str) -> Dict[str, Any]
     """Read a deployment's live rollout health, generation-guarded.
 
     Returns ``{"observedCurrent": bool, "desired": int, "ready": int,
-    "updated": int}``. ``observedCurrent`` is False while the deployment
-    controller has not yet observed the latest spec — the replica counters then
-    still describe the PREVIOUS template and must not be trusted (the same
-    guard ``kubectl rollout status`` applies). Raises ``K8sCommandError`` /
-    ``ValueError`` when the deployment can't be read.
+    "updated": int, "total": int, "available": int}``. ``observedCurrent`` is
+    False while the deployment controller has not yet observed the latest
+    spec — the replica counters then still describe the PREVIOUS template and
+    must not be trusted (the same guard ``kubectl rollout status`` applies).
+
+    Callers judging rollout completion need ``total`` and ``available``, not
+    just ``ready``/``updated``: ``ready`` counts pods of EVERY ReplicaSet (a
+    still-serving old pod satisfies it) and ``updated`` counts new-template
+    pods regardless of readiness (a crashlooping new pod satisfies it), so
+    those two alone read green on a stuck rolling update. Raises
+    ``K8sCommandError`` / ``ValueError`` when the deployment can't be read.
     """
     import json
 
@@ -168,6 +174,8 @@ def rollout_health(cluster_id: str, namespace: str, name: str) -> Dict[str, Any]
         "desired": int((doc.get("spec") or {}).get("replicas") or 0),
         "ready": int(status.get("readyReplicas") or 0),
         "updated": int(status.get("updatedReplicas") or 0),
+        "total": int(status.get("replicas") or 0),
+        "available": int(status.get("availableReplicas") or 0),
     }
 
 

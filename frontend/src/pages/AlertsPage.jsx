@@ -35,6 +35,7 @@ const TYPE_FILTERS = [
   { key: "metric", label: "Metric" },
   { key: "log", label: "Log" },
   { key: "service", label: "Service" },
+  { key: "automation", label: "Automation" },
 ];
 
 function IconSearch(props) {
@@ -54,6 +55,7 @@ function alertMatchesQuery(alert, query) {
     alert.pod,
     alert.resourceName,
     alert.serviceName,
+    alert.ticketNumber,
     alert.matchedPattern,
     alert.description,
   ]

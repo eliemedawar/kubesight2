@@ -126,6 +126,7 @@ const LAST_RESULT_LABELS = {
   met: "Met",
   not_met: "Not met",
   error: "Error",
+  event_driven: "Event-driven",
 };
 
 function PolicyLastResult({ policy }) {
@@ -163,9 +164,18 @@ const SERVICE_TRIGGER_FALLBACK = [
 ];
 
 const APP_SERVICES_CLUSTER_LABEL = "App Services";
+const AUTOMATION_CLUSTER_LABEL = "Deploy Automation";
+
+// Sentinel cluster ids used by cluster-agnostic policy types (must match the
+// backend's alert_policy_catalog values).
+const SENTINEL_CLUSTER_IDS = ["__app_services__", "__deploy_automation__"];
 
 function isServicePolicyRow(policy) {
   return policy?.alertType === "service";
+}
+
+function isAutomationPolicyRow(policy) {
+  return policy?.alertType === "automation";
 }
 
 const EMPTY_POLICY = {
@@ -234,10 +244,14 @@ function PolicyFormModal({
     setForm((previous) => ({
       ...previous,
       alertType: nextType,
-      // A service policy stores the sentinel cluster id; switching back to a
-      // cluster-scoped type must force a real cluster selection.
+      // Service/automation policies store sentinel cluster ids; switching back
+      // to a cluster-scoped type must force a real cluster selection.
       clusterId:
-        nextType !== "service" && previous.clusterId === "__app_services__" ? "" : previous.clusterId,
+        nextType !== "service" &&
+        nextType !== "automation" &&
+        SENTINEL_CLUSTER_IDS.includes(previous.clusterId)
+          ? ""
+          : previous.clusterId,
       logConfig: previous.logConfig || { ...DEFAULT_LOG_CONFIG },
       serviceConfig: previous.serviceConfig || { ...DEFAULT_SERVICE_CONFIG },
     }));
@@ -269,6 +283,7 @@ function PolicyFormModal({
   const metrics = catalog?.metrics || [];
   const isLogPolicy = form.alertType === "log";
   const isServicePolicy = form.alertType === "service";
+  const isAutomationPolicy = form.alertType === "automation";
   const serviceConfig = form.serviceConfig || catalog?.defaultServiceConfig || DEFAULT_SERVICE_CONFIG;
   const applicationServices = catalog?.applicationServices || [];
   const serviceTriggerLevels = catalog?.serviceAlertTriggerLevels?.length
@@ -368,7 +383,7 @@ function PolicyFormModal({
               required
             />
           </label>
-          {!isServicePolicy ? (
+          {!isServicePolicy && !isAutomationPolicy ? (
             <label>
               Cluster
               <SearchableSelect
@@ -395,7 +410,7 @@ function PolicyFormModal({
                 ))}
               </SearchableSelect>
             </label>
-          ) : (
+          ) : isServicePolicy ? (
             <label>
               Application Service
               <SearchableSelect
@@ -419,7 +434,7 @@ function PolicyFormModal({
                 ))}
               </SearchableSelect>
             </label>
-          )}
+          ) : null}
           <label className="full-width">
             Description
             <textarea
@@ -437,6 +452,7 @@ function PolicyFormModal({
               <option value="metric">Metric</option>
               <option value="log">Log</option>
               <option value="service">Service Health</option>
+              <option value="automation">Deploy Automation</option>
             </SearchableSelect>
           </label>
           <label>
@@ -460,22 +476,24 @@ function PolicyFormModal({
               <option value="disabled">Disabled</option>
             </SearchableSelect>
           </label>
-          <label>
-            Evaluation Interval
-            <SearchableSelect
-              value={form.evaluationIntervalSeconds ?? DEFAULT_EVALUATION_INTERVAL_SECONDS}
-              onChange={(e) => handleEvaluationIntervalChange(Number(e.target.value))}
-            >
-              {(catalog?.evaluationIntervals || EVALUATION_INTERVAL_OPTIONS).map((option) => (
-                <option key={option.seconds} value={option.seconds}>
-                  Every {option.label}
-                </option>
-              ))}
-            </SearchableSelect>
-          </label>
+          {!isAutomationPolicy ? (
+            <label>
+              Evaluation Interval
+              <SearchableSelect
+                value={form.evaluationIntervalSeconds ?? DEFAULT_EVALUATION_INTERVAL_SECONDS}
+                onChange={(e) => handleEvaluationIntervalChange(Number(e.target.value))}
+              >
+                {(catalog?.evaluationIntervals || EVALUATION_INTERVAL_OPTIONS).map((option) => (
+                  <option key={option.seconds} value={option.seconds}>
+                    Every {option.label}
+                  </option>
+                ))}
+              </SearchableSelect>
+            </label>
+          ) : null}
         </div>
 
-        {!isServicePolicy ? (
+        {!isServicePolicy && !isAutomationPolicy ? (
         <section className="alert-policy-section">
           <h3>Scope</h3>
           <p className="muted alert-policy-routing-hint">
@@ -493,7 +511,17 @@ function PolicyFormModal({
         </section>
         ) : null}
 
-        {isServicePolicy ? (
+        {isAutomationPolicy ? (
+        <section className="alert-policy-section">
+          <h3>Trigger</h3>
+          <p className="muted alert-policy-routing-hint">
+            Fires whenever a ticket-driven deploy automation run fails — registry check, Jenkins
+            build, image verification, approval, deploy, or rollout. Alerts resolve automatically
+            when a later run deploys the same target successfully. Pick the receivers below to
+            choose who gets notified when a ticket fails.
+          </p>
+        </section>
+        ) : isServicePolicy ? (
         <section className="alert-policy-section">
           <h3>Trigger</h3>
           <p className="muted alert-policy-routing-hint">
@@ -939,20 +967,39 @@ export default function AlertPoliciesPage({
       policies.map((policy) => ({
         id: policy.id,
         name: policy.name,
-        cluster: isServicePolicyRow(policy) ? APP_SERVICES_CLUSTER_LABEL : policy.clusterId,
-        alertType: isServicePolicyRow(policy) ? "Service" : policy.alertType === "log" ? "Log" : "Metric",
+        cluster: isServicePolicyRow(policy)
+          ? APP_SERVICES_CLUSTER_LABEL
+          : isAutomationPolicyRow(policy)
+            ? AUTOMATION_CLUSTER_LABEL
+            : policy.clusterId,
+        alertType: isServicePolicyRow(policy)
+          ? "Service"
+          : isAutomationPolicyRow(policy)
+            ? "Automation"
+            : policy.alertType === "log"
+              ? "Log"
+              : "Metric",
         severity: policy.severity,
         status: policy.enabled ? "Enabled" : "Disabled",
-        logic: policy.alertType === "log" ? "—" : policy.conditionLogic === "all" ? "ALL" : "ANY",
+        logic:
+          policy.alertType === "log" || isAutomationPolicyRow(policy)
+            ? "—"
+            : policy.conditionLogic === "all"
+              ? "ALL"
+              : "ANY",
         conditions: isServicePolicyRow(policy)
           ? `${policy.serviceName || "All services"} · ${
               policy.serviceConfig?.triggerOn === "degraded" ? "degraded or down" : "down"
             }`
-          : policy.alertType === "log"
-            ? policy.logConfig?.pattern || "—"
-            : `${(policy.conditions || []).length} rule(s)`,
+          : isAutomationPolicyRow(policy)
+            ? "Any failed deploy run"
+            : policy.alertType === "log"
+              ? policy.logConfig?.pattern || "—"
+              : `${(policy.conditions || []).length} rule(s)`,
         receivers: formatNotificationDestinations(policy),
-        evaluationInterval: formatEvaluationIntervalShort(policy),
+        evaluationInterval: isAutomationPolicyRow(policy)
+          ? "Event-driven"
+          : formatEvaluationIntervalShort(policy),
         lastEval: <PolicyLastEvalCell policy={policy} />,
         actions: policy,
       })),

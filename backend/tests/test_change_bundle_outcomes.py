@@ -187,6 +187,7 @@ def test_watch_failure_rolls_back_and_notifies(app, monkeypatch):
         "api.services.deployment_service.rollout_health",
         lambda cluster_id, namespace, name: {
             "observedCurrent": True, "desired": 2, "ready": 0, "updated": 2,
+            "total": 2, "available": 0,
         },
     )
     undo_calls = []
@@ -236,6 +237,7 @@ def test_watch_waits_on_stale_generation(app, monkeypatch):
         "api.services.deployment_service.rollout_health",
         lambda cluster_id, namespace, name: {
             "observedCurrent": False, "desired": 2, "ready": 2, "updated": 2,
+            "total": 2, "available": 2,
         },
     )
 
@@ -245,3 +247,37 @@ def test_watch_waits_on_stale_generation(app, monkeypatch):
     row = db.session.get(BundleRolloutWatch, watch.id)
     assert row.status == "watching"
     assert "observe" in (row.detail or "")
+
+
+def test_watch_not_fooled_by_stuck_rolling_update(app, monkeypatch):
+    """ready counts the OLD pod (still serving) and updated counts the
+    crashlooping NEW pod — the watch must stay watching until the old pod is
+    gone and the new one is available."""
+    bundle = _make_bundle(None, status="completed", with_item=False)
+    watch = BundleRolloutWatch(
+        bundle_id=bundle.id,
+        cluster_id=CLUSTER,
+        namespace=NAMESPACE,
+        deployment_name=DEPLOYMENT,
+        started_at=datetime.now(timezone.utc),
+    )
+    db.session.add(watch)
+    db.session.commit()
+
+    monkeypatch.setattr(
+        "api.services.change_bundle_executor.should_use_real_k8s", lambda cid=None: True
+    )
+    monkeypatch.setattr(
+        "api.services.deployment_service.rollout_health",
+        lambda cluster_id, namespace, name: {
+            "observedCurrent": True, "desired": 1, "ready": 1, "updated": 1,
+            "total": 2, "available": 1,
+        },
+    )
+
+    from api.services.change_bundle_executor import watch_bundle_rollouts
+
+    watch_bundle_rollouts()
+    row = db.session.get(BundleRolloutWatch, watch.id)
+    assert row.status == "watching", "the old pod's readiness must not mark the watch healthy"
+    assert "old pod" in (row.detail or "")

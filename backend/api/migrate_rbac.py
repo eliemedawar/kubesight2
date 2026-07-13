@@ -577,6 +577,10 @@ def _migrate_deploy_automation_columns() -> None:
         _add_column_if_missing("jenkins_connection", "rollback_on_failure", "BOOLEAN DEFAULT true")
         # Operator-pinned registry for the automation's image checks (2026-07-13).
         _add_column_if_missing("jenkins_connection", "registry_connection_id", "INTEGER")
+        # Per-parameter router contract toggles (2026-07-13).
+        _add_column_if_missing("jenkins_connection", "send_param_app", "BOOLEAN DEFAULT true")
+        _add_column_if_missing("jenkins_connection", "send_param_namespace", "BOOLEAN DEFAULT true")
+        _add_column_if_missing("jenkins_connection", "send_param_tag", "BOOLEAN DEFAULT true")
     if "deploy_automation_runs" in tables:
         _add_column_if_missing("deploy_automation_runs", "rollout_started_at", "DATETIME")
         _add_column_if_missing("deploy_automation_runs", "ticket_tag", "VARCHAR(200)")

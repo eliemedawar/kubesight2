@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 from ..access_engine import can_access_cluster, is_admin
 from ..alert_policy_catalog import (
     ALL_SERVICES_ID,
+    AUTOMATION_ALERT_CLUSTER_ID,
     CONDITION_LOGIC,
     DEFAULT_EVALUATION_INTERVAL_SECONDS,
     SERVICE_ALERT_CLUSTER_ID,
@@ -61,12 +62,12 @@ def _trigger_policy_evaluation(policy: AlertPolicy, user: Optional[User] = None)
 
 
 def _user_can_access_policy_cluster(user: Optional[User], cluster_id: str) -> bool:
-    """Cluster-level RBAC for a policy. Service alert policies live under a
-    sentinel cluster id (Application Services span clusters), so they are gated
+    """Cluster-level RBAC for a policy. Service and automation alert policies
+    live under sentinel cluster ids (they span clusters), so they are gated
     only by the route-level alerts:view/manage permission."""
     if not user or is_admin(user):
         return True
-    if cluster_id == SERVICE_ALERT_CLUSTER_ID:
+    if cluster_id in (SERVICE_ALERT_CLUSTER_ID, AUTOMATION_ALERT_CLUSTER_ID):
         return True
     return can_access_cluster(user, cluster_id)
 
@@ -277,16 +278,17 @@ def _validate_payload(
     if not partial or "name" in payload:
         if not str(payload.get("name") or "").strip():
             return "Policy name is required"
-    if alert_type != "service":
-        # Service policies target Application Services (sentinel cluster id),
-        # so no cluster selection is required for them.
+    if alert_type not in ("service", "automation"):
+        # Service/automation policies live under sentinel cluster ids, so no
+        # cluster selection is required for them.
         cluster_in_payload = str(payload.get("clusterId") or "").strip()
+        sentinel_ids = (SERVICE_ALERT_CLUSTER_ID, AUTOMATION_ALERT_CLUSTER_ID)
         if not partial or "clusterId" in payload:
-            if not cluster_in_payload or cluster_in_payload == SERVICE_ALERT_CLUSTER_ID:
+            if not cluster_in_payload or cluster_in_payload in sentinel_ids:
                 return "Cluster is required"
-        elif existing is not None and existing.cluster_id == SERVICE_ALERT_CLUSTER_ID:
-            # Switching an existing service policy back to metric/log needs a
-            # real cluster; its stored cluster id is the sentinel.
+        elif existing is not None and existing.cluster_id in sentinel_ids:
+            # Switching an existing service/automation policy back to metric or
+            # log needs a real cluster; its stored cluster id is a sentinel.
             return "Cluster is required"
     if "severity" in payload or not partial:
         severity = str(payload.get("severity") or "warning").lower()
@@ -315,7 +317,7 @@ def _validate_payload(
             error = validate_service_config(payload.get("serviceConfig"))
             if error:
                 return error
-    if alert_type != "service" and ("scope" in payload or not partial):
+    if alert_type not in ("service", "automation") and ("scope" in payload or not partial):
         error = validate_scope(payload.get("scope") or {})
         if error:
             return error
@@ -368,7 +370,9 @@ def list_policies(user: Optional[User], cluster_id: Optional[str] = None) -> Lis
 
     query = AlertPolicy.query.order_by(AlertPolicy.name.asc())
     if cluster_id:
-        query = query.filter(AlertPolicy.cluster_id.in_((cluster_id, SERVICE_ALERT_CLUSTER_ID)))
+        query = query.filter(
+            AlertPolicy.cluster_id.in_((cluster_id, SERVICE_ALERT_CLUSTER_ID, AUTOMATION_ALERT_CLUSTER_ID))
+        )
     policies = query.all()
     if not user or is_admin(user):
         return [_policy_dict(p) for p in policies]
@@ -391,6 +395,8 @@ def create_policy(user: Optional[User], payload: Dict[str, Any]) -> Tuple[Option
     alert_type = normalize_alert_type(payload.get("alertType", "metric"))
     if alert_type == "service":
         cluster_id = SERVICE_ALERT_CLUSTER_ID
+    elif alert_type == "automation":
+        cluster_id = AUTOMATION_ALERT_CLUSTER_ID
     else:
         cluster_id = str(payload.get("clusterId")).strip()
     if not _user_can_access_policy_cluster(user, cluster_id):
@@ -474,6 +480,13 @@ def update_policy(
         if "alertType" in payload:
             policy.conditions = []
             policy.service_config = None
+    elif policy.alert_type == "automation":
+        # Automation policies carry no per-type config — severity + receivers
+        # are the whole rule.
+        if "alertType" in payload:
+            policy.conditions = []
+            policy.log_config = None
+            policy.service_config = None
     else:
         if "serviceConfig" in payload:
             policy.service_config = normalize_service_config(payload.get("serviceConfig"))
@@ -484,6 +497,8 @@ def update_policy(
             policy.log_config = None
     if policy.alert_type == "service":
         policy.cluster_id = SERVICE_ALERT_CLUSTER_ID
+    elif policy.alert_type == "automation":
+        policy.cluster_id = AUTOMATION_ALERT_CLUSTER_ID
     if "scope" in payload:
         policy.scope = normalize_scope(payload.get("scope"))
     if "showOnDashboard" in payload or "notificationChannels" in payload:

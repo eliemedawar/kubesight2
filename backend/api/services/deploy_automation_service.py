@@ -32,6 +32,7 @@ convention for scheduler-driven work).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from datetime import datetime, timedelta, timezone
@@ -53,6 +54,8 @@ from ..models import (
 from ..secret_encryption import decrypt_secret, encrypt_secret
 from . import jenkins_client
 from .jenkins_client import JenkinsConfig, JenkinsError
+
+logger = logging.getLogger(__name__)
 
 ACTIVE_STATUSES = (
     "queued",
@@ -121,6 +124,9 @@ def serialize_jenkins(row: JenkinsConnection) -> Dict[str, Any]:
         "buildTokenConfigured": bool(row.build_token_encrypted),
         "routerJobPath": row.router_job_path or "",
         "verifyTls": bool(row.verify_tls),
+        "sendParamApp": row.send_param_app is not False,
+        "sendParamNamespace": row.send_param_namespace is not False,
+        "sendParamTag": row.send_param_tag is not False,
         "autoRunTickets": bool(row.auto_run_tickets),
         "autoRunClusters": row.auto_run_clusters or {},
         "imageTagTemplate": row.image_tag_template or "{tag}",
@@ -159,6 +165,19 @@ def update_jenkins(payload: Dict[str, Any]) -> Dict[str, Any]:
         row.verify_tls = bool(payload.get("verifyTls"))
     if "autoRunTickets" in payload:
         row.auto_run_tickets = bool(payload.get("autoRunTickets"))
+    for key, attr in (
+        ("sendParamApp", "send_param_app"),
+        ("sendParamNamespace", "send_param_namespace"),
+        ("sendParamTag", "send_param_tag"),
+    ):
+        if key in payload:
+            setattr(row, attr, bool(payload.get(key)))
+    # NULL (pre-migration row) means "send" — only three explicit offs are invalid.
+    if all(
+        v is False
+        for v in (row.send_param_app, row.send_param_namespace, row.send_param_tag)
+    ):
+        errors.append("At least one router parameter (APP, NAMESPACE or TAG) must be sent.")
     if "rollbackOnFailure" in payload:
         row.rollback_on_failure = bool(payload.get("rollbackOnFailure"))
     if "autoRunClusters" in payload:
@@ -307,6 +326,12 @@ def _fail(run: DeployAutomationRun, step_key: str, message: str) -> None:
         details={"ticket": run.ticket_number, "deployment": run.deployment_name, "error": message},
         commit=False,
     )
+    try:
+        from .automation_alert_service import fire_run_failure_alerts
+
+        fire_run_failure_alerts(run)
+    except Exception:  # alerting must never mask the failure itself
+        logger.exception("Automation failure alerting failed: run_id=%s", run.id)
     _report_outcome(run, "failed")
 
 
@@ -1015,16 +1040,17 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
         # The verified router contract (2026-07-08): APP / TAG / NAMESPACE, with
         # the job-level `token` appended by the client. APP is the Kubernetes
         # deployment name; TAG is the RAW ticket tag — the router owns the naming
-        # convention (e.g. v{tag}-prod).
+        # convention (e.g. v{tag}-prod). Each parameter can be turned off in the
+        # Jenkins settings for routers that aren't parameterized with all three.
         app = run.deployment_name
-        queue_url = jenkins_client.trigger_build(
-            _to_client_config(jrow),
-            {
-                "APP": app,
-                "TAG": run.ticket_tag or run.image_tag,
-                "NAMESPACE": run.namespace,
-            },
-        )
+        params: Dict[str, str] = {}
+        if jrow.send_param_app is not False:
+            params["APP"] = app
+        if jrow.send_param_tag is not False:
+            params["TAG"] = run.ticket_tag or run.image_tag
+        if jrow.send_param_namespace is not False:
+            params["NAMESPACE"] = run.namespace
+        queue_url = jenkins_client.trigger_build(_to_client_config(jrow), params)
     except JenkinsError as exc:
         _fail(run, "build", f"Could not trigger the router build: {exc}")
         return
@@ -1377,11 +1403,17 @@ def _complete_deployed(run: DeployAutomationRun, pods_detail: str) -> None:
         },
         commit=False,
     )
+    try:
+        from .automation_alert_service import resolve_run_success_alerts
+
+        resolve_run_success_alerts(run)
+    except Exception:  # alert bookkeeping must never affect the run
+        logger.exception("Automation alert resolution failed: run_id=%s", run.id)
     _report_outcome(run, "deployed")
 
 
 def _do_check_pods(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
-    """verifying_rollout → deployed once readyReplicas covers the desired count.
+    """verifying_rollout → deployed once the NEW pods cover the desired count.
 
     Read errors during a rollout are treated as "still waiting" (pods churn,
     apiservers hiccup) — only the rollout timeout fails the run.
@@ -1406,14 +1438,26 @@ def _do_check_pods(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
             # read fully ready (`kubectl rollout status` uses this guard).
             detail = "waiting for the controller to observe the new spec"
         else:
-            desired, ready, updated = health["desired"], health["ready"], health["updated"]
+            desired, updated = health["desired"], health["updated"]
+            total, available = health["total"], health["available"]
             if desired == 0:
                 _complete_deployed(run, "deployment is scaled to 0 — no pods expected")
                 return
-            if ready >= desired and updated >= desired:
-                _complete_deployed(run, f"{ready}/{desired} ready")
+            # ready/updated alone are not enough: during a rolling update the
+            # OLD pod keeps readyReplicas satisfied while the crashlooping NEW
+            # pod counts as updated. Completion = the full `kubectl rollout
+            # status` condition: all pods on the new template, no old pods
+            # left, and the new pods available.
+            if updated >= desired and total <= updated and available >= updated:
+                _complete_deployed(run, f"{available}/{desired} ready")
                 return
-            detail = f"{ready}/{desired} ready ({updated}/{desired} on the new image)"
+            what = "spec" if _is_env_run(run) else "image"
+            if updated < desired:
+                detail = f"{updated}/{desired} pods updated to the new {what}"
+            elif total > updated:
+                detail = f"waiting for {total - updated} old pod(s) to terminate"
+            else:
+                detail = f"{available}/{updated} new pods available"
     except (K8sCommandError, ValueError) as exc:
         detail = f"could not read pod status — retrying: {exc}"
 

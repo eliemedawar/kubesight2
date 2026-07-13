@@ -77,6 +77,9 @@ export function getAlertTypeLabel(alert) {
   if (type === "service") {
     return "Service";
   }
+  if (type === "automation") {
+    return "Automation";
+  }
   return "Metric";
 }
 
@@ -88,13 +91,17 @@ export function isServiceAlert(alert) {
   return alert?.alertType === "service";
 }
 
+export function isAutomationAlert(alert) {
+  return alert?.alertType === "automation";
+}
+
 export function formatTriggeredConditions(alert) {
   if (isLogAlert(alert)) {
     return alert?.matchedPattern ? `Pattern: ${alert.matchedPattern}` : alert?.description || "—";
   }
-  if (isServiceAlert(alert)) {
-    // Service alert descriptions are already a full sentence naming the
-    // service and the unhealthy component/deployment.
+  if (isServiceAlert(alert) || isAutomationAlert(alert)) {
+    // Service/automation alert descriptions are already a full sentence naming
+    // the service or ticket and what went wrong.
     return alert?.description || "—";
   }
   const conditions = alert?.triggeredConditions;
