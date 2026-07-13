@@ -225,6 +225,42 @@ def test_image_host_alias_accepts_comma_string(app):
         assert registry_service.match_connection("reg2.areeba.com") is not None
 
 
+def test_match_connection_preferred_id_breaks_host_tie(app, monkeypatch):
+    # Two registries fronted by the same DNS name, different servers.
+    first = _make_conn(app, name="Nexus A", baseUrl="10.1.1.5", imageHosts=["registry.areeba.com"])
+    second = _make_conn(app, name="Nexus B", baseUrl="10.2.2.5", imageHosts=["registry.areeba.com"])
+    other = _make_conn(app, name="Quay", baseUrl="quay.example.com")
+    with app.app_context():
+        # Default: first-created wins.
+        assert registry_service.match_connection("registry.areeba.com").id == first["id"]
+        # Pinned: the preferred connection wins the tie.
+        matched = registry_service.match_connection("registry.areeba.com", preferred_id=second["id"])
+        assert matched.id == second["id"]
+        # A pin that doesn't own the host falls back to the default scan.
+        matched = registry_service.match_connection("registry.areeba.com", preferred_id=other["id"])
+        assert matched.id == first["id"]
+        # A disabled pin also falls back.
+        registry_service.update_connection(second["id"], {"enabled": False})
+        matched = registry_service.match_connection("registry.areeba.com", preferred_id=second["id"])
+        assert matched.id == first["id"]
+
+    # check_image actually queries the pinned connection's server.
+    seen = {}
+
+    def fake(req, **kw):
+        seen["url"] = req.full_url
+        return _FakeResp(200)
+
+    monkeypatch.setattr(registry_client.urllib.request, "urlopen", fake)
+    with app.app_context():
+        registry_service.update_connection(second["id"], {"enabled": True})
+        result = registry_service.check_image(
+            "registry.areeba.com/team/api:1.0", preferred_connection_id=second["id"]
+        )
+        assert result["status"] == "found"
+        assert "10.2.2.5" in seen["url"]
+
+
 def test_check_images_blocks_missing(app, monkeypatch):
     _make_conn(app, enforcement="block")
 

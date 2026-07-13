@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { listRegistries } from "../../api/registriesApi.js";
 import { getZohoSourceClusters } from "../../api/zohoApi.js";
 import { IconAlert, IconCheck } from "./icons.jsx";
 import { CopyButton } from "./common.jsx";
@@ -528,8 +529,10 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
     bundleWindowHours: jenkins?.bundleWindowHours || 24,
     rolloutTimeoutMinutes: jenkins?.rolloutTimeoutMinutes || 15,
     rollbackOnFailure: jenkins?.rollbackOnFailure !== false,
+    registryConnectionId: jenkins?.registryConnectionId || "",
   }));
   const [clusters, setClusters] = useState([]);
+  const [registries, setRegistries] = useState([]);
   const set = (k, v) => setForm((prev) => ({ ...prev, [k]: v }));
 
   // The tab mounts fresh each visit; jenkins may still be loading then — seed
@@ -553,11 +556,13 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
         bundleWindowHours: jenkins.bundleWindowHours || 24,
         rolloutTimeoutMinutes: jenkins.rolloutTimeoutMinutes || 15,
         rollbackOnFailure: jenkins.rollbackOnFailure !== false,
+        registryConnectionId: jenkins.registryConnectionId || "",
       }));
     }
   }, [jenkins]);
 
-  // Per-cluster auto-start overrides need the selectable cluster list.
+  // Per-cluster auto-start overrides need the selectable cluster list; the
+  // image-check pin needs the linked registries.
   useEffect(() => {
     let cancelled = false;
     getZohoSourceClusters()
@@ -566,6 +571,13 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
       })
       .catch(() => {
         /* section simply stays empty */
+      });
+    listRegistries()
+      .then((res) => {
+        if (!cancelled) setRegistries(res?.items || []);
+      })
+      .catch(() => {
+        /* dropdown falls back to Auto only */
       });
     return () => {
       cancelled = true;
@@ -597,6 +609,7 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
       rollbackOnFailure: form.rollbackOnFailure,
       autoRunClusters: form.autoRunClusters,
       imageTagTemplate: form.imageTagTemplate.trim() || "{tag}",
+      registryConnectionId: form.registryConnectionId ? Number(form.registryConnectionId) : null,
     };
     if (form.apiToken.trim()) payload.apiToken = form.apiToken.trim();
     if (form.buildToken.trim()) payload.buildToken = form.buildToken.trim();
@@ -722,6 +735,26 @@ function JenkinsSection({ canManage, jenkins, onSave, saving, onTest, testing, r
           <span className="field-hint">
             <code>{"v{tag}-prod"}</code> ⇒ ticket <code>1.72.1</code> checks/deploys{" "}
             <code>v1.72.1-prod</code>; Jenkins always gets the raw tag.
+          </span>
+        </label>
+        <label>
+          Image-check registry
+          <select
+            value={String(form.registryConnectionId || "")}
+            onChange={(e) => set("registryConnectionId", e.target.value)}
+            disabled={ro}
+          >
+            <option value="">Auto — first linked registry matching the image host</option>
+            {registries.map((r) => (
+              <option key={r.id} value={String(r.id)}>
+                {r.name} ({r.host}){r.enabled ? "" : " — disabled"}
+              </option>
+            ))}
+          </select>
+          <span className="field-hint">
+            When several linked registries claim the same image host (same DNS, different
+            servers), the automation checks this one. Auto keeps the default first-created
+            match.
           </span>
         </label>
         <label className="checkbox-label sg-zh-jcheck">

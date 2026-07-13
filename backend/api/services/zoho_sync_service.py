@@ -33,7 +33,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -825,33 +825,42 @@ def _record_dependency(row: ZohoIntegration, status: str, message: str) -> None:
     db.session.commit()
 
 
-def _sync_dependency_mapping(
+def _delete_dependency_mappings(cfg: ZohoConfig, pairs: List[Tuple[str, str]]) -> None:
+    """Delete every existing mapping matching one of the ``(parentId, childId)`` pairs.
+
+    Zoho refuses to create a mapping whose child field already parents another
+    mapping (HTTP 422 "invalid child Id") — Application sits in the middle of
+    the Environment→Application→Variable chain, so EVERY managed mapping must be
+    gone before any is recreated. Best-effort: the creates that follow are what
+    surface real errors.
+    """
+    wanted = {(str(p), str(c)) for p, c in pairs}
+    try:
+        existing = zoho_client.list_dependency_mappings(cfg)
+        for m in existing.get("data") or []:
+            if (str(m.get("parentId")), str(m.get("childId"))) in wanted:
+                mid = m.get("id")
+                if mid:
+                    zoho_client.delete_dependency_mapping(cfg, str(mid))
+    except ZohoError:
+        pass
+
+
+def _create_dependency_mapping(
     cfg: ZohoConfig, parent_id: str, child_id: str, mappings: Dict[str, List[str]]
 ) -> Optional[str]:
-    """Create/replace one parent→child dependency mapping; returns the new id.
+    """Create one parent→child dependency mapping; returns the new id.
 
     Verified Zoho Desk schema (2026-07-07): ``POST /dependencyMappings`` with
     ``{layoutId, parentId, childId, mappings:{parentValue:[childValues]}}`` — the
     ``mappings`` value is an OBJECT keyed by parent value (an array yields HTTP
-    415). Create-or-replace: delete any existing mapping for this field pair
-    (values go stale as deployments change), then POST fresh. May raise
+    415). The caller must have deleted the chain's prior mappings first (see
+    :func:`_delete_dependency_mappings`) and must create parent-first. May raise
     ZohoError (e.g. 403 without Desk.settings.CREATE) — the caller degrades softly.
     """
     mappings = {parent: children for parent, children in mappings.items() if parent and children}
     if not mappings:
         return None
-
-    # Remove any prior mapping(s) for this parent/child pair so we replace cleanly.
-    try:
-        existing = zoho_client.list_dependency_mappings(cfg)
-        for m in existing.get("data") or []:
-            if str(m.get("parentId")) == str(parent_id) and str(m.get("childId")) == str(child_id):
-                mid = m.get("id")
-                if mid:
-                    zoho_client.delete_dependency_mapping(cfg, str(mid))
-    except ZohoError:
-        pass  # best-effort cleanup; the create below is what matters
-
     body = {
         "layoutId": cfg.layout_id,
         "parentId": str(parent_id),
@@ -882,7 +891,18 @@ def _maybe_sync_cascade(
         return {"status": "skipped", "message": msg}
     try:
         env_map = _namespace_to_labels(entries)
-        new_id = _sync_dependency_mapping(
+        manage_variables = bool(row.sync_variables and row.variable_field_id and vars_by_ns is not None)
+
+        # Delete BOTH managed mappings before creating either, then rebuild
+        # parent-first. Recreating Environment→Application while Application
+        # still parents the Application→Variable mapping trips Zoho's chain
+        # check ("invalid child Id") and used to leave level 1 permanently gone.
+        pairs = [(str(row.environment_field_id), str(row.app_field_id))]
+        if row.variable_field_id:
+            pairs.append((str(row.app_field_id), str(row.variable_field_id)))
+        _delete_dependency_mappings(cfg, pairs)
+
+        new_id = _create_dependency_mapping(
             cfg, str(row.environment_field_id), str(row.app_field_id), env_map
         )
         if new_id:
@@ -890,14 +910,16 @@ def _maybe_sync_cascade(
         parts = [f"Cascade configured for {len(env_map)} namespace(s)."]
 
         # Second level: Application → Variable (only when variables are published).
-        if row.sync_variables and row.variable_field_id and vars_by_ns is not None:
+        if manage_variables:
             var_map = _app_to_variables(entries, vars_by_ns)
-            var_id = _sync_dependency_mapping(
+            var_id = _create_dependency_mapping(
                 cfg, str(row.app_field_id), str(row.variable_field_id), var_map
             )
             if var_id:
                 row.variable_mapping_id = var_id
             parts.append(f"Variable lists mapped for {len(var_map)} application(s).")
+        elif row.variable_field_id and row.variable_mapping_id:
+            row.variable_mapping_id = None  # deleted above, not recreated
 
         message = " ".join(parts)
         _record_dependency(row, "ok", message)
@@ -1239,6 +1261,12 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
             error = "The ticket has both a Tag and a Variable — automation needs exactly one change."
         elif has_variable and not has_value:
             error = "The ticket picks a Variable but has no Value to set it to."
+        elif not has_tag and not has_variable:
+            error = (
+                "The ticket carries no change — neither a Tag nor a Variable/Value arrived. "
+                "If they were filled on the ticket, the Zoho webhook payload is missing those "
+                "fields (it must send cf_tag, plus the Variable/Value custom fields)."
+            )
 
     record.error = error
     record.payload = payload if isinstance(payload, dict) else {"raw": payload}

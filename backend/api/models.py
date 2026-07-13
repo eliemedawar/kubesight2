@@ -2049,6 +2049,11 @@ class JenkinsConnection(db.Model):
     rollout_timeout_minutes = db.Column(db.Integer, nullable=False, default=15)
     # On rollout failure: kubectl rollout undo back to the previous revision.
     rollback_on_failure = db.Column(db.Boolean, nullable=False, default=True)
+    # Pin the automation's image checks to one RegistryConnection. Several linked
+    # registries can claim the same image host (e.g. one DNS name fronting two
+    # Nexus instances); when set and that connection matches the image's host, it
+    # wins over the default first-created-wins scan. Null = auto-match by host.
+    registry_connection_id = db.Column(db.Integer, nullable=True)
 
     last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
     last_test_status = db.Column(db.String(16), nullable=True)

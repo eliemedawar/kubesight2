@@ -10,10 +10,11 @@ const STEPS = [
   { key: "pods", label: "Pod health" },
 ];
 
-// Variable-change runs skip the registry/Jenkins stages; the image_check slot
-// is their "variable check" validation step.
+// Variable-change runs skip the Jenkins build; image_check gates the RUNNING
+// image (the change restarts pods) and the verify slot is the variable check.
 const ENV_STEPS = [
-  { key: "image_check", label: "Variable check" },
+  { key: "image_check", label: "Image check" },
+  { key: "verify", label: "Variable check" },
   { key: "approval", label: "Approval" },
   { key: "deploy", label: "Apply" },
   { key: "pods", label: "Pod health" },

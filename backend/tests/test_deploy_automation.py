@@ -1,8 +1,8 @@
-"""Deploy automation: Jenkins config CRUD + the per-ticket run state machine.
+﻿"""Deploy automation: Jenkins config CRUD + the per-ticket run state machine.
 
 Runs execute against the mock cluster ("prod-us-east" / "payments" /
 "payments-api" from mock_data). Registry + live-YAML reads are monkeypatched at
-their module attributes — the service imports them function-locally, so the
+their module attributes â€” the service imports them function-locally, so the
 patch is picked up at call time.
 """
 
@@ -125,6 +125,39 @@ def test_jenkins_config_roundtrip(client, admin_token):
     assert data["enabled"] is True and data["autoRunTickets"] is True
 
 
+def test_jenkins_registry_pin_roundtrip(client, admin_token, app):
+    """The image-check registry pin must reference a real connection; null = auto."""
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={"registryConnectionId": 424242},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 400
+    assert "registry" in response.get_json()["error"].lower()
+
+    from api.services import registry_service
+
+    with app.app_context():
+        conn = registry_service.create_connection(
+            {"name": "Nexus", "baseUrl": "10.1.1.5", "authMode": "none"}
+        )
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={"registryConnectionId": conn["id"]},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    assert response.get_json()["data"]["registryConnectionId"] == conn["id"]
+
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={"registryConnectionId": None},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    assert response.get_json()["data"]["registryConnectionId"] is None
+
+
 def test_start_run_validations(client, admin_token, app):
     unresolved = _make_ticket(resolved=False)
     body = _start(client, admin_token, unresolved.id, expect=400)
@@ -139,7 +172,7 @@ def test_start_run_validations(client, admin_token, app):
 
 
 def test_run_fails_when_build_needed_but_jenkins_off(client, admin_token, app):
-    """No linked registry (no_connection ⇒ build required) + Jenkins disabled ⇒ clear failure."""
+    """No linked registry (no_connection â‡’ build required) + Jenkins disabled â‡’ clear failure."""
     ticket = _make_ticket()
     run = _start(client, admin_token, ticket.id)
     assert run["status"] == "failed"
@@ -149,10 +182,10 @@ def test_run_fails_when_build_needed_but_jenkins_off(client, admin_token, app):
 
 
 def test_run_bundle_path_when_cluster_requires_approval(client, admin_token, app, monkeypatch):
-    """Image already in the registry ⇒ skip build/verify ⇒ Change Bundle handoff."""
+    """Image already in the registry â‡’ skip build/verify â‡’ Change Bundle handoff."""
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
-        lambda image: {"status": "found", "image": image},
+        lambda image, **kw: {"status": "found", "image": image},
     )
     monkeypatch.setattr(
         "api.services.resource_actions_service.get_resource_yaml",
@@ -177,14 +210,14 @@ def test_run_bundle_path_when_cluster_requires_approval(client, admin_token, app
     item = bundle.items[0]
     assert item.action_type == "edit_deployment"
     assert "ghcr.io/mock/payments:v9.9.9" in item.yaml_preview
-    # Only the image changed — the live spec (replicas, resources) is preserved.
+    # Only the image changed â€” the live spec (replicas, resources) is preserved.
     assert "replicas: 3" in item.yaml_preview
 
     # Duplicate start for the same ticket/deployment is refused while active.
     body = _start(client, admin_token, ticket.id, expect=409)
     assert "already active" in body["error"]
 
-    # Bundle completes (executor's job) → the run lands on deployed.
+    # Bundle completes (executor's job) â†’ the run lands on deployed.
     from api.services.deploy_automation_service import advance_runs
 
     bundle.status = "completed"
@@ -217,7 +250,7 @@ def test_ticket_writeback_on_deploy(client, admin_token, app, monkeypatch):
     calls = {"update": [], "comment": []}
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
-        lambda image: {"status": "found", "image": image},
+        lambda image, **kw: {"status": "found", "image": image},
     )
     monkeypatch.setattr(
         "api.services.zoho_client.resolve_agent_id",
@@ -236,7 +269,7 @@ def test_ticket_writeback_on_deploy(client, admin_token, app, monkeypatch):
 
     run = _start(client, admin_token, ticket.id)
     assert run["status"] == "deployed"
-    # Owner reassigned, deployed status set, comment posted — all on the Desk id.
+    # Owner reassigned, deployed status set, comment posted â€” all on the Desk id.
     assert any(f.get("assigneeId") == "999149000003619001" for _, f in calls["update"])
     assert any(f.get("status") == "Closed" for _, f in calls["update"])
     assert any(f.get("resolution") for _, f in calls["update"])
@@ -249,7 +282,7 @@ def test_ticket_writeback_off_makes_no_calls(client, admin_token, app, monkeypat
     hit = []
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
-        lambda image: {"status": "found", "image": image},
+        lambda image, **kw: {"status": "found", "image": image},
     )
     monkeypatch.setattr(
         "api.services.zoho_client.update_ticket",
@@ -275,7 +308,7 @@ def test_auto_run_respects_per_cluster_overrides(client, admin_token, app):
     started = maybe_auto_run(ticket.id)
     assert started is not None and started["auto"] is True
 
-    # Flip: global ON but the cluster is overridden to manual — nothing starts.
+    # Flip: global ON but the cluster is overridden to manual â€” nothing starts.
     row = JenkinsConnection.query.get(1)
     row.auto_run_tickets = True
     row.auto_run_clusters = {CLUSTER: "manual"}
@@ -288,11 +321,11 @@ def test_auto_run_respects_per_cluster_overrides(client, admin_token, app):
 
 
 def test_run_direct_path_when_no_approval_required(client, admin_token, app, monkeypatch):
-    """Approval-free cluster ⇒ image applied immediately (mock mode), with the
+    """Approval-free cluster â‡’ image applied immediately (mock mode), with the
     ticket's raw tag resolved through the image tag template."""
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
-        lambda image: {"status": "found", "image": image},
+        lambda image, **kw: {"status": "found", "image": image},
     )
     _set_cluster_approvals(0)
     response = client.put(
@@ -327,7 +360,7 @@ def test_router_trigger_contract(client, admin_token, app, monkeypatch):
 
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
-        lambda image: {"status": "not_found", "image": image},
+        lambda image, **kw: {"status": "not_found", "image": image},
     )
     monkeypatch.setattr("api.services.jenkins_client.trigger_build", fake_trigger)
     response = client.put(
@@ -366,17 +399,17 @@ def test_image_tag_template_resolution(app):
 
     row = JenkinsConnection(id=1, image_tag_template="v{tag}-prod")
     assert resolve_image_tag(row, "1.72.1") == "v1.72.1-prod"
-    # Operator already typed the full registry form (any case) → used as-is.
+    # Operator already typed the full registry form (any case) â†’ used as-is.
     assert resolve_image_tag(row, "V1.72.5-prod") == "V1.72.5-prod"
     assert resolve_image_tag(row, "v2.0.0-prod") == "v2.0.0-prod"
-    # No template configured → raw passthrough.
+    # No template configured â†’ raw passthrough.
     assert resolve_image_tag(None, "1.2.3") == "1.2.3"
     row.image_tag_template = "{tag}"
     assert resolve_image_tag(row, "1.2.3") == "1.2.3"
 
 
 def test_rollout_failure_rolls_back_and_emails_admins(client, admin_token, app, monkeypatch):
-    """Pods never come up ⇒ rollout undo + failed run + admin notification."""
+    """Pods never come up â‡’ rollout undo + failed run + admin notification."""
     from api.models import JenkinsConnection, User
     from api.services import deploy_automation_service as svc
 
@@ -433,7 +466,7 @@ def test_rollout_failure_rolls_back_and_emails_admins(client, admin_token, app, 
 
 def test_rollout_watch_ignores_stale_status(client, admin_token, app, monkeypatch):
     """Counters from before the controller observed the new spec (stale
-    observedGeneration) must not mark the run deployed — otherwise the check
+    observedGeneration) must not mark the run deployed â€” otherwise the check
     that runs milliseconds after `kubectl set image` reads the OLD template's
     3/3-ready status and goes green before the rollout even starts."""
     from api.models import JenkinsConnection
@@ -453,7 +486,7 @@ def test_rollout_watch_ignores_stale_status(client, admin_token, app, monkeypatc
     db.session.commit()
 
     payloads = {
-        # Fully "ready" — but the controller hasn't seen generation 7 yet.
+        # Fully "ready" â€” but the controller hasn't seen generation 7 yet.
         "stale": {
             "metadata": {"generation": 7},
             "spec": {"replicas": 3},
@@ -479,7 +512,7 @@ def test_rollout_watch_ignores_stale_status(client, admin_token, app, monkeypatc
     pods = next(s for s in row.steps if s["key"] == "pods")
     assert "observe" in pods["detail"]
 
-    # The controller catches up → the same counters now count.
+    # The controller catches up â†’ the same counters now count.
     current["key"] = "fresh"
     svc.advance_runs()
     row = db.session.get(DeployAutomationRun, run.id)
@@ -487,11 +520,11 @@ def test_rollout_watch_ignores_stale_status(client, admin_token, app, monkeypatc
 
 
 def test_cancel_withdraws_pending_and_approved_bundles(client, admin_token, app, monkeypatch):
-    """Cancelling a run must stop its Change Bundle too — a bundle that outlives
+    """Cancelling a run must stop its Change Bundle too â€” a bundle that outlives
     the run would deploy later with no run watching the rollout."""
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
-        lambda image: {"status": "found", "image": image},
+        lambda image, **kw: {"status": "found", "image": image},
     )
     monkeypatch.setattr(
         "api.services.resource_actions_service.get_resource_yaml",
@@ -503,7 +536,7 @@ def test_cancel_withdraws_pending_and_approved_bundles(client, admin_token, app,
     )
     _set_cluster_approvals(1)
 
-    # Bundle still pending approval → rejected via the normal decide path.
+    # Bundle still pending approval â†’ rejected via the normal decide path.
     ticket = _make_ticket(tag="v4.4.4")
     run = _start(client, admin_token, ticket.id)
     assert run["status"] == "awaiting_approval" and run["bundleId"]
@@ -518,7 +551,7 @@ def test_cancel_withdraws_pending_and_approved_bundles(client, admin_token, app,
     assert bundle.status == "rejected"
     assert "cancelled" in (bundle.rejection_reason or "").lower()
 
-    # Bundle already approved (executor hasn't started) → withdrawn directly.
+    # Bundle already approved (executor hasn't started) â†’ withdrawn directly.
     ticket2 = _make_ticket(tag="v4.4.5")
     run2 = _start(client, admin_token, ticket2.id)
     bundle2 = ChangeBundle.query.get(run2["bundleId"])
@@ -550,7 +583,7 @@ def test_auto_run_is_idempotent_per_ticket(client, admin_token, app, monkeypatch
 
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
-        lambda image: {"status": "found", "image": image},
+        lambda image, **kw: {"status": "found", "image": image},
     )
     _set_cluster_approvals(0)  # direct path, no bundle needed
     db.session.add(
@@ -561,7 +594,7 @@ def test_auto_run_is_idempotent_per_ticket(client, admin_token, app, monkeypatch
 
     first = maybe_auto_run(ticket.id)
     assert first is not None
-    # Second delivery of the SAME ticket → no new run.
+    # Second delivery of the SAME ticket â†’ no new run.
     second = maybe_auto_run(ticket.id)
     assert second is None
     assert DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).count() == 1
@@ -572,7 +605,7 @@ def test_manager_reject_is_authoritative(client, admin_token, app, monkeypatch):
     larger than the required-approval count (the old quorum needed 2 declines)."""
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
-        lambda image: {"status": "found", "image": image},
+        lambda image, **kw: {"status": "found", "image": image},
     )
     monkeypatch.setattr(
         "api.services.resource_actions_service.get_resource_yaml",
@@ -608,7 +641,7 @@ def test_manager_reject_is_authoritative(client, admin_token, app, monkeypatch):
 def test_automation_bundle_requester_label(client, admin_token, app, monkeypatch):
     monkeypatch.setattr(
         "api.services.registry_service.check_image",
-        lambda image: {"status": "found", "image": image},
+        lambda image, **kw: {"status": "found", "image": image},
     )
     monkeypatch.setattr(
         "api.services.resource_actions_service.get_resource_yaml",
@@ -663,8 +696,8 @@ def test_variable_run_validations(client, admin_token, app):
 
 
 def test_variable_run_direct_path(client, admin_token, app):
-    """Approval-free cluster ⇒ the variable change applies immediately (mock
-    mode) with the registry/Jenkins stages skipped."""
+    """Approval-free cluster â‡’ the variable change applies immediately (mock
+    mode): image gate first, then the variable check, no Jenkins build."""
     _set_cluster_approvals(0)
     ticket = _make_ticket(tag="", variable="LOG_LEVEL", value="debug")
 
@@ -672,8 +705,11 @@ def test_variable_run_direct_path(client, admin_token, app):
     assert run["status"] == "deployed", run
     assert run["changeType"] == "env_var"
     assert run["variableName"] == "LOG_LEVEL" and run["variableValue"] == "debug"
+    # Step 1 is the registry gate on the RUNNING image (no linked registry in
+    # tests â‡’ passes with a "cannot verify" note), then the variable check.
+    assert _step(run, "image_check")["status"] == "done"
     assert _step(run, "build")["status"] == "skip"
-    assert _step(run, "verify")["status"] == "skip"
+    assert _step(run, "verify")["status"] == "done"
     assert _step(run, "approval")["status"] == "skip"
     assert _step(run, "deploy")["status"] == "done"
     assert "LOG_LEVEL=debug" in _step(run, "deploy")["detail"]
@@ -681,8 +717,54 @@ def test_variable_run_direct_path(client, admin_token, app):
     assert run["bundleId"] is None
 
 
+def test_variable_run_blocks_when_running_image_missing(client, admin_token, app, monkeypatch):
+    """The image gate: a variable change restarts every pod, so a running image
+    that has been pruned from the registry blocks the edit before anything is
+    applied (no ImagePullBackOff surprise)."""
+    live_deployment = {
+        "metadata": {"generation": 1},
+        "spec": {
+            "replicas": 1,
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "payments-api",
+                            "image": "ghcr.io/mock/payments:v2.8.1",
+                            "env": [{"name": "LOG_LEVEL", "value": "info"}],
+                        }
+                    ]
+                }
+            },
+        },
+        "status": {"observedGeneration": 1, "readyReplicas": 1, "updatedReplicas": 1},
+    }
+    monkeypatch.setattr("api.k8s_provider.should_use_real_k8s", lambda cid=None: True)
+    monkeypatch.setattr("api.k8s_provider.resolve_cluster_access", lambda cid: object())
+    monkeypatch.setattr(
+        "api.k8s_provider._run_for_access", lambda access, args: json.dumps(live_deployment)
+    )
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "not_found", "image": image},
+    )
+    kubectl_calls = []
+    monkeypatch.setattr(
+        "api.services.deployment_service._run_kubectl_for_cluster",
+        lambda cid, args: kubectl_calls.append(args) or "",
+    )
+    _set_cluster_approvals(0)
+
+    ticket = _make_ticket(tag="", variable="LOG_LEVEL", value="debug")
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "failed", run
+    assert _step(run, "image_check")["status"] == "fail"
+    assert "no longer in the registry" in run["error"]
+    assert kubectl_calls == [], "the variable change must not be applied"
+
+
 def test_variable_run_bundle_path(client, admin_token, app, monkeypatch):
-    """Approval cluster ⇒ a Change Bundle carrying the live YAML with ONLY the
+    """Approval cluster â‡’ a Change Bundle carrying the live YAML with ONLY the
     variable's value edited (valueFrom refs + the rest of the spec untouched)."""
     monkeypatch.setattr(
         "api.services.resource_actions_service.get_resource_yaml",
@@ -712,7 +794,7 @@ def test_variable_run_bundle_path(client, admin_token, app, monkeypatch):
 
 
 def test_variable_run_missing_var_fails_bundle_prep(client, admin_token, app, monkeypatch):
-    """The live YAML has no such literal var ⇒ the bundle prep fails clearly."""
+    """The live YAML has no such literal var â‡’ the bundle prep fails clearly."""
     monkeypatch.setattr(
         "api.services.resource_actions_service.get_resource_yaml",
         lambda user, cluster_id, namespace, kind, name: (
@@ -766,19 +848,19 @@ def test_variable_resolve_validates_against_live_spec(client, admin_token, app, 
     )
     _set_cluster_approvals(0)
 
-    # valueFrom var → refused with a pointer to the source.
+    # valueFrom var â†’ refused with a pointer to the source.
     ticket = _make_ticket(tag="", variable="DB_URL", value="postgres://x")
     run = _start(client, admin_token, ticket.id)
     assert run["status"] == "failed"
     assert "valueFrom" in run["error"]
 
-    # Unknown var → failure lists the changeable variables.
+    # Unknown var â†’ failure lists the changeable variables.
     ticket = _make_ticket(tag="", variable="NOPE", value="1")
     run = _start(client, admin_token, ticket.id)
     assert run["status"] == "failed"
     assert "LOG_LEVEL" in run["error"]
 
-    # Literal var → applied, targeting only the defining container.
+    # Literal var â†’ applied, targeting only the defining container.
     ticket = _make_ticket(tag="", variable="LOG_LEVEL", value="debug")
     run = _start(client, admin_token, ticket.id)
     assert run["status"] == "deployed", run
@@ -791,9 +873,9 @@ def test_variable_resolve_validates_against_live_spec(client, admin_token, app, 
 
 
 def test_variable_values_dedupe_case_insensitively(app):
-    """Zoho compares picklist values case-insensitively — 'encryption_key' and
+    """Zoho compares picklist values case-insensitively â€” 'encryption_key' and
     'ENCRYPTION_KEY' must publish as ONE option (HTTP 400 'duplicate value'
-    otherwise), and the App→Variable cascade must reference exactly the
+    otherwise), and the Appâ†’Variable cascade must reference exactly the
     published spellings."""
     from api.services.zoho_sync_service import _app_to_variables, build_variable_values
 
@@ -819,6 +901,83 @@ def test_variable_values_dedupe_case_insensitively(app):
     shared_a = {v for v in mapping["svc-a"] if v.lower() == "encryption_key"}
     shared_b = {v for v in mapping["svc-b"] if v.lower() == "encryption_key"}
     assert shared_a == shared_b
+
+
+def test_cascade_resync_rebuilds_chain_parent_first(app, monkeypatch):
+    """Re-syncing with BOTH mappings already in Zoho must not trip the chain
+    check: Zoho rejects creating Environmentâ†’Application while Application still
+    parents Applicationâ†’Variable (HTTP 422 'invalid child Id'). The sync must
+    delete every managed mapping first, then rebuild parent-first."""
+    from api.db import db
+    from api.models import ZohoIntegration
+    from api.services import zoho_sync_service as svc
+    from api.services.zoho_client import ZohoConfig, ZohoError
+
+    ENV_F, APP_F, VAR_F = "111", "222", "333"
+    row = ZohoIntegration.query.get(1) or ZohoIntegration(id=1)
+    row.cascade_enabled = True
+    row.sync_application = True
+    row.sync_environment = True
+    row.sync_variables = True
+    row.app_field_id = APP_F
+    row.environment_field_id = ENV_F
+    row.variable_field_id = VAR_F
+    db.session.add(row)
+    db.session.commit()
+
+    cfg = ZohoConfig(
+        api_base="https://desk.example/api/v1",
+        accounts_base="https://accounts.example",
+        token_endpoint="https://accounts.example/oauth/v2/token",
+        org_id="1",
+        layout_id="L1",
+        app_field_id=APP_F,
+        client_id="c",
+        client_secret="s",
+        refresh_token="r",
+        environment_field_id=ENV_F,
+    )
+
+    # State after a successful first sync: both cascade levels live in Zoho.
+    store = {
+        "m1": {"id": "m1", "parentId": ENV_F, "childId": APP_F},
+        "m2": {"id": "m2", "parentId": APP_F, "childId": VAR_F},
+    }
+    created_order = []
+
+    def fake_create(cfg_, body):
+        # Zoho's chain validation (observed live): the new mapping's child must
+        # not already be the parent of another mapping.
+        if any(m["parentId"] == body["childId"] for m in store.values()):
+            raise ZohoError(
+                "POST dependency mapping failed (HTTP 422): "
+                "Validation failed for the condition : invalid child Id",
+                422,
+            )
+        new_id = f"new{len(created_order) + 1}"
+        store[new_id] = {"id": new_id, "parentId": body["parentId"], "childId": body["childId"]}
+        created_order.append((body["parentId"], body["childId"]))
+        return {"id": new_id}
+
+    monkeypatch.setattr(
+        "api.services.zoho_client.list_dependency_mappings",
+        lambda cfg_: {"data": list(store.values())},
+    )
+    monkeypatch.setattr(
+        "api.services.zoho_client.delete_dependency_mapping",
+        lambda cfg_, mid: store.pop(mid, None) or {},
+    )
+    monkeypatch.setattr("api.services.zoho_client.create_dependency_mapping", fake_create)
+
+    entries = [{"id": 1, "namespace": "verto-sit", "name": "svc-a", "label": "svc-a"}]
+    vars_by_ns = {"verto-sit": {"svc-a": ["LOG_LEVEL"]}}
+    result = svc._maybe_sync_cascade(row, cfg, entries, vars_by_ns)
+
+    assert result["status"] == "ok", result
+    assert created_order == [(ENV_F, APP_F), (APP_F, VAR_F)], "must rebuild parent-first"
+    pairs = {(m["parentId"], m["childId"]) for m in store.values()}
+    assert pairs == {(ENV_F, APP_F), (APP_F, VAR_F)}
+    assert row.dependency_mapping_id and row.variable_mapping_id
 
 
 def test_variable_resolve_matches_case_insensitively(client, admin_token, app, monkeypatch):
@@ -894,7 +1053,7 @@ def test_resolve_inbound_parses_variable_change(client, admin_token, app):
     )
     assert result["error"] is None and result["variableName"] is None
 
-    # Both a tag and a variable → flagged, automation refuses to guess.
+    # Both a tag and a variable â†’ flagged, automation refuses to guess.
     result = resolve_inbound(
         {
             "ticketId": "vt-3",
@@ -908,7 +1067,7 @@ def test_resolve_inbound_parses_variable_change(client, admin_token, app):
     assert result["resolved"] is True
     assert "exactly one" in result["error"]
 
-    # Variable without a value → flagged too.
+    # Variable without a value â†’ flagged too.
     result = resolve_inbound(
         {
             "ticketId": "vt-4",
@@ -919,10 +1078,36 @@ def test_resolve_inbound_parses_variable_change(client, admin_token, app):
     )
     assert "no Value" in result["error"]
 
+    # No change at all (webhook payload missing the fields) â†’ flagged, so the
+    # operator sees WHY nothing ran instead of a silent dash.
+    result = resolve_inbound(
+        {
+            "ticketId": "vt-5",
+            "cf_application": DEPLOYMENT,
+            "cf_environment": NAMESPACE,
+        }
+    )
+    assert result["resolved"] is True
+    assert "carries no change" in result["error"]
+
+    # The user's real field api name arrives as cf_env_variable â€” parsed too.
+    result = resolve_inbound(
+        {
+            "ticketId": "vt-6",
+            "cf_application": DEPLOYMENT,
+            "cf_environment": NAMESPACE,
+            "cf_env_variable": "LOG_LEVEL",
+            "cf_value": "debug",
+        }
+    )
+    assert result["variableName"] == "LOG_LEVEL"
+    assert result["variableValue"] == "debug"
+    assert result["error"] is None
+
 
 def test_inbound_log_pruned_to_newest_10(client, admin_token, app):
     """Every webhook delivery trims the inbound log to the 10 newest tickets,
-    deleting pruned tickets' finished runs — but never a ticket whose run is
+    deleting pruned tickets' finished runs â€” but never a ticket whose run is
     still active (write-back + duplicate-delivery guard need the row)."""
     from api.services.zoho_sync_service import resolve_inbound
 
@@ -961,7 +1146,7 @@ def test_inbound_log_pruned_to_newest_10(client, admin_token, app):
         )
     db.session.commit()
 
-    # The webhook path is the intake choke point — it triggers the prune.
+    # The webhook path is the intake choke point â€” it triggers the prune.
     resolve_inbound(
         {
             "ticketId": "prune-new",

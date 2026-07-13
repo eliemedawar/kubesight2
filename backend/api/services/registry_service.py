@@ -214,12 +214,26 @@ def _enabled_connections() -> List[RegistryConnection]:
     )
 
 
-def match_connection(registry_host: str) -> Optional[RegistryConnection]:
-    """The enabled connection matching ``registry_host`` (base URL host or alias)."""
+def match_connection(
+    registry_host: str, preferred_id: Optional[int] = None
+) -> Optional[RegistryConnection]:
+    """The enabled connection matching ``registry_host`` (base URL host or alias).
+
+    Several connections can claim the same image host (e.g. one DNS name fronting
+    two registry instances); by default the first-created enabled match wins.
+    ``preferred_id`` breaks that tie: when that connection is enabled AND matches
+    the host, it is chosen instead. A preferred connection that is disabled,
+    deleted, or doesn't own the host falls back to the default scan.
+    """
     host = (registry_host or "").strip().lower()
     if not host:
         return None
-    for row in _enabled_connections():
+    rows = _enabled_connections()
+    if preferred_id:
+        for row in rows:
+            if row.id == int(preferred_id) and host in _connection_hosts(row):
+                return row
+    for row in rows:
         if host in _connection_hosts(row):
             return row
     return None
@@ -233,19 +247,25 @@ def allowed_registry_hosts() -> List[str]:
     return sorted(h for h in hosts if h)
 
 
-def check_image(image: str) -> Dict[str, Any]:
+def check_image(image: str, preferred_connection_id: Optional[int] = None) -> Dict[str, Any]:
     """Check one image reference against its matching registry.
 
     Returns ``{image, status, message, registry, enforcement}`` where status is
     ``found | not_found | unreachable | no_connection``. ``no_connection`` means
     no linked registry owns that image's host — the check simply doesn't apply.
+    ``preferred_connection_id`` tie-breaks between connections claiming the same
+    host (see :func:`match_connection`).
     """
     parsed = registry_client.parse_image_reference(image)
     if parsed is None:
         return {"image": image, "status": "no_connection", "message": "No image specified.",
                 "registry": "", "enforcement": "off"}
 
-    conn = match_connection(parsed.registry) if parsed.has_registry else None
+    conn = (
+        match_connection(parsed.registry, preferred_id=preferred_connection_id)
+        if parsed.has_registry
+        else None
+    )
     if conn is None:
         return {
             "image": image,

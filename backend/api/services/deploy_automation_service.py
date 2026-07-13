@@ -17,7 +17,8 @@ Flow per run (DEPLOY-AUTOMATION-PLAN.md):
    executor deploys it); ``0`` → ``kubectl set image`` immediately.
 
 Variable-change runs (``change_type == "env_var"``, ticket carries a variable +
-value instead of a tag) skip the registry/Jenkins stages entirely: queued →
+value instead of a tag) skip the Jenkins build entirely: queued → registry gate
+on the RUNNING image (the change restarts pods, which must re-pull it) →
 validate the variable against the live spec → the SAME handoff (bundle with the
 env value edited in the live YAML, or direct ``kubectl set env``) → the same
 pod-health rollout watch + rollback.
@@ -45,6 +46,7 @@ from ..models import (
     ChangeBundle,
     DeployAutomationRun,
     JenkinsConnection,
+    RegistryConnection,
     ZohoDeploymentSnapshot,
     ZohoInboundTicket,
 )
@@ -127,6 +129,7 @@ def serialize_jenkins(row: JenkinsConnection) -> Dict[str, Any]:
         "bundleWindowHours": int(row.bundle_window_hours or 24),
         "rolloutTimeoutMinutes": int(row.rollout_timeout_minutes or 15),
         "rollbackOnFailure": bool(row.rollback_on_failure),
+        "registryConnectionId": row.registry_connection_id,
         "lastTestAt": _iso(row.last_test_at),
         "lastTestStatus": row.last_test_status,
         "lastTestMessage": row.last_test_message,
@@ -176,6 +179,22 @@ def update_jenkins(payload: Dict[str, Any]) -> Dict[str, Any]:
             errors.append("The image tag template must contain {tag}.")
         else:
             row.image_tag_template = template
+    if "registryConnectionId" in payload:
+        # Null/blank/0 = auto (match by image host). Otherwise the pinned
+        # connection must actually exist so a stale pick fails loudly here
+        # instead of silently falling back at check time.
+        value = payload.get("registryConnectionId")
+        if value in (None, "", 0, "0"):
+            row.registry_connection_id = None
+        else:
+            try:
+                conn_id = int(value)
+            except (TypeError, ValueError):
+                conn_id = None
+            if conn_id and RegistryConnection.query.get(conn_id):
+                row.registry_connection_id = conn_id
+            else:
+                errors.append("The selected image-check registry no longer exists.")
 
     for key, attr, lo, hi in (
         ("buildTimeoutMinutes", "build_timeout_minutes", 1, 24 * 60),
@@ -392,10 +411,9 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
         triggered_by=(getattr(user, "username", None) or ("auto" if auto else None)),
     )
     if variable:
-        # No registry/Jenkins stages for a variable change — the image_check
-        # slot doubles as the "variable check" validation step.
+        # No Jenkins build for a variable change; image_check gates the RUNNING
+        # image (the change restarts pods) and verify becomes the variable check.
         _set_step(run, "build", "skip", "not needed for a variable change")
-        _set_step(run, "verify", "skip", "not needed for a variable change")
     db.session.add(run)
     db.session.commit()
 
@@ -607,13 +625,13 @@ def _advance(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
         if run.status == "queued":
             # Variable changes skip the registry/Jenkins stages: validate the
             # variable against the live spec, then hand off straight away.
-            _do_resolve_variable(run) if _is_env_run(run) else _do_resolve(run)
+            _do_resolve_variable(run, jrow) if _is_env_run(run) else _do_resolve(run)
         elif run.status == "checking_image":
             _do_check(run, jrow)
         elif run.status == "building":
             _do_poll_build(run, jrow)
         elif run.status == "verifying_image":
-            _do_verify(run)
+            _do_verify(run, jrow)
         elif run.status == "awaiting_approval":
             _do_watch_bundle(run)
         elif run.status == "verifying_rollout":
@@ -774,13 +792,68 @@ def _do_resolve(run: DeployAutomationRun) -> None:
     run.status = "checking_image"
 
 
-def _do_resolve_variable(run: DeployAutomationRun) -> None:
-    """queued → handoff for env-var runs.
+def _gate_running_images(run: DeployAutomationRun, images: List[str], check_image) -> bool:
+    """Image gate for variable runs: every RUNNING container image must still be
+    pullable before we trigger a restart. Returns True to continue; on False the
+    run was failed, or left queued so the next tick retries a flaky registry.
+    """
+    unverified: List[str] = []
+    for image in images:
+        result = check_image(image)
+        status = result.get("status")
+        if status == "not_found":
+            _fail(
+                run,
+                "image_check",
+                f"The running image {image} is no longer in the registry — a variable "
+                "change restarts the pods and they would fail to pull it. Restore the "
+                "image (or deploy a valid tag) first.",
+            )
+            return False
+        if status == "unreachable":
+            run.retry_count = (run.retry_count or 0) + 1
+            if run.retry_count > _MAX_TRANSIENT_RETRIES:
+                _fail(run, "image_check", f"Registry unreachable while checking {image}: {result.get('message')}")
+            else:
+                _set_step(
+                    run, "image_check", "run",
+                    f"registry unreachable — retrying ({run.retry_count}/{_MAX_TRANSIENT_RETRIES})",
+                )
+            return False
+        if status == "no_connection":
+            unverified.append(image)
+    if not images:
+        _set_step(run, "image_check", "skip", "no readable container image to verify")
+    elif len(unverified) == len(images):
+        _set_step(
+            run, "image_check", "done",
+            "no linked registry owns the running image(s) — cannot verify; continuing",
+        )
+    elif unverified:
+        _set_step(
+            run, "image_check", "done",
+            f"{len(images) - len(unverified)} image(s) verified; "
+            f"{len(unverified)} not covered by a linked registry",
+        )
+    else:
+        _set_step(
+            run, "image_check", "done",
+            f"running image{'s' if len(images) > 1 else ''} still in the registry",
+        )
+    run.retry_count = 0
+    return True
 
-    Confirms the ticket's variable exists as a LITERAL value on the live
-    deployment (a ``valueFrom`` ConfigMap/Secret reference can't be set to a
-    literal safely) and records which containers define it — the apply targets
-    exactly those containers.
+
+def _do_resolve_variable(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
+    """queued → handoff for env-var runs, through two gates.
+
+    1. Image gate — the change rolls every pod, and rescheduled pods must
+       re-pull their images: if the RUNNING tag has been pruned from the
+       registry the rollout would die in ImagePullBackOff, so verify it first.
+    2. Variable gate — the ticket's variable must exist as a LITERAL value on
+       the live deployment (a ``valueFrom`` ConfigMap/Secret reference can't be
+       set to a literal safely); the apply targets exactly the containers that
+       define it.
     """
     from ..k8s_provider import (
         K8sCommandError,
@@ -788,13 +861,26 @@ def _do_resolve_variable(run: DeployAutomationRun) -> None:
         resolve_cluster_access,
         should_use_real_k8s,
     )
+    from .registry_service import check_image
+
+    def check(image: str):
+        return check_image(image, preferred_connection_id=jrow.registry_connection_id)
 
     var = run.variable_name or ""
-    _set_step(run, "image_check", "run", f"checking {var} on the live deployment")
+    _set_step(run, "image_check", "run", "checking the running image is still in the registry")
 
     if not should_use_real_k8s(run.cluster_id):
+        from ..mock_data import NAMESPACE_RESOURCES
+
+        ns_res = (NAMESPACE_RESOURCES.get(run.cluster_id) or {}).get(run.namespace) or {}
+        entry = next(
+            (d for d in ns_res.get("deployments", []) if d.get("name") == run.deployment_name), None
+        )
+        image = (entry or {}).get("image")
+        if not _gate_running_images(run, [image] if image else [], check):
+            return
         run.container_name = run.deployment_name
-        _set_step(run, "image_check", "done", f"[mock] {var} accepted")
+        _set_step(run, "verify", "done", f"[mock] {var} accepted")
         _do_handoff(run)
         return
 
@@ -815,9 +901,21 @@ def _do_resolve_variable(run: DeployAutomationRun) -> None:
     containers = (
         (((spec.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
     )
-    # The Zoho picklist merges names case-insensitively, so the ticket's value
-    # may not match the deployment's exact spelling — match loosely, then apply
-    # with the ACTUAL live name (kubectl/env names are case-sensitive).
+
+    # Gate 1: every unique running image must still be pullable.
+    images: List[str] = []
+    for c in containers:
+        img = c.get("image")
+        if img and img not in images:
+            images.append(img)
+    if not _gate_running_images(run, images, check):
+        return
+
+    # Gate 2: the variable itself. The Zoho picklist merges names
+    # case-insensitively, so the ticket's value may not match the deployment's
+    # exact spelling — match loosely, then apply with the ACTUAL live name
+    # (kubectl/env names are case-sensitive).
+    _set_step(run, "verify", "run", f"checking {var} on the live deployment")
     by_actual: Dict[str, List[str]] = {}
     referenced = False
     available: List[str] = []
@@ -842,21 +940,21 @@ def _do_resolve_variable(run: DeployAutomationRun) -> None:
         else:
             _fail(
                 run,
-                "image_check",
+                "verify",
                 f"'{var}' matches several differently-cased variables on "
                 f"'{run.deployment_name}' ({', '.join(sorted(by_actual))}) — use the exact name.",
             )
             return
         run.variable_name = actual
         run.container_name = ",".join(by_actual[actual])
-        _set_step(run, "image_check", "done", f"{actual} found on container(s) {run.container_name}")
+        _set_step(run, "verify", "done", f"{actual} found on container(s) {run.container_name}")
         run.retry_count = 0
         _do_handoff(run)
         return
     if referenced:
         _fail(
             run,
-            "image_check",
+            "verify",
             f"'{var}' on '{run.deployment_name}' comes from a ConfigMap/Secret reference "
             "(valueFrom) — change it at its source instead of on the Deployment.",
         )
@@ -864,7 +962,7 @@ def _do_resolve_variable(run: DeployAutomationRun) -> None:
     hint = ", ".join(sorted(available)[:15]) or "none"
     _fail(
         run,
-        "image_check",
+        "verify",
         f"Deployment '{run.deployment_name}' in '{run.namespace}' has no environment "
         f"variable '{var}'. Changeable variables: {hint}.",
     )
@@ -875,7 +973,7 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     from .registry_service import check_image
 
     target = _target_image(run)
-    result = check_image(target)
+    result = check_image(target, preferred_connection_id=jrow.registry_connection_id)
     status = result.get("status")
 
     if status == "found":
@@ -1012,12 +1110,12 @@ def _do_poll_build(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
         _fail(run, "build", f"Router build #{run.jenkins_build_number} finished {outcome}.")
 
 
-def _do_verify(run: DeployAutomationRun) -> None:
+def _do_verify(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     """verifying_image → handoff | failed. The registry is the source of truth."""
     from .registry_service import check_image
 
     target = _target_image(run)
-    result = check_image(target)
+    result = check_image(target, preferred_connection_id=jrow.registry_connection_id)
     status = result.get("status")
 
     if status == "found":
