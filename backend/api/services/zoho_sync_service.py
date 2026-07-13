@@ -1441,7 +1441,7 @@ def _prune_inbound_tickets(keep: int = INBOUND_TICKET_RETENTION) -> int:
     few more than ``keep`` while old runs finish.
     """
     from ..models import DeployAutomationRun
-    from .deploy_automation_service import ACTIVE_STATUSES
+    from .deploy_automation_service import OPEN_STATUSES
 
     overflow = (
         ZohoInboundTicket.query.order_by(
@@ -1453,7 +1453,7 @@ def _prune_inbound_tickets(keep: int = INBOUND_TICKET_RETENTION) -> int:
     deleted = 0
     for row in overflow:
         runs = DeployAutomationRun.query.filter_by(ticket_record_id=row.id).all()
-        if any(r.status in ACTIVE_STATUSES for r in runs):
+        if any(r.status in OPEN_STATUSES for r in runs):
             continue
         for run in runs:
             db.session.delete(run)

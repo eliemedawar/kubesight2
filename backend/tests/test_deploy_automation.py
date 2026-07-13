@@ -1568,3 +1568,136 @@ def test_custom_environment_rejects_variable_change(client, admin_token, app):
         ticket_id = ticket.id
     body = _start(client, admin_token, ticket_id, expect=400)
     assert "custom environment" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# Run queue — any number of tickets per target; same-target runs serialize FIFO
+# ---------------------------------------------------------------------------
+
+def _enable_jenkins_with_controllable_build(client, admin_token, monkeypatch, state):
+    """Jenkins on + a fake router whose build stays running until
+    ``state["result"]`` is set (e.g. to "SUCCESS")."""
+    monkeypatch.setattr(
+        "api.services.jenkins_client.trigger_build",
+        lambda cfg, params: "http://jenkins/queue/item/9",
+    )
+    monkeypatch.setattr(
+        "api.services.jenkins_client.queue_state",
+        lambda cfg, url: {"state": "building", "buildNumber": 5, "buildUrl": "http://jenkins/b/5"},
+    )
+    monkeypatch.setattr(
+        "api.services.jenkins_client.build_state",
+        lambda cfg, url: {
+            "building": state["result"] is None,
+            "result": state["result"],
+            "durationMs": 0,
+            "url": url,
+        },
+    )
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={
+            "enabled": True,
+            "baseUrl": "http://jenkins:8080",
+            "username": "bot",
+            "apiToken": "t0ken",
+            "routerJobPath": "router",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+
+
+def test_same_target_tickets_queue_fifo(client, admin_token, app, monkeypatch):
+    """Three tickets for one target: the first runs, the others wait, and each
+    is promoted FIFO by the scheduler tick as the target frees up."""
+    from api.services.deploy_automation_service import advance_runs
+
+    state = {"result": None}
+    _enable_jenkins_with_controllable_build(client, admin_token, monkeypatch, state)
+    with app.app_context():
+        _set_custom_source(customs=[{"name": "POS-UAT", "applications": ["pos"]}])
+        t1 = _make_custom_ticket(tag="1.0.0").id
+        t2 = _make_custom_ticket(tag="1.0.1").id
+        t3 = _make_custom_ticket(tag="1.0.2").id
+
+    run1 = _start(client, admin_token, t1)
+    assert run1["status"] == "building"
+    run2 = _start(client, admin_token, t2)
+    assert run2["status"] == "waiting", run2
+    run3 = _start(client, admin_token, t3)
+    assert run3["status"] == "waiting"
+
+    # Re-running a queued ticket is refused (one open run per ticket).
+    body = _start(client, admin_token, t2, expect=409)
+    assert "already queued" in body["error"]
+
+    # Target still busy → the queue holds.
+    advance_runs()
+    assert DeployAutomationRun.query.get(run2["id"]).status == "waiting"
+
+    # Build 1 succeeds → run1 finishes this tick; run2 is promoted on the NEXT
+    # tick (promotion happens before advancement) and chains straight through.
+    state["result"] = "SUCCESS"
+    advance_runs()
+    assert DeployAutomationRun.query.get(run1["id"]).status == "deployed"
+    assert DeployAutomationRun.query.get(run2["id"]).status == "waiting"
+
+    advance_runs()
+    assert DeployAutomationRun.query.get(run2["id"]).status == "deployed"
+    assert DeployAutomationRun.query.get(run3["id"]).status == "waiting"  # FIFO: one at a time
+
+    advance_runs()
+    assert DeployAutomationRun.query.get(run3["id"]).status == "deployed"
+
+
+def test_waiting_run_can_be_cancelled(client, admin_token, app, monkeypatch):
+    state = {"result": None}
+    _enable_jenkins_with_controllable_build(client, admin_token, monkeypatch, state)
+    with app.app_context():
+        _set_custom_source(customs=[{"name": "POS-UAT", "applications": ["pos"]}])
+        t1 = _make_custom_ticket(tag="1.0.0").id
+        t2 = _make_custom_ticket(tag="1.0.1").id
+    _start(client, admin_token, t1)
+    run2 = _start(client, admin_token, t2)
+    assert run2["status"] == "waiting"
+
+    response = client.post(
+        f"/api/zoho/automation/runs/{run2['id']}/cancel", headers=auth_headers(admin_token)
+    )
+    assert response.status_code == 200
+    assert response.get_json()["data"]["status"] == "cancelled"
+    assert "never started" in response.get_json()["data"]["error"]
+
+
+def test_auto_run_queues_behind_active(client, admin_token, app, monkeypatch):
+    """The webhook auto-start no longer skips a busy target — the second ticket's
+    run is created waiting."""
+    from api.models import ZohoIntegration
+    from api.services.zoho_sync_service import _source_entries, resolve_inbound
+
+    state = {"result": None}
+    _enable_jenkins_with_controllable_build(client, admin_token, monkeypatch, state)
+    response = client.put(
+        "/api/zoho/jenkins", json={"autoRunTickets": True}, headers=auth_headers(admin_token)
+    )
+    assert response.status_code == 200
+
+    with app.app_context():
+        _set_custom_source(customs=[{"name": "POS-UAT", "applications": ["pos"]}])
+        _source_entries(ZohoIntegration.query.get(1))  # snapshot the custom entries
+
+    for i, tag in enumerate(["1.0.0", "1.0.1"]):
+        result = resolve_inbound(
+            {
+                "ticketId": f"queue-{i}",
+                "cf_application": "pos",
+                "cf_environment": "POS-UAT",
+                "cf_tag": tag,
+            }
+        )
+        assert result["resolved"] is True and result["error"] is None
+
+    runs = DeployAutomationRun.query.order_by(DeployAutomationRun.id.asc()).all()
+    assert [r.status for r in runs] == ["building", "waiting"]
+    assert all(r.auto for r in runs)

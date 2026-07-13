@@ -24,9 +24,10 @@ env value edited in the live YAML, or direct ``kubectl set env``) → the same
 pod-health rollout watch + rollback.
 
 Every run is a DB row advanced by the 15s scheduler tick — fully resumable
-across restarts. One active run per ticket and per (cluster, namespace,
-deployment). System actions audit with ``actor=None`` (the established
-convention for scheduler-driven work).
+across restarts. One open run per ticket; runs on the same (cluster, namespace,
+deployment) are SERIALIZED: later tickets queue as ``waiting`` and the tick
+promotes them FIFO once the target frees up. System actions audit with
+``actor=None`` (the established convention for scheduler-driven work).
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import yaml
-from sqlalchemy import and_, or_
+from sqlalchemy import and_
 
 from ..audit import log_audit
 from ..db import db
@@ -66,6 +67,13 @@ ACTIVE_STATUSES = (
     "awaiting_approval",
     "verifying_rollout",
 )
+# A run created while another run on the SAME (cluster, namespace, deployment)
+# is still active. It sits in line and is promoted FIFO by the scheduler tick
+# once the target frees up — so any number of tickets can pile onto one target.
+WAITING_STATUS = "waiting"
+# Every non-terminal status: waiting runs count for ticket-conflict checks,
+# inbound-log pruning protection and cancellation.
+OPEN_STATUSES = (WAITING_STATUS,) + ACTIVE_STATUSES
 TERMINAL_STATUSES = ("deployed", "failed", "cancelled")
 
 # Serializes run advancement. The inline advance in start_run (web/webhook
@@ -361,17 +369,28 @@ def resolve_image_tag(row: Optional[JenkinsConnection], raw_tag: str) -> str:
     return template.replace("{tag}", raw)
 
 
-def _active_conflict(ticket_record_id: int, cluster_id: str, namespace: str, name: str):
+def _open_ticket_run(ticket_record_id: int):
+    """The ticket's not-yet-finished run, if any — one open run per ticket."""
     return (
         DeployAutomationRun.query.filter(
-            DeployAutomationRun.status.in_(ACTIVE_STATUSES),
-            or_(
-                DeployAutomationRun.ticket_record_id == ticket_record_id,
-                and_(
-                    DeployAutomationRun.cluster_id == cluster_id,
-                    DeployAutomationRun.namespace == namespace,
-                    DeployAutomationRun.deployment_name == name,
-                ),
+            DeployAutomationRun.status.in_(OPEN_STATUSES),
+            DeployAutomationRun.ticket_record_id == ticket_record_id,
+        )
+        .order_by(DeployAutomationRun.id.desc())
+        .first()
+    )
+
+
+def _open_target_run(cluster_id: str, namespace: str, name: str):
+    """The newest open (active OR waiting) run on this target. A new run joins
+    the queue behind it rather than being refused."""
+    return (
+        DeployAutomationRun.query.filter(
+            DeployAutomationRun.status.in_(OPEN_STATUSES),
+            and_(
+                DeployAutomationRun.cluster_id == cluster_id,
+                DeployAutomationRun.namespace == namespace,
+                DeployAutomationRun.deployment_name == name,
             ),
         )
         .order_by(DeployAutomationRun.id.desc())
@@ -416,14 +435,19 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
             400,
         )
 
-    conflict = _active_conflict(ticket.id, snapshot.cluster_id, snapshot.namespace, snapshot.deployment_name)
+    conflict = _open_ticket_run(ticket.id)
     if conflict:
-        raise AutomationError(
-            f"Run #{conflict.id} is already active for this "
-            f"{'ticket' if conflict.ticket_record_id == ticket.id else 'deployment'} "
-            f"({conflict.status.replace('_', ' ')}).",
-            409,
+        state = (
+            "already queued"
+            if conflict.status == WAITING_STATUS
+            else f"already active ({conflict.status.replace('_', ' ')})"
         )
+        raise AutomationError(f"Run #{conflict.id} is {state} for this ticket.", 409)
+
+    # Another run on the same target doesn't refuse the ticket any more — the
+    # new run joins the queue (waiting) and the scheduler starts it FIFO once
+    # the target frees up.
+    ahead = _open_target_run(snapshot.cluster_id, snapshot.namespace, snapshot.deployment_name)
 
     jrow = get_or_create_jenkins()
     run = DeployAutomationRun(
@@ -439,7 +463,7 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
         # Registry/deploy tag = template applied; the router gets the raw tag.
         image_tag=resolve_image_tag(jrow, tag) if tag else "",
         ticket_tag=tag or None,
-        status="queued",
+        status=WAITING_STATUS if ahead else "queued",
         steps=_initial_steps(),
         auto=bool(auto),
         triggered_by=(getattr(user, "username", None) or ("auto" if auto else None)),
@@ -448,6 +472,8 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
         # No Jenkins build for a variable change; image_check gates the RUNNING
         # image (the change restarts pods) and verify becomes the variable check.
         _set_step(run, "build", "skip", "not needed for a variable change")
+    if ahead:
+        _set_step(run, "image_check", "wait", f"queued behind run #{ahead.id}")
     db.session.add(run)
     db.session.commit()
 
@@ -467,10 +493,13 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
             "variable": run.variable_name,
             "value": run.variable_value,
             "auto": bool(auto),
+            "queuedBehind": ahead.id if ahead else None,
         },
     )
     # Mark the ticket as picked up (status → started/Open, owner → zagent).
-    _report_outcome(run, "started")
+    # Queued runs report "started" when they are actually promoted.
+    if run.status != WAITING_STATUS:
+        _report_outcome(run, "started")
 
     # Advance immediately so a manual Run gives instant feedback (the first
     # stages are seconds); errors are recorded on the run, never raised. Under
@@ -530,9 +559,11 @@ def cancel_run(run_id: int, user=None) -> Dict[str, Any]:
     run = DeployAutomationRun.query.get(int(run_id))
     if run is None:
         raise AutomationError("Automation run not found.", 404)
-    if run.status not in ACTIVE_STATUSES:
+    if run.status not in OPEN_STATUSES:
         raise AutomationError(f"Run is already {run.status} — nothing to cancel.", 409)
     note = "Cancelled by operator."
+    if run.status == WAITING_STATUS:
+        note = "Cancelled by operator while queued — it never started."
     if run.status == "building":
         note = "Cancelled by operator — the Jenkins build itself keeps running."
     bundle_note = _withdraw_bundle(run, user)
@@ -609,6 +640,49 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
 # State machine — advanced on every scheduler tick
 # ---------------------------------------------------------------------------
 
+def _promote_waiting_runs() -> int:
+    """FIFO dequeue: start the OLDEST waiting run of every target that no
+    longer has an active run. At most one run per target is promoted per tick;
+    the rest keep waiting. Called under the advance lock; commits."""
+    waiting = (
+        DeployAutomationRun.query.filter_by(status=WAITING_STATUS)
+        .order_by(DeployAutomationRun.id.asc())
+        .all()
+    )
+    if not waiting:
+        return 0
+    busy = {
+        (r.cluster_id, r.namespace, r.deployment_name)
+        for r in DeployAutomationRun.query.filter(
+            DeployAutomationRun.status.in_(ACTIVE_STATUSES)
+        ).all()
+    }
+    promoted: List[DeployAutomationRun] = []
+    for run in waiting:
+        key = (run.cluster_id, run.namespace, run.deployment_name)
+        if key in busy:
+            continue
+        busy.add(key)
+        run.status = "queued"
+        run.retry_count = 0
+        _set_step(run, "image_check", "wait", "dequeued — starting")
+        log_audit(
+            "automation_run_dequeued",
+            actor=None,
+            target_type="deploy_automation_run",
+            target_id=str(run.id),
+            details={"ticket": run.ticket_number, "deployment": run.deployment_name},
+            commit=False,
+        )
+        promoted.append(run)
+    if promoted:
+        db.session.commit()
+        # The ticket is only now actually picked up (status → started/Open).
+        for run in promoted:
+            _report_outcome(run, "started")
+    return len(promoted)
+
+
 def advance_runs() -> int:
     """Advance every active run one (chained) step. Returns how many advanced.
 
@@ -618,6 +692,8 @@ def advance_runs() -> int:
     # Hold the advance lock for the whole batch and query INSIDE it, so an inline
     # advance from start_run can't interleave and re-trigger a run mid-flight.
     with _advance_lock:
+        # Freed targets first: promoted runs join this tick's batch below.
+        _promote_waiting_runs()
         runs = (
             DeployAutomationRun.query.filter(DeployAutomationRun.status.in_(ACTIVE_STATUSES))
             .order_by(DeployAutomationRun.id.asc())

@@ -3,6 +3,7 @@ import { StatusPill, timeAgo } from "./common.jsx";
 import { ACTIVE_RUN_STATUSES } from "./ZohoRunDetail.jsx";
 
 const RUN_EVENT_TEXT = {
+  waiting: ["warn", "in queue"],
   awaiting_approval: ["warn", "awaiting approval"],
   deployed: ["ok", "deployed"],
   failed: ["danger", "failed"],

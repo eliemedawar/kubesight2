@@ -29,6 +29,7 @@ const STEP_CHIP_CLASS = {
 };
 
 const RUN_STATUS_PILL = {
+  waiting: ["warn", "In queue"],
   queued: ["info", "Queued"],
   checking_image: ["info", "Checking image"],
   building: ["info", "Building"],
@@ -40,7 +41,10 @@ const RUN_STATUS_PILL = {
   cancelled: ["muted", "Cancelled"],
 };
 
+// "waiting" = queued behind another run on the same target; it's open (polls,
+// cancellable, blocks a second Run on the ticket) even though nothing runs yet.
 export const ACTIVE_RUN_STATUSES = new Set([
+  "waiting",
   "queued",
   "checking_image",
   "building",
