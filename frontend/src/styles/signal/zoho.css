@@ -993,3 +993,61 @@
   max-height: 220px;
   overflow-y: auto;
 }
+
+/* ── Custom (non-cluster) environments ──────────────────────────── */
+.sg-zh-custom { margin-top: var(--space-4); }
+.sg-zh-custom-group { margin-top: 0.6rem; }
+
+.sg-zh-custom-add {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.55rem;
+  flex-wrap: wrap;
+}
+.sg-zh-custom-add input { flex: 1 1 220px; min-width: 0; }
+
+.sg-zh-chip { display: inline-flex; align-items: center; gap: 0.3rem; }
+.sg-zh-chip-x {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  font-size: 0.7rem;
+  line-height: 1;
+  color: var(--text-muted);
+}
+.sg-zh-chip-x:hover { color: var(--danger, #c62828); }
+
+.sg-zh-custom-jenkins {
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.sg-zh-custom-field { display: flex; flex-direction: column; gap: 0.25rem; margin: 0; }
+.sg-zh-custom-field > span,
+.sg-zh-custom-params-head > span {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.sg-zh-custom-params-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.sg-zh-custom-param {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) auto;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+/* A custom environment tag in summaries — dashed to signal "virtual". */
+.sg-tag-custom { border-style: dashed; }

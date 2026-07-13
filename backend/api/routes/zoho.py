@@ -91,6 +91,7 @@ def get_source():
             "clusterId": cfg.get("sourceClusterId") or "",
             "selectedNamespaces": cfg.get("selectedNamespaces") or [],
             "selectedDeployments": cfg.get("selectedDeployments") or {},
+            "customEnvironments": cfg.get("customEnvironments") or [],
             "cascadeEnabled": cfg.get("cascadeEnabled"),
         }
     )
@@ -109,7 +110,13 @@ def update_source():
     deployments = payload.get("deployments")
     if deployments is None:
         deployments = payload.get("selectedDeployments")
-    data = svc.set_source(cluster_id, namespaces, deployments)
+    custom_environments = payload.get("customEnvironments")
+    if custom_environments is not None and not isinstance(custom_environments, list):
+        custom_environments = []
+    try:
+        data = svc.set_source(cluster_id, namespaces, deployments, custom_environments)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
     log_audit(
         "zoho_source_updated",
         actor=get_current_user(),
@@ -119,6 +126,7 @@ def update_source():
             "clusterId": data.get("sourceClusterId"),
             "namespaces": data.get("selectedNamespaces"),
             "deployments": data.get("selectedDeployments"),
+            "customEnvironments": data.get("customEnvironments"),
         },
     )
     return success_response(data)

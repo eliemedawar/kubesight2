@@ -11,13 +11,16 @@ import {
  * Modal to choose the dropdown source: a cluster + which of its namespaces feed
  * the Zoho Environment field, and — per namespace — exactly which live deployments
  * feed the Application field. Each namespace is either "All deployments" (dynamic:
- * future deployments auto-included) or an explicit subset. Saving persists the
- * source; the operator publishes it with "Sync now".
+ * future deployments auto-included) or an explicit subset. Custom (non-cluster)
+ * environments can be added too: a free-text Environment name (e.g. POS-UAT) with
+ * free-text applications, plus the Jenkins job + parameter map its tickets should
+ * trigger. Saving persists the source; the operator publishes it with "Sync now".
  */
 export default function ZohoSourcePicker({
   initialClusterId = "",
   initialNamespaces = [],
   initialDeployments = {},
+  initialCustom = [],
   onClose,
   onSaved,
 }) {
@@ -38,6 +41,22 @@ export default function ZohoSourcePicker({
   // Search filters to tame long lists.
   const [nsFilter, setNsFilter] = useState("");
   const [depFilters, setDepFilters] = useState({}); // { [ns]: query }
+
+  // Custom (non-cluster) environments. Params are kept as ordered rows for
+  // editing and folded back into an object on save.
+  const [custom, setCustom] = useState(() =>
+    (initialCustom || []).map((c) => ({
+      name: c.name || "",
+      applications: [...(c.applications || [])],
+      jenkinsJobPath: c.jenkinsJobPath || "",
+      params: Object.entries(c.jenkinsParams || {}).map(([name, value]) => ({
+        name,
+        value: value == null ? "" : String(value),
+      })),
+    }))
+  );
+  const [newEnvName, setNewEnvName] = useState("");
+  const [appDrafts, setAppDrafts] = useState({}); // { [envName]: text }
 
   // 1) Load selectable clusters once.
   useEffect(() => {
@@ -178,6 +197,64 @@ export default function ZohoSourcePicker({
     return q ? deps.filter((d) => d.toLowerCase().includes(q)) : deps;
   };
 
+  // --- Custom environments ------------------------------------------------
+  const addCustomEnv = () => {
+    const name = newEnvName.trim();
+    if (!name) return;
+    const taken = new Set(
+      [...custom.map((c) => c.name), ...namespaces].map((n) => n.toLowerCase())
+    );
+    if (taken.has(name.toLowerCase())) {
+      setError(`"${name}" already exists as a namespace or custom environment.`);
+      return;
+    }
+    setCustom((prev) => [
+      ...prev,
+      { name, applications: [], jenkinsJobPath: "", params: [] },
+    ]);
+    setNewEnvName("");
+  };
+
+  const removeCustomEnv = (idx) =>
+    setCustom((prev) => prev.filter((_, i) => i !== idx));
+
+  const patchCustom = (idx, patch) =>
+    setCustom((prev) => prev.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
+
+  const addCustomApp = (idx) => {
+    const env = custom[idx];
+    const draft = (appDrafts[env.name] || "").trim();
+    if (!draft) return;
+    // Comma-separated input adds several at once.
+    const incoming = draft.split(",").map((s) => s.trim()).filter(Boolean);
+    const existing = new Set(env.applications.map((a) => a.toLowerCase()));
+    const merged = [...env.applications];
+    incoming.forEach((a) => {
+      if (!existing.has(a.toLowerCase())) {
+        existing.add(a.toLowerCase());
+        merged.push(a);
+      }
+    });
+    patchCustom(idx, { applications: merged });
+    setAppDrafts((prev) => ({ ...prev, [env.name]: "" }));
+  };
+
+  const removeCustomApp = (idx, app) =>
+    patchCustom(idx, {
+      applications: custom[idx].applications.filter((a) => a !== app),
+    });
+
+  const addParamRow = (idx) =>
+    patchCustom(idx, { params: [...custom[idx].params, { name: "", value: "" }] });
+
+  const setParamRow = (idx, pIdx, field, value) =>
+    patchCustom(idx, {
+      params: custom[idx].params.map((p, i) => (i === pIdx ? { ...p, [field]: value } : p)),
+    });
+
+  const removeParamRow = (idx, pIdx) =>
+    patchCustom(idx, { params: custom[idx].params.filter((_, i) => i !== pIdx) });
+
   const nsSelectedCount = (g) => {
     const sel = deploySel[g.namespace];
     if (!sel || sel.all) return (g.deployments || []).length;
@@ -200,6 +277,18 @@ export default function ZohoSourcePicker({
         clusterId,
         namespaces: [...selected],
         deployments,
+        customEnvironments: custom
+          .filter((c) => c.name.trim())
+          .map((c) => ({
+            name: c.name.trim(),
+            applications: c.applications,
+            jenkinsJobPath: c.jenkinsJobPath.trim(),
+            jenkinsParams: Object.fromEntries(
+              c.params
+                .filter((p) => p.name.trim())
+                .map((p) => [p.name.trim(), p.value])
+            ),
+          })),
       });
       onSaved?.(data);
       onClose?.();
@@ -223,7 +312,9 @@ export default function ZohoSourcePicker({
             <p className="muted">
               Pick a cluster and the namespaces to publish as the <code>Environment</code> options. For
               each namespace, publish <strong>all</strong> live deployments (auto-includes future ones)
-              or choose exactly which deployments feed the <code>Application</code> field.
+              or choose exactly which deployments feed the <code>Application</code> field. Targets that
+              are <strong>not</strong> in the cluster (e.g. <code>POS-UAT</code>) go under Custom
+              environments below.
             </p>
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
@@ -413,6 +504,142 @@ export default function ZohoSourcePicker({
           <p className="muted">Select a cluster to choose namespaces and deployments.</p>
         )}
 
+        {/* Custom (non-cluster) environments -------------------------------- */}
+        <div className="sg-zh-custom">
+          <div className="sg-zh-pick-head">
+            <b>Custom environments {custom.length ? `(${custom.length})` : ""}</b>
+          </div>
+          <p className="field-hint">
+            Extra <code>Environment</code> options that are <strong>not</strong> cluster namespaces,
+            each with free-text applications for the <code>Application</code> cascade. Tickets for
+            these skip the cluster entirely — KubeSight triggers the Jenkins job below with your
+            parameters and the build result is the outcome. Parameter values may use{" "}
+            <code>{"{app}"}</code>, <code>{"{tag}"}</code>, <code>{"{environment}"}</code> or any
+            ticket field, e.g. <code>{"{cf_country}"}</code>.
+          </p>
+          <div className="sg-zh-custom-add">
+            <input
+              type="text"
+              value={newEnvName}
+              onChange={(e) => setNewEnvName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addCustomEnv();
+                }
+              }}
+              placeholder='New environment name (e.g. "POS-UAT")…'
+            />
+            <button
+              type="button"
+              className="secondary"
+              onClick={addCustomEnv}
+              disabled={!newEnvName.trim()}
+            >
+              Add environment
+            </button>
+          </div>
+
+          {custom.map((env, idx) => (
+            <div key={env.name} className="sg-zh-pick-group sg-zh-custom-group">
+              <div className="sg-zh-pick-group-head">
+                <span className="mono">
+                  <b>{env.name}</b>{" "}
+                  <span className="sg-zh-gcount">
+                    ({env.applications.length} application{env.applications.length === 1 ? "" : "s"})
+                  </span>
+                </span>
+                <button type="button" className="link-button" onClick={() => removeCustomEnv(idx)}>
+                  Remove
+                </button>
+              </div>
+
+              <div className="sg-zh-tags sg-zh-fvals">
+                {env.applications.map((app) => (
+                  <span key={app} className="sg-tag sg-zh-chip">
+                    {app}
+                    <button
+                      type="button"
+                      className="sg-zh-chip-x"
+                      onClick={() => removeCustomApp(idx, app)}
+                      aria-label={`Remove ${app}`}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+                {env.applications.length === 0 ? (
+                  <span className="muted">no applications yet</span>
+                ) : null}
+              </div>
+              <div className="sg-zh-custom-add">
+                <input
+                  type="text"
+                  value={appDrafts[env.name] || ""}
+                  onChange={(e) =>
+                    setAppDrafts((prev) => ({ ...prev, [env.name]: e.target.value }))
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addCustomApp(idx);
+                    }
+                  }}
+                  placeholder="Add application (e.g. pos) — comma-separate for several…"
+                />
+                <button type="button" className="link-button" onClick={() => addCustomApp(idx)}>
+                  Add
+                </button>
+              </div>
+
+              <div className="sg-zh-custom-jenkins">
+                <label className="sg-zh-custom-field">
+                  <span>Jenkins job path (blank = the router job)</span>
+                  <input
+                    type="text"
+                    value={env.jenkinsJobPath}
+                    onChange={(e) => patchCustom(idx, { jenkinsJobPath: e.target.value })}
+                    placeholder="e.g. pos-deploy or folder/pos-deploy"
+                  />
+                </label>
+                <div className="sg-zh-custom-params-head">
+                  <span>
+                    Build parameters{" "}
+                    <span className="muted">(none = the router contract APP/TAG/NAMESPACE)</span>
+                  </span>
+                  <button type="button" className="link-button" onClick={() => addParamRow(idx)}>
+                    Add parameter
+                  </button>
+                </div>
+                {env.params.map((p, pIdx) => (
+                  <div key={pIdx} className="sg-zh-custom-param">
+                    <input
+                      type="text"
+                      value={p.name}
+                      onChange={(e) => setParamRow(idx, pIdx, "name", e.target.value)}
+                      placeholder="name (e.g. repotag)"
+                    />
+                    <input
+                      type="text"
+                      value={p.value}
+                      onChange={(e) => setParamRow(idx, pIdx, "value", e.target.value)}
+                      placeholder="value (e.g. {tag}, uat, {cf_country})"
+                    />
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => removeParamRow(idx, pIdx)}
+                      aria-label="Remove parameter"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
         <div className="modal-actions">
           <button type="button" className="secondary" onClick={onClose}>
             Cancel
@@ -421,7 +648,7 @@ export default function ZohoSourcePicker({
             type="button"
             className="primary"
             onClick={save}
-            disabled={saving || !clusterId}
+            disabled={saving || (!clusterId && custom.length === 0)}
           >
             {saving ? "Saving…" : "Save source"}
           </button>

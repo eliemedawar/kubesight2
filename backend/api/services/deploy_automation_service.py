@@ -35,6 +35,7 @@ import json
 import logging
 import re
 import threading
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -406,6 +407,14 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
     snapshot = ZohoDeploymentSnapshot.query.get(ticket.app_service_id)
     if snapshot is None:
         raise AutomationError("The ticket's deployment snapshot no longer exists.", 404)
+    from .zoho_sync_service import CUSTOM_SOURCE_CLUSTER
+
+    if snapshot.cluster_id == CUSTOM_SOURCE_CLUSTER and variable:
+        raise AutomationError(
+            f"'{snapshot.namespace}' is a custom environment — variable changes need a live "
+            "cluster deployment; only tag deploys route to Jenkins.",
+            400,
+        )
 
     conflict = _active_conflict(ticket.id, snapshot.cluster_id, snapshot.namespace, snapshot.deployment_name)
     if conflict:
@@ -566,6 +575,7 @@ def serialize_run(run: DeployAutomationRun) -> Dict[str, Any]:
         "deploymentName": run.deployment_name,
         "containerName": run.container_name,
         "changeType": run.change_type or "image",
+        "customEnvironment": _is_custom_run(run),
         "variableName": run.variable_name,
         "variableValue": run.variable_value,
         "imageRepo": run.image_repo,
@@ -648,9 +658,15 @@ def _advance(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     for _ in range(_MAX_CHAIN_PER_TICK):
         before = run.status
         if run.status == "queued":
-            # Variable changes skip the registry/Jenkins stages: validate the
+            # Custom (non-cluster) environments go straight to their Jenkins job;
+            # variable changes skip the registry/Jenkins stages: validate the
             # variable against the live spec, then hand off straight away.
-            _do_resolve_variable(run, jrow) if _is_env_run(run) else _do_resolve(run)
+            if _is_custom_run(run):
+                _do_trigger_custom(run, jrow)
+            elif _is_env_run(run):
+                _do_resolve_variable(run, jrow)
+            else:
+                _do_resolve(run)
         elif run.status == "checking_image":
             _do_check(run, jrow)
         elif run.status == "building":
@@ -671,6 +687,15 @@ def _target_image(run: DeployAutomationRun) -> str:
 
 def _is_env_run(run: DeployAutomationRun) -> bool:
     return (run.change_type or "image") == "env_var"
+
+
+def _is_custom_run(run: DeployAutomationRun) -> bool:
+    """A run against a custom (non-cluster) environment — snapshotted under the
+    sentinel cluster id. No live deployment exists: the whole deploy is the
+    configured Jenkins job, and build success is the outcome."""
+    from .zoho_sync_service import CUSTOM_SOURCE_CLUSTER
+
+    return run.cluster_id == CUSTOM_SOURCE_CLUSTER
 
 
 def _change_summary(run: DeployAutomationRun) -> str:
@@ -718,7 +743,17 @@ def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
         )
     elif outcome == "deployed":
         mode = "change bundle" if run.bundle_id else "direct apply"
-        if env_run:
+        if _is_custom_run(run):
+            shown_tag = run.ticket_tag or run.image_tag
+            comment = (
+                f"Deploy succeeded: the Jenkins job for {run.namespace} finished successfully "
+                f"({run.deployment_name} @ {shown_tag})."
+            )
+            resolution = (
+                f"KubeSight routed {run.deployment_name} (tag {shown_tag}) for {run.namespace} "
+                f"to Jenkins; the build succeeded. ({who})"
+            )
+        elif env_run:
             comment = (
                 f"Variable change applied: {change} on {run.deployment_name} "
                 f"in {run.namespace} (via {mode}); pods reported healthy."
@@ -993,6 +1028,130 @@ def _do_resolve_variable(run: DeployAutomationRun, jrow: JenkinsConnection) -> N
     )
 
 
+# A parameter template placeholder: {app}, {tag}, {environment}, {ticket} or any
+# inbound-ticket field name like {cf_country} / {cf_debugProd}.
+_PARAM_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_.\-]+)\}")
+
+
+def _render_param(template: str, run: DeployAutomationRun, payload: Dict[str, Any]) -> str:
+    """Fill one Jenkins parameter template from the run + its ticket payload.
+
+    Built-ins resolve from the run ({app}/{tag}/{environment}/{ticket}); anything
+    else is looked up in the inbound webhook payload (top level and the nested
+    cf/customFields containers), so a Zoho custom field like cf_country flows
+    through as {cf_country}. Unknown fields render as "" — the Jenkins job's
+    parameter default then applies. Booleans (Zoho checkboxes) become
+    "true"/"false" as Jenkins checkbox params expect.
+    """
+    from .zoho_sync_service import _extract
+
+    def _value(match) -> str:
+        key = match.group(1)
+        low = key.lower()
+        if low == "app":
+            return run.deployment_name or ""
+        if low == "tag":
+            return run.ticket_tag or run.image_tag or ""
+        if low in ("environment", "env", "namespace"):
+            return run.namespace or ""
+        if low == "ticket":
+            return run.ticket_number or ""
+        value = _extract(payload, key)
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    return _PARAM_PLACEHOLDER_RE.sub(_value, str(template))
+
+
+def _custom_params(
+    run: DeployAutomationRun, env_cfg: Dict[str, Any], jrow: JenkinsConnection
+) -> Dict[str, str]:
+    """The buildWithParameters fields for a custom-environment run.
+
+    The entry's operator-defined parameter map wins (each value a template
+    rendered via :func:`_render_param`); with no map configured, fall back to
+    the standard router contract (APP/TAG/NAMESPACE, honoring the toggles).
+    """
+    templates = (env_cfg or {}).get("jenkinsParams") or {}
+    if not templates:
+        params: Dict[str, str] = {}
+        if jrow.send_param_app is not False:
+            params["APP"] = run.deployment_name
+        if jrow.send_param_tag is not False:
+            params["TAG"] = run.ticket_tag or run.image_tag
+        if jrow.send_param_namespace is not False:
+            params["NAMESPACE"] = run.namespace
+        return params
+    payload: Dict[str, Any] = {}
+    if run.ticket_record_id:
+        record = ZohoInboundTicket.query.get(run.ticket_record_id)
+        if record is not None and isinstance(record.payload, dict):
+            payload = record.payload
+    return {name: _render_param(template, run, payload) for name, template in templates.items()}
+
+
+def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
+    """queued → building for a custom (non-cluster) environment run.
+
+    There is no live deployment behind these targets — no image to read, no
+    registry repo to gate on, nothing for kubectl to apply or watch. The
+    configured Jenkins job (the entry's own path, else the router) owns the
+    whole deploy; it is triggered with the entry's parameter map and build
+    success is the run's outcome.
+    """
+    from .zoho_sync_service import custom_environment_by_name
+
+    _set_step(run, "image_check", "skip", "custom environment — no live cluster image to gate on")
+
+    env_cfg = custom_environment_by_name(run.namespace) or {}
+    job_path = str(env_cfg.get("jenkinsJobPath") or "").strip()
+    path = job_path or (jrow.router_job_path or "")
+    if not (jrow.enabled and jrow.base_url and path and jrow.api_token_encrypted):
+        _fail(
+            run,
+            "build",
+            f"'{run.namespace}' is a custom environment — it deploys only through Jenkins, "
+            "and the Jenkins connection (or a job path for it) is not configured.",
+        )
+        return
+
+    params = _custom_params(run, env_cfg, jrow)
+    cfg = _to_client_config(jrow)
+    if job_path:
+        cfg = replace(cfg, router_job_path=job_path)
+    try:
+        queue_url = jenkins_client.trigger_build(cfg, params)
+    except JenkinsError as exc:
+        _fail(run, "build", f"Could not trigger the Jenkins build on '{path}': {exc}")
+        return
+
+    run.jenkins_queue_url = queue_url
+    run.build_triggered_at = datetime.now(timezone.utc)
+    run.retry_count = 0
+    run.status = "building"
+    shown = ", ".join(f"{k}={v}" for k, v in params.items()) or "no parameters"
+    _set_step(run, "build", "run", f"build queued on {path} ({shown})")
+    log_audit(
+        "automation_build_triggered",
+        actor=None,
+        target_type="deploy_automation_run",
+        target_id=str(run.id),
+        details={
+            "ticket": run.ticket_number,
+            "deployment": run.deployment_name,
+            "environment": run.namespace,
+            "custom": True,
+            "job": path,
+            "params": params,
+            "queueUrl": queue_url,
+        },
+        commit=False,
+    )
+
+
 def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     """checking_image → handoff (found) | building (missing) | failed."""
     from .registry_service import check_image
@@ -1129,6 +1288,17 @@ def _do_poll_build(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
 
     outcome = result.get("result") or "UNKNOWN"
     if outcome in jenkins_client.SUCCESS_RESULTS:
+        if _is_custom_run(run):
+            # The Jenkins job IS the deploy for a custom environment — nothing
+            # in a registry or cluster to verify afterwards.
+            _set_step(run, "build", "done", f"build #{run.jenkins_build_number} succeeded")
+            _set_step(run, "verify", "skip", "no registry gate for a custom environment")
+            _set_step(run, "approval", "skip", "Jenkins owns the deploy for custom environments")
+            _set_step(run, "deploy", "done", "performed by the Jenkins job")
+            _complete_deployed(
+                run, "no cluster rollout to watch — the Jenkins build result is the outcome"
+            )
+            return
         _set_step(run, "build", "done", f"router build #{run.jenkins_build_number} succeeded")
         run.status = "verifying_image"
         _set_step(run, "verify", "run", "re-checking the registry for the built tag")

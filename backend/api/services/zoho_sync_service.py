@@ -45,6 +45,12 @@ from .zoho_client import ZohoConfig, ZohoError
 
 # The placeholder Zoho keeps as the default/blank picklist entry — always first.
 NONE_VALUE = "-None-"
+# Sentinel cluster id for snapshots of CUSTOM (non-cluster) environment entries —
+# same convention as the service/automation alert sentinel cluster ids. Their
+# "namespace" is the custom environment name and their "deployment" the free-text
+# application; deploy automation recognizes the sentinel and routes the run to
+# Jenkins instead of touching a cluster.
+CUSTOM_SOURCE_CLUSTER = "__custom__"
 # How the snapshot id is embedded in / parsed out of a picklist value. We anchor
 # to the END of the string so digits inside a deployment/namespace name can't be
 # mistaken for the id marker.
@@ -110,6 +116,7 @@ def serialize(row: ZohoIntegration) -> Dict[str, Any]:
         "sourceClusterId": row.source_cluster_id or "",
         "selectedNamespaces": _namespace_list(row),
         "selectedDeployments": _deployment_selection(row),
+        "customEnvironments": _custom_environment_list(row),
         "cascadeEnabled": bool(row.cascade_enabled),
         "dependencyMappingId": row.dependency_mapping_id or "",
         "lastDependencyStatus": row.last_dependency_status,
@@ -169,6 +176,80 @@ def _deployment_selection(row: ZohoIntegration) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _custom_environment_list(row: ZohoIntegration) -> List[Dict[str, Any]]:
+    """Decode the operator's custom (non-cluster) environments.
+
+    Shape: ``[{"name", "applications", "jenkinsJobPath", "jenkinsParams"}]``.
+    """
+    raw = row.custom_environments
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def custom_environment_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """The custom-environment entry whose name matches ``name`` (Zoho compares
+    picklist values case-insensitively, so match casefolded). Used by deploy
+    automation to find a run's Jenkins routing."""
+    target = str(name or "").strip().casefold()
+    if not target:
+        return None
+    for entry in _custom_environment_list(get_or_create_config()):
+        if str(entry.get("name", "")).casefold() == target:
+            return entry
+    return None
+
+
+def _normalize_custom_environments(value: Any, reserved: Optional[set] = None) -> List[Dict[str, Any]]:
+    """Coerce an incoming custom-environments payload; raises ValueError on a
+    name that collides (case-insensitively — Zoho's comparison) with a selected
+    namespace or another custom entry. Names/applications are reduced to
+    Zoho-safe picklist characters up front so what is stored is exactly what
+    gets published and matched on inbound."""
+    out: List[Dict[str, Any]] = []
+    if not isinstance(value, list):
+        return out
+    seen = {str(r).casefold() for r in (reserved or set())}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = _sanitize_value(item.get("name"))[:_MAX_VALUE_LEN].rstrip()
+        if not name or name == NONE_VALUE:
+            continue
+        if name.casefold() in seen:
+            raise ValueError(
+                f"Custom environment '{name}' collides with a selected namespace "
+                "or another custom environment."
+            )
+        seen.add(name.casefold())
+        apps: List[str] = []
+        seen_apps = set()
+        for app in item.get("applications") or []:
+            clean = _sanitize_value(app)[:_MAX_VALUE_LEN].rstrip()
+            if clean and clean != NONE_VALUE and clean.casefold() not in seen_apps:
+                seen_apps.add(clean.casefold())
+                apps.append(clean)
+        params: Dict[str, str] = {}
+        raw_params = item.get("jenkinsParams")
+        if isinstance(raw_params, dict):
+            for key, template in raw_params.items():
+                param = str(key).strip()
+                if param:
+                    params[param] = "" if template is None else str(template)
+        entry: Dict[str, Any] = {
+            "name": name,
+            "applications": apps,
+            "jenkinsJobPath": str(item.get("jenkinsJobPath") or "").strip(),
+            "jenkinsParams": params,
+        }
+        out.append(entry)
+    return out
+
+
 def _normalize_deployment_selection(value: Any) -> Dict[str, Any]:
     """Coerce an incoming selection map into ``{ns: {"all": bool, "names": [str]}}``."""
     out: Dict[str, Any] = {}
@@ -195,14 +276,17 @@ def set_source(
     cluster_id: Optional[str],
     namespaces: Optional[List[str]],
     deployments: Optional[Dict[str, Any]] = None,
+    custom_environments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Persist the dropdown source: a cluster, the namespaces, and (optionally) the
-    specific deployments to publish per namespace.
+    """Persist the dropdown source: a cluster, the namespaces, (optionally) the
+    specific deployments to publish per namespace, and (optionally) the custom
+    non-cluster environments.
 
-    The Environment picklist becomes exactly these namespaces; the Application
-    picklist becomes the live deployments running in them (resolved at sync time),
-    filtered by ``deployments`` — a namespace left unspecified publishes all of its
-    deployments dynamically.
+    The Environment picklist becomes exactly these namespaces plus the custom
+    environment names; the Application picklist becomes the live deployments
+    running in them (resolved at sync time) plus the custom applications —
+    a namespace left unspecified publishes all of its deployments dynamically.
+    Raises ValueError on a custom name colliding with a namespace.
     """
     row = get_or_create_config()
     row.source_cluster_id = (str(cluster_id).strip() if cluster_id else None) or None
@@ -213,6 +297,10 @@ def set_source(
         if name and name not in seen:
             seen.add(name)
             clean.append(name)
+    if custom_environments is not None:
+        row.custom_environments = json.dumps(
+            _normalize_custom_environments(custom_environments, reserved=seen)
+        )
     row.selected_namespaces = json.dumps(clean)
     if deployments is not None:
         # Keep only selections for namespaces still chosen.
@@ -300,6 +388,15 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         row.selected_deployments = json.dumps(
             _normalize_deployment_selection(payload.get("selectedDeployments"))
         )
+    if "customEnvironments" in payload:
+        try:
+            row.custom_environments = json.dumps(
+                _normalize_custom_environments(
+                    payload.get("customEnvironments"), reserved=set(_namespace_list(row))
+                )
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
 
     # Secrets: set only when a non-empty value is supplied; explicit clear flags wipe.
     _apply_secret(payload, "clientSecret", "clearClientSecret", row, "client_secret_encrypted")
@@ -573,48 +670,63 @@ def _get_or_create_snapshot(cluster_id: str, namespace: str, name: str) -> ZohoD
 
 
 def _source_entries(row: ZohoIntegration, fresh: bool = False) -> List[Dict[str, Any]]:
-    """The live deployments to publish: [{id, namespace, name, label}], snapshotted.
+    """The deployments to publish: [{id, namespace, name, label, custom}], snapshotted.
 
-    Raises ValueError when no cluster is configured or a cluster read fails, so the
-    caller (sync/preview) can surface a clear message instead of publishing nothing.
+    Live cluster entries first, then the custom (non-cluster) environments' free-
+    text applications — snapshotted under the sentinel cluster so inbound tickets
+    resolve them the same way. Raises ValueError when no source at all is
+    configured or a cluster read fails, so the caller (sync/preview) can surface
+    a clear message instead of publishing nothing.
     """
     cluster_id = (row.source_cluster_id or "").strip()
-    if not cluster_id:
-        raise ValueError("No source cluster selected. Pick a cluster and namespaces first.")
-    selection = _deployment_selection(row)
-    namespaces = _namespace_list(row)
-    # All cluster reads fan out up front; the DB snapshot work below stays on the
-    # request thread (it needs the app-context session).
-    per_ns = _list_deployments_by_namespace(cluster_id, namespaces, fresh=fresh)
+    customs = _custom_environment_list(row)
+    if not cluster_id and not customs:
+        raise ValueError("No source selected. Pick a cluster and namespaces (or add custom environments) first.")
     entries: List[Dict[str, Any]] = []
-    # One entry per (namespace, deployment) — NOT de-duplicated here, because the
-    # same app name can live in several namespaces and each pairing is needed for
-    # the cascade + snapshot resolution. The Application picklist itself is
-    # de-duplicated later (see _application_values).
-    for ns in namespaces:
-        ns_sel = selection.get(ns)
-        # No entry for the namespace => publish all (dynamic default).
-        explicit_names = None
-        if isinstance(ns_sel, dict) and not ns_sel.get("all", True):
-            explicit_names = set(ns_sel.get("names") or [])
-        for name in per_ns.get(ns, []):
-            if explicit_names is not None and name not in explicit_names:
-                continue
-            snap = _get_or_create_snapshot(cluster_id, ns, name)
-            label = compose_deployment_label(ns, name, snap.id)
-            entries.append({"id": snap.id, "namespace": ns, "name": name, "label": label})
+    if cluster_id:
+        selection = _deployment_selection(row)
+        namespaces = _namespace_list(row)
+        # All cluster reads fan out up front; the DB snapshot work below stays on
+        # the request thread (it needs the app-context session).
+        per_ns = _list_deployments_by_namespace(cluster_id, namespaces, fresh=fresh)
+        # One entry per (namespace, deployment) — NOT de-duplicated here, because
+        # the same app name can live in several namespaces and each pairing is
+        # needed for the cascade + snapshot resolution. The Application picklist
+        # itself is de-duplicated later (see _application_values).
+        for ns in namespaces:
+            ns_sel = selection.get(ns)
+            # No entry for the namespace => publish all (dynamic default).
+            explicit_names = None
+            if isinstance(ns_sel, dict) and not ns_sel.get("all", True):
+                explicit_names = set(ns_sel.get("names") or [])
+            for name in per_ns.get(ns, []):
+                if explicit_names is not None and name not in explicit_names:
+                    continue
+                snap = _get_or_create_snapshot(cluster_id, ns, name)
+                label = compose_deployment_label(ns, name, snap.id)
+                entries.append({"id": snap.id, "namespace": ns, "name": name, "label": label})
+    for custom in customs:
+        env_name = custom.get("name") or ""
+        for app in custom.get("applications") or []:
+            snap = _get_or_create_snapshot(CUSTOM_SOURCE_CLUSTER, env_name, app)
+            label = compose_deployment_label(env_name, app, snap.id)
+            entries.append(
+                {"id": snap.id, "namespace": env_name, "name": app, "label": label, "custom": True}
+            )
     db.session.commit()
     return entries
 
 
 def build_environment_values(row: ZohoIntegration) -> List[str]:
-    """Environment dropdown: ``-None-`` + the operator's selected namespaces."""
+    """Environment dropdown: ``-None-`` + the operator's selected namespaces +
+    the custom environment names. De-duped casefolded — Zoho compares picklist
+    values case-insensitively and rejects the whole PATCH on a duplicate."""
     values = [NONE_VALUE]
-    seen = {NONE_VALUE}
-    for ns in _namespace_list(row):
+    seen = {NONE_VALUE.casefold()}
+    for ns in _namespace_list(row) + [c.get("name", "") for c in _custom_environment_list(row)]:
         s = _sanitize_value(ns)
-        if s and s not in seen:
-            seen.add(s)
+        if s and s.casefold() not in seen:
+            seen.add(s.casefold())
             values.append(s)
     return values
 
@@ -661,7 +773,8 @@ def _variables_for_entries(
     namespace — variables are additive on top of an otherwise-good sync.
     """
     cluster_id = (row.source_cluster_id or "").strip()
-    namespaces = sorted({e["namespace"] for e in entries})
+    # Custom (non-cluster) entries have no live spec to read env vars from.
+    namespaces = sorted({e["namespace"] for e in entries if not e.get("custom")})
     if not cluster_id or not namespaces:
         return {}
     from ..k8s_provider import (
@@ -779,7 +892,8 @@ def build_preview(fresh: bool = False) -> Dict[str, Any]:
             "label": e["label"],
             "deploymentName": e["name"],
             "namespace": e["namespace"],
-            "clusterId": row.source_cluster_id or "",
+            "clusterId": CUSTOM_SOURCE_CLUSTER if e.get("custom") else (row.source_cluster_id or ""),
+            "custom": bool(e.get("custom")),
             "variables": _entry_variables(e, vars_by_ns) if manage_variables else [],
         }
         for e in entries
@@ -790,6 +904,7 @@ def build_preview(fresh: bool = False) -> Dict[str, Any]:
         "sourceClusterId": row.source_cluster_id or "",
         "selectedNamespaces": _namespace_list(row),
         "selectedDeployments": _deployment_selection(row),
+        "customEnvironments": _custom_environment_list(row),
         "count": max(0, len(app_values) - 1),
         "manageApplication": bool(row.sync_application and row.app_field_id),
         "manageEnvironment": bool(row.sync_environment and row.environment_field_id),
@@ -1181,7 +1296,10 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
             return None
         q = ZohoDeploymentSnapshot.query.filter_by(namespace=ns, deployment_name=name)
         if source_cluster:
-            q = q.filter_by(cluster_id=source_cluster)
+            # Custom (non-cluster) environments snapshot under the sentinel.
+            q = q.filter(
+                ZohoDeploymentSnapshot.cluster_id.in_((source_cluster, CUSTOM_SOURCE_CLUSTER))
+            )
         return q.order_by(ZohoDeploymentSnapshot.id.desc()).first()
 
     # 1) An explicit id field wins if present.
@@ -1213,7 +1331,9 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     if snapshot is None and dep_name and not ns_name:
         q = ZohoDeploymentSnapshot.query.filter_by(deployment_name=dep_name)
         if source_cluster:
-            q = q.filter_by(cluster_id=source_cluster)
+            q = q.filter(
+                ZohoDeploymentSnapshot.cluster_id.in_((source_cluster, CUSTOM_SOURCE_CLUSTER))
+            )
         matches = q.all()
         if len(matches) == 1:
             snapshot = matches[0]

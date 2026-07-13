@@ -32,6 +32,7 @@ export default function ZohoLayoutEditor({
   // off, its options stay manually manageable like any other picklist.
   const variableFieldId = config.syncVariables ? String(config.variableFieldId || "") : "";
   const selectedNamespaces = config.selectedNamespaces || [];
+  const customEnvironments = config.customEnvironments || [];
   const [layout, setLayout] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -155,16 +156,22 @@ export default function ZohoLayoutEditor({
       {/* Source + cascade summary */}
       <div className="sg-zh-src">
         <span className="sg-zh-src-label">Source</span>
-        {config.sourceClusterId ? (
+        {config.sourceClusterId || customEnvironments.length ? (
           <>
-            <span className="sg-tag">{config.sourceClusterId}</span>
-            {selectedNamespaces.length ? (
-              selectedNamespaces.map((ns) => (
-                <span key={ns} className="sg-tag">{ns}</span>
-              ))
-            ) : (
+            {config.sourceClusterId ? (
+              <span className="sg-tag">{config.sourceClusterId}</span>
+            ) : null}
+            {selectedNamespaces.map((ns) => (
+              <span key={ns} className="sg-tag">{ns}</span>
+            ))}
+            {customEnvironments.map((c) => (
+              <span key={c.name} className="sg-tag sg-tag-custom" title="Custom environment (Jenkins-only)">
+                {c.name}
+              </span>
+            ))}
+            {!selectedNamespaces.length && !customEnvironments.length ? (
               <span>no namespaces selected</span>
-            )}
+            ) : null}
           </>
         ) : (
           <span>not set — use “Choose namespaces” on the Environment field below.</span>
@@ -317,6 +324,7 @@ export default function ZohoLayoutEditor({
           initialClusterId={config.sourceClusterId || ""}
           initialNamespaces={selectedNamespaces}
           initialDeployments={config.selectedDeployments || {}}
+          initialCustom={customEnvironments}
           onClose={closeModal}
           onSaved={(data) => {
             closeModal();

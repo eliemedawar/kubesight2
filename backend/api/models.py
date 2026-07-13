@@ -1878,6 +1878,15 @@ class ZohoIntegration(db.Model):
     # deployments (dynamic — future ones auto-included); {"all": false, "names": [...]}
     # publishes only that subset. Lets the operator curate exactly what Zoho shows.
     selected_deployments = db.Column(db.Text, nullable=True)
+    # Custom (non-cluster) Environment entries (JSON-encoded list). Each entry:
+    # {"name": "POS-UAT", "applications": ["pos"], "jenkinsJobPath": "pos-deploy",
+    #  "jenkinsParams": {"msName": "{app}", "repotag": "{tag}", "envi": "uat", ...}}.
+    # The name joins the Environment picklist, the applications join the
+    # Application picklist (cascade-filtered), and an inbound ticket for one of
+    # these routes straight to the configured Jenkins job — there is no live
+    # cluster deployment behind it. Param values may reference {app}, {tag},
+    # {environment} or any inbound-ticket field like {cf_country}.
+    custom_environments = db.Column(db.Text, nullable=True)
 
     # --- Application <- Environment cascade (Zoho field dependency mapping) ---
     # When on, after publishing both picklists the sync configures a Zoho Desk

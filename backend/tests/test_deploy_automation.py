@@ -1326,3 +1326,245 @@ def test_viewer_cannot_start_or_configure(client, viewer_token, app):
         "/api/zoho/jenkins", json={"enabled": False}, headers=auth_headers(viewer_token)
     )
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Custom (non-cluster) environments — free-text Environment/Application entries
+# that route straight to a Jenkins job with an operator-defined parameter map.
+# ---------------------------------------------------------------------------
+
+CUSTOM_ENVS = [
+    {
+        "name": "POS-UAT",
+        "applications": ["pos"],
+        "jenkinsJobPath": "pos-deploy",
+        "jenkinsParams": {
+            "msName": "{app}",
+            "repotag": "{tag}",
+            "envi": "uat",
+            "company": "{cf_company}",
+            "debugProd": "{cf_debugProd}",
+            "country": "{cf_country}",
+        },
+    }
+]
+
+
+def _set_custom_source(cluster_id=CLUSTER, namespaces=None, customs=CUSTOM_ENVS):
+    from api.services.zoho_sync_service import set_source
+
+    return set_source(cluster_id, namespaces or [NAMESPACE], None, customs)
+
+
+def test_custom_environments_publish_values_and_cascade(app):
+    """Custom env names join the Environment picklist, their apps join the
+    Application picklist, and the cascade maps env → its apps."""
+    from api.models import ZohoIntegration
+    from api.services.zoho_sync_service import (
+        CUSTOM_SOURCE_CLUSTER,
+        _application_values,
+        _namespace_to_labels,
+        _source_entries,
+        build_environment_values,
+    )
+
+    with app.app_context():
+        _set_custom_source()
+        row = ZohoIntegration.query.get(1)
+        env_values = build_environment_values(row)
+        assert NAMESPACE in env_values and "POS-UAT" in env_values
+
+        entries = _source_entries(row)
+        customs = [e for e in entries if e.get("custom")]
+        assert [(e["namespace"], e["name"]) for e in customs] == [("POS-UAT", "pos")]
+        assert "pos" in _application_values(entries)
+        assert _namespace_to_labels(entries).get("POS-UAT") == ["pos"]
+
+        # Snapshotted under the sentinel cluster for inbound resolution.
+        snap = ZohoDeploymentSnapshot.query.filter_by(
+            cluster_id=CUSTOM_SOURCE_CLUSTER, namespace="POS-UAT", deployment_name="pos"
+        ).first()
+        assert snap is not None
+
+
+def test_custom_environment_name_collision_rejected(client, admin_token, app):
+    """A custom env named like a selected namespace is refused (Zoho compares
+    picklist values case-insensitively)."""
+    response = client.put(
+        "/api/zoho/source",
+        json={
+            "clusterId": CLUSTER,
+            "namespaces": [NAMESPACE],
+            "customEnvironments": [{"name": NAMESPACE.upper(), "applications": ["x"]}],
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 400
+    assert "collides" in response.get_json()["error"]
+
+
+def test_custom_environment_inbound_resolves(client, admin_token, app):
+    """A ticket for a custom env resolves via the sentinel snapshot."""
+    from api.services.zoho_sync_service import CUSTOM_SOURCE_CLUSTER, resolve_inbound
+
+    with app.app_context():
+        _set_custom_source()
+        from api.models import ZohoIntegration
+        from api.services.zoho_sync_service import _source_entries
+
+        _source_entries(ZohoIntegration.query.get(1))  # snapshot the custom entries
+
+    result = resolve_inbound(
+        {
+            "ticketId": "pos-1",
+            "ticketNumber": "DR-8001",
+            "cf_application": "pos",
+            "cf_environment": "POS-UAT",
+            "cf_tag": "2.4.0",
+            "cf_company": "kozen",
+            "cf_country": "Lebanon",
+        }
+    )
+    assert result["resolved"] is True, result
+    assert result["error"] is None
+    assert result["namespace"] == "POS-UAT"
+    assert result["clusterId"] == CUSTOM_SOURCE_CLUSTER
+
+
+def _make_custom_ticket(tag="2.4.0", variable=None, value=None, payload=None):
+    from api.services.zoho_sync_service import CUSTOM_SOURCE_CLUSTER
+
+    snapshot = ZohoDeploymentSnapshot.query.filter_by(
+        cluster_id=CUSTOM_SOURCE_CLUSTER, namespace="POS-UAT", deployment_name="pos"
+    ).first()
+    if snapshot is None:
+        snapshot = ZohoDeploymentSnapshot(
+            cluster_id=CUSTOM_SOURCE_CLUSTER, namespace="POS-UAT", deployment_name="pos"
+        )
+        db.session.add(snapshot)
+        db.session.flush()
+    ticket = ZohoInboundTicket(
+        ticket_id=f"pos-{datetime.now(timezone.utc).timestamp()}",
+        ticket_number="DR-8002",
+        resolved=True,
+        app_service_id=snapshot.id,
+        tag=tag,
+        variable_name=variable,
+        variable_value=value,
+        payload=payload,
+        received_at=datetime.now(timezone.utc),
+    )
+    db.session.add(ticket)
+    db.session.commit()
+    return ticket
+
+
+def test_custom_environment_run_routes_to_jenkins(client, admin_token, app, monkeypatch):
+    """A custom-env run skips every cluster stage: it triggers the entry's OWN
+    Jenkins job with the rendered parameter map ({app}/{tag}/fixed/{cf_*}) and
+    completes as deployed on build success — no registry, kubectl or rollout."""
+    captured = {}
+
+    def fake_trigger(cfg, params):
+        captured["job_path"] = cfg.router_job_path
+        captured["params"] = params
+        return "http://jenkins/queue/item/77"
+
+    monkeypatch.setattr("api.services.jenkins_client.trigger_build", fake_trigger)
+    monkeypatch.setattr(
+        "api.services.jenkins_client.queue_state",
+        lambda cfg, url: {"state": "building", "buildNumber": 12, "buildUrl": "http://jenkins/job/pos-deploy/12"},
+    )
+    monkeypatch.setattr(
+        "api.services.jenkins_client.build_state",
+        lambda cfg, url: {"building": False, "result": "SUCCESS", "durationMs": 1000, "url": url},
+    )
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={
+            "enabled": True,
+            "baseUrl": "http://jenkins:8080",
+            "username": "bot",
+            "apiToken": "t0ken",
+            "routerJobPath": "router",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+
+    with app.app_context():
+        _set_custom_source()
+        ticket = _make_custom_ticket(
+            payload={"cf": {"cf_company": "kozen", "cf_debugProd": True, "cf_country": "Lebanon"}}
+        )
+        ticket_id = ticket.id
+
+    run = _start(client, admin_token, ticket_id)
+    # The trigger went to the entry's own job with the rendered param map.
+    assert captured["job_path"] == "pos-deploy"
+    assert captured["params"] == {
+        "msName": "pos",
+        "repotag": "2.4.0",
+        "envi": "uat",
+        "company": "kozen",
+        "debugProd": "true",
+        "country": "Lebanon",
+    }
+    assert _step(run, "image_check")["status"] == "skip"
+
+    # Poll ticks: queue → build success → deployed, with the cluster stages skipped.
+    from api.services.deploy_automation_service import advance_runs
+
+    with app.app_context():
+        advance_runs()
+        advance_runs()
+        final = DeployAutomationRun.query.get(run["id"])
+        assert final.status == "deployed", (final.status, final.error)
+        steps = {s["key"]: s["status"] for s in final.steps}
+        assert steps["verify"] == "skip"
+        assert steps["approval"] == "skip"
+        assert steps["deploy"] == "done"
+        assert steps["pods"] == "done"
+
+
+def test_custom_environment_run_defaults_to_router_contract(client, admin_token, app, monkeypatch):
+    """No job path / params on the entry → the router job gets APP/TAG/NAMESPACE."""
+    captured = {}
+
+    def fake_trigger(cfg, params):
+        captured["job_path"] = cfg.router_job_path
+        captured["params"] = params
+        return "http://jenkins/queue/item/78"
+
+    monkeypatch.setattr("api.services.jenkins_client.trigger_build", fake_trigger)
+    response = client.put(
+        "/api/zoho/jenkins",
+        json={
+            "enabled": True,
+            "baseUrl": "http://jenkins:8080",
+            "username": "bot",
+            "apiToken": "t0ken",
+            "routerJobPath": "router",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+
+    with app.app_context():
+        _set_custom_source(customs=[{"name": "POS-UAT", "applications": ["pos"]}])
+        ticket = _make_custom_ticket()
+        ticket_id = ticket.id
+
+    run = _start(client, admin_token, ticket_id)
+    assert run["status"] == "building", run
+    assert captured["job_path"] == "router"
+    assert captured["params"] == {"APP": "pos", "TAG": "2.4.0", "NAMESPACE": "POS-UAT"}
+
+
+def test_custom_environment_rejects_variable_change(client, admin_token, app):
+    with app.app_context():
+        _set_custom_source()
+        ticket = _make_custom_ticket(tag="", variable="LOG_LEVEL", value="debug")
+        ticket_id = ticket.id
+    body = _start(client, admin_token, ticket_id, expect=400)
+    assert "custom environment" in body["error"]

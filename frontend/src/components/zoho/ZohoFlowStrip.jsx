@@ -50,8 +50,10 @@ export default function ZohoFlowStrip({
   const enabled = Boolean(config?.enabled);
   const namespaces = config?.selectedNamespaces || [];
 
-  // Source cluster
-  const hasSource = Boolean(config?.sourceClusterId);
+  // Source cluster (custom Jenkins-only environments count as a source too)
+  const hasSource = Boolean(
+    config?.sourceClusterId || (config?.customEnvironments || []).length
+  );
   const sourceTone = hasSource ? "ok" : "warn";
 
   // Field sync

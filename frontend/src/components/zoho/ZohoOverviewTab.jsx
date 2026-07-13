@@ -131,19 +131,28 @@ export default function ZohoOverviewTab({ config, tickets, runs }) {
             }
           />
           <HealthRow
-            tone={config?.sourceClusterId ? "ok" : "warn"}
+            tone={
+              config?.sourceClusterId || (config?.customEnvironments || []).length
+                ? "ok"
+                : "warn"
+            }
             title="Dropdown source"
             message={
-              config?.sourceClusterId
+              config?.sourceClusterId || (config?.customEnvironments || []).length
                 ? ""
                 : "No source cluster selected yet — use “Choose namespaces” on the Environment field in Field sync."
             }
             tags={
-              config?.sourceClusterId ? (
+              config?.sourceClusterId || (config?.customEnvironments || []).length ? (
                 <>
-                  <span className="sg-tag">{config.sourceClusterId}</span>
+                  {config?.sourceClusterId ? (
+                    <span className="sg-tag">{config.sourceClusterId}</span>
+                  ) : null}
                   <span className="sg-zh-count">
                     {(config?.selectedNamespaces || []).length} namespace(s)
+                    {(config?.customEnvironments || []).length
+                      ? ` + ${(config?.customEnvironments || []).length} custom`
+                      : ""}
                   </span>
                 </>
               ) : null
