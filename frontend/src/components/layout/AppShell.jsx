@@ -41,6 +41,7 @@ export default function AppShell({
   displayUser,
   userInitials,
   onLogout,
+  onStartTour,
   children,
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -126,6 +127,7 @@ export default function AppShell({
           userInitials={userInitials}
           onLogout={onLogout}
           onMenuToggle={toggleSidebar}
+          onStartTour={onStartTour}
           sidebarOpen={sidebarOpen}
         />
         {loadingOverlay ? (

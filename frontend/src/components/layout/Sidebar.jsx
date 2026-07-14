@@ -119,7 +119,7 @@ export default function Sidebar({ pages, activePage, onNavigate, open = false })
           </div>
         </div>
       </div>
-      <nav aria-label="Main navigation">
+      <nav aria-label="Main navigation" data-tour="sidebar-nav">
         {sections.map((section) => (
           <div key={section.label || "main"} className="sidebar-section">
             {section.label ? (

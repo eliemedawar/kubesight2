@@ -1,0 +1,247 @@
+/* ── Signal v3 · Coach marks (guided page tips) ─────────────────────────────
+   A spotlight overlay plus an anchored popover. Colors come entirely from the
+   design tokens, so light and dark themes both work without overrides. */
+
+.coachmarks {
+  position: fixed;
+  inset: 0;
+  z-index: 6000; /* above modals (.modal-overlay) and the change-bundle .fab */
+}
+
+/* Transparent click shield: the page stays visible but not interactive while
+   the tour runs, so a stray click can't navigate mid-step. */
+.cm-blocker {
+  position: fixed;
+  inset: 0;
+}
+
+/* Full dim shown briefly while the next step's target is being located. */
+.cm-veil {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  animation: cm-fade var(--dur) var(--ease);
+}
+
+/* Four panels around the spotlight hole dim the rest of the page. (A single
+   giant box-shadow would be simpler, but Chromium drops shadows with very
+   large spread radii.) */
+.cm-dim {
+  position: fixed;
+  background: var(--backdrop);
+  pointer-events: none;
+  animation: cm-fade var(--dur-slow) var(--ease);
+}
+
+/* The "hole": a transparent ring marking the spotlit element. */
+.cm-spotlight {
+  position: fixed;
+  border-radius: var(--radius-md);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  pointer-events: none;
+  animation: cm-fade var(--dur-slow) var(--ease);
+}
+
+.cm-pop {
+  position: fixed;
+  width: min(330px, calc(100vw - 24px));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  animation: cm-pop-in var(--dur-slow) var(--ease);
+}
+
+.cm-arrow {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  transform: rotate(45deg);
+}
+
+.cm-pop[data-placement="bottom"] .cm-arrow {
+  top: -7px;
+  margin-left: -6px;
+  border-right: none;
+  border-bottom: none;
+}
+
+.cm-pop[data-placement="top"] .cm-arrow {
+  bottom: -7px;
+  margin-left: -6px;
+  border-left: none;
+  border-top: none;
+}
+
+.cm-pop[data-placement="right"] .cm-arrow {
+  left: -7px;
+  margin-top: -6px;
+  border-right: none;
+  border-top: none;
+}
+
+.cm-pop[data-placement="left"] .cm-arrow {
+  right: -7px;
+  margin-top: -6px;
+  border-left: none;
+  border-bottom: none;
+}
+
+.cm-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.cm-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--text-strong);
+  line-height: 1.3;
+}
+
+.cm-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin: -4px -4px 0 0;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.cm-close:hover {
+  background: var(--bg-interactive);
+  color: var(--text-strong);
+}
+
+.cm-body {
+  margin: var(--space-1) 0 var(--space-2);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--text-subtle);
+}
+
+.cm-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border-soft);
+  padding-top: var(--space-2);
+}
+
+.cm-foot-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cm-count {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+.cm-mute {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.cm-mute:hover {
+  color: var(--text-strong);
+}
+
+.cm-foot-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: none;
+}
+
+.cm-btn {
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.cm-back {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-main);
+}
+
+.cm-back:hover {
+  background: var(--bg-interactive);
+}
+
+.cm-next {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #ffffff;
+}
+
+.cm-next:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.cm-next:focus-visible,
+.cm-back:focus-visible,
+.cm-close:focus-visible,
+.cm-mute:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+@keyframes cm-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes cm-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cm-veil,
+  .cm-spotlight,
+  .cm-pop {
+    animation: none;
+  }
+}

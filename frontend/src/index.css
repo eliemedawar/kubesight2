@@ -6536,6 +6536,21 @@ kbd {
   flex-direction: column;
   gap: 0.6rem;
 }
+/* Fullscreen editing: lift the editor out of the modal into a viewport-filling
+   layer (same z tier as the fullscreen topology viewer / maximized log viewer).
+   The canvas grows to fill the remaining height and scrolls both ways. */
+.topo-editor--fs {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--bg-main);
+  padding: 1rem 1.25rem 1.25rem;
+}
+.topo-editor--fs .topo-canvas {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
 .topo-editor-block-header {
   display: flex;
   align-items: center;

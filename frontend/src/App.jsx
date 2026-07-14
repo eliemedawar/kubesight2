@@ -51,6 +51,9 @@ import {
   getUserInitials,
 } from "./utils/formatters.js";
 import { applyTheme, readThemePreference, storeThemePreference } from "./utils/theme.js";
+import CoachMarks from "./components/tour/CoachMarks.jsx";
+import { getTourSteps, getWelcomeSteps, WELCOME_TOUR_KEY } from "./tours/tourDefinitions.js";
+import { markTourSeen, readTourState, setToursMuted } from "./utils/tourStorage.js";
 
 // Theme is a per-browser preference: the locally stored choice always wins
 // over the workspace value returned by the API, so one user's theme never
@@ -307,6 +310,88 @@ export default function App() {
       setActivePage(pageKey);
     }
   };
+
+  // ── Coach marks (guided page tips) ─────────────────────────────────────
+  // Each page's tour auto-runs once per user (per browser, like the theme
+  // preference) and can be replayed from the topbar ? button. Steps are
+  // filtered with the same permission predicates the pages render with, so
+  // users only get tips for controls their role can actually see; the tour
+  // engine additionally skips steps whose target element isn't in the DOM.
+  const [activeTour, setActiveTour] = useState(null);
+
+  const buildTourSteps = (pageKey) => {
+    const ctx = { isAdmin, hasPermission, pageAllowed: isPageAllowed };
+    const state = readTourState(authUser?.id);
+    const pageSteps = getTourSteps(pageKey, ctx);
+    const includesWelcome = !state.seen[WELCOME_TOUR_KEY];
+    const steps =
+      includesWelcome && pageSteps.length ? [...getWelcomeSteps(ctx), ...pageSteps] : pageSteps;
+    return { steps, includesWelcome };
+  };
+
+  const markActiveTourSeen = (tour) => {
+    if (!tour) {
+      return;
+    }
+    markTourSeen(authUser?.id, tour.pageKey);
+    if (tour.includesWelcome) {
+      markTourSeen(authUser?.id, WELCOME_TOUR_KEY);
+    }
+  };
+
+  const startPageTour = () => {
+    if (!resolvedActivePage) {
+      return;
+    }
+    const { steps, includesWelcome } = buildTourSteps(resolvedActivePage);
+    if (steps.length) {
+      setActiveTour({ pageKey: resolvedActivePage, steps, auto: false, includesWelcome });
+    }
+  };
+
+  const closeTour = () => {
+    markActiveTourSeen(activeTour);
+    setActiveTour(null);
+  };
+
+  const muteTours = () => {
+    setToursMuted(authUser?.id, true);
+    closeTour();
+  };
+
+  useEffect(() => {
+    if (!isAuthenticated || authLoading || needsOnboarding || !resolvedActivePage || activeTour) {
+      return undefined;
+    }
+    const state = readTourState(authUser?.id);
+    if (state.muted || state.seen[resolvedActivePage]) {
+      return undefined;
+    }
+    const { steps, includesWelcome } = buildTourSteps(resolvedActivePage);
+    if (!steps.length) {
+      return undefined;
+    }
+    // Small delay so the page renders its chrome before the spotlight looks
+    // for targets; slow data is handled by the engine's per-step polling.
+    const timer = setTimeout(
+      () => setActiveTour({ pageKey: resolvedActivePage, steps, auto: true, includesWelcome }),
+      800
+    );
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, authLoading, needsOnboarding, resolvedActivePage, activeTour, authUser?.id]);
+
+  // Navigating away mid-tour ends it (and counts it as seen, so it doesn't
+  // nag again); logging out clears it so the next user starts fresh.
+  useEffect(() => {
+    if (activeTour && (!isAuthenticated || activeTour.pageKey !== resolvedActivePage)) {
+      if (isAuthenticated) {
+        markActiveTourSeen(activeTour);
+      }
+      setActiveTour(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTour, resolvedActivePage, isAuthenticated]);
 
   useEffect(() => {
     if (!isAuthenticated || authLoading) {
@@ -1740,9 +1825,19 @@ export default function App() {
       displayUser={displayUser}
       userInitials={userInitials}
       onLogout={logout}
+      onStartTour={startPageTour}
     >
       {pageNode}
     </AppShell>
+    {activeTour ? (
+      <CoachMarks
+        steps={activeTour.steps}
+        showMuteOption={activeTour.auto}
+        onFinish={closeTour}
+        onDismiss={closeTour}
+        onMuteAuto={muteTours}
+      />
+    ) : null}
     {changeBundle.enabled ? (
       <>
         {!changeBundle.isOpen && activePage !== "resources" ? (

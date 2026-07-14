@@ -69,6 +69,7 @@ export default function Topbar({
   userInitials,
   onLogout,
   onMenuToggle = () => {},
+  onStartTour,
   sidebarOpen = false,
 }) {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -138,7 +139,7 @@ export default function Topbar({
         </button>
         <div className="topbar-selectors">
         {showClusterSelector ? (
-          <div className="topbar-field">
+          <div className="topbar-field" data-tour="cluster-select">
             <p className="eyebrow">Active Cluster</p>
             <SearchableSelect
               value={selectedClusterId}
@@ -155,7 +156,7 @@ export default function Topbar({
           </div>
         ) : null}
         {showNamespaceSelector ? (
-          <div className="topbar-field">
+          <div className="topbar-field" data-tour="namespace-select">
             <p className="eyebrow">Active Namespace</p>
             <SearchableSelect
               value={selectedNamespace}
@@ -174,7 +175,7 @@ export default function Topbar({
         </div>
       </div>
       <div className="topbar-actions">
-        <div className="notifications-anchor" ref={notificationsRef}>
+        <div className="notifications-anchor" ref={notificationsRef} data-tour="notifications">
           <button
             type="button"
             className={`icon-button btn-ghost${notificationsOpen ? " is-active" : ""}`}
@@ -201,7 +202,14 @@ export default function Topbar({
             onClose={() => setNotificationsOpen(false)}
           />
         </div>
-        <button type="button" className="icon-button btn-ghost topbar-help-button" aria-label="Help & documentation">
+        <button
+          type="button"
+          className="icon-button btn-ghost topbar-help-button"
+          aria-label="Show page tips"
+          title="Show page tips"
+          data-tour="help-button"
+          onClick={onStartTour}
+        >
           <IconQuestion />
         </button>
         <button type="button" className="btn-outline topbar-logout" onClick={onLogout} aria-label="Sign out">

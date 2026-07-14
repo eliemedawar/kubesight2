@@ -327,6 +327,7 @@ function TopologyEditor({ topology, onChange, components = [] }) {
   const [linking, setLinking] = useState(null); // { fromTempId, x, y } while drawing an edge
   const [drag, setDrag] = useState(null);        // { tempId, x, y } uncommitted live drag position
   const [edgePopup, setEdgePopup] = useState(null); // { index, x, y } open connection editor
+  const [fullscreen, setFullscreen] = useState(false);
 
   const nodeById = useMemo(() => {
     const m = {};
@@ -357,6 +358,21 @@ function TopologyEditor({ topology, onChange, components = [] }) {
 
   // Clean up a pending animation frame on unmount.
   useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  // Exit fullscreen on Escape. Capture phase + stopPropagation so a parent
+  // modal's own Escape-to-close handler doesn't also fire — one Escape closes
+  // only the fullscreen layer (same pattern as TopologyViewer).
+  useEffect(() => {
+    if (!fullscreen) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setFullscreen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [fullscreen]);
 
   const canvasPoint = (evt) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -540,7 +556,12 @@ function TopologyEditor({ topology, onChange, components = [] }) {
   const popupEdge = edgePopup ? edges[edgePopup.index] : null;
 
   return (
-    <div className="topo-editor">
+    <div
+      className={`topo-editor${fullscreen ? " topo-editor--fs" : ""}`}
+      role={fullscreen ? "dialog" : undefined}
+      aria-modal={fullscreen ? "true" : undefined}
+      aria-label={fullscreen ? "Topology editor fullscreen" : undefined}
+    >
       <div className="topo-editor-block-header">
         <span className="topo-editor-block-title">Topology canvas</span>
         <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
@@ -558,6 +579,15 @@ function TopologyEditor({ topology, onChange, components = [] }) {
             </div>
           )}
           <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Custom</button>
+          <button
+            type="button"
+            className="btn-outline btn-compact"
+            onClick={() => setFullscreen((v) => !v)}
+            aria-pressed={fullscreen}
+            title={fullscreen ? "Exit fullscreen (Esc)" : "Edit in fullscreen"}
+          >
+            {fullscreen ? "Exit fullscreen" : "Fullscreen"}
+          </button>
         </div>
       </div>
       <p className="muted topo-canvas-hint">
@@ -569,7 +599,7 @@ function TopologyEditor({ topology, onChange, components = [] }) {
       <div
         ref={canvasRef}
         className="topo-canvas"
-        style={{ height: nodes.length ? Math.max(TOPO_CANVAS_MIN_H, contentH) : TOPO_CANVAS_MIN_H }}
+        style={fullscreen ? undefined : { height: nodes.length ? Math.max(TOPO_CANVAS_MIN_H, contentH) : TOPO_CANVAS_MIN_H }}
         onPointerDown={() => setEdgePopup(null)}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
