@@ -320,7 +320,7 @@ export default function App() {
   const [activeTour, setActiveTour] = useState(null);
 
   const buildTourSteps = (pageKey) => {
-    const ctx = { isAdmin, hasPermission, pageAllowed: isPageAllowed };
+    const ctx = { isAdmin, hasPermission, pageAllowed: isPageAllowed, pageKey };
     const state = readTourState(authUser?.id);
     const pageSteps = getTourSteps(pageKey, ctx);
     const includesWelcome = !state.seen[WELCOME_TOUR_KEY];

@@ -12,6 +12,8 @@
 // `title` and `body` may be strings or functions of ctx, so the copy itself
 // can differ between admins and other roles.
 
+import { pageNeedsClusterContext, pageNeedsNamespaceContext } from "../utils/authz.js";
+
 export const WELCOME_TOUR_KEY = "welcome";
 
 const WELCOME_STEPS = [
@@ -27,11 +29,15 @@ const WELCOME_STEPS = [
     target: '[data-tour="cluster-select"]',
     title: "Active cluster",
     body: "Most pages are scoped to this cluster. Switch it here and dashboards, resources, logs, and alerts follow along.",
+    // The topbar only shows the selector on cluster-scoped pages, so gate the
+    // step on the page the welcome tour happens to run on.
+    when: (ctx) => pageNeedsClusterContext(ctx.pageKey),
   },
   {
     target: '[data-tour="namespace-select"]',
     title: "Active namespace",
     body: "Narrow the view to one namespace. Resource and log pages honour this selection.",
+    when: (ctx) => pageNeedsNamespaceContext(ctx.pageKey),
   },
   {
     target: '[data-tour="notifications"]',
@@ -121,7 +127,9 @@ const PAGE_TOURS = {
       when: (ctx) => ctx.hasPermission("clusters:add"),
     },
     {
-      target: ".data-table",
+      // The shared DataTable renders no class on its <table>; .table-shell is
+      // its stable wrapper.
+      target: ".table-shell",
       title: "Connected clusters",
       body: "Test, edit, or remove connections from each row — the actions you see match your permissions.",
     },
@@ -134,7 +142,7 @@ const PAGE_TOURS = {
       body: "A deeper look at the cluster you selected — status, version, and capacity.",
     },
     {
-      target: ".content-grid",
+      target: ".stat-grid",
       title: "Key facts",
       body: "Status, Kubernetes version, CPU and memory usage, and the namespaces in your scope.",
     },
@@ -150,7 +158,7 @@ const PAGE_TOURS = {
           : "The namespaces you can see in the active cluster — your access rules decide this list.",
     },
     {
-      target: ".data-table",
+      target: ".table-shell",
       title: "Usage at a glance",
       body: "Pods, deployments, services, CPU, memory, and alert counts per namespace.",
     },
@@ -218,17 +226,12 @@ const PAGE_TOURS = {
     {
       target: ".sg-ph",
       title: "My Requests",
-      body: "Every deployment request you've submitted, with its current status.",
+      body: "Every deployment request you've submitted, with its current status. You'll also get a notification when a decision lands.",
     },
     {
-      target: ".user-filters",
-      title: "Filter",
-      body: "Narrow the list by status or search to find a specific request.",
-    },
-    {
-      target: ".card.ops-section",
-      title: "Status & history",
-      body: "Track each request from submission through approval to deployment. You'll also get a notification when something changes.",
+      target: ".tab-bar",
+      title: "Active vs History",
+      body: "Active lists requests still awaiting a decision; History keeps the rest, with search and status filters.",
     },
   ],
 
@@ -443,12 +446,12 @@ const PAGE_TOURS = {
       body: "Requests submitted by users who need an approval before deploying.",
     },
     {
-      target: ".user-filters",
-      title: "Filter",
-      body: "Narrow the queue by status or requester.",
+      target: ".tab-bar",
+      title: "Queue views",
+      body: "Active holds requests awaiting a decision; History keeps past decisions, with search and status filters.",
     },
     {
-      target: ".card.ops-section",
+      target: ".sg-rq-list",
       title: (ctx) => (ctx.hasPermission("deployment_requests:manage") ? "Approve or deny" : "Request queue"),
       body: (ctx) =>
         ctx.hasPermission("deployment_requests:manage")

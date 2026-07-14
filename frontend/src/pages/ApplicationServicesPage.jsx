@@ -317,7 +317,116 @@ function edgeStroke(scope) {
   return scope === "external" ? "var(--warn)" : "var(--text-muted)";
 }
 
-function TopologyEditor({ topology, onChange, components = [] }) {
+// Compact kind → cluster → namespace → workload picker shown inside the
+// topology canvas toolbar, so resources can be linked without scrolling down
+// to the "Linked resources" section. Adds go through the same deployments
+// list, so the node is mirrored onto the canvas automatically.
+function ResourceQuickAdd({ clusters = [], deployments = [], onAdd }) {
+  const [kind, setKind] = useState("deployment");
+  const [cluster, setCluster] = useState("");
+  const [namespace, setNamespace] = useState("");
+  const [namespaces, setNamespaces] = useState([]);
+  const [items, setItems] = useState([]);
+  const [nsLoading, setNsLoading] = useState(false);
+  const [itemsLoading, setItemsLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadItems = async (cl, ns, k) => {
+    if (!cl || !ns) { setItems([]); return; }
+    setItemsLoading(true);
+    setError("");
+    try {
+      const res = await listPickerWorkloads(cl, ns, k);
+      setItems(res.items || []);
+    } catch (err) {
+      setError(err.message || `Failed to load ${k}s`);
+    } finally { setItemsLoading(false); }
+  };
+
+  const handleCluster = async (val) => {
+    setCluster(val);
+    setNamespace("");
+    setNamespaces([]);
+    setItems([]);
+    setError("");
+    if (!val) return;
+    setNsLoading(true);
+    try {
+      const res = await listNamespacesByCluster(val);
+      setNamespaces((res.items || res.namespaces || res || []).map((n) => (typeof n === "string" ? n : n.name)));
+    } catch (err) {
+      setError(err.message || "Failed to load namespaces");
+    } finally { setNsLoading(false); }
+  };
+
+  const handleNamespace = (val) => {
+    setNamespace(val);
+    setItems([]);
+    setError("");
+    loadItems(cluster, val, kind);
+  };
+
+  const handleKind = (k) => {
+    setKind(k);
+    setItems([]);
+    setError("");
+    if (cluster && namespace) loadItems(cluster, namespace, k);
+  };
+
+  // Workloads in the picked namespace not already linked (for the same kind).
+  const available = items.filter(
+    (name) =>
+      !deployments.some(
+        (d) =>
+          d.clusterId === cluster &&
+          d.namespace === namespace &&
+          d.deploymentName === name &&
+          (d.kind || "deployment") === kind
+      )
+  );
+
+  return (
+    <div className="topo-resource-add">
+      <div className="dep-picker-controls">
+        <SearchableSelect
+          options={WORKLOAD_KINDS.map((k) => ({ value: k, label: KIND_LABEL[k] }))}
+          value={kind}
+          onChange={(e) => handleKind(e.target.value)}
+          placeholder="Kind…"
+        />
+        <SearchableSelect
+          options={clusters.map((c) => ({ value: c.id, label: c.name || c.id }))}
+          value={cluster}
+          onChange={(e) => handleCluster(e.target.value)}
+          placeholder="Select cluster…"
+        />
+        <SearchableSelect
+          options={namespaces.map((ns) => ({ value: ns, label: ns }))}
+          value={namespace}
+          onChange={(e) => handleNamespace(e.target.value)}
+          placeholder={nsLoading ? "Loading…" : "Select namespace…"}
+          disabled={!cluster || nsLoading}
+        />
+        <SearchableSelect
+          options={available.map((name) => ({ value: name, label: name }))}
+          value=""
+          onChange={(e) => e.target.value && onAdd({ clusterId: cluster, namespace, deploymentName: e.target.value, kind })}
+          placeholder={itemsLoading ? "Loading…" : !namespace ? `Select ${KIND_LABEL[kind]}…` : `Add ${KIND_LABEL[kind]}…`}
+          disabled={!namespace || itemsLoading}
+        />
+      </div>
+      {error && <p className="banner-message error" style={{ marginTop: "0.5rem" }}>{error}</p>}
+      {namespace && !itemsLoading && items.length === 0 && (
+        <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.4rem" }}>No {KIND_LABEL[kind]}s found in this namespace.</p>
+      )}
+      {namespace && !itemsLoading && items.length > 0 && available.length === 0 && (
+        <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.4rem" }}>All {KIND_LABEL[kind]}s in this namespace are already linked.</p>
+      )}
+    </div>
+  );
+}
+
+function TopologyEditor({ topology, onChange, components = [], clusters = [], deployments = [], onDeploymentsChange }) {
   const { nodes, edges } = topology;
   const canvasRef = useRef(null);
   const dragRef = useRef(null);          // { tempId, offX, offY, moved, pointerId } while dragging
@@ -328,6 +437,7 @@ function TopologyEditor({ topology, onChange, components = [] }) {
   const [drag, setDrag] = useState(null);        // { tempId, x, y } uncommitted live drag position
   const [edgePopup, setEdgePopup] = useState(null); // { index, x, y } open connection editor
   const [fullscreen, setFullscreen] = useState(false);
+  const [resourcePickerOpen, setResourcePickerOpen] = useState(false); // "+ Link resource" panel
 
   const nodeById = useMemo(() => {
     const m = {};
@@ -426,6 +536,16 @@ function TopologyEditor({ topology, onChange, components = [] }) {
       nodes: nodes.filter((n) => n.tempId !== tempId),
       edges: edges.filter((e) => e.sourceTempId !== tempId && e.targetTempId !== tempId),
     });
+  };
+
+  // Unlink a resource-backed node: remove it from the linked deployments list;
+  // the resource↔node sync then drops the mirrored node (and its edges), the
+  // Linked resources row, and any DR mapping — same as removing it below.
+  const removeResourceNode = (node) => {
+    if (!onDeploymentsChange) return;
+    setEdgePopup(null);
+    const key = nodeResourceKey(node);
+    onDeploymentsChange(deployments.filter((d) => resourceKey(d) !== key));
   };
 
   const removeEdge = (idx) => {
@@ -578,6 +698,17 @@ function TopologyEditor({ topology, onChange, components = [] }) {
               />
             </div>
           )}
+          {onDeploymentsChange && (
+            <button
+              type="button"
+              className={`btn-outline btn-compact${resourcePickerOpen ? " is-active" : ""}`}
+              onClick={() => setResourcePickerOpen((v) => !v)}
+              aria-pressed={resourcePickerOpen}
+              title="Link a deployment/pod and add it to the canvas"
+            >
+              + Link resource
+            </button>
+          )}
           <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Custom</button>
           <button
             type="button"
@@ -590,10 +721,27 @@ function TopologyEditor({ topology, onChange, components = [] }) {
           </button>
         </div>
       </div>
+      {onDeploymentsChange && resourcePickerOpen && (
+        <ResourceQuickAdd
+          clusters={clusters}
+          deployments={deployments}
+          onAdd={(entry) => {
+            const dup = deployments.some(
+              (d) =>
+                d.clusterId === entry.clusterId &&
+                d.namespace === entry.namespace &&
+                d.deploymentName === entry.deploymentName &&
+                (d.kind || "deployment") === entry.kind
+            );
+            if (!dup) onDeploymentsChange([...deployments, entry]);
+          }}
+        />
+      )}
       <p className="muted topo-canvas-hint">
-        Add a predefined building block from <strong>Components</strong>, a custom box, or link deployments/pods below
-        (which appear here automatically). Drag a box by its header to move it. Drag from the
-        <span className="topo-handle-legend">●</span> handle on the right of a box to another to connect them.
+        Add a predefined building block from <strong>Components</strong>, a custom box, or link a deployment/pod via
+        <strong> + Link resource</strong> (linked resources appear here automatically). Drag a box by its header to
+        move it. Drag from the <span className="topo-handle-legend">●</span> handle on the right of a box to another
+        to connect them.
       </p>
 
       <div
@@ -700,9 +848,14 @@ function TopologyEditor({ topology, onChange, components = [] }) {
                   <div className="topo-canvas-node-header" onPointerDown={(e) => onNodePointerDown(e, node)}>
                     <span className="topo-grip">⠿</span>
                     {isResource ? (
-                      <span className={`topo-node-kind topo-node-kind--${(node.type || "deployment").toLowerCase()}`}>
-                        {KIND_LABEL[(node.type || "deployment").toLowerCase()] || "Deployment"}
-                      </span>
+                      <>
+                        <span className={`topo-node-kind topo-node-kind--${(node.type || "deployment").toLowerCase()}`}>
+                          {KIND_LABEL[(node.type || "deployment").toLowerCase()] || "Deployment"}
+                        </span>
+                        {onDeploymentsChange && (
+                          <button type="button" className="topo-node-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeResourceNode(node)} title="Unlink resource">✕</button>
+                        )}
+                      </>
                     ) : isComponent ? (
                       <>
                         <span className="topo-node-kind topo-node-kind--component">{node.type || "Component"}</span>
@@ -990,7 +1143,14 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
           <p className="muted" style={{ fontSize: "0.8125rem", marginBottom: "0.85rem" }}>
             Define the components and connections that make up this service's architecture.
           </p>
-          <TopologyEditor topology={topology} onChange={setTopology} components={components} />
+          <TopologyEditor
+            topology={topology}
+            onChange={setTopology}
+            components={components}
+            clusters={clusters}
+            deployments={deployments}
+            onDeploymentsChange={handleDeploymentsChange}
+          />
         </section>
 
         <section className="form-section">

@@ -73,6 +73,9 @@ export default function CoachMarks({
   onMuteAuto,
   showMuteOption = false,
 }) {
+  // Steps whose target never appears are removed from this list (rather than
+  // jumped over) so the "N of M" counter never shows gaps.
+  const [activeSteps, setActiveSteps] = useState(steps);
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState(null);
   const [popSize, setPopSize] = useState(DEFAULT_POP);
@@ -82,11 +85,11 @@ export default function CoachMarks({
   // don't restart (re-scroll, re-poll) every time the parent re-renders.
   const cbRef = useRef({});
   cbRef.current = { onFinish, onDismiss, onMuteAuto };
-  const isLast = index === steps.length - 1;
+  const isLast = index === activeSteps.length - 1;
   const stateRef = useRef({});
   stateRef.current = { isLast };
 
-  const step = steps[index];
+  const step = activeSteps[index];
 
   const goNext = () => {
     if (isLast) {
@@ -169,10 +172,12 @@ export default function CoachMarks({
         return;
       }
       if (Date.now() - startedAt >= FIND_TIMEOUT) {
-        if (index < steps.length - 1) {
-          setIndex((i) => i + 1);
-        } else {
+        // Target never showed up (permission-hidden control or empty state) —
+        // drop the step so the counter stays contiguous.
+        if (index >= activeSteps.length - 1) {
           cbRef.current.onFinish?.();
+        } else {
+          setActiveSteps((prev) => prev.filter((_, i) => i !== index));
         }
         return;
       }
@@ -187,7 +192,7 @@ export default function CoachMarks({
       }
       detach();
     };
-  }, [index, step, steps.length]);
+  }, [index, step, activeSteps.length]);
 
   useEffect(() => {
     const onKey = (event) => {
@@ -285,7 +290,7 @@ export default function CoachMarks({
           data-placement={pos.placement}
           role="dialog"
           aria-modal="true"
-          aria-label={`Tip ${index + 1} of ${steps.length}: ${step.title}`}
+          aria-label={`Tip ${index + 1} of ${activeSteps.length}: ${step.title}`}
         >
           {pos.arrow ? (
             <span
@@ -315,7 +320,7 @@ export default function CoachMarks({
           <footer className="cm-foot">
             <div className="cm-foot-meta">
               <span className="cm-count">
-                {index + 1} of {steps.length}
+                {index + 1} of {activeSteps.length}
               </span>
               {showMuteOption ? (
                 <button type="button" className="cm-mute" onClick={() => cbRef.current.onMuteAuto?.()}>

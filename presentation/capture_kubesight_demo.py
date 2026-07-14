@@ -25,7 +25,9 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-BASE = os.environ.get("KUBESIGHT_DEMO_URL", "http://127.0.0.1:5000").rstrip("/")
+# Port 5001 is reserved for this disposable presentation instance, keeping it
+# separate from any developer server that may already be running on 5000.
+BASE = os.environ.get("KUBESIGHT_DEMO_URL", "http://127.0.0.1:5001").rstrip("/")
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "screenshots"
 TOKEN = ""
@@ -432,7 +434,12 @@ def capture_demo() -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, executable_path=chrome, args=["--no-sandbox", "--disable-gpu"])
         context = browser.new_context(viewport={"width": 1600, "height": 900}, device_scale_factor=1, color_scheme="light", locale="en-US")
-        context.add_init_script("localStorage.setItem('kubesight-theme','light');")
+        context.add_init_script("""
+          localStorage.setItem('kubesight-theme','light');
+          for (let i = 1; i <= 20; i += 1) {
+            localStorage.setItem(`kubesight.coachmarks.v1.${i}`, JSON.stringify({seen: {}, muted: true}));
+          }
+        """)
 
         synthetic_layout = {
             "success": True,
@@ -485,6 +492,7 @@ def capture_demo() -> None:
         page.get_by_label("Password").fill("admin123")
         page.get_by_role("button", name="Sign In", exact=True).click()
         page.get_by_text("Operations Dashboard", exact=False).first.wait_for(timeout=20000)
+        optional("dismiss first-run coachmarks", lambda: page.get_by_role("button", name="Close tour", exact=True).click(timeout=8000))
         shot("02_dashboard.png", 1800)
 
         nav("Clusters")

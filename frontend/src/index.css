@@ -6568,6 +6568,17 @@ kbd {
   font-size: 0.78rem;
   margin: 0;
 }
+/* "+ Link resource" quick-add panel inside the canvas toolbar. */
+.topo-resource-add {
+  padding: 0.6rem 0.75rem;
+  border: 1px dashed var(--border-strong, var(--border));
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--bg-panel);
+}
+.btn-outline.is-active {
+  border-color: var(--accent);
+  color: var(--accent-strong, var(--accent));
+}
 .topo-handle-legend {
   color: var(--accent-strong);
 }
