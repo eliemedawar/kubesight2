@@ -385,6 +385,8 @@ def _migrate_client_service_connections() -> None:
     for col, sql_type in [
         ("source_ip", "VARCHAR(64)"),
         ("destination_ip", "VARCHAR(64)"),
+        ("netted_source_ip", "VARCHAR(64)"),
+        ("netted_destination_ip", "VARCHAR(64)"),
         ("transport_type", "VARCHAR(32)"),
         ("transport_name", "VARCHAR(255)"),
         ("transport_notes", "TEXT"),

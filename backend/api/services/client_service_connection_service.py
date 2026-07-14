@@ -71,9 +71,15 @@ def _parse_component_refs(raw: Any) -> List[Dict[str, str]]:
                 "name": str(item.get("name") or item["ref"]),
                 "sourceIp": str(item.get("sourceIp") or ""),
                 "destinationIp": str(item.get("destinationIp") or ""),
+                "nettedSourceIp": str(item.get("nettedSourceIp") or ""),
+                "nettedDestinationIp": str(item.get("nettedDestinationIp") or ""),
             })
         elif item is not None:
-            out.append({"ref": str(item), "name": str(item), "sourceIp": "", "destinationIp": ""})
+            out.append({
+                "ref": str(item), "name": str(item),
+                "sourceIp": "", "destinationIp": "",
+                "nettedSourceIp": "", "nettedDestinationIp": "",
+            })
     return out
 
 
@@ -86,6 +92,8 @@ def _connection_to_dict(conn: Optional[ClientServiceConnection]) -> Optional[Dic
         "serviceId": conn.service_id,
         "sourceIp": conn.source_ip or "",
         "destinationIp": conn.destination_ip or "",
+        "nettedSourceIp": conn.netted_source_ip or "",
+        "nettedDestinationIp": conn.netted_destination_ip or "",
         "transportType": conn.transport_type or "",
         "transportName": conn.transport_name or "",
         "transportNotes": conn.transport_notes or "",
@@ -164,18 +172,25 @@ def _normalize_component_refs(
     if not isinstance(value, (list, tuple)):
         return None, "componentRefs must be a list."
 
-    # Accept a list of ref strings or of {ref, name, sourceIp, destinationIp}.
+    # Accept a list of ref strings or of {ref, name, sourceIp, destinationIp,
+    # nettedSourceIp, nettedDestinationIp}.
     requested: List[Dict[str, Any]] = []
     for item in value:
         if isinstance(item, dict):
             ref = item.get("ref")
             src = item.get("sourceIp")
             dst = item.get("destinationIp")
+            nsrc = item.get("nettedSourceIp")
+            ndst = item.get("nettedDestinationIp")
         else:
-            ref, src, dst = item, None, None
+            ref, src, dst, nsrc, ndst = item, None, None, None, None
         if ref is None or str(ref).strip() == "":
             continue
-        requested.append({"ref": str(ref).strip(), "sourceIp": src, "destinationIp": dst})
+        requested.append({
+            "ref": str(ref).strip(),
+            "sourceIp": src, "destinationIp": dst,
+            "nettedSourceIp": nsrc, "nettedDestinationIp": ndst,
+        })
 
     if not requested:
         return None, None
@@ -200,6 +215,9 @@ def _normalize_component_refs(
             # Per-component addressing (each component can have its own IPs).
             "sourceIp": _clean(item.get("sourceIp"), 64) or "",
             "destinationIp": _clean(item.get("destinationIp"), 64) or "",
+            # Optional NAT ("netted") addresses.
+            "nettedSourceIp": _clean(item.get("nettedSourceIp"), 64) or "",
+            "nettedDestinationIp": _clean(item.get("nettedDestinationIp"), 64) or "",
         })
 
     return json.dumps(resolved), None
@@ -319,6 +337,8 @@ def upsert_connection(
 
     conn.source_ip = _clean(payload.get("sourceIp"), 64)
     conn.destination_ip = _clean(payload.get("destinationIp"), 64)
+    conn.netted_source_ip = _clean(payload.get("nettedSourceIp"), 64)
+    conn.netted_destination_ip = _clean(payload.get("nettedDestinationIp"), 64)
     conn.transport_type = transport_type
     conn.transport_name = transport_name
     conn.transport_notes = _clean(payload.get("transportNotes"), 4000)
@@ -454,6 +474,9 @@ def get_client_service_topology(
 
     conn_source = (conn.source_ip if conn else None) or ""
     conn_dest = (conn.destination_ip if conn else None) or ""
+    # Optional NAT addresses — empty when the connection isn't NATted.
+    conn_netted_source = (conn.netted_source_ip if conn else None) or ""
+    conn_netted_dest = (conn.netted_destination_ip if conn else None) or ""
     transport_type = (conn.transport_type if conn else None) or _NOT_CONFIGURED
     transport_name = (conn.transport_name if conn else None) or ""
 
@@ -492,6 +515,8 @@ def get_client_service_topology(
                     "id": node_index[r["ref"]]["id"],
                     "sourceIp": r.get("sourceIp") or conn_source or _NOT_CONFIGURED,
                     "destinationIp": r.get("destinationIp") or conn_dest or _NOT_CONFIGURED,
+                    "nettedSourceIp": r.get("nettedSourceIp") or conn_netted_source,
+                    "nettedDestinationIp": r.get("nettedDestinationIp") or conn_netted_dest,
                 })
         else:
             entry_id = _entry_node_id(svc_nodes, svc_edges)
@@ -500,6 +525,8 @@ def get_client_service_topology(
                     "id": entry_id,
                     "sourceIp": conn_source or _NOT_CONFIGURED,
                     "destinationIp": conn_dest or _NOT_CONFIGURED,
+                    "nettedSourceIp": conn_netted_source,
+                    "nettedDestinationIp": conn_netted_dest,
                 })
         # Accent the components this connection lands on.
         attach_id_strs = {str(t["id"]) for t in targets}
@@ -519,6 +546,8 @@ def get_client_service_topology(
             "id": service_attach_id,
             "sourceIp": conn_source or _NOT_CONFIGURED,
             "destinationIp": conn_dest or _NOT_CONFIGURED,
+            "nettedSourceIp": conn_netted_source,
+            "nettedDestinationIp": conn_netted_dest,
         })
 
     # One transport node per target so each component's own source/destination IP
@@ -545,8 +574,14 @@ def get_client_service_topology(
     for idx, target in enumerate(targets):
         src_ip = target["sourceIp"]
         dst_ip = target["destinationIp"]
+        netted_src = target.get("nettedSourceIp") or ""
+        netted_dst = target.get("nettedDestinationIp") or ""
         transport_node_id = f"transport-{client_id}-{service_id}-{idx}"
         transport_desc_parts = [f"Source: {src_ip}", f"Destination: {dst_ip}"]
+        if netted_src:
+            transport_desc_parts.append(f"Netted source: {netted_src}")
+        if netted_dst:
+            transport_desc_parts.append(f"Netted destination: {netted_dst}")
         if transport_name:
             transport_desc_parts.append(transport_name)
         nodes.append({
@@ -557,6 +592,8 @@ def get_client_service_topology(
             "overlay": "transport",
             "sourceIp": src_ip,
             "destinationIp": dst_ip,
+            "nettedSourceIp": netted_src,
+            "nettedDestinationIp": netted_dst,
             "transportName": transport_name,
         })
         if direction in ("inbound", "both"):

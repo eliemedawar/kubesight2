@@ -34,6 +34,16 @@ function componentNames(conn) {
   return refs.map((r) => r.name).join(", ");
 }
 
+// Optional "netted src → netted dst" suffix shown only when NAT addresses exist.
+function NettedAddressing({ src, dst }) {
+  if (!src && !dst) return null;
+  return (
+    <span className="muted">
+      {" "}(netted: {src || "—"} → {dst || "—"})
+    </span>
+  );
+}
+
 // Per-component addressing rows (name: source → destination) for detail views.
 function ComponentAddressing({ conn }) {
   const refs = conn?.componentRefs || [];
@@ -44,6 +54,7 @@ function ComponentAddressing({ conn }) {
         {conn?.sourceIp || <span className="muted">no src</span>}
         <span className="muted"> → </span>
         {conn?.destinationIp || <span className="muted">no dst</span>}
+        <NettedAddressing src={conn?.nettedSourceIp} dst={conn?.nettedDestinationIp} />
       </div>
     );
   }
@@ -56,6 +67,7 @@ function ComponentAddressing({ conn }) {
           {r.sourceIp || <span className="muted">no src</span>}
           <span className="muted"> → </span>
           {r.destinationIp || <span className="muted">no dst</span>}
+          <NettedAddressing src={r.nettedSourceIp} dst={r.nettedDestinationIp} />
         </div>
       ))}
     </div>

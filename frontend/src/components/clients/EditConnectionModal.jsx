@@ -53,11 +53,20 @@ export default function EditConnectionModal({
   // Connection-level IPs — only used when the service has no components to attach to.
   const [sourceIp, setSourceIp] = useState(c.sourceIp || "");
   const [destinationIp, setDestinationIp] = useState(c.destinationIp || "");
-  // Per-component selection + addressing: { [ref]: { sourceIp, destinationIp } }.
+  // Optional NAT ("netted") addresses when the connection traverses NAT.
+  const [nettedSourceIp, setNettedSourceIp] = useState(c.nettedSourceIp || "");
+  const [nettedDestinationIp, setNettedDestinationIp] = useState(c.nettedDestinationIp || "");
+  // Per-component selection + addressing:
+  // { [ref]: { sourceIp, destinationIp, nettedSourceIp, nettedDestinationIp } }.
   const [compData, setCompData] = useState(() => {
     const init = {};
     (c.componentRefs || []).forEach((r) => {
-      init[String(r.ref)] = { sourceIp: r.sourceIp || "", destinationIp: r.destinationIp || "" };
+      init[String(r.ref)] = {
+        sourceIp: r.sourceIp || "",
+        destinationIp: r.destinationIp || "",
+        nettedSourceIp: r.nettedSourceIp || "",
+        nettedDestinationIp: r.nettedDestinationIp || "",
+      };
     });
     return init;
   });
@@ -70,7 +79,7 @@ export default function EditConnectionModal({
     setCompData((prev) => {
       const next = { ...prev };
       if (next[ref]) delete next[ref];
-      else next[ref] = { sourceIp: "", destinationIp: "" };
+      else next[ref] = { sourceIp: "", destinationIp: "", nettedSourceIp: "", nettedDestinationIp: "" };
       return next;
     });
   };
@@ -90,10 +99,14 @@ export default function EditConnectionModal({
       // Connection-level IPs matter only for the no-component (entrypoint) case.
       sourceIp: hasComponents ? "" : sourceIp.trim(),
       destinationIp: hasComponents ? "" : destinationIp.trim(),
+      nettedSourceIp: hasComponents ? "" : nettedSourceIp.trim(),
+      nettedDestinationIp: hasComponents ? "" : nettedDestinationIp.trim(),
       componentRefs: Object.entries(compData).map(([ref, v]) => ({
         ref,
         sourceIp: (v.sourceIp || "").trim(),
         destinationIp: (v.destinationIp || "").trim(),
+        nettedSourceIp: (v.nettedSourceIp || "").trim(),
+        nettedDestinationIp: (v.nettedDestinationIp || "").trim(),
       })),
     });
   };
@@ -161,6 +174,14 @@ export default function EditConnectionModal({
                   Destination IP
                   <input value={destinationIp} onChange={(e) => setDestinationIp(e.target.value)} maxLength={64} placeholder="e.g. 10.4.12.50" />
                 </label>
+                <label>
+                  Netted source IP <span className="muted">(optional)</span>
+                  <input value={nettedSourceIp} onChange={(e) => setNettedSourceIp(e.target.value)} maxLength={64} placeholder="NATted source, if any" />
+                </label>
+                <label>
+                  Netted destination IP <span className="muted">(optional)</span>
+                  <input value={nettedDestinationIp} onChange={(e) => setNettedDestinationIp(e.target.value)} maxLength={64} placeholder="NATted destination, if any" />
+                </label>
               </div>
             </>
           ) : (
@@ -212,6 +233,24 @@ export default function EditConnectionModal({
                               onChange={(e) => setCompField(ref, "destinationIp", e.target.value)}
                               maxLength={64}
                               placeholder="e.g. 10.4.12.50"
+                            />
+                          </label>
+                          <label>
+                            Netted source IP <span className="muted">(optional)</span>
+                            <input
+                              value={compData[ref].nettedSourceIp}
+                              onChange={(e) => setCompField(ref, "nettedSourceIp", e.target.value)}
+                              maxLength={64}
+                              placeholder="NATted source, if any"
+                            />
+                          </label>
+                          <label>
+                            Netted destination IP <span className="muted">(optional)</span>
+                            <input
+                              value={compData[ref].nettedDestinationIp}
+                              onChange={(e) => setCompField(ref, "nettedDestinationIp", e.target.value)}
+                              maxLength={64}
+                              placeholder="NATted destination, if any"
                             />
                           </label>
                         </div>

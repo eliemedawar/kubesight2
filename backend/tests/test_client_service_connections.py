@@ -94,6 +94,26 @@ class TestUpsertConnection:
         assert data["transportType"] == "VPN"
         assert data["isActive"] is True
 
+    def test_netted_ips_optional_round_trip(self, client, admin_token):
+        svc = _create_service(client, admin_token)
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        url = f"/api/clients/{cl['id']}/services/{svc['id']}/connection"
+        # Omitted → serialized as empty strings.
+        res = client.post(url, json={"transportType": "VPN"}, headers=auth_headers(admin_token))
+        data = res.get_json()["data"]
+        assert data["nettedSourceIp"] == ""
+        assert data["nettedDestinationIp"] == ""
+        # Provided → stored and returned.
+        res = client.post(
+            url,
+            json={"sourceIp": "10.4.24.129", "nettedSourceIp": "196.10.20.99",
+                  "nettedDestinationIp": "172.16.0.5", "transportType": "VPN"},
+            headers=auth_headers(admin_token),
+        )
+        data = res.get_json()["data"]
+        assert data["nettedSourceIp"] == "196.10.20.99"
+        assert data["nettedDestinationIp"] == "172.16.0.5"
+
     def test_update_existing_connection_returns_200(self, client, admin_token):
         svc = _create_service(client, admin_token)
         cl = _create_client(client, admin_token, service_ids=[svc["id"]])
@@ -325,6 +345,38 @@ class TestComponentSelection:
         assert refs[0]["name"] == "Backend API"
         assert refs[0]["sourceIp"] == "10.0.0.1"
         assert refs[0]["destinationIp"] == "10.0.0.2"
+
+    def test_component_refs_store_netted_ips(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        backend = self._node_id(svc, "Backend API")
+        res = self._post_conn(
+            client, admin_token, cl, svc, transportType="VPN",
+            componentRefs=[{
+                "ref": str(backend), "sourceIp": "10.0.0.1", "destinationIp": "10.0.0.2",
+                "nettedSourceIp": "196.10.20.99", "nettedDestinationIp": "172.16.0.5",
+            }],
+        )
+        assert res.status_code == 201, res.get_json()
+        ref = res.get_json()["data"]["componentRefs"][0]
+        assert ref["nettedSourceIp"] == "196.10.20.99"
+        assert ref["nettedDestinationIp"] == "172.16.0.5"
+        # The transport node for this component surfaces the netted addresses.
+        topo = self._topology(client, admin_token, cl, svc)
+        transport = next(n for n in topo["nodes"] if n["name"] == "VPN")
+        assert transport["nettedSourceIp"] == "196.10.20.99"
+        assert "Netted source: 196.10.20.99" in transport["description"]
+        assert "Netted destination: 172.16.0.5" in transport["description"]
+
+    def test_netted_ips_omitted_stay_out_of_description(self, client, admin_token):
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        self._post_conn(client, admin_token, cl, svc, transportType="VPN",
+                        sourceIp="10.0.0.1", destinationIp="10.0.0.2")
+        topo = self._topology(client, admin_token, cl, svc)
+        transport = next(n for n in topo["nodes"] if n["name"] == "VPN")
+        assert transport["nettedSourceIp"] == ""
+        assert "Netted" not in transport["description"]
 
     def test_invalid_component_ref_rejected(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())

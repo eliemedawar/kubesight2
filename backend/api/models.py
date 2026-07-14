@@ -864,6 +864,10 @@ class ClientServiceConnection(db.Model):
     service_id = db.Column(db.Integer, db.ForeignKey("application_services.id"), nullable=False)
     source_ip = db.Column(db.String(64), nullable=True)
     destination_ip = db.Column(db.String(64), nullable=True)
+    # Optional NAT ("netted") addresses when the connection traverses NAT: the
+    # translated source/destination the other side actually sees.
+    netted_source_ip = db.Column(db.String(64), nullable=True)
+    netted_destination_ip = db.Column(db.String(64), nullable=True)
     # VPN | Leased Line | MPLS | Internet | Private Link | Direct Connect |
     # Internal Network | Other  (validated in the service layer).
     transport_type = db.Column(db.String(32), nullable=True)

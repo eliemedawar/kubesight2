@@ -107,6 +107,10 @@ export function computeLayout(nodes, edges) {
     const key = `${s}→${t}`;
     if (seenPair.has(key)) return;
     seenPair.add(key);
+    // The reverse half of a bidirectional pair (A ⇄ B) would read as a
+    // 2-cycle here and inflate both ranks to the iteration cap; drop it from
+    // the layout graph (the drawn edges are unaffected).
+    if (seenPair.has(`${t}→${s}`)) return;
     outAdj[s].push(t);
     inAdj[t].push(s);
   });
@@ -124,7 +128,14 @@ export function computeLayout(nodes, edges) {
     if (!changed) break;
   }
 
-  // Bucket nodes into layers by rank (input order preserved within each layer).
+  // Bucket nodes into layers by rank (input order preserved within each
+  // layer). Ranks are first compacted to consecutive indices: a cycle longer
+  // than two nodes still inflates ranks unevenly, and the gaps would leave
+  // holes in `layers` (empty bands in the drawing, NaN from the spread below).
+  const usedRanks = [...new Set(ids.map((id) => rank[id]))].sort((a, b) => a - b);
+  const rankIndex = new Map(usedRanks.map((r, i) => [r, i]));
+  ids.forEach((id) => { rank[id] = rankIndex.get(rank[id]); });
+
   const layers = [];
   ids.forEach((id) => {
     const r = rank[id];
