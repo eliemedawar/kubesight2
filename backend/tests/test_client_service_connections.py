@@ -367,6 +367,10 @@ class TestComponentSelection:
         assert transport["nettedSourceIp"] == "196.10.20.99"
         assert "Netted source: 196.10.20.99" in transport["description"]
         assert "Netted destination: 172.16.0.5" in transport["description"]
+        # The connection edges carry the netted address as a second label line.
+        edge_descs = [e.get("description") or "" for e in topo["edges"]]
+        assert "Source 10.0.0.1\nnetted 196.10.20.99" in edge_descs
+        assert "Destination 10.0.0.2\nnetted 172.16.0.5" in edge_descs
 
     def test_netted_ips_omitted_stay_out_of_description(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
@@ -377,6 +381,7 @@ class TestComponentSelection:
         transport = next(n for n in topo["nodes"] if n["name"] == "VPN")
         assert transport["nettedSourceIp"] == ""
         assert "Netted" not in transport["description"]
+        assert not any("netted" in (e.get("description") or "") for e in topo["edges"])
 
     def test_invalid_component_ref_rejected(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())

@@ -391,12 +391,17 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
             const tone = edgeToneFor(edge);
             const protocol = edge.protocol || "";
             const description = edge.description || "";
-            const descLabel = description.length > 32 ? description.slice(0, 31) + "…" : description;
+            // Descriptions may be multi-line (e.g. "Source 1.2.3.4\nnetted
+            // 5.6.7.8"); each line truncates independently and stacks below.
+            const descLines = description
+              ? description.split("\n").map((l) => (l.length > 32 ? l.slice(0, 31) + "…" : l))
+              : [];
             const labelFill = tone === "danger"
               ? "var(--danger)"
               : tone === "warn" ? "var(--warn)" : "var(--text-muted)";
 
-            const edgeTip = [protocol, edge.scope, edge.description].filter(Boolean).join(" · ");
+            const edgeTip = [protocol, edge.scope, description.replace(/\n/g, " · ")]
+              .filter(Boolean).join(" · ");
 
             return (
               <g key={edge.id ?? `e${idx}`}>
@@ -411,13 +416,13 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
                     {protocol}
                   </text>
                 ) : null}
-                {description ? (
-                  <text x={labelX} y={labelY + (protocol ? 7 : -2)} textAnchor="middle"
+                {descLines.map((line, i) => (
+                  <text key={i} x={labelX} y={labelY + (protocol ? 7 : -2) + i * 10} textAnchor="middle"
                     fill="var(--text-muted)" fontSize={9}
                     style={{ paintOrder: "stroke" }} stroke="var(--bg-inset)" strokeWidth={3}>
-                    {descLabel}
+                    {line}
                   </text>
-                ) : null}
+                ))}
               </g>
             );
           })}
