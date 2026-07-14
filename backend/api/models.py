@@ -1891,6 +1891,16 @@ class ZohoIntegration(db.Model):
     # cluster deployment behind it. Param values may reference {app}, {tag},
     # {environment} or any inbound-ticket field like {cf_country}.
     custom_environments = db.Column(db.Text, nullable=True)
+    # Jenkins job overrides for CLUSTER targets (JSON-encoded list of rules):
+    # [{"namespace": "common-dev", "deployments": ["persona-ms"],  # [] = whole namespace
+    #   "jenkinsJobPath": "folder/persona-deploy", "jenkinsParams": {"msName": "{app}"}}].
+    # When a run needs a BUILD (the ticket's image tag is not in the registry),
+    # the matching rule's job + parameter map replace the global router call —
+    # a rule naming the deployment beats a whole-namespace rule. Everything else
+    # (registry gate, kubectl deploy, rollout watch) is unchanged. Blank
+    # jenkinsJobPath = the router job; empty jenkinsParams = the standard
+    # APP/TAG/NAMESPACE contract honoring the send_param_* toggles.
+    job_overrides = db.Column(db.Text, nullable=True)
 
     # --- Application <- Environment cascade (Zoho field dependency mapping) ---
     # When on, after publishing both picklists the sync configures a Zoho Desk

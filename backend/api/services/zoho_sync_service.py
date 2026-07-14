@@ -117,6 +117,7 @@ def serialize(row: ZohoIntegration) -> Dict[str, Any]:
         "selectedNamespaces": _namespace_list(row),
         "selectedDeployments": _deployment_selection(row),
         "customEnvironments": _custom_environment_list(row),
+        "jobOverrides": _job_override_list(row),
         "cascadeEnabled": bool(row.cascade_enabled),
         "dependencyMappingId": row.dependency_mapping_id or "",
         "lastDependencyStatus": row.last_dependency_status,
@@ -204,6 +205,106 @@ def custom_environment_by_name(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _job_override_list(row: ZohoIntegration) -> List[Dict[str, Any]]:
+    """Decode the operator's Jenkins job overrides for cluster targets.
+
+    Shape: ``[{"namespace", "deployments", "jenkinsJobPath", "jenkinsParams"}]``
+    — an empty ``deployments`` list means the whole namespace.
+    """
+    raw = row.job_overrides
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def job_override_for(namespace: str, deployment: str) -> Optional[Dict[str, Any]]:
+    """The Jenkins job-override rule for a cluster target, or None (= the
+    global router). A rule naming the deployment beats a whole-namespace rule.
+    Matched casefolded — the values round-trip through Zoho, which compares
+    picklist values case-insensitively. Used by deploy automation when a run
+    actually needs a build (the image tag is not in the registry)."""
+    ns = str(namespace or "").strip().casefold()
+    dep = str(deployment or "").strip().casefold()
+    if not ns:
+        return None
+    ns_wide: Optional[Dict[str, Any]] = None
+    for entry in _job_override_list(get_or_create_config()):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("namespace", "")).strip().casefold() != ns:
+            continue
+        deps = [str(d).strip().casefold() for d in entry.get("deployments") or []]
+        if deps:
+            if dep and dep in deps:
+                return entry
+        elif ns_wide is None:
+            ns_wide = entry
+    return ns_wide
+
+
+def _normalize_job_overrides(value: Any) -> List[Dict[str, Any]]:
+    """Coerce incoming Jenkins job-override rules for cluster targets.
+
+    Each rule: ``{"namespace", "deployments" ([] = whole namespace),
+    "jenkinsJobPath", "jenkinsParams"}``. Raises ValueError when two rules
+    cover the exact same target (the same namespace-wide, or the same
+    deployment twice) — routing must stay unambiguous. A namespace-wide rule
+    plus deployment-specific rules in that namespace is fine (the specific
+    rule wins).
+    """
+    out: List[Dict[str, Any]] = []
+    if not isinstance(value, list):
+        return out
+    seen_targets: set = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        namespace = str(item.get("namespace") or "").strip()
+        if not namespace:
+            continue
+        deployments: List[str] = []
+        seen_deps = set()
+        for dep in item.get("deployments") or []:
+            clean = str(dep).strip()
+            if clean and clean.casefold() not in seen_deps:
+                seen_deps.add(clean.casefold())
+                deployments.append(clean)
+        keys = (
+            [(namespace.casefold(), d.casefold()) for d in deployments]
+            if deployments
+            else [(namespace.casefold(), None)]
+        )
+        for key in keys:
+            if key in seen_targets:
+                target = (
+                    f"deployment '{key[1]}' in '{namespace}'"
+                    if key[1]
+                    else f"the whole namespace '{namespace}'"
+                )
+                raise ValueError(f"Two Jenkins job overrides target {target} — remove one.")
+            seen_targets.add(key)
+        params: Dict[str, str] = {}
+        raw_params = item.get("jenkinsParams")
+        if isinstance(raw_params, dict):
+            for key, template in raw_params.items():
+                param = str(key).strip()
+                if param:
+                    params[param] = "" if template is None else str(template)
+        out.append(
+            {
+                "namespace": namespace,
+                "deployments": deployments,
+                "jenkinsJobPath": str(item.get("jenkinsJobPath") or "").strip(),
+                "jenkinsParams": params,
+            }
+        )
+    return out
+
+
 def _normalize_custom_environments(value: Any, reserved: Optional[set] = None) -> List[Dict[str, Any]]:
     """Coerce an incoming custom-environments payload; raises ValueError on a
     name that collides (case-insensitively — Zoho's comparison) with a selected
@@ -277,16 +378,18 @@ def set_source(
     namespaces: Optional[List[str]],
     deployments: Optional[Dict[str, Any]] = None,
     custom_environments: Optional[List[Dict[str, Any]]] = None,
+    job_overrides: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Persist the dropdown source: a cluster, the namespaces, (optionally) the
-    specific deployments to publish per namespace, and (optionally) the custom
-    non-cluster environments.
+    specific deployments to publish per namespace, the custom non-cluster
+    environments, and the Jenkins job overrides for cluster targets.
 
     The Environment picklist becomes exactly these namespaces plus the custom
     environment names; the Application picklist becomes the live deployments
     running in them (resolved at sync time) plus the custom applications —
     a namespace left unspecified publishes all of its deployments dynamically.
-    Raises ValueError on a custom name colliding with a namespace.
+    Raises ValueError on a custom name colliding with a namespace or on
+    ambiguous job overrides.
     """
     row = get_or_create_config()
     row.source_cluster_id = (str(cluster_id).strip() if cluster_id else None) or None
@@ -301,6 +404,10 @@ def set_source(
         row.custom_environments = json.dumps(
             _normalize_custom_environments(custom_environments, reserved=seen)
         )
+    if job_overrides is not None:
+        # Keep only rules for namespaces still chosen (same as deployments).
+        rules = [r for r in _normalize_job_overrides(job_overrides) if r["namespace"] in seen]
+        row.job_overrides = json.dumps(rules)
     row.selected_namespaces = json.dumps(clean)
     if deployments is not None:
         # Keep only selections for namespaces still chosen.
@@ -395,6 +502,11 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
                     payload.get("customEnvironments"), reserved=set(_namespace_list(row))
                 )
             )
+        except ValueError as exc:
+            errors.append(str(exc))
+    if "jobOverrides" in payload:
+        try:
+            row.job_overrides = json.dumps(_normalize_job_overrides(payload.get("jobOverrides")))
         except ValueError as exc:
             errors.append(str(exc))
 

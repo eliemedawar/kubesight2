@@ -1145,7 +1145,8 @@ def _render_param(template: str, run: DeployAutomationRun, payload: Dict[str, An
 def _custom_params(
     run: DeployAutomationRun, env_cfg: Dict[str, Any], jrow: JenkinsConnection
 ) -> Dict[str, str]:
-    """The buildWithParameters fields for a custom-environment run.
+    """The buildWithParameters fields for a routing entry (a custom
+    environment or a cluster job override).
 
     The entry's operator-defined parameter map wins (each value a template
     rendered via :func:`_render_param`); with no map configured, fall back to
@@ -1263,7 +1264,17 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     else:
         _set_step(run, "image_check", "done", f"{run.image_tag} not in the registry — build required")
 
-    if not (jrow.enabled and jrow.base_url and jrow.router_job_path and jrow.api_token_encrypted):
+    # A job override from the source picker (a rule for this namespace, or for
+    # this specific deployment — the specific rule wins) replaces the global
+    # router call: its own job path (blank = the router job) and parameter map
+    # (empty = the standard contract). Only the BUILD trigger changes — the
+    # registry gate above and the deploy/rollout stages after stay the same.
+    from .zoho_sync_service import job_override_for
+
+    override = job_override_for(run.namespace, run.deployment_name) or {}
+    override_path = str(override.get("jenkinsJobPath") or "").strip()
+    path = override_path or (jrow.router_job_path or "")
+    if not (jrow.enabled and jrow.base_url and path and jrow.api_token_encrypted):
         _fail(
             run, "build",
             "The image tag is not in the registry and Jenkins is not configured — configure the "
@@ -1277,24 +1288,26 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
         # deployment name; TAG is the RAW ticket tag — the router owns the naming
         # convention (e.g. v{tag}-prod). Each parameter can be turned off in the
         # Jenkins settings for routers that aren't parameterized with all three.
+        # An override's parameter map takes precedence over all of that.
         app = run.deployment_name
-        params: Dict[str, str] = {}
-        if jrow.send_param_app is not False:
-            params["APP"] = app
-        if jrow.send_param_tag is not False:
-            params["TAG"] = run.ticket_tag or run.image_tag
-        if jrow.send_param_namespace is not False:
-            params["NAMESPACE"] = run.namespace
-        queue_url = jenkins_client.trigger_build(_to_client_config(jrow), params)
+        params = _custom_params(run, override, jrow)
+        cfg = _to_client_config(jrow)
+        if override_path:
+            cfg = replace(cfg, router_job_path=override_path)
+        queue_url = jenkins_client.trigger_build(cfg, params)
     except JenkinsError as exc:
-        _fail(run, "build", f"Could not trigger the router build: {exc}")
+        _fail(run, "build", f"Could not trigger the build on '{path}': {exc}")
         return
 
     run.jenkins_queue_url = queue_url
     run.build_triggered_at = datetime.now(timezone.utc)
     run.retry_count = 0
     run.status = "building"
-    _set_step(run, "build", "run", f"router build queued (APP={app})")
+    if override:
+        shown = ", ".join(f"{k}={v}" for k, v in params.items()) or "no parameters"
+        _set_step(run, "build", "run", f"override build queued on {path} ({shown})")
+    else:
+        _set_step(run, "build", "run", f"router build queued (APP={app})")
     log_audit(
         "automation_build_triggered",
         actor=None,
@@ -1305,6 +1318,9 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
             "deployment": run.deployment_name,
             "app": app,
             "tag": run.ticket_tag or run.image_tag,
+            "job": path,
+            "override": bool(override),
+            "params": params,
             "queueUrl": queue_url,
         },
         commit=False,

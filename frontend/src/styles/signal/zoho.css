@@ -994,6 +994,34 @@
   overflow-y: auto;
 }
 
+/* ── Jenkins job overrides (cluster targets) ────────────────────── */
+.sg-zh-ovr { margin-top: var(--space-4); }
+.sg-zh-ovr-target {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+.sg-zh-ovr-target label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+}
+.sg-zh-ovr-target label > span {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.sg-zh-ovr-add {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.45rem;
+  flex-wrap: wrap;
+}
+.sg-zh-ovr-add select { min-width: 240px; }
+
 /* ── Custom (non-cluster) environments ──────────────────────────── */
 .sg-zh-custom { margin-top: var(--space-4); }
 .sg-zh-custom-group { margin-top: 0.6rem; }

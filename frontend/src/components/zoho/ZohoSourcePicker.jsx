@@ -11,7 +11,9 @@ import {
  * Modal to choose the dropdown source: a cluster + which of its namespaces feed
  * the Zoho Environment field, and — per namespace — exactly which live deployments
  * feed the Application field. Each namespace is either "All deployments" (dynamic:
- * future deployments auto-included) or an explicit subset. Custom (non-cluster)
+ * future deployments auto-included) or an explicit subset. Cluster targets can
+ * carry Jenkins job overrides (a namespace — or specific deployments — builds via
+ * its own job + parameter map instead of the router). Custom (non-cluster)
  * environments can be added too: a free-text Environment name (e.g. POS-UAT) with
  * free-text applications, plus the Jenkins job + parameter map its tickets should
  * trigger. Saving persists the source; the operator publishes it with "Sync now".
@@ -21,6 +23,7 @@ export default function ZohoSourcePicker({
   initialNamespaces = [],
   initialDeployments = {},
   initialCustom = [],
+  initialOverrides = [],
   onClose,
   onSaved,
 }) {
@@ -57,6 +60,21 @@ export default function ZohoSourcePicker({
   );
   const [newEnvName, setNewEnvName] = useState("");
   const [appDrafts, setAppDrafts] = useState({}); // { [envName]: text }
+
+  // Jenkins job overrides for cluster targets. scope "all" = the whole
+  // namespace (deployments saved as []); "some" = the listed deployments only.
+  const [overrides, setOverrides] = useState(() =>
+    (initialOverrides || []).map((o) => ({
+      namespace: o.namespace || "",
+      scope: (o.deployments || []).length ? "some" : "all",
+      deployments: [...(o.deployments || [])],
+      jenkinsJobPath: o.jenkinsJobPath || "",
+      params: Object.entries(o.jenkinsParams || {}).map(([name, value]) => ({
+        name,
+        value: value == null ? "" : String(value),
+      })),
+    }))
+  );
 
   // 1) Load selectable clusters once.
   useEffect(() => {
@@ -255,6 +273,47 @@ export default function ZohoSourcePicker({
   const removeParamRow = (idx, pIdx) =>
     patchCustom(idx, { params: custom[idx].params.filter((_, i) => i !== pIdx) });
 
+  // --- Jenkins job overrides (cluster targets) ------------------------------
+  const addOverride = () => {
+    const first = [...selected][0] || "";
+    setOverrides((prev) => [
+      ...prev,
+      { namespace: first, scope: "all", deployments: [], jenkinsJobPath: "", params: [] },
+    ]);
+  };
+
+  const removeOverride = (idx) => setOverrides((prev) => prev.filter((_, i) => i !== idx));
+
+  const patchOverride = (idx, patch) =>
+    setOverrides((prev) => prev.map((o, i) => (i === idx ? { ...o, ...patch } : o)));
+
+  const addOverrideDeployment = (idx, name) => {
+    if (!name) return;
+    const cur = overrides[idx];
+    if (cur.deployments.includes(name)) return;
+    patchOverride(idx, { deployments: [...cur.deployments, name] });
+  };
+
+  const removeOverrideDeployment = (idx, name) =>
+    patchOverride(idx, {
+      deployments: overrides[idx].deployments.filter((d) => d !== name),
+    });
+
+  const addOverrideParamRow = (idx) =>
+    patchOverride(idx, { params: [...overrides[idx].params, { name: "", value: "" }] });
+
+  const setOverrideParamRow = (idx, pIdx, field, value) =>
+    patchOverride(idx, {
+      params: overrides[idx].params.map((p, i) => (i === pIdx ? { ...p, [field]: value } : p)),
+    });
+
+  const removeOverrideParamRow = (idx, pIdx) =>
+    patchOverride(idx, { params: overrides[idx].params.filter((_, i) => i !== pIdx) });
+
+  // The live deployments known for a namespace (loaded for selected namespaces).
+  const namespaceDeployments = (ns) =>
+    (groups.find((g) => g.namespace === ns) || {}).deployments || [];
+
   const nsSelectedCount = (g) => {
     const sel = deploySel[g.namespace];
     if (!sel || sel.all) return (g.deployments || []).length;
@@ -264,6 +323,16 @@ export default function ZohoSourcePicker({
   const totalSelected = groups.reduce((sum, g) => sum + nsSelectedCount(g), 0);
 
   const save = async () => {
+    const incomplete = overrides.find(
+      (o) => o.namespace && o.scope === "some" && o.deployments.length === 0
+    );
+    if (incomplete) {
+      setError(
+        `The Jenkins override on "${incomplete.namespace}" targets specific deployments ` +
+          "but none are chosen — add one or switch it to the whole namespace."
+      );
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -285,6 +354,18 @@ export default function ZohoSourcePicker({
             jenkinsJobPath: c.jenkinsJobPath.trim(),
             jenkinsParams: Object.fromEntries(
               c.params
+                .filter((p) => p.name.trim())
+                .map((p) => [p.name.trim(), p.value])
+            ),
+          })),
+        jobOverrides: overrides
+          .filter((o) => o.namespace.trim())
+          .map((o) => ({
+            namespace: o.namespace.trim(),
+            deployments: o.scope === "all" ? [] : o.deployments,
+            jenkinsJobPath: o.jenkinsJobPath.trim(),
+            jenkinsParams: Object.fromEntries(
+              o.params
                 .filter((p) => p.name.trim())
                 .map((p) => [p.name.trim(), p.value])
             ),
@@ -503,6 +584,184 @@ export default function ZohoSourcePicker({
         ) : (
           <p className="muted">Select a cluster to choose namespaces and deployments.</p>
         )}
+
+        {/* Jenkins job overrides (cluster targets) -------------------------- */}
+        {clusterId ? (
+          <div className="sg-zh-ovr">
+            <div className="sg-zh-pick-head">
+              <b>Jenkins job overrides {overrides.length ? `(${overrides.length})` : ""}</b>
+              <button
+                type="button"
+                className="link-button"
+                onClick={addOverride}
+                disabled={selected.size === 0}
+              >
+                Add override
+              </button>
+            </div>
+            <p className="field-hint">
+              Send builds for chosen cluster targets to their <strong>own</strong> Jenkins job
+              instead of the router. An override fires only when a build is needed (the ticket's
+              image tag is missing from the registry); a rule for specific deployments beats a
+              whole-namespace rule. Everything else — image check, deploy, pod health — is
+              unchanged. Blank job path = the router job; no parameters = the standard
+              APP/TAG/NAMESPACE contract. Parameter values may use <code>{"{app}"}</code>,{" "}
+              <code>{"{tag}"}</code>, <code>{"{environment}"}</code> or any ticket field, e.g.{" "}
+              <code>{"{cf_country}"}</code>.
+            </p>
+            {selected.size === 0 ? (
+              <p className="muted">Select one or more namespaces to add overrides.</p>
+            ) : null}
+
+            {overrides.map((o, idx) => {
+              const available = namespaceDeployments(o.namespace);
+              const addable = available.filter((d) => !o.deployments.includes(d));
+              const nsOptions = [...selected];
+              if (o.namespace && !selected.has(o.namespace)) nsOptions.unshift(o.namespace);
+              return (
+                <div key={idx} className="sg-zh-pick-group sg-zh-custom-group">
+                  <div className="sg-zh-pick-group-head">
+                    <span className="mono">
+                      <b>{o.namespace || "(pick a namespace)"}</b>{" "}
+                      <span className="sg-zh-gcount">
+                        {o.scope === "all"
+                          ? "whole namespace"
+                          : `${o.deployments.length} deployment${o.deployments.length === 1 ? "" : "s"}`}
+                        {" → "}
+                        {o.jenkinsJobPath.trim() || "router job"}
+                      </span>
+                    </span>
+                    <button type="button" className="link-button" onClick={() => removeOverride(idx)}>
+                      Remove
+                    </button>
+                  </div>
+
+                  <div className="sg-zh-ovr-target">
+                    <label>
+                      <span>Namespace</span>
+                      <select
+                        value={o.namespace}
+                        onChange={(e) =>
+                          patchOverride(idx, { namespace: e.target.value, deployments: [] })
+                        }
+                      >
+                        {!o.namespace ? <option value="">Pick a namespace…</option> : null}
+                        {nsOptions.map((ns) => (
+                          <option key={ns} value={ns}>
+                            {ns}
+                            {!selected.has(ns) ? " (no longer selected)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Applies to</span>
+                      <select
+                        value={o.scope}
+                        onChange={(e) => patchOverride(idx, { scope: e.target.value })}
+                      >
+                        <option value="all">Whole namespace</option>
+                        <option value="some">Specific deployments</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  {o.scope === "some" ? (
+                    <>
+                      <div className="sg-zh-tags sg-zh-fvals">
+                        {o.deployments.map((d) => (
+                          <span key={d} className="sg-tag sg-zh-chip">
+                            {d}
+                            <button
+                              type="button"
+                              className="sg-zh-chip-x"
+                              onClick={() => removeOverrideDeployment(idx, d)}
+                              aria-label={`Remove ${d}`}
+                            >
+                              ✕
+                            </button>
+                          </span>
+                        ))}
+                        {o.deployments.length === 0 ? (
+                          <span className="muted">no deployments chosen yet</span>
+                        ) : null}
+                      </div>
+                      <div className="sg-zh-ovr-add">
+                        <select
+                          value=""
+                          disabled={!o.namespace || addable.length === 0}
+                          onChange={(e) => addOverrideDeployment(idx, e.target.value)}
+                        >
+                          <option value="">
+                            {!o.namespace
+                              ? "Pick a namespace first…"
+                              : addable.length === 0
+                                ? "No more deployments"
+                                : `Add deployment (${addable.length})…`}
+                          </option>
+                          {addable.map((d) => (
+                            <option key={d} value={d}>
+                              {d}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </>
+                  ) : null}
+
+                  <div className="sg-zh-custom-jenkins">
+                    <label className="sg-zh-custom-field">
+                      <span>Jenkins job path (blank = the router job)</span>
+                      <input
+                        type="text"
+                        value={o.jenkinsJobPath}
+                        onChange={(e) => patchOverride(idx, { jenkinsJobPath: e.target.value })}
+                        placeholder="e.g. persona-deploy or folder/persona-deploy"
+                      />
+                    </label>
+                    <div className="sg-zh-custom-params-head">
+                      <span>
+                        Build parameters{" "}
+                        <span className="muted">(none = the router contract APP/TAG/NAMESPACE)</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => addOverrideParamRow(idx)}
+                      >
+                        Add parameter
+                      </button>
+                    </div>
+                    {o.params.map((p, pIdx) => (
+                      <div key={pIdx} className="sg-zh-custom-param">
+                        <input
+                          type="text"
+                          value={p.name}
+                          onChange={(e) => setOverrideParamRow(idx, pIdx, "name", e.target.value)}
+                          placeholder="name (e.g. msName)"
+                        />
+                        <input
+                          type="text"
+                          value={p.value}
+                          onChange={(e) => setOverrideParamRow(idx, pIdx, "value", e.target.value)}
+                          placeholder="value (e.g. {app}, {tag}, uat)"
+                        />
+                        <button
+                          type="button"
+                          className="link-button"
+                          onClick={() => removeOverrideParamRow(idx, pIdx)}
+                          aria-label="Remove parameter"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
 
         {/* Custom (non-cluster) environments -------------------------------- */}
         <div className="sg-zh-custom">

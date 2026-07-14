@@ -559,6 +559,8 @@ def _migrate_zoho_integration_columns() -> None:
         _add_column_if_missing("zoho_integration", "variable_mapping_id", "VARCHAR(64)")
         # Custom (non-cluster) Environment entries with their Jenkins routing.
         _add_column_if_missing("zoho_integration", "custom_environments", "TEXT")
+        # Per-namespace/per-deployment Jenkins job overrides for cluster targets.
+        _add_column_if_missing("zoho_integration", "job_overrides", "TEXT")
     if "zoho_inbound_tickets" in inspect(db.engine).get_table_names():
         _add_column_if_missing("zoho_inbound_tickets", "variable_name", "TEXT")
         _add_column_if_missing("zoho_inbound_tickets", "variable_value", "TEXT")

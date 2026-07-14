@@ -92,6 +92,7 @@ def get_source():
             "selectedNamespaces": cfg.get("selectedNamespaces") or [],
             "selectedDeployments": cfg.get("selectedDeployments") or {},
             "customEnvironments": cfg.get("customEnvironments") or [],
+            "jobOverrides": cfg.get("jobOverrides") or [],
             "cascadeEnabled": cfg.get("cascadeEnabled"),
         }
     )
@@ -113,8 +114,13 @@ def update_source():
     custom_environments = payload.get("customEnvironments")
     if custom_environments is not None and not isinstance(custom_environments, list):
         custom_environments = []
+    job_overrides = payload.get("jobOverrides")
+    if job_overrides is not None and not isinstance(job_overrides, list):
+        job_overrides = []
     try:
-        data = svc.set_source(cluster_id, namespaces, deployments, custom_environments)
+        data = svc.set_source(
+            cluster_id, namespaces, deployments, custom_environments, job_overrides
+        )
     except ValueError as exc:
         return error_response(str(exc), 400)
     log_audit(
@@ -127,6 +133,7 @@ def update_source():
             "namespaces": data.get("selectedNamespaces"),
             "deployments": data.get("selectedDeployments"),
             "customEnvironments": data.get("customEnvironments"),
+            "jobOverrides": data.get("jobOverrides"),
         },
     )
     return success_response(data)

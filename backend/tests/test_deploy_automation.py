@@ -1571,6 +1571,176 @@ def test_custom_environment_rejects_variable_change(client, admin_token, app):
 
 
 # ---------------------------------------------------------------------------
+# Jenkins job overrides — cluster targets whose BUILD goes to their own job
+# (per-namespace or per-deployment rules from the source picker); the rest of
+# the pipeline (registry gate, deploy, rollout watch) is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _set_source_with_overrides(overrides):
+    from api.services.zoho_sync_service import set_source
+
+    return set_source(CLUSTER, [NAMESPACE], None, None, overrides)
+
+
+def _enable_router(client, admin_token, extra=None):
+    body = {
+        "enabled": True,
+        "baseUrl": "http://jenkins:8080",
+        "username": "bot",
+        "apiToken": "t0ken",
+        "routerJobPath": "router",
+    }
+    body.update(extra or {})
+    response = client.put("/api/zoho/jenkins", json=body, headers=auth_headers(admin_token))
+    assert response.status_code == 200
+
+
+def test_job_override_builds_via_own_job_and_params(client, admin_token, app, monkeypatch):
+    """A deployment-specific override wins over the namespace-wide rule: the
+    build goes to ITS job with the rendered parameter map; the run then polls
+    the build exactly like a router one."""
+    captured = {}
+
+    def fake_trigger(cfg, params):
+        captured["job_path"] = cfg.router_job_path
+        captured["params"] = params
+        return "http://jenkins/queue/item/80"
+
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "not_found", "image": image},
+    )
+    monkeypatch.setattr("api.services.jenkins_client.trigger_build", fake_trigger)
+    _enable_router(client, admin_token)
+
+    with app.app_context():
+        _set_source_with_overrides(
+            [
+                {"namespace": NAMESPACE, "deployments": [], "jenkinsJobPath": "ns-wide-job"},
+                {
+                    "namespace": NAMESPACE,
+                    "deployments": [DEPLOYMENT],
+                    "jenkinsJobPath": "folder/payments-build",
+                    "jenkinsParams": {"msName": "{app}", "repotag": "{tag}", "envi": "uat"},
+                },
+            ]
+        )
+        ticket = _make_ticket(tag="1.2.3")
+        ticket_id = ticket.id
+
+    run = _start(client, admin_token, ticket_id)
+    assert run["status"] == "building", run
+    assert captured["job_path"] == "folder/payments-build"
+    assert captured["params"] == {"msName": DEPLOYMENT, "repotag": "1.2.3", "envi": "uat"}
+    # The audit trail records which job the override routed the build to.
+    # (The build step's detail is transient — the same tick already chains into
+    # the first poll, whose note replaces it.)
+    from api.models import AuditLog
+
+    with app.app_context():
+        entry = (
+            AuditLog.query.filter_by(action="automation_build_triggered")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert entry.details["job"] == "folder/payments-build"
+        assert entry.details["override"] is True
+
+
+def test_job_override_namespace_wide_default_contract(client, admin_token, app, monkeypatch):
+    """A whole-namespace rule with no parameter map keeps the standard
+    APP/TAG/NAMESPACE contract (send_param toggles honored) on its own job;
+    a blank job path would fall back to the router path."""
+    captured = {}
+
+    def fake_trigger(cfg, params):
+        captured["job_path"] = cfg.router_job_path
+        captured["params"] = params
+        return "http://jenkins/queue/item/81"
+
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "not_found", "image": image},
+    )
+    monkeypatch.setattr("api.services.jenkins_client.trigger_build", fake_trigger)
+    _enable_router(client, admin_token, {"sendParamNamespace": False})
+
+    with app.app_context():
+        _set_source_with_overrides(
+            [{"namespace": NAMESPACE, "deployments": [], "jenkinsJobPath": "common-router"}]
+        )
+        ticket = _make_ticket(tag="4.5.6")
+        ticket_id = ticket.id
+
+    run = _start(client, admin_token, ticket_id)
+    assert run["status"] == "building", run
+    assert captured["job_path"] == "common-router"
+    assert captured["params"] == {"APP": DEPLOYMENT, "TAG": "4.5.6"}
+
+
+def test_job_override_skipped_when_image_exists(client, admin_token, app, monkeypatch):
+    """The registry gate is unchanged: with the tag already in the registry the
+    override job never fires and the run deploys directly."""
+    calls = []
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "found", "image": image},
+    )
+    monkeypatch.setattr(
+        "api.services.jenkins_client.trigger_build",
+        lambda cfg, params: calls.append(params) or "http://jenkins/queue/item/82",
+    )
+    _enable_router(client, admin_token)
+
+    with app.app_context():
+        _set_cluster_approvals(0)
+        _set_source_with_overrides(
+            [{"namespace": NAMESPACE, "deployments": [DEPLOYMENT], "jenkinsJobPath": "never-used"}]
+        )
+        ticket = _make_ticket(tag="v3.0.0")
+        ticket_id = ticket.id
+
+    run = _start(client, admin_token, ticket_id)
+    assert run["status"] == "deployed", run
+    assert calls == []
+    assert _step(run, "build")["status"] == "skip"
+
+
+def test_job_override_source_roundtrip_and_duplicates(client, admin_token, app):
+    """PUT /source persists rules (pruned to selected namespaces) and rejects
+    two rules covering the exact same target."""
+    payload = {
+        "clusterId": CLUSTER,
+        "namespaces": [NAMESPACE],
+        "jobOverrides": [
+            {"namespace": NAMESPACE, "deployments": [DEPLOYMENT], "jenkinsJobPath": "dep-job"},
+            {"namespace": NAMESPACE, "deployments": [], "jenkinsJobPath": "ns-job"},
+            {"namespace": "other-ns", "deployments": [], "jenkinsJobPath": "dropped"},
+        ],
+    }
+    response = client.put("/api/zoho/source", json=payload, headers=auth_headers(admin_token))
+    assert response.status_code == 200
+
+    response = client.get("/api/zoho/source", headers=auth_headers(admin_token))
+    rules = response.get_json()["data"]["jobOverrides"]
+    # The rule for the unselected namespace was pruned; the others round-trip.
+    assert [(r["namespace"], r["deployments"], r["jenkinsJobPath"]) for r in rules] == [
+        (NAMESPACE, [DEPLOYMENT], "dep-job"),
+        (NAMESPACE, [], "ns-job"),
+    ]
+
+    # Same deployment twice (case-insensitively) is ambiguous — rejected.
+    payload["jobOverrides"] = [
+        {"namespace": NAMESPACE, "deployments": [DEPLOYMENT], "jenkinsJobPath": "a"},
+        {"namespace": NAMESPACE, "deployments": [DEPLOYMENT.upper()], "jenkinsJobPath": "b"},
+    ]
+    response = client.put("/api/zoho/source", json=payload, headers=auth_headers(admin_token))
+    assert response.status_code == 400
+    assert "Two Jenkins job overrides" in response.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
 # Run queue — any number of tickets per target; same-target runs serialize FIFO
 # ---------------------------------------------------------------------------
 

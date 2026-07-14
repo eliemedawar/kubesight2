@@ -325,6 +325,7 @@ export default function ZohoLayoutEditor({
           initialNamespaces={selectedNamespaces}
           initialDeployments={config.selectedDeployments || {}}
           initialCustom={customEnvironments}
+          initialOverrides={config.jobOverrides || []}
           onClose={closeModal}
           onSaved={(data) => {
             closeModal();
