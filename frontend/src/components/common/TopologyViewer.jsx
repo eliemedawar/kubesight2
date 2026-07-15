@@ -261,6 +261,20 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
     return map;
   }, [nodes]);
 
+  // Parallel edges between the same unordered node pair (A→B twice, or A→B
+  // plus B→A): group them so each can fan out into its own lane instead of
+  // drawing on top of the others. Tunnels keep their own geometry.
+  const pairGroups = useMemo(() => {
+    const g = {};
+    (edges || []).forEach((e, i) => {
+      if (e.kind === "tunnel") return;
+      const a = String(e.sourceNodeId), b = String(e.targetNodeId);
+      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+      (g[key] = g[key] || []).push(i);
+    });
+    return g;
+  }, [edges]);
+
   const [fullscreen, setFullscreen] = useState(false);
 
   // Exit fullscreen on Escape. Capture phase + stopPropagation so the parent
@@ -384,24 +398,33 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
             const nx = dx / len, ny = dy / len;
 
             const isTunnel = edge.kind === "tunnel";
-            const hasBidi = !isTunnel && (edges || []).some(
-              (e2) =>
-                String(e2.sourceNodeId) === String(edge.targetNodeId) &&
-                String(e2.targetNodeId) === String(edge.sourceNodeId)
-            );
+            const aId = String(edge.sourceNodeId), bId = String(edge.targetNodeId);
+            const group = isTunnel
+              ? null
+              : pairGroups[aId < bId ? `${aId}|${bId}` : `${bId}|${aId}`];
+            const lane = group && group.length > 1
+              ? group.indexOf(idx) - (group.length - 1) / 2
+              : 0;
 
             const p1 = nodeExitPoint(srcCX, srcCY, nx, ny);
             const p2 = nodeExitPoint(tgtCX, tgtCY, -nx, -ny);
 
             let d;
             let labelX, labelY;
+            let labelAnchor = "middle";
             let c1x, c1y, c2x, c2y; // cubic control points (smooth branch only)
-            if (hasBidi) {
-              const sign = String(edge.sourceNodeId) < String(edge.targetNodeId) ? 1 : -1;
-              const px = -ny * 16 * sign, py = nx * 16 * sign;
-              const mx = (p1.x + p2.x) / 2 + px, my = (p1.y + p2.y) / 2 + py;
-              d = `M ${p1.x},${p1.y} Q ${mx},${my} ${p2.x},${p2.y}`;
-              labelX = mx; labelY = my;
+            if (lane !== 0) {
+              // The perpendicular is taken along the pair's canonical
+              // direction (low id → high id) so opposite-direction edges land
+              // in different lanes instead of mirroring onto each other. Each
+              // label sits just outside its own arc, anchored outward, so the
+              // lanes' labels never collide.
+              const canon = aId < bId ? 1 : -1;
+              const ox = -ny * 22 * lane * canon, oy = nx * 22 * lane * canon;
+              const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+              d = `M ${p1.x},${p1.y} Q ${mx + ox * 2},${my + oy * 2} ${p2.x},${p2.y}`;
+              labelX = mx + ox * 1.35; labelY = my + oy * 1.35;
+              if (Math.abs(ox) > Math.abs(oy)) labelAnchor = ox < 0 ? "end" : "start";
             } else {
               // Smooth cubic bezier along the dominant axis (Signal skin); the
               // curve's midpoint is exactly the straight-line midpoint, so
@@ -545,14 +568,14 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
                   className={`sg-edge${tone === "ok" ? "" : ` sg-edge--${tone}`}`}
                   markerEnd={`url(#topo-arrow-${tone})`} />
                 {protocol ? (
-                  <text x={labelX} y={labelY - 5} textAnchor="middle"
+                  <text x={labelX} y={labelY - 5} textAnchor={labelAnchor}
                     fill={labelFill} fontSize={10} fontWeight={600}
                     style={{ paintOrder: "stroke" }} stroke="var(--bg-inset)" strokeWidth={3}>
                     {protocol}
                   </text>
                 ) : null}
                 {descLines.map((line, i) => (
-                  <text key={i} x={labelX} y={labelY + (protocol ? 7 : -2) + i * 10} textAnchor="middle"
+                  <text key={i} x={labelX} y={labelY + (protocol ? 7 : -2) + i * 10} textAnchor={labelAnchor}
                     fill="var(--text-muted)" fontSize={9}
                     style={{ paintOrder: "stroke" }} stroke="var(--bg-inset)" strokeWidth={3}>
                     {line}

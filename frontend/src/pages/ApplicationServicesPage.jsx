@@ -445,6 +445,35 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
     return m;
   }, [nodes]);
 
+  // Parallel edges between the same unordered pair (A→B twice, or A→B plus
+  // B→A) are grouped so each bows into its own lane — otherwise they draw on
+  // top of each other and only the topmost is clickable.
+  const pairGroups = useMemo(() => {
+    const g = {};
+    edges.forEach((e, i) => {
+      const key = e.sourceTempId < e.targetTempId
+        ? `${e.sourceTempId}|${e.targetTempId}`
+        : `${e.targetTempId}|${e.sourceTempId}`;
+      (g[key] = g[key] || []).push(i);
+    });
+    return g;
+  }, [edges]);
+
+  // Outside fullscreen the canvas is a fit-to-width, read-only preview: track
+  // the container width so the surface can scale down instead of scrolling.
+  const [previewW, setPreviewW] = useState(0);
+  useEffect(() => {
+    if (fullscreen) return undefined;
+    const el = canvasRef.current;
+    if (!el) return undefined;
+    const measure = () => setPreviewW(el.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fullscreen]);
+
   // Live position of a node: the one being dragged uses the uncommitted position
   // so only this component re-renders during a drag (not the whole modal).
   const posOf = (node) =>
@@ -469,6 +498,15 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
   // Clean up a pending animation frame on unmount.
   useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
 
+  // Leaving fullscreen also drops any in-flight editing state — the inline
+  // canvas is a read-only preview, so nothing interactive may stay open.
+  const exitFullscreen = () => {
+    setFullscreen(false);
+    setEdgePopup(null);
+    setLinking(null);
+    setResourcePickerOpen(false);
+  };
+
   // Exit fullscreen on Escape. Capture phase + stopPropagation so a parent
   // modal's own Escape-to-close handler doesn't also fire — one Escape closes
   // only the fullscreen layer (same pattern as TopologyViewer).
@@ -477,11 +515,12 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        setFullscreen(false);
+        exitFullscreen();
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fullscreen]);
 
   const canvasPoint = (evt) => {
@@ -568,6 +607,39 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
     return {
       p1: rectExitPoint(sc.x, sc.y, nx, ny, E_NODE_W, E_NODE_H),
       p2: rectExitPoint(tc.x, tc.y, -nx, -ny, E_NODE_W, E_NODE_H),
+    };
+  };
+
+  // Path + label anchor for one edge; parallel edges of the same pair bow
+  // into separate lanes (perpendicular offset along the pair's canonical
+  // low→high direction so opposite-direction edges don't mirror onto each
+  // other) — keeping every connection visible and clickable.
+  const edgeGeometry = (edge, idx) => {
+    const s = nodeById[edge.sourceTempId], t = nodeById[edge.targetTempId];
+    const { p1, p2 } = edgeEndpoints(s, t);
+    const key = edge.sourceTempId < edge.targetTempId
+      ? `${edge.sourceTempId}|${edge.targetTempId}`
+      : `${edge.targetTempId}|${edge.sourceTempId}`;
+    const group = pairGroups[key];
+    const lane = group && group.length > 1
+      ? group.indexOf(idx) - (group.length - 1) / 2
+      : 0;
+    const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+    if (lane === 0) {
+      return { d: `M ${p1.x},${p1.y} L ${p2.x},${p2.y}`, lx: mx, ly: my };
+    }
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const canon = edge.sourceTempId < edge.targetTempId ? 1 : -1;
+    const ox = (-dy / len) * 22 * lane * canon;
+    const oy = (dx / len) * 22 * lane * canon;
+    // The label chip is a ~50px-wide centered pill: push it further out than
+    // the arc itself (more horizontally than vertically) so side-by-side
+    // lanes' chips don't touch.
+    return {
+      d: `M ${p1.x},${p1.y} Q ${mx + ox * 2},${my + oy * 2} ${p2.x},${p2.y}`,
+      lx: mx + ox * 4,
+      ly: my + oy * 1.6,
     };
   };
 
@@ -672,6 +744,8 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
   const placedNodes = nodes.filter((n) => typeof n.x === "number" && typeof n.y === "number");
   const contentW = placedNodes.reduce((m, n) => Math.max(m, posOf(n).x + E_NODE_W), 0) + 60;
   const contentH = placedNodes.reduce((m, n) => Math.max(m, posOf(n).y + E_NODE_H), 0) + 60;
+  // Fit-to-width factor for the inline read-only preview (never scale up).
+  const previewScale = !fullscreen && previewW > 0 ? Math.min(1, (previewW - 2) / contentW) : 1;
 
   const popupEdge = edgePopup ? edges[edgePopup.index] : null;
 
@@ -685,43 +759,55 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
       <div className="topo-editor-block-header">
         <span className="topo-editor-block-title">Topology canvas</span>
         <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
-          {components.length > 0 && (
-            <div style={{ minWidth: 190 }}>
-              <SearchableSelect
-                options={components.map((c) => ({
-                  value: String(c.id),
-                  label: c.category ? `${c.name} · ${c.category}` : c.name,
-                }))}
-                value=""
-                onChange={(e) => e.target.value && addComponentNode(e.target.value)}
-                placeholder="+ Add from Components…"
-              />
-            </div>
-          )}
-          {onDeploymentsChange && (
+          {fullscreen ? (
+            <>
+              {components.length > 0 && (
+                <div style={{ minWidth: 190 }}>
+                  <SearchableSelect
+                    options={components.map((c) => ({
+                      value: String(c.id),
+                      label: c.category ? `${c.name} · ${c.category}` : c.name,
+                    }))}
+                    value=""
+                    onChange={(e) => e.target.value && addComponentNode(e.target.value)}
+                    placeholder="+ Add from Components…"
+                  />
+                </div>
+              )}
+              {onDeploymentsChange && (
+                <button
+                  type="button"
+                  className={`btn-outline btn-compact${resourcePickerOpen ? " is-active" : ""}`}
+                  onClick={() => setResourcePickerOpen((v) => !v)}
+                  aria-pressed={resourcePickerOpen}
+                  title="Link a deployment/pod and add it to the canvas"
+                >
+                  + Link resource
+                </button>
+              )}
+              <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Custom</button>
+              <button
+                type="button"
+                className="btn-outline btn-compact"
+                onClick={exitFullscreen}
+                title="Exit fullscreen (Esc)"
+              >
+                Exit fullscreen
+              </button>
+            </>
+          ) : (
             <button
               type="button"
-              className={`btn-outline btn-compact${resourcePickerOpen ? " is-active" : ""}`}
-              onClick={() => setResourcePickerOpen((v) => !v)}
-              aria-pressed={resourcePickerOpen}
-              title="Link a deployment/pod and add it to the canvas"
+              className="btn-outline btn-compact"
+              onClick={() => setFullscreen(true)}
+              title="Open the fullscreen topology editor"
             >
-              + Link resource
+              Edit topology
             </button>
           )}
-          <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Custom</button>
-          <button
-            type="button"
-            className="btn-outline btn-compact"
-            onClick={() => setFullscreen((v) => !v)}
-            aria-pressed={fullscreen}
-            title={fullscreen ? "Exit fullscreen (Esc)" : "Edit in fullscreen"}
-          >
-            {fullscreen ? "Exit fullscreen" : "Fullscreen"}
-          </button>
         </div>
       </div>
-      {onDeploymentsChange && resourcePickerOpen && (
+      {fullscreen && onDeploymentsChange && resourcePickerOpen && (
         <ResourceQuickAdd
           clusters={clusters}
           deployments={deployments}
@@ -737,29 +823,58 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
           }}
         />
       )}
-      <p className="muted topo-canvas-hint">
-        Add a predefined building block from <strong>Components</strong>, a custom box, or link a deployment/pod via
-        <strong> + Link resource</strong> (linked resources appear here automatically). Drag a box by its header to
-        move it. Drag from the <span className="topo-handle-legend">●</span> handle on the right of a box to another
-        to connect them.
-      </p>
+      {fullscreen ? (
+        <p className="muted topo-canvas-hint">
+          Add a predefined building block from <strong>Components</strong>, a custom box, or link a deployment/pod via
+          <strong> + Link resource</strong> (linked resources appear here automatically). Drag a box by its header to
+          move it. Drag from the <span className="topo-handle-legend">●</span> handle on the right of a box to another
+          to connect them.
+        </p>
+      ) : (
+        <p className="muted topo-canvas-hint">
+          Read-only preview — click the canvas (or <strong>Edit topology</strong>) to edit in fullscreen.
+        </p>
+      )}
 
       <div
         ref={canvasRef}
-        className="topo-canvas"
-        style={fullscreen ? undefined : { height: nodes.length ? Math.max(TOPO_CANVAS_MIN_H, contentH) : TOPO_CANVAS_MIN_H }}
-        onPointerDown={() => setEdgePopup(null)}
-        onPointerMove={onCanvasPointerMove}
-        onPointerUp={onCanvasPointerUp}
-        onPointerLeave={onCanvasPointerLeave}
+        className={`topo-canvas${fullscreen ? "" : " topo-canvas--preview"}`}
+        style={fullscreen ? undefined : {
+          height: nodes.length
+            ? Math.max(220, Math.round(contentH * previewScale) + 2)
+            : 220,
+          minHeight: 0,
+        }}
+        onClick={fullscreen ? undefined : () => setFullscreen(true)}
+        onPointerDown={fullscreen ? () => setEdgePopup(null) : undefined}
+        onPointerMove={fullscreen ? onCanvasPointerMove : undefined}
+        onPointerUp={fullscreen ? onCanvasPointerUp : undefined}
+        onPointerLeave={fullscreen ? onCanvasPointerLeave : undefined}
       >
         {nodes.length === 0 ? (
           <div className="topo-canvas-empty">
             <p>No components yet.</p>
-            <button type="button" className="btn-outline btn-compact" onClick={addNode}>+ Add your first component</button>
+            <button
+              type="button"
+              className="btn-outline btn-compact"
+              onClick={() => { if (!fullscreen) setFullscreen(true); addNode(); }}
+            >
+              + Add your first component
+            </button>
           </div>
         ) : (
-          <div className="topo-canvas-surface" style={{ width: contentW, height: contentH }}>
+          <div
+            className="topo-canvas-surface"
+            style={{
+              width: contentW,
+              height: contentH,
+              ...(fullscreen ? {} : {
+                transform: `scale(${previewScale})`,
+                transformOrigin: "0 0",
+                pointerEvents: "none",
+              }),
+            }}
+          >
             {/* Edges + the in-progress link line */}
             <svg className="topo-canvas-edges" width={contentW} height={contentH}>
               <defs>
@@ -774,22 +889,22 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
                 const s = nodeById[edge.sourceTempId];
                 const t = nodeById[edge.targetTempId];
                 if (!s || !t || typeof s.x !== "number" || typeof t.x !== "number") return null;
-                const { p1, p2 } = edgeEndpoints(s, t);
+                const { d, lx, ly } = edgeGeometry(edge, idx);
                 const isExternal = edge.scope === "external";
                 const stroke = edgeStroke(edge.scope);
                 return (
                   <g key={idx} className="topo-canvas-edge" onPointerDown={(e) => e.stopPropagation()}>
                     <path
-                      d={`M ${p1.x},${p1.y} L ${p2.x},${p2.y}`}
+                      d={d}
                       fill="none" stroke={stroke} strokeWidth={2}
                       strokeDasharray={isExternal ? "7 4" : undefined}
                       markerEnd={`url(#${isExternal ? "topo-edit-arrow-ext" : "topo-edit-arrow"})`}
                     />
                     {/* fat invisible hit-line to make the connection easy to click */}
-                    <path d={`M ${p1.x},${p1.y} L ${p2.x},${p2.y}`}
+                    <path d={d}
                       fill="none" stroke="transparent" strokeWidth={16}
                       style={{ cursor: "pointer" }}
-                      onClick={() => setEdgePopup({ index: idx, x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 })}>
+                      onClick={() => setEdgePopup({ index: idx, x: lx, y: ly })}>
                       <title>Edit connection</title>
                     </path>
                   </g>
@@ -808,17 +923,16 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
               const s = nodeById[edge.sourceTempId];
               const t = nodeById[edge.targetTempId];
               if (!s || !t || typeof s.x !== "number" || typeof t.x !== "number") return null;
-              const { p1, p2 } = edgeEndpoints(s, t);
-              const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+              const { lx, ly } = edgeGeometry(edge, idx);
               const isExternal = edge.scope === "external";
               return (
                 <button
                   key={`elabel-${idx}`}
                   type="button"
                   className={`topo-edge-label${isExternal ? " is-external" : ""}`}
-                  style={{ left: mx, top: my }}
+                  style={{ left: lx, top: ly }}
                   onPointerDown={(e) => e.stopPropagation()}
-                  onClick={() => setEdgePopup({ index: idx, x: mx, y: my })}
+                  onClick={() => setEdgePopup({ index: idx, x: lx, y: ly })}
                   title={edge.description ? edge.description : "Edit connection"}
                 >
                   <span className="topo-edge-proto">{edge.protocol || DEFAULT_PROTOCOL}</span>
@@ -959,6 +1073,9 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
               </div>
             ) : null}
           </div>
+        )}
+        {!fullscreen && nodes.length > 0 && (
+          <div className="topo-preview-cta">Click to edit in fullscreen</div>
         )}
       </div>
     </div>

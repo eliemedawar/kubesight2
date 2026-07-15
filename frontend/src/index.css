@@ -6598,6 +6598,28 @@ kbd {
   touch-action: none;
   user-select: none;
 }
+/* Non-fullscreen: the canvas is a fit-to-width, read-only preview (no
+   horizontal scrolling inside the modal) — all editing happens fullscreen. */
+.topo-canvas--preview {
+  overflow: hidden;
+  cursor: pointer;
+}
+.topo-preview-cta {
+  position: absolute;
+  left: 50%;
+  bottom: 0.75rem;
+  transform: translateX(-50%);
+  padding: 0.3rem 0.9rem;
+  border-radius: 999px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong, var(--border));
+  box-shadow: var(--shadow-md, 0 2px 8px rgba(0, 0, 0, 0.12));
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent-strong, var(--accent));
+  pointer-events: none;
+  white-space: nowrap;
+}
 .topo-canvas-empty {
   position: absolute;
   inset: 0;
