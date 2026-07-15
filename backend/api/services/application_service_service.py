@@ -839,11 +839,31 @@ def _service_list_item(
 # ---------------------------------------------------------------------------
 
 def _save_topology(service_id: int, topology_payload: Dict[str, Any]) -> None:
-    """Replace all topology nodes and edges for service_id."""
-    # Edges must be deleted before nodes due to FK constraints.
+    """Sync topology nodes and edges for service_id.
+
+    Nodes the editor sends back carry their existing id in tempId
+    ("node-<id>"): those rows are updated IN PLACE so node ids survive the
+    edit. Client connections reference topology node ids in their
+    component_refs — recreating every node on save would orphan every
+    client's component selection (and its per-component IPs). Edges are
+    referenced by nothing, so they are still rebuilt wholesale.
+    """
+    # Edges must be deleted before any node deletion due to FK constraints.
     ApplicationServiceTopologyEdge.query.filter_by(service_id=service_id).delete()
-    ApplicationServiceTopologyNode.query.filter_by(service_id=service_id).delete()
     db.session.flush()
+
+    existing_nodes = {
+        n.id: n
+        for n in ApplicationServiceTopologyNode.query.filter_by(service_id=service_id).all()
+    }
+
+    def _existing_from_temp(temp_id: str):
+        if not temp_id.startswith("node-"):
+            return None
+        try:
+            return existing_nodes.get(int(temp_id[5:]))
+        except (TypeError, ValueError):
+            return None
 
     nodes_raw = topology_payload.get("nodes") or []
     edges_raw = topology_payload.get("edges") or []
@@ -873,27 +893,42 @@ def _save_topology(service_id: int, topology_payload: Dict[str, Any]) -> None:
         return cid if TopologyComponent.query.get(cid) else None
 
     temp_to_id: Dict[str, int] = {}
+    kept_ids: set = set()
     for node_data in nodes_raw:
         name = (node_data.get("name") or "").strip()
         if not name:
             continue
-        node = ApplicationServiceTopologyNode(
-            service_id=service_id,
-            name=name,
-            type=(node_data.get("type") or "").strip() or None,
-            description=(node_data.get("description") or "").strip() or None,
-            linked_cluster_id=(node_data.get("linkedClusterId") or "").strip() or None,
-            linked_namespace=(node_data.get("linkedNamespace") or "").strip() or None,
-            linked_deployment=(node_data.get("linkedDeployment") or "").strip() or None,
-            component_id=_resolve_component_id(node_data.get("componentId")),
-            position_x=_coerce_pos(node_data.get("positionX")),
-            position_y=_coerce_pos(node_data.get("positionY")),
-        )
-        db.session.add(node)
-        db.session.flush()
         temp_id = str(node_data.get("tempId") or "")
+        fields = {
+            "name": name,
+            "type": (node_data.get("type") or "").strip() or None,
+            "description": (node_data.get("description") or "").strip() or None,
+            "linked_cluster_id": (node_data.get("linkedClusterId") or "").strip() or None,
+            "linked_namespace": (node_data.get("linkedNamespace") or "").strip() or None,
+            "linked_deployment": (node_data.get("linkedDeployment") or "").strip() or None,
+            "component_id": _resolve_component_id(node_data.get("componentId")),
+            "position_x": _coerce_pos(node_data.get("positionX")),
+            "position_y": _coerce_pos(node_data.get("positionY")),
+        }
+        node = _existing_from_temp(temp_id)
+        if node is not None and node.id in kept_ids:
+            node = None  # duplicate tempId in the payload → treat as a new node
+        if node is None:
+            node = ApplicationServiceTopologyNode(service_id=service_id, **fields)
+            db.session.add(node)
+            db.session.flush()
+        else:
+            for field, value in fields.items():
+                setattr(node, field, value)
+        kept_ids.add(node.id)
         if temp_id:
             temp_to_id[temp_id] = node.id
+
+    # Drop only the nodes the editor actually removed.
+    for node_id, node in existing_nodes.items():
+        if node_id not in kept_ids:
+            db.session.delete(node)
+    db.session.flush()
 
     seen_edges: set = set()
     for edge_data in edges_raw:

@@ -84,6 +84,45 @@ def _parse_component_refs(raw: Any) -> List[Dict[str, str]]:
     return out
 
 
+def _heal_component_refs(
+    conn: Optional[ClientServiceConnection],
+    svc_nodes: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Resolve a connection's saved component refs against the live topology,
+    re-pointing dangling refs to a same-named live node when unambiguous.
+
+    Service-topology saves used to recreate every node with a fresh id, which
+    orphaned the node ids stored in component_refs (the connection looked
+    "reset"). Node ids are now stable across edits, but connections saved
+    before that fix — or whose component was deleted and re-added under the
+    same name — are repaired here, and the repair is persisted so it runs
+    once per connection.
+    """
+    refs = _parse_component_refs(conn.component_refs) if conn else []
+    if not conn or not refs or not svc_nodes:
+        return refs
+    live_ids = {str(n.get("id")) for n in svc_nodes}
+    by_name: Dict[str, List[str]] = {}
+    for n in svc_nodes:
+        by_name.setdefault(str(n.get("name") or ""), []).append(str(n.get("id")))
+    healed: List[Dict[str, str]] = []
+    changed = False
+    for r in refs:
+        if r.get("ref") in live_ids:
+            healed.append(r)
+            continue
+        candidates = by_name.get(r.get("name") or "")
+        if candidates and len(candidates) == 1:
+            healed.append({**r, "ref": candidates[0]})
+            changed = True
+        else:
+            healed.append(r)
+    if changed:
+        conn.component_refs = json.dumps(healed)
+        db.session.commit()
+    return healed
+
+
 def _connection_to_dict(conn: Optional[ClientServiceConnection]) -> Optional[Dict[str, Any]]:
     if conn is None:
         return None
@@ -265,6 +304,8 @@ def list_client_services(
             }
         conn = connections.get(sid)
         svc_nodes = (svc.get("topology") or {}).get("nodes") or []
+        # Repair refs orphaned by pre-fix topology edits before serializing.
+        _heal_component_refs(conn, svc_nodes)
         items.append({
             "serviceId": svc["id"],
             "serviceName": svc["name"],
@@ -501,7 +542,7 @@ def get_client_service_topology(
     # service has no topology at all, synthesize a single service node so we still
     # render Client ↔ Transport ↔ Service.
     node_index = {str(n.get("id")): n for n in svc_nodes}
-    saved_refs = _parse_component_refs(conn.component_refs) if conn else []
+    saved_refs = _heal_component_refs(conn, svc_nodes)
 
     # Each target: {"id", "sourceIp", "destinationIp"}. Per-component IP falls back
     # to the connection-level IP, then to "Not configured".

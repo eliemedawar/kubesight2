@@ -443,6 +443,92 @@ class TestComponentSelection:
         tunnels = self._tunnels(topo)
         assert [str(t["targetNodeId"]) for t in tunnels] == [str(waf)]
 
+    def test_connection_survives_service_topology_edit(self, client, admin_token):
+        """Editing the service topology must not orphan the connection's refs.
+
+        The editor sends existing nodes back as tempId "node-<id>"; the save
+        updates those rows in place so their ids (and every client
+        connection's component selection) survive the edit.
+        """
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        backend = self._node_id(svc, "Backend API")
+        self._post_conn(
+            client, admin_token, cl, svc, transportType="VPN",
+            componentRefs=[{"ref": str(backend), "sourceIp": "10.0.0.1", "destinationIp": "10.0.0.2"}],
+        )
+        # Re-save the service the way the editor does: existing nodes carry
+        # their id in tempId, plus a rename and a brand-new node.
+        res = client.put(
+            f"/api/application-services/{svc['id']}",
+            json={
+                "name": svc["name"],
+                "deployments": [],
+                "topology": {
+                    "nodes": [
+                        {"tempId": f"node-{n['id']}",
+                         "name": "Backend API v2" if n["name"] == "Backend API" else n["name"],
+                         "type": n.get("type") or ""}
+                        for n in svc["topology"]["nodes"]
+                    ] + [{"tempId": "tmp-new", "name": "Cache", "type": "Datastore"}],
+                    "edges": [],
+                },
+            },
+            headers=auth_headers(admin_token),
+        )
+        assert res.status_code == 200, res.get_json()
+        updated = res.get_json()["data"]
+        # The edited node kept its id (just renamed).
+        assert str(self._node_id(updated, "Backend API v2")) == str(backend)
+        # The connection still points at it, with its per-component IPs.
+        listed = client.get(f"/api/clients/{cl['id']}/services", headers=auth_headers(admin_token)).get_json()["data"]
+        refs = listed["items"][0]["connection"]["componentRefs"]
+        assert [r["ref"] for r in refs] == [str(backend)]
+        assert refs[0]["sourceIp"] == "10.0.0.1"
+        topo = self._topology(client, admin_token, cl, svc)
+        assert [str(t["targetNodeId"]) for t in self._tunnels(topo)] == [str(backend)]
+
+    def test_orphaned_refs_heal_by_component_name(self, client, admin_token):
+        """Connections broken by pre-fix topology saves re-attach by name.
+
+        Saving with unrecognized tempIds recreates every node with fresh ids
+        (the legacy behavior that orphaned refs); the next read should
+        re-point the stored refs to the same-named live nodes and persist it.
+        """
+        svc = _create_service(client, admin_token, topology=_topology_two_nodes())
+        cl = _create_client(client, admin_token, service_ids=[svc["id"]])
+        backend = self._node_id(svc, "Backend API")
+        self._post_conn(
+            client, admin_token, cl, svc, transportType="VPN",
+            componentRefs=[{"ref": str(backend), "sourceIp": "10.0.0.1", "destinationIp": "10.0.0.2"}],
+        )
+        res = client.put(
+            f"/api/application-services/{svc['id']}",
+            json={
+                "name": svc["name"],
+                "deployments": [],
+                "topology": {
+                    "nodes": [
+                        {"tempId": "a1", "name": "WAF", "type": "Security"},
+                        {"tempId": "a2", "name": "Backend API", "type": "Application"},
+                    ],
+                    "edges": [],
+                },
+            },
+            headers=auth_headers(admin_token),
+        )
+        assert res.status_code == 200, res.get_json()
+        new_backend = self._node_id(res.get_json()["data"], "Backend API")
+        assert str(new_backend) != str(backend)  # ids really did change
+        # Reading the client services heals the refs onto the new node id.
+        listed = client.get(f"/api/clients/{cl['id']}/services", headers=auth_headers(admin_token)).get_json()["data"]
+        refs = listed["items"][0]["connection"]["componentRefs"]
+        assert [r["ref"] for r in refs] == [str(new_backend)]
+        assert refs[0]["name"] == "Backend API"
+        assert refs[0]["sourceIp"] == "10.0.0.1"
+        topo = self._topology(client, admin_token, cl, svc)
+        assert [str(t["targetNodeId"]) for t in self._tunnels(topo)] == [str(new_backend)]
+
     def test_status_only_update_keeps_component_refs(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
         cl = _create_client(client, admin_token, service_ids=[svc["id"]])
