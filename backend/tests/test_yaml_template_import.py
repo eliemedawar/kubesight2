@@ -241,6 +241,69 @@ def test_parser_imports_config_secret_volume_mounts():
     assert drafts[0]["storage"]["volumeMounts"][0]["mountPath"] == "/var/lib/data"
 
 
+MULTI_PVC_YAML = """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: processing-issuing-ms
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: processing-issuing-ms
+    spec:
+      containers:
+        - name: processing-issuing-ms
+          image: registry.example.com/processing-issuing-ms:V1.73.13
+          volumeMounts:
+            - mountPath: /app/pin
+              name: processing-ms-pin
+            - mountPath: /app/logs
+              name: processing-ms-volume
+      volumes:
+        - name: processing-ms-volume
+          persistentVolumeClaim:
+            claimName: processing-ms-volume-claim
+        - name: processing-ms-pin
+          persistentVolumeClaim:
+            claimName: processing-ms-pin-volume-claim
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: processing-ms-volume-claim
+spec:
+  resources:
+    requests:
+      storage: 10Gi
+"""
+
+
+def test_parser_imports_every_pvc_backed_mount():
+    drafts, error = parse_yaml_to_template_drafts(MULTI_PVC_YAML)
+    assert error is None
+    storage = drafts[0]["storage"]
+
+    mounts = {m["mountPath"]: m for m in storage["volumeMounts"]}
+    assert set(mounts) == {"/app/pin", "/app/logs"}
+    assert mounts["/app/pin"]["pvcName"] == "processing-ms-pin-volume-claim"
+    assert mounts["/app/logs"]["pvcName"] == "processing-ms-volume-claim"
+    # Pod-volume names stay distinct so the generator emits one volume per mount.
+    assert len({m["name"] for m in storage["volumeMounts"]}) == 2
+
+    pvcs = {p["name"]: p for p in storage["newPvcs"]}
+    assert set(pvcs) == {"processing-ms-pin-volume-claim", "processing-ms-volume-claim"}
+    # Size resolved from the PVC doc when present, defaulted (with a warning) when not.
+    assert pvcs["processing-ms-volume-claim"]["size"] == "10Gi"
+    assert pvcs["processing-ms-pin-volume-claim"]["size"] == "1Gi"
+    assert any("processing-ms-pin-volume-claim" in w for w in drafts[0]["warnings"])
+
+    # Legacy mirror keeps single-volume consumers working.
+    assert storage["newPvc"] == pvcs["processing-ms-pin-volume-claim"]
+    assert storage["pvcMode"] == "new"
+
+
 def test_parser_warns_on_extra_containers():
     drafts, error = parse_yaml_to_template_drafts(MULTI_YAML)
     assert error is None

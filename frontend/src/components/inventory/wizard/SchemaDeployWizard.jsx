@@ -135,6 +135,56 @@ function initServiceExposure(template) {
   };
 }
 
+/** A fresh manual-PV sub-answer for one storage volume. */
+function emptyPvAnswer() {
+  return {
+    enabled: false, name: "", capacity: "", storageType: "hostPath", reclaimPolicy: "Retain",
+    hostPath: "", nfsServer: "", nfsPath: "", localPath: "", nodeName: "",
+  };
+}
+
+/** One storage-volume answer per template mount. Multi-volume templates carry a
+ * `newPvcs` list (linked to mounts by pvcName); legacy templates have a single
+ * `newPvc` shared by their one mount. */
+function initStorageVolumes(template) {
+  const ts = template?.storage || {};
+  const appName = template?.id || "app";
+  const pvcs = ts.newPvcs?.length ? ts.newPvcs : ts.newPvc ? [ts.newPvc] : [];
+  const mounts = ts.volumeMounts?.length ? ts.volumeMounts : [{ mountPath: "/data" }];
+  return mounts.map((vm, i) => {
+    const pvc = (vm.pvcName && pvcs.find((p) => p.name === vm.pvcName)) || pvcs[i] || pvcs[0] || {};
+    return {
+      mountPath: vm.mountPath || "/data",
+      mode: ts.pvcMode === "existing" ? "existing" : "new",
+      existingPvc: (ts.pvcMode === "existing" ? vm.pvcName : "") || ts.existingPvc || "",
+      newPvc: {
+        name: pvc.name || `${appName}-data${i ? `-${i + 1}` : ""}`,
+        size: pvc.size || "1Gi",
+        accessMode: pvc.accessMode || "ReadWriteOnce",
+        storageClass: pvc.storageClass || "",
+      },
+      pv: emptyPvAnswer(),
+    };
+  });
+}
+
+/** A blank volume for the "+ Add volume" action on the Storage step. */
+function emptyStorageVolume(template, index) {
+  const appName = template?.id || "app";
+  return {
+    mountPath: "",
+    mode: "new",
+    existingPvc: "",
+    newPvc: {
+      name: `${appName}-data-${index + 1}`,
+      size: "1Gi",
+      accessMode: "ReadWriteOnce",
+      storageClass: "",
+    },
+    pv: emptyPvAnswer(),
+  };
+}
+
 /** Build the initial answers from the template schema's defaults. */
 function initAnswers(template, defaultClusterId) {
   const schema = template.schema || {};
@@ -169,19 +219,7 @@ function initAnswers(template, defaultClusterId) {
     volumes,
     storage: {
       enabled: Boolean(ts.pvcMode && ts.pvcMode !== "none"),
-      mode: ts.pvcMode === "existing" ? "existing" : "new",
-      existingPvc: ts.existingPvc || "",
-      mountPath: ts.volumeMounts?.[0]?.mountPath || "/data",
-      newPvc: {
-        name: ts.newPvc?.name || `${template.id || "app"}-data`,
-        size: ts.newPvc?.size || "1Gi",
-        accessMode: ts.newPvc?.accessMode || "ReadWriteOnce",
-        storageClass: ts.newPvc?.storageClass || "",
-      },
-      pv: {
-        enabled: false, name: "", capacity: "", storageType: "hostPath", reclaimPolicy: "Retain",
-        hostPath: "", nfsServer: "", nfsPath: "", localPath: "", nodeName: "",
-      },
+      volumes: initStorageVolumes(template),
     },
     serviceExposure: initServiceExposure(template),
     ingress: schema.ingress?.supported
@@ -557,10 +595,50 @@ export default function SchemaDeployWizard({
   };
   const setStorage = (patch) =>
     setAnswers((a) => ({ ...a, storage: { ...a.storage, ...patch } }));
-  const setNewPvc = (patch) =>
-    setAnswers((a) => ({ ...a, storage: { ...a.storage, newPvc: { ...a.storage.newPvc, ...patch } } }));
-  const setPv = (patch) =>
-    setAnswers((a) => ({ ...a, storage: { ...a.storage, pv: { ...a.storage.pv, ...patch } } }));
+  const setStorageVolume = (index, patch) =>
+    setAnswers((a) => ({
+      ...a,
+      storage: {
+        ...a.storage,
+        volumes: (a.storage.volumes || []).map((v, i) => (i === index ? { ...v, ...patch } : v)),
+      },
+    }));
+  const setNewPvc = (index, patch) =>
+    setAnswers((a) => ({
+      ...a,
+      storage: {
+        ...a.storage,
+        volumes: (a.storage.volumes || []).map((v, i) =>
+          i === index ? { ...v, newPvc: { ...v.newPvc, ...patch } } : v,
+        ),
+      },
+    }));
+  const setPv = (index, patch) =>
+    setAnswers((a) => ({
+      ...a,
+      storage: {
+        ...a.storage,
+        volumes: (a.storage.volumes || []).map((v, i) =>
+          i === index ? { ...v, pv: { ...v.pv, ...patch } } : v,
+        ),
+      },
+    }));
+  const addStorageVolume = () =>
+    setAnswers((a) => ({
+      ...a,
+      storage: {
+        ...a.storage,
+        volumes: [...(a.storage.volumes || []), emptyStorageVolume(template, (a.storage.volumes || []).length)],
+      },
+    }));
+  const removeStorageVolume = (index) =>
+    setAnswers((a) => {
+      const volumes = (a.storage.volumes || []).filter((_, i) => i !== index);
+      return {
+        ...a,
+        storage: { ...a.storage, volumes: volumes.length ? volumes : [emptyStorageVolume(template, 0)] },
+      };
+    });
   const setService = (patch) =>
     setAnswers((a) => ({ ...a, serviceExposure: { ...a.serviceExposure, ...patch } }));
   const updateServicePort = (index, patch) =>
@@ -1083,117 +1161,141 @@ export default function SchemaDeployWizard({
               </label>
               {answers.storage.enabled ? (
                 <>
-                  <Field label="PVC">
-                    <SearchableSelect value={answers.storage.mode} onChange={(e) => setStorage({ mode: e.target.value })}>
-                      <option value="new">Create new PVC</option>
-                      <option value="existing">Use existing PVC</option>
-                    </SearchableSelect>
-                  </Field>
-                  <Field label="Mount path">
-                    <input value={answers.storage.mountPath} onChange={(e) => setStorage({ mountPath: e.target.value })} placeholder="/data" />
-                  </Field>
-
-                  {answers.storage.mode === "existing" ? (
-                    <Field label="Existing PVC name">
-                      <input value={answers.storage.existingPvc} onChange={(e) => setStorage({ existingPvc: e.target.value })} placeholder="shared-data" />
-                    </Field>
-                  ) : (
-                    <>
-                      <div className="schema-override-grid">
-                        <Field label="PVC name">
-                          <input value={answers.storage.newPvc.name} onChange={(e) => setNewPvc({ name: e.target.value })} placeholder="data" />
-                        </Field>
-                        <Field label="Size">
-                          <input value={answers.storage.newPvc.size} onChange={(e) => setNewPvc({ size: e.target.value })} placeholder="1Gi" />
-                        </Field>
-                        <Field label="Access mode">
-                          <SearchableSelect value={answers.storage.newPvc.accessMode} onChange={(e) => setNewPvc({ accessMode: e.target.value })}>
-                            {ACCESS_MODES.map((m) => (
-                              <option key={m} value={m}>{m}</option>
-                            ))}
-                          </SearchableSelect>
-                        </Field>
-                        <Field label="Storage class">
-                          {storageClasses.length ? (
-                            <SearchableSelect
-                              value={answers.storage.newPvc.storageClass}
-                              onChange={(e) => setNewPvc({ storageClass: e.target.value })}
-                              disabled={answers.storage.pv.enabled}
-                            >
-                              <option value="">(cluster default)</option>
-                              {storageClasses.map((sc) => (
-                                <option key={sc.name} value={sc.name}>{sc.default ? `${sc.name} (default)` : sc.name}</option>
-                              ))}
-                            </SearchableSelect>
-                          ) : (
-                            <input
-                              value={answers.storage.newPvc.storageClass}
-                              onChange={(e) => setNewPvc({ storageClass: e.target.value })}
-                              placeholder="(cluster default)"
-                              disabled={answers.storage.pv.enabled}
-                            />
-                          )}
-                        </Field>
-                      </div>
-
-                      <details className="schema-optional-env">
-                        <summary>Advanced: manually create a PersistentVolume</summary>
-                        <label className="wizard-checkbox" style={{ marginTop: "var(--space-3)" }}>
-                          <input type="checkbox" checked={answers.storage.pv.enabled} onChange={(e) => setPv({ enabled: e.target.checked })} />
-                          Create a PersistentVolume and bind it to this PVC
-                        </label>
-                        {answers.storage.pv.enabled ? (
-                          <div className="schema-override-grid" style={{ marginTop: "var(--space-3)" }}>
-                            <Field label="PV name">
-                              <input value={answers.storage.pv.name} onChange={(e) => setPv({ name: e.target.value })} placeholder="(auto from PVC)" />
-                            </Field>
-                            <Field label="Capacity">
-                              <input value={answers.storage.pv.capacity} onChange={(e) => setPv({ capacity: e.target.value })} placeholder={answers.storage.newPvc.size} />
-                            </Field>
-                            <Field label="Volume type">
-                              <SearchableSelect value={answers.storage.pv.storageType} onChange={(e) => setPv({ storageType: e.target.value })}>
-                                {PV_TYPES.map((t) => (
-                                  <option key={t} value={t}>{t}</option>
-                                ))}
-                              </SearchableSelect>
-                            </Field>
-                            <Field label="Reclaim policy">
-                              <SearchableSelect value={answers.storage.pv.reclaimPolicy} onChange={(e) => setPv({ reclaimPolicy: e.target.value })}>
-                                {RECLAIM_POLICIES.map((p) => (
-                                  <option key={p} value={p}>{p}</option>
-                                ))}
-                              </SearchableSelect>
-                            </Field>
-                            {answers.storage.pv.storageType === "hostPath" ? (
-                              <Field label="Host path">
-                                <input value={answers.storage.pv.hostPath} onChange={(e) => setPv({ hostPath: e.target.value })} placeholder="/data" />
-                              </Field>
-                            ) : null}
-                            {answers.storage.pv.storageType === "nfs" ? (
-                              <>
-                                <Field label="NFS server">
-                                  <input value={answers.storage.pv.nfsServer} onChange={(e) => setPv({ nfsServer: e.target.value })} placeholder="10.0.0.10" />
-                                </Field>
-                                <Field label="NFS path">
-                                  <input value={answers.storage.pv.nfsPath} onChange={(e) => setPv({ nfsPath: e.target.value })} placeholder="/exports/data" />
-                                </Field>
-                              </>
-                            ) : null}
-                            {answers.storage.pv.storageType === "local" ? (
-                              <>
-                                <Field label="Local path">
-                                  <input value={answers.storage.pv.localPath} onChange={(e) => setPv({ localPath: e.target.value })} placeholder="/mnt/data" />
-                                </Field>
-                                <Field label="Node name">
-                                  <input value={answers.storage.pv.nodeName} onChange={(e) => setPv({ nodeName: e.target.value })} placeholder="worker-1" />
-                                </Field>
-                              </>
-                            ) : null}
-                          </div>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    Each volume mounts its own PVC at the given path. Add more volumes for apps
+                    that persist to several paths (e.g. /app/pin and /app/logs).
+                  </p>
+                  {(answers.storage.volumes || []).map((vol, volIndex) => (
+                    <div key={volIndex} className="schema-env-card">
+                      <div className="schema-env-card__top">
+                        <strong>Volume {volIndex + 1}</strong>
+                        {(answers.storage.volumes || []).length > 1 ? (
+                          <button
+                            type="button"
+                            className="btn-outline template-env-row__remove"
+                            onClick={() => removeStorageVolume(volIndex)}
+                            aria-label={`Remove volume ${volIndex + 1}`}
+                          >
+                            ×
+                          </button>
                         ) : null}
-                      </details>
-                    </>
-                  )}
+                      </div>
+                      <Field label="PVC">
+                        <SearchableSelect value={vol.mode} onChange={(e) => setStorageVolume(volIndex, { mode: e.target.value })}>
+                          <option value="new">Create new PVC</option>
+                          <option value="existing">Use existing PVC</option>
+                        </SearchableSelect>
+                      </Field>
+                      <Field label="Mount path">
+                        <input value={vol.mountPath} onChange={(e) => setStorageVolume(volIndex, { mountPath: e.target.value })} placeholder="/data" />
+                      </Field>
+
+                      {vol.mode === "existing" ? (
+                        <Field label="Existing PVC name">
+                          <input value={vol.existingPvc} onChange={(e) => setStorageVolume(volIndex, { existingPvc: e.target.value })} placeholder="shared-data" />
+                        </Field>
+                      ) : (
+                        <>
+                          <div className="schema-override-grid">
+                            <Field label="PVC name">
+                              <input value={vol.newPvc.name} onChange={(e) => setNewPvc(volIndex, { name: e.target.value })} placeholder="data" />
+                            </Field>
+                            <Field label="Size">
+                              <input value={vol.newPvc.size} onChange={(e) => setNewPvc(volIndex, { size: e.target.value })} placeholder="1Gi" />
+                            </Field>
+                            <Field label="Access mode">
+                              <SearchableSelect value={vol.newPvc.accessMode} onChange={(e) => setNewPvc(volIndex, { accessMode: e.target.value })}>
+                                {ACCESS_MODES.map((m) => (
+                                  <option key={m} value={m}>{m}</option>
+                                ))}
+                              </SearchableSelect>
+                            </Field>
+                            <Field label="Storage class">
+                              {storageClasses.length ? (
+                                <SearchableSelect
+                                  value={vol.newPvc.storageClass}
+                                  onChange={(e) => setNewPvc(volIndex, { storageClass: e.target.value })}
+                                  disabled={vol.pv.enabled}
+                                >
+                                  <option value="">(cluster default)</option>
+                                  {storageClasses.map((sc) => (
+                                    <option key={sc.name} value={sc.name}>{sc.default ? `${sc.name} (default)` : sc.name}</option>
+                                  ))}
+                                </SearchableSelect>
+                              ) : (
+                                <input
+                                  value={vol.newPvc.storageClass}
+                                  onChange={(e) => setNewPvc(volIndex, { storageClass: e.target.value })}
+                                  placeholder="(cluster default)"
+                                  disabled={vol.pv.enabled}
+                                />
+                              )}
+                            </Field>
+                          </div>
+
+                          <details className="schema-optional-env">
+                            <summary>Advanced: manually create a PersistentVolume</summary>
+                            <label className="wizard-checkbox" style={{ marginTop: "var(--space-3)" }}>
+                              <input type="checkbox" checked={vol.pv.enabled} onChange={(e) => setPv(volIndex, { enabled: e.target.checked })} />
+                              Create a PersistentVolume and bind it to this PVC
+                            </label>
+                            {vol.pv.enabled ? (
+                              <div className="schema-override-grid" style={{ marginTop: "var(--space-3)" }}>
+                                <Field label="PV name">
+                                  <input value={vol.pv.name} onChange={(e) => setPv(volIndex, { name: e.target.value })} placeholder="(auto from PVC)" />
+                                </Field>
+                                <Field label="Capacity">
+                                  <input value={vol.pv.capacity} onChange={(e) => setPv(volIndex, { capacity: e.target.value })} placeholder={vol.newPvc.size} />
+                                </Field>
+                                <Field label="Volume type">
+                                  <SearchableSelect value={vol.pv.storageType} onChange={(e) => setPv(volIndex, { storageType: e.target.value })}>
+                                    {PV_TYPES.map((t) => (
+                                      <option key={t} value={t}>{t}</option>
+                                    ))}
+                                  </SearchableSelect>
+                                </Field>
+                                <Field label="Reclaim policy">
+                                  <SearchableSelect value={vol.pv.reclaimPolicy} onChange={(e) => setPv(volIndex, { reclaimPolicy: e.target.value })}>
+                                    {RECLAIM_POLICIES.map((p) => (
+                                      <option key={p} value={p}>{p}</option>
+                                    ))}
+                                  </SearchableSelect>
+                                </Field>
+                                {vol.pv.storageType === "hostPath" ? (
+                                  <Field label="Host path">
+                                    <input value={vol.pv.hostPath} onChange={(e) => setPv(volIndex, { hostPath: e.target.value })} placeholder="/data" />
+                                  </Field>
+                                ) : null}
+                                {vol.pv.storageType === "nfs" ? (
+                                  <>
+                                    <Field label="NFS server">
+                                      <input value={vol.pv.nfsServer} onChange={(e) => setPv(volIndex, { nfsServer: e.target.value })} placeholder="10.0.0.10" />
+                                    </Field>
+                                    <Field label="NFS path">
+                                      <input value={vol.pv.nfsPath} onChange={(e) => setPv(volIndex, { nfsPath: e.target.value })} placeholder="/exports/data" />
+                                    </Field>
+                                  </>
+                                ) : null}
+                                {vol.pv.storageType === "local" ? (
+                                  <>
+                                    <Field label="Local path">
+                                      <input value={vol.pv.localPath} onChange={(e) => setPv(volIndex, { localPath: e.target.value })} placeholder="/mnt/data" />
+                                    </Field>
+                                    <Field label="Node name">
+                                      <input value={vol.pv.nodeName} onChange={(e) => setPv(volIndex, { nodeName: e.target.value })} placeholder="worker-1" />
+                                    </Field>
+                                  </>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </details>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                  <button type="button" className="btn-outline" onClick={addStorageVolume}>
+                    + Add volume
+                  </button>
                 </>
               ) : null}
             </div>

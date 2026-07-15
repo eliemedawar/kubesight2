@@ -34,12 +34,12 @@ function componentNames(conn) {
   return refs.map((r) => r.name).join(", ");
 }
 
-// Optional "netted src → netted dst" suffix shown only when NAT addresses exist.
+// Optional "NAT src → NAT dst" suffix shown only when NAT addresses exist.
 function NettedAddressing({ src, dst }) {
   if (!src && !dst) return null;
   return (
     <span className="muted">
-      {" "}(netted: {src || "—"} → {dst || "—"})
+      {" "}(NAT: {src || "—"} → {dst || "—"})
     </span>
   );
 }

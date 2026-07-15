@@ -140,47 +140,86 @@ class _Provisioned:
         return self._merge(self._secrets, self._secrets_binary, "stringData", "data")
 
 
+def _advanced_pv_block(pv: Dict[str, Any], size: str) -> Dict[str, Any]:
+    return {
+        "createManualPv": True,
+        "pvName": str(pv.get("name") or "").strip(),
+        "capacity": str(pv.get("capacity") or size or "1Gi").strip(),
+        "storageType": pv.get("storageType") or "hostPath",
+        "reclaimPolicy": pv.get("reclaimPolicy") or "Retain",
+        "hostPath": str(pv.get("hostPath") or "").strip(),
+        "nfsServer": str(pv.get("nfsServer") or "").strip(),
+        "nfsPath": str(pv.get("nfsPath") or "").strip(),
+        "localPath": str(pv.get("localPath") or "").strip(),
+        "nodeName": str(pv.get("nodeName") or "").strip(),
+    }
+
+
 def _resolve_storage(answer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Build a storage payload from the deployer's PVC/PV choices.
 
-    Returns ``None`` when the deployer left storage disabled, signalling the caller
-    to keep the template's storage defaults.
+    Accepts the multi-volume answer shape (``volumes`` is a list, one entry per
+    mount) and the legacy single-volume shape (flat ``mountPath``/``mode``/
+    ``newPvc``/``pv`` keys). Returns ``None`` when the deployer left storage
+    disabled, signalling the caller to keep the template's storage defaults.
     """
     if not answer or not answer.get("enabled"):
         return None
-    mount_path = str(answer.get("mountPath") or "/data").strip() or "/data"
-    storage: Dict[str, Any] = {
-        "volumeMounts": [{"name": "data", "mountPath": mount_path, "readOnly": False}],
-    }
-    if (answer.get("mode") or "new") == "existing":
-        storage["pvcMode"] = "existing"
-        storage["existingPvc"] = str(answer.get("existingPvc") or "").strip()
-        return storage
+    volumes = answer.get("volumes")
+    if not isinstance(volumes, list) or not volumes:
+        volumes = [{
+            "mountPath": answer.get("mountPath"),
+            "mode": answer.get("mode"),
+            "existingPvc": answer.get("existingPvc"),
+            "newPvc": answer.get("newPvc"),
+            "pv": answer.get("pv"),
+        }]
 
-    new_pvc = answer.get("newPvc") or {}
-    storage["pvcMode"] = "new"
-    storage["newPvc"] = {
-        "name": str(new_pvc.get("name") or "data-pvc").strip(),
-        "size": str(new_pvc.get("size") or "1Gi").strip(),
-        "accessMode": new_pvc.get("accessMode") or "ReadWriteOnce",
-        "storageClass": str(new_pvc.get("storageClass") or "").strip(),
-    }
-    pv = answer.get("pv") or {}
-    if pv.get("enabled"):
-        storage["advanced"] = {
-            "createManualPv": True,
-            "pvName": str(pv.get("name") or "").strip(),
-            "capacity": str(pv.get("capacity") or new_pvc.get("size") or "1Gi").strip(),
-            "storageType": pv.get("storageType") or "hostPath",
-            "reclaimPolicy": pv.get("reclaimPolicy") or "Retain",
-            "hostPath": str(pv.get("hostPath") or "").strip(),
-            "nfsServer": str(pv.get("nfsServer") or "").strip(),
-            "nfsPath": str(pv.get("nfsPath") or "").strip(),
-            "localPath": str(pv.get("localPath") or "").strip(),
-            "nodeName": str(pv.get("nodeName") or "").strip(),
+    mounts: List[Dict[str, Any]] = []
+    new_pvcs: List[Dict[str, Any]] = []
+    for index, vol in enumerate(volumes):
+        if not isinstance(vol, dict):
+            continue
+        suffix = "" if index == 0 else f"-{index + 1}"
+        mount_path = str(vol.get("mountPath") or "").strip() or f"/data{suffix}"
+        mount: Dict[str, Any] = {
+            "name": f"data{suffix}",
+            "mountPath": mount_path,
+            "readOnly": bool(vol.get("readOnly")),
         }
-        # A manually-bound PV uses an empty storage class on the PVC.
-        storage["newPvc"]["storageClass"] = ""
+        if (vol.get("mode") or "new") == "existing":
+            mount["pvcName"] = str(vol.get("existingPvc") or "").strip()
+            mounts.append(mount)
+            continue
+
+        new_pvc = vol.get("newPvc") or {}
+        pvc_cfg: Dict[str, Any] = {
+            "name": str(new_pvc.get("name") or f"data-pvc{suffix}").strip(),
+            "size": str(new_pvc.get("size") or "1Gi").strip(),
+            "accessMode": new_pvc.get("accessMode") or "ReadWriteOnce",
+            "storageClass": str(new_pvc.get("storageClass") or "").strip(),
+        }
+        pv = vol.get("pv") or {}
+        if pv.get("enabled"):
+            pvc_cfg["advanced"] = _advanced_pv_block(pv, new_pvc.get("size"))
+            # A manually-bound PV uses an empty storage class on the PVC.
+            pvc_cfg["storageClass"] = ""
+        mount["pvcName"] = pvc_cfg["name"]
+        mounts.append(mount)
+        new_pvcs.append(pvc_cfg)
+
+    storage: Dict[str, Any] = {"volumeMounts": mounts}
+    if new_pvcs:
+        # "new" makes the generator emit one PVC per newPvcs entry; mounts bound
+        # to existing claims just reference them via pvcName.
+        storage["pvcMode"] = "new"
+        storage["newPvcs"] = new_pvcs
+        storage["newPvc"] = {k: v for k, v in new_pvcs[0].items() if k != "advanced"}
+        if new_pvcs[0].get("advanced"):
+            storage["advanced"] = new_pvcs[0]["advanced"]
+    else:
+        storage["pvcMode"] = "existing"
+        storage["existingPvc"] = next((m.get("pvcName") for m in mounts if m.get("pvcName")), "")
     return storage
 
 
@@ -424,8 +463,13 @@ def _apply_overrides(
                 resources[field] = str(overrides["resources"][field]).strip()
 
     if overrides.get("storageSize") and schema_overrides.get("storageSize"):
-        new_pvc = storage.setdefault("newPvc", {})
-        new_pvc["size"] = str(overrides["storageSize"]).strip()
+        size = str(overrides["storageSize"]).strip()
+        # The size override targets the template's primary (first) volume; extra
+        # volumes are edited individually on the wizard's Storage step.
+        storage.setdefault("newPvc", {})["size"] = size
+        new_pvcs = storage.get("newPvcs")
+        if isinstance(new_pvcs, list) and new_pvcs and isinstance(new_pvcs[0], dict):
+            new_pvcs[0]["size"] = size
 
     allowed_types = schema_overrides.get("serviceType")
     if overrides.get("serviceType") and isinstance(allowed_types, list):

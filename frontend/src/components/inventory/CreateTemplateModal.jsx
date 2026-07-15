@@ -53,6 +53,9 @@ const EMPTY_DEPENDENCY = { kind: "postgresql", name: "", required: true, note: "
 // (existing or freshly created) at deploy time.
 const EMPTY_VOLUME = { mountPath: "", kind: "configMap", readOnly: false, subPath: "" };
 
+// A persistent-storage volume: each row becomes its own PVC + mount.
+const EMPTY_STORAGE_VOLUME = { size: "1Gi", mountPath: "" };
+
 // Every override the deployer may be granted lives here — the single home for the
 // lock-vs-override decision.
 const DEFAULT_OVERRIDES = {
@@ -108,10 +111,10 @@ const EMPTY_FORM = {
   dependencies: [],
   volumeMounts: [],
   ingressTls: false,
-  // Storage (simplified — advanced PVC/PV details are no longer authored here)
+  // Storage (simplified — advanced PVC/PV details are no longer authored here).
+  // Each volume row becomes its own PVC + mount at deploy time.
   storageEnabled: false,
-  storageSize: "1Gi",
-  storageMountPath: "/data",
+  storageVolumes: [{ size: "1Gi", mountPath: "/data" }],
   probes: freshProbes(),
 };
 
@@ -123,6 +126,7 @@ function freshForm(category) {
     overrides: { ...DEFAULT_OVERRIDES },
     dependencies: [],
     volumeMounts: [],
+    storageVolumes: [{ size: "1Gi", mountPath: "/data" }],
     probes: freshProbes(),
   };
 }
@@ -157,6 +161,19 @@ function formFromTemplate(detail) {
     readOnly: Boolean(v.readOnly),
     subPath: v.subPath || "",
   }));
+
+  // One editable row per persistent mount. Multi-volume templates carry a
+  // `newPvcs` list (one PVC per mount, linked by pvcName); legacy templates
+  // have a single `newPvc` shared by every mount.
+  const storagePvcs = storage.newPvcs?.length
+    ? storage.newPvcs
+    : storage.newPvc
+      ? [storage.newPvc]
+      : [];
+  const storageVolumes = (storage.volumeMounts || []).map((vm, i) => {
+    const pvc = (vm.pvcName && storagePvcs.find((p) => p.name === vm.pvcName)) || storagePvcs[i] || storagePvcs[0] || {};
+    return { size: pvc.size || "1Gi", mountPath: vm.mountPath || "" };
+  });
 
   const probes = freshProbes();
   for (const { key } of PROBE_KEYS) {
@@ -208,8 +225,7 @@ function formFromTemplate(detail) {
     volumeMounts,
     ingressTls: Boolean(schema.ingress?.tls),
     storageEnabled: Boolean(storage.pvcMode && storage.pvcMode !== "none"),
-    storageSize: storage.newPvc?.size || "1Gi",
-    storageMountPath: storage.volumeMounts?.[0]?.mountPath || "/data",
+    storageVolumes: storageVolumes.length ? storageVolumes : [{ size: storage.newPvc?.size || "1Gi", mountPath: "/data" }],
     probes,
   };
 }
@@ -460,12 +476,29 @@ export default function CreateTemplateModal({
     const envVars = envSchema.filter((f) => f.default).map((f) => ({ name: f.key, value: f.default }));
     if (envVars.length) payload.environment = { envVars };
 
-    // Storage (simplified): a single PVC + mount, no advanced PV authoring.
+    // Storage (simplified): one PVC + mount per volume row, no advanced PV
+    // authoring. Mounts link to their PVC via pvcName; `newPvc` mirrors the
+    // first PVC for older consumers of the single-volume shape.
     if (form.storageEnabled) {
+      const rows = form.storageVolumes
+        .map((v) => ({ size: (v.size || "").trim() || "1Gi", mountPath: (v.mountPath || "").trim() }))
+        .filter((v) => v.mountPath);
+      const volumes = rows.length ? rows : [{ size: "1Gi", mountPath: "/data" }];
+      const newPvcs = volumes.map((v, i) => ({
+        name: i === 0 ? `${containerName}-data` : `${containerName}-data-${i + 1}`,
+        size: v.size,
+        accessMode: "ReadWriteOnce",
+      }));
       payload.storage = {
         pvcMode: "new",
-        newPvc: { name: `${containerName}-data`, size: form.storageSize.trim() || "1Gi", accessMode: "ReadWriteOnce" },
-        volumeMounts: [{ name: "data", mountPath: form.storageMountPath.trim() || "/data", readOnly: false }],
+        newPvc: { ...newPvcs[0] },
+        newPvcs,
+        volumeMounts: volumes.map((v, i) => ({
+          name: i === 0 ? "data" : `data-${i + 1}`,
+          mountPath: v.mountPath,
+          readOnly: false,
+          pvcName: newPvcs[i].name,
+        })),
       };
     }
 
@@ -745,20 +778,54 @@ export default function CreateTemplateModal({
             <span>Enable persistent storage</span>
           </label>
           {form.storageEnabled ? (
-            <div className="form-grid" style={{ marginTop: "var(--space-3)" }}>
-              <label>
-                Default size
-                <input value={form.storageSize} onChange={update("storageSize")} placeholder="1Gi" />
-              </label>
-              <label>
-                Mount path
-                <input value={form.storageMountPath} onChange={update("storageMountPath")} placeholder="/data" />
-              </label>
-              <label className="checkbox-row form-grid__full">
+            <>
+              <p className="muted" style={{ marginTop: "var(--space-2)" }}>
+                Each volume becomes its own PVC mounted at the given path (e.g. /app/pin and /app/logs).
+              </p>
+              <div className="schema-env-list" style={{ marginTop: "var(--space-3)" }}>
+                {form.storageVolumes.map((vol, index) => (
+                  <div key={index} className="schema-env-card">
+                    <div className="form-grid">
+                      <label>
+                        Mount path
+                        <input
+                          value={vol.mountPath}
+                          onChange={updateRow("storageVolumes", index, "mountPath")}
+                          placeholder={index === 0 ? "/data" : "/app/logs"}
+                          aria-label={`Storage volume ${index + 1} mount path`}
+                        />
+                      </label>
+                      <label>
+                        Default size
+                        <input
+                          value={vol.size}
+                          onChange={updateRow("storageVolumes", index, "size")}
+                          placeholder="1Gi"
+                          aria-label={`Storage volume ${index + 1} size`}
+                        />
+                      </label>
+                    </div>
+                    {form.storageVolumes.length > 1 ? (
+                      <button
+                        type="button"
+                        className="btn-outline template-env-row__remove"
+                        onClick={removeRow("storageVolumes", EMPTY_STORAGE_VOLUME, index)}
+                        aria-label={`Remove storage volume ${index + 1}`}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+              <button type="button" className="btn-outline" onClick={addRow("storageVolumes", EMPTY_STORAGE_VOLUME)}>
+                + Add volume
+              </button>
+              <label className="checkbox-row" style={{ marginTop: "var(--space-3)" }}>
                 <input type="checkbox" checked={form.overrides.storageSize} onChange={toggleOverride("storageSize")} />
                 <span>Allow the deployer to override the size</span>
               </label>
-            </div>
+            </>
           ) : null}
         </section>
 

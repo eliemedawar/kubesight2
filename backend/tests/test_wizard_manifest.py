@@ -205,6 +205,41 @@ def test_generate_deployment_volume_mount_uses_updated_pvc_name():
     assert "claimName: data-pvc" not in yaml_text
 
 
+def test_generate_deployment_with_multiple_pvcs():
+    # The multi-volume storage shape: one PVC per newPvcs entry, mounts linked
+    # to their claim via pvcName (e.g. /app/pin + /app/logs).
+    payload = {
+        "basics": {"appName": "data-app", "namespace": "default"},
+        "workloadType": "Deployment",
+        "containers": [{"name": "app", "image": "nginx", "tag": "latest", "ports": [80]}],
+        "resources": {"cpuRequest": "100m", "cpuLimit": "500m", "memoryRequest": "128Mi", "memoryLimit": "256Mi"},
+        "storage": {
+            "pvcMode": "new",
+            "newPvc": {"name": "pin-pvc", "size": "1Gi", "accessMode": "ReadWriteOnce"},
+            "newPvcs": [
+                {"name": "pin-pvc", "size": "1Gi", "accessMode": "ReadWriteOnce"},
+                {"name": "logs-pvc", "size": "5Gi", "accessMode": "ReadWriteOnce"},
+            ],
+            "volumeMounts": [
+                {"name": "data", "mountPath": "/app/pin", "readOnly": False, "pvcName": "pin-pvc"},
+                {"name": "data-2", "mountPath": "/app/logs", "readOnly": False, "pvcName": "logs-pvc"},
+            ],
+        },
+        "scaling": {"replicas": 1},
+    }
+    yaml_text, summary, error = generate_wizard_manifests(payload)
+    assert error is None
+    assert yaml_text.count("kind: PersistentVolumeClaim") == 2
+    assert "claimName: pin-pvc" in yaml_text
+    assert "claimName: logs-pvc" in yaml_text
+    assert "mountPath: /app/pin" in yaml_text
+    assert "mountPath: /app/logs" in yaml_text
+    assert "storage: 1Gi" in yaml_text
+    assert "storage: 5Gi" in yaml_text
+    kinds = [r["kind"] for r in summary["resources"]]
+    assert kinds.count("PersistentVolumeClaim") == 2
+
+
 def test_generate_deployment_with_service():
     payload = {
         "basics": {"appName": "nginx-demo", "namespace": "default"},

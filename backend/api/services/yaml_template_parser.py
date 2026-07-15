@@ -191,7 +191,13 @@ def _storage(
     pvc_sizes: Dict[str, str],
     warnings: List[str],
 ) -> Optional[Dict[str, Any]]:
-    """Build a storage block from the first PVC-backed volume mount."""
+    """Build a storage block from every PVC-backed volume mount.
+
+    Each distinct claim becomes one entry in ``newPvcs`` and each mount keeps a
+    ``pvcName`` pointer at its claim, so a workload with several persistent
+    mounts (e.g. ``/app/pin`` + ``/app/logs``) imports losslessly. ``newPvc``
+    mirrors the first claim for older consumers of the single-volume shape.
+    """
     volumes = pod_spec.get("volumes") or []
     pvc_volumes = {
         str((v or {}).get("name")): str((v.get("persistentVolumeClaim") or {}).get("claimName") or "")
@@ -200,25 +206,37 @@ def _storage(
     }
     if not pvc_volumes:
         return None
+
+    mounts: List[Dict[str, Any]] = []
+    new_pvcs: List[Dict[str, Any]] = []
+    seen_claims = set()
     for mount in container.get("volumeMounts") or []:
         vol_name = str((mount or {}).get("name") or "")
         if vol_name not in pvc_volumes:
             continue
-        mount_path = str(mount.get("mountPath") or "/data")
-        claim = pvc_volumes[vol_name]
-        size = pvc_sizes.get(claim, "")
-        if not size:
-            warnings.append(
-                f"Storage size for claim '{claim}' wasn't found in the file; defaulting to 1Gi."
-            )
-        return {
-            "pvcMode": "new",
-            "newPvc": {"name": claim or f"{vol_name}-pvc", "size": size or "1Gi",
-                       "accessMode": "ReadWriteOnce"},
-            "volumeMounts": [{"name": "data", "mountPath": mount_path,
-                              "readOnly": bool(mount.get("readOnly"))}],
-        }
-    return None
+        claim = pvc_volumes[vol_name] or f"{vol_name}-pvc"
+        if claim not in seen_claims:
+            seen_claims.add(claim)
+            size = pvc_sizes.get(claim, "")
+            if not size:
+                warnings.append(
+                    f"Storage size for claim '{claim}' wasn't found in the file; defaulting to 1Gi."
+                )
+            new_pvcs.append({"name": claim, "size": size or "1Gi", "accessMode": "ReadWriteOnce"})
+        mounts.append({
+            "name": "data" if not mounts else f"data-{len(mounts) + 1}",
+            "mountPath": str(mount.get("mountPath") or "/data"),
+            "readOnly": bool(mount.get("readOnly")),
+            "pvcName": claim,
+        })
+    if not mounts:
+        return None
+    return {
+        "pvcMode": "new",
+        "newPvc": dict(new_pvcs[0]),
+        "newPvcs": new_pvcs,
+        "volumeMounts": mounts,
+    }
 
 
 def _config_secret_volume_mounts(

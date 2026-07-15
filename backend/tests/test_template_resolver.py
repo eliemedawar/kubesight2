@@ -332,6 +332,128 @@ def test_storage_with_manual_pv():
     assert "hostPath:" in yaml_text
 
 
+def test_storage_multiple_volumes_emit_one_pvc_each():
+    answers = _answers(storage={
+        "enabled": True,
+        "volumes": [
+            {"mountPath": "/app/pin", "mode": "new",
+             "newPvc": {"name": "orders-pin", "size": "1Gi", "accessMode": "ReadWriteOnce"}},
+            {"mountPath": "/app/logs", "mode": "new",
+             "newPvc": {"name": "orders-logs", "size": "5Gi", "accessMode": "ReadWriteOnce"}},
+        ],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert err is None
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert yaml_text.count("kind: PersistentVolumeClaim") == 2
+    assert "claimName: orders-pin" in yaml_text
+    assert "claimName: orders-logs" in yaml_text
+    assert "mountPath: /app/pin" in yaml_text
+    assert "mountPath: /app/logs" in yaml_text
+    assert "storage: 1Gi" in yaml_text
+    assert "storage: 5Gi" in yaml_text
+
+
+def test_storage_mixed_new_and_existing_volumes():
+    answers = _answers(storage={
+        "enabled": True,
+        "volumes": [
+            {"mountPath": "/app/logs", "mode": "new",
+             "newPvc": {"name": "orders-logs", "size": "2Gi"}},
+            {"mountPath": "/app/shared", "mode": "existing", "existingPvc": "shared-data"},
+        ],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert err is None
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    # Only the new claim gets a PVC document; the existing one is referenced.
+    assert yaml_text.count("kind: PersistentVolumeClaim") == 1
+    assert "claimName: orders-logs" in yaml_text
+    assert "claimName: shared-data" in yaml_text
+    assert "mountPath: /app/shared" in yaml_text
+
+
+def test_storage_size_override_applies_to_first_volume_only():
+    template = _base_template(overrides={"storageSize": True})
+    template["storage"] = {
+        "pvcMode": "new",
+        "newPvc": {"name": "orders-pin", "size": "1Gi", "accessMode": "ReadWriteOnce"},
+        "newPvcs": [
+            {"name": "orders-pin", "size": "1Gi", "accessMode": "ReadWriteOnce"},
+            {"name": "orders-logs", "size": "5Gi", "accessMode": "ReadWriteOnce"},
+        ],
+        "volumeMounts": [
+            {"name": "data", "mountPath": "/app/pin", "readOnly": False, "pvcName": "orders-pin"},
+            {"name": "data-2", "mountPath": "/app/logs", "readOnly": False, "pvcName": "orders-logs"},
+        ],
+    }
+    payload, err = resolve_template(template, _answers(overrides={"storageSize": "20Gi"}))
+    assert err is None
+    assert payload["storage"]["newPvcs"][0]["size"] == "20Gi"
+    assert payload["storage"]["newPvc"]["size"] == "20Gi"
+    assert payload["storage"]["newPvcs"][1]["size"] == "5Gi"
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert yaml_text.count("kind: PersistentVolumeClaim") == 2
+    assert "storage: 20Gi" in yaml_text
+    assert "storage: 5Gi" in yaml_text
+
+
+def test_storage_two_paths_with_manual_pv_emit_two_pvs():
+    # Two persistent paths, both with a manually-created PV: the generator must
+    # emit 2 PVs and 2 PVCs, each PVC pinned to its own PV via volumeName.
+    answers = _answers(storage={
+        "enabled": True,
+        "volumes": [
+            {"mountPath": "/app/pin", "mode": "new",
+             "newPvc": {"name": "pin-data", "size": "1Gi"},
+             "pv": {"enabled": True, "name": "pin-pv", "storageType": "hostPath", "hostPath": "/mnt/pin"}},
+            {"mountPath": "/app/logs", "mode": "new",
+             "newPvc": {"name": "logs-data", "size": "5Gi"},
+             "pv": {"enabled": True, "name": "logs-pv", "storageType": "hostPath", "hostPath": "/mnt/logs"}},
+        ],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert err is None
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert yaml_text.count("kind: PersistentVolume\n") == 2
+    assert yaml_text.count("kind: PersistentVolumeClaim") == 2
+    assert "name: pin-pv" in yaml_text
+    assert "name: logs-pv" in yaml_text
+    assert "path: /mnt/pin" in yaml_text
+    assert "path: /mnt/logs" in yaml_text
+    # Each claim binds to its own PV.
+    assert "volumeName: pin-pv" in yaml_text
+    assert "volumeName: logs-pv" in yaml_text
+
+
+def test_storage_manual_pv_per_volume():
+    answers = _answers(storage={
+        "enabled": True,
+        "volumes": [
+            {"mountPath": "/app/pin", "mode": "new",
+             "newPvc": {"name": "pin-data", "size": "1Gi"}},
+            {"mountPath": "/app/logs", "mode": "new",
+             "newPvc": {"name": "logs-data", "size": "2Gi", "storageClass": "fast"},
+             "pv": {"enabled": True, "name": "logs-pv", "storageType": "hostPath", "hostPath": "/mnt/logs"}},
+        ],
+    })
+    payload, err = resolve_template(_base_template(), answers)
+    assert err is None
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    # One manual PV (for logs) plus both PVCs.
+    assert yaml_text.count("kind: PersistentVolume\n") == 1
+    assert yaml_text.count("kind: PersistentVolumeClaim") == 2
+    assert "name: logs-pv" in yaml_text
+    assert "path: /mnt/logs" in yaml_text
+    # The manually-bound PVC drops its storage class.
+    assert "storageClassName: fast" not in yaml_text
+
+
 def test_ingress_host_path_and_existing_tls():
     payload, err = resolve_template(
         _base_template(),

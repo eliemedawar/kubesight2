@@ -391,7 +391,7 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
             const tone = edgeToneFor(edge);
             const protocol = edge.protocol || "";
             const description = edge.description || "";
-            // Descriptions may be multi-line (e.g. "Source 1.2.3.4\nnetted
+            // Descriptions may be multi-line (e.g. "Source 1.2.3.4\nNAT
             // 5.6.7.8"); each line truncates independently and stacks below.
             const descLines = description
               ? description.split("\n").map((l) => (l.length > 32 ? l.slice(0, 31) + "…" : l))

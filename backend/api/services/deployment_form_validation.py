@@ -165,12 +165,13 @@ def validate_import(
             _check_ref(ips, "Image pull secret", "imagePullSecrets", provisioned_docker, "imagePullSecret.name")
 
     storage = payload.get("storage") or {}
-    sc = (storage.get("newPvc") or {}).get("storageClass")
-    if sc and "storageClasses" in dd:
-        if sc in (dd.get("storageClasses") or []):
-            checks.ok("overrides.storageSize", "Storage class", f"Storage class '{sc}' exists.")
-        else:
-            checks.warn("overrides.storageSize", "Storage class", f"Storage class '{sc}' was not found; the cluster default may be used.")
+    new_pvcs = [c for c in (storage.get("newPvcs") or []) if isinstance(c, dict)] or [storage.get("newPvc") or {}]
+    if "storageClasses" in dd:
+        for sc in {c.get("storageClass") for c in new_pvcs if c.get("storageClass")}:
+            if sc in (dd.get("storageClasses") or []):
+                checks.ok("overrides.storageSize", "Storage class", f"Storage class '{sc}' exists.")
+            else:
+                checks.warn("overrides.storageSize", "Storage class", f"Storage class '{sc}' was not found; the cluster default may be used.")
 
     # Image registry allow-list.
     allowed_registries = dd.get("allowedRegistries")

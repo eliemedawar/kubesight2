@@ -268,6 +268,15 @@ def _build_persistent_volume(
     }
 
 
+def _new_pvc_configs(storage: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """All new-PVC configs: the multi-volume ``newPvcs`` list when present,
+    otherwise the legacy single ``newPvc`` block."""
+    configs = [dict(c) for c in (storage.get("newPvcs") or []) if isinstance(c, dict)]
+    if configs:
+        return configs
+    return [dict(storage.get("newPvc") or {})]
+
+
 def _append_pvc_documents(
     documents: List[Dict[str, Any]],
     storage: Dict[str, Any],
@@ -276,30 +285,33 @@ def _append_pvc_documents(
     *,
     default_name: str,
 ) -> None:
-    advanced = storage.get("advanced") or {}
-    manual_pv = bool(advanced.get("createManualPv"))
-    new_pvc = storage.get("newPvc") or {}
-    pvc_name = _sanitize_name(new_pvc.get("name") or default_name)
-    if any(d.get("kind") == "PersistentVolumeClaim" and d["metadata"]["name"] == pvc_name for d in documents):
-        return
+    for index, new_pvc in enumerate(_new_pvc_configs(storage)):
+        # A per-PVC advanced block wins; the legacy storage-level block only ever
+        # described the single (first) volume, so it falls back for index 0 only.
+        advanced = new_pvc.get("advanced") or (storage.get("advanced") if index == 0 else None) or {}
+        manual_pv = bool(advanced.get("createManualPv"))
+        fallback_name = default_name if index == 0 else f"{default_name}-{index + 1}"
+        pvc_name = _sanitize_name(new_pvc.get("name") or fallback_name)
+        if any(d.get("kind") == "PersistentVolumeClaim" and d["metadata"]["name"] == pvc_name for d in documents):
+            continue
 
-    pv_name = None
-    if manual_pv:
-        pv_doc = _build_persistent_volume(advanced, new_pvc, labels)
-        pv_name = pv_doc["metadata"]["name"]
-        documents.append(pv_doc)
+        pv_name = None
+        if manual_pv:
+            pv_doc = _build_persistent_volume(advanced, new_pvc, labels)
+            pv_name = pv_doc["metadata"]["name"]
+            documents.append(pv_doc)
 
-    documents.append({
-        "apiVersion": "v1",
-        "kind": "PersistentVolumeClaim",
-        "metadata": {"name": pvc_name, "namespace": namespace, "labels": labels},
-        "spec": _pvc_spec(
-            new_pvc,
-            volume_name=pv_name,
-            storage_class="" if manual_pv else None,
-            force_storage_class=manual_pv,
-        ),
-    })
+        documents.append({
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {"name": pvc_name, "namespace": namespace, "labels": labels},
+            "spec": _pvc_spec(
+                new_pvc,
+                volume_name=pv_name,
+                storage_class="" if manual_pv else None,
+                force_storage_class=manual_pv,
+            ),
+        })
 
 
 def _provisioned_config_documents(
@@ -490,7 +502,13 @@ def _pod_template(
             })
     for vm in storage.get("volumeMounts") or []:
         vol_name = _volume_mount_name(vm) or "data"
-        pvc_name = vm.get("pvcName") or storage.get("existingPvc") or (storage.get("newPvc") or {}).get("name")
+        # Mounts carry their own pvcName in the multi-volume shape; legacy mounts
+        # fall back to the single existing/new PVC the template described.
+        pvc_name = (
+            vm.get("pvcName")
+            or storage.get("existingPvc")
+            or _new_pvc_configs(storage)[0].get("name")
+        )
         if pvc_name and vol_name and not any(v["name"] == vol_name for v in volumes):
             volumes.append({"name": vol_name, "persistentVolumeClaim": {"claimName": pvc_name}})
 

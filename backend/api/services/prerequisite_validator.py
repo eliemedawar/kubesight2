@@ -125,30 +125,49 @@ def validate_prerequisites(
 
     storage = payload.get("storage") or {}
     if storage.get("pvcMode") == "existing":
-        pvc_name = storage.get("existingPvc") or ""
-        if pvc_name and _resource_exists(access, "pvc", pvc_name, namespace):
-            checks.append(_check("passed", "Storage", f"PVC '{pvc_name}' exists"))
-        elif pvc_name:
-            checks.append(_check("failed", "Storage", f"PVC '{pvc_name}' not found"))
+        # Multi-volume payloads carry one pvcName per mount; the legacy shape has a
+        # single existingPvc. Check each distinct claim once.
+        pvc_names = []
+        for vm in storage.get("volumeMounts") or []:
+            name = (vm.get("pvcName") or "").strip()
+            if name and name not in pvc_names:
+                pvc_names.append(name)
+        if not pvc_names and storage.get("existingPvc"):
+            pvc_names = [storage["existingPvc"]]
+        for pvc_name in pvc_names:
+            if _resource_exists(access, "pvc", pvc_name, namespace):
+                checks.append(_check("passed", "Storage", f"PVC '{pvc_name}' exists"))
+            else:
+                checks.append(_check("failed", "Storage", f"PVC '{pvc_name}' not found"))
     elif storage.get("pvcMode") == "new" or workload_type == "PersistentVolumeClaim":
-        advanced = storage.get("advanced") or {}
-        manual_pv = bool(advanced.get("createManualPv"))
-        new_pvc = storage.get("newPvc") or {}
-        sc = new_pvc.get("storageClass") or ""
-        if manual_pv:
-            pv_name = (advanced.get("pvName") or "").strip()
-            if pv_name:
-                checks.append(_check("passed", "Storage", f"Manual PV '{pv_name}' will be created with the claim"))
+        new_pvcs = [c for c in (storage.get("newPvcs") or []) if isinstance(c, dict)]
+        if not new_pvcs:
+            new_pvcs = [storage.get("newPvc") or {}]
+        checked_scs = set()
+        for index, new_pvc in enumerate(new_pvcs):
+            # Mirrors the generator: a per-PVC advanced block wins; the legacy
+            # storage-level block applies to the first PVC only.
+            advanced = new_pvc.get("advanced") or (storage.get("advanced") if index == 0 else None) or {}
+            manual_pv = bool(advanced.get("createManualPv"))
+            sc = new_pvc.get("storageClass") or ""
+            label = new_pvc.get("name") or "PVC"
+            if manual_pv:
+                pv_name = (advanced.get("pvName") or "").strip()
+                if pv_name:
+                    checks.append(_check("passed", "Storage", f"Manual PV '{pv_name}' will be created with the claim"))
+                else:
+                    checks.append(_check("warning", "Storage", f"Manual PV name not set for '{label}'", "A generated PV name will be used"))
+                checks.append(_check("passed", "Storage", "Manual PV mode will create a matching PV and PVC without a StorageClass"))
+            elif sc:
+                if sc in checked_scs:
+                    continue
+                checked_scs.add(sc)
+                if _storage_class_exists(access, sc):
+                    checks.append(_check("passed", "Storage", f"StorageClass '{sc}' exists"))
+                else:
+                    checks.append(_check("failed", "Storage", f"StorageClass '{sc}' not found"))
             else:
-                checks.append(_check("warning", "Storage", "Manual PV name not set", "A generated PV name will be used"))
-            checks.append(_check("passed", "Storage", "Manual PV mode will create a matching PV and PVC without a StorageClass"))
-        elif sc:
-            if _storage_class_exists(access, sc):
-                checks.append(_check("passed", "Storage", f"StorageClass '{sc}' exists"))
-            else:
-                checks.append(_check("failed", "Storage", f"StorageClass '{sc}' not found"))
-        else:
-            checks.append(_check("warning", "Storage", "No StorageClass specified", "Cluster default will be used if available"))
+                checks.append(_check("warning", "Storage", f"No StorageClass specified for '{label}'", "Cluster default will be used if available"))
 
     environment = payload.get("environment") or {}
     for ref in environment.get("configMapRefs") or []:

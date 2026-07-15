@@ -579,9 +579,9 @@ def get_client_service_topology(
         transport_node_id = f"transport-{client_id}-{service_id}-{idx}"
         transport_desc_parts = [f"Source: {src_ip}", f"Destination: {dst_ip}"]
         if netted_src:
-            transport_desc_parts.append(f"Netted source: {netted_src}")
+            transport_desc_parts.append(f"NAT source: {netted_src}")
         if netted_dst:
-            transport_desc_parts.append(f"Netted destination: {netted_dst}")
+            transport_desc_parts.append(f"NAT destination: {netted_dst}")
         if transport_name:
             transport_desc_parts.append(transport_name)
         nodes.append({
@@ -598,8 +598,8 @@ def get_client_service_topology(
         })
         # The NAT-translated address renders as a second label line under the
         # real one (the viewer splits edge descriptions on newlines).
-        src_label = f"Source {src_ip}" + (f"\nnetted {netted_src}" if netted_src else "")
-        dst_label = f"Destination {dst_ip}" + (f"\nnetted {netted_dst}" if netted_dst else "")
+        src_label = f"Source {src_ip}" + (f"\nNAT {netted_src}" if netted_src else "")
+        dst_label = f"Destination {dst_ip}" + (f"\nNAT {netted_dst}" if netted_dst else "")
         if direction in ("inbound", "both"):
             _add_edge(f"edge-conn-in-{idx}-a", client_node_id, transport_node_id, src_label)
             _add_edge(f"edge-conn-in-{idx}-b", transport_node_id, target["id"], dst_label)

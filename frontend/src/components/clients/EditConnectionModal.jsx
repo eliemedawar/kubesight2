@@ -175,12 +175,12 @@ export default function EditConnectionModal({
                   <input value={destinationIp} onChange={(e) => setDestinationIp(e.target.value)} maxLength={64} placeholder="e.g. 10.4.12.50" />
                 </label>
                 <label>
-                  Netted source IP <span className="muted">(optional)</span>
-                  <input value={nettedSourceIp} onChange={(e) => setNettedSourceIp(e.target.value)} maxLength={64} placeholder="NATted source, if any" />
+                  NAT source IP <span className="muted">(optional)</span>
+                  <input value={nettedSourceIp} onChange={(e) => setNettedSourceIp(e.target.value)} maxLength={64} placeholder="NAT source, if any" />
                 </label>
                 <label>
-                  Netted destination IP <span className="muted">(optional)</span>
-                  <input value={nettedDestinationIp} onChange={(e) => setNettedDestinationIp(e.target.value)} maxLength={64} placeholder="NATted destination, if any" />
+                  NAT destination IP <span className="muted">(optional)</span>
+                  <input value={nettedDestinationIp} onChange={(e) => setNettedDestinationIp(e.target.value)} maxLength={64} placeholder="NAT destination, if any" />
                 </label>
               </div>
             </>
@@ -236,21 +236,21 @@ export default function EditConnectionModal({
                             />
                           </label>
                           <label>
-                            Netted source IP <span className="muted">(optional)</span>
+                            NAT source IP <span className="muted">(optional)</span>
                             <input
                               value={compData[ref].nettedSourceIp}
                               onChange={(e) => setCompField(ref, "nettedSourceIp", e.target.value)}
                               maxLength={64}
-                              placeholder="NATted source, if any"
+                              placeholder="NAT source, if any"
                             />
                           </label>
                           <label>
-                            Netted destination IP <span className="muted">(optional)</span>
+                            NAT destination IP <span className="muted">(optional)</span>
                             <input
                               value={compData[ref].nettedDestinationIp}
                               onChange={(e) => setCompField(ref, "nettedDestinationIp", e.target.value)}
                               maxLength={64}
-                              placeholder="NATted destination, if any"
+                              placeholder="NAT destination, if any"
                             />
                           </label>
                         </div>
