@@ -5,9 +5,10 @@ describing how *this* client connects to the service: the direction (client →
 service, service → client, or both), the transport (VPN, Leased Line, …), the
 source/destination IPs, and **which component(s)** of the service the connection
 attaches to. The reusable service topology is never duplicated per client: the
-composed client topology simply overlays a client node and a transport node onto
-the shared service topology, linking the transport to each selected component
-(falling back to the service entrypoint when no components are chosen).
+composed client topology simply overlays a client node onto the shared service
+topology and draws a transport "tunnel" edge from the client straight to each
+selected component (falling back to the service entrypoint when no components
+are chosen).
 """
 
 from __future__ import annotations
@@ -40,9 +41,9 @@ TRANSPORT_TYPES = [
 _NOT_CONFIGURED = "Not configured"
 
 # Direction of the client↔service connectivity link drawn in the composed
-# topology:
-#   inbound  → client talks to the service   (client → transport → component)
-#   outbound → service talks to the client   (component → transport → client)
+# topology (a transport tunnel edge between client and component):
+#   inbound  → client talks to the service   (client → component)
+#   outbound → service talks to the client   (component → client)
 #   both     → bidirectional
 DIRECTIONS = ["inbound", "outbound", "both"]
 _DEFAULT_DIRECTION = "inbound"
@@ -550,62 +551,51 @@ def get_client_service_topology(
             "nettedDestinationIp": conn_netted_dest,
         })
 
-    # One transport node per target so each component's own source/destination IP
-    # is shown unambiguously. With multiple components this branches from the
-    # client into parallel client → transport → component paths (a readable tree)
-    # instead of chaining every component through a single shared hop. The saved
-    # `direction` flips the arrows:
-    #   inbound  → client → transport → component  (client talks to service)
-    #   outbound → component → transport → client  (service talks to client)
-    #   both     → both directions (bidirectional)
+    # One tunnel edge per target: the transport is drawn as a tunnel directly
+    # between the client and the component (no intermediate node), labeled with
+    # the transport type. Each component keeps its own source/destination IPs on
+    # its own tunnel. The saved `direction` picks the tunnel's origin:
+    #   inbound  → client → component  (client talks to service)
+    #   outbound → component → client  (service talks to client)
+    #   both     → drawn client → component with arrowheads on both ends
+    # `sourceLabel` renders at the origin end and `targetLabel` at the far end,
+    # so the Source IP (+ its NAT) always sits beside the node traffic leaves
+    # and the Destination IP (+ its NAT) beside the node it lands on.
     direction = (conn.direction if conn else None) or _DEFAULT_DIRECTION
-    seen_pairs = {(str(e["sourceNodeId"]), str(e["targetNodeId"])) for e in edges}
-
-    def _add_edge(edge_id: str, a: Any, b: Any, desc: str) -> None:
-        if (str(a), str(b)) in seen_pairs:
-            return
-        edges.append({
-            "id": edge_id,
-            "sourceNodeId": a, "targetNodeId": b,
-            "scope": "external", "description": desc,
-        })
-        seen_pairs.add((str(a), str(b)))
 
     for idx, target in enumerate(targets):
         src_ip = target["sourceIp"]
         dst_ip = target["destinationIp"]
         netted_src = target.get("nettedSourceIp") or ""
         netted_dst = target.get("nettedDestinationIp") or ""
-        transport_node_id = f"transport-{client_id}-{service_id}-{idx}"
-        transport_desc_parts = [f"Source: {src_ip}", f"Destination: {dst_ip}"]
+        desc_parts = [f"Source: {src_ip}", f"Destination: {dst_ip}"]
         if netted_src:
-            transport_desc_parts.append(f"NAT source: {netted_src}")
+            desc_parts.append(f"NAT source: {netted_src}")
         if netted_dst:
-            transport_desc_parts.append(f"NAT destination: {netted_dst}")
+            desc_parts.append(f"NAT destination: {netted_dst}")
         if transport_name:
-            transport_desc_parts.append(transport_name)
-        nodes.append({
-            "id": transport_node_id,
-            "name": transport_type,
-            "type": "Connectivity",
-            "description": " · ".join(transport_desc_parts),
-            "overlay": "transport",
-            "sourceIp": src_ip,
-            "destinationIp": dst_ip,
-            "nettedSourceIp": netted_src,
-            "nettedDestinationIp": netted_dst,
-            "transportName": transport_name,
-        })
+            desc_parts.append(transport_name)
         # The NAT-translated address renders as a second label line under the
-        # real one (the viewer splits edge descriptions on newlines).
+        # real one (the viewer splits end labels on newlines).
         src_label = f"Source {src_ip}" + (f"\nNAT {netted_src}" if netted_src else "")
         dst_label = f"Destination {dst_ip}" + (f"\nNAT {netted_dst}" if netted_dst else "")
-        if direction in ("inbound", "both"):
-            _add_edge(f"edge-conn-in-{idx}-a", client_node_id, transport_node_id, src_label)
-            _add_edge(f"edge-conn-in-{idx}-b", transport_node_id, target["id"], dst_label)
-        if direction in ("outbound", "both"):
-            _add_edge(f"edge-conn-out-{idx}-a", transport_node_id, client_node_id, src_label)
-            _add_edge(f"edge-conn-out-{idx}-b", target["id"], transport_node_id, dst_label)
+        if direction == "outbound":
+            origin, dest = target["id"], client_node_id
+        else:
+            origin, dest = client_node_id, target["id"]
+        edges.append({
+            "id": f"edge-conn-{idx}",
+            "sourceNodeId": origin,
+            "targetNodeId": dest,
+            "scope": "external",
+            "kind": "tunnel",
+            "transportType": transport_type,
+            "transportName": transport_name,
+            "bidirectional": direction == "both",
+            "sourceLabel": src_label,
+            "targetLabel": dst_label,
+            "description": " · ".join(desc_parts),
+        })
 
     return (
         {

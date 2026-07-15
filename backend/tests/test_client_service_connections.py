@@ -168,7 +168,7 @@ class TestUpsertConnection:
 # ---------------------------------------------------------------------------
 
 class TestComposedTopology:
-    def test_topology_prepends_client_and_transport(self, client, admin_token):
+    def test_topology_prepends_client_and_tunnel(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
         cl = _create_client(client, admin_token, service_ids=[svc["id"]])
         client.post(
@@ -181,15 +181,18 @@ class TestComposedTopology:
         topo = res.get_json()["data"]["topology"]
         names = [n["name"] for n in topo["nodes"]]
         assert "Bank ABC" in names  # client node
-        assert "VPN" in names       # transport node
         assert "WAF" in names       # existing service topology preserved
-        # An edge should connect the transport node to the service entrypoint (WAF).
+        assert "VPN" not in names   # transport is a tunnel edge, not a node
+        # A tunnel edge connects the client straight to the entrypoint (WAF),
+        # labeled with the transport type and the end IPs.
         waf = next(n for n in topo["nodes"] if n["name"] == "WAF")
-        transport = next(n for n in topo["nodes"] if n["name"] == "VPN")
-        assert any(
-            str(e["sourceNodeId"]) == str(transport["id"]) and str(e["targetNodeId"]) == str(waf["id"])
-            for e in topo["edges"]
-        )
+        client_node = next(n for n in topo["nodes"] if n["name"] == "Bank ABC")
+        tunnel = next(e for e in topo["edges"] if e.get("kind") == "tunnel")
+        assert tunnel["transportType"] == "VPN"
+        assert str(tunnel["sourceNodeId"]) == str(client_node["id"])
+        assert str(tunnel["targetNodeId"]) == str(waf["id"])
+        assert tunnel["sourceLabel"] == "Source 196.10.20.5"
+        assert tunnel["targetLabel"] == "Destination 10.4.12.50"
 
     def _topo_with_direction(self, client, admin_token, direction):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
@@ -206,40 +209,41 @@ class TestComposedTopology:
 
     def _ids(self, topo):
         client_node = next(n for n in topo["nodes"] if n["name"] == "Bank ABC")["id"]
-        transport = next(n for n in topo["nodes"] if n["name"] == "VPN")["id"]
         waf = next(n for n in topo["nodes"] if n["name"] == "WAF")["id"]
-        return str(client_node), str(transport), str(waf)
+        return str(client_node), str(waf)
 
-    def _has_edge(self, topo, src, tgt):
-        return any(
-            str(e["sourceNodeId"]) == src and str(e["targetNodeId"]) == tgt
-            for e in topo["edges"]
-        )
+    def _tunnel(self, topo):
+        return next(e for e in topo["edges"] if e.get("kind") == "tunnel")
 
     def test_direction_defaults_inbound(self, client, admin_token):
         data = self._topo_with_direction(client, admin_token, "")
         assert data["connection"]["direction"] == "inbound"
-        client_node, transport, waf = self._ids(data["topology"])
-        # inbound: client → transport → service (WAF).
-        assert self._has_edge(data["topology"], client_node, transport)
-        assert self._has_edge(data["topology"], transport, waf)
+        client_node, waf = self._ids(data["topology"])
+        tunnel = self._tunnel(data["topology"])
+        # inbound: tunnel drawn client → service (WAF).
+        assert str(tunnel["sourceNodeId"]) == client_node
+        assert str(tunnel["targetNodeId"]) == waf
+        assert tunnel["bidirectional"] is False
 
     def test_direction_outbound_reverses_link(self, client, admin_token):
         data = self._topo_with_direction(client, admin_token, "outbound")
-        client_node, transport, waf = self._ids(data["topology"])
-        # outbound: service (WAF) → transport → client.
-        assert self._has_edge(data["topology"], waf, transport)
-        assert self._has_edge(data["topology"], transport, client_node)
-        assert not self._has_edge(data["topology"], client_node, transport)
-        assert not self._has_edge(data["topology"], transport, waf)
+        client_node, waf = self._ids(data["topology"])
+        tunnel = self._tunnel(data["topology"])
+        # outbound: tunnel drawn service (WAF) → client; the Source IP label
+        # sits at the service end and the Destination IP label at the client.
+        assert str(tunnel["sourceNodeId"]) == waf
+        assert str(tunnel["targetNodeId"]) == client_node
+        assert tunnel["bidirectional"] is False
+        assert tunnel["sourceLabel"].startswith("Source ")
+        assert tunnel["targetLabel"].startswith("Destination ")
 
     def test_direction_both_is_bidirectional(self, client, admin_token):
         data = self._topo_with_direction(client, admin_token, "both")
-        client_node, transport, waf = self._ids(data["topology"])
-        assert self._has_edge(data["topology"], client_node, transport)
-        assert self._has_edge(data["topology"], transport, client_node)
-        assert self._has_edge(data["topology"], transport, waf)
-        assert self._has_edge(data["topology"], waf, transport)
+        client_node, waf = self._ids(data["topology"])
+        tunnel = self._tunnel(data["topology"])
+        assert str(tunnel["sourceNodeId"]) == client_node
+        assert str(tunnel["targetNodeId"]) == waf
+        assert tunnel["bidirectional"] is True
 
     def test_topology_without_service_topology_still_shows_chain(self, client, admin_token):
         svc = _create_service(client, admin_token, name="No Topo Svc")
@@ -251,7 +255,7 @@ class TestComposedTopology:
         names = [n["name"] for n in topo["nodes"]]
         assert "Bank ABC" in names
         assert "No Topo Svc" in names  # synthetic service node
-        assert "Not configured" in " ".join(n.get("description", "") for n in topo["nodes"])
+        assert "Not configured" in " ".join(e.get("description", "") for e in topo["edges"])
 
 
 # ---------------------------------------------------------------------------
@@ -315,14 +319,8 @@ class TestComponentSelection:
         assert res.status_code == 200, res.get_json()
         return res.get_json()["data"]["topology"]
 
-    def _transport_id(self, topo):
-        return next(n for n in topo["nodes"] if n["name"] == "VPN")["id"]
-
-    def _has_edge(self, topo, src, tgt):
-        return any(
-            str(e["sourceNodeId"]) == str(src) and str(e["targetNodeId"]) == str(tgt)
-            for e in topo["edges"]
-        )
+    def _tunnels(self, topo):
+        return [e for e in topo["edges"] if e.get("kind") == "tunnel"]
 
     def test_list_services_includes_components(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
@@ -361,16 +359,14 @@ class TestComponentSelection:
         ref = res.get_json()["data"]["componentRefs"][0]
         assert ref["nettedSourceIp"] == "196.10.20.99"
         assert ref["nettedDestinationIp"] == "172.16.0.5"
-        # The transport node for this component surfaces the netted addresses.
+        # The tunnel edge surfaces the netted addresses: description summary +
+        # a second "NAT …" label line under the matching end's IP.
         topo = self._topology(client, admin_token, cl, svc)
-        transport = next(n for n in topo["nodes"] if n["name"] == "VPN")
-        assert transport["nettedSourceIp"] == "196.10.20.99"
-        assert "NAT source: 196.10.20.99" in transport["description"]
-        assert "NAT destination: 172.16.0.5" in transport["description"]
-        # The connection edges carry the netted address as a second label line.
-        edge_descs = [e.get("description") or "" for e in topo["edges"]]
-        assert "Source 10.0.0.1\nNAT 196.10.20.99" in edge_descs
-        assert "Destination 10.0.0.2\nNAT 172.16.0.5" in edge_descs
+        tunnel = self._tunnels(topo)[0]
+        assert "NAT source: 196.10.20.99" in tunnel["description"]
+        assert "NAT destination: 172.16.0.5" in tunnel["description"]
+        assert tunnel["sourceLabel"] == "Source 10.0.0.1\nNAT 196.10.20.99"
+        assert tunnel["targetLabel"] == "Destination 10.0.0.2\nNAT 172.16.0.5"
 
     def test_netted_ips_omitted_stay_out_of_description(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
@@ -378,10 +374,10 @@ class TestComponentSelection:
         self._post_conn(client, admin_token, cl, svc, transportType="VPN",
                         sourceIp="10.0.0.1", destinationIp="10.0.0.2")
         topo = self._topology(client, admin_token, cl, svc)
-        transport = next(n for n in topo["nodes"] if n["name"] == "VPN")
-        assert transport["nettedSourceIp"] == ""
-        assert "NAT" not in transport["description"]
-        assert not any("NAT" in (e.get("description") or "") for e in topo["edges"])
+        tunnel = self._tunnels(topo)[0]
+        assert "NAT" not in tunnel["description"]
+        assert "NAT" not in tunnel["sourceLabel"]
+        assert "NAT" not in tunnel["targetLabel"]
 
     def test_invalid_component_ref_rejected(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
@@ -396,10 +392,10 @@ class TestComponentSelection:
         waf = self._node_id(svc, "WAF")
         self._post_conn(client, admin_token, cl, svc, transportType="VPN", direction="inbound", componentRefs=[str(backend)])
         topo = self._topology(client, admin_token, cl, svc)
-        transport = self._transport_id(topo)
-        # inbound: transport → selected Backend API, NOT the WAF entrypoint.
-        assert self._has_edge(topo, transport, backend)
-        assert not self._has_edge(topo, transport, waf)
+        tunnels = self._tunnels(topo)
+        # inbound: tunnel → selected Backend API, NOT the WAF entrypoint.
+        assert [str(t["targetNodeId"]) for t in tunnels] == [str(backend)]
+        assert str(waf) not in {str(t["targetNodeId"]) for t in tunnels}
 
     def test_topology_attaches_to_multiple_components(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
@@ -409,18 +405,15 @@ class TestComponentSelection:
         self._post_conn(client, admin_token, cl, svc, transportType="VPN", direction="inbound",
                         componentRefs=[str(backend), str(waf)])
         topo = self._topology(client, admin_token, cl, svc)
-        # One transport node per component: parallel client → transport → component
-        # paths, not a single shared hop.
-        transports = [n for n in topo["nodes"] if n["name"] == "VPN"]
-        assert len(transports) == 2
+        # One tunnel per component: parallel client → component tunnels, not a
+        # single shared hop.
+        tunnels = self._tunnels(topo)
+        assert len(tunnels) == 2
         client_node = next(n for n in topo["nodes"] if n["name"] == "Bank ABC")["id"]
-        for target in (backend, waf):
-            assert any(
-                self._has_edge(topo, client_node, t["id"]) and self._has_edge(topo, t["id"], target)
-                for t in transports
-            )
+        assert all(str(t["sourceNodeId"]) == str(client_node) for t in tunnels)
+        assert {str(t["targetNodeId"]) for t in tunnels} == {str(backend), str(waf)}
 
-    def test_per_component_ips_on_own_transport(self, client, admin_token):
+    def test_per_component_ips_on_own_tunnel(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
         cl = _create_client(client, admin_token, service_ids=[svc["id"]])
         backend = self._node_id(svc, "Backend API")
@@ -433,12 +426,12 @@ class TestComponentSelection:
             ],
         )
         topo = self._topology(client, admin_token, cl, svc)
-        transports = [n for n in topo["nodes"] if n["name"] == "VPN"]
-        # Each component's transport node carries that component's own IPs.
-        bt = next(t for t in transports if self._has_edge(topo, t["id"], backend))
-        assert "10.0.0.1" in bt["description"] and "10.0.0.2" in bt["description"]
-        wt = next(t for t in transports if self._has_edge(topo, t["id"], waf))
-        assert "10.1.1.1" in wt["description"] and "10.1.1.2" in wt["description"]
+        tunnels = self._tunnels(topo)
+        # Each component's tunnel carries that component's own IPs.
+        bt = next(t for t in tunnels if str(t["targetNodeId"]) == str(backend))
+        assert "10.0.0.1" in bt["sourceLabel"] and "10.0.0.2" in bt["targetLabel"]
+        wt = next(t for t in tunnels if str(t["targetNodeId"]) == str(waf))
+        assert "10.1.1.1" in wt["sourceLabel"] and "10.1.1.2" in wt["targetLabel"]
 
     def test_topology_falls_back_to_entrypoint_without_components(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())
@@ -446,9 +439,9 @@ class TestComponentSelection:
         waf = self._node_id(svc, "WAF")
         self._post_conn(client, admin_token, cl, svc, transportType="VPN")
         topo = self._topology(client, admin_token, cl, svc)
-        transport = self._transport_id(topo)
         # No components selected → attaches to the WAF entrypoint (legacy behavior).
-        assert self._has_edge(topo, transport, waf)
+        tunnels = self._tunnels(topo)
+        assert [str(t["targetNodeId"]) for t in tunnels] == [str(waf)]
 
     def test_status_only_update_keeps_component_refs(self, client, admin_token):
         svc = _create_service(client, admin_token, topology=_topology_two_nodes())

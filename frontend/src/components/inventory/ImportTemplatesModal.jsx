@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { createWizardTemplate, importTemplatesFromYaml } from "../../api/inventoryApi.js";
+import { createWizardTemplate, importTemplatesFromYaml, updateWizardTemplate } from "../../api/inventoryApi.js";
 import CreateTemplateModal from "./CreateTemplateModal.jsx";
 
 /**
@@ -20,7 +20,10 @@ export default function ImportTemplatesModal({
   const [drafts, setDrafts] = useState([]);
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState("");
-  const [savedIndexes, setSavedIndexes] = useState(() => new Set());
+  // index -> { id, detail }: the created template's id and the payload as last
+  // saved. "Edit again" reopens `detail` (the user's edits, not the pristine
+  // parse) and re-saving updates `id` in place instead of creating a duplicate.
+  const [savedTemplates, setSavedTemplates] = useState({});
   const [savedAny, setSavedAny] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const fileInputRef = useRef(null);
@@ -32,7 +35,7 @@ export default function ImportTemplatesModal({
       setDrafts([]);
       setParsing(false);
       setParseError("");
-      setSavedIndexes(new Set());
+      setSavedTemplates({});
       setSavedAny(false);
       setActiveIndex(-1);
     }
@@ -63,7 +66,7 @@ export default function ImportTemplatesModal({
     setParsing(true);
     setParseError("");
     setDrafts([]);
-    setSavedIndexes(new Set());
+    setSavedTemplates({});
     try {
       const data = await importTemplatesFromYaml(yamlText);
       const found = data?.drafts || [];
@@ -76,16 +79,35 @@ export default function ImportTemplatesModal({
     }
   };
 
-  // The draft category should appear in the modal's category dropdown.
+  // The draft categories — and any category typed while saving — should appear
+  // in the modal's category dropdown.
   const categoriesWithDrafts = Array.from(
-    new Set([...(existingCategories || []), ...drafts.map((d) => d.category || "Imported")]),
+    new Set([
+      ...(existingCategories || []),
+      ...drafts.map((d) => d.category || "Imported"),
+      ...Object.values(savedTemplates)
+        .map((s) => s.detail?.category)
+        .filter(Boolean),
+    ]),
   );
 
-  const activeDraft = activeIndex >= 0 ? drafts[activeIndex] : null;
+  // Once saved, editing again must show what the user saved (their edits), not
+  // the pristine parse result.
+  const activeDraft =
+    activeIndex >= 0 ? savedTemplates[activeIndex]?.detail || drafts[activeIndex] : null;
 
   const handleSaveDraft = async (payload) => {
-    await createWizardTemplate(payload);
-    setSavedIndexes((prev) => new Set(prev).add(activeIndex));
+    const existing = savedTemplates[activeIndex];
+    let id = existing?.id;
+    if (id) {
+      // Already saved once: update that template in place — never create a
+      // same-named duplicate.
+      await updateWizardTemplate(id, payload);
+    } else {
+      const created = await createWizardTemplate(payload);
+      id = created?.id;
+    }
+    setSavedTemplates((prev) => ({ ...prev, [activeIndex]: { id, detail: payload } }));
     setSavedAny(true);
     setActiveIndex(-1);
   };
@@ -140,7 +162,7 @@ export default function ImportTemplatesModal({
               <div className="schema-env-list">
                 {drafts.map((draft, index) => {
                   const container = draft.containers?.[0] || {};
-                  const saved = savedIndexes.has(index);
+                  const saved = Boolean(savedTemplates[index]);
                   const image = container.image
                     ? `${container.image}${container.tag ? `:${container.tag}` : ""}`
                     : "—";

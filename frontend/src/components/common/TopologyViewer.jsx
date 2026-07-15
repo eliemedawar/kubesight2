@@ -128,6 +128,24 @@ export function computeLayout(nodes, edges) {
     if (!changed) break;
   }
 
+  // Overlay client nodes rank 0 by default (nothing points at them). When a
+  // client's tunnel attaches deep inside the service graph, pull the client
+  // down beside that component so the tunnel spans a single layer instead of
+  // sweeping across the whole drawing (and dragging its labels over other
+  // nodes). Outbound tunnels (component → client) already rank the client
+  // below the component naturally.
+  nodes.forEach((nd) => {
+    if (nd.overlay !== "client") return;
+    const cid = String(nd.id);
+    const targetRanks = edges
+      .filter((e) =>
+        e.kind === "tunnel" &&
+        String(e.sourceNodeId) === cid &&
+        idSet.has(String(e.targetNodeId)))
+      .map((e) => rank[String(e.targetNodeId)]);
+    if (targetRanks.length) rank[cid] = Math.max(0, Math.min(...targetRanks) - 1);
+  });
+
   // Bucket nodes into layers by rank (input order preserved within each
   // layer). Ranks are first compacted to consecutive indices: a cycle longer
   // than two nodes still inflates ranks unevenly, and the gaps would leave
@@ -344,6 +362,11 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
           <marker id="topo-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="var(--text-muted)" />
           </marker>
+          {/* Tunnel arrowhead: auto-start-reverse so the same marker points
+              outward on both ends of a bidirectional tunnel. */}
+          <marker id="topo-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse">
+            <polygon points="0 0, 8 3, 0 6" fill="var(--accent-strong)" />
+          </marker>
         </defs>
 
         <g transform={`translate(${PAD},${PAD})`}>
@@ -360,7 +383,8 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
             const len = Math.sqrt(dx * dx + dy * dy) || 1;
             const nx = dx / len, ny = dy / len;
 
-            const hasBidi = (edges || []).some(
+            const isTunnel = edge.kind === "tunnel";
+            const hasBidi = !isTunnel && (edges || []).some(
               (e2) =>
                 String(e2.sourceNodeId) === String(edge.targetNodeId) &&
                 String(e2.targetNodeId) === String(edge.sourceNodeId)
@@ -371,6 +395,7 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
 
             let d;
             let labelX, labelY;
+            let c1x, c1y, c2x, c2y; // cubic control points (smooth branch only)
             if (hasBidi) {
               const sign = String(edge.sourceNodeId) < String(edge.targetNodeId) ? 1 : -1;
               const px = -ny * 16 * sign, py = nx * 16 * sign;
@@ -382,10 +407,120 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
               // curve's midpoint is exactly the straight-line midpoint, so
               // label anchoring is unchanged.
               const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
-              d = Math.abs(dy) >= Math.abs(dx)
-                ? `M ${p1.x},${p1.y} C ${p1.x},${my} ${p2.x},${my} ${p2.x},${p2.y}`
-                : `M ${p1.x},${p1.y} C ${mx},${p1.y} ${mx},${p2.y} ${p2.x},${p2.y}`;
+              if (Math.abs(dy) >= Math.abs(dx)) {
+                c1x = p1.x; c1y = my; c2x = p2.x; c2y = my;
+              } else {
+                c1x = mx; c1y = p1.y; c2x = mx; c2y = p2.y;
+              }
+              d = `M ${p1.x},${p1.y} C ${c1x},${c1y} ${c2x},${c2y} ${p2.x},${p2.y}`;
               labelX = mx; labelY = my;
+            }
+
+            if (isTunnel) {
+              // Transport tunnel: a hollow pipe drawn straight from origin to
+              // destination, with the transport type in a pill at the middle,
+              // the Source IP label at the origin mouth and the Destination IP
+              // label at the far mouth. The pipe is a wide accent stroke with
+              // a background-colored stroke overdrawn to hollow it out, plus a
+              // dashed centerline carrying the direction arrowhead(s).
+              const bez = (a, b, c, e, t) => {
+                const u = 1 - t;
+                return u * u * u * a + 3 * u * u * t * b + 3 * u * t * t * c + t * t * t * e;
+              };
+              const anchor = (t) => ({
+                x: bez(p1.x, c1x, c2x, p2.x, t),
+                y: bez(p1.y, c1y, c2y, p2.y, t),
+              });
+              const srcA = anchor(0.18), tgtA = anchor(0.82);
+              const toLines = (s) => String(s || "").split("\n").filter(Boolean)
+                .map((l) => (l.length > 32 ? l.slice(0, 31) + "…" : l));
+              const srcLines = toLines(edge.sourceLabel);
+              const tgtLines = toLines(edge.targetLabel);
+              const tType = edge.transportType || "Link";
+              const tName = edge.transportName || "";
+              const pillLabel = truncate(tType, 16);
+              const pillW = Math.max(44, pillLabel.length * 6.4 + 18);
+              // IP labels sit beside the pipe (right of vertical tunnels,
+              // above horizontal ones) so their text halos don't erase it —
+              // and are clamped clear of the mid-pill, which is wide enough
+              // ("Leased Line") to cover them on short tunnels otherwise.
+              const vertical = Math.abs(dy) >= Math.abs(dx);
+              const subH = tName ? 11 : 0; // transport-name line under the pill
+              let srcPos, tgtPos; // (i) => props of the block's i-th line
+              if (vertical) {
+                const yBlock = (a, lines, isUpper) => {
+                  const first = isUpper
+                    ? Math.min(a.y, labelY - 14 - (lines.length - 1) * 10)
+                    : Math.max(a.y - (lines.length - 1) * 10, labelY + 20 + subH);
+                  return (i) => ({ x: a.x + 13, y: first + i * 10, textAnchor: "start" });
+                };
+                const srcUpper = p1.y <= p2.y;
+                srcPos = yBlock(srcA, srcLines, srcUpper);
+                tgtPos = yBlock(tgtA, tgtLines, !srcUpper);
+              } else {
+                // Horizontal/diagonal tunnels: each IP block hugs its own end
+                // of the pipe — Source beside the origin node, Destination
+                // beside the target — anchored a third of the way along the
+                // pipe on the side it is bending away from, so the text stays
+                // off the pipe's path and clear of the node cards.
+                const rightward = p2.x >= p1.x;
+                const flatLift = Math.abs(dy) < 24 ? 16 : 0;
+                const srcB = anchor(0.3), tgtB = anchor(0.7);
+                srcPos = (i) => ({
+                  x: srcB.x + (rightward ? -10 : 10),
+                  y: srcB.y + i * 10 - flatLift,
+                  textAnchor: rightward ? "end" : "start",
+                });
+                tgtPos = (i) => ({
+                  x: tgtB.x + (rightward ? 10 : -10),
+                  y: tgtB.y - (tgtLines.length - 1 - i) * 10 - flatLift,
+                  textAnchor: rightward ? "start" : "end",
+                });
+              }
+              const tip = [tType, tName, (edge.description || "").replace(/\n/g, " · ")]
+                .filter(Boolean).join(" · ");
+              const halo = { paintOrder: "stroke" };
+              return (
+                <g key={edge.id ?? `e${idx}`} className="topo-tunnel">
+                  <title>{tip}</title>
+                  <path d={d} fill="none" stroke="var(--accent-border)" strokeWidth={15} />
+                  <path d={d} fill="none" stroke="var(--bg-inset)" strokeWidth={12} />
+                  <path d={d} fill="none" stroke="var(--accent-strong)" strokeWidth={1.5}
+                    strokeDasharray="6 5"
+                    markerEnd="url(#topo-arrow-accent)"
+                    markerStart={edge.bidirectional ? "url(#topo-arrow-accent)" : undefined} />
+                  <rect x={labelX - pillW / 2} y={labelY - 10} width={pillW} height={20}
+                    rx={10} ry={10}
+                    fill="var(--bg-panel)" stroke="var(--accent-border)" strokeWidth={1}
+                    filter="url(#topo-shadow)" />
+                  <text x={labelX} y={labelY + 1} textAnchor="middle" dominantBaseline="middle"
+                    fill="var(--accent-strong)" fontSize={9.5} fontWeight={750}
+                    letterSpacing="0.05em">
+                    {pillLabel}
+                  </text>
+                  {tName ? (
+                    <text x={labelX} y={labelY + 19} textAnchor="middle"
+                      fill="var(--text-muted)" fontSize={8.5} fontFamily="var(--font-mono)"
+                      style={halo} stroke="var(--bg-inset)" strokeWidth={3}>
+                      {truncate(tName, 20)}
+                    </text>
+                  ) : null}
+                  {srcLines.map((line, i) => (
+                    <text key={`s${i}`} {...srcPos(i)}
+                      fill="var(--text-muted)" fontSize={9}
+                      style={halo} stroke="var(--bg-inset)" strokeWidth={3}>
+                      {line}
+                    </text>
+                  ))}
+                  {tgtLines.map((line, i) => (
+                    <text key={`t${i}`} {...tgtPos(i)}
+                      fill="var(--text-muted)" fontSize={9}
+                      style={halo} stroke="var(--bg-inset)" strokeWidth={3}>
+                      {line}
+                    </text>
+                  ))}
+                </g>
+              );
             }
 
             const tone = edgeToneFor(edge);

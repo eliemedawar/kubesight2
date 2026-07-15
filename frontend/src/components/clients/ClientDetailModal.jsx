@@ -90,8 +90,9 @@ function tabStyle(active) {
 
 // ─── Connectivity Topology tab ────────────────────────────────────────────────
 
-// Composed view: Client → Transport → selected component(s), overlaid on the
-// service topology. Arrow direction follows the connection's saved direction.
+// Composed view: transport tunnel(s) drawn from the Client straight to the
+// selected component(s), overlaid on the service topology. Arrow direction
+// follows the connection's saved direction.
 function ConnectivityTopology({ clientId, selectedServiceId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);

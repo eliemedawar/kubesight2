@@ -231,6 +231,8 @@ def test_parser_imports_config_secret_volume_mounts():
     assert "/var/lib/data" not in mounts
     assert mounts["/etc/config"]["kind"] == "configMap"
     assert mounts["/etc/config"]["allowedSources"] == ["existingConfigMap", "createConfigMap"]
+    # A mount without readOnly in the manifest must import as writable.
+    assert mounts["/etc/config"]["readOnly"] is False
     assert mounts["/opt/keys/wso2carbon.jks"]["kind"] == "secret"
     assert mounts["/opt/keys/wso2carbon.jks"]["readOnly"] is True
 
