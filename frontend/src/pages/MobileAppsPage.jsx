@@ -19,6 +19,7 @@ import {
   downloadBuild,
   fetchMobileAppBuilds,
   listMobileAppBuilds,
+  listMobileAppEnvironments,
   listMobileAppPublishes,
   listMobileApps,
   publishMobileBuild,
@@ -59,6 +60,9 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
   const [editingAppId, setEditingAppId] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
+  // Custom Zoho environment names for the form's dropdown; null = not loaded
+  // (or fetch failed), which makes the modal fall back to a free-text input.
+  const [envOptions, setEnvOptions] = useState(null);
 
   // Publish dialog + delete confirm.
   const [publishBuild, setPublishBuild] = useState(null);
@@ -243,6 +247,23 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
       setTestingAppStore(false);
     }
   };
+
+  // Refresh the environment dropdown each time the form opens so it reflects
+  // custom environments added in the Zoho settings since the page loaded.
+  useEffect(() => {
+    if (!formOpen) return;
+    let cancelled = false;
+    listMobileAppEnvironments()
+      .then((res) => {
+        if (!cancelled) setEnvOptions(Array.isArray(res?.items) ? res.items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setEnvOptions(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [formOpen]);
 
   const openCreate = () => {
     setFormMode("create");
@@ -537,6 +558,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
             open={formOpen}
             mode={formMode}
             app={editingApp}
+            environments={envOptions}
             onClose={() => setFormOpen(false)}
             onSave={saveApp}
             saving={saving}

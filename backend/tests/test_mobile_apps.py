@@ -109,6 +109,28 @@ def test_rbac_gating(client, admin_token, operator_token, viewer_token, artifact
     assert created["id"]
 
 
+def test_environment_options_endpoint(client, app, admin_token, operator_token):
+    """The form's dropdown source: custom Zoho environment names, manage-gated."""
+    from api.services.zoho_sync_service import set_source
+
+    with app.app_context():
+        set_source(
+            None,
+            [],
+            None,
+            [
+                {"name": "POS Mobile", "applications": ["pos"]},
+                {"name": "Wallet", "applications": ["wallet"]},
+            ],
+        )
+    resp = client.get("/api/mobile-apps/environments", headers=auth_headers(admin_token))
+    assert resp.status_code == 200
+    assert resp.get_json()["data"]["items"] == ["POS Mobile", "Wallet"]
+    # Operator holds mobile_apps:view only — the manage-gated list is refused.
+    resp = client.get("/api/mobile-apps/environments", headers=auth_headers(operator_token))
+    assert resp.status_code == 403
+
+
 def test_duplicate_zoho_environment_rejected(client, admin_token, artifact_dir):
     _create_app(client, admin_token)
     resp = client.post(

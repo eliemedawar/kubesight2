@@ -91,6 +91,7 @@ export default function AppFormModal({
   open,
   mode = "create",
   app = null,
+  environments = null,
   onClose,
   onSave,
   saving = false,
@@ -105,6 +106,16 @@ export default function AppFormModal({
 
   const isEdit = mode === "edit";
   const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  // Dropdown options for the Zoho environment binding. null (list unavailable —
+  // fetch failed) falls back to the legacy free-text input; a stored value that
+  // has since been removed from the Zoho config stays selectable so opening the
+  // edit form doesn't silently unlink the app.
+  const envList = Array.isArray(environments)
+    ? form.zohoEnvironment && !environments.includes(form.zohoEnvironment)
+      ? [form.zohoEnvironment, ...environments]
+      : environments
+    : null;
 
   const buildPayload = () => {
     const artifactConfig = {};
@@ -211,13 +222,29 @@ export default function AppFormModal({
           <div className="settings-form sg-ma-grid2">
             <label>
               Zoho environment
-              <input
-                value={form.zohoEnvironment}
-                onChange={(e) => set("zohoEnvironment", e.target.value)}
-                placeholder="POS-PROD"
-              />
+              {envList ? (
+                <select
+                  value={form.zohoEnvironment}
+                  onChange={(e) => set("zohoEnvironment", e.target.value)}
+                >
+                  <option value="">Not linked</option>
+                  {envList.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={form.zohoEnvironment}
+                  onChange={(e) => set("zohoEnvironment", e.target.value)}
+                  placeholder="POS-PROD"
+                />
+              )}
               <span className="field-hint">
-                Must match the custom Environment value on the Zoho ticket.
+                {envList && environments.length === 0
+                  ? "No custom environments configured yet — add one under Zoho Desk settings."
+                  : "The custom Environment whose ticket builds feed this app."}
               </span>
             </label>
             <label>

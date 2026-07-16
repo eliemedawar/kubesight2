@@ -192,6 +192,17 @@ def _custom_environment_list(row: ZohoIntegration) -> List[Dict[str, Any]]:
     return parsed if isinstance(parsed, list) else []
 
 
+def custom_environment_names() -> List[str]:
+    """Names of the operator's custom (non-cluster) environments, in stored
+    order. Used by Mobile Applications to offer the environment binding as a
+    dropdown instead of free text."""
+    return [
+        str(entry.get("name", "")).strip()
+        for entry in _custom_environment_list(get_or_create_config())
+        if str(entry.get("name", "")).strip()
+    ]
+
+
 def custom_environment_by_name(name: str) -> Optional[Dict[str, Any]]:
     """The custom-environment entry whose name matches ``name`` (Zoho compares
     picklist values case-insensitively, so match casefolded). Used by deploy

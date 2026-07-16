@@ -13,6 +13,9 @@ export const updateMobileApp = (id, payload) =>
 export const deleteMobileApp = (id) =>
   request(`/api/mobile-apps/${encodeURIComponent(id)}`, { method: "DELETE" });
 
+// Custom Zoho environment names offered by the form's environment dropdown.
+export const listMobileAppEnvironments = () => request("/api/mobile-apps/environments");
+
 // ── Connection / credential tests (return {status, message}) ─────────
 export const testMobileAppJenkins = (id) =>
   request(`/api/mobile-apps/${encodeURIComponent(id)}/test-jenkins`, { method: "POST" });

@@ -27,6 +27,17 @@ def list_apps():
     return success_response({"items": svc.list_apps()})
 
 
+@mobile_apps_bp.route("/environments", methods=["GET"])
+@require_permission("mobile_apps:manage")
+def list_environments():
+    """Custom Zoho environment names the register/edit form offers as the
+    zohoEnvironment dropdown. Gated by mobile_apps:manage (not zoho:view)
+    because it exists solely for that manage-only form."""
+    from ..services import zoho_sync_service
+
+    return success_response({"items": zoho_sync_service.custom_environment_names()})
+
+
 @mobile_apps_bp.route("", methods=["POST"])
 @require_permission("mobile_apps:manage")
 def create_app():
