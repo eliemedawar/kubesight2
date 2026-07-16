@@ -597,6 +597,23 @@ def serialize_run(run: DeployAutomationRun) -> Dict[str, Any]:
     if run.bundle_id:
         bundle = ChangeBundle.query.get(run.bundle_id)
         bundle_status = bundle.status if bundle else "deleted"
+    # A custom-environment run bound to a registered Mobile Application hands
+    # its artifact to the mobile binary store after the build — summarise that
+    # ingest so the run's pipeline strip can show the handoff as a stage.
+    mobile_builds = None
+    if _is_custom_run(run):
+        from ..models import MobileAppBuild
+
+        rows = MobileAppBuild.query.filter_by(run_id=run.id).all()
+        if rows:
+            statuses = {b.status for b in rows}
+            if "failed" in statuses:
+                agg = "failed"
+            elif statuses & {"pending", "downloading"}:
+                agg = "fetching"
+            else:
+                agg = "available"
+            mobile_builds = {"count": len(rows), "status": agg}
     return {
         "id": run.id,
         "ticketRecordId": run.ticket_record_id,
@@ -607,6 +624,7 @@ def serialize_run(run: DeployAutomationRun) -> Dict[str, Any]:
         "containerName": run.container_name,
         "changeType": run.change_type or "image",
         "customEnvironment": _is_custom_run(run),
+        "mobileBuilds": mobile_builds,
         "variableName": run.variable_name,
         "variableValue": run.variable_value,
         "imageRepo": run.image_repo,
