@@ -206,6 +206,23 @@ def _locked_message(user: User) -> str:
     return _LOCKED_TEMP_MESSAGE
 
 
+def _lock_details(user: User) -> Dict[str, Any]:
+    """Structured lock info returned alongside 423 errors so the client can
+    render the right state (admin unlock vs. a temporary hold with countdown)."""
+    if user.requires_admin_unlock:
+        return {"kind": "admin"}
+    locked_until = _as_utc(user.locked_until)
+    remaining = 0
+    if locked_until:
+        remaining = max(0, int((locked_until - _now()).total_seconds()))
+    return {
+        "kind": "temporary",
+        "reason": user.lock_reason,
+        "retryAfterSeconds": remaining,
+        "lockedUntil": locked_until.isoformat() if locked_until else None,
+    }
+
+
 def _recent_temp_lock_count(user: User) -> int:
     """Number of temporary locks recorded for this user within the last 24h."""
     since = _now() - timedelta(hours=24)
@@ -466,7 +483,7 @@ def _complete_login(user: User) -> Tuple[Dict[str, Any], None, int]:
     )
 
 
-def _locked_response(user: User) -> Tuple[None, str, int]:
+def _locked_response(user: User) -> Tuple[Optional[Dict[str, Any]], str, int]:
     log_audit(
         "login_failed",
         actor_user_id=user.id,
@@ -478,7 +495,7 @@ def _locked_response(user: User) -> Tuple[None, str, int]:
             "ip": _client_ip(),
         },
     )
-    return None, _locked_message(user), 423
+    return {"lock": _lock_details(user)}, _locked_message(user), 423
 
 
 # ---------------------------------------------------------------------------
@@ -642,7 +659,7 @@ def verify_first_login_totp(
     if not verify_totp(user.totp_secret, code):
         locked = _register_mfa_failure(user)
         if locked:
-            return None, _locked_message(user), 423
+            return {"lock": _lock_details(user)}, _locked_message(user), 423
         return None, "Invalid or expired authentication code. Try again.", 400
 
     first_time = not user.mfa_enabled
@@ -678,7 +695,7 @@ def verify_login_mfa(
         if locked:
             # Pending MFA session is cancelled: the interim token no longer maps
             # to a usable state and the client must restart login after the lock.
-            return None, _locked_message(user), 423
+            return {"lock": _lock_details(user)}, _locked_message(user), 423
         return None, "Invalid or expired authentication code. Try again.", 400
     return _complete_login(user)
 

@@ -1,0 +1,586 @@
+/* ═══ Signal — Login / pre-auth shell ("Aperture") ═══
+   One card that carries the whole sign-in journey: credentials, the MFA
+   challenge, lockout states, and first-login onboarding. Shared by
+   LoginPage and OnboardingPage via components/auth/AuthShell.
+   The old .login-screen/.login-card classes stay in index.css — they are
+   still used by the App boot splash and ErrorBoundary. */
+
+.sg-lg-screen {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  padding: var(--space-6) var(--space-4) 4.5rem;
+  background: var(--bg-main);
+  overflow-x: hidden;
+}
+
+/* ─── Aperture ring field — the circle brand, one slow red sweep ─── */
+.sg-lg-aperture {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.sg-lg-halo {
+  position: absolute;
+  width: 56rem;
+  height: 34rem;
+  top: -10rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: radial-gradient(52rem 30rem at 50% 0, var(--accent-soft), transparent 68%);
+}
+
+.sg-lg-ring {
+  position: absolute;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+}
+
+.sg-lg-ring--1 { width: 30rem; height: 30rem; }
+.sg-lg-ring--2 { width: 40rem; height: 40rem; opacity: 0.7; }
+.sg-lg-ring--3 { width: 52rem; height: 52rem; opacity: 0.45; }
+
+.sg-lg-sweep {
+  position: absolute;
+  width: 40rem;
+  height: 40rem;
+  opacity: 0.5;
+  animation: sg-lg-sweep 9s linear infinite;
+}
+
+.sg-lg-sweep circle {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-dasharray: 70 1500;
+}
+
+@keyframes sg-lg-sweep {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── The card ─── */
+.sg-lg-card {
+  position: relative;
+  width: min(26.5rem, 100%);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg), var(--highlight);
+  padding: var(--space-8);
+}
+
+.sg-lg-card--wide { width: min(30rem, 100%); }
+
+.sg-lg-scene {
+  display: grid;
+  gap: var(--space-4);
+  animation: sg-lg-scene-in var(--dur-slow) var(--ease);
+}
+
+@keyframes sg-lg-scene-in {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: none; }
+}
+
+.sg-lg-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.sg-lg-brand img {
+  width: 2.6rem;
+  height: 2.6rem;
+  object-fit: contain;
+}
+
+.sg-lg-brand h1 {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  color: var(--text-strong);
+}
+
+.sg-lg-title {
+  font-family: var(--font-display);
+  font-size: var(--font-size-lg);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+  margin: 0;
+}
+
+.sg-lg-sub {
+  color: var(--text-muted);
+  font-size: var(--font-size-base);
+  margin: calc(-1 * var(--space-2)) 0 0;
+}
+
+.sg-lg-center { text-align: center; }
+
+/* ─── Fields ─── */
+.sg-lg-field {
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+
+.sg-lg-inputwrap {
+  position: relative;
+  display: flex;
+}
+
+.sg-lg-field input {
+  width: 100%;
+  font: inherit;
+  font-weight: 400;
+  font-size: var(--font-size-md);
+  color: var(--text-main);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 0.62rem 0.8rem;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.sg-lg-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.sg-lg-eye {
+  position: absolute;
+  right: 0.3rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.35rem;
+  border-radius: var(--radius-sm);
+}
+
+.sg-lg-eye:hover {
+  color: var(--text-main);
+  background: var(--bg-interactive);
+}
+
+.sg-lg-eye:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.sg-lg-caps {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  justify-self: start;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.55rem;
+}
+
+/* ─── Error banner ─── */
+.sg-lg-error {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.75rem;
+}
+
+.sg-lg-error svg {
+  flex: none;
+  margin-top: 0.1rem;
+}
+
+/* ─── Identity chip (MFA challenge) ─── */
+.sg-lg-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-self: start;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 0.3rem 0.55rem 0.3rem 0.3rem;
+}
+
+.sg-lg-chip-avatar {
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: var(--radius-full);
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.sg-lg-chip-name {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.sg-lg-chip button {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.1rem 0.25rem;
+}
+
+.sg-lg-chip button:hover {
+  color: var(--accent-strong);
+  text-decoration: underline;
+}
+
+/* ─── Segmented one-time-code input ─── */
+.sg-lg-otp {
+  display: flex;
+  gap: 0.45rem;
+  justify-content: center;
+}
+
+.sg-lg-otp input {
+  width: 2.55rem;
+  height: 3.1rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 1.25rem;
+  color: var(--text-strong);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.sg-lg-otp input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.sg-lg-otp input.is-filled { background: var(--bg-inset); }
+
+/* ─── Progress: step dots + labelled track ─── */
+.sg-lg-dots {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: center;
+}
+
+.sg-lg-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+
+.sg-lg-dot.is-on { background: var(--accent); }
+.sg-lg-dot.is-done { background: var(--ok); }
+
+.sg-lg-track {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.sg-lg-step {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.sg-lg-step-n {
+  width: 1.45rem;
+  height: 1.45rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-strong);
+  display: grid;
+  place-items: center;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-panel);
+}
+
+.sg-lg-step.is-on { color: var(--text-main); }
+
+.sg-lg-step.is-on .sg-lg-step-n {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.sg-lg-step.is-done { color: var(--ok); }
+
+.sg-lg-step.is-done .sg-lg-step-n {
+  background: var(--ok-soft);
+  border-color: transparent;
+  color: var(--ok);
+}
+
+.sg-lg-track-join {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+  min-width: 0.8rem;
+}
+
+/* ─── Password rule checklist ─── */
+.sg-lg-rules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.3rem;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.sg-lg-rules li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.sg-lg-tick {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-strong);
+  display: grid;
+  place-items: center;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.sg-lg-tick svg { opacity: 0; }
+
+.sg-lg-rules li.is-ok { color: var(--ok); }
+
+.sg-lg-rules li.is-ok .sg-lg-tick {
+  background: var(--ok-soft);
+  border-color: transparent;
+}
+
+.sg-lg-rules li.is-ok .sg-lg-tick svg { opacity: 1; }
+
+/* ─── Lockout: countdown ring + admin badge ─── */
+.sg-lg-holdring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  margin: 0 auto;
+}
+
+.sg-lg-holdring svg { transform: rotate(-90deg); }
+
+.sg-lg-holdring .sg-lg-hold-base {
+  fill: none;
+  stroke: var(--bg-interactive);
+  stroke-width: 5;
+}
+
+.sg-lg-holdring .sg-lg-hold-arc {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 1s linear;
+}
+
+.sg-lg-holdtime {
+  position: absolute;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 1.15rem;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.sg-lg-lockbadge {
+  width: 3.4rem;
+  height: 3.4rem;
+  margin: 0 auto;
+  border-radius: var(--radius-full);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  display: grid;
+  place-items: center;
+  color: var(--danger);
+}
+
+.sg-lg-note {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--text-subtle);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.75rem;
+}
+
+.sg-lg-note svg { flex: none; margin-top: 0.1rem; }
+
+.sg-lg-hint {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  text-align: center;
+  margin: 0;
+}
+
+/* ─── TOTP enrolment (QR + manual key) ─── */
+.sg-lg-enroll {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.sg-lg-qr {
+  display: grid;
+  background: #fff; /* QR stays ink-on-white in both themes for scannability */
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-2);
+}
+
+.sg-lg-qr img {
+  display: block;
+  width: 148px;
+  height: 148px;
+}
+
+.sg-lg-keyside {
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+  min-width: 0;
+}
+
+.sg-lg-keylabel {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sg-lg-key {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.03em;
+  color: var(--text-main);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.6rem;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.sg-lg-copy {
+  justify-self: start;
+  font: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-subtle);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+}
+
+.sg-lg-copy:hover {
+  background: var(--bg-interactive);
+  color: var(--text-main);
+}
+
+@media (max-width: 32rem) {
+  .sg-lg-enroll { grid-template-columns: 1fr; justify-items: center; }
+  .sg-lg-keyside { justify-items: center; text-align: center; }
+}
+
+/* ─── Buttons / footers ─── */
+.sg-lg-submit {
+  width: 100%;
+  padding: 0.65rem;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+}
+
+.sg-lg-cancel { justify-self: center; }
+
+/* ─── Trust strip ─── */
+.sg-lg-trust {
+  position: absolute;
+  bottom: 1.1rem;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0 var(--space-4);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.sg-lg-trust-host {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+}
+
+.sg-lg-trust-sep {
+  width: 3px;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sg-lg-sweep { animation: none; }
+  .sg-lg-scene { animation: none; }
+  .sg-lg-holdring .sg-lg-hold-arc { transition: none; }
+}

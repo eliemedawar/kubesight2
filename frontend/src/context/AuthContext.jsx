@@ -32,6 +32,27 @@ export function AuthProvider({ children }) {
   // between submitting credentials and receiving a full session. `null` once the
   // user is fully authenticated (or before any login attempt).
   const [pendingAuth, setPendingAuth] = useState(null);
+  // Structured lock info from a 423 response ({kind, reason, retryAfterSeconds}).
+  // Lives here (not in LoginPage) because the page remounts around the global
+  // loading splash and would lose local state before it could render the scene.
+  const [accountLock, setAccountLock] = useState(null);
+
+  // Returns true when the error is an account lock; switches the auth UI to the
+  // lock scene and abandons any interim (onboarding / MFA) session.
+  const captureLock = useCallback((err) => {
+    if (err?.status === 423 && err.data?.lock) {
+      setAccountLock(err.data.lock);
+      setPendingAuth(null);
+      setError("");
+      return true;
+    }
+    return false;
+  }, []);
+
+  const clearAccountLock = useCallback(() => {
+    setAccountLock(null);
+    setError("");
+  }, []);
 
   const refreshUser = useCallback(async () => {
     const currentToken = getStoredToken();
@@ -92,7 +113,9 @@ export function AuthProvider({ children }) {
       setPendingAuth({ ...data, username: data.username || username });
       return data;
     } catch (err) {
-      setError(err.message || "Login failed");
+      if (!captureLock(err)) {
+        setError(err.message || "Login failed");
+      }
       throw err;
     } finally {
       setLoading(false);
@@ -122,8 +145,13 @@ export function AuthProvider({ children }) {
     if (!pendingAuth?.onboardingToken) {
       throw new Error("Onboarding session expired. Please sign in again.");
     }
-    const data = await apiVerifyFirstLoginTotp(pendingAuth.onboardingToken, code);
-    return { stage: "authenticated", user: finalizeAuth(data) };
+    try {
+      const data = await apiVerifyFirstLoginTotp(pendingAuth.onboardingToken, code);
+      return { stage: "authenticated", user: finalizeAuth(data) };
+    } catch (err) {
+      captureLock(err);
+      throw err;
+    }
   };
 
   // Normal-login MFA challenge: verify the 6-digit code and complete sign-in.
@@ -131,8 +159,14 @@ export function AuthProvider({ children }) {
     if (!pendingAuth?.mfaToken) {
       throw new Error("MFA session expired. Please sign in again.");
     }
-    const data = await apiVerifyLoginMfa(pendingAuth.mfaToken, code);
-    return { stage: "authenticated", user: finalizeAuth(data) };
+    try {
+      const data = await apiVerifyLoginMfa(pendingAuth.mfaToken, code);
+      return { stage: "authenticated", user: finalizeAuth(data) };
+    } catch (err) {
+      // A lock kills the interim MFA token; the client must restart login.
+      captureLock(err);
+      throw err;
+    }
   };
 
   const cancelPendingAuth = useCallback(() => {
@@ -181,6 +215,8 @@ export function AuthProvider({ children }) {
       submitFirstLoginTotp,
       submitLoginMfa,
       cancelPendingAuth,
+      accountLock,
+      clearAccountLock,
       isAdmin: access.isAdmin,
       hasAnyPermission: access.hasAnyPermission,
       canAccessCluster: access.canAccessCluster,
@@ -209,7 +245,7 @@ export function AuthProvider({ children }) {
       formatAccessError: access.formatAccessError,
       shouldShowAccessError: access.shouldShowAccessError,
     }),
-    [user, token, loading, error, pendingAuth, refreshUser, hasPermission, access]
+    [user, token, loading, error, pendingAuth, accountLock, clearAccountLock, refreshUser, hasPermission, access]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

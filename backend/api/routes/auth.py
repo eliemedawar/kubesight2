@@ -39,7 +39,8 @@ def login():
 
     data, error, status = login_user(identifier, password)
     if error:
-        return error_response(error, status)
+        # `data` may carry structured details (e.g. lock kind + retry seconds).
+        return error_response(error, status, data=data)
     return success_response(data)
 
 
@@ -76,7 +77,7 @@ def first_login_totp_verify():
     code = payload.get("code") or ""
     data, error, status = verify_first_login_totp(user, code)
     if error:
-        return error_response(error, status)
+        return error_response(error, status, data=data)
     return success_response(data)
 
 
@@ -89,7 +90,7 @@ def mfa_verify():
     code = payload.get("code") or ""
     data, error, status = verify_login_mfa(user, code)
     if error:
-        return error_response(error, status)
+        return error_response(error, status, data=data)
     return success_response(data)
 
 

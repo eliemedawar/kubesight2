@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../context/AuthContext";
-import BrandMark from "../components/BrandMark.jsx";
+import AuthShell, { AuthError } from "../components/auth/AuthShell.jsx";
+import OtpInput from "../components/auth/OtpInput.jsx";
+import PasswordField from "../components/auth/PasswordField.jsx";
 
+// Mirrors validate_password_policy() in backend/api/services/auth_service.py.
 const PASSWORD_RULES = [
   { key: "length", label: "At least 12 characters", test: (v) => v.length >= 12 },
   { key: "upper", label: "One uppercase letter", test: (v) => /[A-Z]/.test(v) },
@@ -11,6 +14,35 @@ const PASSWORD_RULES = [
 ];
 
 const STEP_INDEX = { password_change: 1, mfa_setup: 2, mfa: 2 };
+
+const TickIcon = () => (
+  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="m4.5 12.5 5 5 10-11" />
+  </svg>
+);
+
+function StepTrack({ current }) {
+  const steps = [
+    { n: 1, label: "Password" },
+    { n: 2, label: "Authenticator" },
+  ];
+  return (
+    <div className="sg-lg-track" aria-label={`Setup step ${current} of ${steps.length}`}>
+      {steps.map((step, i) => {
+        const state = current > step.n ? "is-done" : current === step.n ? "is-on" : "";
+        return (
+          <span key={step.n} style={{ display: "contents" }}>
+            {i > 0 ? <span className="sg-lg-track-join" /> : null}
+            <span className={`sg-lg-step ${state}`}>
+              <span className="sg-lg-step-n">{current > step.n ? <TickIcon /> : step.n}</span>
+              {step.label}
+            </span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function OnboardingPage() {
   const {
@@ -29,6 +61,7 @@ export default function OnboardingPage() {
   const [enrolling, setEnrolling] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
 
   const passwordChecks = PASSWORD_RULES.map((rule) => ({ ...rule, ok: rule.test(password) }));
   const passwordValid = passwordChecks.every((c) => c.ok);
@@ -88,162 +121,168 @@ export default function OnboardingPage() {
     }
   };
 
-  const handleTotpSubmit = async (event) => {
-    event.preventDefault();
+  const handleTotpSubmit = async (otp) => {
+    const value = (typeof otp === "string" ? otp : code).trim();
+    if (value.length < 6 || busy) {
+      return;
+    }
     setError("");
     setBusy(true);
     try {
-      await submitFirstLoginTotp(code.trim());
+      await submitFirstLoginTotp(value);
       // On success AuthContext finalizes the session; this screen unmounts.
     } catch (err) {
-      setError(err.message || "Invalid code. Try again.");
-      setCode("");
+      if (err.status !== 423) {
+        setError(err.message || "Invalid code. Try again.");
+        setCode("");
+      }
+      // A 423 lock drops pendingAuth in the context; the lock scene takes over.
     } finally {
       setBusy(false);
     }
   };
 
+  const copySecret = () => {
+    if (!enrollment?.secret) {
+      return;
+    }
+    navigator.clipboard?.writeText(enrollment.secret);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1400);
+  };
+
   const currentStep = STEP_INDEX[stage] || 1;
+  const secretDisplay = enrollment?.secret
+    ? enrollment.secret.replace(/(.{4})/g, "$1 ").trim()
+    : "";
 
   return (
-    <div className="login-screen">
-      <div className="login-card onboarding-card">
-        <div className="login-brand">
-          <BrandMark className="login-logo" />
-          <h1>Welcome to KubeSight</h1>
-        </div>
-        <p className="brand-subtitle">Finish setting up your account</p>
+    <AuthShell wide>
+      <div className="sg-lg-scene">
+        <StepTrack current={currentStep} />
+        <h1 className="sg-lg-title">Welcome to KubeSight</h1>
+        <p className="sg-lg-sub">
+          {stage === "password_change"
+            ? "Your temporary password works once. Choose your own to continue."
+            : stage === "mfa_setup"
+              ? "Scan with any TOTP app — Google Authenticator, Microsoft Authenticator, Authy — then enter the first code it shows."
+              : "Enter the 6-digit code from your existing authenticator app to finish signing in."}
+        </p>
 
-        <ol className="onboarding-steps">
-          <li className={currentStep >= 1 ? (currentStep > 1 ? "done" : "active") : ""}>
-            1. Set password
-          </li>
-          <li className={currentStep >= 2 ? "active" : ""}>2. Set up MFA</li>
-        </ol>
-
-        {error ? <p className="banner-message error">{error}</p> : null}
+        <AuthError>{error}</AuthError>
 
         {stage === "password_change" ? (
-          <form onSubmit={handlePasswordSubmit} className="onboarding-form">
-            <p className="muted">
-              Choose a new permanent password to replace your temporary one.
-            </p>
-            <label>
-              New password
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="new-password"
-                autoFocus
-                required
-              />
-            </label>
-            <label>
-              Confirm new password
-              <input
-                type="password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                autoComplete="new-password"
-                required
-              />
-            </label>
-            <ul className="password-rules">
+          <form onSubmit={handlePasswordSubmit} className="sg-lg-scene">
+            <PasswordField
+              label="New password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+              autoFocus
+            />
+            <PasswordField
+              label="Confirm new password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              autoComplete="new-password"
+            />
+            <ul className="sg-lg-rules">
               {passwordChecks.map((c) => (
-                <li key={c.key} className={c.ok ? "ok" : ""}>
-                  {c.ok ? "✓" : "○"} {c.label}
+                <li key={c.key} className={c.ok ? "is-ok" : ""}>
+                  <span className="sg-lg-tick"><TickIcon /></span>
+                  {c.label}
                 </li>
               ))}
-              <li className={passwordsMatch ? "ok" : ""}>
-                {passwordsMatch ? "✓" : "○"} Passwords match
+              <li className={passwordsMatch ? "is-ok" : ""}>
+                <span className="sg-lg-tick"><TickIcon /></span>
+                Passwords match
               </li>
             </ul>
             <button
               type="submit"
-              className="primary"
+              className="primary sg-lg-submit"
               disabled={busy || !passwordValid || !passwordsMatch}
             >
-              {busy ? "Saving..." : "Change password"}
+              {busy ? "Saving..." : "Set password and continue"}
             </button>
           </form>
         ) : null}
 
         {stage === "mfa_setup" ? (
-          <form onSubmit={handleTotpSubmit} className="onboarding-form">
-            <p className="muted">
-              Scan this QR code with Google Authenticator, Microsoft Authenticator, Authy,
-              or any TOTP app, then enter the 6-digit code it shows.
-            </p>
-            {enrolling ? <p className="muted">Generating your MFA secret…</p> : null}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleTotpSubmit();
+            }}
+            className="sg-lg-scene"
+          >
+            {enrolling ? <p className="sg-lg-sub">Generating your MFA secret…</p> : null}
             {!enrolling && !enrollment ? (
-              <button type="button" className="btn-outline" onClick={loadEnrollment}>
+              <button type="button" className="btn-outline sg-lg-submit" onClick={loadEnrollment}>
                 Retry generating QR code
               </button>
             ) : null}
             {enrollment ? (
-              <>
+              <div className="sg-lg-enroll">
                 {enrollment.qrDataUri ? (
-                  <div className="mfa-qr">
-                    <img src={enrollment.qrDataUri} alt="MFA QR code" width={192} height={192} />
+                  <div className="sg-lg-qr">
+                    <img src={enrollment.qrDataUri} alt="MFA QR code" width={148} height={148} />
                   </div>
                 ) : null}
-                <p className="mfa-secret">
-                  {enrollment.qrDataUri
-                    ? "Can't scan? Enter this key manually:"
-                    : "Add this key to your authenticator app:"}
-                  <code>{enrollment.secret}</code>
-                </p>
-              </>
+                <div className="sg-lg-keyside">
+                  <span className="sg-lg-keylabel">
+                    {enrollment.qrDataUri ? "Can’t scan? Enter this key" : "Add this key to your app"}
+                  </span>
+                  <span className="sg-lg-key">{secretDisplay}</span>
+                  <button type="button" className="sg-lg-copy" onClick={copySecret}>
+                    {copied ? "Copied" : "Copy key"}
+                  </button>
+                </div>
+              </div>
             ) : null}
-            <label>
-              Authentication code
-              <input
-                type="text"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                pattern="[0-9]*"
-                maxLength={6}
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-                required
-              />
-            </label>
-            <button type="submit" className="primary" disabled={busy || code.length < 6 || !enrollment}>
+            <OtpInput
+              value={code}
+              onChange={setCode}
+              onComplete={enrollment ? handleTotpSubmit : undefined}
+              disabled={busy || !enrollment}
+              label="First 6-digit code from the app"
+            />
+            <button
+              type="submit"
+              className="primary sg-lg-submit"
+              disabled={busy || code.length < 6 || !enrollment}
+            >
               {busy ? "Verifying..." : "Verify & finish"}
             </button>
           </form>
         ) : null}
 
         {stage === "mfa" ? (
-          <form onSubmit={handleTotpSubmit} className="onboarding-form">
-            <p className="muted">
-              Enter the 6-digit code from your existing authenticator app to finish signing in.
-            </p>
-            <label>
-              Authentication code
-              <input
-                type="text"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                pattern="[0-9]*"
-                maxLength={6}
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-                autoFocus
-                required
-              />
-            </label>
-            <button type="submit" className="primary" disabled={busy || code.length < 6}>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleTotpSubmit();
+            }}
+            className="sg-lg-scene"
+          >
+            <OtpInput
+              value={code}
+              onChange={setCode}
+              onComplete={handleTotpSubmit}
+              disabled={busy}
+              autoFocus
+              label="6-digit verification code"
+            />
+            <button type="submit" className="primary sg-lg-submit" disabled={busy || code.length < 6}>
               {busy ? "Verifying..." : "Verify & finish"}
             </button>
           </form>
         ) : null}
 
-        <button type="button" className="btn-link onboarding-cancel" onClick={cancelPendingAuth}>
+        <button type="button" className="btn-link sg-lg-cancel" onClick={cancelPendingAuth}>
           Cancel and return to sign in
         </button>
       </div>
-    </div>
+    </AuthShell>
   );
 }

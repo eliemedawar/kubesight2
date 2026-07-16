@@ -92,8 +92,10 @@ async function performRequest(path, { method = "GET", body, query, auth = true, 
         ? new Error("You do not have access to this resource.")
         : new Error(message);
     // Expose the HTTP status so callers can react to specific codes (e.g. a 404
-    // for a cluster that was deleted out from under a stale tab).
+    // for a cluster that was deleted out from under a stale tab), and any
+    // structured detail payload (e.g. account-lock kind + retry seconds).
     error.status = response.status;
+    error.data = payload.data ?? null;
     throw error;
   }
 
