@@ -1387,6 +1387,12 @@ def _do_poll_build(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
             _set_step(run, "verify", "skip", "no registry gate for a custom environment")
             _set_step(run, "approval", "skip", "Jenkins owns the deploy for custom environments")
             _set_step(run, "deploy", "done", "performed by the Jenkins job")
+            # A custom environment mapped to a registered Mobile Application:
+            # queue its APK/AAB/IPA artifact for ingestion (rows join this
+            # transaction; the mobile scheduler tick does the download).
+            from .mobile_app_service import on_custom_build_success
+
+            on_custom_build_success(run)
             _complete_deployed(
                 run, "no cluster rollout to watch — the Jenkins build result is the outcome"
             )

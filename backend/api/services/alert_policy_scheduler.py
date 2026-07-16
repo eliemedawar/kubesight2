@@ -115,6 +115,18 @@ def _scheduler_loop(app: Flask) -> None:
                 advance_runs()
         except Exception:
             logger.exception("Deploy automation tick failed")
+        try:
+            with app.app_context():
+                from .mobile_app_service import advance_mobile_builds, advance_mobile_publishes
+
+                # Mobile Applications: dispatch pending artifact downloads and
+                # store uploads to worker threads (the heavy transfers never run
+                # on this tick thread) and poll App Store processing states.
+                # No-ops instantly when nothing is pending.
+                advance_mobile_builds()
+                advance_mobile_publishes()
+        except Exception:
+            logger.exception("Mobile applications tick failed")
 
 
 _scheduler_started = False

@@ -517,6 +517,36 @@ const PAGE_TOURS = {
     },
   ],
 
+  mobileApps: [
+    {
+      target: ".page-title",
+      title: "Mobile Applications",
+      body: "Jenkins builds land here as APK, AAB, and IPA binaries — pulled from deployment tickets — ready to publish to Google Play and the App Store.",
+    },
+    {
+      target: ".sg-ma-stats",
+      title: "Fleet at a glance",
+      body: "Registered apps, builds ready to download, work in flight (fetching or publishing), and anything that failed — summarised across every app's latest build.",
+    },
+    {
+      target: ".sg-ma-table",
+      title: "Your applications",
+      body: "Each row is a registered app with its platforms, Zoho environment, Jenkins job, and store credentials. Open one to see its builds and publish history.",
+    },
+    {
+      target: ".page-title-action",
+      title: "Register an application",
+      body: "Link a Jenkins job, artifact patterns, and store credentials, then fetch builds from deployment tickets.",
+      when: (ctx) => ctx.hasPermission("mobile_apps:manage"),
+    },
+    {
+      target: ".sg-ma-table",
+      title: "Publishing to the stores",
+      body: "Publishing a build to Google Play or the App Store is an administrator-only action — you'll confirm it from inside an app's drawer, per build.",
+      when: (ctx) => ctx.isAdmin,
+    },
+  ],
+
   settings: [
     {
       target: ".settings-rail",

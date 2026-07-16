@@ -84,6 +84,7 @@ const ChangeBundlesPage = lazy(() => import("./pages/ChangeBundlesPage.jsx"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
 const ImageRegistriesPage = lazy(() => import("./pages/ImageRegistriesPage.jsx"));
 const ZohoSyncPage = lazy(() => import("./pages/ZohoSyncPage.jsx"));
+const MobileAppsPage = lazy(() => import("./pages/MobileAppsPage.jsx"));
 const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
@@ -1620,6 +1621,8 @@ export default function App() {
         return <ImageRegistriesPage canManage={hasPermission("registries:manage")} />;
       case "zohoSync":
         return <ZohoSyncPage canManage={hasPermission("zoho:manage")} />;
+      case "mobileApps":
+        return <MobileAppsPage canManage={hasPermission("mobile_apps:manage")} canPublish={isAdmin} />;
       case "upgrade":
         return (
           <UpgradeSafeModePage

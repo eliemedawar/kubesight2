@@ -26,6 +26,7 @@ from .topology_components import topology_components_bp
 from .deployment_forms import deployment_forms_bp
 from .registries import registries_bp
 from .zoho import zoho_bp
+from .mobile_apps import mobile_apps_bp
 
 
 def register_blueprints(app: Flask) -> None:
@@ -56,3 +57,4 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(deployment_forms_bp)
     app.register_blueprint(registries_bp)
     app.register_blueprint(zoho_bp)
+    app.register_blueprint(mobile_apps_bp)

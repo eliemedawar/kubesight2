@@ -78,6 +78,8 @@ PERMISSIONS = [
     ("registries:manage", "Add, edit, and remove linked image registries"),
     ("zoho:view", "View the Zoho Desk integration status and config"),
     ("zoho:manage", "Configure the Zoho Desk integration and trigger a sync"),
+    ("mobile_apps:view", "View mobile applications and download builds"),
+    ("mobile_apps:manage", "Register mobile applications and configure store credentials"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -149,6 +151,11 @@ PERMISSION_GROUPS = [
         ],
     },
     {
+        "id": "mobileApps",
+        "label": "Mobile Applications",
+        "keys": ["mobile_apps:view", "mobile_apps:manage"],
+    },
+    {
         "id": "components",
         "label": "Components",
         "keys": [
@@ -178,7 +185,7 @@ DANGEROUS_PERMISSION_KEYS = {
     "app_services:delete", "clients:delete", "api_tokens:manage",
     "deployment_requests:manage", "change_bundles:manage",
     "service_blueprints:delete", "service_blueprints:deploy",
-    "components:delete", "registries:manage",
+    "components:delete", "registries:manage", "mobile_apps:manage",
 }
 
 
@@ -276,6 +283,7 @@ OPERATOR_PERMISSIONS = [
     "components:create",
     "components:update",
     "components:check",
+    "mobile_apps:view",
 ]
 
 CLUSTER_ADMIN_PERMISSIONS = [
@@ -327,6 +335,7 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "components:update",
     "components:delete",
     "components:check",
+    "mobile_apps:view",
 ]
 
 HERMES_AGENT_PERMISSIONS = [

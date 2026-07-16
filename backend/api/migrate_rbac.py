@@ -598,10 +598,23 @@ def _migrate_deploy_automation_columns() -> None:
         _add_column_if_missing("deploy_automation_runs", "variable_value", "TEXT")
 
 
+def _migrate_mobile_app_columns() -> None:
+    """Column adds for the Mobile Applications tables (created 2026-07-15).
+
+    ``create_all`` makes the tables themselves; columns added after that first
+    release go here so existing databases pick them up.
+    """
+    tables = inspect(db.engine).get_table_names()
+    if "mobile_applications" not in tables:
+        return
+    # No post-creation columns yet.
+
+
 def run_migrations() -> None:
     db.create_all()
     _migrate_zoho_integration_columns()
     _migrate_deploy_automation_columns()
+    _migrate_mobile_app_columns()
     _migrate_user_onboarding_columns()
     _migrate_deployment_request_columns()
     _migrate_change_bundle_columns()

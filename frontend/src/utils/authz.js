@@ -149,6 +149,12 @@ export const NAV_PAGES = [
 
   // Operations
   {
+    key: "mobileApps",
+    label: "Mobile Applications",
+    permission: "mobile_apps:view",
+    section: "Operations",
+  },
+  {
     key: "upgrade",
     label: "Upgrade Center",
     anyPermissions: ["upgrades:precheck", "upgrades:start"],
@@ -1006,6 +1012,8 @@ export function pageAllowed(user, pageKey) {
       return hasPermission(user, "registries:view");
     case "zohoSync":
       return hasPermission(user, "zoho:view");
+    case "mobileApps":
+      return hasPermission(user, "mobile_apps:view");
     case "userManagement":
       return hasPermission(user, "users:view");
     case "auditLogs":

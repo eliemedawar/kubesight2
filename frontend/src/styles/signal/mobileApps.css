@@ -1,0 +1,444 @@
+/* Signal page-specific styles — Mobile Applications.
+   Structure: page header → stat row → apps table → right-side app drawer,
+   plus the register/edit form modal and the publish dialog. All colour comes
+   from index.css tokens so light/dark theme follow automatically. */
+
+.sg-ma-page > .stat-grid { margin: var(--space-4) 0; }
+.sg-ma-page .banner.banner-success { margin-top: var(--space-4); }
+
+/* ── Platform badges ────────────────────────────────────────────── */
+.sg-ma-plat {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: var(--bg-interactive);
+  color: var(--text-subtle);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.sg-ma-plat--android { background: var(--ok-soft); border-color: var(--ok-border); color: var(--ok); }
+.sg-ma-plat--ios { background: var(--info-soft); border-color: var(--info-border); color: var(--info); }
+.sg-ma-plats { display: inline-flex; flex-wrap: wrap; gap: 0.35rem; }
+
+/* Informational count pill (not an alert). */
+.sg-ma-count {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.55rem;
+  border-radius: var(--radius-full);
+  background: var(--bg-interactive);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Neutral variant for the shared status pill (missing / disabled). */
+.status-pill.muted {
+  color: var(--text-muted);
+  background: var(--bg-interactive);
+  border-color: var(--border);
+}
+
+/* ── Apps table ─────────────────────────────────────────────────── */
+.sg-ma-table-shell { margin-top: 0.25rem; overflow-x: auto; }
+.sg-ma-table { width: 100%; }
+.sg-ma-table th { white-space: nowrap; }
+.sg-ma-table td { vertical-align: middle; }
+.sg-ma-table tr.data-table-row--clickable { cursor: pointer; }
+.sg-ma-table tr.data-table-row--clickable:hover td { background: var(--bg-panel-strong); }
+.sg-ma-table tr.data-table-row--clickable:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-border);
+}
+
+.sg-ma-cell-name { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.sg-ma-cell-name b { font-weight: 700; color: var(--text-strong); }
+.sg-ma-cell-desc {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sg-ma-wrap { overflow-wrap: anywhere; }
+.sg-ma-latest { display: inline-flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.sg-ma-creds { display: inline-flex; gap: 0.35rem; flex-wrap: wrap; }
+
+/* The drawer sits above the app chrome (z 50/51). Modals launched from inside
+   it — edit, publish, delete confirm — must stack above the drawer, so bump
+   every modal-overlay rendered within this page above it. */
+.sg-ma-page .modal-overlay { z-index: 60; }
+
+/* ── App drawer (slide-over) ────────────────────────────────────── */
+.sg-ma-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  backdrop-filter: blur(2px);
+  z-index: 50;
+}
+.sg-ma-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(580px, 96vw);
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  z-index: 51;
+  display: flex;
+  flex-direction: column;
+  animation: sg-ma-drawer-in 0.28s var(--ease);
+}
+@keyframes sg-ma-drawer-in {
+  from { transform: translateX(105%); }
+  to { transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sg-ma-drawer { animation: none; }
+}
+
+.sg-ma-dr-head {
+  padding: 1.1rem 1.25rem 1rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+.sg-ma-dr-top { display: flex; align-items: center; gap: 0.6rem; }
+.sg-ma-dr-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--font-size-lg);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sg-ma-dr-close { margin-left: auto; flex: none; }
+.sg-ma-dr-desc {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.sg-ma-dr-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem 1rem;
+  margin-top: 0.9rem;
+}
+.sg-ma-fact { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+.sg-ma-fact-k {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.sg-ma-fact-v { font-size: 0.8125rem; color: var(--text-main); min-width: 0; }
+.sg-ma-creds .status-pill { text-transform: none; }
+
+.sg-ma-testline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.85rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+  line-height: 1.45;
+}
+.sg-ma-testline--err { color: var(--danger); }
+
+.sg-ma-dr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.sg-ma-del-app { color: var(--danger); }
+.sg-ma-del-app:hover { background: var(--danger-soft); color: var(--danger); }
+
+.sg-ma-dr-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem 1.25rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+}
+.sg-ma-dr-sect { min-width: 0; }
+.sg-ma-dr-secthead {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+.sg-ma-dr-secthead h4 {
+  margin: 0;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ── Build rows ─────────────────────────────────────────────────── */
+.sg-ma-builds,
+.sg-ma-pubs { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.6rem; }
+
+.sg-ma-build {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  min-width: 0;
+}
+.sg-ma-build-main { flex: 1; min-width: 0; }
+.sg-ma-build-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.sg-ma-build-ver {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+.sg-ma-build-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  min-width: 0;
+}
+.sg-ma-build-file {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  color: var(--text-subtle);
+}
+.sg-ma-dot { color: var(--border-strong); }
+.sg-ma-jlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--accent-strong);
+  white-space: nowrap;
+}
+.sg-ma-jlink svg { flex: none; }
+
+.sg-ma-build-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: none;
+}
+.sg-ma-pubbtn { font-size: 0.72rem; padding: 0.3rem 0.7rem; white-space: nowrap; }
+.sg-ma-danger-icon { color: var(--text-muted); }
+.sg-ma-danger-icon:hover { color: var(--danger); background: var(--danger-soft); }
+
+.sg-ma-inline-error {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  color: var(--danger);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.sg-ma-empty-hint { font-size: 0.8125rem; line-height: 1.5; }
+
+/* ── Publish cards ──────────────────────────────────────────────── */
+.sg-ma-pub {
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  min-width: 0;
+}
+.sg-ma-pub-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.55rem;
+}
+.sg-ma-pub-head b {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+.sg-ma-pub-ref {
+  margin: 0.5rem 0 0;
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+  overflow-wrap: anywhere;
+}
+.sg-ma-pub-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0.6rem 0 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+.sg-ma-htime { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ── Publish step chips ─────────────────────────────────────────── */
+.sg-ma-steps { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.sg-ma-step {
+  font-size: 0.68rem;
+  font-weight: 650;
+  padding: 0.15rem 0.55rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: var(--bg-interactive);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.sg-ma-step--done { background: var(--ok-soft); border-color: var(--ok-border); color: var(--ok); }
+.sg-ma-step--run { background: var(--info-soft); border-color: var(--info-border); color: var(--info); }
+.sg-ma-step--fail { background: var(--danger-soft); border-color: var(--danger-border); color: var(--danger); }
+.sg-ma-step--wait { opacity: 0.85; }
+.sg-ma-step--skip { opacity: 0.6; }
+
+/* ── Register / edit form modal ─────────────────────────────────── */
+.sg-ma-form-panel { width: min(46rem, 100%); }
+.sg-ma-form { display: block; }
+.sg-ma-formsect {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 1.35rem 0 0.6rem;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.sg-ma-formsect:first-child { margin-top: 0.25rem; }
+.sg-ma-formsect::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+
+.sg-ma-grid2.settings-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sg-ma-span { grid-column: 1 / -1; }
+.sg-ma-form .settings-form label input:not([type="checkbox"]):not([type="radio"]),
+.sg-ma-form .settings-form label select,
+.sg-ma-form .settings-form label textarea { width: 100%; min-width: 0; }
+.sg-ma-form .checkbox-label { margin-top: 0.35rem; }
+
+.sg-ma-pick-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+.sg-ma-artifact-intro { margin: 0 0 0.6rem; }
+.sg-ma-artifacts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.sg-ma-artifact {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel-strong);
+  padding: 0.7rem 0.8rem;
+  min-width: 0;
+}
+.sg-ma-artifact .checkbox-label { margin-top: 0; }
+.sg-ma-artifact-body { display: grid; gap: 0.5rem; margin-top: 0.6rem; }
+.sg-ma-artifact-body label {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+.sg-ma-textarea { font-size: 0.78rem; line-height: 1.5; resize: vertical; }
+.sg-ma-testrow { display: flex; gap: 0.5rem; }
+
+@media (max-width: 640px) {
+  .sg-ma-grid2.settings-form,
+  .sg-ma-artifacts { grid-template-columns: 1fr; }
+  .sg-ma-dr-facts { grid-template-columns: 1fr; }
+}
+
+/* ── Publish dialog ─────────────────────────────────────────────── */
+.sg-ma-publish-panel { width: min(34rem, 100%); }
+.sg-ma-publish-sub {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.sg-ma-targets {
+  border: 0;
+  padding: 0;
+  margin: 0 0 1rem;
+  display: grid;
+  gap: 0.5rem;
+}
+.sg-ma-target {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+.sg-ma-target:hover { border-color: var(--border-strong); }
+.sg-ma-target--on { border-color: var(--accent-border); background: var(--accent-soft); }
+.sg-ma-target--danger.sg-ma-target--on { border-color: var(--danger-border); background: var(--danger-soft); }
+.sg-ma-target input { margin-top: 0.2rem; flex: none; }
+.sg-ma-target-body { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+.sg-ma-target-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+.sg-ma-target-label .status-pill { text-transform: none; }
+.sg-ma-target-hint { font-size: 0.72rem; color: var(--text-muted); line-height: 1.45; }
+
+.sg-ma-confirm-note {
+  padding: 0.6rem 0.8rem;
+  border-radius: var(--radius-md);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin-bottom: 0.7rem;
+}
+.sg-ma-confirm-note b { color: inherit; }
+.sg-ma-confirm-field {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+.sg-ma-confirm-field input { width: 100%; }

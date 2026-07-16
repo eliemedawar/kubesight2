@@ -1730,3 +1730,30 @@ def report_ticket_outcome(
                 logger.warning("Zoho ticket comment failed (%s)", ticket_id, exc_info=True)
 
     _dispatch_ticket_work(_work)
+
+
+def post_ticket_comment(ticket_id: Optional[str], comment: str) -> None:
+    """Post a comment on a Desk ticket WITHOUT touching status/owner/resolution.
+
+    Used by follow-on automations (e.g. Mobile Applications reporting that a
+    binary landed or was published) after the deploy flow already set the
+    ticket's final status. Same gating and best-effort semantics as
+    :func:`report_ticket_outcome` — never raises.
+    """
+    if not (ticket_id and comment):
+        return
+    row = get_or_create_config()
+    if not row.ticket_writeback_enabled:
+        return
+    if not (row.refresh_token_encrypted and row.client_id and row.org_id):
+        return
+    cfg = _to_client_config(row)
+    ticket_id = str(ticket_id)
+
+    def _work() -> None:
+        try:
+            zoho_client.add_ticket_comment(cfg, ticket_id, comment)
+        except Exception:
+            logger.warning("Zoho ticket comment failed (%s)", ticket_id, exc_info=True)
+
+    _dispatch_ticket_work(_work)

@@ -85,11 +85,16 @@ class JenkinsConfig:
     build_token: str = ""
 
 
-def job_url(cfg: JenkinsConfig) -> str:
-    """Absolute URL of the router job: ``folder/router`` → ``/job/folder/job/router``."""
-    segments = [s for s in (cfg.router_job_path or "").split("/") if s.strip()]
+def job_url(cfg: JenkinsConfig, job_path: Optional[str] = None) -> str:
+    """Absolute URL of a job: ``folder/router`` → ``/job/folder/job/router``.
+
+    Defaults to the configured router job; pass ``job_path`` to address another
+    job (e.g. a mobile app's build job) with the same connection.
+    """
+    raw = cfg.router_job_path if job_path is None else job_path
+    segments = [s for s in (raw or "").split("/") if s.strip()]
     if not segments:
-        raise JenkinsError("No router job path configured.")
+        raise JenkinsError("No Jenkins job path configured.")
     path = "/".join(f"job/{quote(s, safe='')}" for s in segments)
     return f"{cfg.base_url.rstrip('/')}/{path}"
 
@@ -262,3 +267,111 @@ def build_state(cfg: JenkinsConfig, build_url: str) -> Dict[str, Any]:
         "durationMs": int(payload.get("duration") or 0),
         "url": payload.get("url") or build_url,
     }
+
+
+# ---------------------------------------------------------------------------
+# Artifacts — used by the Mobile Applications feature to pull APK/AAB/IPA
+# binaries out of a finished build.
+# ---------------------------------------------------------------------------
+
+def last_successful_build(cfg: JenkinsConfig, job_path: str) -> Optional[Dict[str, Any]]:
+    """Number + URL of a job's last successful build, or None if it never built."""
+    url = f"{job_url(cfg, job_path)}/lastSuccessfulBuild/api/json?tree=number,url,result"
+    try:
+        _, _, payload = _request(cfg, "GET", url)
+    except JenkinsError as exc:
+        if exc.status == 404:
+            return None
+        raise
+    if not payload.get("number"):
+        return None
+    return {
+        "number": int(payload["number"]),
+        "url": _rebase(cfg, str(payload.get("url") or "")).rstrip("/"),
+    }
+
+
+def list_artifacts(cfg: JenkinsConfig, build_url: str) -> list:
+    """The build's ARCHIVED artifacts: ``[{"fileName", "relativePath"}]``.
+
+    Only artifacts saved with ``archiveArtifacts`` appear here — files left in
+    the workspace do not (fetch those by explicit path via ``download_file``).
+    """
+    url = f"{_rebase(cfg, build_url).rstrip('/')}/api/json?tree=artifacts[fileName,relativePath]"
+    _, _, payload = _request(cfg, "GET", url)
+    out = []
+    for item in payload.get("artifacts") or []:
+        if isinstance(item, dict) and item.get("relativePath"):
+            out.append(
+                {
+                    "fileName": item.get("fileName") or item["relativePath"].rsplit("/", 1)[-1],
+                    "relativePath": item["relativePath"],
+                }
+            )
+    return out
+
+
+def artifact_url(cfg: JenkinsConfig, build_url: str, relative_path: str) -> str:
+    """URL of one archived artifact of a build."""
+    encoded = "/".join(quote(seg) for seg in relative_path.split("/") if seg)
+    return f"{_rebase(cfg, build_url).rstrip('/')}/artifact/{encoded}"
+
+
+def workspace_file_url(cfg: JenkinsConfig, build_url: str, ws_path: str) -> str:
+    """URL of a file under the build's workspace browser, e.g.
+    ``execution/node/71/ws/pos.apk`` for a pipeline node's workspace."""
+    encoded = "/".join(quote(seg) for seg in ws_path.split("/") if seg)
+    return f"{_rebase(cfg, build_url).rstrip('/')}/{encoded}"
+
+
+def download_file(
+    cfg: JenkinsConfig,
+    url: str,
+    dest_path: str,
+    *,
+    max_bytes: int = 2 * 1024 * 1024 * 1024,
+) -> Dict[str, Any]:
+    """Stream ``url`` (authed like every other call) into ``dest_path``.
+
+    Returns ``{"size": int, "sha256": str}``. Chunked so a multi-hundred-MB
+    binary never sits in memory; aborts past ``max_bytes`` (default 2 GiB).
+    A generous read timeout applies per socket read, not to the whole download.
+    """
+    import hashlib
+
+    req = urllib.request.Request(url, headers=_headers(cfg), method="GET")
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with urllib.request.urlopen(req, timeout=60, context=_ssl_context(cfg)) as resp:
+            declared = resp.headers.get("Content-Length")
+            if declared and int(declared) > max_bytes:
+                raise JenkinsError(
+                    f"Artifact is {int(declared)} bytes — larger than the {max_bytes} byte limit."
+                )
+            with open(dest_path, "wb") as fh:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise JenkinsError(
+                            f"Artifact exceeded the {max_bytes} byte download limit."
+                        )
+                    digest.update(chunk)
+                    fh.write(chunk)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise JenkinsError(
+                "Jenkins returned 404 for the artifact — the file is not at the configured "
+                "path (workspace files are overwritten by newer builds; archiving artifacts "
+                "in the Jenkinsfile is the reliable option).",
+                404,
+            ) from exc
+        raise JenkinsError(f"Artifact download failed (HTTP {exc.code}).", exc.code) from exc
+    except urllib.error.URLError as exc:
+        raise JenkinsError(f"Could not reach Jenkins ({exc.reason}).") from exc
+    except TimeoutError as exc:
+        raise JenkinsError("Artifact download timed out.") from exc
+    return {"size": size, "sha256": digest.hexdigest()}

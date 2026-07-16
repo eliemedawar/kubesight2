@@ -134,6 +134,11 @@ export const PERMISSION_GROUPS = [
       "change_bundles:manage",
     ],
   },
+  {
+    id: "mobileApps",
+    label: "Mobile Applications",
+    keys: ["mobile_apps:view", "mobile_apps:manage"],
+  },
 ];
 
 export const PERMISSION_CATALOG = [
@@ -200,6 +205,8 @@ export const PERMISSION_CATALOG = [
   { key: "change_bundles:create", label: "Create and submit change bundles", dangerous: false },
   { key: "change_bundles:view", label: "View change bundles", dangerous: false },
   { key: "change_bundles:manage", label: "Approve or reject change bundles", dangerous: true },
+  { key: "mobile_apps:view", label: "View mobile applications", dangerous: false },
+  { key: "mobile_apps:manage", label: "Manage mobile applications and store credentials", dangerous: true },
 ];
 
 const BLOCKED_HIGHLIGHT_KEYS = new Set([

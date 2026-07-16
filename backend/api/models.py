@@ -2174,3 +2174,191 @@ class DeployAutomationRun(db.Model):
         onupdate=lambda: datetime.now(timezone.utc),
     )
     finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+
+class MobileApplication(db.Model):
+    """A registered mobile app whose binaries (APK/AAB/IPA) come out of Jenkins.
+
+    The Zoho→Jenkins automation already handles the trigger: the operator adds a
+    custom Environment (e.g. "POS Mobile") whose Jenkins job produces the app
+    binary, and a ticket for that environment runs the job via the existing
+    custom-environment flow. ``zoho_environment`` links this registration to that
+    environment (matched casefolded, like all Zoho picklist values): when such a
+    run's build succeeds, the artifact is pulled from Jenkins into KubeSight's
+    binary store and listed under Mobile Applications.
+
+    Store credentials are per-app and Fernet-encrypted at rest like every other
+    integration secret. Google Play wants the service account's JSON key file;
+    App Store Connect wants an API key (issuer id + key id + .p8 private key).
+    """
+
+    __tablename__ = "mobile_applications"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, default="")
+    description = db.Column(db.Text, nullable=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+
+    # Custom Zoho Environment value whose successful Jenkins build feeds this app.
+    zoho_environment = db.Column(db.String(180), nullable=True)
+
+    # Jenkins job that builds the binaries, folder-style like router_job_path
+    # ("folder/pos-apk" -> /job/folder/job/pos-apk). Used for manual fetches;
+    # ticket-driven runs already carry their own build URL.
+    jenkins_job_path = db.Column(db.String(255), nullable=False, default="")
+    # Per-platform artifact resolution (JSON):
+    #   {"android": {"source": "archive", "pattern": "*.apk"},
+    #    "ios":     {"source": "workspace", "path": "execution/node/71/ws/app.ipa"}}
+    # ``archive`` matches ``pattern`` against the build's archived artifacts
+    # (recommended — survives the next build); ``workspace`` fetches ``path``
+    # relative to the build URL (volatile: the next build overwrites it, which is
+    # why KubeSight downloads the file into its own store immediately).
+    artifact_config = db.Column(db.JSON, nullable=True)
+
+    # --- Android / Google Play ---
+    android_package_name = db.Column(db.String(255), nullable=False, default="")
+    play_service_account_json_encrypted = db.Column(db.Text, nullable=True)
+
+    # --- iOS / App Store Connect ---
+    ios_bundle_id = db.Column(db.String(255), nullable=False, default="")
+    asc_issuer_id = db.Column(db.String(64), nullable=False, default="")
+    asc_key_id = db.Column(db.String(64), nullable=False, default="")
+    asc_private_key_encrypted = db.Column(db.Text, nullable=True)
+    # The numeric App Store Connect app id (resolved from the bundle id on the
+    # first successful credential test; needed for TestFlight/review calls).
+    asc_app_id = db.Column(db.String(64), nullable=False, default="")
+
+    # Last connectivity/credential test outcome, per side (mirrors the
+    # RegistryConnection.last_test_* convention).
+    last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_test_status = db.Column(db.String(16), nullable=True)
+    last_test_message = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class MobileAppBuild(db.Model):
+    """One binary ingested from a Jenkins build for a registered mobile app.
+
+    A DB-persisted download job advanced by the scheduler tick (same pattern as
+    DeployAutomationRun): created ``pending`` when a matching Jenkins build
+    succeeds (or a manual fetch is requested), the tick downloads the artifact
+    into the binary store and flips it ``available``. ``storage_path`` is
+    relative to the mobile artifact dir so the store can be relocated wholesale.
+    """
+
+    __tablename__ = "mobile_app_builds"
+    __table_args__ = (
+        db.Index("ix_mobile_build_app", "app_id"),
+        db.Index("ix_mobile_build_status", "status"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    app_id = db.Column(
+        db.Integer, db.ForeignKey("mobile_applications.id", ondelete="CASCADE"), nullable=False
+    )
+    platform = db.Column(db.String(16), nullable=False, default="android")  # android | ios
+    artifact_type = db.Column(db.String(8), nullable=False, default="apk")  # apk | aab | ipa
+    # Human version label — the Zoho ticket's tag for automation builds.
+    version = db.Column(db.String(200), nullable=True)
+
+    file_name = db.Column(db.String(255), nullable=False, default="")
+    file_size = db.Column(db.BigInteger, nullable=True)
+    sha256 = db.Column(db.String(64), nullable=True)
+    storage_path = db.Column(db.Text, nullable=True)
+
+    jenkins_build_number = db.Column(db.Integer, nullable=True)
+    jenkins_build_url = db.Column(db.Text, nullable=True)
+
+    ticket_record_id = db.Column(
+        db.Integer, db.ForeignKey("zoho_inbound_tickets.id", ondelete="SET NULL"), nullable=True
+    )
+    ticket_number = db.Column(db.String(64), nullable=True)
+    # Originating DeployAutomationRun (plain id, not a FK — runs may be pruned).
+    run_id = db.Column(db.Integer, nullable=True)
+    # ticket (Zoho automation) | manual ("Fetch latest build" button)
+    source = db.Column(db.String(16), nullable=False, default="ticket")
+
+    # pending | downloading | available | failed
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    error = db.Column(db.Text, nullable=True)
+    retry_count = db.Column(db.Integer, nullable=False, default=0)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    downloaded_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class MobileAppPublish(db.Model):
+    """One store-publish job for one ingested build: Google Play (track release)
+    or App Store Connect (TestFlight upload, optionally submitted for review).
+
+    Same tick-advanced state machine pattern as DeployAutomationRun. ``steps``
+    is the pipeline-chip JSON the UI renders ({key, status, detail, at} with
+    status ∈ wait | run | done | fail | skip). ``store_ref`` keeps the store's
+    identifiers (Play edit id / ASC upload + build ids) so a restart mid-upload
+    can resume or at least report precisely where it stopped.
+    """
+
+    __tablename__ = "mobile_app_publishes"
+    __table_args__ = (
+        db.Index("ix_mobile_publish_app", "app_id"),
+        db.Index("ix_mobile_publish_build", "build_id"),
+        db.Index("ix_mobile_publish_status", "status"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    app_id = db.Column(
+        db.Integer, db.ForeignKey("mobile_applications.id", ondelete="CASCADE"), nullable=False
+    )
+    build_id = db.Column(
+        db.Integer, db.ForeignKey("mobile_app_builds.id", ondelete="CASCADE"), nullable=False
+    )
+
+    store = db.Column(db.String(16), nullable=False)  # google_play | app_store
+    # google_play: internal | alpha | beta | production
+    # app_store:   testflight | review (TestFlight upload + submit for App Review)
+    target = db.Column(db.String(32), nullable=False, default="internal")
+
+    # queued | uploading | processing | published | failed
+    status = db.Column(db.String(16), nullable=False, default="queued")
+    steps = db.Column(db.JSON, nullable=True)
+    store_ref = db.Column(db.JSON, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+    retry_count = db.Column(db.Integer, nullable=False, default=0)
+
+    triggered_by = db.Column(db.String(120), nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
