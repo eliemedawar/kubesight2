@@ -524,14 +524,19 @@ const PAGE_TOURS = {
       body: "Jenkins builds land here as APK, AAB, and IPA binaries — pulled from deployment tickets — ready to publish to Google Play and the App Store.",
     },
     {
-      target: ".sg-ma-stats",
-      title: "Fleet at a glance",
-      body: "Registered apps, builds ready to download, work in flight (fetching or publishing), and anything that failed — summarised across every app's latest build.",
+      target: ".sg-ma-flow",
+      title: "The release pipeline",
+      body: "Every binary follows this path: a deployment ticket triggers the Jenkins build, the artifact lands in KubeSight's binary store, and from there it ships to the stores. The counts are live.",
     },
     {
-      target: ".sg-ma-table",
+      target: ".sg-ma-tiles",
+      title: "Tiles are filters",
+      body: "Ready, in flight, or failed — summarised from every app's latest build. Click a tile to filter the cards below to just those apps; click again to clear.",
+    },
+    {
+      target: ".sg-ma-grid",
       title: "Your applications",
-      body: "Each row is a registered app with its platforms, Zoho environment, Jenkins job, and store credentials. Open one to see its builds and publish history.",
+      body: "Each card is a registered app: platforms, Zoho environment, latest build, and whether its store credentials are ready. Open one to see its releases and setup.",
     },
     {
       target: ".page-title-action",
@@ -540,9 +545,9 @@ const PAGE_TOURS = {
       when: (ctx) => ctx.hasPermission("mobile_apps:manage"),
     },
     {
-      target: ".sg-ma-table",
+      target: ".sg-ma-grid",
       title: "Publishing to the stores",
-      body: "Publishing a build to Google Play or the App Store is an administrator-only action — you'll confirm it from inside an app's drawer, per build.",
+      body: "Publishing a build to Google Play or the App Store is an administrator-only action — you'll confirm it from inside an app's drawer, per release.",
       when: (ctx) => ctx.isAdmin,
     },
   ],

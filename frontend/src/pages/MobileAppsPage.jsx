@@ -1,6 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import PageTitle from "../components/common/PageTitle.jsx";
-import StatCard from "../components/common/StatCard.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import ConfirmActionModal from "../components/inventory/ConfirmActionModal.jsx";
@@ -8,9 +7,16 @@ import AppDrawer from "../components/mobileApps/AppDrawer.jsx";
 import {
   ACTIVE_BUILD_STATUSES,
   ACTIVE_PUBLISH_STATUSES,
+  AppAvatar,
   BuildStatusPill,
-  IconSmartphone,
+  IconChevron,
+  IconGear,
+  IconPackage,
+  IconRocket,
+  IconTicketFile,
   PlatformBadge,
+  StoreReadinessRows,
+  timeAgo,
 } from "../components/mobileApps/common.jsx";
 import {
   createMobileApp,
@@ -34,7 +40,19 @@ const PublishDialog = lazy(() => import("../components/mobileApps/PublishDialog.
 
 const POLL_INTERVAL_MS = 8000;
 
+// One operational state per app, derived from its latest build — drives both
+// the KPI tiles (which double as filters) and each card's build strip.
+function appState(app) {
+  const s = app?.latestBuild?.status;
+  if (s === "available") return "ready";
+  if (ACTIVE_BUILD_STATUSES.has(s)) return "inflight";
+  if (s === "failed") return "failed";
+  return "none";
+}
+
 export default function MobileAppsPage({ canManage = false, canPublish = false }) {
+  // Tile filter: "all" | "ready" | "inflight" | "failed".
+  const [filter, setFilter] = useState("all");
   const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -372,23 +390,41 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     let inFlight = 0;
     let failed = 0;
     let enabled = 0;
+    let buildsHeld = 0;
+    let publishes = 0;
+    const envs = new Set();
     apps.forEach((a) => {
       if (a.enabled) enabled += 1;
-      const s = a.latestBuild?.status;
-      if (s === "available") ready += 1;
-      else if (ACTIVE_BUILD_STATUSES.has(s)) inFlight += 1;
+      if (a.zohoEnvironment) envs.add(a.zohoEnvironment.trim().toLowerCase());
+      buildsHeld += a.buildCount || 0;
+      publishes += a.publishCount || 0;
+      const s = appState(a);
+      if (s === "ready") ready += 1;
+      else if (s === "inflight") inFlight += 1;
       else if (s === "failed") failed += 1;
     });
-    return { count: apps.length, enabled, ready, inFlight, failed };
+    return {
+      count: apps.length,
+      enabled,
+      ready,
+      inFlight,
+      failed,
+      envs: envs.size,
+      buildsHeld,
+      publishes,
+    };
   }, [apps]);
 
-  const columns = [
-    "Name",
-    "Platforms",
-    "Zoho environment",
-    "Jenkins job",
-    "Latest build",
-    "Store credentials",
+  const visibleApps = useMemo(
+    () => (filter === "all" ? apps : apps.filter((a) => appState(a) === filter)),
+    [apps, filter]
+  );
+
+  const tiles = [
+    { key: "all", label: "Applications", value: stats.count, detail: `${stats.enabled} enabled` },
+    { key: "ready", label: "Ready", value: stats.ready, tone: "ok", detail: "latest build downloadable" },
+    { key: "inflight", label: "In flight", value: stats.inFlight, tone: "warn", detail: "fetching or publishing" },
+    { key: "failed", label: "Failed", value: stats.failed, tone: "danger", detail: "latest build failed" },
   ];
 
   return (
@@ -410,110 +446,179 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
         </div>
       ) : null}
 
-      <section className="stat-grid sg-ma-stats">
-        <StatCard
-          title="Applications"
-          value={stats.count}
-          detail={`${stats.enabled} enabled`}
-          icon={<IconSmartphone width={20} height={20} />}
-        />
-        <StatCard
-          title="Builds ready"
-          value={stats.ready}
-          detail="latest build downloadable"
-          tone={stats.ready ? "ok" : "default"}
-        />
-        <StatCard
-          title="In flight"
-          value={stats.inFlight}
-          detail="fetching or publishing"
-          tone={stats.inFlight ? "warn" : "default"}
-        />
-        <StatCard
-          title="Failed"
-          value={stats.failed}
-          detail="latest build failed"
-          tone={stats.failed ? "danger" : "default"}
-        />
-      </section>
+      {/* ── Flow strip: the feature drawn as its pipeline ──────────── */}
+      <div className="sg-ma-flow" role="group" aria-label="Release pipeline">
+        <div className="sg-ma-fnode">
+          <span className="sg-ma-fico">
+            <IconTicketFile />
+          </span>
+          <span className="sg-ma-fbody">
+            <span className="sg-ma-fk">Zoho ticket</span>
+            <span className="sg-ma-fv">
+              {stats.envs} environment{stats.envs === 1 ? "" : "s"} <small>linked</small>
+            </span>
+          </span>
+        </div>
+        <span className="sg-ma-flink" aria-hidden="true">
+          <IconChevron />
+        </span>
+        <div className="sg-ma-fnode">
+          <span className={`sg-ma-fico${stats.inFlight ? " sg-ma-fico--hot" : ""}`}>
+            <IconGear />
+          </span>
+          <span className="sg-ma-fbody">
+            <span className="sg-ma-fk">Jenkins build</span>
+            <span className="sg-ma-fv">
+              {stats.inFlight ? (
+                <>
+                  {stats.inFlight} fetching <small>now</small>
+                </>
+              ) : (
+                <>
+                  idle <small>pulls on ticket success</small>
+                </>
+              )}
+            </span>
+          </span>
+        </div>
+        <span className="sg-ma-flink" aria-hidden="true">
+          <IconChevron />
+        </span>
+        <div className="sg-ma-fnode">
+          <span className="sg-ma-fico">
+            <IconPackage />
+          </span>
+          <span className="sg-ma-fbody">
+            <span className="sg-ma-fk">Binary store</span>
+            <span className="sg-ma-fv">
+              {stats.buildsHeld} build{stats.buildsHeld === 1 ? "" : "s"} <small>held</small>
+            </span>
+          </span>
+        </div>
+        <span className="sg-ma-flink" aria-hidden="true">
+          <IconChevron />
+        </span>
+        <div className="sg-ma-fnode">
+          <span className="sg-ma-fico">
+            <IconRocket />
+          </span>
+          <span className="sg-ma-fbody">
+            <span className="sg-ma-fk">Store publish</span>
+            <span className="sg-ma-fv">
+              {stats.publishes} publish{stats.publishes === 1 ? "" : "es"}{" "}
+              <small>Google Play · App Store</small>
+            </span>
+          </span>
+        </div>
+      </div>
 
+      {/* ── KPI tiles double as filters ────────────────────────────── */}
+      <div className="sg-ma-tiles" role="group" aria-label="Filter applications">
+        {tiles.map((t) => {
+          const pressed = filter === t.key;
+          return (
+            <button
+              key={t.key}
+              type="button"
+              className="sg-kpi sg-ma-tile"
+              aria-pressed={pressed}
+              onClick={() => setFilter(t.key === "all" || pressed ? "all" : t.key)}
+              title={
+                t.key === "all"
+                  ? "Show all applications"
+                  : pressed
+                    ? "Clear filter"
+                    : `Show only ${t.label.toLowerCase()} applications`
+              }
+            >
+              <p className="sg-kpi-label">{t.label}</p>
+              <span className="sg-ma-tile-value">
+                {t.value}
+                {t.tone && t.value > 0 ? (
+                  <span className={`sg-ma-tile-dot sg-ma-tile-dot--${t.tone}`} aria-hidden="true" />
+                ) : null}
+              </span>
+              <span className="sg-ma-tile-detail">{t.detail}</span>
+              {t.key !== "all" ? (
+                <span className="sg-ma-tile-flag" aria-hidden="true">
+                  filtering
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── App identity cards ─────────────────────────────────────── */}
       {loading ? (
         <p className="muted">Loading applications…</p>
       ) : apps.length ? (
-        <div className="table-shell sg-ma-table-shell" role="region" aria-label="Mobile applications" tabIndex={0}>
-          <table className="sg-ma-table">
-            <thead>
-              <tr>
-                {columns.map((c) => (
-                  <th key={c}>{c}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {apps.map((app) => (
-                <tr
-                  key={app.id}
-                  className="data-table-row--clickable"
-                  onClick={() => openApp(app)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      openApp(app);
-                    }
-                  }}
-                  tabIndex={0}
-                  role="button"
-                >
-                  <td>
-                    <div className="sg-ma-cell-name">
-                      <b>{app.name}</b>
-                      {app.description ? (
-                        <span className="sg-ma-cell-desc">{app.description}</span>
-                      ) : null}
-                    </div>
-                  </td>
-                  <td>
-                    <span className="sg-ma-plats">
-                      {(app.platforms || []).length ? (
-                        app.platforms.map((p) => <PlatformBadge key={p} platform={p} />)
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
+        visibleApps.length ? (
+          <div className="sg-ma-grid">
+            {visibleApps.map((app) => (
+              <button
+                key={app.id}
+                type="button"
+                className={`sg-ma-card${app.enabled ? "" : " sg-ma-card--dim"}`}
+                onClick={() => openApp(app)}
+                aria-haspopup="dialog"
+              >
+                <span className="sg-ma-card-top">
+                  <AppAvatar name={app.name} enabled={app.enabled} />
+                  <span className="sg-ma-card-id">
+                    <span className="sg-ma-card-name">
+                      {app.name}
+                      <span
+                        className={`sg-ma-endot${app.enabled ? "" : " sg-ma-endot--off"}`}
+                        title={app.enabled ? "Enabled" : "Disabled"}
+                      />
                     </span>
-                  </td>
-                  <td>
-                    {app.zohoEnvironment ? (
-                      <span className="sg-tag">{app.zohoEnvironment}</span>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td className="mono sg-ma-wrap">{app.jenkinsJobPath || "—"}</td>
-                  <td>
-                    {app.latestBuild ? (
-                      <span className="sg-ma-latest">
-                        <span className="mono">{app.latestBuild.version || "—"}</span>
-                        <BuildStatusPill status={app.latestBuild.status} />
+                    {app.description ? (
+                      <span className="sg-ma-card-desc">{app.description}</span>
+                    ) : null}
+                  </span>
+                </span>
+                <span className="sg-ma-card-chips">
+                  {(app.platforms || []).map((p) => (
+                    <PlatformBadge key={p} platform={p} />
+                  ))}
+                  {app.zohoEnvironment ? <span className="sg-tag">{app.zohoEnvironment}</span> : null}
+                  {!app.enabled ? <span className="sg-tag">Disabled</span> : null}
+                </span>
+                <span className="sg-ma-card-build">
+                  {app.latestBuild ? (
+                    <>
+                      <span className="sg-ma-card-ver">{app.latestBuild.version || "—"}</span>
+                      <BuildStatusPill status={app.latestBuild.status} />
+                      <span className="sg-ma-card-when">
+                        {timeAgo(app.latestBuild.createdAt)}
+                        {app.latestBuild.ticketNumber ? ` · ${app.latestBuild.ticketNumber}` : ""}
                       </span>
-                    ) : (
-                      <span className="muted">No builds</span>
-                    )}
-                  </td>
-                  <td>
-                    <span className="sg-ma-creds">
-                      <span className={`status-pill ${app.playServiceAccountConfigured ? "ok" : "muted"}`}>
-                        Play
-                      </span>
-                      <span className={`status-pill ${app.ascPrivateKeyConfigured ? "ok" : "muted"}`}>
-                        ASC
-                      </span>
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                    </>
+                  ) : (
+                    <span className="muted">No builds yet</span>
+                  )}
+                </span>
+                <StoreReadinessRows app={app} />
+                <span className="sg-ma-card-foot">
+                  {app.jenkinsJobPath ? (
+                    <span className="sg-ma-count sg-ma-card-job">{app.jenkinsJobPath}</span>
+                  ) : (
+                    <span className="sg-ma-count">No Jenkins job</span>
+                  )}
+                  <span className="sg-ma-card-open">Open ›</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="muted sg-ma-filter-empty">
+            No applications match this filter.{" "}
+            <button type="button" className="link-button" onClick={() => setFilter("all")}>
+              Show all
+            </button>
+          </p>
+        )
       ) : (
         <EmptyState
           variant="applications"

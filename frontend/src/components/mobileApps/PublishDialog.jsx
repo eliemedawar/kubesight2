@@ -1,5 +1,7 @@
 import { useState } from "react";
 import {
+  AppAvatar,
+  formatBytes,
   IconClose,
   PlatformBadge,
   PUBLISH_TARGETS,
@@ -44,18 +46,25 @@ export default function PublishDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <header className="modal-header">
-          <div>
-            <h3>Publish to {storeInfo?.label || "store"}</h3>
-            <p className="sg-ma-publish-sub">
-              <PlatformBadge platform={build.platform} />
-              <span className="sg-tag">{(build.artifactType || "").toUpperCase()}</span>
-              <span className="mono">{build.version || build.fileName}</span>
-            </p>
-          </div>
+          <h3>Publish to {storeInfo?.label || "store"}</h3>
           <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
             <IconClose />
           </button>
         </header>
+
+        {/* What exactly is being shipped — never implicit. */}
+        <div className="sg-ma-bin">
+          <AppAvatar name={app?.name} enabled size="sm" />
+          <PlatformBadge platform={build.platform} />
+          <span className="sg-ma-bin-ver mono">{build.version || build.fileName || "—"}</span>
+          <span className="sg-tag">
+            {(build.artifactType || "").toUpperCase()}
+            {build.fileSize ? ` · ${formatBytes(build.fileSize)}` : ""}
+          </span>
+          {build.ticketNumber ? (
+            <span className="sg-ma-bin-from">from ticket {build.ticketNumber}</span>
+          ) : null}
+        </div>
 
         <form onSubmit={submit}>
           <fieldset className="sg-ma-targets">

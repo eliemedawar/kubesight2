@@ -70,7 +70,11 @@ class MobileAppError(Exception):
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
-    return dt.isoformat() if dt else None
+    # Column values are naive UTC — mark them as such, or browsers parse the
+    # bare ISO string as local time and every relative timestamp drifts.
+    if not dt:
+        return None
+    return dt.isoformat() if dt.tzinfo else f"{dt.isoformat()}Z"
 
 
 def _aware(dt: Optional[datetime]) -> Optional[datetime]:
@@ -212,6 +216,7 @@ def serialize_app(app: MobileApplication, *, with_stats: bool = False) -> Dict[s
             .first()
         )
         data["buildCount"] = MobileAppBuild.query.filter_by(app_id=app.id).count()
+        data["publishCount"] = MobileAppPublish.query.filter_by(app_id=app.id).count()
         data["latestBuild"] = serialize_build(latest) if latest else None
     return data
 

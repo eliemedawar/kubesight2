@@ -62,6 +62,47 @@ export const IconRocket = (props) => (
   </svg>
 );
 
+export const IconTicketFile = (props) => (
+  <svg {...base} {...props}>
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <path d="M14 2v6h6" />
+  </svg>
+);
+
+export const IconGear = (props) => (
+  <svg {...base} {...props}>
+    <circle cx="12" cy="12" r="3" />
+    <path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8" />
+  </svg>
+);
+
+export const IconPackage = (props) => (
+  <svg {...base} {...props}>
+    <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+    <path d="m3.3 7 8.7 5 8.7-5" />
+    <path d="M12 22V12" />
+  </svg>
+);
+
+export const IconChevron = (props) => (
+  <svg {...base} {...props}>
+    <path d="m9 18 6-6-6-6" />
+  </svg>
+);
+
+export const IconPlayStore = (props) => (
+  <svg {...base} {...props}>
+    <path d="m5 3 14 9-14 9z" />
+  </svg>
+);
+
+export const IconAppStore = (props) => (
+  <svg {...base} {...props}>
+    <path d="M12 20.94c1.5 0 2.75 1.06 4 1.06 3 0 6-8 6-12.22A4.91 4.91 0 0 0 17 5c-2.22 0-4 1.44-5 2-1-.56-2.78-2-5-2a4.9 4.9 0 0 0-5 4.78C2 14 5 22 8 22c1.25 0 2.5-1.06 4-1.06Z" />
+    <path d="M10 2c1 .5 2 2.5 2 5" />
+  </svg>
+);
+
 // ── Formatters ───────────────────────────────────────────────────────
 export function formatBytes(bytes) {
   const n = Number(bytes);
@@ -97,6 +138,82 @@ export const PLATFORM_LABEL = { android: "Android", ios: "iOS" };
 export function PlatformBadge({ platform }) {
   const label = PLATFORM_LABEL[platform] || platform || "—";
   return <span className={`sg-ma-plat sg-ma-plat--${platform || "unknown"}`}>{label}</span>;
+}
+
+// ── App identity avatar ──────────────────────────────────────────────
+// Up to two initials from the first words of the name ("POS Terminal" → "PT"),
+// on a tone picked deterministically from the name so an app keeps its colour.
+const AVATAR_TONES = ["red", "blue", "green", "amber"];
+
+export function appInitials(name) {
+  const words = String(name || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return "?";
+  if (words.length === 1) return words[0].slice(0, 2);
+  return (words[0][0] + words[1][0]).slice(0, 2);
+}
+
+export function AppAvatar({ name, enabled = true, size }) {
+  let hash = 0;
+  const str = String(name || "");
+  for (let i = 0; i < str.length; i += 1) hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  const tone = enabled ? AVATAR_TONES[hash % AVATAR_TONES.length] : "grey";
+  return (
+    <span
+      className={`sg-ma-avatar sg-ma-avatar--${tone}${size === "sm" ? " sg-ma-avatar--sm" : ""}`}
+      aria-hidden="true"
+    >
+      {appInitials(name)}
+    </span>
+  );
+}
+
+// ── Store readiness (plain-language, three states) ───────────────────
+// ready    → platform shipped and the publish credential is stored
+// missing  → platform shipped but the credential is absent
+// off      → the app does not ship on that platform ("Not shipped")
+export function storeReadiness(app) {
+  const platforms = app?.platforms || [];
+  return [
+    {
+      key: "google_play",
+      label: "Google Play",
+      Icon: IconPlayStore,
+      state: platforms.includes("android")
+        ? app?.playServiceAccountConfigured
+          ? "ready"
+          : "missing"
+        : "off",
+    },
+    {
+      key: "app_store",
+      label: "App Store",
+      Icon: IconAppStore,
+      state: platforms.includes("ios")
+        ? app?.ascPrivateKeyConfigured
+          ? "ready"
+          : "missing"
+        : "off",
+    },
+  ];
+}
+
+const READINESS_TEXT = { ready: "✓ Ready", missing: "Key missing", off: "Not shipped" };
+
+export function StoreReadinessRows({ app }) {
+  return (
+    <span className="sg-ma-stores">
+      {storeReadiness(app).map(({ key, label, Icon, state }) => (
+        <span key={key} className="sg-ma-store">
+          <Icon width={13} height={13} />
+          <b>{label}</b>
+          <span className={`sg-ma-store-st sg-ma-store-st--${state}`}>{READINESS_TEXT[state]}</span>
+        </span>
+      ))}
+    </span>
+  );
 }
 
 // ── Build status ─────────────────────────────────────────────────────
