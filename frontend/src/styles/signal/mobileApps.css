@@ -37,6 +37,21 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Stripped-signature warning on a build (shielding removes the signature —
+   the binary cannot be published until it is re-signed). */
+.sg-ma-unsigned {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.55rem;
+  border-radius: var(--radius-full);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  color: var(--warn);
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .sg-ma-jobchip,
 .sg-ma-card-job {
   font-family: var(--font-mono);
@@ -491,6 +506,7 @@
 .sg-ma-jlink svg { flex: none; }
 .sg-ma-rel-acts { display: flex; align-items: center; gap: 0.35rem; flex: none; }
 .sg-ma-pubbtn { font-size: 0.72rem; padding: 0.3rem 0.7rem; white-space: nowrap; }
+.sg-ma-resignbtn { font-size: 0.72rem; padding: 0.3rem 0.7rem; white-space: nowrap; }
 .sg-ma-danger-icon { color: var(--text-muted); }
 .sg-ma-danger-icon:hover { color: var(--danger); background: var(--danger-soft); }
 

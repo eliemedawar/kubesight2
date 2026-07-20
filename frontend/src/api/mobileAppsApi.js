@@ -70,6 +70,15 @@ export async function uploadMobileBuild(id, { file, platform, version } = {}) {
 export const deleteMobileBuild = (buildId) =>
   request(`/api/mobile-apps/builds/${encodeURIComponent(buildId)}`, { method: "DELETE" });
 
+// ── Re-signing ───────────────────────────────────────────────────────
+// Shielding strips the signature; this hands the binary to a signing job that
+// holds the key and registers the signed result as a new build.
+export const listMobileAppResigns = (id) =>
+  request(`/api/mobile-apps/${encodeURIComponent(id)}/resigns`);
+
+export const resignMobileBuild = (buildId) =>
+  request(`/api/mobile-apps/builds/${encodeURIComponent(buildId)}/resign`, { method: "POST" });
+
 // ── Publishes (ADMIN only for the POST) ──────────────────────────────
 export const listMobileAppPublishes = (id) =>
   request(`/api/mobile-apps/${encodeURIComponent(id)}/publishes`);

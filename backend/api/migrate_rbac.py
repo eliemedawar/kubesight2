@@ -607,7 +607,17 @@ def _migrate_mobile_app_columns() -> None:
     tables = inspect(db.engine).get_table_names()
     if "mobile_applications" not in tables:
         return
-    # No post-creation columns yet.
+    if "mobile_app_builds" in tables:
+        # Signature probe at ingest, gating publish on shielded binaries
+        # (2026-07-20). Existing rows default to "unknown" so they stay
+        # publishable — backfilling would mean re-reading every stored binary.
+        _add_column_if_missing(
+            "mobile_app_builds", "signature_state", "VARCHAR(16) DEFAULT 'unknown'"
+        )
+        # Signed output linked back to the shielded build it came from.
+        _add_column_if_missing("mobile_app_builds", "parent_build_id", "INTEGER")
+    # Per-platform re-signing setup (2026-07-20).
+    _add_column_if_missing("mobile_applications", "resign_config", "JSON")
 
 
 def run_migrations() -> None:

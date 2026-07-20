@@ -7,6 +7,7 @@ import AppDrawer from "../components/mobileApps/AppDrawer.jsx";
 import {
   ACTIVE_BUILD_STATUSES,
   ACTIVE_PUBLISH_STATUSES,
+  ACTIVE_RESIGN_STATUSES,
   AppAvatar,
   BuildStatusPill,
   IconChevron,
@@ -27,8 +28,10 @@ import {
   listMobileAppBuilds,
   listMobileAppEnvironments,
   listMobileAppPublishes,
+  listMobileAppResigns,
   listMobileApps,
   publishMobileBuild,
+  resignMobileBuild,
   testMobileAppAppStore,
   testMobileAppJenkins,
   testMobileAppPlay,
@@ -64,6 +67,8 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
   const [selectedAppId, setSelectedAppId] = useState(null);
   const [builds, setBuilds] = useState([]);
   const [publishes, setPublishes] = useState([]);
+  const [resigns, setResigns] = useState([]);
+  const [resigningBuildId, setResigningBuildId] = useState(null);
   const [drawerLoading, setDrawerLoading] = useState(false);
 
   // Per-action busy flags.
@@ -135,12 +140,14 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     if (!appId) return;
     setDrawerLoading(true);
     try {
-      const [b, p] = await Promise.all([
+      const [b, p, r] = await Promise.all([
         listMobileAppBuilds(appId).catch(() => ({ items: [] })),
         listMobileAppPublishes(appId).catch(() => ({ items: [] })),
+        listMobileAppResigns(appId).catch(() => ({ items: [] })),
       ]);
       setBuilds(b?.items || []);
       setPublishes(p?.items || []);
+      setResigns(r?.items || []);
     } finally {
       setDrawerLoading(false);
     }
@@ -150,6 +157,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     setSelectedAppId(app.id);
     setBuilds([]);
     setPublishes([]);
+    setResigns([]);
     loadDrawerData(app.id);
   };
 
@@ -157,6 +165,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     setSelectedAppId(null);
     setBuilds([]);
     setPublishes([]);
+    setResigns([]);
   };
 
   // Poll while the open app has a build fetching/downloading or a publish in
@@ -165,19 +174,22 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
   const hasActiveWork =
     Boolean(selectedAppId) &&
     (builds.some((b) => ACTIVE_BUILD_STATUSES.has(b.status)) ||
-      publishes.some((p) => ACTIVE_PUBLISH_STATUSES.has(p.status)));
+      publishes.some((p) => ACTIVE_PUBLISH_STATUSES.has(p.status)) ||
+      resigns.some((r) => ACTIVE_RESIGN_STATUSES.has(r.status)));
 
   useEffect(() => {
     if (!hasActiveWork) return undefined;
     const timer = setInterval(async () => {
       try {
-        const [b, p, listRes] = await Promise.all([
+        const [b, p, r, listRes] = await Promise.all([
           listMobileAppBuilds(selectedAppId),
           listMobileAppPublishes(selectedAppId),
+          listMobileAppResigns(selectedAppId),
           listMobileApps(),
         ]);
         setBuilds(b?.items || []);
         setPublishes(p?.items || []);
+        setResigns(r?.items || []);
         setApps(listRes?.items || []);
       } catch {
         /* transient — the next tick retries */
@@ -373,6 +385,27 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
       setError(err.message || "Failed to download the build.");
     } finally {
       setDownloadingBuildId(null);
+    }
+  };
+
+  // Queue a signing job for a build whose signature shielding stripped. The
+  // job itself reports progress through the resign rows the poll picks up, so
+  // this only has to get it started.
+  const runResign = async (build) => {
+    setResigningBuildId(build.id);
+    setError("");
+    setNotice("");
+    try {
+      await resignMobileBuild(build.id);
+      setNotice(
+        `Signing ${build.version || build.fileName || `build #${build.id}`}… ` +
+          "the signed binary appears here when the job finishes."
+      );
+      loadDrawerData(selectedAppId);
+    } catch (err) {
+      setError(err.message || "Failed to start the signing job.");
+    } finally {
+      setResigningBuildId(null);
     }
   };
 
@@ -664,6 +697,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
           onClose={closeDrawer}
           builds={builds}
           publishes={publishes}
+          resigns={resigns}
           loading={drawerLoading}
           onFetch={runFetch}
           fetching={fetching}
@@ -683,6 +717,8 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
             setPublishError("");
             setPublishBuild(build);
           }}
+          onResignBuild={runResign}
+          resigningBuildId={resigningBuildId}
         />
       ) : null}
 

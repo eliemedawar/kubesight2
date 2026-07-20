@@ -32,6 +32,9 @@ def jwt_expiry_hours() -> int:
 PURPOSE_ACCESS = "access"
 PURPOSE_ONBOARDING = "onboarding"
 PURPOSE_MFA = "mfa"
+# Handed to an external signing job so it can fetch exactly one build and post
+# back exactly one result. Carries no user identity and unlocks nothing else.
+PURPOSE_RESIGN = "resign"
 
 # Interim tokens (onboarding, pending-MFA) are intentionally short-lived — they
 # only need to survive a single multi-step setup / challenge.
@@ -68,6 +71,39 @@ def create_interim_token(user: User, purpose: str) -> str:
             "exp": now + timedelta(minutes=_INTERIM_TOKEN_MINUTES),
         }
     )
+
+
+def create_resign_token(resign_id: int, build_id: int, minutes: int) -> str:
+    """Mint a token for one signing job, scoped to one build and one result.
+
+    Deliberately not tied to a user: the signer is a machine, and binding this
+    to the operator who clicked "Re-sign" would hand a pod something that
+    outlives the job and carries their permissions. ``sub`` names the run so
+    audit lines read sensibly.
+    """
+    now = datetime.now(timezone.utc)
+    return _encode_token(
+        {
+            "sub": f"resign:{int(resign_id)}",
+            "purpose": PURPOSE_RESIGN,
+            "resignId": int(resign_id),
+            "buildId": int(build_id),
+            "iat": now,
+            "exp": now + timedelta(minutes=max(1, int(minutes))),
+        }
+    )
+
+
+def resign_token_claims(token: str) -> Optional[Dict[str, Any]]:
+    """Validated claims of a resign-purpose token, or None.
+
+    Rejects every other token type, so a normal access token cannot be used to
+    post a signing result and a resign token cannot reach anything else.
+    """
+    payload = decode_access_token(token)
+    if not payload or payload.get("purpose") != PURPOSE_RESIGN:
+        return None
+    return payload
 
 
 def decode_access_token(token: str) -> Optional[Dict[str, Any]]:

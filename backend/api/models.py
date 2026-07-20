@@ -2206,6 +2206,18 @@ class MobileApplication(db.Model):
     # ("folder/pos-apk" -> /job/folder/job/pos-apk). Used for manual fetches;
     # ticket-driven runs already carry their own build URL.
     jenkins_job_path = db.Column(db.String(255), nullable=False, default="")
+    # Per-platform re-signing setup (JSON). Shielding strips the signature, so
+    # the shielded binary has to be signed again before any store will take it.
+    # Signing runs outside KubeSight — the tooling and the private key live
+    # elsewhere — and ``executor`` picks how it is driven:
+    #   {"android": {"executor": "k8s_job", "cluster": "prod", "namespace": "kubesight",
+    #                "image": "registry/android-signer:1", "keystoreSecret": "upload-keystore",
+    #                "keystoreKey": "upload.jks", "keyAlias": "upload",
+    #                "storePassKey": "store-password", "keyPassKey": "key-password"}}
+    # Keystore material is referenced, never stored here: the Job mounts the
+    # named Kubernetes Secret, so the key never enters KubeSight's database.
+    resign_config = db.Column(db.JSON, nullable=True)
+
     # Per-platform artifact resolution (JSON):
     #   {"android": {"source": "archive", "pattern": "*.apk"},
     #    "ios":     {"source": "workspace", "path": "execution/node/71/ws/app.ipa"}}
@@ -2277,6 +2289,13 @@ class MobileAppBuild(db.Model):
     sha256 = db.Column(db.String(64), nullable=True)
     storage_path = db.Column(db.Text, nullable=True)
 
+    # Does the stored binary still carry a code signature? Shielding (SafeCore)
+    # strips it, so a shielded upload arrives "unsigned" and must be re-signed
+    # before any store will take it — publish refuses those outright. "unknown"
+    # means the probe could not read the archive and never blocks a publish.
+    # signed | unsigned | unknown  (see services/binary_signature.py)
+    signature_state = db.Column(db.String(16), nullable=False, default="unknown")
+
     jenkins_build_number = db.Column(db.Integer, nullable=True)
     jenkins_build_url = db.Column(db.Text, nullable=True)
 
@@ -2287,7 +2306,15 @@ class MobileAppBuild(db.Model):
     # Originating DeployAutomationRun (plain id, not a FK — runs may be pruned).
     run_id = db.Column(db.Integer, nullable=True)
     # ticket (Zoho automation) | manual ("Fetch latest build" button)
+    # | upload (operator-supplied binary) | resign (output of a signing job)
     source = db.Column(db.String(16), nullable=False, default="ticket")
+
+    # For source="resign": the build this one was produced from. Keeps the
+    # shielded original and its signed output together in the releases timeline
+    # instead of leaving the signed binary as an orphan.
+    parent_build_id = db.Column(
+        db.Integer, db.ForeignKey("mobile_app_builds.id", ondelete="SET NULL"), nullable=True
+    )
 
     # pending | downloading | available | failed
     status = db.Column(db.String(16), nullable=False, default="pending")
@@ -2307,6 +2334,72 @@ class MobileAppBuild(db.Model):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class MobileAppResign(db.Model):
+    """One re-signing job: take a signature-stripped build, hand it to a signer
+    that holds the key, and register the signed result as a new build.
+
+    Shielding (SafeCore) strips the code signature, so the shielded binary is
+    unpublishable until it is signed again. The signing itself cannot run inside
+    KubeSight — Android needs the upload keystore, iOS needs macOS and a
+    keychain — so this is an orchestration record: it tracks the external job,
+    then ingests what comes back.
+
+    Same tick-advanced state machine as MobileAppPublish, and ``steps`` is the
+    same pipeline-chip JSON the drawer already renders.
+    """
+
+    __tablename__ = "mobile_app_resigns"
+    __table_args__ = (
+        db.Index("ix_mobile_resign_app", "app_id"),
+        db.Index("ix_mobile_resign_build", "build_id"),
+        db.Index("ix_mobile_resign_status", "status"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    app_id = db.Column(
+        db.Integer, db.ForeignKey("mobile_applications.id", ondelete="CASCADE"), nullable=False
+    )
+    # The unsigned source build.
+    build_id = db.Column(
+        db.Integer, db.ForeignKey("mobile_app_builds.id", ondelete="CASCADE"), nullable=False
+    )
+    # The signed build this produced, once the result has been ingested.
+    result_build_id = db.Column(
+        db.Integer, db.ForeignKey("mobile_app_builds.id", ondelete="SET NULL"), nullable=True
+    )
+
+    platform = db.Column(db.String(16), nullable=False, default="android")
+    # How the signing was driven: k8s_job | jenkins | ssh
+    executor = db.Column(db.String(16), nullable=False, default="k8s_job")
+
+    # queued | running | completed | failed
+    status = db.Column(db.String(16), nullable=False, default="queued")
+    steps = db.Column(db.JSON, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+
+    # Executor handle for diagnosis — the Job name/namespace, or a build URL.
+    job_ref = db.Column(db.JSON, nullable=True)
+    # sha256 of the token handed to the signer, so a leaked token can be traced
+    # back to the run that issued it. Never the token itself.
+    token_hash = db.Column(db.String(64), nullable=True)
+
+    triggered_by = db.Column(db.String(120), nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
 
 class MobileAppPublish(db.Model):

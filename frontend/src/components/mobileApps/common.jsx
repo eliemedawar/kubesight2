@@ -264,11 +264,13 @@ const STEP_CHIP_CLASS = {
   skip: "sg-ma-step--skip",
 };
 
-export function PublishSteps({ steps }) {
+// Renders a fixed pipeline of chips against whatever the backend reported, so
+// the shape of the pipeline stays visible before any step has run.
+function StepChips({ steps, defs }) {
   const byKey = new Map((steps || []).map((s) => [s.key, s]));
   return (
     <div className="sg-ma-steps">
-      {PUBLISH_STEPS.map((step) => {
+      {defs.map((step) => {
         const state = byKey.get(step.key) || { status: "wait" };
         return (
           <span
@@ -283,6 +285,37 @@ export function PublishSteps({ steps }) {
       })}
     </div>
   );
+}
+
+export function PublishSteps({ steps }) {
+  return <StepChips steps={steps} defs={PUBLISH_STEPS} />;
+}
+
+// ── Re-signing ───────────────────────────────────────────────────────
+const RESIGN_STATUS_PILL = {
+  queued: ["info", "Queued"],
+  running: ["info", "Signing"],
+  completed: ["ok", "Signed"],
+  failed: ["danger", "Failed"],
+};
+
+export const ACTIVE_RESIGN_STATUSES = new Set(["queued", "running"]);
+
+export function ResignStatusPill({ status }) {
+  const [tone, label] = RESIGN_STATUS_PILL[status] || ["muted", status || "—"];
+  return <span className={`status-pill ${tone}`}>{label}</span>;
+}
+
+const RESIGN_STEPS = [
+  { key: "prepare", label: "Prepare" },
+  { key: "launch", label: "Launch" },
+  { key: "sign", label: "Sign" },
+  { key: "collect", label: "Collect" },
+  { key: "verify", label: "Verify" },
+];
+
+export function ResignSteps({ steps }) {
+  return <StepChips steps={steps} defs={RESIGN_STEPS} />;
 }
 
 // ── Stores + publish targets ─────────────────────────────────────────

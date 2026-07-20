@@ -333,6 +333,76 @@ def test_upload_build_rejects_wrong_extension(client, admin_token, artifact_dir)
     assert ".apk or .aab" in resp.get_json()["error"]
 
 
+def _aab_bytes(signed: bool) -> bytes:
+    """A minimal .aab, with or without its JAR signature block."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    names = ["base/manifest/AndroidManifest.xml", "META-INF/MANIFEST.MF"]
+    if signed:
+        names.append("META-INF/UPLOAD.RSA")
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in names:
+            zf.writestr(name, b"payload")
+    return buf.getvalue()
+
+
+def test_upload_flags_stripped_binary_as_unsigned(client, admin_token, artifact_dir):
+    """A SafeCore-shielded upload arrives without a signature and must be
+    flagged, so the UI offers a re-sign instead of a doomed publish."""
+    created = _create_app(client, admin_token)
+    resp = _upload(client, admin_token, created["id"], payload=_aab_bytes(signed=False))
+    assert resp.status_code == 201, resp.get_json()
+    assert resp.get_json()["data"]["signatureState"] == "unsigned"
+
+
+def test_upload_flags_signed_binary_as_signed(client, admin_token, artifact_dir):
+    created = _create_app(client, admin_token)
+    resp = _upload(client, admin_token, created["id"], payload=_aab_bytes(signed=True))
+    assert resp.status_code == 201, resp.get_json()
+    assert resp.get_json()["data"]["signatureState"] == "signed"
+
+
+def test_publish_rejects_unsigned_build(app, client, admin_token, artifact_dir):
+    """The gate: a stripped binary cannot reach a store track."""
+    created = _create_app(client, admin_token)
+    build = _upload(
+        client, admin_token, created["id"], payload=_aab_bytes(signed=False)
+    ).get_json()["data"]
+
+    resp = client.post(
+        f"/api/mobile-apps/builds/{build['id']}/publish",
+        json={"store": "google_play", "target": "internal"},
+        headers=auth_headers(admin_token),
+    )
+    assert resp.status_code == 409
+    assert "unsigned" in resp.get_json()["error"].lower()
+    with app.app_context():
+        assert MobileAppPublish.query.filter_by(build_id=build["id"]).count() == 0
+
+
+def test_publish_allows_unknown_signature_state(app, client, admin_token, artifact_dir, monkeypatch):
+    """An unreadable probe must not strand a build — only a definite "unsigned"
+    blocks. Covers binaries ingested before the probe existed."""
+    created = _create_app(client, admin_token)
+    build = _upload(client, admin_token, created["id"], payload=b"not-a-zip").get_json()["data"]
+    assert build["signatureState"] == "unknown"
+
+    monkeypatch.setattr(google_play_client, "access_token", lambda cfg: "tok")
+    monkeypatch.setattr(google_play_client, "create_edit", lambda cfg, tok: "edit-1")
+    monkeypatch.setattr(google_play_client, "upload_binary", lambda *a: 7)
+    monkeypatch.setattr(google_play_client, "assign_track", lambda *a: None)
+    monkeypatch.setattr(google_play_client, "commit_edit", lambda *a: None)
+
+    resp = client.post(
+        f"/api/mobile-apps/builds/{build['id']}/publish",
+        json={"store": "google_play", "target": "internal"},
+        headers=auth_headers(admin_token),
+    )
+    assert resp.status_code == 202, resp.get_json()
+
+
 def test_upload_build_requires_manage(client, admin_token, operator_token, artifact_dir):
     created = _create_app(client, admin_token)
     # Operator holds mobile_apps:view only, not manage.

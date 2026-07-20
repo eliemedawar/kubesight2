@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   ACTIVE_PUBLISH_STATUSES,
+  ACTIVE_RESIGN_STATUSES,
   AppAvatar,
   BuildStatusPill,
   formatBytes,
@@ -12,6 +13,8 @@ import {
   PlatformBadge,
   PublishStatusPill,
   PublishSteps,
+  ResignStatusPill,
+  ResignSteps,
   storeReadiness,
   storeTargetLabel,
   TestStatusPill,
@@ -49,20 +52,53 @@ function PublishEntry({ publish }) {
   );
 }
 
+// One signing attempt, nested under the build it was signing. Same treatment
+// as a publish: chips only while it matters.
+function ResignEntry({ resign }) {
+  const active = ACTIVE_RESIGN_STATUSES.has(resign.status);
+  const failed = resign.status === "failed";
+  const tone = resign.status === "completed" ? "ok" : failed ? "fail" : active ? "run" : "wait";
+  return (
+    <li className={`sg-ma-rpub sg-ma-rpub--${tone}`}>
+      <div className="sg-ma-rpub-line">
+        <b>Re-sign</b>
+        <ResignStatusPill status={resign.status} />
+        {resign.triggeredBy ? <span className="sg-ma-rpub-who">by {resign.triggeredBy}</span> : null}
+        <span className="sg-ma-rpub-when">{timeAgo(resign.finishedAt || resign.createdAt)}</span>
+      </div>
+      {active || failed ? <ResignSteps steps={resign.steps} /> : null}
+      {failed && resign.error ? <p className="sg-ma-inline-error">{resign.error}</p> : null}
+    </li>
+  );
+}
+
 // A build and everything that happened to it: metadata, artifact actions,
 // and its publish attempts nested underneath.
 function ReleaseCard({
   build,
   publishes = [],
+  resigns = [],
   canManage,
   canPublish,
+  canResign,
   onDownload,
   downloading,
   onDeleteBuild,
   deleting,
   onPublishBuild,
+  onResignBuild,
+  resigning,
 }) {
   const available = build.status === "available";
+  // Shielding strips the code signature, so a shielded binary can never be
+  // published as-is — the backend refuses it too. Surface that on the card
+  // rather than letting the operator find out from a failed publish.
+  const unsigned = build.signatureState === "unsigned";
+  // Only offer signing where KubeSight can actually do it, and not while a job
+  // for this build is already in flight.
+  const signingInFlight = resigns.some((r) => ACTIVE_RESIGN_STATUSES.has(r.status));
+  const showResign =
+    canResign && available && unsigned && build.platform === "android" && !signingInFlight;
   return (
     <li className="sg-ma-rel">
       <div className="sg-ma-rel-build">
@@ -74,6 +110,14 @@ function ReleaseCard({
             <BuildStatusPill status={build.status} />
             {build.source === "manual" ? <span className="sg-ma-count">manual</span> : null}
             {build.source === "upload" ? <span className="sg-ma-count">uploaded</span> : null}
+            {unsigned ? (
+              <span
+                className="sg-ma-unsigned"
+                title="This binary has no code signature — shielding strips it. Re-sign before publishing."
+              >
+                Unsigned
+              </span>
+            ) : null}
           </div>
           <div className="sg-ma-rel-meta">
             {build.fileName ? (
@@ -135,8 +179,29 @@ function ReleaseCard({
               <IconDownload />
             </button>
           ) : null}
+          {showResign ? (
+            <button
+              type="button"
+              className="secondary sg-ma-resignbtn"
+              onClick={() => onResignBuild(build)}
+              disabled={resigning}
+              title="Sign this binary with the upload key"
+            >
+              {resigning ? "Starting…" : "Re-sign"}
+            </button>
+          ) : null}
           {canPublish && available ? (
-            <button type="button" className="btn-outline sg-ma-pubbtn" onClick={() => onPublishBuild(build)}>
+            <button
+              type="button"
+              className="btn-outline sg-ma-pubbtn"
+              onClick={() => onPublishBuild(build)}
+              disabled={unsigned}
+              title={
+                unsigned
+                  ? "Unsigned binary — re-sign it before publishing"
+                  : undefined
+              }
+            >
               <IconRocket width={14} height={14} />
               Publish…
             </button>
@@ -155,10 +220,13 @@ function ReleaseCard({
           ) : null}
         </div>
       </div>
-      {publishes.length ? (
+      {resigns.length || publishes.length ? (
         <ul className="sg-ma-rel-pubs">
+          {resigns.map((resign) => (
+            <ResignEntry key={`r${resign.id}`} resign={resign} />
+          ))}
           {publishes.map((publish) => (
-            <PublishEntry key={publish.id} publish={publish} />
+            <PublishEntry key={`p${publish.id}`} publish={publish} />
           ))}
         </ul>
       ) : null}
@@ -210,6 +278,7 @@ export default function AppDrawer({
   onClose,
   builds = [],
   publishes = [],
+  resigns = [],
   loading = false,
   onFetch,
   fetching = false,
@@ -223,6 +292,8 @@ export default function AppDrawer({
   onDeleteBuild,
   deletingBuildId,
   onPublishBuild,
+  onResignBuild,
+  resigningBuildId,
 }) {
   const [tab, setTab] = useState("releases");
 
@@ -241,6 +312,21 @@ export default function AppDrawer({
     const buildIds = new Set(builds.map((b) => b.id));
     return publishes.filter((p) => !buildIds.has(p.buildId));
   }, [builds, publishes]);
+
+  // Signing attempts hang off the build they were signing, same as publishes.
+  const resignsByBuild = useMemo(() => {
+    const map = new Map();
+    resigns.forEach((r) => {
+      const list = map.get(r.buildId) || [];
+      list.push(r);
+      map.set(r.buildId, list);
+    });
+    return map;
+  }, [resigns]);
+
+  // Whether re-signing is set up at all for this app — no point offering a
+  // button that can only return "no re-signing setup".
+  const canResign = canManage && Boolean((app?.resignConfig || {}).android);
 
   if (!app) return null;
 
@@ -290,7 +376,7 @@ export default function AppDrawer({
               </button>
               {onUpload ? (
                 <button type="button" className="secondary" onClick={onUpload}>
-                  Upload build…
+                  Upload build
                 </button>
               ) : null}
               <button
@@ -349,13 +435,17 @@ export default function AppDrawer({
                       key={build.id}
                       build={build}
                       publishes={pubsByBuild.get(build.id) || []}
+                      resigns={resignsByBuild.get(build.id) || []}
                       canManage={canManage}
                       canPublish={canPublish}
+                      canResign={canResign}
                       onDownload={onDownload}
                       downloading={downloadingBuildId === build.id}
                       onDeleteBuild={onDeleteBuild}
                       deleting={deletingBuildId === build.id}
                       onPublishBuild={onPublishBuild}
+                      onResignBuild={onResignBuild}
+                      resigning={resigningBuildId === build.id}
                     />
                   ))}
                 </ul>
@@ -377,7 +467,7 @@ export default function AppDrawer({
               <p className="muted sg-ma-empty-hint">
                 No builds yet.{" "}
                 {canManage
-                  ? "Use “Fetch latest build” to pull the newest Jenkins artifact, or “Upload build…” to add an APK/AAB/IPA directly."
+                  ? "Use “Fetch latest build” to pull the newest Jenkins artifact, or “Upload build” to add an APK/AAB/IPA directly."
                   : null}
               </p>
             )

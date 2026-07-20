@@ -34,10 +34,11 @@ from ..models import (
     MobileAppBuild,
     MobileApplication,
     MobileAppPublish,
+    MobileAppResign,
     ZohoInboundTicket,
 )
 from ..secret_encryption import decrypt_secret, encrypt_secret
-from . import jenkins_client
+from . import binary_signature, jenkins_client
 from .jenkins_client import JenkinsConfig, JenkinsError
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,61 @@ def _normalize_artifact_config(value: Any) -> Dict[str, Dict[str, str]]:
     return out
 
 
+_RESIGN_STR_FIELDS = (
+    "executor",
+    "cluster",
+    "namespace",
+    "image",
+    "callbackUrl",
+    "keystoreSecret",
+    "keystoreKey",
+    "keyAlias",
+    "storePassKey",
+    "keyPassKey",
+    "serviceAccount",
+    "imagePullSecret",
+)
+_RESIGN_EXECUTORS = ("k8s_job",)
+
+
+def _normalize_resign_config(value: Any) -> Dict[str, Dict[str, str]]:
+    """Coerce the per-platform re-signing setup.
+
+    Only string fields are accepted — every value here names a Kubernetes
+    object or an image, never key material. The keystore itself stays in the
+    Secret this points at, so nothing secret can be written into this column
+    even by accident.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    if not isinstance(value, dict):
+        return out
+    for platform in PLATFORMS:
+        entry = value.get(platform)
+        if not isinstance(entry, dict):
+            continue
+        cleaned = {
+            field: str(entry.get(field) or "").strip()
+            for field in _RESIGN_STR_FIELDS
+            if str(entry.get(field) or "").strip()
+        }
+        if not cleaned:
+            continue
+        executor = cleaned.get("executor") or "k8s_job"
+        if executor not in _RESIGN_EXECUTORS:
+            raise MobileAppError(
+                f"Unsupported re-signing executor '{executor}'. "
+                f"Supported: {', '.join(_RESIGN_EXECUTORS)}."
+            )
+        cleaned["executor"] = executor
+        if platform == "ios":
+            raise MobileAppError(
+                "iOS re-signing cannot run from KubeSight — it needs macOS and a "
+                "keychain. Configure Android only."
+            )
+        out[platform] = cleaned
+    return out
+
+
 def _platform_config(app: MobileApplication, platform: str) -> Optional[Dict[str, str]]:
     cfg = app.artifact_config or {}
     entry = cfg.get(platform)
@@ -195,6 +251,7 @@ def serialize_app(app: MobileApplication, *, with_stats: bool = False) -> Dict[s
         "zohoEnvironment": app.zoho_environment or "",
         "jenkinsJobPath": app.jenkins_job_path or "",
         "artifactConfig": app.artifact_config or {},
+        "resignConfig": app.resign_config or {},
         "androidPackageName": app.android_package_name or "",
         "playServiceAccountConfigured": bool(app.play_service_account_json_encrypted),
         "iosBundleId": app.ios_bundle_id or "",
@@ -231,10 +288,12 @@ def serialize_build(build: MobileAppBuild) -> Dict[str, Any]:
         "fileName": build.file_name or "",
         "fileSize": build.file_size,
         "sha256": build.sha256 or "",
+        "signatureState": build.signature_state or "unknown",
         "jenkinsBuildNumber": build.jenkins_build_number,
         "jenkinsBuildUrl": build.jenkins_build_url or "",
         "ticketNumber": build.ticket_number or "",
         "source": build.source or "ticket",
+        "parentBuildId": build.parent_build_id,
         "status": build.status,
         "error": build.error,
         "createdAt": _iso(build.created_at),
@@ -297,6 +356,8 @@ def _apply_payload(app: MobileApplication, payload: Dict[str, Any]) -> None:
         app.enabled = bool(payload.get("enabled"))
     if "artifactConfig" in payload:
         app.artifact_config = _normalize_artifact_config(payload.get("artifactConfig"))
+    if "resignConfig" in payload:
+        app.resign_config = _normalize_resign_config(payload.get("resignConfig"))
 
     # Write-only secrets: set when a non-blank value arrives, clear on request.
     if str(payload.get("playServiceAccountJson") or "").strip():
@@ -614,6 +675,9 @@ def create_upload_build(app_id, platform, file, version: str = "", user=None) ->
     build.file_size = size
     build.sha256 = sha256
     build.storage_path = os.path.join(rel_dir, file_name)
+    # Shielded binaries come back stripped — flag it here so the drawer offers
+    # a re-sign instead of a publish that the store would reject.
+    build.signature_state = binary_signature.detect_safe(dest, ext)
     build.status = "available"
     build.downloaded_at = datetime.now(timezone.utc)
     db.session.add(build)
@@ -776,6 +840,7 @@ def _download_build(build_id: int) -> None:
         build.sha256 = result["sha256"]
         build.storage_path = os.path.join(rel_dir, file_name)
         build.artifact_type = _artifact_type_for(file_name, build.platform)
+        build.signature_state = binary_signature.detect_safe(dest, build.artifact_type)
         build.status = "available"
         build.error = None
         build.downloaded_at = datetime.now(timezone.utc)
@@ -887,6 +952,15 @@ def start_publish(build_id: int, store: str, target: str, user=None) -> Dict[str
         raise MobileAppError("Build not found.", 404)
     if build.status != "available":
         raise MobileAppError("Only downloaded builds can be published.", 409)
+    # A shielded binary has had its signature stripped: no store will accept it
+    # and no device would install it. Re-sign first. "unknown" (unreadable
+    # probe) is deliberately allowed through rather than stranding a build.
+    if build.signature_state == binary_signature.UNSIGNED:
+        raise MobileAppError(
+            "This build is unsigned — its code signature was stripped "
+            "(shielding does this). Re-sign it before publishing.",
+            409,
+        )
     app = MobileApplication.query.get(build.app_id)
     if app is None:
         raise MobileAppError("The application registration no longer exists.", 404)
@@ -1222,6 +1296,387 @@ def _report_publish_outcome(
 # Store credential tests
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Re-signing — hand a stripped binary to a signer that holds the key
+# ---------------------------------------------------------------------------
+
+_RESIGN_STEP_KEYS = ("prepare", "launch", "sign", "collect", "verify")
+RESIGN_ACTIVE_STATUSES = ("queued", "running")
+RESIGN_TERMINAL_STATUSES = ("completed", "failed")
+
+# A signing job that has not reported in this long is wedged — its pod is gone,
+# its node died, or it is waiting on something that will never arrive.
+_RESIGN_TIMEOUT_MINUTES = 20
+
+
+def _resign_token_minutes() -> int:
+    """Token lifetime. Long enough to cover a slow image pull plus the
+    transfer of a few hundred MB, short enough that a leaked one is stale."""
+    try:
+        return max(5, int(os.getenv("RESIGN_TOKEN_MINUTES", "30")))
+    except ValueError:
+        return 30
+
+
+def _resign_callback_url() -> str:
+    """Where the signing job reaches KubeSight. In-cluster service DNS by
+    default — the Job runs beside the API, not through the ingress."""
+    return os.getenv("RESIGN_CALLBACK_URL", "http://backend-service:5000").rstrip("/")
+
+
+def _resign_config(app: MobileApplication, platform: str) -> Dict[str, Any]:
+    cfg = (app.resign_config or {}).get(platform) if isinstance(app.resign_config, dict) else None
+    return dict(cfg) if isinstance(cfg, dict) else {}
+
+
+def serialize_resign(row: "MobileAppResign") -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "appId": row.app_id,
+        "buildId": row.build_id,
+        "resultBuildId": row.result_build_id,
+        "platform": row.platform,
+        "executor": row.executor,
+        "status": row.status,
+        "steps": row.steps or [],
+        "jobRef": row.job_ref or {},
+        "error": row.error,
+        "triggeredBy": row.triggered_by,
+        "createdAt": _iso(row.created_at),
+        "finishedAt": _iso(row.finished_at),
+    }
+
+
+def _initial_resign_steps() -> List[Dict[str, Any]]:
+    return [{"key": k, "status": "wait", "detail": "", "at": None} for k in _RESIGN_STEP_KEYS]
+
+
+def _set_resign_step(row: "MobileAppResign", key: str, status: str, detail: str = "") -> None:
+    steps = [dict(s) for s in (row.steps or _initial_resign_steps())]
+    by_key = {s.get("key"): s for s in steps}
+    step = by_key.get(key)
+    if step is None:
+        step = {"key": key, "status": "wait", "detail": "", "at": None}
+        steps.append(step)
+    step["status"] = status
+    step["detail"] = detail
+    step["at"] = datetime.now(timezone.utc).isoformat()
+    row.steps = steps
+
+
+def list_resigns(
+    app_id: Optional[int] = None, build_id: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    query = MobileAppResign.query
+    if app_id is not None:
+        query = query.filter_by(app_id=int(app_id))
+    if build_id is not None:
+        query = query.filter_by(build_id=int(build_id))
+    rows = query.order_by(MobileAppResign.created_at.desc()).limit(100).all()
+    return [serialize_resign(r) for r in rows]
+
+
+def start_resign(build_id: int, user=None) -> Dict[str, Any]:
+    """Queue a signing job for one stripped build."""
+    build = MobileAppBuild.query.get(int(build_id))
+    if build is None:
+        raise MobileAppError("Build not found.", 404)
+    if build.status != "available":
+        raise MobileAppError("Only downloaded builds can be re-signed.", 409)
+    if build.platform != "android":
+        raise MobileAppError(
+            "Only Android builds can be re-signed from KubeSight — iOS signing "
+            "needs macOS and a keychain.",
+            400,
+        )
+    app = MobileApplication.query.get(build.app_id)
+    if app is None:
+        raise MobileAppError("The application registration no longer exists.", 404)
+
+    cfg = _resign_config(app, build.platform)
+    if not cfg:
+        raise MobileAppError(
+            f"No re-signing setup for {build.platform} on this app. Configure it first.", 409
+        )
+    missing = [k for k in ("cluster", "namespace", "image", "keystoreSecret") if not cfg.get(k)]
+    if missing:
+        raise MobileAppError(
+            "The re-signing setup is incomplete — missing: " + ", ".join(missing) + ".", 409
+        )
+
+    active = MobileAppResign.query.filter(
+        MobileAppResign.build_id == build.id,
+        MobileAppResign.status.in_(RESIGN_ACTIVE_STATUSES),
+    ).first()
+    if active is not None:
+        raise MobileAppError("A signing job for this build is already running.", 409)
+
+    row = MobileAppResign(
+        app_id=app.id,
+        build_id=build.id,
+        platform=build.platform,
+        executor=str(cfg.get("executor") or "k8s_job"),
+        status="queued",
+        steps=_initial_resign_steps(),
+        triggered_by=getattr(user, "username", None),
+    )
+    db.session.add(row)
+    log_audit(
+        "mobile_app_resign_requested",
+        actor=user,
+        target_type="mobile_app_build",
+        target_id=str(build.id),
+        details={"app": app.name, "platform": build.platform, "executor": row.executor},
+        commit=False,
+    )
+    db.session.commit()
+    kick_workers()
+    return serialize_resign(row)
+
+
+def advance_mobile_resigns() -> None:
+    """Tick: launch queued signing jobs and poll running ones."""
+    for row in MobileAppResign.query.filter_by(status="queued").all():
+        _launch_resign(row.id)
+
+    for row in MobileAppResign.query.filter_by(status="running").all():
+        _poll_resign(row.id)
+
+
+def _launch_resign(resign_id: int) -> None:
+    from . import resign_executor
+
+    row = MobileAppResign.query.get(int(resign_id))
+    if row is None or row.status != "queued":
+        return
+    build = MobileAppBuild.query.get(row.build_id)
+    app = MobileApplication.query.get(row.app_id)
+    if build is None or app is None:
+        _fail_resign(row, "The build or application registration no longer exists.")
+        return
+
+    cfg = _resign_config(app, row.platform)
+    try:
+        _set_resign_step(row, "prepare", "run", "minting a scoped token for the signer")
+        import hashlib
+
+        from ..auth_utils import create_resign_token
+
+        minutes = _resign_token_minutes()
+        token = create_resign_token(row.id, build.id, minutes)
+        row.token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        _set_resign_step(row, "prepare", "done", f"token valid for {minutes} min")
+
+        spec = resign_executor.ResignJobSpec(
+            resign_id=row.id,
+            build_id=build.id,
+            artifact_type=build.artifact_type or "aab",
+            cluster=str(cfg.get("cluster") or ""),
+            namespace=str(cfg.get("namespace") or "kubesight"),
+            image=str(cfg.get("image") or ""),
+            callback_url=str(cfg.get("callbackUrl") or _resign_callback_url()),
+            token=token,
+            keystore_secret=str(cfg.get("keystoreSecret") or ""),
+            keystore_key=str(cfg.get("keystoreKey") or "upload.jks"),
+            key_alias=str(cfg.get("keyAlias") or "upload"),
+            store_pass_key=str(cfg.get("storePassKey") or "store-password"),
+            key_pass_key=str(cfg.get("keyPassKey") or "key-password"),
+            service_account=str(cfg.get("serviceAccount") or ""),
+            image_pull_secret=str(cfg.get("imagePullSecret") or ""),
+        )
+        _set_resign_step(row, "launch", "run", f"starting the signing job in {spec.namespace}")
+        row.job_ref = resign_executor.launch(spec)
+        _set_resign_step(row, "launch", "done", resign_executor.job_name(row.id))
+        _set_resign_step(row, "sign", "run", "signing on the cluster")
+        row.status = "running"
+        db.session.add(row)
+        db.session.commit()
+    except Exception as exc:
+        logger.exception("Launching resign job failed: resign_id=%s", resign_id)
+        _set_resign_step(row, "launch", "fail", str(exc))
+        _fail_resign(row, f"Could not start the signing job: {exc}")
+
+
+def _poll_resign(resign_id: int) -> None:
+    from . import resign_executor
+
+    row = MobileAppResign.query.get(int(resign_id))
+    if row is None or row.status != "running":
+        return
+
+    # The result arrives by callback, so a job that reports success without one
+    # is still incomplete — but a job that FAILED will never call back, and a
+    # job that vanished never will either. Poll to catch exactly those.
+    age = datetime.now(timezone.utc) - (_aware(row.updated_at) or datetime.now(timezone.utc))
+    try:
+        state = resign_executor.poll(row.job_ref or {})
+    except Exception as exc:
+        logger.warning("Polling resign job failed: resign_id=%s (%s)", resign_id, exc)
+        return
+
+    if state.get("phase") == "failed":
+        detail = state.get("detail") or "the signing job failed"
+        tail = resign_executor.logs(row.job_ref or {})
+        if tail:
+            detail = f"{detail} — {tail.splitlines()[-1][:300]}"
+        _set_resign_step(row, "sign", "fail", detail)
+        _fail_resign(row, detail)
+        return
+
+    if state.get("phase") == "succeeded" and row.result_build_id is None:
+        # Succeeded but nothing posted back: give the callback a grace period,
+        # then call it what it is rather than polling forever.
+        if age > timedelta(minutes=5):
+            _set_resign_step(
+                row, "collect", "fail", "the job finished without returning a signed binary"
+            )
+            _fail_resign(row, "The signing job finished but returned no signed binary.")
+        return
+
+    if age > timedelta(minutes=_RESIGN_TIMEOUT_MINUTES):
+        _set_resign_step(row, "sign", "fail", "timed out")
+        _fail_resign(row, f"The signing job did not finish within {_RESIGN_TIMEOUT_MINUTES} min.")
+
+
+def ingest_resign_result(resign_id: int, build_id: int, file) -> Dict[str, Any]:
+    """Register the signed binary a signing job posted back as a new build.
+
+    Authorization is the caller's problem — the route validates the scoped
+    token before reaching here. This verifies the *content*: a signer that
+    returned something still unsigned has failed, however cleanly it exited.
+    """
+    row = MobileAppResign.query.get(int(resign_id))
+    if row is None:
+        raise MobileAppError("Signing job not found.", 404)
+    if row.status != "running":
+        raise MobileAppError("This signing job is not accepting a result.", 409)
+    if int(build_id) != int(row.build_id):
+        raise MobileAppError("Token does not match this signing job's build.", 403)
+    if row.result_build_id is not None:
+        raise MobileAppError("A result was already recorded for this signing job.", 409)
+
+    parent = MobileAppBuild.query.get(row.build_id)
+    app = MobileApplication.query.get(row.app_id)
+    if parent is None or app is None:
+        raise MobileAppError("The build or application registration no longer exists.", 404)
+    if file is None or not getattr(file, "filename", ""):
+        raise MobileAppError("No file was uploaded.")
+
+    file_name = _safe_filename(file.filename)
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    if ext not in ARTIFACT_TYPES.get(row.platform, ()):
+        raise MobileAppError(f"A {row.platform} build cannot be a '.{ext}' file.")
+
+    _set_resign_step(row, "sign", "done", "signed on the cluster")
+    _set_resign_step(row, "collect", "run", "storing the signed binary")
+    db.session.add(row)
+
+    # Same two-phase write as the direct upload: commit the row first so its id
+    # anchors the store directory and the DB lock is released before the save.
+    child = MobileAppBuild(
+        app_id=app.id,
+        platform=row.platform,
+        artifact_type=ext,
+        version=parent.version,
+        source="resign",
+        parent_build_id=parent.id,
+        ticket_record_id=parent.ticket_record_id,
+        ticket_number=parent.ticket_number,
+        status="downloading",
+    )
+    db.session.add(child)
+    db.session.commit()
+
+    rel_dir = _store_dir_for(child)
+    dest = os.path.join(artifact_root(), rel_dir, file_name)
+    try:
+        file.save(dest)
+        sha256, size = _hash_and_size(dest)
+        if size <= 0:
+            raise MobileAppError("The signed file is empty.")
+    except Exception as exc:
+        try:
+            if os.path.isfile(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+        db.session.delete(child)
+        db.session.commit()
+        _set_resign_step(row, "collect", "fail", str(exc))
+        _fail_resign(row, f"Could not store the signed binary ({exc}).")
+        if isinstance(exc, MobileAppError):
+            raise
+        raise MobileAppError(f"Could not store the signed binary ({exc}).", 500)
+
+    state = binary_signature.detect_safe(dest, ext)
+    _set_resign_step(row, "collect", "done", f"{file_name} ({size} bytes)")
+    _set_resign_step(row, "verify", "run", "checking the signature")
+    if state == binary_signature.UNSIGNED:
+        # The whole point of the job was to produce a signature. Do not let a
+        # dud through as a publishable build.
+        child.status = "failed"
+        child.error = "The signing job returned an unsigned binary."
+        db.session.add(child)
+        db.session.commit()
+        _set_resign_step(row, "verify", "fail", "the returned binary is still unsigned")
+        _fail_resign(row, "The signing job returned an unsigned binary.")
+        raise MobileAppError("The returned binary is still unsigned.", 422)
+
+    child.file_name = file_name
+    child.file_size = size
+    child.sha256 = sha256
+    child.storage_path = os.path.join(rel_dir, file_name)
+    child.signature_state = state
+    child.status = "available"
+    child.downloaded_at = datetime.now(timezone.utc)
+    db.session.add(child)
+
+    _set_resign_step(row, "verify", "done", "signature present")
+    row.result_build_id = child.id
+    row.status = "completed"
+    row.finished_at = datetime.now(timezone.utc)
+    db.session.add(row)
+    log_audit(
+        "mobile_app_build_resigned",
+        actor=None,
+        target_type="mobile_app_build",
+        target_id=str(child.id),
+        details={
+            "app": app.name,
+            "parentBuild": parent.id,
+            "file": file_name,
+            "size": size,
+            "signatureState": state,
+        },
+        commit=False,
+    )
+    db.session.commit()
+
+    # Best-effort teardown; a leftover Job must not fail a successful signing.
+    try:
+        from . import resign_executor
+
+        resign_executor.cleanup(row.job_ref or {})
+    except Exception:
+        logger.warning("Resign cleanup failed: resign_id=%s", row.id)
+
+    return serialize_build(child)
+
+
+def _fail_resign(row, message: str) -> None:
+    row.status = "failed"
+    row.error = message
+    row.finished_at = datetime.now(timezone.utc)
+    db.session.add(row)
+    db.session.commit()
+    try:
+        from . import resign_executor
+
+        resign_executor.cleanup(row.job_ref or {})
+    except Exception:
+        logger.warning("Resign cleanup failed after error: resign_id=%s", row.id)
+
+
 def test_play_credentials(app_id: int) -> Dict[str, Any]:
     app = get_app(app_id)
     if not app.android_package_name:
@@ -1272,5 +1727,6 @@ def kick_workers() -> None:
     try:
         advance_mobile_builds()
         advance_mobile_publishes()
+        advance_mobile_resigns()
     except Exception:
         logger.exception("Mobile apps worker kick failed")
