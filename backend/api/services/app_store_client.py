@@ -229,7 +229,12 @@ def upload_build(cfg: AscConfig, path: str, file_name: str) -> Dict[str, Any]:
         body={
             "data": {
                 "type": "buildUploadFiles",
-                "attributes": {"fileName": file_name, "fileSize": size, "assetType": "ASSET"},
+                "attributes": {
+                    "fileName": file_name,
+                    "fileSize": size,
+                    "assetType": "ASSET",
+                    "uti": "com.apple.ipa",
+                },
                 "relationships": {
                     "buildUpload": {"data": {"type": "buildUploads", "id": upload_id}}
                 },
