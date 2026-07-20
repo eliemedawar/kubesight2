@@ -64,6 +64,17 @@ function ResignEntry({ resign }) {
         <b>Re-sign</b>
         <ResignStatusPill status={resign.status} />
         {resign.triggeredBy ? <span className="sg-ma-rpub-who">by {resign.triggeredBy}</span> : null}
+        {resign.jenkinsBuildUrl ? (
+          <a
+            href={resign.jenkinsBuildUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="sg-ma-jlink"
+          >
+            Jenkins #{resign.jenkinsBuildNumber}
+            <IconExternal width={12} height={12} />
+          </a>
+        ) : null}
         <span className="sg-ma-rpub-when">{timeAgo(resign.finishedAt || resign.createdAt)}</span>
       </div>
       {active || failed ? <ResignSteps steps={resign.steps} /> : null}
@@ -94,11 +105,11 @@ function ReleaseCard({
   // published as-is — the backend refuses it too. Surface that on the card
   // rather than letting the operator find out from a failed publish.
   const unsigned = build.signatureState === "unsigned";
-  // Only offer signing where KubeSight can actually do it, and not while a job
-  // for this build is already in flight.
+  // Only offer signing where a job is configured for this build's platform,
+  // and not while one for this build is already in flight.
   const signingInFlight = resigns.some((r) => ACTIVE_RESIGN_STATUSES.has(r.status));
   const showResign =
-    canResign && available && unsigned && build.platform === "android" && !signingInFlight;
+    canResign(build.platform) && available && unsigned && !signingInFlight;
   return (
     <li className="sg-ma-rel">
       <div className="sg-ma-rel-build">
@@ -185,7 +196,7 @@ function ReleaseCard({
               className="secondary sg-ma-resignbtn"
               onClick={() => onResignBuild(build)}
               disabled={resigning}
-              title="Sign this binary with the upload key"
+              title="Send this binary to the Jenkins signing job"
             >
               {resigning ? "Starting…" : "Re-sign"}
             </button>
@@ -265,6 +276,30 @@ function ArtifactRow({ platform, config }) {
   );
 }
 
+// One platform's signing job, or a warning that shielded builds of that
+// platform have nowhere to be signed.
+function ResignRow({ platform, config }) {
+  const label = platform === "android" ? "Android signing" : "iOS signing";
+  if (!config) {
+    return (
+      <div className="sg-ma-cfg-row">
+        <span className="sg-ma-cfg-k">{label}</span>
+        <span className="sg-ma-cfg-v muted">
+          not configured — shielded builds cannot be published
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="sg-ma-cfg-row">
+      <span className="sg-ma-cfg-k">{label}</span>
+      <span className="sg-ma-cfg-v mono">
+        {`${config.jobPath || "—"} · ${config.resultPattern || (platform === "android" ? "*.aab" : "*.ipa")}`}
+      </span>
+    </div>
+  );
+}
+
 const READINESS_STATE = {
   ready: ["sg-ma-cfg-ok", "✓ Ready"],
   missing: ["sg-ma-cfg-warn", "Key missing"],
@@ -324,14 +359,15 @@ export default function AppDrawer({
     return map;
   }, [resigns]);
 
-  // Whether re-signing is set up at all for this app — no point offering a
-  // button that can only return "no re-signing setup".
-  const canResign = canManage && Boolean((app?.resignConfig || {}).android);
+  // Whether a signing job is configured for a given platform — no point
+  // offering a button that can only return "no signing job configured".
+  const resignConfig = app?.resignConfig || {};
+  const canResign = (platform) => canManage && Boolean(resignConfig[platform]);
 
   if (!app) return null;
 
   const artifactConfig = app.artifactConfig || {};
-  const resignAndroid = (app.resignConfig || {}).android || null;
+
   const readiness = storeReadiness(app);
   const playState = readiness.find((r) => r.key === "google_play")?.state || "off";
   const ascState = readiness.find((r) => r.key === "app_store")?.state || "off";
@@ -516,36 +552,9 @@ export default function AppDrawer({
               </section>
 
               <section className="sg-ma-cfg">
-                <h5>Re-signing (Android)</h5>
-                {resignAndroid ? (
-                  <>
-                    <div className="sg-ma-cfg-row">
-                      <span className="sg-ma-cfg-k">Signing job</span>
-                      <span className="sg-ma-cfg-v mono">
-                        {`${resignAndroid.cluster || "—"} · ${resignAndroid.namespace || "—"}`}
-                      </span>
-                    </div>
-                    <div className="sg-ma-cfg-row">
-                      <span className="sg-ma-cfg-k">Signer image</span>
-                      <span className="sg-ma-cfg-v mono">{resignAndroid.image || "—"}</span>
-                    </div>
-                    <div className="sg-ma-cfg-row">
-                      <span className="sg-ma-cfg-k">Keystore</span>
-                      <span className="sg-ma-cfg-v mono">
-                        {`${resignAndroid.keystoreSecret || "—"} · alias ${
-                          resignAndroid.keyAlias || "upload"
-                        }`}
-                      </span>
-                    </div>
-                  </>
-                ) : (
-                  <div className="sg-ma-cfg-row">
-                    <span className="sg-ma-cfg-k">Signing job</span>
-                    <span className="sg-ma-cfg-v muted">
-                      not configured — shielded builds cannot be published
-                    </span>
-                  </div>
-                )}
+                <h5>Signing</h5>
+                <ResignRow platform="android" config={resignConfig.android} />
+                <ResignRow platform="ios" config={resignConfig.ios} />
               </section>
 
               <section className="sg-ma-cfg">

@@ -1,14 +1,40 @@
 import { useState } from "react";
 import { IconClose, TestStatusPill } from "./common.jsx";
 
+// Extra Jenkins build parameters are edited as KEY=value lines — the natural
+// shape for job parameters, and it keeps the form from needing a repeater.
+function paramsToText(params) {
+  return Object.entries(params || {})
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+function textToParams(text) {
+  const out = {};
+  String(text || "")
+    .split("\n")
+    .forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return;
+      const at = trimmed.indexOf("=");
+      if (at <= 0) return;
+      const key = trimmed.slice(0, at).trim();
+      const value = trimmed.slice(at + 1).trim();
+      if (key && value) out[key] = value;
+    });
+  return out;
+}
+
 // Seed the local form from an existing app (edit) or blank defaults (create).
 function formFromApp(app) {
   const artifact = app?.artifactConfig || {};
   const android = artifact.android || null;
   const ios = artifact.ios || null;
-  // Re-signing is Android-only: iOS signing needs macOS and a keychain, which
-  // a Kubernetes Job cannot provide.
-  const resign = (app?.resignConfig || {}).android || null;
+  // Signing runs on Jenkins for both platforms — that is where the keys are
+  // (the Android keystore on a Linux agent, the keychain on the Mac agent).
+  const resignCfg = app?.resignConfig || {};
+  const resignAndroid = resignCfg.android || null;
+  const resignIos = resignCfg.ios || null;
   return {
     name: app?.name || "",
     description: app?.description || "",
@@ -24,19 +50,16 @@ function formFromApp(app) {
     iosSource: ios?.source || "archive",
     iosPattern: ios?.pattern || "",
     iosPath: ios?.path || "",
-    // Re-signing (Android)
-    resignEnabled: Boolean(resign),
-    resignCluster: resign?.cluster || "",
-    resignNamespace: resign?.namespace || "kubesight",
-    resignImage: resign?.image || "",
-    resignKeystoreSecret: resign?.keystoreSecret || "",
-    resignKeystoreKey: resign?.keystoreKey || "",
-    resignKeyAlias: resign?.keyAlias || "",
-    resignStorePassKey: resign?.storePassKey || "",
-    resignKeyPassKey: resign?.keyPassKey || "",
-    resignServiceAccount: resign?.serviceAccount || "",
-    resignImagePullSecret: resign?.imagePullSecret || "",
-    resignCallbackUrl: resign?.callbackUrl || "",
+    // Signing jobs — shared KubeSight URL + per-platform Jenkins job
+    resignBaseUrl: resignAndroid?.baseUrl || resignIos?.baseUrl || "",
+    androidResignEnabled: Boolean(resignAndroid),
+    androidResignJobPath: resignAndroid?.jobPath || "",
+    androidResignPattern: resignAndroid?.resultPattern || "",
+    androidResignExtra: paramsToText(resignAndroid?.extraParams),
+    iosResignEnabled: Boolean(resignIos),
+    iosResignJobPath: resignIos?.jobPath || "",
+    iosResignPattern: resignIos?.resultPattern || "",
+    iosResignExtra: paramsToText(resignIos?.extraParams),
     // Google Play
     androidPackageName: app?.androidPackageName || "",
     playServiceAccountJson: "",
@@ -103,6 +126,66 @@ function ArtifactFields({ prefix, form, set }) {
   );
 }
 
+// One platform's signing job. Both platforms sign on Jenkins — Android with the
+// upload keystore, iOS with the macOS keychain — so the fields are the same.
+function ResignFields({ prefix, form, set }) {
+  const enabled = form[`${prefix}ResignEnabled`];
+  const isAndroid = prefix === "android";
+  return (
+    <div className="sg-ma-artifact">
+      <label className="checkbox-label">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => set(`${prefix}ResignEnabled`, e.target.checked)}
+        />
+        {isAndroid ? "Android (APK/AAB)" : "iOS (IPA)"}
+      </label>
+      {enabled ? (
+        <div className="sg-ma-artifact-body">
+          <label>
+            Jenkins job path
+            <input
+              value={form[`${prefix}ResignJobPath`]}
+              onChange={(e) => set(`${prefix}ResignJobPath`, e.target.value)}
+              placeholder={isAndroid ? "mobile/android-resign" : "mobile/ios-resign"}
+              className="mono"
+              required
+            />
+          </label>
+          <label>
+            Signed artifact pattern
+            <input
+              value={form[`${prefix}ResignPattern`]}
+              onChange={(e) => set(`${prefix}ResignPattern`, e.target.value)}
+              placeholder={isAndroid ? "*.aab" : "signed/*.ipa"}
+              className="mono"
+            />
+            <span className="field-hint">
+              Matched against the build&apos;s archived artifacts.
+            </span>
+          </label>
+          <label className="sg-ma-span">
+            Extra build parameters
+            <textarea
+              rows={3}
+              value={form[`${prefix}ResignExtra`]}
+              onChange={(e) => set(`${prefix}ResignExtra`, e.target.value)}
+              placeholder={
+                isAndroid ? "KEY_ALIAS=upload" : "PROFILE=comareeba_AppStore.mobileprovision"
+              }
+              className="mono sg-ma-textarea"
+            />
+            <span className="field-hint">
+              One <code>KEY=value</code> per line, passed to the job as-is.
+            </span>
+          </label>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function AppFormModal({
   open,
   mode = "create",
@@ -148,30 +231,26 @@ export default function AppFormModal({
           : { source: "workspace", path: form.iosPath.trim() };
     }
     // Only the fields the operator actually filled in are sent — the backend
-    // supplies its own defaults for the omitted key names, so sending empty
-    // strings would overwrite good defaults with nothing.
-    const resignConfig = {};
-    if (form.resignEnabled) {
-      const android = { executor: "k8s_job" };
+    // supplies its own defaults for the omitted ones, so sending empty strings
+    // would overwrite good defaults with nothing.
+    const resignEntry = (prefix) => {
+      const entry = { executor: "jenkins" };
       const optional = {
-        cluster: form.resignCluster,
-        namespace: form.resignNamespace,
-        image: form.resignImage,
-        keystoreSecret: form.resignKeystoreSecret,
-        keystoreKey: form.resignKeystoreKey,
-        keyAlias: form.resignKeyAlias,
-        storePassKey: form.resignStorePassKey,
-        keyPassKey: form.resignKeyPassKey,
-        serviceAccount: form.resignServiceAccount,
-        imagePullSecret: form.resignImagePullSecret,
-        callbackUrl: form.resignCallbackUrl,
+        jobPath: form[`${prefix}ResignJobPath`],
+        resultPattern: form[`${prefix}ResignPattern`],
+        baseUrl: form.resignBaseUrl,
       };
       Object.entries(optional).forEach(([key, value]) => {
         const trimmed = (value || "").trim();
-        if (trimmed) android[key] = trimmed;
+        if (trimmed) entry[key] = trimmed;
       });
-      resignConfig.android = android;
-    }
+      const extra = textToParams(form[`${prefix}ResignExtra`]);
+      if (Object.keys(extra).length) entry.extraParams = extra;
+      return entry;
+    };
+    const resignConfig = {};
+    if (form.androidResignEnabled) resignConfig.android = resignEntry("android");
+    if (form.iosResignEnabled) resignConfig.ios = resignEntry("ios");
     const payload = {
       name: form.name.trim(),
       description: form.description.trim(),
@@ -365,154 +444,41 @@ export default function AppFormModal({
             ) : null}
           </div>
 
-          {/* ── Re-signing (Android) ───────────────────────────────── */}
-          <h4 className="sg-ma-formsect">Re-signing (Android)</h4>
+          {/* ── Signing ────────────────────────────────────────────── */}
+          <h4 className="sg-ma-formsect">Signing</h4>
           <div className="settings-form sg-ma-grid2">
             <p className="field-hint sg-ma-span sg-ma-artifact-intro">
-              Shielding strips the code signature, and Google Play rejects an unsigned bundle.
-              KubeSight signs it again by running a short-lived Kubernetes Job that mounts your
-              upload keystore. The keystore stays in its Secret — it is never uploaded here.
+              Shielding strips the code signature, and no store accepts an unsigned binary. Pressing
+              &ldquo;Re-sign&rdquo; on a build triggers the Jenkins job below: KubeSight passes it a
+              one-time link to the unsigned file, the job signs it and archives the result, and
+              KubeSight pulls that back as a new, publishable build. Signing keys stay on Jenkins.
             </p>
-            <label className="checkbox-label sg-ma-span">
+            <label className="sg-ma-span">
+              KubeSight URL for Jenkins
               <input
-                type="checkbox"
-                checked={form.resignEnabled}
-                onChange={(e) => set("resignEnabled", e.target.checked)}
+                value={form.resignBaseUrl}
+                onChange={(e) => set("resignBaseUrl", e.target.value)}
+                placeholder="https://kubesight.areeba.com"
+                className="mono"
               />
-              Re-sign Android builds in KubeSight
+              <span className="field-hint">
+                Where the job downloads the unsigned binary from — it must be reachable from your
+                Jenkins agents. Leave blank to use the server default.
+              </span>
             </label>
-
-            {form.resignEnabled ? (
-              <>
-                <label>
-                  Cluster
-                  <input
-                    value={form.resignCluster}
-                    onChange={(e) => set("resignCluster", e.target.value)}
-                    placeholder="prod"
-                    className="mono"
-                    required
-                  />
-                  <span className="field-hint">The cluster the signing Job runs in.</span>
-                </label>
-                <label>
-                  Namespace
-                  <input
-                    value={form.resignNamespace}
-                    onChange={(e) => set("resignNamespace", e.target.value)}
-                    placeholder="kubesight"
-                    className="mono"
-                    required
-                  />
-                </label>
-                <label className="sg-ma-span">
-                  Signer image
-                  <input
-                    value={form.resignImage}
-                    onChange={(e) => set("resignImage", e.target.value)}
-                    placeholder="registry.example.com/kubesight-android-signer:1"
-                    className="mono"
-                    required
-                  />
-                  <span className="field-hint">
-                    Built from <code>k8s/signer/</code> in the KubeSight repo.
-                  </span>
-                </label>
-                <label className="sg-ma-span">
-                  Keystore Secret
-                  <input
-                    value={form.resignKeystoreSecret}
-                    onChange={(e) => set("resignKeystoreSecret", e.target.value)}
-                    placeholder="android-upload-keystore"
-                    className="mono"
-                    required
-                  />
-                  <span className="field-hint">
-                    A Kubernetes Secret in that namespace holding the keystore file and its two
-                    passwords. Use the upload key — with Play App Signing, Google re-signs with the
-                    real app signing key.
-                  </span>
-                </label>
-
-                <details className="sg-ma-span sg-ma-resign-adv">
-                  <summary>Advanced — key names and pod options</summary>
-                  <div className="settings-form sg-ma-grid2 sg-ma-resign-advbody">
-                    <label>
-                      Keystore file key
-                      <input
-                        value={form.resignKeystoreKey}
-                        onChange={(e) => set("resignKeystoreKey", e.target.value)}
-                        placeholder="upload.jks"
-                        className="mono"
-                      />
-                    </label>
-                    <label>
-                      Key alias
-                      <input
-                        value={form.resignKeyAlias}
-                        onChange={(e) => set("resignKeyAlias", e.target.value)}
-                        placeholder="upload"
-                        className="mono"
-                      />
-                    </label>
-                    <label>
-                      Store password key
-                      <input
-                        value={form.resignStorePassKey}
-                        onChange={(e) => set("resignStorePassKey", e.target.value)}
-                        placeholder="store-password"
-                        className="mono"
-                      />
-                    </label>
-                    <label>
-                      Key password key
-                      <input
-                        value={form.resignKeyPassKey}
-                        onChange={(e) => set("resignKeyPassKey", e.target.value)}
-                        placeholder="key-password"
-                        className="mono"
-                      />
-                    </label>
-                    <label>
-                      Service account
-                      <input
-                        value={form.resignServiceAccount}
-                        onChange={(e) => set("resignServiceAccount", e.target.value)}
-                        placeholder="default"
-                        className="mono"
-                      />
-                    </label>
-                    <label>
-                      Image pull secret
-                      <input
-                        value={form.resignImagePullSecret}
-                        onChange={(e) => set("resignImagePullSecret", e.target.value)}
-                        placeholder="regcred"
-                        className="mono"
-                      />
-                    </label>
-                    <label className="sg-ma-span">
-                      Callback URL
-                      <input
-                        value={form.resignCallbackUrl}
-                        onChange={(e) => set("resignCallbackUrl", e.target.value)}
-                        placeholder="http://backend-service:5000"
-                        className="mono"
-                      />
-                      <span className="field-hint">
-                        Where the Job reaches KubeSight. Defaults to in-cluster service DNS — leave
-                        blank unless the Job runs outside this cluster.
-                      </span>
-                    </label>
-                    <span className="field-hint sg-ma-span">
-                      Blank fields fall back to the defaults shown as placeholders.
-                    </span>
-                  </div>
-                </details>
-              </>
-            ) : null}
+            <div className="sg-ma-span">
+              <span className="sg-ma-pick-label">Signing jobs</span>
+              <div className="sg-ma-artifacts">
+                <ResignFields prefix="android" form={form} set={set} />
+                <ResignFields prefix="ios" form={form} set={set} />
+              </div>
+            </div>
+            <span className="field-hint sg-ma-span">
+              The job receives <code>KUBESIGHT_SOURCE_URL</code> and <code>KUBESIGHT_TOKEN</code> as
+              build parameters. See <code>k8s/jenkins/resign.Jenkinsfile</code> in the KubeSight repo
+              for a ready-made pipeline.
+            </span>
           </div>
-
           {/* ── App Store Connect ──────────────────────────────────── */}
           <h4 className="sg-ma-formsect">App Store Connect</h4>
           <div className="settings-form sg-ma-grid2">

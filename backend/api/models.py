@@ -2206,16 +2206,17 @@ class MobileApplication(db.Model):
     # ("folder/pos-apk" -> /job/folder/job/pos-apk). Used for manual fetches;
     # ticket-driven runs already carry their own build URL.
     jenkins_job_path = db.Column(db.String(255), nullable=False, default="")
-    # Per-platform re-signing setup (JSON). Shielding strips the signature, so
-    # the shielded binary has to be signed again before any store will take it.
-    # Signing runs outside KubeSight — the tooling and the private key live
-    # elsewhere — and ``executor`` picks how it is driven:
-    #   {"android": {"executor": "k8s_job", "cluster": "prod", "namespace": "kubesight",
-    #                "image": "registry/android-signer:1", "keystoreSecret": "upload-keystore",
-    #                "keystoreKey": "upload.jks", "keyAlias": "upload",
-    #                "storePassKey": "store-password", "keyPassKey": "key-password"}}
-    # Keystore material is referenced, never stored here: the Job mounts the
-    # named Kubernetes Secret, so the key never enters KubeSight's database.
+    # Per-platform signing-job setup (JSON). Shielding strips the signature, so
+    # the shielded binary must be signed again before any store will take it.
+    # Signing runs on Jenkins, where the keys already are — the Android upload
+    # keystore on a Linux agent, the macOS keychain on the Mac agent:
+    #   {"android": {"executor": "jenkins", "jobPath": "mobile/android-resign",
+    #                "resultPattern": "*.aab", "baseUrl": "https://kubesight.example.com"},
+    #    "ios":     {"executor": "jenkins", "jobPath": "mobile/ios-resign",
+    #                "resultPattern": "signed/*.ipa",
+    #                "extraParams": {"PROFILE": "…_AppStore.mobileprovision"}}}
+    # Only job names, globs, parameter names and URLs live here — never key
+    # material, which stays on the agent that holds it.
     resign_config = db.Column(db.JSON, nullable=True)
 
     # Per-platform artifact resolution (JSON):
@@ -2337,14 +2338,14 @@ class MobileAppBuild(db.Model):
 
 
 class MobileAppResign(db.Model):
-    """One re-signing job: take a signature-stripped build, hand it to a signer
-    that holds the key, and register the signed result as a new build.
+    """One re-signing run: take a signature-stripped build, hand it to a Jenkins
+    job that holds the key, and register the signed result as a new build.
 
     Shielding (SafeCore) strips the code signature, so the shielded binary is
     unpublishable until it is signed again. The signing itself cannot run inside
     KubeSight — Android needs the upload keystore, iOS needs macOS and a
-    keychain — so this is an orchestration record: it tracks the external job,
-    then ingests what comes back.
+    keychain — so this is an orchestration record: it triggers the Jenkins build,
+    follows it, then pulls the artifact it archived.
 
     Same tick-advanced state machine as MobileAppPublish, and ``steps`` is the
     same pipeline-chip JSON the drawer already renders.
@@ -2371,15 +2372,16 @@ class MobileAppResign(db.Model):
     )
 
     platform = db.Column(db.String(16), nullable=False, default="android")
-    # How the signing was driven: k8s_job | jenkins | ssh
-    executor = db.Column(db.String(16), nullable=False, default="k8s_job")
+    # How the signing was driven. Only "jenkins" today.
+    executor = db.Column(db.String(16), nullable=False, default="jenkins")
 
-    # queued | running | completed | failed
+    # queued | running | collecting | completed | failed
     status = db.Column(db.String(16), nullable=False, default="queued")
     steps = db.Column(db.JSON, nullable=True)
     error = db.Column(db.Text, nullable=True)
 
-    # Executor handle for diagnosis — the Job name/namespace, or a build URL.
+    # Jenkins handle for diagnosis + the drawer's build link:
+    # {"kind", "jobPath", "queueUrl", "buildUrl", "buildNumber"}
     job_ref = db.Column(db.JSON, nullable=True)
     # sha256 of the token handed to the signer, so a leaked token can be traced
     # back to the run that issued it. Never the token itself.

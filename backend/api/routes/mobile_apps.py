@@ -223,12 +223,15 @@ def list_resigns(app_id: int):
     return success_response({"items": svc.list_resigns(app_id=app_id)})
 
 
-# --- Signing-job callbacks -------------------------------------------------
-# Machine endpoints, authorized by the short-lived scoped token minted for one
+# --- Signing-job source fetch ----------------------------------------------
+# A machine endpoint, authorized by the short-lived scoped token minted for one
 # signing run — not by a user session. The token names exactly one resign and
-# one build, so it can fetch that binary and post back that result, nothing
-# else. Deliberately separate from the operator-facing download route so a
-# signer token can never reach a user surface.
+# one build, so it can fetch that one binary and nothing else. Deliberately
+# separate from the operator-facing download route so a signing token can never
+# reach a user surface.
+#
+# There is no matching result endpoint: the job archives the signed file and
+# KubeSight pulls it off the build, so the job never posts anything back.
 
 def _resign_claims(resign_id: int):
     """(claims, None) when the bearer token authorizes this resign, else
@@ -265,21 +268,6 @@ def resign_source(resign_id: int):
         download_name=build.file_name or os.path.basename(path),
         conditional=True,
     )
-
-
-@mobile_apps_bp.route("/resigns/<int:resign_id>/result", methods=["POST"])
-def resign_result(resign_id: int):
-    """The signed binary, posted back by the signing job (multipart: file)."""
-    claims, denied = _resign_claims(resign_id)
-    if denied is not None:
-        return denied
-    try:
-        data = svc.ingest_resign_result(
-            resign_id, int(claims.get("buildId") or 0), request.files.get("file")
-        )
-    except MobileAppError as exc:
-        return error_response(str(exc), exc.status)
-    return success_response(data, status_code=201)
 
 
 @mobile_apps_bp.route("/builds/<int:build_id>/publish", methods=["POST"])
