@@ -331,6 +331,7 @@ export default function AppDrawer({
   if (!app) return null;
 
   const artifactConfig = app.artifactConfig || {};
+  const resignAndroid = (app.resignConfig || {}).android || null;
   const readiness = storeReadiness(app);
   const playState = readiness.find((r) => r.key === "google_play")?.state || "off";
   const ascState = readiness.find((r) => r.key === "app_store")?.state || "off";
@@ -512,6 +513,39 @@ export default function AppDrawer({
                     </button>
                   </div>
                 ) : null}
+              </section>
+
+              <section className="sg-ma-cfg">
+                <h5>Re-signing (Android)</h5>
+                {resignAndroid ? (
+                  <>
+                    <div className="sg-ma-cfg-row">
+                      <span className="sg-ma-cfg-k">Signing job</span>
+                      <span className="sg-ma-cfg-v mono">
+                        {`${resignAndroid.cluster || "—"} · ${resignAndroid.namespace || "—"}`}
+                      </span>
+                    </div>
+                    <div className="sg-ma-cfg-row">
+                      <span className="sg-ma-cfg-k">Signer image</span>
+                      <span className="sg-ma-cfg-v mono">{resignAndroid.image || "—"}</span>
+                    </div>
+                    <div className="sg-ma-cfg-row">
+                      <span className="sg-ma-cfg-k">Keystore</span>
+                      <span className="sg-ma-cfg-v mono">
+                        {`${resignAndroid.keystoreSecret || "—"} · alias ${
+                          resignAndroid.keyAlias || "upload"
+                        }`}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="sg-ma-cfg-row">
+                    <span className="sg-ma-cfg-k">Signing job</span>
+                    <span className="sg-ma-cfg-v muted">
+                      not configured — shielded builds cannot be published
+                    </span>
+                  </div>
+                )}
               </section>
 
               <section className="sg-ma-cfg">

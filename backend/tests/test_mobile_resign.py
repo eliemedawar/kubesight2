@@ -199,6 +199,77 @@ def test_resign_requires_manage_permission(app, client, admin_token, operator_to
 
 
 # ---------------------------------------------------------------------------
+# Configuration round-trip (the Edit application form)
+# ---------------------------------------------------------------------------
+
+def test_resign_config_round_trips_through_the_api(app, client, admin_token, artifact_dir):
+    created = _create_app(client, admin_token)
+    assert created["resignConfig"]["android"]["image"] == RESIGN_CFG["android"]["image"]
+    # Defaults the form leaves blank are not invented here — the service fills
+    # them in at launch, so the stored config stays as typed.
+    assert "keystoreKey" not in created["resignConfig"]["android"]
+
+    resp = client.put(
+        f"/api/mobile-apps/{created['id']}",
+        json={
+            "resignConfig": {
+                "android": {
+                    "executor": "k8s_job",
+                    "cluster": "staging",
+                    "namespace": "kubesight",
+                    "image": "registry.local/android-signer:2",
+                    "keystoreSecret": "other-keystore",
+                    "keyAlias": "release",
+                }
+            }
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert resp.status_code == 200, resp.get_json()
+    android = resp.get_json()["data"]["resignConfig"]["android"]
+    assert android["cluster"] == "staging"
+    assert android["keyAlias"] == "release"
+
+
+def test_clearing_resign_config_disables_resigning(app, client, admin_token, artifact_dir):
+    """Unchecking the box in the form sends an empty object, which must
+    actually turn re-signing off rather than silently keeping the old setup."""
+    created = _create_app(client, admin_token)
+    resp = client.put(
+        f"/api/mobile-apps/{created['id']}",
+        json={"resignConfig": {}},
+        headers=auth_headers(admin_token),
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["data"]["resignConfig"] == {}
+
+    build = _upload(client, admin_token, created["id"], _aab(signed=False)).get_json()["data"]
+    resp = client.post(
+        f"/api/mobile-apps/builds/{build['id']}/resign", headers=auth_headers(admin_token)
+    )
+    assert resp.status_code == 409
+
+
+def test_resign_config_ignores_unknown_fields(app, client, admin_token, artifact_dir):
+    """Only the known string fields are stored — nothing can smuggle key
+    material into this column."""
+    created = _create_app(
+        client,
+        admin_token,
+        resign_config={
+            "android": {
+                **RESIGN_CFG["android"],
+                "storePassword": "hunter2",
+                "keystoreBase64": "AAAA",
+            }
+        },
+    )
+    android = created["resignConfig"]["android"]
+    assert "storePassword" not in android
+    assert "keystoreBase64" not in android
+
+
+# ---------------------------------------------------------------------------
 # The signing job's callbacks
 # ---------------------------------------------------------------------------
 

@@ -507,6 +507,24 @@
 .sg-ma-rel-acts { display: flex; align-items: center; gap: 0.35rem; flex: none; }
 .sg-ma-pubbtn { font-size: 0.72rem; padding: 0.3rem 0.7rem; white-space: nowrap; }
 .sg-ma-resignbtn { font-size: 0.72rem; padding: 0.3rem 0.7rem; white-space: nowrap; }
+
+/* Advanced re-signing fields — collapsed by default; the four required ones
+   sit above it, so this stays out of the way until someone needs it. */
+.sg-ma-resign-adv > summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: var(--text-muted);
+  padding: 0.35rem 0;
+}
+.sg-ma-resign-adv > summary:hover { color: var(--text); }
+.sg-ma-resign-advbody {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle, var(--bg-interactive));
+}
 .sg-ma-danger-icon { color: var(--text-muted); }
 .sg-ma-danger-icon:hover { color: var(--danger); background: var(--danger-soft); }
 
