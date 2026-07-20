@@ -7,14 +7,16 @@ has both — a Linux agent for ``jarsigner``/``apksigner``, a Mac agent for
 
 The contract with the job is deliberately small:
 
-1. KubeSight triggers it with a source URL and a scoped token.
-2. The job pulls the unsigned binary from that URL, signs it, and archives the
-   signed file with ``archiveArtifacts``.
+1. KubeSight triggers it, uploading the unsigned binary as a Jenkins *file
+   parameter* — the trigger carries the payload.
+2. The job signs whatever landed in its workspace and archives the result with
+   ``archiveArtifacts``.
 3. KubeSight polls the build, then downloads the archived artifact.
 
-Nothing is POSTed back, so the job never has to know KubeSight's API shape — it
-curls one URL and archives one file. The signing key never leaves the agent
-that holds it.
+Both hops are KubeSight → Jenkins, which matters: the agents here have no route
+back to KubeSight, so a job that had to fetch the binary itself could not work.
+The signing key never leaves the agent that holds it, and the job never needs to
+know KubeSight's API shape.
 """
 
 from __future__ import annotations
@@ -28,10 +30,10 @@ from .jenkins_client import JenkinsConfig, JenkinsError
 
 logger = logging.getLogger(__name__)
 
-# Default build-parameter names, overridable per app because an existing job may
-# already name them something else.
-DEFAULT_SOURCE_URL_PARAM = "KUBESIGHT_SOURCE_URL"
-DEFAULT_TOKEN_PARAM = "KUBESIGHT_TOKEN"
+# Default name of the Jenkins file parameter carrying the unsigned binary.
+# Overridable per app because an existing job may already name it something else
+# (areeba's release pipeline calls it "apkfile").
+DEFAULT_FILE_PARAM = "apkfile"
 
 # Default glob for the signed artifact the job archives.
 DEFAULT_RESULT_PATTERN = {"android": "*.aab", "ios": "*.ipa"}
@@ -50,36 +52,41 @@ class ResignJobSpec:
     platform: str
     artifact_type: str
     job_path: str
-    source_url: str
-    token: str
-    source_url_param: str = DEFAULT_SOURCE_URL_PARAM
-    token_param: str = DEFAULT_TOKEN_PARAM
+    binary_path: str
+    file_name: str = ""
+    file_param: str = DEFAULT_FILE_PARAM
     artifact_type_param: str = ""
     extra_params: Optional[Dict[str, str]] = None
 
 
 def build_params(spec: ResignJobSpec) -> Dict[str, str]:
-    """The parameters sent to the job.
+    """The non-file parameters sent to the job.
 
-    Operator-supplied extras are applied first so they can never overwrite the
-    source URL or the token — those are what make the run work at all.
+    Operator-supplied extras are applied first so a stray entry cannot shadow
+    the values KubeSight derives from the build itself.
     """
     params: Dict[str, str] = {}
     for key, value in (spec.extra_params or {}).items():
         name = str(key).strip()
-        if name:
+        # The binary rides as a file part; a same-named text field would
+        # collide with it.
+        if name and name != spec.file_param:
             params[name] = str(value)
     if spec.artifact_type_param:
         params[spec.artifact_type_param] = spec.artifact_type
-    params[spec.source_url_param] = spec.source_url
-    params[spec.token_param] = spec.token
     return params
 
 
 def launch(cfg: JenkinsConfig, spec: ResignJobSpec) -> Dict[str, Any]:
-    """Trigger the signing build. Returns the job reference to poll."""
+    """Trigger the signing build, uploading the unsigned binary with it."""
     try:
-        queue_url = jenkins_client.trigger_build(cfg, build_params(spec))
+        queue_url = jenkins_client.trigger_build_with_file(
+            cfg,
+            build_params(spec),
+            spec.file_param,
+            spec.binary_path,
+            spec.file_name,
+        )
     except JenkinsError as exc:
         raise ResignExecutorError(str(exc)) from exc
     return {

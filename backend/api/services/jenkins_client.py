@@ -172,11 +172,34 @@ def trigger_build(cfg: JenkinsConfig, params: Dict[str, str]) -> str:
     if cfg.build_token:
         fields["token"] = cfg.build_token
     body = urlencode(fields).encode("utf-8")
-    url = f"{job_url(cfg)}/buildWithParameters"
+    return _submit_build(
+        cfg, body, "application/x-www-form-urlencoded", len(body), job_path=cfg.router_job_path
+    )
+
+
+def _submit_build(
+    cfg: JenkinsConfig,
+    data,
+    content_type: str,
+    content_length: int,
+    job_path: str = "",
+) -> str:
+    """POST to buildWithParameters and return the queue item URL.
+
+    ``data`` may be bytes or a readable stream — a signing job's binary is
+    hundreds of MB, and buffering that into one bytes object would put the whole
+    upload in memory. http.client streams file-like bodies when Content-Length
+    is set, so the caller passes both.
+    """
+    url = f"{job_url(cfg, job_path)}/buildWithParameters"
     req = urllib.request.Request(
         url,
-        data=body,
-        headers={**_headers(cfg), "Content-Type": "application/x-www-form-urlencoded"},
+        data=data,
+        headers={
+            **_headers(cfg),
+            "Content-Type": content_type,
+            "Content-Length": str(content_length),
+        },
         method="POST",
     )
     # A no-redirect opener: the trigger must be a SINGLE POST. If a proxy answers
@@ -212,8 +235,9 @@ def trigger_build(cfg: JenkinsConfig, params: Dict[str, str]) -> str:
                 pass
             if exc.code == 400:
                 raise JenkinsError(
-                    "Jenkins rejected the parameters (400) — the router job may not be parameterized "
-                    "with APP/TAG/NAMESPACE yet.",
+                    "Jenkins rejected the parameters (400) — the job may not declare them yet. "
+                    "A pipeline's parameters only register after its first build, so run it "
+                    "once manually.",
                     400,
                 ) from exc
             if exc.code == 403:
@@ -235,6 +259,105 @@ def trigger_build(cfg: JenkinsConfig, params: Dict[str, str]) -> str:
     if not location:
         raise JenkinsError("Jenkins accepted the build but returned no queue location header.")
     return _rebase(cfg, location.rstrip("/"))
+
+
+class _MultipartStream:
+    """Reads a multipart body as prefix → file → suffix, without ever holding
+    the file in memory. http.client pulls this in blocks."""
+
+    def __init__(self, prefix: bytes, file_path: str, suffix: bytes):
+        self._prefix = prefix
+        self._suffix = suffix
+        self._file = open(file_path, "rb")
+        self._stage = 0  # 0 prefix, 1 file, 2 suffix, 3 done
+        self._offset = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = 1024 * 1024
+        while True:
+            if self._stage == 0:
+                chunk = self._prefix[self._offset : self._offset + size]
+                self._offset += len(chunk)
+                if self._offset >= len(self._prefix):
+                    self._stage, self._offset = 1, 0
+                if chunk:
+                    return chunk
+                continue
+            if self._stage == 1:
+                chunk = self._file.read(size)
+                if chunk:
+                    return chunk
+                self._file.close()
+                self._stage, self._offset = 2, 0
+                continue
+            if self._stage == 2:
+                chunk = self._suffix[self._offset : self._offset + size]
+                self._offset += len(chunk)
+                if self._offset >= len(self._suffix):
+                    self._stage = 3
+                if chunk:
+                    return chunk
+                continue
+            return b""
+
+    def close(self) -> None:
+        if not self._file.closed:
+            self._file.close()
+
+
+def trigger_build_with_file(
+    cfg: JenkinsConfig,
+    params: Dict[str, str],
+    file_param: str,
+    file_path: str,
+    file_name: str = "",
+) -> str:
+    """Trigger a build, uploading ``file_path`` as a Jenkins *file parameter*.
+
+    Used where the agent cannot reach KubeSight to fetch the binary itself: the
+    trigger carries the payload instead. Jenkins drops a file parameter into the
+    workspace under the parameter's name, so the job just reads that path.
+    """
+    import os
+    import uuid
+
+    if not os.path.isfile(file_path):
+        raise JenkinsError(f"File to upload not found: {file_path}")
+
+    fields = {k: str(v) for k, v in params.items()}
+    if cfg.build_token:
+        fields["token"] = cfg.build_token
+
+    boundary = uuid.uuid4().hex
+    name = file_name or os.path.basename(file_path)
+    chunks = []
+    for key, value in fields.items():
+        chunks.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+            f"{value}\r\n"
+        )
+    chunks.append(
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{file_param}"; filename="{name}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    )
+    prefix = "".join(chunks).encode("utf-8")
+    suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    total = len(prefix) + os.path.getsize(file_path) + len(suffix)
+
+    stream = _MultipartStream(prefix, file_path, suffix)
+    try:
+        return _submit_build(
+            cfg,
+            stream,
+            f"multipart/form-data; boundary={boundary}",
+            total,
+            job_path=cfg.router_job_path,
+        )
+    finally:
+        stream.close()
 
 
 def queue_state(cfg: JenkinsConfig, queue_url: str) -> Dict[str, Any]:

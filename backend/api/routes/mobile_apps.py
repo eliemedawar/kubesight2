@@ -12,7 +12,7 @@ import os
 from flask import Blueprint, request, send_file
 
 from ..audit import log_audit
-from ..auth_utils import get_bearer_token, get_current_user, resign_token_claims
+from ..auth_utils import get_current_user
 from ..decorators import require_admin, require_permission
 from ..response import error_response, success_response
 from ..services import mobile_app_service as svc
@@ -221,53 +221,6 @@ def resign_build(build_id: int):
 @require_permission("mobile_apps:view")
 def list_resigns(app_id: int):
     return success_response({"items": svc.list_resigns(app_id=app_id)})
-
-
-# --- Signing-job source fetch ----------------------------------------------
-# A machine endpoint, authorized by the short-lived scoped token minted for one
-# signing run — not by a user session. The token names exactly one resign and
-# one build, so it can fetch that one binary and nothing else. Deliberately
-# separate from the operator-facing download route so a signing token can never
-# reach a user surface.
-#
-# There is no matching result endpoint: the job archives the signed file and
-# KubeSight pulls it off the build, so the job never posts anything back.
-
-def _resign_claims(resign_id: int):
-    """(claims, None) when the bearer token authorizes this resign, else
-    (None, response)."""
-    token = get_bearer_token()
-    claims = resign_token_claims(token) if token else None
-    if not claims or int(claims.get("resignId") or 0) != int(resign_id):
-        return None, error_response("Invalid or expired signing token.", 401)
-    return claims, None
-
-
-@mobile_apps_bp.route("/resigns/<int:resign_id>/source", methods=["GET"])
-def resign_source(resign_id: int):
-    """The unsigned binary, for the signing job to pull."""
-    from ..models import MobileAppBuild, MobileAppResign
-
-    claims, denied = _resign_claims(resign_id)
-    if denied is not None:
-        return denied
-
-    row = MobileAppResign.query.get(resign_id)
-    if row is None or row.status != "running":
-        return error_response("This signing job is not active.", 409)
-    build = MobileAppBuild.query.get(row.build_id)
-    if build is None or int(claims.get("buildId") or 0) != int(build.id):
-        return error_response("Token does not match this signing job's build.", 403)
-
-    path = svc.binary_path(build)
-    if not (path and os.path.isfile(path)):
-        return error_response("This build's binary is not available.", 409)
-    return send_file(
-        path,
-        as_attachment=True,
-        download_name=build.file_name or os.path.basename(path),
-        conditional=True,
-    )
 
 
 @mobile_apps_bp.route("/builds/<int:build_id>/publish", methods=["POST"])

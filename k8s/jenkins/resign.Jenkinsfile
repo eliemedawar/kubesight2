@@ -5,10 +5,10 @@
 // store will take it. Publishing now happens in KubeSight, so this job's only
 // output is an archived, signed artifact.
 //
-// KubeSight triggers it with two parameters and then downloads whatever this
-// job archives:
-//   KUBESIGHT_SOURCE_URL — one-time link to the unsigned binary
-//   KUBESIGHT_TOKEN      — scoped bearer token, valid ~60 min, this build only
+// KubeSight uploads the unsigned binary with the trigger, as the `apkfile`
+// FILE parameter — Jenkins drops it into the workspace under that name. Nothing
+// here calls back to KubeSight; it only archives the signed file, which
+// KubeSight then pulls off the build.
 //
 // Point one KubeSight app at this job per platform (Edit application → Signing).
 
@@ -16,8 +16,12 @@ pipeline {
     agent none
 
     parameters {
-        string(name: 'KUBESIGHT_SOURCE_URL', defaultValue: '', description: 'Unsigned binary (set by KubeSight)')
-        password(name: 'KUBESIGHT_TOKEN', defaultValue: '', description: 'Scoped fetch token (set by KubeSight)')
+        // The unsigned binary, uploaded by KubeSight with the trigger.
+        // stashedFile comes from the File Parameters plugin — the classic
+        // `file` parameter does not reach a Pipeline workspace (JENKINS-27413).
+        // Each stage recovers it with `unstash 'apkfile'`, which is how the
+        // existing areeba release pipeline already receives its binary.
+        stashedFile(name: 'apkfile', description: 'Unsigned binary (set by KubeSight)')
         choice(name: 'PLATFORM', choices: ['android', 'ios'], description: 'Which signer to run')
         string(name: 'ANDROID_EXT', defaultValue: 'aab', description: 'aab or apk')
         string(name: 'KEY_ALIAS', defaultValue: 'upload', description: 'Android keystore alias')
@@ -39,6 +43,7 @@ pipeline {
             agent { label 'master' }
             steps {
                 cleanWs()
+                unstash 'apkfile'
                 withCredentials([
                     file(credentialsId: 'android-upload-keystore', variable: 'KEYSTORE'),
                     string(credentialsId: 'android-keystore-password', variable: 'STORE_PASS'),
@@ -49,9 +54,9 @@ pipeline {
                         export ANDROID_HOME=${ANDROID_HOME:-/opt/android-sdk}
                         mkdir -p signed
 
-                        echo "==> Fetching unsigned binary from KubeSight"
-                        curl -fsSL -H "Authorization: Bearer ${KUBESIGHT_TOKEN}" \
-                            "${KUBESIGHT_SOURCE_URL}" -o "unsigned.${ANDROID_EXT}"
+                        echo "==> Binary uploaded by KubeSight"
+                        [ -f apkfile ] || { echo "apkfile missing from workspace" >&2; exit 1; }
+                        mv apkfile "unsigned.${ANDROID_EXT}"
                         echo "    $(wc -c < unsigned.${ANDROID_EXT}) bytes"
 
                         if [ "${ANDROID_EXT}" = "aab" ]; then
@@ -100,6 +105,7 @@ pipeline {
             agent { label 'mac' }
             steps {
                 cleanWs()
+                unstash 'apkfile'
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'MacDevops',
@@ -121,9 +127,9 @@ pipeline {
                         . ./ios_env
                         set +a
 
-                        echo "==> Fetching shielded IPA from KubeSight"
-                        curl -fsSL -H "Authorization: Bearer ${KUBESIGHT_TOKEN}" \
-                            "${KUBESIGHT_SOURCE_URL}" -o "shielded.ipa"
+                        echo "==> IPA uploaded by KubeSight"
+                        [ -f apkfile ] || { echo "apkfile missing from workspace" >&2; exit 1; }
+                        mv apkfile shielded.ipa
                         echo "    $(wc -c < shielded.ipa) bytes"
 
                         PROV_PROFILE="$HOME/Library/MobileDevice/Provisioning Profiles/${PROV_PROFILE}"

@@ -50,15 +50,16 @@ function formFromApp(app) {
     iosSource: ios?.source || "archive",
     iosPattern: ios?.pattern || "",
     iosPath: ios?.path || "",
-    // Signing jobs — shared KubeSight URL + per-platform Jenkins job
-    resignBaseUrl: resignAndroid?.baseUrl || resignIos?.baseUrl || "",
+    // Signing jobs (per platform)
     androidResignEnabled: Boolean(resignAndroid),
     androidResignJobPath: resignAndroid?.jobPath || "",
     androidResignPattern: resignAndroid?.resultPattern || "",
+    androidResignFileParam: resignAndroid?.fileParam || "",
     androidResignExtra: paramsToText(resignAndroid?.extraParams),
     iosResignEnabled: Boolean(resignIos),
     iosResignJobPath: resignIos?.jobPath || "",
     iosResignPattern: resignIos?.resultPattern || "",
+    iosResignFileParam: resignIos?.fileParam || "",
     iosResignExtra: paramsToText(resignIos?.extraParams),
     // Google Play
     androidPackageName: app?.androidPackageName || "",
@@ -165,6 +166,18 @@ function ResignFields({ prefix, form, set }) {
               Matched against the build&apos;s archived artifacts.
             </span>
           </label>
+          <label>
+            Binary file parameter
+            <input
+              value={form[`${prefix}ResignFileParam`]}
+              onChange={(e) => set(`${prefix}ResignFileParam`, e.target.value)}
+              placeholder="apkfile"
+              className="mono"
+            />
+            <span className="field-hint">
+              The job&apos;s file parameter the binary is uploaded as.
+            </span>
+          </label>
           <label className="sg-ma-span">
             Extra build parameters
             <textarea
@@ -238,7 +251,7 @@ export default function AppFormModal({
       const optional = {
         jobPath: form[`${prefix}ResignJobPath`],
         resultPattern: form[`${prefix}ResignPattern`],
-        baseUrl: form.resignBaseUrl,
+        fileParam: form[`${prefix}ResignFileParam`],
       };
       Object.entries(optional).forEach(([key, value]) => {
         const trimmed = (value || "").trim();
@@ -449,23 +462,10 @@ export default function AppFormModal({
           <div className="settings-form sg-ma-grid2">
             <p className="field-hint sg-ma-span sg-ma-artifact-intro">
               Shielding strips the code signature, and no store accepts an unsigned binary. Pressing
-              &ldquo;Re-sign&rdquo; on a build triggers the Jenkins job below: KubeSight passes it a
-              one-time link to the unsigned file, the job signs it and archives the result, and
-              KubeSight pulls that back as a new, publishable build. Signing keys stay on Jenkins.
+              &ldquo;Re-sign&rdquo; on a build triggers the Jenkins job below, uploading the binary
+              with it. The job signs it and archives the result, and KubeSight pulls that back as a
+              new, publishable build. Signing keys stay on Jenkins.
             </p>
-            <label className="sg-ma-span">
-              KubeSight URL for Jenkins
-              <input
-                value={form.resignBaseUrl}
-                onChange={(e) => set("resignBaseUrl", e.target.value)}
-                placeholder="https://kubesight.areeba.com"
-                className="mono"
-              />
-              <span className="field-hint">
-                Where the job downloads the unsigned binary from — it must be reachable from your
-                Jenkins agents. Leave blank to use the server default.
-              </span>
-            </label>
             <div className="sg-ma-span">
               <span className="sg-ma-pick-label">Signing jobs</span>
               <div className="sg-ma-artifacts">
@@ -474,9 +474,9 @@ export default function AppFormModal({
               </div>
             </div>
             <span className="field-hint sg-ma-span">
-              The job receives <code>KUBESIGHT_SOURCE_URL</code> and <code>KUBESIGHT_TOKEN</code> as
-              build parameters. See <code>k8s/jenkins/resign.Jenkinsfile</code> in the KubeSight repo
-              for a ready-made pipeline.
+              The binary is uploaded as a Jenkins file parameter, so the job never needs to reach
+              KubeSight. See <code>k8s/jenkins/resign.Jenkinsfile</code> in the KubeSight repo for a
+              ready-made pipeline.
             </span>
           </div>
           {/* ── App Store Connect ──────────────────────────────────── */}

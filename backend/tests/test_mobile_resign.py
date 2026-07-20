@@ -25,7 +25,6 @@ from tests.conftest import auth_headers
 def artifact_dir(tmp_path, monkeypatch):
     root = tmp_path / "mobile_artifacts"
     monkeypatch.setenv("MOBILE_ARTIFACT_DIR", str(root))
-    monkeypatch.setenv("KUBESIGHT_PUBLIC_URL", "https://kubesight.example.com")
     return root
 
 
@@ -34,6 +33,7 @@ RESIGN_CFG = {
         "executor": "jenkins",
         "jobPath": "mobile/android-resign",
         "resultPattern": "signed/*.aab",
+        "fileParam": "apkfile",
     },
     "ios": {
         "executor": "jenkins",
@@ -121,12 +121,16 @@ def _fake_jenkins(monkeypatch, *, signed_bytes=None, result_name="app-release.aa
         "artifacts": [{"fileName": result_name, "relativePath": f"signed/{result_name}"}],
     }
 
-    def fake_trigger(cfg, params):
+    def fake_trigger(cfg, params, file_param, file_path, file_name=""):
         seen["params"] = params
         seen["jobPath"] = cfg.router_job_path
+        seen["fileParam"] = file_param
+        with open(file_path, "rb") as fh:
+            seen["uploaded"] = fh.read()
+        seen["fileName"] = file_name
         return QUEUE_URL
 
-    monkeypatch.setattr(jenkins_client, "trigger_build", fake_trigger)
+    monkeypatch.setattr(jenkins_client, "trigger_build_with_file", fake_trigger)
     monkeypatch.setattr(jenkins_client, "queue_state", lambda cfg, url: seen["queue"])
     monkeypatch.setattr(jenkins_client, "build_state", lambda cfg, url: seen["build"])
     monkeypatch.setattr(jenkins_client, "list_artifacts", lambda cfg, url: seen["artifacts"])
@@ -154,9 +158,14 @@ def _dispatch(seen):
 # Triggering
 # ---------------------------------------------------------------------------
 
-def test_resign_triggers_job_with_scoped_token(app, client, admin_token, artifact_dir, monkeypatch):
+def test_resign_uploads_the_binary_with_the_trigger(
+    app, client, admin_token, artifact_dir, monkeypatch
+):
+    """The agents have no route back to KubeSight, so the trigger must carry the
+    binary — nothing may depend on the job fetching it."""
     created = _create_app(client, admin_token)
-    build = _upload(client, admin_token, created["id"], _aab(signed=False)).get_json()["data"]
+    unsigned = _aab(signed=False)
+    build = _upload(client, admin_token, created["id"], unsigned).get_json()["data"]
     assert build["signatureState"] == "unsigned"
 
     seen = _fake_jenkins(monkeypatch)
@@ -165,39 +174,27 @@ def test_resign_triggers_job_with_scoped_token(app, client, admin_token, artifac
     )
     assert resp.status_code == 202, resp.get_json()
 
-    params = seen["params"]
     assert seen["jobPath"] == "mobile/android-resign"
-    assert params["KUBESIGHT_SOURCE_URL"].startswith("https://kubesight.example.com/api/mobile-apps/resigns/")
-    assert params["KUBESIGHT_SOURCE_URL"].endswith("/source")
-
-    from api.auth_utils import resign_token_claims
-
-    claims = resign_token_claims(params["KUBESIGHT_TOKEN"])
-    assert claims["buildId"] == build["id"]
-    assert claims["purpose"] == "resign"
+    assert seen["fileParam"] == "apkfile"
+    assert seen["uploaded"] == unsigned  # the exact stored binary, byte for byte
+    assert seen["fileName"] == "app-release.aab"
 
     with app.app_context():
         row = MobileAppResign.query.filter_by(build_id=build["id"]).first()
         assert row.status == "running"
         assert row.executor == "jenkins"
         assert row.job_ref["queueUrl"] == QUEUE_URL
-        # The token is fingerprinted, never stored.
-        assert row.token_hash and params["KUBESIGHT_TOKEN"] not in (row.token_hash or "")
 
 
-def test_extra_params_cannot_shadow_the_source_url_or_token(
+def test_extra_params_cannot_collide_with_the_file_part(
     app, client, admin_token, artifact_dir, monkeypatch
 ):
-    """Operator-supplied parameters are conveniences; overwriting the fetch URL
-    or the token would break the run (or redirect the binary)."""
+    """A text field named like the file parameter would collide with the upload
+    in the multipart body; harmless extras still pass through."""
     hostile = {
         "android": {
             **RESIGN_CFG["android"],
-            "extraParams": {
-                "KUBESIGHT_SOURCE_URL": "http://evil.example.com/",
-                "KUBESIGHT_TOKEN": "attacker-token",
-                "KEY_ALIAS": "upload",
-            },
+            "extraParams": {"apkfile": "not-the-binary", "KEY_ALIAS": "zakykey"},
         }
     }
     created = _create_app(client, admin_token, resign_config=hostile)
@@ -205,10 +202,8 @@ def test_extra_params_cannot_shadow_the_source_url_or_token(
     seen = _fake_jenkins(monkeypatch)
     client.post(f"/api/mobile-apps/builds/{build['id']}/resign", headers=auth_headers(admin_token))
 
-    params = seen["params"]
-    assert "evil.example.com" not in params["KUBESIGHT_SOURCE_URL"]
-    assert params["KUBESIGHT_TOKEN"] != "attacker-token"
-    assert params["KEY_ALIAS"] == "upload"  # harmless extras still pass through
+    assert "apkfile" not in seen["params"]
+    assert seen["params"]["KEY_ALIAS"] == "zakykey"
 
 
 def test_resign_requires_a_configured_job(app, client, admin_token, artifact_dir):
@@ -391,55 +386,13 @@ def test_missing_archived_artifact_fails_with_a_useful_message(
 
 
 # ---------------------------------------------------------------------------
-# The source-fetch endpoint
-# ---------------------------------------------------------------------------
-
-def test_job_fetches_the_unsigned_binary(app, client, admin_token, artifact_dir, monkeypatch):
-    _, _, resign_id, seen = _start(app, client, admin_token, monkeypatch)
-    token = seen["params"]["KUBESIGHT_TOKEN"]
-
-    resp = client.get(
-        f"/api/mobile-apps/resigns/{resign_id}/source",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 200
-    assert resp.data == _aab(signed=False)
-
-
-def test_source_requires_the_signing_token(app, client, admin_token, artifact_dir, monkeypatch):
-    _, _, resign_id, seen = _start(app, client, admin_token, monkeypatch)
-
-    assert client.get(f"/api/mobile-apps/resigns/{resign_id}/source").status_code == 401
-    # A normal session token is not a signing token.
-    resp = client.get(
-        f"/api/mobile-apps/resigns/{resign_id}/source", headers=auth_headers(admin_token)
-    )
-    assert resp.status_code == 401
-    # ...and the signing token opens nothing else.
-    token = seen["params"]["KUBESIGHT_TOKEN"]
-    resp = client.get("/api/mobile-apps", headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code in (401, 403)
-
-
-def test_token_for_another_run_is_rejected(app, client, admin_token, artifact_dir, monkeypatch):
-    _, _, first_id, first_seen = _start(app, client, admin_token, monkeypatch)
-    _, _, second_id, _ = _start(app, client, admin_token, monkeypatch)
-    assert first_id != second_id
-
-    resp = client.get(
-        f"/api/mobile-apps/resigns/{second_id}/source",
-        headers={"Authorization": f"Bearer {first_seen['params']['KUBESIGHT_TOKEN']}"},
-    )
-    assert resp.status_code == 401
-
-
-# ---------------------------------------------------------------------------
 # Configuration round-trip (the Edit application form)
 # ---------------------------------------------------------------------------
 
 def test_resign_config_round_trips_through_the_api(app, client, admin_token, artifact_dir):
     created = _create_app(client, admin_token)
     assert created["resignConfig"]["android"]["jobPath"] == "mobile/android-resign"
+    assert created["resignConfig"]["android"]["fileParam"] == "apkfile"
     assert created["resignConfig"]["ios"]["extraParams"]["PROV_PROFILE"].endswith(".mobileprovision")
 
     resp = client.put(
@@ -512,6 +465,81 @@ def test_unsupported_executor_is_rejected(app, client, admin_token, artifact_dir
 # ---------------------------------------------------------------------------
 # Executor unit
 # ---------------------------------------------------------------------------
+
+def test_multipart_body_streams_the_file_without_buffering_it(tmp_path):
+    """The upload is hundreds of MB — the body must be produced as a stream, not
+    assembled in memory, and Content-Length must match it exactly."""
+    from api.services.jenkins_client import _MultipartStream
+
+    binary = tmp_path / "app.aab"
+    binary.write_bytes(b"BINARY" * 5000)
+
+    prefix = b"--B\r\nContent-Disposition: form-data; name=\"apkfile\"\r\n\r\n"
+    suffix = b"\r\n--B--\r\n"
+    stream = _MultipartStream(prefix, str(binary), suffix)
+
+    # Read in awkward chunk sizes to prove the stage transitions hold.
+    out = b""
+    while True:
+        chunk = stream.read(7)
+        if not chunk:
+            break
+        out += chunk
+
+    assert out == prefix + binary.read_bytes() + suffix
+    assert len(out) == len(prefix) + binary.stat().st_size + len(suffix)
+    stream.close()
+
+
+def test_trigger_with_file_builds_a_well_formed_multipart_body(tmp_path, monkeypatch):
+    from api.services import jenkins_client as jc
+
+    binary = tmp_path / "app.aab"
+    binary.write_bytes(b"PAYLOAD")
+    captured = {}
+
+    def fake_submit(cfg, data, content_type, content_length, job_path=""):
+        captured["contentType"] = content_type
+        captured["length"] = content_length
+        # Drain it the way http.client does: read until empty. A short read at a
+        # stage boundary is legal and must not be mistaken for EOF.
+        body = b""
+        while True:
+            chunk = data.read(8192)
+            if not chunk:
+                break
+            body += chunk
+        captured["body"] = body
+        return QUEUE_URL
+
+    monkeypatch.setattr(jc, "_submit_build", fake_submit)
+    cfg = jc.JenkinsConfig(
+        base_url="http://jenkins.local:8080",
+        username="u",
+        api_token="t",
+        router_job_path="mobile/resign",
+    )
+    url = jc.trigger_build_with_file(cfg, {"PLATFORM": "android"}, "apkfile", str(binary))
+
+    assert url == QUEUE_URL
+    body = captured["body"]
+    assert captured["contentType"].startswith("multipart/form-data; boundary=")
+    assert b'name="PLATFORM"' in body and b"android" in body
+    assert b'name="apkfile"; filename="app.aab"' in body
+    assert b"PAYLOAD" in body
+    # Content-Length must cover the whole body or the request truncates.
+    assert captured["length"] >= len(b"PAYLOAD")
+
+
+def test_trigger_with_file_rejects_a_missing_binary(tmp_path):
+    from api.services import jenkins_client as jc
+
+    cfg = jc.JenkinsConfig(
+        base_url="http://jenkins.local:8080", username="u", api_token="t", router_job_path="x"
+    )
+    with pytest.raises(jc.JenkinsError, match="not found"):
+        jc.trigger_build_with_file(cfg, {}, "apkfile", str(tmp_path / "nope.aab"))
+
 
 def test_poll_reports_queued_until_an_executor_picks_it_up(monkeypatch):
     monkeypatch.setattr(

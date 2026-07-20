@@ -168,12 +168,9 @@ _RESIGN_STR_FIELDS = (
     "jobPath",
     # Glob matched against the build's ARCHIVED artifacts to find the signed file.
     "resultPattern",
-    # KubeSight base URL the job fetches the unsigned binary from. Jenkins runs
-    # outside the cluster, so this must be an address its agents can reach.
-    "baseUrl",
-    # Names of the build parameters KubeSight fills in.
-    "sourceUrlParam",
-    "tokenParam",
+    # Jenkins FILE parameter the unsigned binary is uploaded as.
+    "fileParam",
+    # Optional text parameter carrying "aab" / "apk" / "ipa".
     "artifactTypeParam",
 )
 _RESIGN_EXECUTORS = ("jenkins",)
@@ -1320,24 +1317,6 @@ RESIGN_TERMINAL_STATUSES = ("completed", "failed")
 _RESIGN_TIMEOUT_MINUTES = 45
 
 
-def _resign_token_minutes() -> int:
-    """Token lifetime. Long enough to cover a queue wait plus the transfer of a
-    few hundred MB, short enough that a leaked one goes stale."""
-    try:
-        return max(5, int(os.getenv("RESIGN_TOKEN_MINUTES", "60")))
-    except ValueError:
-        return 60
-
-
-def _resign_base_url() -> str:
-    """The KubeSight base URL Jenkins uses to fetch the unsigned binary.
-
-    Jenkins runs outside the cluster, so this has to be an address its agents
-    can actually reach — not in-cluster service DNS.
-    """
-    return os.getenv("KUBESIGHT_PUBLIC_URL", os.getenv("RESIGN_CALLBACK_URL", "")).rstrip("/")
-
-
 def _resign_config(app: MobileApplication, platform: str) -> Dict[str, Any]:
     cfg = (app.resign_config or {}).get(platform) if isinstance(app.resign_config, dict) else None
     return dict(cfg) if isinstance(cfg, dict) else {}
@@ -1411,12 +1390,8 @@ def start_resign(build_id: int, user=None) -> Dict[str, Any]:
         )
     if not cfg.get("jobPath"):
         raise MobileAppError("The signing setup has no Jenkins job path.", 409)
-    if not (cfg.get("baseUrl") or _resign_base_url()):
-        raise MobileAppError(
-            "No KubeSight URL is configured for Jenkins to fetch the binary from. "
-            "Set it on the app's signing setup (or KUBESIGHT_PUBLIC_URL).",
-            409,
-        )
+    if not binary_path(build) or not os.path.isfile(binary_path(build) or ""):
+        raise MobileAppError("This build's binary is missing from the store.", 409)
 
     active = MobileAppResign.query.filter(
         MobileAppResign.build_id == build.id,
@@ -1478,37 +1453,30 @@ def _launch_resign(resign_id: int) -> None:
 
     cfg = _resign_config(app, row.platform)
     try:
-        import hashlib
+        source = binary_path(build) or ""
+        if not os.path.isfile(source):
+            _fail_resign(row, "This build's binary is missing from the store.")
+            return
+        size_mb = os.path.getsize(source) / (1024 * 1024)
+        _set_resign_step(row, "prepare", "done", f"{build.file_name} ({size_mb:.0f} MB)")
 
-        from ..auth_utils import create_resign_token
-
-        _set_resign_step(row, "prepare", "run", "minting a scoped token for the signing job")
-        minutes = _resign_token_minutes()
-        token = create_resign_token(row.id, build.id, minutes)
-        row.token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        _set_resign_step(row, "prepare", "done", f"token valid for {minutes} min")
-
-        base = str(cfg.get("baseUrl") or _resign_base_url()).rstrip("/")
         spec = resign_executor.ResignJobSpec(
             resign_id=row.id,
             build_id=build.id,
             platform=row.platform,
             artifact_type=build.artifact_type or "",
             job_path=str(cfg.get("jobPath") or ""),
-            source_url=f"{base}/api/mobile-apps/resigns/{row.id}/source",
-            token=token,
-            source_url_param=str(
-                cfg.get("sourceUrlParam") or resign_executor.DEFAULT_SOURCE_URL_PARAM
-            ),
-            token_param=str(cfg.get("tokenParam") or resign_executor.DEFAULT_TOKEN_PARAM),
+            binary_path=source,
+            file_name=build.file_name or "",
+            file_param=str(cfg.get("fileParam") or resign_executor.DEFAULT_FILE_PARAM),
             artifact_type_param=str(cfg.get("artifactTypeParam") or ""),
             extra_params=cfg.get("extraParams") if isinstance(cfg.get("extraParams"), dict) else {},
         )
 
-        _set_resign_step(row, "launch", "run", f"triggering {spec.job_path}")
+        _set_resign_step(row, "launch", "run", f"uploading to {spec.job_path}")
         jcfg = _jenkins_cfg(spec.job_path)
         row.job_ref = resign_executor.launch(jcfg, spec)
-        _set_resign_step(row, "launch", "done", "queued in Jenkins")
+        _set_resign_step(row, "launch", "done", "uploaded and queued in Jenkins")
         _set_resign_step(row, "sign", "run", "waiting for the signing build")
         row.status = "running"
         db.session.add(row)

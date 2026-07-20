@@ -2383,10 +2383,6 @@ class MobileAppResign(db.Model):
     # Jenkins handle for diagnosis + the drawer's build link:
     # {"kind", "jobPath", "queueUrl", "buildUrl", "buildNumber"}
     job_ref = db.Column(db.JSON, nullable=True)
-    # sha256 of the token handed to the signer, so a leaked token can be traced
-    # back to the run that issued it. Never the token itself.
-    token_hash = db.Column(db.String(64), nullable=True)
-
     triggered_by = db.Column(db.String(120), nullable=True)
 
     created_at = db.Column(
