@@ -249,28 +249,21 @@ def upload_build(cfg: AscConfig, path: str, file_name: str) -> Dict[str, Any]:
         _put_chunk(op, path)
 
     file_id = str(file_entry.get("id") or "")
-    if file_id:
-        try:
-            _request(
-                cfg,
-                "PATCH",
-                f"{_API}/buildUploadFiles/{quote(file_id, safe='')}",
-                body={
-                    "data": {
-                        "type": "buildUploadFiles",
-                        "id": file_id,
-                        "attributes": {"uploaded": True},
-                    }
-                },
-            )
-        except AscError:
-            pass  # some flows only require the buildUploads-level completion below
+    if not file_id:
+        raise AscError("App Store Connect did not return a build upload file id.")
+    # Finalize on the FILE resource: marking buildUploadFiles uploaded=true is the
+    # authoritative completion signal. buildUploads itself only allows CREATE /
+    # DELETE / GET_INSTANCE — PATCHing it 403s ("does not allow 'UPDATE'").
     _request(
         cfg,
         "PATCH",
-        f"{_API}/buildUploads/{quote(upload_id, safe='')}",
+        f"{_API}/buildUploadFiles/{quote(file_id, safe='')}",
         body={
-            "data": {"type": "buildUploads", "id": upload_id, "attributes": {"uploaded": True}}
+            "data": {
+                "type": "buildUploadFiles",
+                "id": file_id,
+                "attributes": {"uploaded": True},
+            }
         },
     )
     return {
