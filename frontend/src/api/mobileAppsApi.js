@@ -35,6 +35,38 @@ export const fetchMobileAppBuilds = (id) =>
 export const listMobileAppBuilds = (id) =>
   request(`/api/mobile-apps/${encodeURIComponent(id)}/builds`);
 
+/**
+ * Upload a binary (APK/AAB/IPA) directly as a ready-to-publish build. Uses a
+ * raw fetch with FormData — the browser sets the multipart boundary, so no
+ * Content-Type header is set here (only Authorization).
+ */
+export async function uploadMobileBuild(id, { file, platform, version } = {}) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("platform", platform);
+  if (version) form.append("version", version);
+  const response = await fetch(
+    `${getBaseUrl()}/api/mobile-apps/${encodeURIComponent(id)}/builds/upload`,
+    { method: "POST", headers: authHeaders(), body: form }
+  );
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+    try {
+      const payload = await response.json();
+      message = payload.error || payload.message || message;
+    } catch {
+      /* non-JSON error body */
+    }
+    const err = new Error(
+      message === "Forbidden" ? "You do not have access to this resource." : message
+    );
+    err.status = response.status;
+    throw err;
+  }
+  const payload = await response.json();
+  return payload?.data ?? payload;
+}
+
 export const deleteMobileBuild = (buildId) =>
   request(`/api/mobile-apps/builds/${encodeURIComponent(buildId)}`, { method: "DELETE" });
 

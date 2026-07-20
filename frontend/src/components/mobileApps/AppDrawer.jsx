@@ -73,6 +73,7 @@ function ReleaseCard({
             <span className="sg-tag">{(build.artifactType || "").toUpperCase()}</span>
             <BuildStatusPill status={build.status} />
             {build.source === "manual" ? <span className="sg-ma-count">manual</span> : null}
+            {build.source === "upload" ? <span className="sg-ma-count">uploaded</span> : null}
           </div>
           <div className="sg-ma-rel-meta">
             {build.fileName ? (
@@ -212,6 +213,7 @@ export default function AppDrawer({
   loading = false,
   onFetch,
   fetching = false,
+  onUpload,
   onTestJenkins,
   testingJenkins = false,
   onEdit,
@@ -286,6 +288,11 @@ export default function AppDrawer({
               <button type="button" className="secondary" onClick={onFetch} disabled={fetching}>
                 {fetching ? "Fetching…" : "Fetch latest build"}
               </button>
+              {onUpload ? (
+                <button type="button" className="secondary" onClick={onUpload}>
+                  Upload build…
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="secondary"
@@ -369,7 +376,9 @@ export default function AppDrawer({
             ) : (
               <p className="muted sg-ma-empty-hint">
                 No builds yet.{" "}
-                {canManage ? "Use “Fetch latest build” to pull the newest Jenkins artifact." : null}
+                {canManage
+                  ? "Use “Fetch latest build” to pull the newest Jenkins artifact, or “Upload build…” to add an APK/AAB/IPA directly."
+                  : null}
               </p>
             )
           ) : (

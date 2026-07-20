@@ -514,6 +514,122 @@ def fetch_latest(app_id: int, user=None) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Direct binary upload — operator supplies the final artifact, no Jenkins
+# ---------------------------------------------------------------------------
+
+_HASH_CHUNK = 1024 * 1024
+
+
+def _hash_and_size(path: str) -> tuple:
+    """(sha256 hex, byte size) of a file, read in chunks so large binaries
+    never load into memory whole."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(_HASH_CHUNK)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+    return digest.hexdigest(), size
+
+
+def create_upload_build(app_id, platform, file, version: str = "", user=None) -> Dict[str, Any]:
+    """Register a binary uploaded straight through the UI as an available build.
+
+    Sidesteps Jenkins entirely: the operator hands KubeSight the final artifact
+    (a re-signed IPA, a release AAB/APK), which lands as a ready-to-publish
+    MobileAppBuild with no download step. The existing publish flow accepts it
+    unchanged — it only needs ``status="available"`` and a file on disk.
+    """
+    app = get_app(app_id)
+    platform = str(platform or "").strip().lower()
+    if platform not in PLATFORMS:
+        raise MobileAppError("Platform must be 'android' or 'ios'.")
+    if file is None or not getattr(file, "filename", ""):
+        raise MobileAppError("No file was uploaded.")
+
+    file_name = _safe_filename(file.filename)
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    allowed = ARTIFACT_TYPES[platform]
+    if ext not in allowed:
+        pretty = " or ".join(f".{e}" for e in allowed)
+        raise MobileAppError(
+            f"A {platform} build must be a {pretty} file"
+            + (f" (got '.{ext}')." if ext else ".")
+        )
+
+    # Commit the row first so its id anchors the store directory AND the DB
+    # write lock is released before the (potentially multi-hundred-MB) save.
+    # "downloading" keeps the scheduler tick from touching it — it only
+    # dispatches "pending" rows and only fails stale (>30 min) in-flight ones.
+    build = MobileAppBuild(
+        app_id=app.id,
+        platform=platform,
+        artifact_type=ext,
+        version=(version or "").strip() or None,
+        source="upload",
+        status="downloading",
+    )
+    db.session.add(build)
+    db.session.commit()
+
+    rel_dir = _store_dir_for(build)
+    dest = os.path.join(artifact_root(), rel_dir, file_name)
+    try:
+        file.save(dest)
+        sha256, size = _hash_and_size(dest)
+        if size <= 0:
+            raise MobileAppError("The uploaded file is empty.")
+    except Exception as exc:
+        try:
+            if os.path.isfile(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+        db.session.delete(build)
+        db.session.commit()
+        if isinstance(exc, MobileAppError):
+            raise
+        logger.exception("Storing uploaded mobile binary failed: app_id=%s", app_id)
+        raise MobileAppError(f"Could not store the uploaded file ({exc}).", 500)
+
+    # An IPA carries its own version in Info.plist — read it so the release
+    # label matches the binary (publish reads it again for the store attrs).
+    if not build.version and ext == "ipa":
+        try:
+            from .app_store_client import ipa_versions
+
+            short, bundle = ipa_versions(dest)
+            build.version = f"{short} ({bundle})"
+        except Exception:
+            pass  # unreadable version is non-fatal
+    if not build.version:
+        build.version = file_name
+
+    build.file_name = file_name
+    build.file_size = size
+    build.sha256 = sha256
+    build.storage_path = os.path.join(rel_dir, file_name)
+    build.status = "available"
+    build.downloaded_at = datetime.now(timezone.utc)
+    db.session.add(build)
+    log_audit(
+        "mobile_app_build_uploaded",
+        actor=user,
+        target_type="mobile_app_build",
+        target_id=str(build.id),
+        details={"app": app.name, "platform": platform, "file": file_name, "size": size},
+        commit=False,
+    )
+    db.session.commit()
+    return serialize_build(build)
+
+
+# ---------------------------------------------------------------------------
 # Automation hook — called when a custom-environment Jenkins run succeeds
 # ---------------------------------------------------------------------------
 

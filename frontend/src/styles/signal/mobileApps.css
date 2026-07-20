@@ -761,3 +761,28 @@
   font-size: var(--font-size-sm);
 }
 .sg-ma-confirm-field input { width: 100%; }
+
+/* ── Upload-binary modal ─────────────────────────────────────────── */
+.sg-ma-upl-hint {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin: 0 0 0.9rem;
+}
+.sg-ma-upl-hint b { color: var(--text-strong); }
+.sg-ma-upl-file {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.45rem 0 0.9rem;
+  font-size: var(--font-size-sm);
+}
+.sg-ma-upl-file .mono {
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+}
+.sg-ma-confirm-field input[type="file"] {
+  padding: 0.4rem;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}

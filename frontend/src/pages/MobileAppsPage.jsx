@@ -33,10 +33,12 @@ import {
   testMobileAppJenkins,
   testMobileAppPlay,
   updateMobileApp,
+  uploadMobileBuild,
 } from "../api/mobileAppsApi.js";
 
 const AppFormModal = lazy(() => import("../components/mobileApps/AppFormModal.jsx"));
 const PublishDialog = lazy(() => import("../components/mobileApps/PublishDialog.jsx"));
+const UploadBuildModal = lazy(() => import("../components/mobileApps/UploadBuildModal.jsx"));
 
 const POLL_INTERVAL_MS = 8000;
 
@@ -81,6 +83,11 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
   // Custom Zoho environment names for the form's dropdown; null = not loaded
   // (or fetch failed), which makes the modal fall back to a free-text input.
   const [envOptions, setEnvOptions] = useState(null);
+
+  // Upload-binary modal.
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
 
   // Publish dialog + delete confirm.
   const [publishBuild, setPublishBuild] = useState(null);
@@ -203,6 +210,24 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
       }
     } finally {
       setFetching(false);
+    }
+  };
+
+  const runUpload = async ({ file, platform, version }) => {
+    if (!selectedApp) return;
+    setUploading(true);
+    setUploadError("");
+    try {
+      const build = await uploadMobileBuild(selectedApp.id, { file, platform, version });
+      setUploadOpen(false);
+      setNotice(
+        `Uploaded ${build?.fileName || "binary"} to ${selectedApp.name}. Ready to publish.`
+      );
+      await Promise.all([loadDrawerData(selectedApp.id), refreshApps()]);
+    } catch (err) {
+      setUploadError(err.message || "Failed to upload the binary.");
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -642,6 +667,10 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
           loading={drawerLoading}
           onFetch={runFetch}
           fetching={fetching}
+          onUpload={() => {
+            setUploadError("");
+            setUploadOpen(true);
+          }}
           onTestJenkins={runTestJenkins}
           testingJenkins={testingJenkins}
           onEdit={openEdit}
@@ -672,6 +701,19 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
             onTestAppStore={runTestAppStore}
             testingPlay={testingPlay}
             testingAppStore={testingAppStore}
+          />
+        </Suspense>
+      ) : null}
+
+      {uploadOpen ? (
+        <Suspense fallback={null}>
+          <UploadBuildModal
+            open={uploadOpen}
+            app={selectedApp}
+            onClose={() => setUploadOpen(false)}
+            onUpload={runUpload}
+            uploading={uploading}
+            error={uploadError}
           />
         </Suspense>
       ) : null}

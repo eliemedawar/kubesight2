@@ -275,6 +275,72 @@ def test_manual_fetch_latest(app, client, admin_token, artifact_dir, monkeypatch
 
 
 # ---------------------------------------------------------------------------
+# Direct binary upload (bypasses Jenkins)
+# ---------------------------------------------------------------------------
+
+def _upload(
+    client,
+    token,
+    app_id,
+    *,
+    filename="app-release.aab",
+    platform="android",
+    payload=b"aab-bytes",
+    version="",
+):
+    from io import BytesIO
+
+    return client.post(
+        f"/api/mobile-apps/{app_id}/builds/upload",
+        data={
+            "file": (BytesIO(payload), filename),
+            "platform": platform,
+            "version": version,
+        },
+        content_type="multipart/form-data",
+        headers=auth_headers(token),
+    )
+
+
+def test_upload_build_creates_available_build(client, admin_token, artifact_dir):
+    created = _create_app(client, admin_token)
+    resp = _upload(client, admin_token, created["id"], payload=b"aab-bytes-123")
+    assert resp.status_code == 201, resp.get_json()
+    build = resp.get_json()["data"]
+    assert build["status"] == "available"
+    assert build["source"] == "upload"
+    assert build["artifactType"] == "aab"
+    assert build["fileName"] == "app-release.aab"
+    assert build["fileSize"] == len(b"aab-bytes-123")
+    # No version supplied and not an IPA → the file name is the release label.
+    assert build["version"] == "app-release.aab"
+
+    # It shows up in the build list and the stored binary downloads normally —
+    # proving the publish flow (which only needs an available build on disk)
+    # will accept it unchanged.
+    resp = client.get(
+        f"/api/mobile-apps/builds/{build['id']}/download", headers=auth_headers(admin_token)
+    )
+    assert resp.status_code == 200
+    assert resp.data == b"aab-bytes-123"
+
+
+def test_upload_build_rejects_wrong_extension(client, admin_token, artifact_dir):
+    created = _create_app(client, admin_token)
+    # An .ipa is not a valid Android artifact.
+    resp = _upload(client, admin_token, created["id"], filename="app.ipa", platform="android")
+    assert resp.status_code == 400
+    assert ".apk or .aab" in resp.get_json()["error"]
+
+
+def test_upload_build_requires_manage(client, admin_token, operator_token, artifact_dir):
+    created = _create_app(client, admin_token)
+    # Operator holds mobile_apps:view only, not manage.
+    resp = _upload(client, operator_token, created["id"])
+    assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # Publishing
 # ---------------------------------------------------------------------------
 

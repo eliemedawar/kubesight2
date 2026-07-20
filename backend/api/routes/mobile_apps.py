@@ -127,6 +127,23 @@ def fetch_latest(app_id: int):
     return success_response({"builds": builds}, status_code=202)
 
 
+@mobile_apps_bp.route("/<int:app_id>/builds/upload", methods=["POST"])
+@require_permission("mobile_apps:manage")
+def upload_build(app_id: int):
+    """Register a binary uploaded directly (multipart: file, platform, version)
+    as a ready-to-publish build — bypasses Jenkins entirely."""
+    file = request.files.get("file")
+    platform = str(request.form.get("platform") or "")
+    version = str(request.form.get("version") or "")
+    try:
+        data = svc.create_upload_build(
+            app_id, platform, file, version, user=get_current_user()
+        )
+    except MobileAppError as exc:
+        return error_response(str(exc), exc.status)
+    return success_response(data, status_code=201)
+
+
 @mobile_apps_bp.route("/<int:app_id>/builds", methods=["GET"])
 @require_permission("mobile_apps:view")
 def list_builds(app_id: int):
