@@ -2072,7 +2072,9 @@ class JenkinsConnection(db.Model):
     # Jenkins router always receives the RAW ticket tag (it owns its own naming).
     image_tag_template = db.Column(db.String(120), nullable=False, default="{tag}")
     build_timeout_minutes = db.Column(db.Integer, nullable=False, default=45)
-    queue_timeout_minutes = db.Column(db.Integer, nullable=False, default=10)
+    # Jenkins queues a build behind whatever is already on the executor, so this
+    # has to cover a full in-progress build, not just scheduler latency.
+    queue_timeout_minutes = db.Column(db.Integer, nullable=False, default=30)
     # How long the auto-created Change Bundle's deployment window stays open.
     bundle_window_hours = db.Column(db.Integer, nullable=False, default=24)
     # How long to wait for the rolled-out pods to become ready before failing.
@@ -2453,3 +2455,17 @@ class MobileAppPublish(db.Model):
         onupdate=lambda: datetime.now(timezone.utc),
     )
     finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+
+# Cluster Builder tables live in their own module; re-exported here so the
+# canonical import surface stays "from .models import X".
+from .models_cluster_build import (  # noqa: E402,F401
+    BuildProfile,
+    ClusterBuild,
+    ClusterBuildNode,
+    ClusterBuildStep,
+    SshConnectionProfile,
+    SshCredential,
+    SshHostKey,
+    VSphereConnection,
+)

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 
 from sqlalchemy import inspect, text
 
 from .db import db
 from .passwords import hash_password
+
+logger = logging.getLogger(__name__)
 
 
 def _table_columns(table_name: str) -> set:
@@ -587,6 +591,15 @@ def _migrate_deploy_automation_columns() -> None:
         _add_column_if_missing("jenkins_connection", "send_param_app", "BOOLEAN DEFAULT true")
         _add_column_if_missing("jenkins_connection", "send_param_namespace", "BOOLEAN DEFAULT true")
         _add_column_if_missing("jenkins_connection", "send_param_tag", "BOOLEAN DEFAULT true")
+        # The original 10 min queue timeout failed builds that were merely waiting
+        # behind an in-progress build; the default is now 30. Only rows still on
+        # the old default are moved — an operator-chosen value is left alone.
+        if "queue_timeout_minutes" in _table_columns("jenkins_connection"):
+            db.session.execute(
+                text("UPDATE jenkins_connection SET queue_timeout_minutes = 30 "
+                     "WHERE queue_timeout_minutes = 10")
+            )
+            db.session.commit()
     if "deploy_automation_runs" in tables:
         _add_column_if_missing("deploy_automation_runs", "rollout_started_at", "DATETIME")
         _add_column_if_missing("deploy_automation_runs", "ticket_tag", "VARCHAR(200)")
@@ -609,8 +622,8 @@ def _migrate_mobile_app_columns() -> None:
         return
     if "mobile_app_builds" in tables:
         # Signature probe at ingest, gating publish on shielded binaries
-        # (2026-07-20). Existing rows default to "unknown" so they stay
-        # publishable — backfilling would mean re-reading every stored binary.
+        # (2026-07-20). Existing rows come in as "unknown" and are then probed
+        # once by _backfill_build_signature_state below.
         _add_column_if_missing(
             "mobile_app_builds", "signature_state", "VARCHAR(16) DEFAULT 'unknown'"
         )
@@ -620,11 +633,58 @@ def _migrate_mobile_app_columns() -> None:
     _add_column_if_missing("mobile_applications", "resign_config", "JSON")
 
 
+def _backfill_build_signature_state() -> None:
+    """Probe binaries that predate the signature check, once.
+
+    Without this, every build ingested before the probe existed stays "unknown"
+    forever — which never blocks a publish, but also never offers a re-sign, so
+    a shielded binary already in the store looks fine and cannot be signed.
+
+    Cheap despite the file sizes: reading a zip's central directory seeks to the
+    end of the file rather than scanning it. Rows whose binary is missing or
+    unreadable are left alone and simply stay "unknown".
+    """
+    from .models import MobileAppBuild
+
+    if "mobile_app_builds" not in inspect(db.engine).get_table_names():
+        return
+    try:
+        pending = (
+            MobileAppBuild.query.filter(
+                MobileAppBuild.status == "available",
+                MobileAppBuild.signature_state == "unknown",
+            )
+            .limit(500)
+            .all()
+        )
+    except Exception:  # column not there yet on a very old DB
+        return
+    if not pending:
+        return
+
+    from .services import binary_signature
+    from .services.mobile_app_service import binary_path
+
+    changed = 0
+    for build in pending:
+        path = binary_path(build)
+        if not path or not os.path.isfile(path):
+            continue
+        state = binary_signature.detect_safe(path, build.artifact_type or "")
+        if state != "unknown":
+            build.signature_state = state
+            changed += 1
+    if changed:
+        db.session.commit()
+        logger.info("Backfilled signature_state for %s mobile build(s)", changed)
+
+
 def run_migrations() -> None:
     db.create_all()
     _migrate_zoho_integration_columns()
     _migrate_deploy_automation_columns()
     _migrate_mobile_app_columns()
+    _backfill_build_signature_state()
     _migrate_user_onboarding_columns()
     _migrate_deployment_request_columns()
     _migrate_change_bundle_columns()

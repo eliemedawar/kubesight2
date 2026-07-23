@@ -18,6 +18,17 @@ export const PERMISSION_GROUPS = [
     ],
   },
   {
+    id: "clusterBuilds",
+    label: "Cluster Builder",
+    keys: [
+      "cluster_builds:view",
+      "cluster_builds:create",
+      "cluster_builds:execute",
+      "ssh_credentials:manage",
+      "vsphere:manage",
+    ],
+  },
+  {
     id: "namespaces",
     label: "Namespaces",
     keys: ["namespaces:view"],

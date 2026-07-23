@@ -1,0 +1,1607 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cluster Builder — UI/UX concept · KubeSight</title>
+
+<style>
+/* ══════════════════════════════════════════════════════════════════
+   Cluster Builder concept — built on KubeSight "Signal" v3 tokens.
+   Palette, radii and type inherited from frontend/src/index.css.
+   One addition: --matter, a cool slate for machines that are not yet
+   part of a cluster, so matter visibly warms as it is claimed.
+   ══════════════════════════════════════════════════════════════════ */
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; }
+img, svg { max-width: 100%; }
+button, input { font: inherit; color: inherit; }
+
+:root {
+  --bg-main: #f8f7f5;
+  --bg-panel: #ffffff;
+  --bg-panel-strong: #faf9f7;
+  --bg-inset: #f4f3f0;
+  --bg-interactive: #f3f2ef;
+
+  --text-strong: #131417;
+  --text-main: #1a1b1e;
+  --text-subtle: #494b52;
+  --text-muted: #6e7076;
+
+  --accent: #ff2929;
+  --accent-strong: #d71f1f;
+  --accent-soft: rgba(255, 41, 41, 0.09);
+  --accent-border: rgba(255, 41, 41, 0.35);
+
+  --ok: #178a45;
+  --ok-soft: rgba(23, 138, 69, 0.10);
+  --warn: #a66104;
+  --warn-soft: rgba(166, 97, 4, 0.10);
+  --danger: #d71f1f;
+  --danger-soft: rgba(215, 31, 31, 0.09);
+  --info: #0e7490;
+  --info-soft: rgba(14, 116, 144, 0.10);
+
+  /* Inert matter — cool against the warm paper. */
+  --matter: #6b7a8f;
+  --matter-soft: rgba(107, 122, 143, 0.10);
+  --matter-border: rgba(107, 122, 143, 0.30);
+
+  --border: #e9e7e3;
+  --border-soft: #f0efeb;
+  --border-strong: #d8d6d0;
+  --shadow-sm: 0 1px 2px rgba(26, 27, 30, 0.05);
+  --shadow-md: 0 2px 8px rgba(26, 27, 30, 0.06), 0 1px 2px rgba(26, 27, 30, 0.05);
+
+  --well: #101113;
+  --well-text: #d7d9de;
+  --well-border: #e9e7e3;
+
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1.125rem;
+  --radius-full: 999px;
+
+  --font-display: 'Plus Jakarta Sans', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-sans: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'Cascadia Mono', Consolas, Menlo, monospace;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-main: #101112; --bg-panel: #17181a; --bg-panel-strong: #1c1d20;
+    --bg-inset: #0b0c0d; --bg-interactive: #2a2b30;
+    --text-strong: #fafaf9; --text-main: #ececea; --text-subtle: #b9bab6; --text-muted: #85868c;
+    --accent: #ff3b3b; --accent-strong: #ff7a70;
+    --accent-soft: rgba(255, 59, 59, 0.14); --accent-border: rgba(255, 59, 59, 0.40);
+    --ok: #2fbe6b; --ok-soft: rgba(47, 190, 107, 0.12);
+    --warn: #f0a32b; --warn-soft: rgba(240, 163, 43, 0.12);
+    --danger: #ff4d4d; --danger-soft: rgba(255, 77, 77, 0.12);
+    --info: #2cb8dc; --info-soft: rgba(44, 184, 220, 0.12);
+    --matter: #8496ad; --matter-soft: rgba(132, 150, 173, 0.13); --matter-border: rgba(132, 150, 173, 0.32);
+    --border: #2a2b2e; --border-soft: #232427; --border-strong: #3a3b3f;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 10px rgba(0, 0, 0, 0.45);
+    --well: #0b0c0d; --well-border: #2a2b2e;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg-main: #101112; --bg-panel: #17181a; --bg-panel-strong: #1c1d20;
+  --bg-inset: #0b0c0d; --bg-interactive: #2a2b30;
+  --text-strong: #fafaf9; --text-main: #ececea; --text-subtle: #b9bab6; --text-muted: #85868c;
+  --accent: #ff3b3b; --accent-strong: #ff7a70;
+  --accent-soft: rgba(255, 59, 59, 0.14); --accent-border: rgba(255, 59, 59, 0.40);
+  --ok: #2fbe6b; --ok-soft: rgba(47, 190, 107, 0.12);
+  --warn: #f0a32b; --warn-soft: rgba(240, 163, 43, 0.12);
+  --danger: #ff4d4d; --danger-soft: rgba(255, 77, 77, 0.12);
+  --info: #2cb8dc; --info-soft: rgba(44, 184, 220, 0.12);
+  --matter: #8496ad; --matter-soft: rgba(132, 150, 173, 0.13); --matter-border: rgba(132, 150, 173, 0.32);
+  --border: #2a2b2e; --border-soft: #232427; --border-strong: #3a3b3f;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 10px rgba(0, 0, 0, 0.45);
+  --well: #0b0c0d; --well-border: #2a2b2e;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg-main: #f8f7f5; --bg-panel: #ffffff; --bg-panel-strong: #faf9f7;
+  --bg-inset: #f4f3f0; --bg-interactive: #f3f2ef;
+  --text-strong: #131417; --text-main: #1a1b1e; --text-subtle: #494b52; --text-muted: #6e7076;
+  --accent: #ff2929; --accent-strong: #d71f1f;
+  --accent-soft: rgba(255, 41, 41, 0.09); --accent-border: rgba(255, 41, 41, 0.35);
+  --ok: #178a45; --ok-soft: rgba(23, 138, 69, 0.10);
+  --warn: #a66104; --warn-soft: rgba(166, 97, 4, 0.10);
+  --danger: #d71f1f; --danger-soft: rgba(215, 31, 31, 0.09);
+  --info: #0e7490; --info-soft: rgba(14, 116, 144, 0.10);
+  --matter: #6b7a8f; --matter-soft: rgba(107, 122, 143, 0.10); --matter-border: rgba(107, 122, 143, 0.30);
+  --border: #e9e7e3; --border-soft: #f0efeb; --border-strong: #d8d6d0;
+  --shadow-sm: 0 1px 2px rgba(26, 27, 30, 0.05);
+  --shadow-md: 0 2px 8px rgba(26, 27, 30, 0.06), 0 1px 2px rgba(26, 27, 30, 0.05);
+  --well: #101113; --well-border: #e9e7e3;
+  color-scheme: light;
+}
+
+body {
+  background: var(--bg-main);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1180px; margin: 0 auto; padding: clamp(28px, 5vw, 64px) clamp(16px, 4vw, 40px) 88px; }
+
+/* ── Theme toggle ─────────────────────────────────────────── */
+.themebtn {
+  position: fixed; top: 16px; right: 16px; z-index: 60;
+  font-size: 12px; font-weight: 650; padding: 7px 15px;
+  border-radius: var(--radius-full); cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--bg-panel);
+  color: var(--text-subtle); box-shadow: var(--shadow-sm);
+}
+.themebtn:hover { border-color: var(--accent-border); color: var(--text-strong); }
+.themebtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Masthead ─────────────────────────────────────────────── */
+
+.masthead { display: flex; flex-direction: column; gap: 18px; margin-bottom: 40px; }
+
+.eyebrow {
+  font-size: 11px; font-weight: 700; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--text-muted);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.eyebrow .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+
+h1 {
+  font-family: var(--font-display);
+  font-size: clamp(2.1rem, 5vw, 3.1rem);
+  line-height: 1.06; letter-spacing: -0.03em; font-weight: 800;
+  margin: 0; color: var(--text-strong); text-wrap: balance;
+}
+
+.standfirst {
+  font-size: clamp(1rem, 2vw, 1.15rem); color: var(--text-subtle);
+  max-width: 62ch; margin: 0; line-height: 1.65;
+}
+.standfirst strong { color: var(--text-strong); font-weight: 650; }
+
+.reframe { display: grid; grid-template-columns: 1fr auto 1fr; gap: 18px; align-items: stretch; margin-top: 6px; }
+.reframe-cell { border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-panel); padding: 18px 20px; }
+.reframe-cell.is-from { border-style: dashed; background: transparent; }
+.reframe-k { font-size: 10.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 7px; }
+.reframe-v { font-size: 15px; color: var(--text-strong); font-weight: 600; line-height: 1.5; }
+.reframe-cell.is-from .reframe-v { color: var(--text-muted); font-weight: 500; }
+.reframe-arrow { display: flex; align-items: center; color: var(--accent-strong); font-size: 20px; font-weight: 700; }
+@media (max-width: 720px) {
+  .reframe { grid-template-columns: 1fr; }
+  .reframe-arrow { transform: rotate(90deg); justify-content: center; }
+}
+
+/* ── View navigation ──────────────────────────────────────── */
+
+.viewnav {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; gap: 7px; flex-wrap: wrap;
+  padding: 12px 0; margin: 36px 0 26px;
+  background: color-mix(in srgb, var(--bg-main) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.viewnav button {
+  font-family: inherit; font-size: 13px; font-weight: 600;
+  padding: 7px 15px; border-radius: var(--radius-full);
+  border: 1px solid var(--border-strong); background: var(--bg-panel);
+  color: var(--text-subtle); cursor: pointer;
+  transition: background 160ms, color 160ms, border-color 160ms;
+}
+.viewnav button:hover { border-color: var(--accent-border); color: var(--text-strong); }
+.viewnav button[aria-current="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.viewnav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── View sections ────────────────────────────────────────── */
+
+.view { display: none; }
+.view.is-on { display: block; animation: fade 260ms ease; }
+@keyframes fade { from { opacity: 0; transform: translateY(5px); } }
+@media (prefers-reduced-motion: reduce) { .view.is-on { animation: none; } }
+
+.view-head { margin-bottom: 22px; max-width: 68ch; }
+.view-num { font-family: var(--font-mono); font-size: 12px; color: var(--accent-strong); font-weight: 600; letter-spacing: .06em; }
+.view-head h2 {
+  font-family: var(--font-display); font-size: clamp(1.4rem, 3vw, 1.85rem);
+  letter-spacing: -0.02em; font-weight: 750; margin: 4px 0 8px;
+  color: var(--text-strong); text-wrap: balance;
+}
+.view-head p { margin: 0; color: var(--text-subtle); font-size: 14.5px; }
+
+.note {
+  border-left: 2px solid var(--accent); padding: 2px 0 2px 16px;
+  margin: 20px 0 0; color: var(--text-subtle); font-size: 14px; max-width: 70ch;
+}
+.note b { color: var(--text-strong); font-weight: 650; }
+
+/* ── App frame (the mock itself) ──────────────────────────── */
+
+.app {
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg-main); box-shadow: var(--shadow-md); overflow: hidden;
+}
+.app-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 13px 20px; background: var(--bg-panel); border-bottom: 1px solid var(--border);
+}
+.app-title { font-family: var(--font-display); font-weight: 750; font-size: 15px; color: var(--text-strong); }
+.app-crumb { color: var(--text-muted); font-size: 13px; }
+.app-tabs { display: flex; gap: 4px; margin-left: auto; }
+.app-tab {
+  font-size: 12.5px; font-weight: 600; padding: 5px 13px;
+  border-radius: var(--radius-full); color: var(--text-muted); border: 1px solid transparent;
+}
+.app-tab.is-on { color: var(--accent-strong); background: var(--accent-soft); border-color: var(--accent-border); }
+.app-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+
+/* ── The four-station rail ────────────────────────────────── */
+
+.rail {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg-panel); overflow: hidden;
+}
+.station { padding: 14px 18px; position: relative; border-right: 1px solid var(--border); }
+.station:last-child { border-right: 0; }
+.station-k { font-size: 10px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; color: var(--text-muted); }
+.station-v {
+  font-family: var(--font-display); font-size: 22px; font-weight: 750;
+  color: var(--text-strong); line-height: 1.25; margin-top: 3px; font-variant-numeric: tabular-nums;
+}
+.station-v .u { font-size: 12.5px; font-weight: 600; color: var(--text-muted); }
+.station-s { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
+.station.is-cold .station-v { color: var(--matter); }
+.station.is-live::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--accent); }
+.station.is-live .station-k { color: var(--accent-strong); }
+@media (max-width: 780px) {
+  .rail { grid-template-columns: repeat(2, 1fr); }
+  .station:nth-child(2) { border-right: 0; }
+  .station:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
+}
+
+/* ── Cards, pills, generic bits ───────────────────────────── */
+
+.card { border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-panel); padding: 18px; }
+.card-h { font-family: var(--font-display); font-size: 14px; font-weight: 700; color: var(--text-strong); margin: 0 0 3px; }
+.card-sub { font-size: 12.5px; color: var(--text-muted); margin: 0 0 14px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 700; padding: 2px 11px;
+  border-radius: var(--radius-full); border: 1px solid var(--border-strong);
+  color: var(--text-muted); white-space: nowrap;
+}
+.pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: var(--ok-soft); }
+.pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: var(--warn-soft); }
+.pill.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: var(--danger-soft); }
+.pill.live { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); background: var(--info-soft); }
+.pill.cold { color: var(--matter); border-color: var(--matter-border); background: var(--matter-soft); }
+
+.mono { font-family: var(--font-mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.muted { color: var(--text-muted); }
+
+.btn {
+  font-family: inherit; font-size: 13px; font-weight: 650;
+  padding: 7px 17px; border-radius: var(--radius-full);
+  border: 1px solid var(--border-strong); background: var(--bg-panel);
+  color: var(--text-strong); cursor: pointer;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Node shape glyph — the persistent motif ──────────────── */
+/* circle = load balancer · red = control plane · square = worker
+   filled = joined · outline only = not yet claimed              */
+
+.shape { display: inline-flex; align-items: center; gap: 5px; }
+.shape i { width: 11px; height: 11px; display: block; border: 1.5px solid var(--matter); border-radius: 2px; background: transparent; }
+.shape i.lb { border-radius: 50%; }
+.shape i.cp { border-color: var(--accent); }
+.shape i.lb.done { background: var(--matter-soft); border-color: var(--ok); }
+.shape i.cp.done { background: var(--accent-soft); border-color: var(--accent); }
+.shape i.wk.done { background: var(--ok-soft); border-color: var(--ok); }
+.shape i.fail { border-color: var(--danger); background: var(--danger-soft); }
+.shape .sep { color: var(--text-muted); font-size: 11px; line-height: 1; }
+
+/* ── Fleet cards ──────────────────────────────────────────── */
+
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 14px; }
+
+.fcard {
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg-panel); padding: 16px 17px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.fcard.is-live { border-color: color-mix(in srgb, var(--info) 45%, transparent); }
+.fcard.is-draft { border-style: dashed; background: transparent; }
+.fcard-top { display: flex; align-items: center; gap: 9px; justify-content: space-between; }
+.fcard-name { font-family: var(--font-display); font-weight: 750; font-size: 14.5px; color: var(--text-strong); }
+.fcard-meta { font-size: 12.5px; color: var(--text-muted); }
+.fcard-foot {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding-top: 9px; border-top: 1px solid var(--border-soft); font-size: 12.5px;
+}
+.fcard-act { margin-left: auto; display: flex; gap: 6px; }
+.mini {
+  font-family: inherit; font-size: 12px; font-weight: 600;
+  padding: 3px 11px; border-radius: var(--radius-full);
+  border: 1px solid var(--border-strong); background: var(--bg-panel);
+  color: var(--text-subtle); cursor: pointer;
+}
+.mini:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.newcard {
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-lg);
+  background: transparent; padding: 22px 17px; text-align: center;
+  display: flex; flex-direction: column; gap: 4px; align-items: center;
+  justify-content: center; cursor: pointer; color: var(--text-subtle);
+}
+.newcard .plus { font-size: 22px; color: var(--accent-strong); line-height: 1; }
+.newcard b { color: var(--text-strong); font-family: var(--font-display); font-size: 14px; }
+
+/* ── Reach: the path diagram ──────────────────────────────── */
+
+.path { display: flex; align-items: stretch; flex-wrap: nowrap; overflow-x: auto; padding: 4px 0 8px; }
+.hop {
+  flex: 1 0 148px; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg-panel-strong); padding: 12px 14px; position: relative;
+}
+.hop + .hop { margin-left: 22px; }
+.hop + .hop::before { content: ""; position: absolute; left: -22px; top: 50%; width: 22px; border-top: 2px dotted var(--border-strong); }
+.hop.ok { border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.hop.ok + .hop::before { border-top-style: solid; border-color: var(--ok); }
+.hop.bad { border-color: color-mix(in srgb, var(--danger) 45%, transparent); background: var(--danger-soft); }
+.hop-k { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--text-muted); }
+.hop-v { font-size: 13px; font-weight: 650; color: var(--text-strong); margin-top: 3px; }
+.hop-s { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+
+/* Tables */
+.tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-md); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 9px 13px; text-align: left; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
+th { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-muted); background: var(--bg-panel-strong); }
+tbody tr:last-child td { border-bottom: 0; }
+td.c { text-align: center; }
+.tick { color: var(--ok); font-weight: 700; }
+.cross { color: var(--danger); font-weight: 700; }
+.dash { color: var(--matter); }
+
+/* ── Compose ──────────────────────────────────────────────── */
+
+.compose { display: grid; grid-template-columns: 1.55fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .compose { grid-template-columns: 1fr; } }
+
+.preset-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.preset {
+  border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+  padding: 12px 14px; cursor: pointer; background: var(--bg-panel);
+  display: flex; flex-direction: column; gap: 5px;
+}
+.preset.is-on { border-color: var(--accent); background: var(--accent-soft); }
+.preset b { font-size: 13px; color: var(--text-strong); font-family: var(--font-display); }
+.preset span { font-size: 11.5px; color: var(--text-muted); }
+
+.tier { margin-bottom: 13px; }
+.tier-h { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.tier-h span:first-child { font-size: 12px; font-weight: 700; color: var(--text-subtle); }
+.tier-n { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+.tier-n.full { color: var(--ok); }
+.slots { display: flex; flex-wrap: wrap; gap: 7px; }
+.slot { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 6px 11px; font-size: 12px; min-width: 96px; background: var(--bg-panel-strong); }
+.slot b { display: block; color: var(--text-strong); font-weight: 650; font-size: 12.5px; }
+.slot span { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); }
+.slot.empty { border-style: dashed; color: var(--matter); background: transparent; display: flex; align-items: center; justify-content: center; font-size: 11.5px; }
+.slot.tie { border-color: var(--warn); background: var(--warn-soft); }
+.slot.cp { border-color: var(--accent-border); }
+.slot.lb { border-radius: var(--radius-full); }
+
+.vipline {
+  display: flex; align-items: center; gap: 9px; font-size: 12.5px;
+  padding: 9px 12px; margin-bottom: 13px;
+  border: 1px dashed var(--accent-border); border-radius: var(--radius-md);
+  background: var(--accent-soft); color: var(--text-strong);
+}
+.vipline .d { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+
+.affnote { font-size: 12.5px; padding: 10px 13px; border-radius: var(--radius-md); margin-bottom: 13px; }
+.affnote.bad { background: var(--warn-soft); color: var(--warn); }
+
+/* ── Preflight ────────────────────────────────────────────── */
+
+.verdict { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.ring {
+  width: 78px; height: 78px; border-radius: 50%; flex: none;
+  display: grid; place-items: center; position: relative;
+  background: conic-gradient(var(--ok) 0 82%, var(--warn) 82% 94%, var(--danger) 94% 100%);
+}
+.ring::after { content: ""; position: absolute; inset: 9px; border-radius: 50%; background: var(--bg-panel); }
+.ring b { position: relative; z-index: 1; font-family: var(--font-display); font-size: 20px; font-weight: 800; color: var(--text-strong); font-variant-numeric: tabular-nums; }
+.verdict-txt h3 { font-family: var(--font-display); font-size: 16px; font-weight: 750; margin: 0 0 3px; color: var(--text-strong); }
+.verdict-txt p { margin: 0; font-size: 13px; color: var(--text-muted); }
+
+.diffstrip {
+  display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+  padding: 10px 14px; border-radius: var(--radius-md);
+  background: var(--bg-inset); font-size: 12.5px; margin-top: 14px;
+}
+.diffstrip .k { color: var(--text-muted); }
+.diffstrip b { font-variant-numeric: tabular-nums; }
+.diffstrip .fixed { color: var(--ok); }
+.diffstrip .newly { color: var(--danger); }
+
+.checkrow { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: start; padding: 12px 0; border-bottom: 1px solid var(--border-soft); }
+.checkrow:last-child { border-bottom: 0; }
+.checkrow-l { font-size: 13px; font-weight: 650; color: var(--text-strong); }
+.checkrow-d { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+.fix { margin-top: 7px; font-size: 12px; border-radius: var(--radius-sm); padding: 8px 11px; background: var(--bg-inset); display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.fix .where { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 2px 8px; border-radius: var(--radius-full); flex: none; }
+.where.vsphere { background: var(--info-soft); color: var(--info); }
+.where.guest { background: var(--matter-soft); color: var(--matter); }
+.fix code { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-strong); }
+
+.ackbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 13px 16px; border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  background: var(--warn-soft); font-size: 13px;
+}
+.ackbar .btn { margin-left: auto; }
+
+/* ── Build (live) ─────────────────────────────────────────── */
+
+.progresshead { display: flex; flex-direction: column; gap: 10px; }
+.progressrow { display: flex; align-items: baseline; gap: 13px; flex-wrap: wrap; }
+.progressrow .now { font-family: var(--font-display); font-size: 16px; font-weight: 750; color: var(--text-strong); }
+.progressrow .el { margin-left: auto; font-family: var(--font-mono); font-size: 12.5px; color: var(--text-muted); }
+.bar { height: 6px; border-radius: var(--radius-full); background: var(--bg-inset); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--info); border-radius: var(--radius-full); }
+
+.livedot { display: inline-flex; align-items: center; gap: 7px; color: var(--info); font-weight: 700; font-size: 12px; }
+.livedot i { width: 8px; height: 8px; border-radius: 50%; background: var(--info); animation: pulse 1.6s infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .livedot i { animation: none; } }
+
+.narrate { font-size: 13px; color: var(--text-subtle); padding: 11px 14px; border-radius: var(--radius-md); background: var(--bg-inset); margin-top: 12px; }
+.narrate b { color: var(--text-strong); font-weight: 650; }
+
+.phase { display: grid; grid-template-columns: 24px 190px 1fr; gap: 0 14px; padding-bottom: 16px; position: relative; }
+.phase:last-child { padding-bottom: 0; }
+.phase::before { content: ""; position: absolute; left: 11px; top: 22px; bottom: -2px; border-left: 2px solid var(--border); }
+.phase:last-child::before { display: none; }
+.knot {
+  width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--border-strong);
+  background: var(--bg-panel); display: grid; place-items: center;
+  font-size: 10.5px; font-weight: 700; color: var(--text-muted); z-index: 1; font-variant-numeric: tabular-nums;
+}
+.phase.done .knot { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
+.phase.now .knot { border-color: var(--info); background: var(--info-soft); color: var(--info); }
+.phase.fail .knot { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.pname { font-size: 13px; font-weight: 650; color: var(--text-strong); }
+.phase.todo .pname { color: var(--text-muted); font-weight: 600; }
+.pnote { display: block; font-size: 11.5px; color: var(--text-muted); font-weight: 500; }
+.lanes { display: flex; gap: 6px; flex-wrap: wrap; align-content: flex-start; }
+.lane {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-full);
+  padding: 2px 11px; color: var(--text-muted); background: var(--bg-panel);
+}
+.lane i { width: 6px; height: 6px; border-radius: 50%; background: var(--border-strong); }
+.lane.done { border-color: color-mix(in srgb, var(--ok) 50%, transparent); color: var(--ok); }
+.lane.done i { background: var(--ok); }
+.lane.now { border-color: color-mix(in srgb, var(--info) 50%, transparent); color: var(--info); }
+.lane.now i { background: var(--info); animation: pulse 1.6s infinite; }
+@media (prefers-reduced-motion: reduce) { .lane.now i { animation: none; } }
+.lane.fail { border-color: color-mix(in srgb, var(--danger) 50%, transparent); color: var(--danger); }
+.lane.fail i { background: var(--danger); }
+.lane.waiting { border: 0; background: transparent; color: var(--matter); padding-left: 0; }
+
+.well {
+  margin: 0; padding: 13px 16px; border-radius: var(--radius-md);
+  background: var(--well); border: 1px solid var(--well-border);
+  color: var(--well-text); font-family: var(--font-mono); font-size: 11.5px;
+  line-height: 1.75; white-space: pre-wrap; overflow-x: auto;
+}
+.wellhead { display: flex; align-items: center; gap: 11px; flex-wrap: wrap; margin-bottom: 9px; }
+.wellhead .t { font-family: var(--font-display); font-size: 13.5px; font-weight: 700; color: var(--text-strong); }
+
+.statetoggle { display: flex; gap: 6px; margin-bottom: 14px; }
+.statetoggle button {
+  font-family: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  padding: 5px 14px; border-radius: var(--radius-full);
+  border: 1px solid var(--border-strong); background: var(--bg-panel); color: var(--text-subtle);
+}
+.statetoggle button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.statetoggle button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.buildstate { display: none; }
+.buildstate.is-on { display: block; }
+
+.diagnosis { border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); border-radius: var(--radius-lg); background: var(--danger-soft); padding: 18px; }
+.diagnosis h3 { font-family: var(--font-display); font-size: 15px; font-weight: 750; margin: 0 0 4px; color: var(--text-strong); }
+.diag-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 14px 0; }
+.diag-cell { background: var(--bg-panel); border-radius: var(--radius-md); padding: 11px 13px; }
+.diag-k { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--text-muted); }
+.diag-v { font-size: 13px; font-weight: 650; color: var(--text-strong); margin-top: 3px; }
+.diag-act { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* ── Day 2 ────────────────────────────────────────────────── */
+
+.receipt { display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; }
+@media (max-width: 700px) { .receipt { grid-template-columns: 1fr; } }
+.okring { width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center; border: 2px solid var(--ok); background: var(--ok-soft); color: var(--ok); font-size: 21px; }
+.receipt h3 { font-family: var(--font-display); font-size: 17px; font-weight: 750; margin: 0 0 2px; color: var(--text-strong); }
+.receipt p { margin: 0; font-size: 13px; color: var(--text-muted); }
+
+.factrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 11px; }
+.fact { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 11px 14px; background: var(--bg-panel); }
+.fact-k { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--text-muted); }
+.fact-v { font-weight: 650; font-size: 13px; margin-top: 2px; color: var(--text-strong); }
+
+.capacity { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.capbar { flex: 1 1 220px; height: 8px; border-radius: var(--radius-full); background: var(--bg-inset); overflow: hidden; display: flex; }
+.capbar i { display: block; height: 100%; }
+.capbar .used { background: var(--accent); }
+.capbar .head { background: var(--ok-soft); }
+
+/* ── Closing notes ────────────────────────────────────────── */
+
+.closing { margin-top: 52px; padding-top: 30px; border-top: 1px solid var(--border); }
+.closing h2 { font-family: var(--font-display); font-size: 1.35rem; font-weight: 750; margin: 0 0 16px; color: var(--text-strong); letter-spacing: -0.015em; }
+.ledger { display: grid; gap: 10px; }
+.ledger-row { display: grid; grid-template-columns: 92px 1fr; gap: 14px; align-items: start; padding: 12px 0; border-bottom: 1px solid var(--border-soft); font-size: 14px; }
+.ledger-row:last-child { border-bottom: 0; }
+.ledger-tag { font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; padding: 3px 9px; border-radius: var(--radius-full); text-align: center; }
+.ledger-tag.keep { background: var(--ok-soft); color: var(--ok); }
+.ledger-tag.new { background: var(--accent-soft); color: var(--accent-strong); }
+.ledger-tag.move { background: var(--info-soft); color: var(--info); }
+.ledger-row b { color: var(--text-strong); font-weight: 650; }
+.ledger-row p { margin: 3px 0 0; color: var(--text-subtle); font-size: 13.5px; }
+</style>
+</head>
+<body>
+
+<button class="themebtn" id="themebtn" type="button">Dark</button>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow"><span class="dot"></span> KubeSight · Signal v3 · concept</div>
+    <h1>Cluster Builder</h1>
+    <p class="standfirst">
+      The tab is built around <strong>the build</strong> — an event that starts, ends, and
+      leaves a receipt. It should be built around <strong>the machines and the cluster</strong>,
+      which persist. A build is only the transition between those two states.
+    </p>
+
+    <div class="reframe">
+      <div class="reframe-cell is-from">
+        <div class="reframe-k">Today</div>
+        <div class="reframe-v">
+          Builds · New build · Infrastructure.<br />
+          Credentials are a settings dump, a finished build is a dead receipt,
+          and a failure is the end of the road.
+        </div>
+      </div>
+      <div class="reframe-arrow" aria-hidden="true">→</div>
+      <div class="reframe-cell">
+        <div class="reframe-k">Proposed</div>
+        <div class="reframe-v">
+          Fleet · Reach · New build.<br />
+          Reach is a live property of machines, a finished build keeps growing,
+          and a failure is a state you continue from.
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <nav class="viewnav" aria-label="Concept screens">
+    <button data-view="fleet" aria-current="true" type="button">Fleet</button>
+    <button data-view="reach" type="button">Reach</button>
+    <button data-view="compose" type="button">Compose</button>
+    <button data-view="preflight" type="button">Preflight</button>
+    <button data-view="build" type="button">Build</button>
+    <button data-view="day2" type="button">Day&nbsp;2</button>
+  </nav>
+
+  <main>
+
+    <!-- ══════════ 1. FLEET ══════════ -->
+    <section class="view is-on" id="v-fleet">
+      <div class="view-head">
+        <div class="view-num">01 — home</div>
+        <h2>Fleet: everything this tab has ever made, still alive</h2>
+        <p>
+          One list holding three kinds of thing — clusters running now, a build in flight,
+          and a draft. A cluster does not graduate out of this page when it finishes; it stays,
+          because growing and shrinking it is the same job as making it.
+        </p>
+      </div>
+
+      <div class="app">
+        <div class="app-bar">
+          <span class="app-title">Cluster Builder</span>
+          <span class="app-crumb">Pick machines from vCenter, assign roles, and KubeSight builds the cluster.</span>
+          <div class="app-tabs">
+            <span class="app-tab is-on">Fleet</span>
+            <span class="app-tab">Reach</span>
+            <span class="app-tab">New build</span>
+          </div>
+        </div>
+        <div class="app-body">
+
+          <div class="rail">
+            <div class="station is-cold">
+              <div class="station-k">Machines seen</div>
+              <div class="station-v">24 <span class="u">VMs</span></div>
+              <div class="station-s">vcenter.areeba.lan</div>
+            </div>
+            <div class="station is-cold">
+              <div class="station-k">Reachable</div>
+              <div class="station-v">18 <span class="u">of 24</span></div>
+              <div class="station-s">6 refuse SSH · checked 4 min ago</div>
+            </div>
+            <div class="station is-live">
+              <div class="station-k">Building</div>
+              <div class="station-v">1</div>
+              <div class="station-s">areeba-prod-01 · CNI install</div>
+            </div>
+            <div class="station">
+              <div class="station-k">Managed here</div>
+              <div class="station-v">3</div>
+              <div class="station-s">2 healthy · 1 needs a worker</div>
+            </div>
+          </div>
+
+          <div class="grid-3">
+
+            <div class="fcard is-live">
+              <div class="fcard-top">
+                <span class="fcard-name">areeba-prod-01</span>
+                <span class="pill live"><span class="livedot"><i></i></span>Building</span>
+              </div>
+              <div class="fcard-meta">v1.32.4 · HA · calico · VIP <span class="mono">10.20.30.100</span></div>
+              <div class="shape" role="img" aria-label="2 load balancers joined, 1 of 3 control planes joined, 2 workers pending">
+                <i class="lb done"></i><i class="lb done"></i>
+                <span class="sep">·</span>
+                <i class="cp done"></i><i class="cp"></i><i class="cp"></i>
+                <span class="sep">·</span>
+                <i class="wk"></i><i class="wk"></i>
+              </div>
+              <div class="fcard-foot">
+                <span class="muted">Phase 5 of 9 · 7 min</span>
+                <span class="fcard-act"><button class="mini" type="button">Watch</button></span>
+              </div>
+            </div>
+
+            <div class="fcard">
+              <div class="fcard-top">
+                <span class="fcard-name">areeba-uat-02</span>
+                <span class="pill ok">Healthy</span>
+              </div>
+              <div class="fcard-meta">v1.32.4 · HA · <span class="mono">10.20.31.100:6443</span></div>
+              <div class="shape" role="img" aria-label="2 load balancers, 3 control planes and 4 workers, all joined">
+                <i class="lb done"></i><i class="lb done"></i>
+                <span class="sep">·</span>
+                <i class="cp done"></i><i class="cp done"></i><i class="cp done"></i>
+                <span class="sep">·</span>
+                <i class="wk done"></i><i class="wk done"></i><i class="wk done"></i><i class="wk done"></i>
+              </div>
+              <div class="fcard-foot">
+                <span class="muted">9 nodes · built 12 Jun</span>
+                <span class="fcard-act">
+                  <button class="mini" type="button">Add worker</button>
+                  <button class="mini" type="button">Open</button>
+                </span>
+              </div>
+            </div>
+
+            <div class="fcard">
+              <div class="fcard-top">
+                <span class="fcard-name">areeba-dev-01</span>
+                <span class="pill warn">1 node down</span>
+              </div>
+              <div class="fcard-meta">v1.31.8 · single CP · <span class="mono">k8s-dev.areeba.lan</span></div>
+              <div class="shape" role="img" aria-label="1 control plane joined, 2 workers joined, 1 worker failed">
+                <i class="cp done"></i>
+                <span class="sep">·</span>
+                <i class="wk done"></i><i class="wk done"></i><i class="wk fail"></i>
+              </div>
+              <div class="fcard-foot">
+                <span class="muted"><span class="mono">worker-3</span> NotReady 40 min</span>
+                <span class="fcard-act">
+                  <button class="mini" type="button">Replace</button>
+                  <button class="mini" type="button">Open</button>
+                </span>
+              </div>
+            </div>
+
+            <div class="fcard is-draft">
+              <div class="fcard-top">
+                <span class="fcard-name">areeba-dr-01</span>
+                <span class="pill cold">Draft</span>
+              </div>
+              <div class="fcard-meta">v1.32.4 · HA · no VIP set yet</div>
+              <div class="shape" role="img" aria-label="2 load balancer slots and 3 control plane slots unfilled">
+                <i class="lb"></i><i class="lb"></i>
+                <span class="sep">·</span>
+                <i class="cp"></i><i class="cp"></i><i class="cp"></i>
+              </div>
+              <div class="fcard-foot">
+                <span class="muted">5 of 7 machines picked</span>
+                <span class="fcard-act"><button class="mini" type="button">Resume</button></span>
+              </div>
+            </div>
+
+            <button class="newcard" type="button">
+              <span class="plus" aria-hidden="true">+</span>
+              <b>New cluster</b>
+              <span class="muted" style="font-size:12.5px">or build another like areeba-uat-02</span>
+            </button>
+
+          </div>
+        </div>
+      </div>
+
+      <p class="note">
+        <b>Why the shape glyph earns its place.</b> Circle is a load balancer, red is a control
+        plane, square is a worker; filled means joined. It is the one element that reads the same
+        on a card, in the composer, and on the live build — so the thing you assembled and the
+        thing that is running are visibly the same object. The dashed draft card uses the identical
+        glyph with nothing filled.
+      </p>
+    </section>
+
+    <!-- ══════════ 2. REACH ══════════ -->
+    <section class="view" id="v-reach">
+      <div class="view-head">
+        <div class="view-num">02 — the prerequisite</div>
+        <h2>Reach: can KubeSight get to your machines?</h2>
+        <p>
+          Today this is four stacked forms called Infrastructure. But nobody opens it to admire a
+          credential — they open it to answer one question, and the answer is a live property of
+          the estate, not a saved record. So the screen answers the question first and keeps the
+          forms behind it.
+        </p>
+      </div>
+
+      <div class="app">
+        <div class="app-bar">
+          <span class="app-title">Cluster Builder</span>
+          <span class="app-crumb">Reach</span>
+          <div class="app-tabs">
+            <span class="app-tab">Fleet</span>
+            <span class="app-tab is-on">Reach</span>
+            <span class="app-tab">New build</span>
+          </div>
+        </div>
+        <div class="app-body">
+
+          <div class="card">
+            <h3 class="card-h">The path to a machine</h3>
+            <p class="card-sub">Every hop the backend takes to run one command as root. A build cannot start until this line is solid.</p>
+            <div class="path">
+              <div class="hop ok">
+                <div class="hop-k">Backend</div>
+                <div class="hop-v">KubeSight</div>
+                <div class="hop-s mono">172.31.126.214</div>
+              </div>
+              <div class="hop ok">
+                <div class="hop-k">Route</div>
+                <div class="hop-v">Bastion</div>
+                <div class="hop-s mono">jump.areeba.lan:22</div>
+              </div>
+              <div class="hop ok">
+                <div class="hop-k">Segment</div>
+                <div class="hop-v">Reachable</div>
+                <div class="hop-s mono">10.20.30.0/24</div>
+              </div>
+              <div class="hop ok">
+                <div class="hop-k">Login</div>
+                <div class="hop-v">kubesight</div>
+                <div class="hop-s">ed25519 key · host key pinned</div>
+              </div>
+              <div class="hop bad">
+                <div class="hop-k">Escalation</div>
+                <div class="hop-v">sudo fails</div>
+                <div class="hop-s">on 6 of 24 machines</div>
+              </div>
+            </div>
+            <p class="note" style="margin-top:14px">
+              The break is drawn where it happens. "sudo fails on 6 machines" is a different job
+              from "the subnet is unreachable", and the current error string makes you work that out yourself.
+            </p>
+          </div>
+
+          <div class="card">
+            <h3 class="card-h">Where it breaks, by machine</h3>
+            <p class="card-sub">Run before you commit to a build, not during it. 18 of 24 pass every column.</p>
+            <div class="tablewrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Machine</th><th>Address</th><th class="c">Port 22</th><th class="c">Login</th>
+                    <th class="c">Sudo</th><th class="c">Clock</th><th class="c">Disk</th><th>Guest OS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>k8s-cp-1</td><td class="mono">10.20.30.21</td>
+                    <td class="c tick">✓</td><td class="c tick">✓</td><td class="c tick">✓</td>
+                    <td class="c tick">✓</td><td class="c tick">✓</td><td>Ubuntu 24.04</td>
+                  </tr>
+                  <tr>
+                    <td>k8s-cp-2</td><td class="mono">10.20.30.22</td>
+                    <td class="c tick">✓</td><td class="c tick">✓</td><td class="c tick">✓</td>
+                    <td class="c tick">✓</td><td class="c tick">✓</td><td>Ubuntu 24.04</td>
+                  </tr>
+                  <tr>
+                    <td>k8s-wk-7</td><td class="mono">10.20.30.37</td>
+                    <td class="c tick">✓</td><td class="c tick">✓</td>
+                    <td class="c cross">✗</td><td class="c tick">✓</td><td class="c tick">✓</td><td>Ubuntu 22.04</td>
+                  </tr>
+                  <tr>
+                    <td>k8s-wk-8</td><td class="mono">10.20.30.38</td>
+                    <td class="c tick">✓</td><td class="c cross">✗</td>
+                    <td class="c dash">—</td><td class="c dash">—</td><td class="c dash">—</td><td>Rocky 9.4</td>
+                  </tr>
+                  <tr>
+                    <td>k8s-wk-9</td><td class="mono">10.20.30.39</td>
+                    <td class="c cross">✗</td><td class="c dash">—</td>
+                    <td class="c dash">—</td><td class="c dash">—</td><td class="c dash">—</td><td class="muted">unknown — no Tools</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="grid-3">
+            <div class="card">
+              <div class="fcard-top" style="margin-bottom:8px">
+                <h3 class="card-h" style="margin:0">vCenter</h3>
+                <span class="pill ok">Connected</span>
+              </div>
+              <p class="card-sub" style="margin-bottom:10px">
+                <span class="mono">vcenter.areeba.lan</span><br />
+                24 VMs visible · read-only role · tested 4 min ago
+              </p>
+              <button class="mini" type="button">Test again</button>
+              <button class="mini" type="button">Edit</button>
+            </div>
+            <div class="card">
+              <div class="fcard-top" style="margin-bottom:8px">
+                <h3 class="card-h" style="margin:0">SSH identity</h3>
+                <span class="pill ok">Key loaded</span>
+              </div>
+              <p class="card-sub" style="margin-bottom:10px">
+                <span class="mono">kubesight</span> via bastion · ed25519<br />
+                Host keys pinned · 24 fingerprints approved
+              </p>
+              <button class="mini" type="button">Test on a host</button>
+              <button class="mini" type="button">Edit</button>
+            </div>
+            <div class="card">
+              <div class="fcard-top" style="margin-bottom:8px">
+                <h3 class="card-h" style="margin:0">Package source</h3>
+                <span class="pill warn">Untested</span>
+              </div>
+              <p class="card-sub" style="margin-bottom:10px">
+                Internal mirror · <span class="mono">nexus.areeba.lan</span><br />
+                Never probed from a node — preflight will do it
+              </p>
+              <button class="mini" type="button">Probe now</button>
+              <button class="mini" type="button">Edit</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <p class="note">
+        <b>The structural change.</b> Credentials, routes and mirrors stop being four things you
+        configure and become one thing you verify. Editing still exists — it is just no longer the
+        point of the screen. This is also the only place the cool slate appears at full strength:
+        machines here are inert, not yet anybody's cluster.
+      </p>
+    </section>
+
+    <!-- ══════════ 3. COMPOSE ══════════ -->
+    <section class="view" id="v-compose">
+      <div class="view-head">
+        <div class="view-num">03 — the wizard's heart</div>
+        <h2>Compose: pick machines, watch the cluster take shape</h2>
+        <p>
+          Basics and Nodes collapse into one screen, because choosing a machine and seeing what it
+          becomes are the same thought. The ESXi host column stays visible while you choose — so
+          co-location is obvious as you make it, not after preflight scolds you.
+        </p>
+      </div>
+
+      <div class="app">
+        <div class="app-bar">
+          <span class="app-title">Cluster Builder</span>
+          <span class="app-crumb">New build · areeba-dr-01</span>
+          <div class="app-tabs">
+            <span class="app-tab">Fleet</span>
+            <span class="app-tab">Reach</span>
+            <span class="app-tab is-on">New build</span>
+          </div>
+        </div>
+        <div class="app-body">
+
+          <div class="preset-row">
+            <div class="preset is-on">
+              <b>Highly available</b>
+              <span>2 load balancers · 3 control planes · N workers</span>
+            </div>
+            <div class="preset">
+              <b>Single control plane</b>
+              <span>1 control plane · N workers — labs only</span>
+            </div>
+            <div class="preset">
+              <b>Same as areeba-uat-02</b>
+              <span>Copy versions, CIDRs, CNI and shape</span>
+            </div>
+          </div>
+
+          <div class="compose">
+            <div class="card">
+              <h3 class="card-h">Machines in vCenter</h3>
+              <p class="card-sub">24 VMs · filter by name, address or ESXi host</p>
+              <div class="tablewrap">
+                <table>
+                  <thead>
+                    <tr><th>Role</th><th>VM</th><th>Address</th><th>vCPU</th><th>Memory</th><th>ESXi host</th><th>Tools</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><span class="pill cold">Load balancer</span></td>
+                      <td>lb-1</td><td class="mono">10.20.30.11</td><td>2</td><td>4 GiB</td>
+                      <td><span class="pill">esxi-a</span></td><td class="tick">✓</td>
+                    </tr>
+                    <tr>
+                      <td><span class="pill cold">Load balancer</span></td>
+                      <td>lb-2</td><td class="mono">10.20.30.12</td><td>2</td><td>4 GiB</td>
+                      <td><span class="pill">esxi-b</span></td><td class="tick">✓</td>
+                    </tr>
+                    <tr>
+                      <td><span class="pill cold">Control plane</span></td>
+                      <td>k8s-cp-1</td><td class="mono">10.20.30.21</td><td>4</td><td>8 GiB</td>
+                      <td><span class="pill">esxi-a</span></td><td class="tick">✓</td>
+                    </tr>
+                    <tr>
+                      <td><span class="pill cold">Control plane</span></td>
+                      <td>k8s-cp-2</td><td class="mono">10.20.30.22</td><td>4</td><td>8 GiB</td>
+                      <td><span class="pill warn">esxi-c</span></td><td class="tick">✓</td>
+                    </tr>
+                    <tr>
+                      <td><span class="pill cold">Control plane</span></td>
+                      <td>k8s-cp-3</td><td class="mono">10.20.30.23</td><td>4</td><td>8 GiB</td>
+                      <td><span class="pill warn">esxi-c</span></td><td class="tick">✓</td>
+                    </tr>
+                    <tr>
+                      <td><span class="pill">—</span></td>
+                      <td>k8s-wk-9</td><td class="muted">no Tools — enter IP</td><td>8</td><td>16 GiB</td>
+                      <td><span class="pill">esxi-b</span></td><td class="cross">✗</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3 class="card-h">Your cluster, taking shape</h3>
+              <p class="card-sub">Highly available · fills as you assign roles</p>
+
+              <div class="vipline">
+                <span class="d" aria-hidden="true"></span>
+                <span>VIP <b class="mono">10.20.30.100</b>:6443 — floats between both load balancers</span>
+              </div>
+
+              <div class="tier">
+                <div class="tier-h"><span>Load balancers</span><span class="tier-n full">2 / 2</span></div>
+                <div class="slots">
+                  <div class="slot lb"><b>lb-1</b><span>esxi-a</span></div>
+                  <div class="slot lb"><b>lb-2</b><span>esxi-b</span></div>
+                </div>
+              </div>
+
+              <div class="tier">
+                <div class="tier-h"><span>Control planes</span><span class="tier-n full">3 / 3</span></div>
+                <div class="slots">
+                  <div class="slot cp"><b>k8s-cp-1</b><span>esxi-a</span></div>
+                  <div class="slot cp tie"><b>k8s-cp-2</b><span>esxi-c</span></div>
+                  <div class="slot cp tie"><b>k8s-cp-3</b><span>esxi-c</span></div>
+                </div>
+              </div>
+
+              <div class="tier">
+                <div class="tier-h"><span>Workers</span><span class="tier-n">0</span></div>
+                <div class="slots">
+                  <div class="slot empty">assign a machine</div>
+                </div>
+              </div>
+
+              <div class="affnote bad">
+                <b>k8s-cp-2</b> and <b>k8s-cp-3</b> both sit on <b class="mono">esxi-c</b>.
+                One host failure would take two of three control planes with it — quorum lost.
+                Move one, or preflight will block the build.
+              </div>
+
+              <button class="btn primary" type="button" style="width:100%">Run preflight</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <p class="note">
+        <b>The anti-affinity warning belongs here, not in preflight.</b> It is knowable the instant
+        the second control plane is assigned, and it is cheapest to fix while you are still looking
+        at the list of machines. Preflight keeps the hard block; this is the same fact delivered
+        early enough to act on cheaply.
+      </p>
+    </section>
+
+    <!-- ══════════ 4. PREFLIGHT ══════════ -->
+    <section class="view" id="v-preflight">
+      <div class="view-head">
+        <div class="view-num">04 — the gate</div>
+        <h2>Preflight: what is wrong, and where you go to fix it</h2>
+        <p>
+          The verdict leads, failures sort first, and everything green collapses into one line.
+          Two additions: a diff against the previous run, so the fix-and-retry loop is legible, and
+          a label on every remedy saying <em>which console you fix it in</em>.
+        </p>
+      </div>
+
+      <div class="app">
+        <div class="app-bar">
+          <span class="app-title">Cluster Builder</span>
+          <span class="app-crumb">New build · areeba-dr-01 · preflight</span>
+          <div class="app-tabs">
+            <span class="app-tab">Fleet</span>
+            <span class="app-tab">Reach</span>
+            <span class="app-tab is-on">New build</span>
+          </div>
+        </div>
+        <div class="app-body">
+
+          <div class="card">
+            <div class="verdict">
+              <div class="ring" role="img" aria-label="41 of 50 checks pass, 6 warnings, 3 failures"><b>50</b></div>
+              <div class="verdict-txt">
+                <h3>41 of 50 checks pass — 3 must be fixed</h3>
+                <p>Failures block the build and cannot be acknowledged. Warnings can, and the acknowledgement is recorded against your name.</p>
+              </div>
+              <button class="btn" type="button" style="margin-left:auto">Re-run preflight</button>
+            </div>
+            <div class="diffstrip">
+              <span class="k">Since 14:02</span>
+              <span><b class="fixed">3 fixed</b></span>
+              <span><b class="newly">1 new</b></span>
+              <span><b>5 unchanged</b></span>
+              <span class="k" style="margin-left:auto">Previous run: 38 of 50</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="fcard-top" style="margin-bottom:12px">
+              <div>
+                <h3 class="card-h" style="margin:0">k8s-cp-2 <span class="muted" style="font-weight:500">· control plane · <span class="mono">10.20.30.22</span></span></h3>
+              </div>
+              <span class="pill bad">2 failures</span>
+            </div>
+
+            <div class="checkrow">
+              <span class="pill bad">Fail</span>
+              <div>
+                <div class="checkrow-l">Control-plane host anti-affinity</div>
+                <div class="checkrow-d">k8s-cp-2 and k8s-cp-3 share ESXi host esxi-c.</div>
+                <div class="fix">
+                  <span class="where vsphere">Fix in vSphere</span>
+                  <span>Migrate one VM to another host, or add a DRS anti-affinity rule for the control-plane group.</span>
+                </div>
+              </div>
+              <span class="muted mono">new</span>
+            </div>
+
+            <div class="checkrow">
+              <span class="pill bad">Fail</span>
+              <div>
+                <div class="checkrow-l">Port 6443 free</div>
+                <div class="checkrow-d">Something is already listening on :6443.</div>
+                <div class="fix">
+                  <span class="where guest">Fix on the machine</span>
+                  <code>ss -lntp 'sport = :6443'</code>
+                  <button class="mini" type="button">Copy</button>
+                </div>
+              </div>
+              <span class="muted mono">unchanged</span>
+            </div>
+
+            <div class="checkrow">
+              <span class="pill warn">Warning</span>
+              <div>
+                <div class="checkrow-l">etcd disk fsync latency</div>
+                <div class="checkrow-d">~14.2 ms per operation. etcd wants 10 ms or less.</div>
+                <div class="fix">
+                  <span class="where vsphere">Fix in vSphere</span>
+                  <span>Slow datastores are the top cause of flaky stacked-etcd clusters. Move this VM to faster storage if you can.</span>
+                </div>
+              </div>
+              <span class="muted mono">unchanged</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="fcard-top">
+              <div>
+                <h3 class="card-h" style="margin:0">6 machines</h3>
+                <p class="card-sub" style="margin:0">Every check green — grouped so the page stays about what needs attention.</p>
+              </div>
+              <span class="pill ok">All pass</span>
+            </div>
+          </div>
+
+          <div class="ackbar">
+            <label style="display:flex;align-items:center;gap:9px">
+              <input type="checkbox" />
+              I understand the 6 warnings and want to proceed.
+            </label>
+            <button class="btn primary" type="button" disabled style="opacity:.5;cursor:not-allowed">Build cluster</button>
+          </div>
+
+        </div>
+      </div>
+
+      <p class="note">
+        <b>"Where do I fix it" is the missing half of a hint.</b> A failed anti-affinity check and a
+        busy port both read as red rows today, but one is a vSphere job and the other is an SSH
+        session — often for two different people. Labelling the console turns a list of complaints
+        into a list of assignable work.
+      </p>
+    </section>
+
+    <!-- ══════════ 5. BUILD ══════════ -->
+    <section class="view" id="v-build">
+      <div class="view-head">
+        <div class="view-num">05 — the long wait</div>
+        <h2>Build: a twenty-minute operation you can leave and come back to</h2>
+        <p>
+          The whole plan is visible from the first second, including the phases that have not
+          started, so the remaining work is legible. The log follows whatever is running. And
+          because failure is the state that matters most, it is the same screen — toggle it.
+        </p>
+      </div>
+
+      <div class="statetoggle" role="group" aria-label="Build state">
+        <button data-state="running" aria-pressed="true" type="button">Running</button>
+        <button data-state="failed" aria-pressed="false" type="button">Failed</button>
+      </div>
+
+      <div class="app">
+        <div class="app-bar">
+          <span class="app-title">Cluster Builder</span>
+          <span class="app-crumb">areeba-prod-01</span>
+          <div class="app-tabs">
+            <span class="app-tab is-on">Fleet</span>
+            <span class="app-tab">Reach</span>
+            <span class="app-tab">New build</span>
+          </div>
+        </div>
+        <div class="app-body">
+
+          <!-- Running -->
+          <div class="buildstate is-on" data-state="running">
+            <div class="card progresshead" style="margin-bottom:16px">
+              <div class="progressrow">
+                <span class="livedot"><i></i>Live</span>
+                <span class="now">CNI install</span>
+                <span class="muted" style="font-size:13px">phase 5 of 9</span>
+                <span class="el">7 min 31 s</span>
+              </div>
+              <div class="bar"><i style="width:44%"></i></div>
+              <div class="narrate">
+                <b>Calico is rolling out to 6 machines.</b> Each one pulls about 180 MB, so this
+                phase usually runs 3–5 minutes on an internal mirror. Nothing is stuck.
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px">
+              <h3 class="card-h" style="margin-bottom:14px">Phases</h3>
+
+              <div class="phase done">
+                <div class="knot">✓</div>
+                <div class="pname">Node preparation<span class="pnote">containerd + kubeadm on every machine, in parallel</span></div>
+                <div class="lanes">
+                  <span class="lane done"><i></i>lb-1</span><span class="lane done"><i></i>lb-2</span>
+                  <span class="lane done"><i></i>cp-1</span><span class="lane done"><i></i>cp-2</span>
+                  <span class="lane done"><i></i>cp-3</span><span class="lane done"><i></i>worker-1</span>
+                  <span class="lane done"><i></i>worker-2</span>
+                </div>
+              </div>
+              <div class="phase done">
+                <div class="knot">✓</div>
+                <div class="pname">Load balancer + VIP<span class="pnote">haproxy + keepalived — VIP live before init</span></div>
+                <div class="lanes"><span class="lane done"><i></i>cluster</span></div>
+              </div>
+              <div class="phase done">
+                <div class="knot">✓</div>
+                <div class="pname">Image pull<span class="pnote">fails early if the registry is missing anything</span></div>
+                <div class="lanes">
+                  <span class="lane done"><i></i>cp-1</span><span class="lane done"><i></i>cp-2</span><span class="lane done"><i></i>cp-3</span>
+                </div>
+              </div>
+              <div class="phase done">
+                <div class="knot">✓</div>
+                <div class="pname">kubeadm init<span class="pnote">through the stable endpoint — it goes into the certs</span></div>
+                <div class="lanes"><span class="lane done"><i></i>cp-1</span></div>
+              </div>
+              <div class="phase now">
+                <div class="knot">5</div>
+                <div class="pname">CNI install<span class="pnote">network plugin, pod CIDR applied</span></div>
+                <div class="lanes"><span class="lane now"><i></i>cluster</span></div>
+              </div>
+              <div class="phase todo">
+                <div class="knot">6</div>
+                <div class="pname">Join control planes<span class="pnote">one at a time, etcd quorum checked between</span></div>
+                <div class="lanes"><span class="lane waiting">not started</span></div>
+              </div>
+              <div class="phase todo">
+                <div class="knot">7</div>
+                <div class="pname">Join workers<span class="pnote">in parallel</span></div>
+                <div class="lanes"><span class="lane waiting">not started</span></div>
+              </div>
+              <div class="phase todo">
+                <div class="knot">8</div>
+                <div class="pname">Cluster verification<span class="pnote">nodes Ready · CoreDNS · etcd · smoke pod</span></div>
+                <div class="lanes"><span class="lane waiting">not started</span></div>
+              </div>
+              <div class="phase todo">
+                <div class="knot">9</div>
+                <div class="pname">Register in KubeSight<span class="pnote">admin.conf → Fleet, no manual step</span></div>
+                <div class="lanes"><span class="lane waiting">not started</span></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="wellhead">
+                <span class="t">Step log</span>
+                <span class="mono muted">CNI install</span>
+                <span class="livedot"><i></i>following</span>
+                <span class="muted" style="font-size:12px;margin-left:auto">secrets scrubbed before anything is stored</span>
+              </div>
+              <pre class="well">daemonset.apps/calico-node created
+deployment.apps/calico-kube-controllers created
+Waiting for daemon set "calico-node" rollout to finish: 1 of 6 updated pods are available...
+Waiting for daemon set "calico-node" rollout to finish: 4 of 6 updated pods are available...</pre>
+              <p class="card-sub" style="margin:10px 0 0">
+                Follows whatever is running. Click a finished phase to pin it; scroll up and it stops chasing the tail.
+              </p>
+            </div>
+          </div>
+
+          <!-- Failed -->
+          <div class="buildstate" data-state="failed">
+            <div class="diagnosis" style="margin-bottom:16px">
+              <h3>Build stopped in phase 6 of 9 — cp-2 could not join</h3>
+              <p class="muted" style="margin:0;font-size:13px">
+                Four phases completed and are kept. Retry resumes from here; it does not start over.
+              </p>
+              <div class="diag-grid">
+                <div class="diag-cell">
+                  <div class="diag-k">Machine</div>
+                  <div class="diag-v">k8s-cp-2 <span class="mono muted">10.20.30.22</span></div>
+                </div>
+                <div class="diag-cell">
+                  <div class="diag-k">Phase</div>
+                  <div class="diag-v">Join control planes</div>
+                </div>
+                <div class="diag-cell">
+                  <div class="diag-k">Most likely cause</div>
+                  <div class="diag-v">etcd member already registered</div>
+                </div>
+                <div class="diag-cell">
+                  <div class="diag-k">Blast radius</div>
+                  <div class="diag-v">cp-1 healthy · API up</div>
+                </div>
+              </div>
+              <p style="font-size:13.5px;margin:0 0 14px">
+                A previous attempt added <span class="mono">k8s-cp-2</span> to etcd before it failed.
+                Retry removes the stale member and resets the machine before rejoining — which is
+                exactly what this needs, so retrying is safe.
+              </p>
+              <div class="diag-act">
+                <button class="btn primary" type="button">Retry from here</button>
+                <button class="mini" type="button">Open the failing log</button>
+                <button class="mini" type="button">Remove cp-2 and build with 1 control plane</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3 class="card-h" style="margin-bottom:14px">Phases</h3>
+              <div class="phase done">
+                <div class="knot">✓</div>
+                <div class="pname">Node preparation<span class="pnote">7 machines prepared</span></div>
+                <div class="lanes">
+                  <span class="lane done"><i></i>lb-1</span><span class="lane done"><i></i>lb-2</span>
+                  <span class="lane done"><i></i>cp-1</span><span class="lane done"><i></i>cp-2</span>
+                  <span class="lane done"><i></i>cp-3</span>
+                </div>
+              </div>
+              <div class="phase done">
+                <div class="knot">✓</div>
+                <div class="pname">kubeadm init<span class="pnote">cluster is alive on cp-1</span></div>
+                <div class="lanes"><span class="lane done"><i></i>cp-1</span></div>
+              </div>
+              <div class="phase fail">
+                <div class="knot">6</div>
+                <div class="pname">Join control planes<span class="pnote">serial — stopped at the first failure</span></div>
+                <div class="lanes">
+                  <span class="lane fail"><i></i>cp-2 <span class="muted">×2</span></span>
+                  <span class="lane waiting">cp-3 not attempted</span>
+                </div>
+              </div>
+              <div class="phase todo">
+                <div class="knot">7</div>
+                <div class="pname">Join workers<span class="pnote">in parallel</span></div>
+                <div class="lanes"><span class="lane waiting">not started</span></div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <p class="note">
+        <b>A failure should say what it costs you.</b> "Blast radius: cp-1 healthy, API up" is the
+        first thing an operator wants at 2am, and it is the one thing the current error banner never
+        says. The third action — carry on with one control plane — exists because at some point the
+        cluster matters more than the shape you planned.
+      </p>
+    </section>
+
+    <!-- ══════════ 6. DAY 2 ══════════ -->
+    <section class="view" id="v-day2">
+      <div class="view-head">
+        <div class="view-num">06 — after the applause</div>
+        <h2>Day 2: the receipt keeps working</h2>
+        <p>
+          The build record already knows every machine, credential and version this cluster was made
+          from. That makes it the right place to add a worker, replace a dead one, or rebuild the
+          whole thing next year — and the wrong place to become a read-only receipt.
+        </p>
+      </div>
+
+      <div class="app">
+        <div class="app-bar">
+          <span class="app-title">Cluster Builder</span>
+          <span class="app-crumb">areeba-uat-02</span>
+          <div class="app-tabs">
+            <span class="app-tab is-on">Fleet</span>
+            <span class="app-tab">Reach</span>
+            <span class="app-tab">New build</span>
+          </div>
+        </div>
+        <div class="app-body">
+
+          <div class="card receipt">
+            <div class="okring" aria-hidden="true">✓</div>
+            <div>
+              <h3>areeba-uat-02 is alive</h3>
+              <p>
+                9 machines · registered as <span class="mono">custom-7</span> — already in Clusters,
+                Dashboard and Inventory. Join secrets were destroyed when the last node joined.
+              </p>
+            </div>
+            <div class="shape" role="img" aria-label="2 load balancers, 3 control planes and 4 workers, all joined">
+              <i class="lb done"></i><i class="lb done"></i>
+              <span class="sep">·</span>
+              <i class="cp done"></i><i class="cp done"></i><i class="cp done"></i>
+              <span class="sep">·</span>
+              <i class="wk done"></i><i class="wk done"></i><i class="wk done"></i><i class="wk done"></i>
+            </div>
+          </div>
+
+          <div class="factrow">
+            <div class="fact"><div class="fact-k">Endpoint</div><div class="fact-v mono">10.20.31.100:6443</div></div>
+            <div class="fact"><div class="fact-k">Built in</div><div class="fact-v">18 min</div></div>
+            <div class="fact"><div class="fact-k">Network</div><div class="fact-v">calico · <span class="mono">10.244.0.0/16</span></div></div>
+            <div class="fact"><div class="fact-k">Kubernetes</div><div class="fact-v">v1.32.4</div></div>
+          </div>
+
+          <div class="card">
+            <h3 class="card-h">Capacity</h3>
+            <p class="card-sub">Across 4 workers. Adding one takes about 4 minutes — node preparation and a join, nothing else.</p>
+            <div class="capacity">
+              <div class="capbar" role="img" aria-label="68 percent of CPU requested">
+                <i class="used" style="width:68%"></i><i class="head" style="width:32%"></i>
+              </div>
+              <span class="mono muted">68% CPU requested · 71% memory</span>
+              <button class="btn primary" type="button" style="margin-left:auto">Add worker</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="fcard-top" style="margin-bottom:12px">
+              <h3 class="card-h" style="margin:0">Machines</h3>
+              <span class="pill ok">9 joined</span>
+            </div>
+            <div class="tablewrap">
+              <table>
+                <thead>
+                  <tr><th>Machine</th><th>Role</th><th>Address</th><th>ESXi host</th><th>OS</th><th>State</th><th></th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>k8s-cp-1 ★</td><td>Control plane</td><td class="mono">10.20.31.21</td>
+                    <td>esxi-a</td><td>Ubuntu 24.04</td><td><span class="pill ok">Joined</span></td>
+                    <td class="muted" style="font-size:12px">primary — cannot be removed</td>
+                  </tr>
+                  <tr>
+                    <td>k8s-cp-2</td><td>Control plane</td><td class="mono">10.20.31.22</td>
+                    <td>esxi-b</td><td>Ubuntu 24.04</td><td><span class="pill ok">Joined</span></td>
+                    <td><button class="mini" type="button">Drain</button></td>
+                  </tr>
+                  <tr>
+                    <td>k8s-wk-1</td><td>Worker</td><td class="mono">10.20.31.31</td>
+                    <td>esxi-a</td><td>Ubuntu 24.04</td><td><span class="pill ok">Joined</span></td>
+                    <td><button class="mini" type="button">Drain</button> <button class="mini" type="button">Remove</button></td>
+                  </tr>
+                  <tr>
+                    <td>k8s-wk-2</td><td>Worker</td><td class="mono">10.20.31.32</td>
+                    <td>esxi-b</td><td>Ubuntu 24.04</td><td><span class="pill warn">Draining</span></td>
+                    <td class="muted" style="font-size:12px">6 pods left to evict</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3 class="card-h">Rebuild</h3>
+            <p class="card-sub" style="margin-bottom:12px">
+              Every choice that made this cluster is still recorded — machines, versions, CIDRs,
+              mirror and SSH route. Next year's rebuild starts from a filled-in form, not a blank one.
+            </p>
+            <button class="mini" type="button">Build another like this</button>
+            <button class="mini" type="button">Export this build as a template</button>
+          </div>
+
+        </div>
+      </div>
+
+      <p class="note">
+        <b>Why this belongs in Cluster Builder and not Clusters.</b> The Clusters page speaks
+        Kubernetes — namespaces, workloads, health. This page speaks machines — vCenter VMs, ESXi
+        hosts, SSH routes, disks. Adding a worker is a machine job, so it lives with the machines.
+      </p>
+    </section>
+
+  </main>
+
+  <section class="closing">
+    <h2>What changes, and what deliberately doesn't</h2>
+    <div class="ledger">
+      <div class="ledger-row">
+        <span class="ledger-tag keep">Keep</span>
+        <div>
+          <b>The shape glyph, the phase rail, the dark log well, the severity-first preflight.</b>
+          <p>These already work and are already built. The concept leans on them harder rather than replacing them — the glyph in particular becomes the spine that ties all six screens together.</p>
+        </div>
+      </div>
+      <div class="ledger-row">
+        <span class="ledger-tag move">Reframe</span>
+        <div>
+          <b>Infrastructure becomes Reach.</b>
+          <p>Same four records, inverted presentation: the screen answers "can we get to the machines" and keeps the forms behind that answer. The path diagram and the per-machine matrix are new; the CRUD underneath is not.</p>
+        </div>
+      </div>
+      <div class="ledger-row">
+        <span class="ledger-tag move">Reframe</span>
+        <div>
+          <b>Builds becomes Fleet.</b>
+          <p>Finished builds stay on the page as managed clusters instead of collapsing into a link. Drafts, in-flight builds and living clusters share one grid because they are the same object at three ages.</p>
+        </div>
+      </div>
+      <div class="ledger-row">
+        <span class="ledger-tag new">New</span>
+        <div>
+          <b>Failure diagnosis, preflight diff, and "where do I fix it" labels.</b>
+          <p>Three small additions aimed at the same thing: turning a report of what is wrong into an instruction about what to do next, and who does it.</p>
+        </div>
+      </div>
+      <div class="ledger-row">
+        <span class="ledger-tag new">New</span>
+        <div>
+          <b>Day 2 — add, drain and replace a worker.</b>
+          <p>Already scoped in the plan and already reachable through the API design. This is the screen it needs. It is also the largest piece of real work in the concept.</p>
+        </div>
+      </div>
+      <div class="ledger-row">
+        <span class="ledger-tag keep">Unchanged</span>
+        <div>
+          <b>Every safety property.</b>
+          <p>Log scrubbing, the warning acknowledgement gate, hard failures that cannot be waved through, encrypted secrets that are never rendered back, and the separation of <span class="mono">create</span> from <span class="mono">execute</span> so a reviewer can gate the run.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+(function () {
+  var nav = document.querySelector(".viewnav");
+  var views = Array.prototype.slice.call(document.querySelectorAll(".view"));
+  var buttons = Array.prototype.slice.call(nav.querySelectorAll("button"));
+
+  function show(name, push) {
+    var found = false;
+    views.forEach(function (v) {
+      var on = v.id === "v-" + name;
+      v.classList.toggle("is-on", on);
+      if (on) { found = true; }
+    });
+    if (!found) { return; }
+    buttons.forEach(function (b) {
+      b.setAttribute("aria-current", b.dataset.view === name ? "true" : "false");
+    });
+    if (push && history.replaceState) {
+      history.replaceState(null, "", "#show-" + name);
+    }
+  }
+
+  nav.addEventListener("click", function (e) {
+    var b = e.target.closest("button");
+    if (b) { show(b.dataset.view, true); }
+  });
+
+  // Build view: running / failed state toggle
+  var toggle = document.querySelector(".statetoggle");
+  if (toggle) {
+    toggle.addEventListener("click", function (e) {
+      var b = e.target.closest("button");
+      if (!b) { return; }
+      var want = b.dataset.state;
+      toggle.querySelectorAll("button").forEach(function (x) {
+        x.setAttribute("aria-pressed", x.dataset.state === want ? "true" : "false");
+      });
+      document.querySelectorAll(".buildstate").forEach(function (s) {
+        s.classList.toggle("is-on", s.dataset.state === want);
+      });
+    });
+  }
+
+  // Theme toggle — starts from the OS preference, then follows the button.
+  var root = document.documentElement;
+  var tb = document.getElementById("themebtn");
+  var startDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  function setTheme(dark) {
+    root.setAttribute("data-theme", dark ? "dark" : "light");
+    tb.textContent = dark ? "Light" : "Dark";
+  }
+  setTheme(startDark);
+  tb.addEventListener("click", function () {
+    setTheme(root.getAttribute("data-theme") !== "dark");
+  });
+
+  var hash = (location.hash || "").replace("#show-", "");
+  show(hash || "fleet", false);
+})();
+</script>
+</body>
+</html>

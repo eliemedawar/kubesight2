@@ -1,0 +1,92 @@
+import { request } from "./client";
+
+// --- Cluster builds ---------------------------------------------------------
+
+export const listClusterBuilds = () => request("/api/cluster-builds");
+
+export const getClusterBuild = (id) => request(`/api/cluster-builds/${id}`);
+
+export const getBuilderOptions = () => request("/api/cluster-builds/options");
+
+export const createClusterBuild = (payload) =>
+  request("/api/cluster-builds", { method: "POST", body: payload });
+
+export const updateClusterBuild = (id, payload) =>
+  request(`/api/cluster-builds/${id}`, { method: "PUT", body: payload });
+
+export const deleteClusterBuild = (id) =>
+  request(`/api/cluster-builds/${id}`, { method: "DELETE" });
+
+export const preflightClusterBuild = (id) =>
+  request(`/api/cluster-builds/${id}/preflight`, { method: "POST" });
+
+export const startClusterBuild = (id, payload = {}) =>
+  request(`/api/cluster-builds/${id}/start`, { method: "POST", body: payload });
+
+export const retryClusterBuild = (id) =>
+  request(`/api/cluster-builds/${id}/retry`, { method: "POST" });
+
+export const cancelClusterBuild = (id) =>
+  request(`/api/cluster-builds/${id}/cancel`, { method: "POST" });
+
+export const getClusterBuildLogs = (id, nodeId) =>
+  request(`/api/cluster-builds/${id}/logs`, { query: nodeId ? { node: nodeId } : {} });
+
+// --- vSphere connections ----------------------------------------------------
+
+export const listVSphereConnections = () => request("/api/vsphere-connections");
+
+export const createVSphereConnection = (payload) =>
+  request("/api/vsphere-connections", { method: "POST", body: payload });
+
+export const updateVSphereConnection = (id, payload) =>
+  request(`/api/vsphere-connections/${id}`, { method: "PUT", body: payload });
+
+export const deleteVSphereConnection = (id) =>
+  request(`/api/vsphere-connections/${id}`, { method: "DELETE" });
+
+export const testVSphereConnection = (id) =>
+  request(`/api/vsphere-connections/${id}/test`, { method: "POST" });
+
+export const listVSphereVms = (id, refresh = false) =>
+  request(`/api/vsphere-connections/${id}/vms`, { query: refresh ? { refresh: 1 } : {} });
+
+// --- SSH credentials + connection profiles ----------------------------------
+
+export const listSshCredentials = () => request("/api/ssh-credentials");
+
+export const createSshCredential = (payload) =>
+  request("/api/ssh-credentials", { method: "POST", body: payload });
+
+export const updateSshCredential = (id, payload) =>
+  request(`/api/ssh-credentials/${id}`, { method: "PUT", body: payload });
+
+export const deleteSshCredential = (id) =>
+  request(`/api/ssh-credentials/${id}`, { method: "DELETE" });
+
+export const listSshProfiles = () => request("/api/ssh-connection-profiles");
+
+export const createSshProfile = (payload) =>
+  request("/api/ssh-connection-profiles", { method: "POST", body: payload });
+
+export const updateSshProfile = (id, payload) =>
+  request(`/api/ssh-connection-profiles/${id}`, { method: "PUT", body: payload });
+
+export const deleteSshProfile = (id) =>
+  request(`/api/ssh-connection-profiles/${id}`, { method: "DELETE" });
+
+export const testSshProfile = (id, host) =>
+  request(`/api/ssh-connection-profiles/${id}/test`, { method: "POST", body: { host } });
+
+// --- Build profiles (repository modes) --------------------------------------
+
+export const listBuildProfiles = () => request("/api/build-profiles");
+
+export const createBuildProfile = (payload) =>
+  request("/api/build-profiles", { method: "POST", body: payload });
+
+export const updateBuildProfile = (id, payload) =>
+  request(`/api/build-profiles/${id}`, { method: "PUT", body: payload });
+
+export const deleteBuildProfile = (id) =>
+  request(`/api/build-profiles/${id}`, { method: "DELETE" });

@@ -186,6 +186,25 @@ def test_resign_uploads_the_binary_with_the_trigger(
         assert row.job_ref["queueUrl"] == QUEUE_URL
 
 
+def test_artifact_type_param_follows_the_build(
+    app, client, admin_token, artifact_dir, monkeypatch
+):
+    """One Android job serves both formats: the type is sent per build, so an
+    APK and an AAB do not need separate jobs or separate config."""
+    cfg = {"android": {**RESIGN_CFG["android"], "artifactTypeParam": "ANDROID_EXT"}}
+    created = _create_app(client, admin_token, resign_config=cfg)
+
+    for name, expected in (("app-release.aab", "aab"), ("app-release.apk", "apk")):
+        build = _upload(
+            client, admin_token, created["id"], _aab(signed=False), filename=name
+        ).get_json()["data"]
+        seen = _fake_jenkins(monkeypatch)
+        client.post(
+            f"/api/mobile-apps/builds/{build['id']}/resign", headers=auth_headers(admin_token)
+        )
+        assert seen["params"]["ANDROID_EXT"] == expected
+
+
 def test_extra_params_cannot_collide_with_the_file_part(
     app, client, admin_token, artifact_dir, monkeypatch
 ):

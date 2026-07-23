@@ -80,6 +80,11 @@ PERMISSIONS = [
     ("zoho:manage", "Configure the Zoho Desk integration and trigger a sync"),
     ("mobile_apps:view", "View mobile applications and download builds"),
     ("mobile_apps:manage", "Register mobile applications and configure store credentials"),
+    ("cluster_builds:view", "View cluster builds"),
+    ("cluster_builds:create", "Create and edit cluster builds"),
+    ("cluster_builds:execute", "Run cluster build preflights and executions"),
+    ("ssh_credentials:manage", "Manage SSH credentials and connection profiles"),
+    ("vsphere:manage", "Manage vSphere connections and browse VM inventory"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -99,6 +104,14 @@ PERMISSION_GROUPS = [
         "id": "clusters",
         "label": "Clusters",
         "keys": ["clusters:view", "clusters:add", "clusters:update", "clusters:remove", "clusters:test"],
+    },
+    {
+        "id": "clusterBuilds",
+        "label": "Cluster Builder",
+        "keys": [
+            "cluster_builds:view", "cluster_builds:create", "cluster_builds:execute",
+            "ssh_credentials:manage", "vsphere:manage",
+        ],
     },
     {"id": "namespaces", "label": "Namespaces", "keys": ["namespaces:view"]},
     {
@@ -186,6 +199,8 @@ DANGEROUS_PERMISSION_KEYS = {
     "deployment_requests:manage", "change_bundles:manage",
     "service_blueprints:delete", "service_blueprints:deploy",
     "components:delete", "registries:manage", "mobile_apps:manage",
+    "cluster_builds:create", "cluster_builds:execute",
+    "ssh_credentials:manage", "vsphere:manage",
 }
 
 

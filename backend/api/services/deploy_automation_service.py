@@ -140,7 +140,7 @@ def serialize_jenkins(row: JenkinsConnection) -> Dict[str, Any]:
         "autoRunClusters": row.auto_run_clusters or {},
         "imageTagTemplate": row.image_tag_template or "{tag}",
         "buildTimeoutMinutes": int(row.build_timeout_minutes or 45),
-        "queueTimeoutMinutes": int(row.queue_timeout_minutes or 10),
+        "queueTimeoutMinutes": int(row.queue_timeout_minutes or 30),
         "bundleWindowHours": int(row.bundle_window_hours or 24),
         "rolloutTimeoutMinutes": int(row.rollout_timeout_minutes or 15),
         "rollbackOnFailure": bool(row.rollback_on_failure),
@@ -1358,7 +1358,7 @@ def _do_poll_build(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
                 _fail(run, "build", "The router build was cancelled while still queued.")
                 return
             if state["state"] == "pending":
-                if now - triggered > timedelta(minutes=int(jrow.queue_timeout_minutes or 10)):
+                if now - triggered > timedelta(minutes=int(jrow.queue_timeout_minutes or 30)):
                     _fail(
                         run, "build",
                         f"Build stuck in the Jenkins queue for {jrow.queue_timeout_minutes} min "

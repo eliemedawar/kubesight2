@@ -76,6 +76,7 @@ const ResourcesPage = lazy(() => import("./pages/ResourcesPage.jsx"));
 const LogsPage = lazy(() => import("./pages/LogsPage.jsx"));
 const AlertsPage = lazy(() => import("./pages/AlertsPage.jsx"));
 const UpgradeSafeModePage = lazy(() => import("./pages/UpgradeSafeModePage.jsx"));
+const ClusterBuilderPage = lazy(() => import("./pages/ClusterBuilderPage.jsx"));
 const UserManagementPage = lazy(() => import("./pages/UserManagementPage.jsx"));
 const AuditLogsPage = lazy(() => import("./pages/AuditLogsPage.jsx"));
 const DeploymentRequestsPage = lazy(() => import("./pages/DeploymentRequestsPage.jsx"));
@@ -1623,6 +1624,16 @@ export default function App() {
         return <ZohoSyncPage canManage={hasPermission("zoho:manage")} />;
       case "mobileApps":
         return <MobileAppsPage canManage={hasPermission("mobile_apps:manage")} canPublish={isAdmin} />;
+      case "clusterBuilder":
+        return (
+          <ClusterBuilderPage
+            canCreate={hasPermission("cluster_builds:create")}
+            canExecute={hasPermission("cluster_builds:execute")}
+            canManageInfra={
+              hasPermission("ssh_credentials:manage") || hasPermission("vsphere:manage")
+            }
+          />
+        );
       case "upgrade":
         return (
           <UpgradeSafeModePage

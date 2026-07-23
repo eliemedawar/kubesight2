@@ -55,11 +55,13 @@ function formFromApp(app) {
     androidResignJobPath: resignAndroid?.jobPath || "",
     androidResignPattern: resignAndroid?.resultPattern || "",
     androidResignFileParam: resignAndroid?.fileParam || "",
+    androidResignTypeParam: resignAndroid?.artifactTypeParam || "",
     androidResignExtra: paramsToText(resignAndroid?.extraParams),
     iosResignEnabled: Boolean(resignIos),
     iosResignJobPath: resignIos?.jobPath || "",
     iosResignPattern: resignIos?.resultPattern || "",
     iosResignFileParam: resignIos?.fileParam || "",
+    iosResignTypeParam: resignIos?.artifactTypeParam || "",
     iosResignExtra: paramsToText(resignIos?.extraParams),
     // Google Play
     androidPackageName: app?.androidPackageName || "",
@@ -178,6 +180,19 @@ function ResignFields({ prefix, form, set }) {
               The job&apos;s file parameter the binary is uploaded as.
             </span>
           </label>
+          <label>
+            Artifact-type parameter
+            <input
+              value={form[`${prefix}ResignTypeParam`]}
+              onChange={(e) => set(`${prefix}ResignTypeParam`, e.target.value)}
+              placeholder={isAndroid ? "ANDROID_EXT" : ""}
+              className="mono"
+            />
+            <span className="field-hint">
+              Optional. Receives {isAndroid ? '"aab" or "apk"' : '"ipa"'} per build, so one job can
+              handle {isAndroid ? "both Android formats" : "any build"}.
+            </span>
+          </label>
           <label className="sg-ma-span">
             Extra build parameters
             <textarea
@@ -252,6 +267,7 @@ export default function AppFormModal({
         jobPath: form[`${prefix}ResignJobPath`],
         resultPattern: form[`${prefix}ResignPattern`],
         fileParam: form[`${prefix}ResignFileParam`],
+        artifactTypeParam: form[`${prefix}ResignTypeParam`],
       };
       Object.entries(optional).forEach(([key, value]) => {
         const trimmed = (value || "").trim();

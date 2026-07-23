@@ -134,6 +134,16 @@ def _scheduler_loop(app: Flask) -> None:
                 advance_mobile_resigns()
         except Exception:
             logger.exception("Mobile applications tick failed")
+        try:
+            with app.app_context():
+                from .cluster_build.executor import advance_cluster_builds
+
+                # Cluster Builder: resume builds orphaned by a backend restart
+                # (completed steps are skipped — resume, not restart). No-ops
+                # instantly when nothing is in status 'building'.
+                advance_cluster_builds()
+        except Exception:
+            logger.exception("Cluster build tick failed")
 
 
 _scheduler_started = False

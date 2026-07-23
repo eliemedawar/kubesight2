@@ -85,7 +85,7 @@ Edge policies decided:
 **`JenkinsConnection`** (single row, id=1, mirrors ZohoIntegration pattern):
 `enabled`, `base_url`, `username`, `api_token_encrypted` (Fernet, write-only in API),
 `router_job_path` (e.g. `folder/router` → URL `/job/folder/job/router`), `verify_tls` (default true),
-`auto_run_tickets` (default false), `build_timeout_minutes` (45), `queue_timeout_minutes` (10),
+`auto_run_tickets` (default false), `build_timeout_minutes` (45), `queue_timeout_minutes` (30),
 `bundle_window_hours` (24), `last_test_at/status/message`, `updated_at`.
 
 **`DeployAutomationRun`**:

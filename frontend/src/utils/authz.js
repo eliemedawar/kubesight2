@@ -155,6 +155,12 @@ export const NAV_PAGES = [
     section: "Operations",
   },
   {
+    key: "clusterBuilder",
+    label: "Cluster Builder",
+    anyPermissions: ["cluster_builds:view", "cluster_builds:create", "cluster_builds:execute"],
+    section: "Operations",
+  },
+  {
     key: "upgrade",
     label: "Upgrade Center",
     anyPermissions: ["upgrades:precheck", "upgrades:start"],

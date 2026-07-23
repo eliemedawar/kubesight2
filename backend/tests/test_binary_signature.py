@@ -146,6 +146,53 @@ def test_unrecognised_artifact_type_is_unknown(tmp_path):
     assert sig.detect(str(p), "exe") == sig.UNKNOWN
 
 
+def test_backfill_probes_builds_that_predate_the_check(app, tmp_path, monkeypatch):
+    """Builds ingested before the probe existed are stuck at "unknown", which
+    never blocks a publish but also never offers a re-sign — so a shielded
+    binary already in the store would look fine and could not be signed."""
+    from api.db import db
+    from api.migrate_rbac import _backfill_build_signature_state
+    from api.models import MobileAppBuild, MobileApplication
+
+    root = tmp_path / "store"
+    monkeypatch.setenv("MOBILE_ARTIFACT_DIR", str(root))
+
+    with app.app_context():
+        mobile_app = MobileApplication(name="Zaky", jenkins_job_path="x")
+        db.session.add(mobile_app)
+        db.session.commit()
+
+        stripped = MobileAppBuild(
+            app_id=mobile_app.id,
+            platform="android",
+            artifact_type="aab",
+            status="available",
+            signature_state="unknown",
+        )
+        missing = MobileAppBuild(
+            app_id=mobile_app.id,
+            platform="android",
+            artifact_type="aab",
+            status="available",
+            signature_state="unknown",
+            storage_path="gone/nowhere.aab",
+        )
+        db.session.add_all([stripped, missing])
+        db.session.commit()
+
+        rel = f"{mobile_app.id}/{stripped.id}"
+        (root / rel).mkdir(parents=True, exist_ok=True)
+        _zip(root / rel / "app.aab", ["base/manifest/AndroidManifest.xml"])
+        stripped.storage_path = f"{rel}/app.aab"
+        db.session.commit()
+
+        _backfill_build_signature_state()
+
+        assert db.session.get(MobileAppBuild, stripped.id).signature_state == "unsigned"
+        # A row whose binary is gone is left alone rather than guessed at.
+        assert db.session.get(MobileAppBuild, missing.id).signature_state == "unknown"
+
+
 def test_detect_safe_swallows_errors(monkeypatch, tmp_path):
     def boom(*_a, **_k):
         raise RuntimeError("probe exploded")
