@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import BrandMark from "../BrandMark.jsx";
 
 const NAV_ICONS = {
@@ -102,6 +103,14 @@ const NAV_ICONS = {
 };
 
 export default function Sidebar({ pages, activePage, onNavigate, open = false }) {
+  const [openSection, setOpenSection] = useState(null);
+  const sidebarRef = useRef(null);
+  const triggerRefs = useRef(new Map());
+  const lastPointerTypeRef = useRef(null);
+  const suppressFocusOpenRef = useRef(false);
+  const hoverOpenTimerRef = useRef(null);
+  const hoverCloseTimerRef = useRef(null);
+  const hoverSwitchLockRef = useRef({ section: null, until: 0 });
   const sections = [];
   const sectionIndex = new Map();
 
@@ -114,8 +123,150 @@ export default function Sidebar({ pages, activePage, onNavigate, open = false })
     sections[sectionIndex.get(sectionLabel)].pages.push(page);
   });
 
+  const activeSection = sections.find((section) =>
+    section.pages.some((page) => page.key === activePage)
+  );
+  const activeSectionLabel = activeSection?.label || null;
+
+  useEffect(() => {
+    setOpenSection(open ? activeSectionLabel : null);
+  }, [activeSectionLabel, open]);
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(hoverOpenTimerRef.current);
+      window.clearTimeout(hoverCloseTimerRef.current);
+    },
+    []
+  );
+
+  const clearHoverTimers = () => {
+    window.clearTimeout(hoverOpenTimerRef.current);
+    window.clearTimeout(hoverCloseTimerRef.current);
+    hoverOpenTimerRef.current = null;
+    hoverCloseTimerRef.current = null;
+  };
+
+  const scheduleSectionOpen = (sectionLabel) => {
+    const activeLock = hoverSwitchLockRef.current;
+    if (Date.now() < activeLock.until && activeLock.section !== sectionLabel) {
+      return;
+    }
+    window.clearTimeout(hoverCloseTimerRef.current);
+    window.clearTimeout(hoverOpenTimerRef.current);
+    hoverCloseTimerRef.current = null;
+    if (openSection === sectionLabel) {
+      return;
+    }
+    hoverOpenTimerRef.current = window.setTimeout(() => {
+      if (openSection && openSection !== sectionLabel) {
+        hoverSwitchLockRef.current = {
+          section: sectionLabel,
+          until: Date.now() + 420,
+        };
+      }
+      setOpenSection(sectionLabel);
+      hoverOpenTimerRef.current = null;
+    }, 160);
+  };
+
+  const scheduleSectionClose = (sectionLabel) => {
+    const activeLock = hoverSwitchLockRef.current;
+    if (activeLock.section === sectionLabel && Date.now() < activeLock.until) {
+      return;
+    }
+    window.clearTimeout(hoverOpenTimerRef.current);
+    window.clearTimeout(hoverCloseTimerRef.current);
+    hoverOpenTimerRef.current = null;
+    hoverCloseTimerRef.current = window.setTimeout(() => {
+      setOpenSection((current) => (current === sectionLabel ? null : current));
+      hoverCloseTimerRef.current = null;
+    }, 140);
+  };
+
+  useEffect(() => {
+    if (!openSection) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event) => {
+      if (sidebarRef.current && !sidebarRef.current.contains(event.target)) {
+        clearHoverTimers();
+        hoverSwitchLockRef.current = { section: null, until: 0 };
+        setOpenSection(null);
+      }
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      const sectionLabel = openSection;
+      const trigger = triggerRefs.current.get(sectionLabel);
+      suppressFocusOpenRef.current = true;
+      try {
+        trigger?.focus({ preventScroll: true });
+      } finally {
+        suppressFocusOpenRef.current = false;
+      }
+      clearHoverTimers();
+      hoverSwitchLockRef.current = { section: null, until: 0 };
+      setOpenSection(null);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openSection]);
+
+  const handleSectionClick = (sectionLabel) => {
+    const pointerType = lastPointerTypeRef.current;
+    lastPointerTypeRef.current = null;
+    clearHoverTimers();
+    hoverSwitchLockRef.current = { section: null, until: 0 };
+    setOpenSection((current) => {
+      if (pointerType === "mouse") {
+        return sectionLabel;
+      }
+      return current === sectionLabel ? null : sectionLabel;
+    });
+  };
+
+  const handleNavigate = (pageKey) => {
+    clearHoverTimers();
+    hoverSwitchLockRef.current = { section: null, until: 0 };
+    setOpenSection(null);
+    onNavigate(pageKey);
+  };
+
   return (
-    <aside className={`sidebar${open ? " sidebar--open" : ""}`} aria-label="Primary navigation">
+    <aside
+      ref={sidebarRef}
+      className={`sidebar${open ? " sidebar--open" : ""}`}
+      aria-label="Primary navigation"
+      onPointerEnter={(event) => {
+        if (event.pointerType !== "touch") {
+          window.clearTimeout(hoverCloseTimerRef.current);
+          hoverCloseTimerRef.current = null;
+        }
+      }}
+      onPointerLeave={(event) => {
+        if (
+          event.pointerType !== "touch" &&
+          !event.currentTarget.querySelector(":focus-visible")
+        ) {
+          clearHoverTimers();
+          hoverCloseTimerRef.current = window.setTimeout(() => {
+            hoverSwitchLockRef.current = { section: null, until: 0 };
+            setOpenSection(null);
+            hoverCloseTimerRef.current = null;
+          }, 140);
+        }
+      }}
+    >
       <div className="sidebar-brand">
         <div className="sidebar-brand-inner">
           <BrandMark className="sidebar-brand-logo" />
@@ -126,31 +277,112 @@ export default function Sidebar({ pages, activePage, onNavigate, open = false })
         </div>
       </div>
       <nav aria-label="Main navigation" data-tour="sidebar-nav">
-        {sections.map((section) => (
-          <div key={section.label || "main"} className="sidebar-section">
-            {section.label ? (
-              <p className="sidebar-section-label" aria-hidden="true">{section.label}</p>
-            ) : null}
-            {section.pages.map((page) => (
+        {sections.map((section, index) => {
+          const sectionLabel = section.label || section.pages[0]?.label || "Navigation";
+          const sectionSlug =
+            sectionLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") ||
+            `section-${index}`;
+          const panelId = `sidebar-${sectionSlug}-pages`;
+          const isOpen = openSection === sectionLabel;
+          const isActive = section.pages.some((page) => page.key === activePage);
+
+          return (
+            <div
+              key={sectionLabel}
+              className={`sidebar-section${isOpen ? " is-open" : ""}${
+                isActive ? " is-active" : ""
+              }`}
+              onPointerEnter={(event) => {
+                if (event.pointerType !== "touch") {
+                  scheduleSectionOpen(sectionLabel);
+                }
+              }}
+              onPointerLeave={(event) => {
+                if (
+                  event.pointerType !== "touch" &&
+                  !event.currentTarget.querySelector(":focus-visible")
+                ) {
+                  scheduleSectionClose(sectionLabel);
+                }
+              }}
+              onFocus={() => {
+                if (!suppressFocusOpenRef.current && !lastPointerTypeRef.current) {
+                  clearHoverTimers();
+                  hoverSwitchLockRef.current = { section: null, until: 0 };
+                  setOpenSection(sectionLabel);
+                }
+              }}
+              onBlur={(event) => {
+                if (
+                  !event.currentTarget.contains(event.relatedTarget) &&
+                  !event.currentTarget.matches(":hover")
+                ) {
+                  clearHoverTimers();
+                  hoverSwitchLockRef.current = { section: null, until: 0 };
+                  setOpenSection((current) => (current === sectionLabel ? null : current));
+                }
+              }}
+            >
               <button
-                key={page.key}
+                ref={(element) => {
+                  if (element) {
+                    triggerRefs.current.set(sectionLabel, element);
+                  } else {
+                    triggerRefs.current.delete(sectionLabel);
+                  }
+                }}
                 type="button"
-                className={`nav-link ${activePage === page.key ? "active" : ""}`}
-                onClick={() => onNavigate(page.key)}
-                aria-current={activePage === page.key ? "page" : undefined}
+                className="sidebar-section-trigger"
+                aria-expanded={isOpen}
+                aria-controls={panelId}
+                aria-label={isActive ? `${sectionLabel}, current section` : sectionLabel}
+                onPointerDown={(event) => {
+                  lastPointerTypeRef.current = event.pointerType;
+                }}
+                onPointerCancel={() => {
+                  lastPointerTypeRef.current = null;
+                }}
+                onClick={() => handleSectionClick(sectionLabel)}
               >
-                <span className="nav-link-icon">
-                  {NAV_ICONS[page.key] || (
-                    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm0-2a6 6 0 100-12 6 6 0 000 12z" clipRule="evenodd" />
-                    </svg>
-                  )}
-                </span>
-                <span className="nav-link-label">{page.label}</span>
+                <span className="sidebar-section-title">{sectionLabel}</span>
               </button>
-            ))}
-          </div>
-        ))}
+
+              <div
+                id={panelId}
+                className="sidebar-flyout"
+                role="group"
+                aria-label={`${sectionLabel} pages`}
+                aria-hidden={!isOpen}
+                inert={!isOpen}
+              >
+                <div className="sidebar-flyout-links">
+                  {section.pages.map((page) => (
+                    <button
+                      key={page.key}
+                      type="button"
+                      className={`nav-link ${activePage === page.key ? "active" : ""}`}
+                      onClick={() => handleNavigate(page.key)}
+                      aria-current={activePage === page.key ? "page" : undefined}
+                    >
+                      <span className="nav-link-icon">
+                        {NAV_ICONS[page.key] || (
+                          <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                            <path
+                              fillRule="evenodd"
+                              d="M10 18a8 8 0 100-16 8 8 0 000 16zm0-2a6 6 0 100-12 6 6 0 000 12z"
+                              clipRule="evenodd"
+                            />
+                          </svg>
+                        )}
+                      </span>
+                      <span className="nav-link-label">{page.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          );
+        })}
       </nav>
       <div className="sidebar-footer">
         <span className="sidebar-footer-version">v1.0.0</span>

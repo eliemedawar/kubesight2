@@ -9,6 +9,7 @@ import "./styles/fonts.css";
 import "./index.css";
 import "./styles/ui-polish.css";
 import "./styles/premium.css";
+import "./styles/sidebar-flyout.css";
 import "./styles/signal/screens.css";
 import "./styles/signal/overview.css";
 import "./styles/signal/clusters.css";

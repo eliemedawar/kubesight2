@@ -126,7 +126,7 @@
 
 /* ── Buttons ──────────────────────────────────────────────── */
 
-button:not(.btn-ghost):not(.icon-button):not(.nav-link):not(.inventory-icon-btn):not(.inventory-app-card__title):not(.inventory-app-card__link) {
+button:not(.btn-ghost):not(.icon-button):not(.nav-link):not(.sidebar-section-trigger):not(.inventory-icon-btn):not(.inventory-app-card__title):not(.inventory-app-card__link) {
   min-height: var(--btn-height);
   padding: 0.4rem 0.875rem;
   font-size: var(--font-size-sm);

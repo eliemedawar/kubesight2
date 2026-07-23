@@ -1,0 +1,184 @@
+/*
+ * Compact control-plane navigation.
+ * Destinations expand inline below the hovered/focused section title, while
+ * touch devices use the same structure as a tap-to-expand accordion.
+ */
+
+.sidebar nav {
+  position: relative;
+}
+
+.sidebar-section {
+  position: relative;
+  gap: 0;
+}
+
+.sidebar-section + .sidebar-section {
+  margin-top: 0.3rem;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.sidebar-section-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid transparent;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--sidebar-nav-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.sidebar-section-trigger:hover,
+.sidebar-section.is-open .sidebar-section-trigger {
+  background: var(--sidebar-nav-hover-bg);
+  color: var(--sidebar-nav-hover-text);
+}
+
+.sidebar-section.is-active .sidebar-section-trigger {
+  border-left-color: var(--sidebar-nav-active-border);
+  background: var(--sidebar-nav-active-bg);
+  color: var(--sidebar-nav-active-text);
+}
+
+.sidebar-section-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.sidebar-section-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-flyout {
+  --sidebar-accordion-duration: 260ms;
+  --sidebar-accordion-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  display: grid;
+  position: static;
+  grid-template-rows: 0fr;
+  width: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0 0 0 0.7rem;
+  padding: 0 0 0 0.6rem;
+  overflow: hidden;
+  border: 0;
+  border-left: 1px solid var(--sidebar-border);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    grid-template-rows var(--sidebar-accordion-duration) var(--sidebar-accordion-ease),
+    margin var(--sidebar-accordion-duration) var(--sidebar-accordion-ease),
+    padding var(--sidebar-accordion-duration) var(--sidebar-accordion-ease),
+    opacity 180ms ease,
+    visibility 0s linear var(--sidebar-accordion-duration);
+}
+
+.sidebar-section.is-open .sidebar-flyout {
+  grid-template-rows: 1fr;
+  margin: 0.2rem 0 0.5rem 0.7rem;
+  padding: 0.2rem 0 0.2rem 0.6rem;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+
+.sidebar-flyout-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-flyout .nav-link {
+  min-height: 2.75rem;
+  padding: 0.6rem 0.7rem;
+  border-radius: var(--radius-md);
+}
+
+@media (max-width: 1023px) {
+  .sidebar {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .sidebar-section + .sidebar-section {
+    margin-top: 0.25rem;
+  }
+
+  .sidebar-flyout .nav-link {
+    min-height: 2.75rem;
+  }
+
+  .shell--sidebar-open .topbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 110;
+    width: min(18rem, 88vw);
+    height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    pointer-events: none;
+  }
+
+  .shell--sidebar-open .topbar-leading {
+    width: 0;
+    height: 0;
+  }
+
+  .shell--sidebar-open .topbar-selectors,
+  .shell--sidebar-open .topbar-actions {
+    display: none;
+  }
+
+  .shell--sidebar-open .icon-button.topbar-menu-button {
+    position: fixed;
+    top: var(--space-4);
+    left: calc(min(18rem, 88vw) - 3.25rem);
+    z-index: 111;
+    display: inline-grid;
+    background: var(--sidebar-bg);
+    border-color: var(--sidebar-border);
+    pointer-events: auto;
+  }
+
+  .shell--sidebar-open .sidebar-brand {
+    padding-right: 3rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-flyout,
+  .sidebar-section.is-open .sidebar-flyout {
+    transition-delay: 0s;
+  }
+}
