@@ -1124,10 +1124,11 @@ function BuildDetail({ buildId, canExecute, notify, onBack, onDeleted }) {
   // The step we're viewing: {id, nodeId, phase}.
   const [logStep, setLogStep] = useState(null);
   const timer = useRef(null);
-  // Follow mode: while the build runs, the log panel tracks whichever step is
-  // currently running (so progress is always visible without clicking).
-  // Clicking a non-running lane pins that step; closing the panel stops
-  // following; clicking the running lane resumes it.
+  // Follow mode: while the build runs, the log panel tracks the first running
+  // step until someone chooses a lane. A manual lane click always pins that
+  // exact step; this matters for parallel phases where several nodes are
+  // running and the generic live follower would otherwise jump back to the
+  // first node on the next detail poll.
   const follow = useRef(true);
   const prevViewedStatus = useRef(null);
   const logEl = useRef(null);
@@ -1182,9 +1183,9 @@ function BuildDetail({ buildId, canExecute, notify, onBack, onDeleted }) {
   }, [buildId, notify]);
 
   const openLogs = (step, { auto = false } = {}) => {
-    // A manual click on a finished step pins it; clicking the running step
-    // (or an automatic open) keeps live-follow on.
-    if (!auto) follow.current = step.status === "running";
+    // Manual selection always wins over the generic live follower. The pinned
+    // step still refreshes below while it is running.
+    if (!auto) follow.current = false;
     const meta = { id: step.id, nodeId: step.nodeId, phase: step.phase };
     prevViewedStatus.current = step.status;
     stickToBottom.current = true;  // a freshly opened step starts at the newest output

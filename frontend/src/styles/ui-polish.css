@@ -18,12 +18,18 @@
   --section-title-size: 1.0625rem;
   --btn-height: 2.125rem;
   --content-max: none;
+
+  /* Workspace gutters. The topbar bleeds edge-to-edge with negative margins
+     built from these vars, so never hardcode .workspace padding — override
+     the vars instead or the topbar gets clipped by .workspace overflow. */
+  --workspace-padding-y: 0;
+  --workspace-padding-x: var(--space-4);
 }
 
 /* ── Layout & density ─────────────────────────────────────── */
 
 .workspace {
-  padding: var(--space-3) var(--space-4);
+  padding: var(--workspace-padding-y) var(--workspace-padding-x) var(--space-3);
 }
 
 .page-content {
@@ -432,7 +438,9 @@ td:last-child button,
 .topbar {
   align-items: center;
   margin-bottom: 0;
-  padding: 0.625rem var(--space-5);
+  /* Horizontal padding matches the workspace gutter so the selectors line up
+     with the page title below. */
+  padding: 0.625rem var(--workspace-padding-x);
   border-radius: 0;
   border-top: none;
   border-left: none;
@@ -998,8 +1006,12 @@ kbd {
 /* ── Responsive refinements ───────────────────────────────── */
 
 @media (max-width: 1023px) {
+  :root {
+    --workspace-padding-x: var(--space-3);
+  }
+
   .workspace {
-    padding: var(--space-2) var(--space-3);
+    padding-bottom: var(--space-2);
   }
 
   .page-title h2 {
@@ -1020,8 +1032,8 @@ kbd {
 }
 
 @media (max-width: 768px) {
-  .workspace {
-    padding: var(--space-2);
+  :root {
+    --workspace-padding-x: var(--space-2);
   }
 
   .page-content {
@@ -1074,8 +1086,12 @@ kbd {
 }
 
 @media (min-width: 1920px) {
+  :root {
+    --workspace-padding-x: var(--space-5);
+  }
+
   .workspace {
-    padding: var(--space-4) var(--space-5);
+    padding-bottom: var(--space-4);
   }
 
   .page-content {
@@ -1364,9 +1380,8 @@ body.has-bundle-fab .page-content.ops-layout {
 }
 
 /* ── Workspace top padding (below topbar, no double padding) ─── */
-.workspace {
-  padding-top: 0;
-}
+/* Set via --workspace-padding-y: 0 above — a plain padding-top override here
+   would desync the topbar's negative top margin and clip the topbar. */
 
 .page-content {
   padding-top: var(--space-4);
