@@ -30,7 +30,7 @@ def test_cluster_root_includes_namespace_workload_health():
     assert by_id["node:worker-1"]["componentStatus"] == "healthy"
 
 
-def test_namespace_topology_is_connected_and_resolves_service_selectors():
+def test_namespace_topology_uses_only_real_traffic_edges_and_resolves_selectors():
     topology = build_namespace_topology(
         "payments",
         [
@@ -68,12 +68,12 @@ def test_namespace_topology_is_connected_and_resolves_service_selectors():
     by_id = {node["id"]: node for node in topology["nodes"]}
     edges = _edge_pairs(topology)
 
-    assert by_id["namespace:payments"]["componentStatus"] == "unhealthy"
+    assert "namespace:payments" not in by_id
     assert by_id["svc:api"]["componentStatus"] == "healthy"
-    assert ("namespace:payments", "ing:api-ingress") in edges
     assert ("ing:api-ingress", "svc:api") in edges
     assert ("svc:api", "pod:api-abc") in edges
-    assert ("namespace:payments", "pod:orphan") in edges
+    assert all("pod:orphan" not in pair for pair in edges)
+    assert by_id["pod:orphan"]["componentStatus"] == "unhealthy"
 
 
 def test_endpoint_ips_are_not_mistaken_for_pod_names():
@@ -84,8 +84,15 @@ def test_endpoint_ips_are_not_mistaken_for_pod_names():
         [],
     )
 
-    assert ("namespace:demo", "pod:api-123") in _edge_pairs(topology)
     assert ("svc:api", "pod:api-123") not in _edge_pairs(topology)
+    assert topology["edges"] == []
+
+
+def test_empty_namespace_returns_an_empty_graph():
+    assert build_namespace_topology("empty", [], [], []) == {
+        "nodes": [],
+        "edges": [],
+    }
 
 
 def test_cluster_topology_returns_partial_graph_when_nodes_fail(client, admin_token):
@@ -149,4 +156,4 @@ def test_namespace_topology_returns_available_resource_groups(client, admin_toke
     data = response.get_json()["data"]
     assert data["partial"] is True
     assert any(node["id"] == "pod:api-1" for node in data["topology"]["nodes"])
-    assert ("namespace:payments", "pod:api-1") in _edge_pairs(data["topology"])
+    assert data["topology"]["edges"] == []

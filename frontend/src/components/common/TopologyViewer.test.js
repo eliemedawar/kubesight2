@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeLayout, NODE_W } from "./TopologyViewer.jsx";
+import { computeLayout, MAX_ZOOM, NODE_H, NODE_W } from "./TopologyViewer.jsx";
 
 
 describe("computeLayout", () => {
@@ -22,5 +22,36 @@ describe("computeLayout", () => {
     expect(Math.max(...leafPositions.map((position) => position.y))).toBeGreaterThan(
       Math.min(...leafPositions.map((position) => position.y))
     );
+  });
+
+  it("packs many independent traffic paths into a widescreen overview", () => {
+    const nodes = [];
+    const edges = [];
+    for (let index = 0; index < 40; index += 1) {
+      nodes.push(
+        { id: `service-${index}`, name: `service-${index}`, kind: "service" },
+        { id: `pod-${index}`, name: `pod-${index}`, kind: "pod" }
+      );
+      edges.push({
+        sourceNodeId: `service-${index}`,
+        targetNodeId: `pod-${index}`,
+        kind: "routes",
+      });
+    }
+
+    const layout = computeLayout(nodes, edges, "packed");
+    const fitScale = Math.min(1920 / layout.svgW, 900 / layout.svgH);
+
+    expect(NODE_H * fitScale).toBeGreaterThanOrEqual(24);
+    edges.forEach((edge) => {
+      const source = layout.positions[edge.sourceNodeId];
+      const target = layout.positions[edge.targetNodeId];
+      expect(target.x - source.x).toBeGreaterThanOrEqual(NODE_W);
+      expect(Math.abs(target.y - source.y)).toBeLessThan(NODE_H);
+    });
+  });
+
+  it("allows zooming well beyond the old five-times cap", () => {
+    expect(MAX_ZOOM).toBeGreaterThanOrEqual(20);
   });
 });

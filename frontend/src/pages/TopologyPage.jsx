@@ -253,6 +253,7 @@ export default function TopologyPage({
           edges={activeTopo.edges}
           fillWidth
           zoomable
+          layoutDirection={view.level === "namespace" ? "packed" : "horizontal"}
           onNodeClick={handleNodeClick}
           nodeClickable={(node) => node.kind === "namespace"}
         />

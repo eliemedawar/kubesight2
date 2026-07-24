@@ -141,7 +141,14 @@ def build_cluster_topology(
                     "description": _description(name, sub, health.title()),
                 }
             )
-            graph_edges.append({"id": f"e:{ns_hub}->{nid}", "sourceNodeId": ns_hub, "targetNodeId": nid})
+            graph_edges.append(
+                {
+                    "id": f"e:{ns_hub}->{nid}",
+                    "sourceNodeId": ns_hub,
+                    "targetNodeId": nid,
+                    "kind": "contains",
+                }
+            )
         graph_nodes.append(
             {
                 "id": ns_hub,
@@ -151,7 +158,14 @@ def build_cluster_topology(
                 "componentStatus": _worst(ns_statuses),
             }
         )
-        graph_edges.append({"id": f"e:cluster->{ns_hub}", "sourceNodeId": root_id, "targetNodeId": ns_hub})
+        graph_edges.append(
+            {
+                "id": f"e:cluster->{ns_hub}",
+                "sourceNodeId": root_id,
+                "targetNodeId": ns_hub,
+                "kind": "contains",
+            }
+        )
         graph_nodes.extend(ns_entries)
 
     valid_nodes = [n for n in nodes if n.get("name")]
@@ -174,7 +188,14 @@ def build_cluster_topology(
                     "description": _description(name, _node_role(n), status.title()),
                 }
             )
-            graph_edges.append({"id": f"e:{node_hub}->{nid}", "sourceNodeId": node_hub, "targetNodeId": nid})
+            graph_edges.append(
+                {
+                    "id": f"e:{node_hub}->{nid}",
+                    "sourceNodeId": node_hub,
+                    "targetNodeId": nid,
+                    "kind": "contains",
+                }
+            )
         graph_nodes.append(
             {
                 "id": node_hub,
@@ -184,7 +205,14 @@ def build_cluster_topology(
                 "componentStatus": _worst(hub_statuses),
             }
         )
-        graph_edges.append({"id": f"e:cluster->{node_hub}", "sourceNodeId": root_id, "targetNodeId": node_hub})
+        graph_edges.append(
+            {
+                "id": f"e:cluster->{node_hub}",
+                "sourceNodeId": root_id,
+                "targetNodeId": node_hub,
+                "kind": "contains",
+            }
+        )
         graph_nodes.extend(node_entries)
 
     # A cluster's summary must include workload health as well as physical node
@@ -262,6 +290,7 @@ def _edge(
     *,
     protocol: Optional[str] = None,
     scope: Optional[str] = None,
+    kind: Optional[str] = None,
 ) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "id": f"e:{source}->{target}",
@@ -272,6 +301,8 @@ def _edge(
         result["protocol"] = protocol
     if scope:
         result["scope"] = scope
+    if kind:
+        result["kind"] = kind
     return result
 
 
@@ -281,26 +312,15 @@ def build_namespace_topology(
     services: List[Dict[str, Any]],
     ingresses: List[Dict[str, Any]],
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Level 2: a connected ``Namespace → Ingress → Service → Pod`` map.
+    """Level 2: real ``Ingress → Service → Pod`` traffic relationships.
 
-    Resources without a normal parent are attached to the namespace root. This
-    keeps orphaned pods and internal-only services visible without leaving them
-    floating in an unrelated first row.
+    The namespace is context, not a traffic source, so it is intentionally not
+    synthesized as a graph node. Internal services become component roots and
+    unattached pods remain visible as isolated resources without a misleading
+    namespace-to-resource fan-out.
     """
     graph_nodes: List[Dict[str, Any]] = []
     graph_edges: List[Dict[str, Any]] = []
-
-    root_id = f"namespace:{namespace}"
-    graph_nodes.append(
-        {
-            "id": root_id,
-            "name": namespace,
-            "type": "Namespace",
-            "kind": "namespace-root",
-            "namespace": namespace,
-            "componentStatus": UNKNOWN,
-        }
-    )
 
     pod_ids: Dict[str, str] = {}
     pod_statuses: Dict[str, str] = {}
@@ -329,7 +349,6 @@ def build_namespace_topology(
         )
 
     svc_ids: Dict[str, str] = {}
-    svc_targets: Dict[str, List[str]] = {}
     svc_statuses: Dict[str, str] = {}
     for svc in services:
         name = svc.get("name")
@@ -338,7 +357,6 @@ def build_namespace_topology(
         sid = f"svc:{name}"
         svc_ids[name] = sid
         targets = _service_target_pod_names(svc, pods)
-        svc_targets[name] = targets
         target_statuses = [pod_statuses[target] for target in targets if target in pod_statuses]
         svc_status = _worst(target_statuses) if target_statuses else UNKNOWN
         svc_statuses[name] = svc_status
@@ -363,10 +381,8 @@ def build_namespace_topology(
             tid = pod_ids.get(target)
             if not tid:
                 continue
-            graph_edges.append(_edge(sid, tid, protocol=port_label))
+            graph_edges.append(_edge(sid, tid, protocol=port_label, kind="routes"))
 
-    ingress_targets = set()
-    ingress_statuses: List[str] = []
     for ing in ingresses:
         name = ing.get("name")
         if not name:
@@ -374,7 +390,6 @@ def build_namespace_topology(
         iid = f"ing:{name}"
         backend = ing.get("backendService")
         ingress_status = svc_statuses.get(backend, UNKNOWN)
-        ingress_statuses.append(ingress_status)
         graph_nodes.append(
             {
                 "id": iid,
@@ -392,33 +407,8 @@ def build_namespace_topology(
             }
         )
         if backend and backend in svc_ids:
-            ingress_targets.add(backend)
-            graph_edges.append(_edge(iid, svc_ids[backend], scope="external"))
-        graph_edges.append(_edge(root_id, iid))
-
-    # Internal-only services and unselected pods remain part of one coherent
-    # hierarchy instead of floating beside ingress entrypoints.
-    for service_name, sid in svc_ids.items():
-        if service_name not in ingress_targets:
-            graph_edges.append(_edge(root_id, sid))
-
-    targeted_pods = {
-        target
-        for targets in svc_targets.values()
-        for target in targets
-        if target in pod_ids
-    }
-    for pod_name, pid in pod_ids.items():
-        if pod_name not in targeted_pods:
-            graph_edges.append(_edge(root_id, pid))
-
-    all_statuses = list(pod_statuses.values()) + list(svc_statuses.values()) + ingress_statuses
-    graph_nodes[0]["componentStatus"] = _worst(all_statuses) if all_statuses else UNKNOWN
-    graph_nodes[0]["description"] = _description(
-        namespace,
-        f"{len(pod_ids)} pods",
-        f"{len(svc_ids)} services",
-        f"{len(ingresses)} ingresses",
-    )
+            graph_edges.append(
+                _edge(iid, svc_ids[backend], scope="external", kind="routes")
+            )
 
     return {"nodes": graph_nodes, "edges": graph_edges}

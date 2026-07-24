@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 // Shared, read-only topology renderer used by the Application Services detail
 // view and the Client Service Access Topology overlay. The layout helpers are
@@ -41,6 +42,8 @@ const CHIP_COLORS = {
 export const NODE_W = 160;
 export const NODE_H = 48;
 export const PAD = 40;
+export const MIN_ZOOM = 0.2;
+export const MAX_ZOOM = 40;
 
 // Point where the ray from (cx,cy) toward (nx,ny) exits a rectangle of (w,h)
 export function rectExitPoint(cx, cy, nx, ny, w = NODE_W, h = NODE_H) {
@@ -61,7 +64,115 @@ function savedNodePos(n) {
   return typeof x === "number" && typeof y === "number" ? { x, y } : null;
 }
 
-export function computeLayout(nodes, edges) {
+function computePackedLayout(nodes, edges) {
+  const nodeById = new Map(nodes.map((node) => [String(node.id), node]));
+  const adjacency = new Map(nodes.map((node) => [String(node.id), new Set()]));
+  const layoutEdges = edges.filter((edge) => edge.kind !== "contains");
+
+  layoutEdges.forEach((edge) => {
+    const source = String(edge.sourceNodeId);
+    const target = String(edge.targetNodeId);
+    if (!adjacency.has(source) || !adjacency.has(target) || source === target) return;
+    adjacency.get(source).add(target);
+    adjacency.get(target).add(source);
+  });
+
+  const seen = new Set();
+  const components = [];
+  [...nodeById.keys()]
+    .sort((a, b) => {
+      const an = nodeById.get(a)?.name || a;
+      const bn = nodeById.get(b)?.name || b;
+      return an.localeCompare(bn);
+    })
+    .forEach((start) => {
+      if (seen.has(start)) return;
+      const ids = [];
+      const queue = [start];
+      seen.add(start);
+      while (queue.length) {
+        const id = queue.shift();
+        ids.push(id);
+        [...(adjacency.get(id) || [])].sort().forEach((next) => {
+          if (seen.has(next)) return;
+          seen.add(next);
+          queue.push(next);
+        });
+      }
+      components.push(ids);
+    });
+
+  const kindOrder = { ingress: 0, service: 1, pod: 2 };
+  const tiles = components.map((ids) => {
+    const idSet = new Set(ids);
+    const componentNodes = ids
+      .map((id) => nodeById.get(id))
+      .sort((a, b) => {
+        const ak = kindOrder[a.kind] ?? 3;
+        const bk = kindOrder[b.kind] ?? 3;
+        return ak - bk || String(a.name || a.id).localeCompare(String(b.name || b.id));
+      });
+    const componentEdges = layoutEdges.filter(
+      (edge) =>
+        idSet.has(String(edge.sourceNodeId)) &&
+        idSet.has(String(edge.targetNodeId))
+    );
+    const local = computeLayout(componentNodes, componentEdges, "horizontal");
+    const points = componentNodes.map((node) => local.positions[String(node.id)]);
+    const minX = Math.min(...points.map((point) => point.x));
+    const minY = Math.min(...points.map((point) => point.y));
+    const maxX = Math.max(...points.map((point) => point.x));
+    const maxY = Math.max(...points.map((point) => point.y));
+    const normalized = {};
+    componentNodes.forEach((node) => {
+      const point = local.positions[String(node.id)];
+      normalized[String(node.id)] = { x: point.x - minX, y: point.y - minY };
+    });
+    return {
+      key: componentNodes.map((node) => String(node.name || node.id)).sort().join("|"),
+      positions: normalized,
+      width: maxX - minX + NODE_W,
+      height: maxY - minY + NODE_H,
+    };
+  }).sort((a, b) => a.key.localeCompare(b.key));
+
+  const TILE_GAP_X = 84;
+  const TILE_GAP_Y = 68;
+  const totalArea = tiles.reduce(
+    (sum, tile) => sum + (tile.width + TILE_GAP_X) * (tile.height + TILE_GAP_Y),
+    0
+  );
+  const widestTile = Math.max(NODE_W, ...tiles.map((tile) => tile.width));
+  const targetWidth = Math.max(widestTile, Math.sqrt(totalArea * (16 / 9)));
+
+  const positions = {};
+  let cursorX = 0;
+  let cursorY = 0;
+  let rowHeight = 0;
+  let usedWidth = 0;
+
+  tiles.forEach((tile) => {
+    if (cursorX > 0 && cursorX + tile.width > targetWidth) {
+      cursorX = 0;
+      cursorY += rowHeight + TILE_GAP_Y;
+      rowHeight = 0;
+    }
+    Object.entries(tile.positions).forEach(([id, point]) => {
+      positions[id] = { x: cursorX + point.x, y: cursorY + point.y };
+    });
+    usedWidth = Math.max(usedWidth, cursorX + tile.width);
+    rowHeight = Math.max(rowHeight, tile.height);
+    cursorX += tile.width + TILE_GAP_X;
+  });
+
+  return {
+    positions,
+    svgW: usedWidth + PAD * 2,
+    svgH: cursorY + rowHeight + PAD * 2,
+  };
+}
+
+export function computeLayout(nodes, edges, layoutDirection = "vertical") {
   const n = nodes.length;
   if (!n) return { positions: {}, svgW: NODE_W + PAD * 2, svgH: NODE_H + PAD * 2 };
 
@@ -89,6 +200,9 @@ export function computeLayout(nodes, edges) {
       svgW: NODE_W + PAD * 2,
       svgH: NODE_H + PAD * 2,
     };
+  }
+  if (layoutDirection === "packed") {
+    return computePackedLayout(nodes, edges);
   }
 
   // Layered (Sugiyama-style) top-to-bottom layout. Topologies are directed
@@ -178,6 +292,36 @@ export function computeLayout(nodes, edges) {
         .sort((a, b) => a.bc - b.bc)
         .map((o) => o.id);
     }
+  }
+
+  if (layoutDirection === "horizontal") {
+    // Wide live-cluster graphs often have dozens of services or pods at the
+    // same rank. Put each rank in its own vertical column so edges travel
+    // through the clear gutter between columns instead of cutting through
+    // wrapped rows of cards.
+    const X_GAP = NODE_W + 150;
+    const Y_GAP = NODE_H + 34;
+    const maxCount = Math.max(1, ...layers.map((layer) => layer?.length || 0));
+    const columnHeight = (maxCount - 1) * Y_GAP;
+    const positions = {};
+
+    layers.forEach((layer, rankNumber) => {
+      if (!layer) return;
+      const layerHeight = (layer.length - 1) * Y_GAP;
+      const offsetY = (columnHeight - layerHeight) / 2;
+      layer.forEach((id, index) => {
+        positions[id] = {
+          x: rankNumber * X_GAP,
+          y: offsetY + index * Y_GAP,
+        };
+      });
+    });
+
+    return {
+      positions,
+      svgW: (layers.length - 1) * X_GAP + NODE_W + PAD * 2,
+      svgH: columnHeight + NODE_H + PAD * 2,
+    };
   }
 
   const H_GAP = NODE_W + 70;   // horizontal spacing within a layer
@@ -312,13 +456,29 @@ export default function TopologyViewer({
   fillWidth = false,
   allowFullscreen = true,
   zoomable = false,
+  layoutDirection = "vertical",
   onNodeClick,
   nodeClickable,
 }) {
   const { positions, svgW, svgH } = useMemo(
-    () => computeLayout(nodes || [], edges || []),
-    [nodes, edges]
+    () => computeLayout(nodes || [], edges || [], layoutDirection),
+    [nodes, edges, layoutDirection]
   );
+  const zoomFocus = useMemo(() => {
+    const center = { x: svgW / 2, y: svgH / 2 };
+    return (nodes || []).reduce((closest, node) => {
+      const position = positions[String(node.id)];
+      if (!position) return closest;
+      const point = {
+        x: position.x + PAD + NODE_W / 2,
+        y: position.y + PAD + NODE_H / 2,
+      };
+      const distance = (point.x - center.x) ** 2 + (point.y - center.y) ** 2;
+      return !closest || distance < closest.distance
+        ? { ...point, distance }
+        : closest;
+    }, null) || center;
+  }, [nodes, positions, svgW, svgH]);
 
   const nodeById = useMemo(() => {
     const map = {};
@@ -347,14 +507,20 @@ export default function TopologyViewer({
   // fire — one Escape closes only the fullscreen layer.
   useEffect(() => {
     if (!fullscreen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();
+        setView({ k: 1, x: 0, y: 0 });
         setFullscreen(false);
       }
     };
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      document.body.style.overflow = previousOverflow;
+    };
   }, [fullscreen]);
 
   // ── Pan & zoom (opt-in via `zoomable`) ─────────────────────────────────
@@ -381,7 +547,11 @@ export default function TopologyViewer({
       if (!ctm) return;
       const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(ctm.inverse());
       setView((v) => {
-        const k = Math.min(5, Math.max(0.3, v.k * Math.exp(-event.deltaY * 0.0015)));
+        const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 120 : 1);
+        const k = Math.min(
+          MAX_ZOOM,
+          Math.max(MIN_ZOOM, v.k * Math.exp(-delta * 0.0015))
+        );
         const ratio = k / v.k;
         return { k, x: point.x - ratio * (point.x - v.x), y: point.y - ratio * (point.y - v.y) };
       });
@@ -399,11 +569,25 @@ export default function TopologyViewer({
   // warn dashed, as before), nominal green only when both endpoints report
   // healthy, muted otherwise (no health data).
   const edgeToneFor = (edge) => {
-    const s = nodeById[String(edge.sourceNodeId)]?.componentStatus;
-    const t = nodeById[String(edge.targetNodeId)]?.componentStatus;
+    const source = nodeById[String(edge.sourceNodeId)];
+    const target = nodeById[String(edge.targetNodeId)];
+    if (edge.kind === "routes") {
+      if (target?.componentStatus === "unhealthy") return "danger";
+      if (target?.componentStatus === "degraded") return "warn";
+      if (edge.scope === "external") return "warn";
+      if (target?.componentStatus === "healthy") return "ok";
+      return "muted";
+    }
+    const sourceIsAggregate = ["cluster", "group", "namespace-root"].includes(source?.kind);
+    // Aggregate roots summarize the worst descendant. Their status must not
+    // paint every outgoing branch red when only one workload is unhealthy;
+    // containment branches take the health of the child they lead to.
+    const s = sourceIsAggregate ? undefined : source?.componentStatus;
+    const t = target?.componentStatus;
     if (s === "unhealthy" || t === "unhealthy") return "danger";
     if (s === "degraded" || t === "degraded") return "warn";
     if (edge.scope === "external") return "warn";
+    if (sourceIsAggregate && t === "healthy") return "ok";
     if (s === "healthy" && t === "healthy") return "ok";
     return "muted";
   };
@@ -479,13 +663,49 @@ export default function TopologyViewer({
   };
   const zoomBy = (factor) =>
     setView((v) => {
-      const k = Math.min(5, Math.max(0.3, v.k * factor));
-      const ratio = k / v.k;
+      const k = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.k * factor));
       const cx = svgW / 2;
       const cy = svgH / 2;
+      if (v.k === 1 && v.x === 0 && v.y === 0 && k > 1) {
+        return {
+          k,
+          x: cx - k * zoomFocus.x,
+          y: cy - k * zoomFocus.y,
+        };
+      }
+      const ratio = k / v.k;
       return { k, x: cx - ratio * (cx - v.x), y: cy - ratio * (cy - v.y) };
     });
   const resetView = () => setView({ k: 1, x: 0, y: 0 });
+  const zoomToActualSize = () => {
+    const ctm = svgRef.current?.getScreenCTM();
+    const baseScale = ctm ? Math.hypot(ctm.a, ctm.b) : 1;
+    const k = Math.min(
+      MAX_ZOOM,
+      Math.max(MIN_ZOOM, baseScale > 0 ? 1 / baseScale : 1)
+    );
+    const cx = svgW / 2;
+    const cy = svgH / 2;
+    setView({
+      k,
+      x: cx - k * zoomFocus.x,
+      y: cy - k * zoomFocus.y,
+    });
+  };
+  const toggleFullscreen = () => {
+    if (fullscreen) {
+      setFullscreen(false);
+      resetView();
+      return;
+    }
+    setFullscreen(true);
+    resetView();
+    // Wait for the viewer to move into its viewport-sized portal, then start
+    // at actual card size. "Fit" remains available for a whole-graph overview.
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(zoomToActualSize);
+    });
+  };
 
   const isClickable = (node) =>
     onNodeClick ? (nodeClickable ? nodeClickable(node) : true) : false;
@@ -494,7 +714,7 @@ export default function TopologyViewer({
     if (isClickable(node)) onNodeClick(node);
   };
 
-  return (
+  const viewer = (
     <div
       className={`topo-viewer${compact ? " topo-viewer--compact" : ""}${fullscreen ? " topo-viewer--fs" : ""}`}
       role={fullscreen ? "dialog" : undefined}
@@ -505,7 +725,7 @@ export default function TopologyViewer({
         <button
           type="button"
           className="topo-fs-btn"
-          onClick={() => setFullscreen((v) => !v)}
+          onClick={toggleFullscreen}
           aria-label={fullscreen ? "Exit fullscreen" : "View topology fullscreen"}
           title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
         >
@@ -522,13 +742,22 @@ export default function TopologyViewer({
       ) : null}
       {zoomable ? (
         <div className="topo-zoom" role="group" aria-label="Zoom controls">
-          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(1.25)} aria-label="Zoom in" title="Zoom in">
+          <output className="topo-zoom-level" aria-live="polite">
+            ×{view.k < 10 ? view.k.toFixed(1) : Math.round(view.k)}
+          </output>
+          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(1.4)}
+            disabled={view.k >= MAX_ZOOM - 0.001} aria-label="Zoom in" title="Zoom in">
             <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M10 5v10M5 10h10" /></svg>
           </button>
-          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(0.8)} aria-label="Zoom out" title="Zoom out">
+          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(1 / 1.4)}
+            disabled={view.k <= MIN_ZOOM + 0.001} aria-label="Zoom out" title="Zoom out">
             <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M5 10h10" /></svg>
           </button>
-          <button type="button" className="topo-fs-btn" onClick={resetView} aria-label="Reset view" title="Reset view">
+          <button type="button" className="topo-fs-btn topo-actual-btn" onClick={zoomToActualSize}
+            aria-label="Show at actual size" title="Actual size">
+            1:1
+          </button>
+          <button type="button" className="topo-fs-btn" onClick={resetView} aria-label="Fit graph" title="Fit graph">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4" /></svg>
           </button>
         </div>
@@ -539,6 +768,7 @@ export default function TopologyViewer({
         onPointerDown={startPan}
         onPointerMove={movePan}
         onPointerUp={endPan}
+        onPointerCancel={endPan}
         onPointerLeave={endPan}
         style={zoomable ? { ...svgStyle, cursor: panning ? "grabbing" : "grab", touchAction: "none" } : svgStyle}>
         <defs>
@@ -729,6 +959,7 @@ export default function TopologyViewer({
             }
 
             const tone = edgeToneFor(edge);
+            const isContainment = edge.kind === "contains";
             const protocol = edge.protocol || "";
             const description = edge.description || "";
             // Descriptions may be multi-line (e.g. "Source 1.2.3.4\nNAT
@@ -747,8 +978,12 @@ export default function TopologyViewer({
               <g key={edge.id ?? `e${idx}`}>
                 {edgeTip ? <title>{edgeTip}</title> : null}
                 <path d={d}
-                  className={`sg-edge${tone === "ok" ? "" : ` sg-edge--${tone}`}`}
-                  markerEnd={`url(#topo-arrow-${tone})`} />
+                  className={
+                    isContainment
+                      ? "sg-edge sg-edge--contains"
+                      : `sg-edge${tone === "ok" ? "" : ` sg-edge--${tone}`}`
+                  }
+                  markerEnd={isContainment ? undefined : `url(#topo-arrow-${tone})`} />
                 {protocol ? (
                   <text x={labelX} y={labelY - 5} textAnchor={labelAnchor}
                     fill={labelFill} fontSize={10} fontWeight={600}
@@ -842,4 +1077,5 @@ export default function TopologyViewer({
       </svg>
     </div>
   );
+  return fullscreen ? createPortal(viewer, document.body) : viewer;
 }

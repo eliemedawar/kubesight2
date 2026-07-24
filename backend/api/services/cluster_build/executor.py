@@ -493,6 +493,18 @@ def _phase_loadbalancer(build: ClusterBuild, resolved) -> None:
 
 def _phase_pull_images(build: ClusterBuild, resolved) -> None:
     cps, workers, _ = _nodes_by_role(build)
+    nodes = cps + workers
+
+    # A retry resumes after the last failed phase.  Do not resolve CNI/add-on
+    # manifests again when every node already completed image pre-pulling:
+    # remote manifests may be unavailable after a backend restart even though
+    # the cluster and its required images are already healthy.
+    if nodes and all(
+        _get_step(build, "pull_images", node).status == "completed"
+        for node in nodes
+    ):
+        return
+
     repo_flag = ""
     from .profiles import DEFAULT_K8S_IMAGE_REGISTRY
 
@@ -521,7 +533,7 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
                 images.extend(extract_images(approver_manifest))
         images = list(dict.fromkeys(images))
     except (cni_registry.CniRenderError, addon_registry.AddonRenderError) as exc:
-        for node in cps + workers:
+        for node in nodes:
             failed_step = _get_step(build, "pull_images", node)
             if failed_step.status == "completed":
                 continue
@@ -530,7 +542,7 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
             break
         raise _PhaseFailed(f"Required image resolution failed: {exc}") from exc
     cp_ids = {node.id for node in cps}
-    for node in cps + workers:
+    for node in nodes:
         step = _get_step(build, "pull_images", node)
         if step.status == "completed":
             continue

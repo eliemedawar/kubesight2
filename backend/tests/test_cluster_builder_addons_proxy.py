@@ -833,7 +833,7 @@ class TestAddonExecution:
         assert "proxy-secret" not in logs
 
     def test_addon_failure_retries_without_rebuilding_cluster(
-        self, client, admin_token, ssh_profile, app
+        self, client, admin_token, ssh_profile, app, monkeypatch
     ):
         hosts = {
             "10.0.0.11": ("cp-1", "control_plane"),
@@ -865,6 +865,17 @@ class TestAddonExecution:
         assert data["status"] == "failed"
         assert data["resultClusterId"]
         assert "add-ons" in (data["error"] or "")
+
+        def _manifest_now_unreachable(self, version, profile):
+            raise CniRenderError("Calico manifest endpoint is unreachable")
+
+        # A backend restart clears its in-memory manifest cache.  The retry
+        # must not re-fetch Calico after every node completed image pulling.
+        monkeypatch.setattr(
+            type(CALICO),
+            "required_images",
+            _manifest_now_unreachable,
+        )
 
         response = client.post(
             f"/api/cluster-builds/{data['id']}/retry",
