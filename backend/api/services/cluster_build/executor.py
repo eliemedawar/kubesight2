@@ -18,7 +18,10 @@ All persisted log text passes through ``scrub`` first, no exceptions.
 from __future__ import annotations
 
 import base64
+import ipaddress
+import json
 import logging
+import re
 import shlex
 import threading
 import time
@@ -33,8 +36,10 @@ from ...models import BuildProfile, ClusterBuild, ClusterBuildNode, ClusterBuild
 from ...secret_encryption import decrypt_secret, encrypt_secret
 from ..ssh import SshCommandError, SshConnectionError, SshTarget, get_transport
 from .. import ssh_profile_service
+from . import addons as addon_registry
 from . import cni as cni_registry
 from . import kubeadm, lb, onboard, os_adapters
+from .cni.base import extract_images, rewrite_manifest_images
 from .profiles import resolve as resolve_profile
 from .scrub import scrub
 
@@ -48,6 +53,10 @@ _CNI_ROLLOUT_TIMEOUT_S = 1200
 _NODE_READY_TIMEOUT_S = 1200
 _COREDNS_ROLLOUT_TIMEOUT_S = 600
 _SMOKE_POD_TIMEOUT_S = 600
+_KUBELET_CSR_APPROVER_IMAGE = (
+    "docker.io/postfinance/kubelet-csr-approver:v1.2.14@"
+    "sha256:c0f6aa1abdc225a32f9a29992fd97f711e78e2df21434f9ce7bc60981f96a5f8"
+)
 
 _active_lock = threading.Lock()
 _active_builds: set = set()
@@ -278,6 +287,8 @@ def _wait_until(fn, *, timeout_s: int, interval_s: int = 5, describe: str = "") 
         try:
             if fn():
                 return
+        except _Cancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 — retried until deadline
             last_error = str(exc)
         time.sleep(interval_s)
@@ -345,7 +356,12 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
                     for label, script in scripts:
                         stream.header(label)
                         _run_traced(
-                            target, script, timeout_s=900, stream=stream
+                            target,
+                            script,
+                            timeout_s=900,
+                            stream=stream,
+                            display_command=f"{label} (generated script hidden)",
+                            input_summary="configuration content hidden",
                         )
                     results[node_id] = (True, stream.text())
                 except SshCommandError as exc:
@@ -483,12 +499,36 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
     if resolved.k8s_image_registry and resolved.k8s_image_registry != DEFAULT_K8S_IMAGE_REGISTRY:
         repo_flag = f" --image-repository {resolved.k8s_image_registry}"
     descriptor = cni_registry.get(build.cni_plugin)
-    cni_images = (
-        descriptor.required_images(
-            build.cni_version or descriptor.versions[0], resolved
+    try:
+        images = (
+            descriptor.required_images(
+                build.cni_version or descriptor.versions[0], resolved
+            )
+            if descriptor is not None else []
         )
-        if descriptor is not None else []
-    )
+        for selection in build.addons_json or []:
+            addon = addon_registry.get(str(selection.get("id") or ""))
+            if addon is None:
+                raise addon_registry.AddonRenderError(
+                    f"Add-on '{selection.get('id')}' is not available."
+                )
+            version = str(selection.get("version") or addon.versions[0])
+            images.extend(addon.required_images(version, resolved))
+            if addon.id == "metrics-server":
+                approver_manifest = _metrics_csr_approver_manifest(
+                    build, resolved
+                )
+                images.extend(extract_images(approver_manifest))
+        images = list(dict.fromkeys(images))
+    except (cni_registry.CniRenderError, addon_registry.AddonRenderError) as exc:
+        for node in cps + workers:
+            failed_step = _get_step(build, "pull_images", node)
+            if failed_step.status == "completed":
+                continue
+            _step_start(failed_step)
+            _step_fail(failed_step, f"Required image resolution failed: {exc}")
+            break
+        raise _PhaseFailed(f"Required image resolution failed: {exc}") from exc
     cp_ids = {node.id for node in cps}
     for node in cps + workers:
         step = _get_step(build, "pull_images", node)
@@ -498,15 +538,31 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
         try:
             stream = _StreamTail(step.id)
             target = _target_for(build, node)
-            commands = ["set -e"]
+            pull_commands = []
+            if resolved.proxy_env():
+                proxy_env = resolved.proxy_env()
+            else:
+                proxy_env = ""
             if node.id in cp_ids:
-                commands.append(
+                pull_commands.append(
                     "kubeadm config images pull "
                     f"--kubernetes-version v{build.k8s_version.lstrip('v')}{repo_flag}"
                 )
-            commands.extend(f"crictl pull {shlex.quote(image)}" for image in cni_images)
+            pull_commands.extend(
+                f"crictl pull {shlex.quote(image)}" for image in images
+            )
+            commands = ["set -e"]
+            if proxy_env:
+                commands.append(proxy_env)
+            commands.extend(pull_commands)
             _run_traced(
-                target, "\n".join(commands), timeout_s=1800, stream=stream
+                target,
+                "\n".join(commands),
+                timeout_s=1800,
+                stream=stream,
+                display_command="\n".join(
+                    ["set -e", *pull_commands, "# proxy environment hidden"]
+                ),
             )
             _step_done(step, stream.text())
         except (SshCommandError, SshConnectionError) as exc:
@@ -535,6 +591,10 @@ def _phase_init(build: ClusterBuild, resolved) -> ClusterBuildNode:
         service_cidr=build.service_cidr,
         profile=resolved,
         node_name=primary.hostname or primary.address,
+        server_tls_bootstrap=any(
+            item.get("id") == "metrics-server"
+            for item in (build.addons_json or [])
+        ),
     )
     upload_flag = " --upload-certs" if is_ha else ""
     try:
@@ -699,7 +759,11 @@ def _phase_join_cp(build: ClusterBuild, primary: ClusterBuildNode) -> None:
     for node, step in pending:
         _check_cancelled(build)
         _step_start(step)
-        join_command = f"{join_base} --control-plane --certificate-key {cert_key}"
+        node_name = shlex.quote(node.hostname or node.address)
+        join_command = (
+            f"{join_base} --control-plane --certificate-key {cert_key} "
+            f"--node-name {node_name}"
+        )
         try:
             stream = _StreamTail(step.id)
             result = _run_traced(
@@ -748,19 +812,31 @@ def _phase_join_workers(build: ClusterBuild) -> None:
     jobs = []
     for node, step in pending:
         _step_start(step)
-        jobs.append((node, step, _target_for(build, node)))
+        jobs.append(
+            (
+                node,
+                step,
+                _target_for(build, node),
+                shlex.quote(node.hostname or node.address),
+            )
+        )
 
     results: Dict[int, Tuple[bool, str]] = {}
     app = current_app._get_current_object()
 
-    def _join(node_id: int, step_id: int, target: SshTarget) -> None:
+    def _join(
+        node_id: int,
+        step_id: int,
+        target: SshTarget,
+        node_name: str,
+    ) -> None:
         try:
             with app.app_context():
                 stream = _StreamTail(step_id)
                 try:
                     _run_traced(
                         target,
-                        f"set -e\n{join_command}",
+                        f"set -e\n{join_command} --node-name {node_name}",
                         timeout_s=900,
                         stream=stream,
                     )
@@ -776,11 +852,11 @@ def _phase_join_workers(build: ClusterBuild) -> None:
             results[node_id] = (False, str(exc))
 
     with ThreadPoolExecutor(max_workers=5) as pool:
-        for node, step, target in jobs:
-            pool.submit(_join, node.id, step.id, target)
+        for node, step, target, node_name in jobs:
+            pool.submit(_join, node.id, step.id, target, node_name)
 
     failures = []
-    for node, step, _ in jobs:
+    for node, step, _, _ in jobs:
         ok, log = results.get(node.id, (False, "no result"))
         if ok:
             node.status = "joined"
@@ -964,6 +1040,280 @@ done
         raise _PhaseFailed(f"onboard failed: {exc}") from exc
 
 
+def _metrics_csr_approver_manifest(build: ClusterBuild, resolved) -> str:
+    """Render the persistent, inventory-scoped kubelet serving CSR approver.
+
+    Kubernetes deliberately does not auto-approve kubelet serving CSRs.
+    Metrics Server needs CA-signed kubelet certificates, including after
+    rotation, so a maintained approver controller is installed with a policy
+    restricted to the exact node names and IPs in this build.
+    """
+    cps, workers, _ = _nodes_by_role(build)
+    nodes = cps + workers
+    names = [str(node.hostname or "").strip() for node in nodes]
+    if not names or any(not name for name in names):
+        raise addon_registry.AddonRenderError(
+            "Metrics Server requires explicit hostnames for all nodes."
+        )
+    prefixes = []
+    addresses = []
+    try:
+        for node in nodes:
+            address = ipaddress.ip_address(node.address)
+            addresses.append(str(address))
+            prefixes.append(f"{address}/{address.max_prefixlen}")
+    except ValueError as exc:
+        raise addon_registry.AddonRenderError(
+            "Metrics Server requires IP-literal node addresses."
+        ) from exc
+
+    provider_regex = "^(?:" + "|".join(re.escape(name) for name in names) + ")$"
+    image = rewrite_manifest_images(
+        f"image: {_KUBELET_CSR_APPROVER_IMAGE}\n",
+        resolved.addon_image_registry,
+    ).split(":", 1)[1].strip()
+    host_aliases = "\n".join(
+        "        - ip: "
+        + json.dumps(address)
+        + "\n          hostnames:\n            - "
+        + json.dumps(name)
+        for name, address in zip(names, addresses)
+    )
+    return f"""apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubelet-csr-approver
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubelet-csr-approver
+rules:
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["certificatesigningrequests"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["certificatesigningrequests/approval"]
+    verbs: ["update"]
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["signers"]
+    resourceNames: ["kubernetes.io/kubelet-serving"]
+    verbs: ["approve"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubelet-csr-approver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubelet-csr-approver
+subjects:
+  - kind: ServiceAccount
+    name: kubelet-csr-approver
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubelet-csr-approver
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kubelet-csr-approver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubelet-csr-approver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubelet-csr-approver
+    spec:
+      serviceAccountName: kubelet-csr-approver
+      automountServiceAccountToken: true
+      # Give the approver an inventory-scoped hostname-to-IP mapping. Keeping
+      # DNS verification enabled binds every requested IP SAN to that node's
+      # configured hostname instead of merely allowing any cluster-node IP.
+      hostAliases:
+{host_aliases}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kubelet-csr-approver
+          image: {image}
+          imagePullPolicy: IfNotPresent
+          args:
+            - -metrics-bind-address
+            - ":8080"
+            - -health-probe-bind-address
+            - ":8081"
+          env:
+            - name: PROVIDER_REGEX
+              value: {json.dumps(provider_regex)}
+            - name: PROVIDER_IP_PREFIXES
+              value: {json.dumps(",".join(prefixes))}
+            - name: MAX_EXPIRATION_SEC
+              value: "31622400"
+            - name: SKIP_DENY_STEP
+              value: "true"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+          readinessProbe:
+            httpGet:
+              # v1.2.14 exposes /healthz but does not register /readyz; using
+              # /readyz leaves a functional approver permanently 0/1 Ready.
+              path: /healthz
+              port: 8081
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+"""
+
+
+def _wait_for_metrics(
+    build: ClusterBuild,
+    target: SshTarget,
+    stream: _StreamTail,
+) -> None:
+    cps, workers, _ = _nodes_by_role(build)
+    expected = len(cps) + len(workers)
+
+    def _all_nodes_have_metrics() -> bool:
+        _check_cancelled(build)
+        output = _kubectl(
+            target,
+            "top nodes --no-headers",
+            timeout_s=60,
+            stream=stream,
+        )
+        return len([line for line in output.splitlines() if line.strip()]) >= expected
+
+    _wait_until(
+        _all_nodes_have_metrics,
+        timeout_s=600,
+        interval_s=10,
+        describe=f"Metrics Server to report all {expected} node(s)",
+    )
+
+
+def _phase_addons(
+    build: ClusterBuild,
+    resolved,
+    primary: ClusterBuildNode,
+) -> None:
+    selections = list(build.addons_json or [])
+    if not selections:
+        return
+    step = _get_step(build, "addons")
+    if step.status == "completed":
+        return
+    _step_start(step)
+    stream = _StreamTail(step.id)
+    target = _target_for(build, primary)
+    catalog_order = {
+        descriptor.id: index
+        for index, descriptor in enumerate(addon_registry.available())
+    }
+    selections.sort(key=lambda item: catalog_order.get(item.get("id"), 999))
+
+    try:
+        for selection in selections:
+            _check_cancelled(build)
+            addon_id = str(selection.get("id") or "")
+            descriptor = addon_registry.get(addon_id)
+            if descriptor is None:
+                raise addon_registry.AddonRenderError(
+                    f"Add-on '{addon_id}' is not available."
+                )
+            version = str(selection.get("version") or descriptor.versions[0])
+            stream.header(f"{descriptor.display_name} {version}")
+            manifests = descriptor.render(version, resolved)
+            if addon_id == "metrics-server":
+                manifests.insert(
+                    0,
+                    _metrics_csr_approver_manifest(build, resolved),
+                )
+            for index, manifest in enumerate(manifests):
+                remote_path = (
+                    f"/etc/kubernetes/kubesight-addon-{addon_id}-{index}.yaml"
+                )
+                _upload_and_run_traced(
+                    target,
+                    remote_path,
+                    manifest,
+                    "kubectl --kubeconfig /etc/kubernetes/admin.conf "
+                    f"apply -f {remote_path}",
+                    timeout_s=600,
+                    stream=stream,
+                )
+            if addon_id == "metrics-server":
+                _kubectl(
+                    target,
+                    "-n kube-system rollout status "
+                    "deployment/kubelet-csr-approver --timeout=600s",
+                    timeout_s=660,
+                    stream=stream,
+                )
+            for command in descriptor.readiness_commands:
+                _kubectl(target, command, timeout_s=960, stream=stream)
+
+            if addon_id == "metrics-server":
+                _wait_for_metrics(build, target, stream)
+            elif addon_id == "nginx-ingress":
+                _kubectl(
+                    target,
+                    "get ingressclass nginx",
+                    timeout_s=60,
+                    stream=stream,
+                )
+                service_type = _kubectl(
+                    target,
+                    "-n nginx-ingress get service nginx-ingress "
+                    "-o jsonpath='{.spec.type}'",
+                    timeout_s=60,
+                    stream=stream,
+                ).strip()
+                if service_type != "NodePort":
+                    raise _PhaseFailed(
+                        "NGINX Ingress service is not exposed as NodePort."
+                    )
+        _check_cancelled(build)
+        _step_done(step, stream.text())
+    except _Cancelled:
+        raise
+    except (
+        addon_registry.AddonRenderError,
+        SshCommandError,
+        SshConnectionError,
+        _PhaseFailed,
+    ) as exc:
+        extra = getattr(exc, "output", "")
+        if extra and extra not in stream.text():
+            stream.write(extra)
+        _step_fail(step, str(exc), stream.text())
+        raise _PhaseFailed(f"add-ons failed: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # The worker
 # ---------------------------------------------------------------------------
@@ -1002,14 +1352,31 @@ def _run_build(app, build_id: int) -> None:
             _check_cancelled(build)
             _phase_verify(build, resolved, primary)
             _phase_onboard(build, primary)
+            _check_cancelled(build)
+            _phase_addons(build, resolved, primary)
+            _check_cancelled(build)
 
-            build.status = "completed"
-            build.error = None
-            build.finished_at = _utcnow()
-            # Join secrets are dead weight (and risk) once the cluster stands.
-            build.cert_key_cipher = None
-            build.cert_key_expires_at = None
-            build.join_command_cipher = None
+            # Complete only if cancellation has not won a concurrent race.
+            # A conditional UPDATE prevents a late cancel request from being
+            # overwritten between the final refresh and this commit.
+            completed = ClusterBuild.query.filter_by(
+                id=build.id, status="building"
+            ).update(
+                {
+                    "status": "completed",
+                    "error": None,
+                    "finished_at": _utcnow(),
+                    # Join secrets are dead weight (and risk) once the cluster
+                    # stands.
+                    "cert_key_cipher": None,
+                    "cert_key_expires_at": None,
+                    "join_command_cipher": None,
+                },
+                synchronize_session=False,
+            )
+            if completed != 1:
+                db.session.rollback()
+                raise _Cancelled()
             db.session.commit()
         except _Cancelled:
             build.finished_at = _utcnow()
@@ -1028,6 +1395,20 @@ def _run_build(app, build_id: int) -> None:
         finally:
             with _active_lock:
                 _active_builds.discard(build_id)
+            # A retry can land in the narrow interval after this worker commits
+            # "failed" but before it releases the in-flight claim. In that
+            # case retry's launch observes the claim and returns; notice the
+            # new "building" state here and hand it to a fresh worker.
+            try:
+                db.session.expire_all()
+                latest = db.session.get(ClusterBuild, build_id)
+                if latest is not None and latest.status == "building":
+                    start_build_worker(build_id)
+            except Exception:  # noqa: BLE001 — status is already persisted
+                logger.exception(
+                    "Could not check for a raced retry of cluster build %s",
+                    build_id,
+                )
 
 
 def start_build_worker(build_id: int) -> None:

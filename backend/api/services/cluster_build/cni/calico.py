@@ -48,5 +48,13 @@ CALICO = _Calico(
     manifest_urls=(
         "https://raw.githubusercontent.com/projectcalico/calico/v{version}/manifests/calico.yaml",
     ),
+    manifest_sha256={
+        "3.28.2": (
+            "be59408bf990e96276f631d2f9285c2a0f9802194c0ad1cecdb6d9c52623a1c8",
+        ),
+        "3.27.4": (
+            "53250439641223c04f25035d9855f980b640baa73cde99bcfac5457b242fc51f",
+        ),
+    },
     readiness_daemonset=("kube-system", "calico-node"),
 )

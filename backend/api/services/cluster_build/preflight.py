@@ -9,6 +9,8 @@ reason the vSphere integration exists.
 
 from __future__ import annotations
 
+import base64
+import shlex
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +21,7 @@ from ..ssh import SshTarget, get_transport
 from . import os_adapters
 from .os_adapters import OsFacts
 from .profiles import ResolvedProfile
+from .scrub import scrub
 
 _ROLE_MINIMUMS = {
     # role: (cpus, memory MiB, disk GiB on /var)
@@ -47,6 +50,25 @@ _ROLE_PORTS = {
     "worker": (10250,),
     "loadbalancer": (6443,),
 }
+
+
+def _required_ports(
+    build: ClusterBuild,
+    node: ClusterBuildNode,
+) -> tuple[int, ...]:
+    """Local ports that must be unused before the selected components start."""
+    ports = list(_ROLE_PORTS.get(node.role, ()))
+    metal_lb_selected = any(
+        (
+            item == "metallb"
+            if isinstance(item, str)
+            else isinstance(item, dict) and item.get("id") == "metallb"
+        )
+        for item in (build.addons_json or [])
+    )
+    if metal_lb_selected and node.role in ("control_plane", "worker"):
+        ports.append(7946)
+    return tuple(ports)
 
 
 def _check(check_id: str, label: str, status: str, detail: str = "", hint: str = "") -> Dict[str, Any]:
@@ -167,19 +189,33 @@ def vsphere_checks(build: ClusterBuild) -> Dict[int, List[Dict[str, Any]]]:
 # ---------------------------------------------------------------------------
 
 def _probe_script(build: ClusterBuild, node: ClusterBuildNode, profile: ResolvedProfile) -> str:
-    ports = " ".join(str(p) for p in _ROLE_PORTS.get(node.role, ()))
+    ports = " ".join(str(p) for p in _required_ports(build, node))
     repo_urls = []
     if profile.repo_mode != "offline":
         minor_placeholder = ".".join(build.k8s_version.lstrip("v").split(".")[:2])
         repo_urls.append(profile.k8s_pkg_repo("debian", minor_placeholder))
-        if profile.k8s_image_registry:
-            repo_urls.append(f"https://{profile.k8s_image_registry}/v2/")
-    probe_urls = " ".join(f'"{u}"' for u in repo_urls)
+        if node.role != "loadbalancer":
+            for host in profile.registry_hosts():
+                repo_urls.append(f"https://{host}/v2/")
+    probe_urls = " ".join(shlex.quote(u) for u in repo_urls)
+    proxy_env = profile.proxy_env()
+    ca_b64 = base64.b64encode(
+        profile.extra_ca_certs_pem.encode("ascii")
+    ).decode("ascii")
     fsync_test = "1" if node.role == "control_plane" else "0"
     vip = build.vip_address or ""
     vip_test = "1" if (node.role == "loadbalancer" and vip) else "0"
     return f"""#!/bin/sh
+{proxy_env}
 # KubeSight node preflight probe — emits KS_KEY=value lines only.
+umask 077
+KS_CA_FILE=""
+KS_FSYNC_FILE=""
+ks_cleanup() {{
+  [ -z "$KS_CA_FILE" ] || rm -f -- "$KS_CA_FILE"
+  [ -z "$KS_FSYNC_FILE" ] || rm -f -- "$KS_FSYNC_FILE"
+}}
+trap ks_cleanup EXIT HUP INT TERM
 [ -f /etc/os-release ] && . /etc/os-release
 echo "KS_OS_ID=$ID"
 echo "KS_OS_LIKE=$ID_LIKE"
@@ -207,21 +243,40 @@ if command -v ss >/dev/null 2>&1; then
   done
 fi
 if command -v curl >/dev/null 2>&1; then
+  if [ -n "{ca_b64}" ]; then
+    KS_CA_FILE="$(mktemp /run/.kubesight-preflight-ca.XXXXXX)" || exit 1
+    for system_ca in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
+      if [ -r "$system_ca" ]; then cat "$system_ca" > "$KS_CA_FILE"; break; fi
+    done
+    echo "{ca_b64}" | base64 -d >> "$KS_CA_FILE"
+    chmod 600 "$KS_CA_FILE"
+  fi
+  ks_curl() {{
+    if [ -n "$KS_CA_FILE" ]; then
+      curl --cacert "$KS_CA_FILE" "$@"
+    else
+      curl "$@"
+    fi
+  }}
   for url in {probe_urls}; do
-    if curl -m 8 -skf -o /dev/null "$url" 2>/dev/null || curl -m 8 -sk -o /dev/null -w '%{{http_code}}' "$url" 2>/dev/null | grep -qE '^(2|3|401|403)'; then
+    if ks_curl -m 8 -sf -o /dev/null "$url" 2>/dev/null || ks_curl -m 8 -s -o /dev/null -w '%{{http_code}}' "$url" 2>/dev/null | grep -qE '^(2|3|401|403)'; then
       echo "KS_REPO_OK=$url"
     else
       echo "KS_REPO_FAIL=$url"
     fi
   done
+  [ -z "$KS_CA_FILE" ] || rm -f -- "$KS_CA_FILE"
+  KS_CA_FILE=""
 else
   echo "KS_CURL=missing"
 fi
 if [ "{fsync_test}" = "1" ] && command -v dd >/dev/null 2>&1; then
+  KS_FSYNC_FILE="$(mktemp /var/tmp/.kubesight-fsync.XXXXXX)" || exit 1
   start=$(date +%s%N 2>/dev/null || echo 0)
-  dd if=/dev/zero of=/var/tmp/.ks_fsync bs=2048 count=100 oflag=dsync >/dev/null 2>&1
+  dd if=/dev/zero of="$KS_FSYNC_FILE" bs=2048 count=100 oflag=dsync >/dev/null 2>&1
   end=$(date +%s%N 2>/dev/null || echo 0)
-  rm -f /var/tmp/.ks_fsync
+  rm -f -- "$KS_FSYNC_FILE"
+  KS_FSYNC_FILE=""
   if [ "$start" != "0" ] && [ "$end" != "0" ]; then
     echo "KS_FSYNC_MS_PER_OP=$(( (end - start) / 100000000 )).$(( ((end - start) / 10000000) % 10 ))"
   fi
@@ -358,7 +413,7 @@ def _node_checks(
             "" if state == "ok" else f"{module} is unavailable on this kernel.",
         ))
 
-    for port in _ROLE_PORTS.get(node.role, ()):
+    for port in _required_ports(build, node):
         state = facts.get(f"KS_PORT_{port}")
         if state == "busy":
             checks.append(_check(
@@ -396,7 +451,10 @@ def _node_checks(
             ))
         if facts.get("repo_ok") and not facts.get("repo_fail"):
             checks.append(_check("repo", "Repository reachability", "pass",
-                                 f"{len(facts['repo_ok'])} endpoint(s) reachable."))
+                                 f"{len(facts['repo_ok'])} endpoint(s) reachable "
+                                 "with TLS verified where applicable; registry "
+                                 "credentials are verified "
+                                 "by the image pre-pull phase."))
         if facts.get("KS_CURL") == "missing":
             checks.append(_check(
                 "repo", "Repository reachability", "warn",
@@ -485,7 +543,7 @@ def run_node_preflight(
             results[node.id] = {
                 "status": "fail",
                 "checks": [_check(
-                    "ssh", "SSH connectivity + escalation", "fail", str(exc),
+                    "ssh", "SSH connectivity + escalation", "fail", scrub(str(exc)),
                     "Verify the node's SSH connection profile.",
                 )],
             }
@@ -500,7 +558,7 @@ def run_node_preflight(
             results[node_id] = {
                 "status": "fail",
                 "checks": [_check(
-                    "ssh", "SSH connectivity + escalation", "fail", str(exc),
+                    "ssh", "SSH connectivity + escalation", "fail", scrub(str(exc)),
                     "Verify the address, credential, sudo mode, and that the "
                     "KubeSight backend can reach the node on its SSH port.",
                 )],

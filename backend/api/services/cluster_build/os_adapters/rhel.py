@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Optional
 
 from ..profiles import DEFAULT_CRI_REPO_RPM
@@ -28,11 +29,15 @@ class RhelAdapter(OsAdapter):
     def script_configure_ca(self, ctx: ScriptContext) -> Optional[str]:
         pem = ctx.profile.extra_ca_certs_pem.strip()
         if not pem:
-            return None
+            return f"""{shell_preamble(ctx)}
+rm -f -- /etc/pki/ca-trust/source/anchors/kubesight-extra.crt
+update-ca-trust
+"""
+        pem_b64 = base64.b64encode(pem.encode("ascii")).decode("ascii")
         return f"""{shell_preamble(ctx)}
-cat > /etc/pki/ca-trust/source/anchors/kubesight-extra.crt <<'KS_CA_EOF'
-{pem}
-KS_CA_EOF
+rm -f -- /etc/pki/ca-trust/source/anchors/kubesight-extra.crt
+echo "{pem_b64}" | base64 -d > /etc/pki/ca-trust/source/anchors/kubesight-extra.crt
+chmod 644 /etc/pki/ca-trust/source/anchors/kubesight-extra.crt
 update-ca-trust
 """
 

@@ -7,6 +7,7 @@ module plus a registry entry, with zero engine changes.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -49,17 +50,100 @@ def shell_preamble(ctx: ScriptContext) -> str:
 
 def containerd_config_script(ctx: ScriptContext) -> str:
     """Shared containerd post-install config: SystemdCgroup=true (mandatory for
-    kubeadm's systemd cgroup driver) + sandbox image from the resolved registry."""
+    kubeadm's systemd cgroup driver), sandbox image from the resolved registry,
+    persistent forward-proxy environment, and optional registry authentication.
+
+    Sensitive generated content is base64-fed into root-owned files, and the
+    executor deliberately hides this stage's command text from persisted logs.
+    """
     from ..kubeadm import pause_image_tag  # local import: avoids module cycle
 
     pause_image = (
         f"{ctx.profile.k8s_image_registry}/pause:{pause_image_tag(ctx.k8s_version)}"
     )
+    proxy_lines = ["[Service]"]
+    for name, value in (
+        ("HTTP_PROXY", ctx.profile.http_proxy),
+        ("HTTPS_PROXY", ctx.profile.https_proxy),
+        ("NO_PROXY", ctx.profile.no_proxy),
+    ):
+        if value:
+            escaped = (
+                value.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("%", "%%")
+                .replace("\r", "")
+                .replace("\n", "")
+            )
+            proxy_lines.append(f'Environment="{name}={escaped}"')
+            proxy_lines.append(f'Environment="{name.lower()}={escaped}"')
+    proxy_dropin = "\n".join(proxy_lines) + "\n" if len(proxy_lines) > 1 else ""
+    proxy_b64 = base64.b64encode(proxy_dropin.encode("utf-8")).decode("ascii")
+
+    def _toml(value: str) -> str:
+        return (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+        )
+
+    def _auth_b64(plugin_id: str) -> str:
+        blocks = []
+        if (
+            ctx.profile.registry_username
+            and ctx.profile.registry_password
+            and ctx.profile.registry_auth_host
+        ):
+            blocks.append(
+                f'[plugins."{plugin_id}".registry.configs.'
+                f'"{_toml(ctx.profile.registry_auth_host)}".auth]\n'
+                f'  username = "{_toml(ctx.profile.registry_username)}"\n'
+                f'  password = "{_toml(ctx.profile.registry_password)}"\n'
+            )
+        content = "\n".join(blocks)
+        return base64.b64encode(content.encode("utf-8")).decode("ascii")
+
+    # containerd 1.x uses config v2/plugin grpc.v1.cri. containerd 2.x uses
+    # config v3/plugin cri.v1.images. The node chooses the matching encrypted
+    # fragment after generating its default config.
+    auth_v2_b64 = _auth_b64("io.containerd.grpc.v1.cri")
+    auth_v3_b64 = _auth_b64("io.containerd.cri.v1.images")
+
     return f"""
+umask 077
 mkdir -p /etc/containerd
 containerd config default > /etc/containerd/config.toml
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-sed -i 's#sandbox_image = ".*"#sandbox_image = "{pause_image}"#' /etc/containerd/config.toml
+if grep -Eq '^[[:space:]]*version[[:space:]]*=[[:space:]]*3' /etc/containerd/config.toml; then
+  # containerd 2.x / config v3.
+  sed -i 's#sandbox = .*#sandbox = "{pause_image}"#' /etc/containerd/config.toml
+  sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+  if ! grep -q 'SystemdCgroup = true' /etc/containerd/config.toml; then
+    awk '{{ print; if ($0 ~ /io\\.containerd\\.cri\\.v1\\.runtime.*runtimes\\.runc\\.options\\]/) print "          SystemdCgroup = true" }}' \
+      /etc/containerd/config.toml > /etc/containerd/config.toml.kubesight
+    mv /etc/containerd/config.toml.kubesight /etc/containerd/config.toml
+  fi
+  AUTH_B64="{auth_v3_b64}"
+else
+  # containerd 1.x / config v2.
+  sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+  sed -i 's#sandbox_image = ".*"#sandbox_image = "{pause_image}"#' /etc/containerd/config.toml
+  AUTH_B64="{auth_v2_b64}"
+fi
+if [ -n "$AUTH_B64" ]; then
+  echo "$AUTH_B64" | base64 -d >> /etc/containerd/config.toml
+fi
+chmod 600 /etc/containerd/config.toml
+mkdir -p /etc/systemd/system/containerd.service.d
+if [ -n "{proxy_b64}" ]; then
+  umask 077
+  echo "{proxy_b64}" | base64 -d > \
+    /etc/systemd/system/containerd.service.d/kubesight-proxy.conf
+  chmod 600 /etc/systemd/system/containerd.service.d/kubesight-proxy.conf
+else
+  rm -f /etc/systemd/system/containerd.service.d/kubesight-proxy.conf
+fi
+systemctl daemon-reload
 systemctl enable containerd
 systemctl restart containerd
 """

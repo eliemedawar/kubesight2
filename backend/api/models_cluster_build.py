@@ -204,6 +204,9 @@ class ClusterBuild(db.Model):
     pod_cidr = db.Column(db.String(64), nullable=False, default="")
     service_cidr = db.Column(db.String(64), nullable=False, default="")
     cni_params_json = db.Column(db.JSON, nullable=True)
+    # Optional, version-pinned cluster add-ons selected in the builder:
+    # [{"id": "metrics-server", "version": "0.7.2"}, ...].
+    addons_json = db.Column(db.JSON, nullable=True)
 
     vsphere_connection_id = db.Column(
         db.Integer, db.ForeignKey("vsphere_connections.id"), nullable=True

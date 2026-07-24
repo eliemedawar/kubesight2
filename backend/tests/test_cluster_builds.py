@@ -13,6 +13,7 @@ from api.models import (
     ClusterBuildNode,
     ClusterBuildStep,
 )
+from api.services import alert_policy_scheduler as scheduler_mod
 from api.services import ssh_profile_service, vsphere_service
 from api.services.ssh import SshCommandError, set_transport_factory
 from api.services.ssh import hostkeys
@@ -166,6 +167,32 @@ def fake_ssh():
     set_transport_factory(lambda: fake)
     yield fake
     set_transport_factory(None)
+
+
+@pytest.fixture(autouse=True)
+def no_network_cni_manifest(monkeypatch):
+    """Cluster-build tests exercise orchestration, never public GitHub.
+
+    Production prefers a bundled pinned manifest and otherwise fetches its
+    pinned URL in internet mode. Keep the suite deterministic with the smallest
+    manifest shape needed to derive and rewrite a CNI image.
+    """
+    monkeypatch.setattr(
+        type(CALICO),
+        "load_manifests",
+        lambda self, version, profile: [
+            "apiVersion: apps/v1\n"
+            "kind: DaemonSet\n"
+            "metadata:\n"
+            "  name: calico-node\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - name: calico-node\n"
+            f"          image: docker.io/calico/node:v{version}\n"
+        ],
+    )
 
 
 @pytest.fixture()
@@ -1077,6 +1104,29 @@ class TestPreflightRecovery:
         db.session.refresh(build)
         assert build.status == "preflight_failed"
         assert "interrupted" in (build.error or "").lower()
+
+
+class TestSchedulerOwnership:
+    @pytest.mark.parametrize(
+        "debug,run_main,expected",
+        [
+            ("true", None, False),
+            ("true", "false", False),
+            ("true", "true", True),
+            ("false", None, True),
+            ("false", "true", True),
+        ],
+    )
+    def test_debug_reloader_only_starts_scheduler_in_serving_child(
+        self, monkeypatch, debug, run_main, expected
+    ):
+        monkeypatch.setenv("FLASK_DEBUG", debug)
+        if run_main is None:
+            monkeypatch.delenv("WERKZEUG_RUN_MAIN", raising=False)
+        else:
+            monkeypatch.setenv("WERKZEUG_RUN_MAIN", run_main)
+
+        assert scheduler_mod._should_start_in_process() is expected
 
 
 class TestPauseImage:

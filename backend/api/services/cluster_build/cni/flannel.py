@@ -30,5 +30,10 @@ FLANNEL = _Flannel(
     manifest_urls=(
         "https://github.com/flannel-io/flannel/releases/download/v{version}/kube-flannel.yml",
     ),
+    manifest_sha256={
+        "0.25.6": (
+            "e4e34aeb64934aa2122dff71b369d2c29b1ccea8d7aa23d5349d6361f1ee5a5c",
+        ),
+    },
     readiness_daemonset=("kube-flannel", "kube-flannel-ds"),
 )

@@ -64,3 +64,87 @@
   width: 2.4rem;
   height: 2.4rem;
 }
+
+/* Zoom controls — stacked round ghost buttons pinned to the bottom-right,
+   matching the fullscreen toggle's Signal skin. */
+.topo-zoom {
+  position: absolute;
+  bottom: 0.6rem;
+  right: 0.6rem;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+/* Buttons borrow the fullscreen toggle's round-ghost look but must lay out in
+   the stack, not pin themselves to the corner like the standalone toggle. */
+.topo-zoom .topo-fs-btn {
+  position: static;
+  top: auto;
+  right: auto;
+}
+.topo-viewer--fs .topo-zoom {
+  position: fixed;
+  bottom: 1rem;
+  right: 1rem;
+}
+
+/* Drill-in affordance: clickable nodes (e.g. a namespace on the cluster view)
+   accent their border on hover, echoing the read-only hover treatment above. */
+.topo-node--click .topo-node-card {
+  transition: stroke var(--dur-fast, 120ms) var(--ease, ease), stroke-width var(--dur-fast, 120ms) var(--ease, ease);
+}
+.topo-node--click:hover .topo-node-card {
+  stroke: var(--accent-strong);
+  stroke-width: 1.5;
+}
+
+/* ── Topology page chrome (standalone drill-down view) ─────────────────── */
+.topology-page .topo-breadcrumb {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.topology-page .topo-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.95rem;
+}
+.topology-page .topo-crumb {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+.topology-page .topo-crumb:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.topology-page .topo-crumb:disabled,
+.topology-page .topo-crumb.is-active {
+  color: var(--text-strong);
+  font-weight: 600;
+  cursor: default;
+}
+.topology-page .topo-crumb-sep {
+  color: var(--text-muted);
+}
+.topology-page .topo-crumb-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.topology-page .topo-hint {
+  margin: 0 0 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+/* Give the canvas a definite height so the zoomable SVG fills it (the graph
+   letterboxes inside via the viewBox). Fullscreen is still available. */
+.topology-page .topo-viewer {
+  height: min(72vh, 680px);
+}

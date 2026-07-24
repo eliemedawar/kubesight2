@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-import os
+import hashlib
 import re
+import ssl
+import threading
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..profiles import ResolvedProfile
 
 _FETCH_TIMEOUT_SECONDS = 30
+_MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+_MANIFEST_CACHE: dict[tuple[str, str], bytes] = {}
+_MANIFEST_CACHE_LOCK = threading.Lock()
 
 
 class CniRenderError(RuntimeError):
@@ -69,45 +74,129 @@ class CniDescriptor:
     default_pod_cidr: str
     manifest_files: Tuple[str, ...]      # filenames under data/cni/<id>/<ver>/
     manifest_urls: Tuple[str, ...]       # pinned upstream, {version} templated
+    manifest_sha256: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     # DaemonSet the readiness gate waits on: (namespace, name).
     readiness_daemonset: Tuple[str, str] = ("kube-system", "")
 
     def bundled_path(self, version: str, filename: str) -> Path:
         return _data_dir() / self.id / version / filename
 
+    def _download(
+        self,
+        *,
+        filename: str,
+        url: str,
+        expected_sha256: str,
+        profile: ResolvedProfile,
+        version: str,
+    ) -> bytes:
+        cache_key = (url, expected_sha256)
+        with _MANIFEST_CACHE_LOCK:
+            cached = _MANIFEST_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        proxies = {}
+        if profile.http_proxy:
+            proxies["http"] = profile.http_proxy
+        if profile.https_proxy:
+            proxies["https"] = profile.https_proxy
+        context = ssl.create_default_context()
+        if profile.extra_ca_certs_pem:
+            context.load_verify_locations(cadata=profile.extra_ca_certs_pem)
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler(proxies or None),
+            urllib.request.HTTPSHandler(context=context),
+        )
+        try:
+            with opener.open(url, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+                content = response.read(_MAX_MANIFEST_BYTES + 1)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise CniRenderError(
+                f"{self.display_name} {version}: manifest '{filename}' "
+                f"fetch failed from {url} — {exc}"
+            ) from exc
+        if len(content) > _MAX_MANIFEST_BYTES:
+            raise CniRenderError(
+                f"{self.display_name} {version}: manifest '{filename}' "
+                f"exceeds {_MAX_MANIFEST_BYTES} bytes."
+            )
+        if hashlib.sha256(content).hexdigest() != expected_sha256:
+            raise CniRenderError(
+                f"{self.display_name} {version}: manifest '{filename}' "
+                "failed its pinned SHA-256 integrity check."
+            )
+        with _MANIFEST_CACHE_LOCK:
+            _MANIFEST_CACHE[cache_key] = content
+        return content
+
     def load_manifests(self, version: str, profile: ResolvedProfile) -> List[str]:
-        """Bundled files first; upstream fetch only in internet mode."""
+        """Load bundled or integrity-pinned manifests through profile egress."""
         if version not in self.versions:
             raise CniRenderError(
                 f"{self.display_name} {version} is not in the tested version set "
                 f"({', '.join(self.versions)})."
             )
+        if self.manifest_urls and len(self.manifest_files) != len(self.manifest_urls):
+            raise CniRenderError(
+                f"{self.display_name} descriptor must pair every manifest "
+                "file with one pinned URL."
+            )
+        digests = self.manifest_sha256.get(version, ())
+        if self.manifest_urls and len(digests) != len(self.manifest_files):
+            raise CniRenderError(
+                f"{self.display_name} {version} descriptor must pin one "
+                "SHA-256 digest per remote manifest."
+            )
+
         manifests: List[str] = []
-        missing: List[str] = []
-        for filename in self.manifest_files:
+        for index, filename in enumerate(self.manifest_files):
             path = self.bundled_path(version, filename)
             if path.is_file():
-                manifests.append(path.read_text(encoding="utf-8"))
+                content = path.read_bytes()
+                if len(content) > _MAX_MANIFEST_BYTES:
+                    raise CniRenderError(
+                        f"{self.display_name} {version}: manifest '{filename}' "
+                        f"exceeds {_MAX_MANIFEST_BYTES} bytes."
+                    )
             else:
-                missing.append(filename)
-        if not missing:
-            return manifests
-        if profile.repo_mode != "internet":
-            raise CniRenderError(
-                f"{self.display_name} {version}: bundled manifest(s) "
-                f"{', '.join(missing)} not found under {_data_dir() / self.id / version} "
-                f"and repo mode '{profile.repo_mode}' forbids fetching from the "
-                "internet. Bundle the manifests to proceed."
-            )
-        for url_template in self.manifest_urls:
-            url = url_template.format(version=version)
-            try:
-                with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT_SECONDS) as response:
-                    manifests.append(response.read().decode("utf-8", errors="replace"))
-            except (urllib.error.URLError, OSError) as exc:
+                if not self.manifest_urls:
+                    raise CniRenderError(
+                        f"{self.display_name} {version}: bundled-only manifest "
+                        f"'{filename}' was not found under "
+                        f"{_data_dir() / self.id / version}."
+                    )
+                if profile.repo_mode == "offline":
+                    raise CniRenderError(
+                        f"{self.display_name} {version}: bundled manifest "
+                        f"'{filename}' not found under "
+                        f"{_data_dir() / self.id / version} and offline mode "
+                        "forbids fetching it."
+                    )
+                url = self.manifest_urls[index].format(version=version)
+                content = self._download(
+                    filename=filename,
+                    url=url,
+                    expected_sha256=digests[index],
+                    profile=profile,
+                    version=version,
+                )
+
+            expected_sha256 = digests[index] if digests else ""
+            if (
+                expected_sha256
+                and hashlib.sha256(content).hexdigest() != expected_sha256
+            ):
                 raise CniRenderError(
-                    f"{self.display_name} {version}: manifest fetch failed from "
-                    f"{url} — {exc}"
+                    f"{self.display_name} {version}: manifest '{filename}' "
+                    "failed its pinned SHA-256 integrity check."
+                )
+            try:
+                manifests.append(content.decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise CniRenderError(
+                    f"{self.display_name} {version}: manifest '{filename}' "
+                    "is not valid UTF-8."
                 ) from exc
         return manifests
 

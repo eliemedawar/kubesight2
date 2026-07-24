@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import inspect, text
 
@@ -62,6 +63,73 @@ def _drop_obsolete_user_columns() -> None:
         return
     for col in ("password", "display_name", "roles"):
         _drop_column_if_exists("users", col)
+
+
+def _migrate_cluster_build_columns() -> None:
+    """Columns added after Cluster Builder's initial release.
+
+    ``db.create_all`` creates new tables but deliberately does not alter an
+    existing one, so deployed databases need this small idempotent migration.
+    """
+    _add_column_if_missing("cluster_builds", "addons_json", "JSON")
+
+
+def _sanitize_legacy_build_profile_proxies() -> None:
+    """Remove obsolete proxy URL credentials from existing profile rows.
+
+    Forward-proxy authentication is intentionally unsupported because process
+    environments are not a safe secret channel. Older versions accepted full
+    URLs, so retain only a credential-free scheme/authority and discard any
+    path, query, or fragment.
+    """
+    columns = _table_columns("build_profiles")
+    proxy_columns = [
+        column for column in ("http_proxy", "https_proxy") if column in columns
+    ]
+    if not proxy_columns:
+        return
+
+    def _safe_proxy(value):
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        if any(char.isspace() or ord(char) < 32 for char in raw):
+            return None
+        try:
+            parsed = urlsplit(raw)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                return None
+            port = parsed.port
+            if port is not None and not 1 <= port <= 65535:
+                return None
+            host = parsed.hostname
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            netloc = host + (f":{port}" if port is not None else "")
+            return urlunsplit((parsed.scheme, netloc, "", "", ""))
+        except (TypeError, ValueError):
+            return None
+
+    select_columns = ", ".join(["id", *proxy_columns])
+    with db.engine.begin() as connection:
+        rows = connection.execute(
+            text(f"SELECT {select_columns} FROM build_profiles")
+        ).mappings().all()
+        for row in rows:
+            updates = {}
+            for column in proxy_columns:
+                safe_value = _safe_proxy(row[column])
+                if safe_value != row[column]:
+                    updates[column] = safe_value
+            if not updates:
+                continue
+            assignments = ", ".join(
+                f"{column} = :{column}" for column in updates
+            )
+            connection.execute(
+                text(f"UPDATE build_profiles SET {assignments} WHERE id = :id"),
+                {**updates, "id": row["id"]},
+            )
 
 
 def _migrate_legacy_users() -> None:
@@ -681,6 +749,8 @@ def _backfill_build_signature_state() -> None:
 
 def run_migrations() -> None:
     db.create_all()
+    _migrate_cluster_build_columns()
+    _sanitize_legacy_build_profile_proxies()
     _migrate_zoho_integration_columns()
     _migrate_deploy_automation_columns()
     _migrate_mobile_app_columns()

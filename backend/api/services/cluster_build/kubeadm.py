@@ -8,6 +8,7 @@ multi-line, backslash-continued echo is too fragile to copy.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -36,6 +37,7 @@ def render_init_config(
     service_cidr: str,
     profile: ResolvedProfile,
     node_name: str,
+    server_tls_bootstrap: bool = False,
 ) -> str:
     """InitConfiguration + ClusterConfiguration + KubeletConfiguration YAML.
 
@@ -47,10 +49,11 @@ def render_init_config(
     if profile.k8s_image_registry and profile.k8s_image_registry != DEFAULT_K8S_IMAGE_REGISTRY:
         image_repo_block = f"imageRepository: {profile.k8s_image_registry}\n"
     endpoint_host = control_plane_endpoint.rsplit(":", 1)[0]
+    server_tls_line = "serverTLSBootstrap: true\n" if server_tls_bootstrap else ""
     return f"""apiVersion: kubeadm.k8s.io/v1beta3
 kind: InitConfiguration
 nodeRegistration:
-  name: {node_name}
+  name: {json.dumps(node_name)}
   criSocket: {CRI_SOCKET}
 ---
 apiVersion: kubeadm.k8s.io/v1beta3
@@ -67,7 +70,7 @@ apiServer:
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 cgroupDriver: systemd
-"""
+{server_tls_line}"""
 
 
 @dataclass

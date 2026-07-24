@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 // Shared, read-only topology renderer used by the Application Services detail
 // view and the Client Service Access Topology overlay. The layout helpers are
@@ -249,7 +249,16 @@ function truncate(str, max) {
   return str.length > max ? str.slice(0, max - 1) + "…" : str;
 }
 
-export default function TopologyViewer({ nodes, edges, compact = false, fillWidth = false, allowFullscreen = true }) {
+export default function TopologyViewer({
+  nodes,
+  edges,
+  compact = false,
+  fillWidth = false,
+  allowFullscreen = true,
+  zoomable = false,
+  onNodeClick,
+  nodeClickable,
+}) {
   const { positions, svgW, svgH } = useMemo(
     () => computeLayout(nodes || [], edges || []),
     [nodes, edges]
@@ -292,6 +301,39 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
     return () => window.removeEventListener("keydown", onKey, true);
   }, [fullscreen]);
 
+  // ── Pan & zoom (opt-in via `zoomable`) ─────────────────────────────────
+  const svgRef = useRef(null);
+  const panRef = useRef(null);
+  const draggedRef = useRef(false);
+  const [view, setView] = useState({ k: 1, x: 0, y: 0 });
+  const [panning, setPanning] = useState(false);
+
+  // A new graph re-fits via the viewBox; drop any prior pan/zoom so it starts centered.
+  useEffect(() => {
+    setView({ k: 1, x: 0, y: 0 });
+  }, [nodes, edges]);
+
+  // Wheel-to-zoom toward the cursor. A native, non-passive listener so the page
+  // doesn't scroll while the pointer is over the canvas.
+  useEffect(() => {
+    if (!zoomable) return undefined;
+    const svg = svgRef.current;
+    if (!svg) return undefined;
+    const onWheel = (event) => {
+      event.preventDefault();
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return;
+      const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(ctm.inverse());
+      setView((v) => {
+        const k = Math.min(5, Math.max(0.3, v.k * Math.exp(-event.deltaY * 0.0015)));
+        const ratio = k / v.k;
+        return { k, x: point.x - ratio * (point.x - v.x), y: point.y - ratio * (point.y - v.y) };
+      });
+    };
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+  }, [zoomable]);
+
   if (!nodes || nodes.length === 0) {
     return <p className="muted" style={{ fontSize: "0.875rem", fontStyle: "italic" }}>No topology defined yet.</p>;
   }
@@ -327,9 +369,74 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
 
   // In fullscreen the SVG fills the viewport (aspect preserved by the viewBox);
   // inline the sizing switch so the same mounted SVG works in both modes.
-  const svgStyle = fullscreen
-    ? { display: "block", width: "100%", height: "100%" }
-    : { display: "block", width: "100%", maxWidth: fillWidth ? "100%" : `${naturalWidth}px`, height: "auto", margin: "0 auto" };
+  const svgStyle =
+    fullscreen || zoomable
+      ? // Fill the container so pan/zoom has room; the viewBox letterboxes the
+        // graph (contain) and keeps it centered.
+        { display: "block", width: "100%", height: "100%" }
+      : { display: "block", width: "100%", maxWidth: fillWidth ? "100%" : `${naturalWidth}px`, height: "auto", margin: "0 auto" };
+
+  // Drag-to-pan. Capture is engaged *lazily* — only once the pointer moves past
+  // a small threshold — so a plain click still reaches the node underneath
+  // (capturing on pointerdown would redirect the click to the SVG and swallow
+  // node drill-downs). Deltas convert screen px → viewBox-user units via the
+  // CTM scale, so panning tracks the cursor at any zoom level.
+  const startPan = (event) => {
+    if (!zoomable || (event.button && event.button !== 0)) return;
+    const ctm = svgRef.current?.getScreenCTM();
+    panRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      origX: view.x,
+      origY: view.y,
+      ax: ctm ? ctm.a : 1,
+      ay: ctm ? ctm.d : 1,
+      pointerId: event.pointerId,
+      moved: false,
+      capturing: false,
+    };
+  };
+  const movePan = (event) => {
+    const pan = panRef.current;
+    if (!pan) return;
+    const dxPx = event.clientX - pan.startX;
+    const dyPx = event.clientY - pan.startY;
+    if (!pan.capturing && Math.abs(dxPx) < 4 && Math.abs(dyPx) < 4) return; // still a click
+    if (!pan.capturing) {
+      pan.capturing = true;
+      pan.moved = true;
+      setPanning(true);
+      svgRef.current?.setPointerCapture?.(pan.pointerId);
+    }
+    setView((v) => ({ ...v, x: pan.origX + dxPx / (pan.ax || 1), y: pan.origY + dyPx / (pan.ay || 1) }));
+  };
+  const endPan = () => {
+    const pan = panRef.current;
+    if (!pan) return;
+    if (pan.capturing) svgRef.current?.releasePointerCapture?.(pan.pointerId);
+    panRef.current = null;
+    setPanning(false);
+    // Flag the just-ended gesture as a drag so the ensuing click on a node is
+    // ignored; cleared on the next tick, after the click has been dispatched.
+    draggedRef.current = pan.moved;
+    window.setTimeout(() => { draggedRef.current = false; }, 0);
+  };
+  const zoomBy = (factor) =>
+    setView((v) => {
+      const k = Math.min(5, Math.max(0.3, v.k * factor));
+      const ratio = k / v.k;
+      const cx = svgW / 2;
+      const cy = svgH / 2;
+      return { k, x: cx - ratio * (cx - v.x), y: cy - ratio * (cy - v.y) };
+    });
+  const resetView = () => setView({ k: 1, x: 0, y: 0 });
+
+  const isClickable = (node) =>
+    onNodeClick ? (nodeClickable ? nodeClickable(node) : true) : false;
+  const handleNodeClick = (node) => {
+    if (draggedRef.current) return;
+    if (isClickable(node)) onNodeClick(node);
+  };
 
   return (
     <div
@@ -357,9 +464,27 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
           )}
         </button>
       ) : null}
-      <svg viewBox={`${-zoomMx} ${-zoomMy} ${svgW + zoomMx * 2} ${svgH + zoomMy * 2}`}
+      {zoomable ? (
+        <div className="topo-zoom" role="group" aria-label="Zoom controls">
+          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(1.25)} aria-label="Zoom in" title="Zoom in">
+            <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M10 5v10M5 10h10" /></svg>
+          </button>
+          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(0.8)} aria-label="Zoom out" title="Zoom out">
+            <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M5 10h10" /></svg>
+          </button>
+          <button type="button" className="topo-fs-btn" onClick={resetView} aria-label="Reset view" title="Reset view">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4" /></svg>
+          </button>
+        </div>
+      ) : null}
+      <svg ref={svgRef}
+        viewBox={`${-zoomMx} ${-zoomMy} ${svgW + zoomMx * 2} ${svgH + zoomMy * 2}`}
         preserveAspectRatio="xMidYMid meet"
-        style={svgStyle}>
+        onPointerDown={startPan}
+        onPointerMove={movePan}
+        onPointerUp={endPan}
+        onPointerLeave={endPan}
+        style={zoomable ? { ...svgStyle, cursor: panning ? "grabbing" : "grab", touchAction: "none" } : svgStyle}>
         <defs>
           <filter id="topo-shadow" x="-30%" y="-30%" width="160%" height="160%">
             <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="rgba(0,0,0,0.5)" />
@@ -383,6 +508,7 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
           </marker>
         </defs>
 
+        <g transform={zoomable ? `translate(${view.x} ${view.y}) scale(${view.k})` : undefined}>
         <g transform={`translate(${PAD},${PAD})`}>
           {/* Edges */}
           {(edges || []).map((edge, idx) => {
@@ -608,9 +734,16 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
             const chipCX = pos.x + 27, chipCY = pos.y + NODE_H / 2;
             const textX = pos.x + 46;
             const nameY = hasSub ? pos.y + 19 : pos.y + NODE_H / 2 + 1;
+            const clickableNode = isClickable(node);
 
             return (
-              <g key={node.id} className="topo-node" title={node.description || node.name}>
+              <g
+                key={node.id}
+                className={`topo-node${clickableNode ? " topo-node--click" : ""}`}
+                onClick={clickableNode ? () => handleNodeClick(node) : undefined}
+                style={clickableNode ? { cursor: "pointer" } : undefined}
+                title={node.description || node.name}
+              >
                 {node.description ? <title>{node.description}</title> : null}
                 <rect className="topo-node-card" x={pos.x} y={pos.y} width={NODE_W} height={NODE_H}
                   rx={14} ry={14}
@@ -639,6 +772,7 @@ export default function TopologyViewer({ nodes, edges, compact = false, fillWidt
               </g>
             );
           })}
+        </g>
         </g>
       </svg>
     </div>

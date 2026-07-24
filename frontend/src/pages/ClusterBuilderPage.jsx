@@ -44,6 +44,7 @@ const PHASE_LABELS = {
   join_workers: "Join workers",
   verify: "Cluster verification",
   onboard: "Register in KubeSight",
+  addons: "Install add-ons",
 };
 
 const PHASE_NOTES = {
@@ -56,12 +57,51 @@ const PHASE_NOTES = {
   join_workers: "in parallel",
   verify: "nodes Ready · CoreDNS · etcd · smoke pod",
   onboard: "admin.conf → Clusters page, no manual step",
+  addons: "selected add-ons, pinned and verified",
 };
 
 const PHASE_ORDER = [
   "base_prep", "loadbalancer", "pull_images", "init", "cni",
-  "join_cp", "join_workers", "verify", "onboard",
+  "join_cp", "join_workers", "verify", "onboard", "addons",
 ];
+
+function addonDisplayName(addon, catalog = []) {
+  const id = typeof addon === "string" ? addon : addon?.id;
+  const match = catalog.find((item) => item.id === id);
+  if (match?.displayName) return match.displayName;
+  return String(id || "Unknown add-on")
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function addonSummary(addons = [], catalog = [], includeVersions = false) {
+  if (!addons.length) return "None";
+  return addons.map((addon) => {
+    const name = addonDisplayName(addon, catalog);
+    const version = typeof addon === "object" ? addon.version : "";
+    return includeVersions && version ? `${name} v${version}` : name;
+  }).join(", ");
+}
+
+function AddonChips({ addons = [], catalog = [], empty = "None" }) {
+  if (!addons.length) return <span className="muted">{empty}</span>;
+  return (
+    <span className="sg-cb-chiprow">
+      {addons.map((addon) => {
+        const id = typeof addon === "string" ? addon : addon.id;
+        const version = typeof addon === "object" ? addon.version : "";
+        return (
+          <span className="sg-cb-chip" key={`${id}-${version}`}>
+            {addonDisplayName(addon, catalog)}
+            {version ? <span className="sg-cb-chip-version">v{version}</span> : null}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
 
 const ROLE_LABELS = {
   control_plane: "Control plane",
@@ -124,12 +164,14 @@ function ShapeGlyph({ shape = [], buildStatus }) {
   );
 }
 
-function Field({ label, children, hint }) {
+function Field({ label, children, hint, error }) {
   return (
     <label className="sg-cb-field">
       <span className="sg-cb-field-label">{label}</span>
       {children}
-      {hint ? <span className="sg-cb-field-hint">{hint}</span> : null}
+      {error
+        ? <span className="sg-cb-field-error">{error}</span>
+        : hint ? <span className="sg-cb-field-hint">{hint}</span> : null}
     </label>
   );
 }
@@ -146,6 +188,97 @@ function WizardSteps({ current }) {
           </span>
         </span>
       ))}
+    </div>
+  );
+}
+
+function AddonSelector({ catalog = [], value = [], onChange }) {
+  const selectedById = new Map(value.map((addon) => [addon.id, addon]));
+
+  const toggle = (addon, checked) => {
+    if (!checked) {
+      onChange(value.filter((item) => item.id !== addon.id));
+      return;
+    }
+    const version = addon.defaultVersion || addon.versions?.[0] || "";
+    onChange([...value.filter((item) => item.id !== addon.id), { id: addon.id, version }]);
+  };
+
+  const setVersion = (id, version) => {
+    onChange(value.map((addon) => addon.id === id ? { ...addon, version } : addon));
+  };
+
+  return (
+    <section className="sg-cb-form-section">
+      <div className="sg-cb-form-section-head">
+        <div>
+          <h4>Plugins &amp; cluster add-ons</h4>
+          <p className="muted">Optional, version-pinned components installed after the cluster is registered.</p>
+        </div>
+        <span className="muted">{value.length ? `${value.length} selected` : "None selected"}</span>
+      </div>
+      {catalog.length ? (
+        <div className="sg-cb-addon-grid">
+          {catalog.map((addon) => {
+            const selected = selectedById.get(addon.id);
+            const versions = addon.versions || [];
+            return (
+              <div key={addon.id} className={`sg-cb-addon-card ${selected ? "is-selected" : ""}`}>
+                <label className="sg-cb-addon-choice">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(selected)}
+                    onChange={(e) => toggle(addon, e.target.checked)}
+                  />
+                  <span>
+                    <span className="sg-cb-addon-title">
+                      <strong>{addon.displayName || addonDisplayName(addon)}</strong>
+                      {addon.supportTier ? <span className="sg-cb-addon-tier">{addon.supportTier}</span> : null}
+                    </span>
+                    {addon.description ? <span className="muted sg-cb-addon-description">{addon.description}</span> : null}
+                  </span>
+                </label>
+                {selected && versions.length ? (
+                  <label className="sg-cb-addon-version">
+                    <span>Version</span>
+                    <select value={selected.version} onChange={(e) => setVersion(addon.id, e.target.value)}>
+                      {versions.map((version) => <option key={version} value={version}>v{version}</option>)}
+                    </select>
+                  </label>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="muted sg-cb-form-section-empty">No optional add-ons are available for this builder.</p>
+      )}
+    </section>
+  );
+}
+
+function WizardConfigurationSummary({ basics, addonCatalog = [], buildProfile }) {
+  const endpoint = basics.endpointMode === "managed_haproxy"
+    ? `${basics.vipAddress}:6443`
+    : basics.controlPlaneEndpoint;
+  return (
+    <div className="card sg-cb-config-summary">
+      <div className="sg-cb-config-item">
+        <span className="sg-cb-config-label">Cluster</span>
+        <strong>v{basics.k8sVersion} · {basics.topologyType === "stacked_ha" ? "Highly available" : "Single control plane"}</strong>
+        <span className="muted">{basics.cniPlugin} · {endpoint}</span>
+      </div>
+      <div className="sg-cb-config-item">
+        <span className="sg-cb-config-label">Add-ons</span>
+        <AddonChips addons={basics.addons} catalog={addonCatalog} />
+      </div>
+      <div className="sg-cb-config-item">
+        <span className="sg-cb-config-label">Sources</span>
+        <strong>{buildProfile?.name || "Internet defaults"}</strong>
+        <span className="muted">
+          Images: {buildProfile?.k8sImageRegistry || "upstream registries"}
+        </span>
+      </div>
     </div>
   );
 }
@@ -242,12 +375,30 @@ function InfraSection({ title, description, items, columns, onDelete, form, test
   );
 }
 
+const EMPTY_REPO_FORM = {
+  name: "",
+  repoMode: "internet",
+  k8sPkgRepoUrl: "",
+  k8sImageRegistry: "",
+  cniImageRegistry: "",
+  addonImageRegistry: "",
+  registryUsername: "",
+  registryPassword: "",
+  extraCaCertsPem: "",
+  httpProxy: "",
+  httpsProxy: "",
+  noProxy: "",
+  offlineBundlePath: "",
+};
+
 function InfraTab({ notify, infra, reloadInfra }) {
   const { vsphere, credentials, profiles, buildProfiles } = infra;
   const [vsForm, setVsForm] = useState({ name: "", baseUrl: "", username: "", password: "", skipTlsVerify: false });
   const [credForm, setCredForm] = useState({ name: "", username: "", authMethod: "key", secret: "", sudoMode: "nopasswd", sudoPassword: "", port: 22 });
   const [profForm, setProfForm] = useState({ name: "", credentialId: "", routeMode: "direct", bastionHost: "", bastionCredentialId: "", hostKeyPolicy: "tofu" });
-  const [repoForm, setRepoForm] = useState({ name: "", repoMode: "internet", k8sPkgRepoUrl: "", k8sImageRegistry: "", cniImageRegistry: "", httpProxy: "", offlineBundlePath: "" });
+  const [repoForm, setRepoForm] = useState({ ...EMPTY_REPO_FORM });
+  const [useImageProxy, setUseImageProxy] = useState(false);
+  const [sameImagePrefix, setSameImagePrefix] = useState(true);
   const [testHost, setTestHost] = useState("");
 
   const submit = async (fn, close) => {
@@ -258,6 +409,110 @@ function InfraTab({ notify, infra, reloadInfra }) {
     } catch (err) {
       notify(err.message || String(err), true);
     }
+  };
+
+  const imagePrefixError = (value, required = false) => {
+    const prefix = String(value || "").trim();
+    if (!prefix) return required ? "Enter a registry host or repository prefix." : "";
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(prefix)) return "Use an image prefix without http:// or https://.";
+    if (/\s/.test(prefix)) return "Image prefixes cannot contain spaces.";
+    return "";
+  };
+
+  const k8sImageError = useImageProxy
+    ? imagePrefixError(repoForm.k8sImageRegistry, true)
+    : "";
+  const cniImageError = useImageProxy && !sameImagePrefix
+    ? imagePrefixError(repoForm.cniImageRegistry)
+    : "";
+  const addonImageError = useImageProxy && !sameImagePrefix
+    ? imagePrefixError(repoForm.addonImageRegistry)
+    : "";
+  const configuredRegistryAuthorities = new Set(
+    (sameImagePrefix
+      ? [repoForm.k8sImageRegistry]
+      : [
+        repoForm.k8sImageRegistry,
+        repoForm.cniImageRegistry,
+        repoForm.addonImageRegistry,
+      ])
+      .map((prefix) => prefix.trim().replace(/\/+$/, "").split("/", 1)[0])
+      .filter(Boolean)
+  );
+  const hasRegistryAuth = Boolean(
+    repoForm.registryUsername.trim() || repoForm.registryPassword
+  );
+  const registryAuthError = useImageProxy &&
+    Boolean(repoForm.registryUsername.trim()) !== Boolean(repoForm.registryPassword)
+    ? "Provide both username and password, or leave both blank for anonymous access."
+    : useImageProxy && hasRegistryAuth && configuredRegistryAuthorities.size !== 1
+      ? "One credential pair can only be used with one registry authority."
+      : "";
+  const forwardProxyError = (value) => {
+    const raw = value.trim();
+    if (!raw) return "";
+    try {
+      const parsed = new URL(raw);
+      if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) {
+        return "Use a valid http:// or https:// proxy URL.";
+      }
+      if (parsed.username || parsed.password) {
+        return "Authenticated forward-proxy URLs are not supported; omit credentials.";
+      }
+      if ((parsed.pathname && parsed.pathname !== "/") || parsed.search || parsed.hash) {
+        return "Use only scheme, host, and an optional port.";
+      }
+      return "";
+    } catch {
+      return "Use a valid http:// or https:// proxy URL.";
+    }
+  };
+  const httpProxyError = forwardProxyError(repoForm.httpProxy);
+  const httpsProxyError = forwardProxyError(repoForm.httpsProxy);
+  const extraCaError = repoForm.extraCaCertsPem.trim() &&
+    (!repoForm.extraCaCertsPem.includes("-----BEGIN CERTIFICATE-----") ||
+      !repoForm.extraCaCertsPem.includes("-----END CERTIFICATE-----"))
+    ? "Paste a PEM-encoded CA certificate."
+    : "";
+  const repoFormValid = Boolean(
+    repoForm.name.trim() &&
+    (repoForm.repoMode !== "mirror" || repoForm.k8sPkgRepoUrl.trim()) &&
+    (repoForm.repoMode !== "offline" || repoForm.offlineBundlePath.trim()) &&
+    !k8sImageError && !cniImageError && !addonImageError &&
+    !registryAuthError && !extraCaError &&
+    !httpProxyError && !httpsProxyError
+  );
+
+  const saveRepoProfile = (close) => {
+    const sharedPrefix = repoForm.k8sImageRegistry.trim().replace(/\/+$/, "");
+    const payload = {
+      ...repoForm,
+      name: repoForm.name.trim(),
+      k8sPkgRepoUrl: repoForm.k8sPkgRepoUrl.trim(),
+      offlineBundlePath: repoForm.offlineBundlePath.trim(),
+      k8sImageRegistry: useImageProxy ? sharedPrefix : "",
+      cniImageRegistry: useImageProxy
+        ? (sameImagePrefix ? sharedPrefix : repoForm.cniImageRegistry.trim().replace(/\/+$/, ""))
+        : "",
+      addonImageRegistry: useImageProxy
+        ? (sameImagePrefix ? sharedPrefix : repoForm.addonImageRegistry.trim().replace(/\/+$/, ""))
+        : "",
+      registryUsername: useImageProxy ? repoForm.registryUsername.trim() : "",
+      registryPassword: useImageProxy ? repoForm.registryPassword : "",
+      extraCaCertsPem: repoForm.extraCaCertsPem.trim(),
+      httpProxy: repoForm.httpProxy.trim(),
+      httpsProxy: repoForm.httpsProxy.trim(),
+      noProxy: repoForm.noProxy.trim(),
+    };
+    submit(
+      () => createBuildProfile(payload),
+      () => {
+        setRepoForm({ ...EMPTY_REPO_FORM });
+        setUseImageProxy(false);
+        setSameImagePrefix(true);
+        close();
+      }
+    );
   };
 
   return (
@@ -433,39 +688,198 @@ function InfraTab({ notify, infra, reloadInfra }) {
 
       <InfraSection
         title="Repository profiles"
-        description="Where packages and images come from: internet (dev/test), internal mirror (production default), or a fully offline bundle."
+        description="Choose package and image sources independently, including a private registry proxy or fully offline bundle."
         items={buildProfiles}
         columns={[
           { key: "name", label: "Name" },
-          { key: "repoMode", label: "Mode" },
-          { key: "k8sImageRegistry", label: "Image registry" },
+          { key: "repoMode", label: "Package source" },
+          {
+            key: "k8sImageRegistry",
+            label: "Image source",
+            render: (item) => item.k8sImageRegistry || "Upstream registries",
+          },
         ]}
         onDelete={(item) => submit(() => deleteBuildProfile(item.id), () => {})}
         form={(close) => (
           <div className="sg-cb-form-grid">
-            <Field label="Name"><input value={repoForm.name} onChange={(e) => setRepoForm({ ...repoForm, name: e.target.value })} /></Field>
-            <Field label="Mode">
+            <Field label="Name">
+              <input
+                value={repoForm.name}
+                onChange={(e) => setRepoForm({ ...repoForm, name: e.target.value })}
+                placeholder="Production sources"
+                required
+              />
+            </Field>
+            <Field label="Package source">
               <select value={repoForm.repoMode} onChange={(e) => setRepoForm({ ...repoForm, repoMode: e.target.value })}>
-                <option value="internet">Internet (dev/test)</option>
-                <option value="mirror">Internal mirror</option>
+                <option value="internet">Upstream internet repositories</option>
+                <option value="mirror">Internal package mirror</option>
                 <option value="offline">Offline bundle</option>
               </select>
             </Field>
-            {repoForm.repoMode !== "internet" ? (
-              <>
-                <Field label="Kubernetes package repo" hint="{minor} is replaced, e.g. …/v{minor}/deb/">
-                  <input value={repoForm.k8sPkgRepoUrl} onChange={(e) => setRepoForm({ ...repoForm, k8sPkgRepoUrl: e.target.value })} />
-                </Field>
-                <Field label="Kubernetes image registry"><input value={repoForm.k8sImageRegistry} onChange={(e) => setRepoForm({ ...repoForm, k8sImageRegistry: e.target.value })} /></Field>
-                <Field label="CNI image registry"><input value={repoForm.cniImageRegistry} onChange={(e) => setRepoForm({ ...repoForm, cniImageRegistry: e.target.value })} /></Field>
-              </>
+            {repoForm.repoMode === "mirror" ? (
+              <Field label="Kubernetes package repository" hint="{minor} is replaced, for example …/v{minor}/deb/.">
+                <input
+                  value={repoForm.k8sPkgRepoUrl}
+                  onChange={(e) => setRepoForm({ ...repoForm, k8sPkgRepoUrl: e.target.value })}
+                  placeholder="https://packages.example/kubernetes/v{minor}/deb/"
+                  required
+                />
+              </Field>
             ) : null}
             {repoForm.repoMode === "offline" ? (
-              <Field label="Offline bundle path"><input value={repoForm.offlineBundlePath} onChange={(e) => setRepoForm({ ...repoForm, offlineBundlePath: e.target.value })} /></Field>
+              <Field label="Offline bundle path">
+                <input
+                  value={repoForm.offlineBundlePath}
+                  onChange={(e) => setRepoForm({ ...repoForm, offlineBundlePath: e.target.value })}
+                  placeholder="/srv/kubesight/bundles/k8s"
+                  required
+                />
+              </Field>
             ) : null}
-            <Field label="HTTP proxy (optional)"><input value={repoForm.httpProxy} onChange={(e) => setRepoForm({ ...repoForm, httpProxy: e.target.value })} /></Field>
+
+            <section className="sg-cb-profile-section">
+              <div className="sg-cb-profile-section-head">
+                <div>
+                  <h4>Image source</h4>
+                  <p className="muted">Pull directly from upstream registries or rewrite builder-managed images through a registry proxy.</p>
+                </div>
+                <label className="sg-cb-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={useImageProxy}
+                    onChange={(e) => setUseImageProxy(e.target.checked)}
+                  />
+                  Use registry proxy
+                </label>
+              </div>
+              {useImageProxy ? (
+                <div className="sg-cb-profile-subgrid">
+                  <Field
+                    label="Kubernetes image prefix"
+                    hint="Registry host or repository prefix, without a URL scheme."
+                    error={k8sImageError}
+                  >
+                    <input
+                      value={repoForm.k8sImageRegistry}
+                      onChange={(e) => setRepoForm({ ...repoForm, k8sImageRegistry: e.target.value })}
+                      placeholder="nexus.example:5000/kubernetes"
+                      aria-invalid={Boolean(k8sImageError)}
+                      required
+                    />
+                  </Field>
+                  <label className="sg-cb-inline-check sg-cb-span-all">
+                    <input
+                      type="checkbox"
+                      checked={sameImagePrefix}
+                      onChange={(e) => setSameImagePrefix(e.target.checked)}
+                    />
+                    Use the same prefix for CNI and add-on images
+                  </label>
+                  <Field
+                    label="CNI image prefix"
+                    hint={sameImagePrefix
+                      ? "Using the Kubernetes image prefix."
+                      : "Optional; leave blank to keep the manifest's upstream registry."}
+                    error={cniImageError}
+                  >
+                    <input
+                      value={sameImagePrefix ? repoForm.k8sImageRegistry : repoForm.cniImageRegistry}
+                      onChange={(e) => setRepoForm({ ...repoForm, cniImageRegistry: e.target.value })}
+                      placeholder="nexus.example:5000/networking"
+                      aria-invalid={Boolean(cniImageError)}
+                      disabled={sameImagePrefix}
+                    />
+                  </Field>
+                  <Field
+                    label="Add-on image prefix"
+                    hint={sameImagePrefix
+                      ? "Using the Kubernetes image prefix."
+                      : "Optional; used by selected cluster add-ons."}
+                    error={addonImageError}
+                  >
+                    <input
+                      value={sameImagePrefix ? repoForm.k8sImageRegistry : repoForm.addonImageRegistry}
+                      onChange={(e) => setRepoForm({ ...repoForm, addonImageRegistry: e.target.value })}
+                      placeholder="nexus.example:5000/addons"
+                      aria-invalid={Boolean(addonImageError)}
+                      disabled={sameImagePrefix}
+                    />
+                  </Field>
+                  <Field label="Registry username (optional)" error={registryAuthError}>
+                    <input
+                      value={repoForm.registryUsername}
+                      onChange={(e) => setRepoForm({ ...repoForm, registryUsername: e.target.value })}
+                      autoComplete="off"
+                      aria-invalid={Boolean(registryAuthError)}
+                    />
+                  </Field>
+                  <Field label="Registry password (optional)">
+                    <input
+                      type="password"
+                      value={repoForm.registryPassword}
+                      onChange={(e) => setRepoForm({ ...repoForm, registryPassword: e.target.value })}
+                      autoComplete="new-password"
+                      aria-invalid={Boolean(registryAuthError)}
+                    />
+                  </Field>
+                </div>
+              ) : (
+                <p className="muted sg-cb-profile-note">Images will use their standard upstream registries.</p>
+              )}
+            </section>
+
+            <section className="sg-cb-profile-section">
+              <div className="sg-cb-profile-section-head">
+                <div>
+                  <h4>Outbound network proxy</h4>
+                  <p className="muted">Optional HTTP(S) egress settings for package and manifest downloads. This is separate from the image registry proxy.</p>
+                </div>
+              </div>
+              <div className="sg-cb-profile-subgrid">
+                <Field label="HTTP proxy (optional)" error={httpProxyError}>
+                  <input
+                    type="url"
+                    value={repoForm.httpProxy}
+                    onChange={(e) => setRepoForm({ ...repoForm, httpProxy: e.target.value })}
+                    placeholder="http://proxy.example:3128"
+                    aria-invalid={Boolean(httpProxyError)}
+                  />
+                </Field>
+                <Field label="HTTPS proxy (optional)" error={httpsProxyError}>
+                  <input
+                    type="url"
+                    value={repoForm.httpsProxy}
+                    onChange={(e) => setRepoForm({ ...repoForm, httpsProxy: e.target.value })}
+                    placeholder="http://proxy.example:3128"
+                    aria-invalid={Boolean(httpsProxyError)}
+                  />
+                </Field>
+                <Field label="NO_PROXY (optional)" hint="Comma-separated hosts, domains, or CIDRs that should bypass the outbound proxy.">
+                  <input
+                    value={repoForm.noProxy}
+                    onChange={(e) => setRepoForm({ ...repoForm, noProxy: e.target.value })}
+                    placeholder=".cluster.local,10.0.0.0/8"
+                  />
+                </Field>
+                <Field
+                  label="Trusted CA certificates (optional)"
+                  hint="Trust an internal registry, package mirror, or TLS-inspecting outbound proxy."
+                  error={extraCaError}
+                >
+                  <textarea
+                    rows={4}
+                    value={repoForm.extraCaCertsPem}
+                    onChange={(e) => setRepoForm({ ...repoForm, extraCaCertsPem: e.target.value })}
+                    placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
+                    aria-invalid={Boolean(extraCaError)}
+                  />
+                </Field>
+              </div>
+            </section>
+
             <div className="sg-cb-form-actions">
-              <button className="primary" onClick={() => submit(() => createBuildProfile(repoForm), close)}>Save profile</button>
+              <button className="primary" disabled={!repoFormValid} onClick={() => saveRepoProfile(close)}>Save profile</button>
             </div>
           </div>
         )}
@@ -488,6 +902,7 @@ const EMPTY_BASICS = {
   cniPlugin: "calico",
   podCidr: "10.244.0.0/16",
   serviceCidr: "10.96.0.0/12",
+  addons: [],
   vsphereConnectionId: "",
   buildProfileId: "",
   connectionProfileId: "",
@@ -764,6 +1179,9 @@ function WizardTab({ options, infra, notify, onBuildLaunched }) {
 
   const buildEnabled = preflightResult && preflightResult.status !== "fail" &&
     (preflightResult.status === "pass" || acked) && !busy;
+  const selectedBuildProfile = infra.buildProfiles.find(
+    (profile) => String(profile.id) === String(basics.buildProfileId)
+  );
 
   return (
     <div className="sg-cb-wizard">
@@ -816,6 +1234,11 @@ function WizardTab({ options, infra, notify, onBuildLaunched }) {
             </Field>
             <Field label="Pod CIDR"><input value={basics.podCidr} onChange={(e) => setBasics({ ...basics, podCidr: e.target.value })} /></Field>
             <Field label="Service CIDR"><input value={basics.serviceCidr} onChange={(e) => setBasics({ ...basics, serviceCidr: e.target.value })} /></Field>
+            <AddonSelector
+              catalog={options.addons || []}
+              value={basics.addons}
+              onChange={(addons) => setBasics({ ...basics, addons })}
+            />
             <Field label="vSphere connection" hint="Optional — enables the VM picker">
               <select value={basics.vsphereConnectionId} onChange={(e) => setBasics({ ...basics, vsphereConnectionId: e.target.value })}>
                 <option value="">None (manual hosts)</option>
@@ -967,6 +1390,11 @@ function WizardTab({ options, infra, notify, onBuildLaunched }) {
 
       {step === 2 && preflightResult && verdict ? (
         <div className="sg-cb-vstack">
+          <WizardConfigurationSummary
+            basics={basics}
+            addonCatalog={options.addons || []}
+            buildProfile={selectedBuildProfile}
+          />
           <div className="card sg-cb-verdict">
             <div className="sg-cb-ring" style={ringStyle} role="img"
                  aria-label={`${verdict.pass} of ${verdict.total} checks pass`}>
@@ -1058,6 +1486,7 @@ function expectedPhases(build) {
     if (phase === "loadbalancer") return build.endpointMode === "managed_haproxy";
     if (phase === "join_cp") return (build.nodeCounts?.controlPlane || 0) > 1;
     if (phase === "join_workers") return (build.nodeCounts?.worker || 0) > 0;
+    if (phase === "addons") return (build.addons || []).length > 0;
     return true;
   });
 }
@@ -1118,7 +1547,15 @@ function BuildProgress({ build, now }) {
 const LOG_REFRESH_MS = 2500;
 const DETAIL_POLL_INTERVAL_MS = 2500;
 
-function BuildDetail({ buildId, canExecute, notify, onBack, onDeleted }) {
+function BuildDetail({
+  buildId,
+  canExecute,
+  notify,
+  onBack,
+  onDeleted,
+  addonCatalog = [],
+  buildProfiles = [],
+}) {
   const [build, setBuild] = useState(null);
   const [logs, setLogs] = useState(null);
   // The step we're viewing: {id, nodeId, phase}.
@@ -1271,6 +1708,9 @@ function BuildDetail({ buildId, canExecute, notify, onBack, onDeleted }) {
 
   const duration = buildDuration(build);
   const isDone = build.status === "completed";
+  const buildProfile = buildProfiles.find(
+    (profile) => String(profile.id) === String(build.buildProfileId)
+  );
 
   return (
     <div className="sg-cb-detail">
@@ -1310,6 +1750,23 @@ function BuildDetail({ buildId, canExecute, notify, onBack, onDeleted }) {
       {build.error ? <ErrorBanner message={build.error} /> : null}
 
       {build.status === "building" ? <BuildProgress build={build} now={now} /> : null}
+
+      <div className="card sg-cb-config-summary sg-cb-detail-config">
+        <div className="sg-cb-config-item">
+          <span className="sg-cb-config-label">Add-ons</span>
+          <AddonChips addons={build.addons || []} catalog={addonCatalog} />
+        </div>
+        <div className="sg-cb-config-item">
+          <span className="sg-cb-config-label">Image source</span>
+          <strong className="sg-cb-mono">{buildProfile?.k8sImageRegistry || "Upstream registries"}</strong>
+          {buildProfile?.k8sImageRegistry ? <span className="muted">Registry proxy</span> : null}
+        </div>
+        <div className="sg-cb-config-item">
+          <span className="sg-cb-config-label">Package source</span>
+          <strong>{buildProfile?.name || "Internet defaults"}</strong>
+          <span className="muted">{buildProfile?.repoMode || "internet"}</span>
+        </div>
+      </div>
 
       {isDone ? (
         <>
@@ -1510,6 +1967,8 @@ export default function ClusterBuilderPage({ canCreate = false, canExecute = fal
           notify={notify}
           onBack={() => { setSelectedBuildId(null); reloadBuilds(); }}
           onDeleted={() => { setSelectedBuildId(null); reloadBuilds(); }}
+          addonCatalog={options?.addons || []}
+          buildProfiles={infra.buildProfiles}
         />
       ) : null}
 
@@ -1530,6 +1989,16 @@ export default function ClusterBuilderPage({ canCreate = false, canExecute = fal
                     <div className="muted">
                       v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"} · {build.cniPlugin}
                       {build.vipAddress ? <> · VIP <span className="sg-cb-mono">{build.vipAddress}</span></> : null}
+                    </div>
+                    <div className="sg-cb-build-card-config">
+                      <span>
+                        {(build.addons || []).length
+                          ? addonSummary(build.addons, options?.addons || [], true)
+                          : "No add-ons"}
+                      </span>
+                      {infra.buildProfiles.find(
+                        (profile) => String(profile.id) === String(build.buildProfileId)
+                      )?.k8sImageRegistry ? <span>Registry proxy</span> : null}
                     </div>
                     <ShapeGlyph shape={build.nodeShape} buildStatus={build.status} />
                     {build.resultClusterId ? (

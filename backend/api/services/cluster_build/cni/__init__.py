@@ -2,9 +2,9 @@
 
 Each plugin is a ``CniDescriptor`` with a closed set of tested versions —
 users pick from the list, never paste manifest URLs. Manifests are preferred
-from the bundled data dir (``backend/api/data/cni/<id>/<version>/``) so mirror
-and offline modes have nothing to fetch; internet mode falls back to the
-pinned upstream URL.
+from the bundled data dir (``backend/api/data/cni/<id>/<version>/``).
+Non-offline modes may fetch the integrity-pinned upstream URL through the
+configured outbound proxy; offline mode requires the bundled copy.
 
 Tiers: calico=production (default), flannel=lab, cilium=experimental (hidden
 unless KUBESIGHT_ENABLE_CILIUM=true — its kernel/kube-proxy prerequisites are

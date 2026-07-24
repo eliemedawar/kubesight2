@@ -31,6 +31,10 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _BEARER_RE = re.compile(r"(Authorization:\s*Bearer\s+)\S+", re.IGNORECASE)
+# Credentials embedded in an outbound proxy URL, e.g. http://user:pass@proxy.
+_URI_PASSWORD_RE = re.compile(
+    r"((?:https?://)[^/\s:@]+:)[^@\s/]+(@)", re.IGNORECASE
+)
 _PRIVATE_KEY_BLOCK_RE = re.compile(
     r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
     re.DOTALL,
@@ -52,6 +56,7 @@ def scrub(text: str) -> str:
     text = _PASSWORD_LINE_RE.sub(rf"\1{_REDACTED}", text)
     text = _SECRET_ASSIGNMENT_RE.sub(rf"\1{_REDACTED}", text)
     text = _BEARER_RE.sub(rf"\1{_REDACTED}", text)
+    text = _URI_PASSWORD_RE.sub(rf"\1{_REDACTED}\2", text)
     text = _PRIVATE_KEY_BLOCK_RE.sub(_REDACTED, text)
     text = _KUBECONFIG_KEY_RE.sub(rf"\1{_REDACTED}", text)
     return text

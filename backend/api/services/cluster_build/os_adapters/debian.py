@@ -7,6 +7,7 @@ serving both upgrades and builds.
 
 from __future__ import annotations
 
+import base64
 from typing import Optional
 
 from ....upgrade_executor import _APT_SHELL_PREAMBLE
@@ -32,11 +33,15 @@ class DebianAdapter(OsAdapter):
     def script_configure_ca(self, ctx: ScriptContext) -> Optional[str]:
         pem = ctx.profile.extra_ca_certs_pem.strip()
         if not pem:
-            return None
+            return f"""{shell_preamble(ctx)}
+rm -f -- /usr/local/share/ca-certificates/kubesight-extra.crt
+update-ca-certificates
+"""
+        pem_b64 = base64.b64encode(pem.encode("ascii")).decode("ascii")
         return f"""{shell_preamble(ctx)}
-cat > /usr/local/share/ca-certificates/kubesight-extra.crt <<'KS_CA_EOF'
-{pem}
-KS_CA_EOF
+rm -f -- /usr/local/share/ca-certificates/kubesight-extra.crt
+echo "{pem_b64}" | base64 -d > /usr/local/share/ca-certificates/kubesight-extra.crt
+chmod 644 /usr/local/share/ca-certificates/kubesight-extra.crt
 update-ca-certificates
 """
 

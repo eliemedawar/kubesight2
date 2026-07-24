@@ -72,6 +72,7 @@ export const NAV_PAGES = [
   },
   { key: "namespaces", label: "Namespaces", permission: "namespaces:view", section: "Infrastructure" },
   { key: "resources", label: "Resources", permission: "resources:view", section: "Infrastructure" },
+  { key: "topology", label: "Topology", permission: "resources:view", section: "Infrastructure" },
 
   // Inventory
   { key: "inventory", label: "Inventory", permission: "inventory:view", section: "Inventory" },
@@ -189,6 +190,7 @@ export const CLUSTER_CONTEXT_PAGE_KEYS = new Set([
   "applicationDetails",
   "namespaces",
   "resources",
+  "topology",
   "logs",
   "alerts",
   "upgrade",
@@ -998,6 +1000,11 @@ export function pageAllowed(user, pageKey) {
       );
     case "resources":
       return canAccessResourcesPage(user);
+    case "topology":
+      return (
+        hasPermission(user, "resources:view") &&
+        (isAdminUser(user) || hasAnyClusterAccess(user))
+      );
     case "logs":
       return canAccessLogsPage(user);
     case "alerts":

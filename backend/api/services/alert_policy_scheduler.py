@@ -43,11 +43,24 @@ def _component_health_refresh_enabled() -> bool:
 
 
 def _should_start_in_process() -> bool:
-    """Avoid duplicate schedulers under Flask/Werkzeug debug reloader parent process."""
-    if os.environ.get("WERKZEU_RUN_MAIN") == "true":
-        return True
-    if os.environ.get("WERKZEU_RUN_RELOAD") == "true":
-        return False
+    """Run once under Werkzeug's debug reloader, normally otherwise.
+
+    Werkzeug imports the app in both the reloader parent and its serving child.
+    Only the child sets ``WERKZEUG_RUN_MAIN=true``. Starting a scheduler in
+    both processes gives each one a separate in-memory worker registry, so the
+    parent can misclassify a live Cluster Builder run as orphaned.
+    """
+    run_main = os.environ.get("WERKZEUG_RUN_MAIN", "").strip().lower()
+    debug = os.environ.get("FLASK_DEBUG", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if debug:
+        return run_main == "true"
+    if run_main:
+        return run_main == "true"
     return True
 
 

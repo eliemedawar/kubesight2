@@ -71,6 +71,7 @@ from ..services.resource_actions_service import (
     get_resource_yaml,
     restart_resource,
 )
+from ..services.topology_service import build_cluster_topology, build_namespace_topology
 
 clusters_bp = Blueprint("clusters", __name__, url_prefix="/api/clusters")
 
@@ -115,6 +116,19 @@ def _resolve_cluster_access_or_error(cluster_id: str):
             return None, error_response("Cluster not found", 404)
         return access, None
     return None, None
+
+
+def _cluster_display_name(cluster_id: str) -> Optional[str]:
+    """Best-effort human name for a cluster id (falls back to the id)."""
+    try:
+        payload = _list_clusters_payload()
+        if isinstance(payload, dict):
+            for item in payload.get("items", []):
+                if item.get("id") == cluster_id:
+                    return item.get("name")
+    except Exception:
+        pass
+    return None
 
 
 @clusters_bp.route("", methods=["GET"])
@@ -622,6 +636,109 @@ def cluster_pod_issues(cluster_id: str):
         pods.extend(ns_pods)
     pods.sort(key=lambda p: ((p.get("namespace") or ""), (p.get("name") or "")))
     return success_response({"clusterId": cluster_id, "pods": pods, "count": len(pods)})
+
+
+@clusters_bp.route("/<cluster_id>/topology", methods=["GET"])
+@require_permission("resources:view")
+@require_cluster_access
+def cluster_topology(cluster_id: str):
+    """Level 1 automatic topology: the cluster fanning out to its namespaces
+    (logical) and worker nodes (physical)."""
+    user = get_current_user()
+    access, err = _resolve_cluster_access_or_error(cluster_id)
+    if err:
+        return err
+
+    if access:
+        try:
+            from ..k8s_provider import list_namespace_counts_from_k8s
+
+            namespaces = list_namespace_counts_from_k8s(access).get("items", [])
+            nodes = list_nodes_from_k8s(access)
+            try:
+                issue_pods = cluster_pod_issues_from_k8s(access).get("pods", [])
+            except K8sCommandError:
+                issue_pods = []
+        except K8sCommandError as exc:
+            return error_response(f"Failed to build cluster topology: {exc}", 503)
+    else:
+        namespaces = NAMESPACES.get(cluster_id)
+        if namespaces is None:
+            return error_response("Cluster not found", 404)
+        nodes = CLUSTER_NODES.get(cluster_id) or []
+        # Derive namespace health from problem pods in the canned resources.
+        issue_pods = []
+        for ns_name, resources in (NAMESPACE_RESOURCES.get(cluster_id) or {}).items():
+            for pod in resources.get("pods") or []:
+                if is_issue_pod_status(pod.get("status")):
+                    issue_pods.append({**pod, "namespace": pod.get("namespace") or ns_name})
+
+    if user:
+        namespaces = filter_namespaces_for_user(user, cluster_id, namespaces)
+
+    topology = build_cluster_topology(
+        cluster_id, _cluster_display_name(cluster_id), namespaces, nodes, issue_pods
+    )
+    return success_response(
+        {"clusterId": cluster_id, "level": "cluster", "topology": topology}
+    )
+
+
+@clusters_bp.route("/<cluster_id>/namespaces/<namespace>/topology", methods=["GET"])
+@require_permission("resources:view")
+@require_cluster_access
+@require_namespace_access
+def namespace_topology(cluster_id: str, namespace: str):
+    """Level 2 automatic topology: one namespace's pods, with
+    ``Ingress → Service → pod`` edges (flat pods)."""
+    user = get_current_user()
+    if user and not is_admin(user) and not can_access_namespace(user, cluster_id, namespace):
+        from ..audit import log_audit
+
+        log_audit(
+            "forbidden_access_attempt",
+            actor=user,
+            target_type="namespace",
+            target_id=f"{cluster_id}/{namespace}",
+        )
+        return error_response("Forbidden", 403)
+
+    access, err = _resolve_cluster_access_or_error(cluster_id)
+    if err:
+        return err
+
+    if access:
+        try:
+            pods = namespace_resource_list_from_k8s(access, namespace, "pods").get("pods", [])
+            services = namespace_resource_list_from_k8s(access, namespace, "services").get(
+                "services", []
+            )
+            ingresses = namespace_resource_list_from_k8s(access, namespace, "ingress").get(
+                "ingress", []
+            )
+        except K8sCommandError as exc:
+            return error_response(f"Failed to build namespace topology: {exc}", 503)
+    else:
+        namespaces = NAMESPACES.get(cluster_id)
+        if namespaces is None:
+            return error_response("Cluster not found", 404)
+        namespace_names = {item.get("name") for item in namespaces}
+        if namespace not in namespace_names:
+            return error_response("Namespace not found", 404)
+        resources = (NAMESPACE_RESOURCES.get(cluster_id) or {}).get(namespace) or {}
+        pods = resources.get("pods") or []
+        services = resources.get("services") or []
+        ingresses = resources.get("ingress") or []
+
+    topology = build_namespace_topology(namespace, pods, services, ingresses)
+    return success_response(
+        {
+            "clusterId": cluster_id,
+            "namespace": namespace,
+            "level": "namespace",
+            "topology": topology,
+        }
+    )
 
 
 @clusters_bp.route(

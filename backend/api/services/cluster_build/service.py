@@ -24,9 +24,11 @@ from ...models import (
 from ...secret_encryption import encrypt_secret
 from .. import ssh_profile_service, vsphere_service
 from ..vsphere_client import VSphereError
+from . import addons as addon_registry
 from . import cni as cni_registry
 from . import executor, os_adapters, preflight
 from .profiles import resolve as resolve_profile
+from .scrub import scrub
 
 _ENDPOINT_MODES = {"managed_haproxy", "external_lb", "manual_endpoint"}
 _TOPOLOGIES = {"single_cp", "stacked_ha"}
@@ -36,6 +38,8 @@ _EDITABLE_STATUSES = {"draft", "preflight_passed", "preflight_failed"}
 SUPPORTED_K8S_VERSIONS = ("1.32.4", "1.31.8", "1.30.12", "1.29.15")
 
 _ENDPOINT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.\-]*(:\d{1,5})?$")
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+_IFNAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
 
 
 def _iso(dt) -> Optional[str]:
@@ -89,7 +93,7 @@ def serialize_step(step: ClusterBuildStep) -> Dict[str, Any]:
 
 _PHASE_ORDER = (
     "base_prep", "loadbalancer", "pull_images", "init", "cni",
-    "join_cp", "join_workers", "verify", "onboard",
+    "join_cp", "join_workers", "verify", "onboard", "addons",
 )
 
 
@@ -123,6 +127,7 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
         "cniVersion": build.cni_version,
         "podCidr": build.pod_cidr,
         "serviceCidr": build.service_cidr,
+        "addons": list(build.addons_json or []),
         "vsphereConnectionId": build.vsphere_connection_id,
         "buildProfileId": build.build_profile_id,
         "connectionProfileId": build.connection_profile_id,
@@ -183,12 +188,72 @@ def _validate_cidr(value: str, field: str) -> str:
     return value
 
 
+def _validate_dns_subdomain(value: str, field: str) -> str:
+    value = str(value or "").strip()
+    labels = value.split(".")
+    if (
+        not value
+        or len(value) > 253
+        or any(
+            not label
+            or len(label) > 63
+            or not _DNS_LABEL_RE.fullmatch(label)
+            for label in labels
+        )
+    ):
+        raise ValueError(
+            f"{field} must be a lowercase Kubernetes DNS subdomain."
+        )
+    return value
+
+
+def _validate_node_address(value: str) -> str:
+    value = str(value or "").strip()
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return _validate_dns_subdomain(value.lower(), "node address")
+
+
+def _validate_interface(value: str) -> str:
+    value = str(value or "").strip()
+    if not _IFNAME_RE.fullmatch(value):
+        raise ValueError(
+            "vipInterface must be a Linux interface name using only "
+            "letters, digits, '_', '.', ':', or '-' (maximum 15 characters)."
+        )
+    return value
+
+
 def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List[str]:
     """Returns warnings; raises on hard violations."""
     warnings: List[str] = []
     cp_count = sum(1 for n in nodes if n.get("role") == "control_plane")
     lb_count = sum(1 for n in nodes if n.get("role") == "loadbalancer")
     worker_count = sum(1 for n in nodes if n.get("role") == "worker")
+
+    if build.vip_interface:
+        _validate_interface(build.vip_interface)
+    effective_node_names = []
+    for node in nodes:
+        address = _validate_node_address(str(node.get("address") or ""))
+        hostname = str(node.get("hostname") or "").strip()
+        if hostname:
+            _validate_dns_subdomain(hostname, "node hostname")
+        if node.get("role") != "loadbalancer":
+            effective_node_names.append(_validate_dns_subdomain(
+                hostname or address,
+                "Kubernetes node name",
+            ))
+    duplicate_names = sorted({
+        name for name in effective_node_names
+        if effective_node_names.count(name) > 1
+    })
+    if duplicate_names:
+        raise ValueError(
+            "Kubernetes node names must be unique (duplicates: "
+            f"{', '.join(duplicate_names)})."
+        )
 
     if build.topology_type == "single_cp":
         if cp_count != 1:
@@ -223,6 +288,50 @@ def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List
         raise ValueError(
             f"{build.endpoint_mode} endpoint mode does not use load-balancer nodes."
         )
+    if worker_count == 0 and build.addons_json:
+        labels = []
+        for item in build.addons_json:
+            descriptor = addon_registry.get(str(item.get("id") or ""))
+            labels.append(
+                descriptor.display_name if descriptor is not None
+                else str(item.get("id") or "unknown")
+            )
+        names = ", ".join(labels)
+        raise ValueError(
+            f"Selected add-ons ({names}) require at least one worker node; "
+            "kubeadm control planes are tainted against normal workloads."
+        )
+    if any(
+        item.get("id") == "metrics-server"
+        for item in (build.addons_json or [])
+    ):
+        missing_hostnames = [
+            str(node.get("address") or "unknown")
+            for node in nodes
+            if node.get("role") != "loadbalancer"
+            and not str(node.get("hostname") or "").strip()
+        ]
+        if missing_hostnames:
+            raise ValueError(
+                "Metrics Server requires an explicit hostname for every "
+                "Kubernetes node so serving certificates can be approved "
+                f"safely (missing: {', '.join(missing_hostnames)})."
+            )
+        invalid_addresses = []
+        for node in nodes:
+            if node.get("role") == "loadbalancer":
+                continue
+            address = str(node.get("address") or "")
+            try:
+                ipaddress.ip_address(address)
+            except ValueError:
+                invalid_addresses.append(address or "unknown")
+        if invalid_addresses:
+            raise ValueError(
+                "Metrics Server's serving-certificate policy requires node "
+                "addresses to be IP literals (invalid: "
+                f"{', '.join(invalid_addresses)})."
+            )
     if worker_count == 0:
         warnings.append("No worker nodes: workloads will need control-plane tolerations.")
     return warnings
@@ -280,7 +389,8 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         build.control_plane_endpoint = endpoint
 
     if "vipInterface" in payload:
-        build.vip_interface = str(payload.get("vipInterface") or "").strip() or None
+        value = str(payload.get("vipInterface") or "").strip()
+        build.vip_interface = _validate_interface(value) if value else None
     if "vrrpRouterId" in payload and payload.get("vrrpRouterId"):
         router_id = int(payload["vrrpRouterId"])
         if router_id < 1 or router_id > 255:
@@ -309,6 +419,13 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
     build.service_cidr = _validate_cidr(
         payload.get("serviceCidr", build.service_cidr or "10.96.0.0/12"), "serviceCidr"
     )
+    if "addons" in payload and "plugins" in payload:
+        raise ValueError("Use either addons or plugins, not both.")
+    if "addons" in payload:
+        build.addons_json = addon_registry.normalize_selection(payload.get("addons"))
+    elif "plugins" in payload:
+        # Friendly alias for callers using the UI's "Plugins & add-ons" label.
+        build.addons_json = addon_registry.normalize_selection(payload.get("plugins"))
 
     for key, attr in (
         ("vsphereConnectionId", "vsphere_connection_id"),
@@ -318,6 +435,10 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         if key in payload:
             value = payload.get(key)
             setattr(build, attr, int(value) if value else None)
+    if build.build_profile_id:
+        profile = db.session.get(BuildProfile, build.build_profile_id)
+        if profile is None:
+            raise ValueError("Build profile not found.")
     if build.connection_profile_id:
         ssh_profile_service.get_profile(build.connection_profile_id)
 
@@ -370,14 +491,18 @@ def _apply_nodes_payload(build: ClusterBuild, nodes_payload: List[Dict[str, Any]
             ).strip()
         else:
             node.hostname = str(payload.get("hostname") or "").strip()
+        if node.hostname:
+            node.hostname = _validate_dns_subdomain(
+                node.hostname, "node hostname"
+            )
 
         manual_address = str(payload.get("address") or "").strip()
         tools_ip = (vm or {}).get("guestIp")
         if manual_address:
-            node.address = manual_address
+            node.address = _validate_node_address(manual_address)
             node.address_source = "manual"
         elif tools_ip:
-            node.address = str(tools_ip)
+            node.address = _validate_node_address(str(tools_ip))
             node.address_source = "vmware_tools"
         else:
             raise ValueError(
@@ -423,7 +548,13 @@ def create_build(payload: Dict[str, Any], created_by: str = "") -> Dict[str, Any
     nodes_payload = payload.get("nodes") or []
     if nodes_payload:
         _apply_nodes_payload(build, nodes_payload)
-        _validate_topology(build, [{"role": n.role} for n in build.nodes])
+        _validate_topology(
+            build,
+            [
+                {"role": n.role, "hostname": n.hostname, "address": n.address}
+                for n in build.nodes
+            ],
+        )
     db.session.add(build)
     db.session.commit()
     return serialize_build(build, include_detail=True)
@@ -437,7 +568,13 @@ def update_build(build_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     if "nodes" in payload:
         _apply_nodes_payload(build, payload.get("nodes") or [])
     if build.nodes:
-        _validate_topology(build, [{"role": n.role} for n in build.nodes])
+        _validate_topology(
+            build,
+            [
+                {"role": n.role, "hostname": n.hostname, "address": n.address}
+                for n in build.nodes
+            ],
+        )
     # Any edit invalidates a previous preflight verdict.
     build.status = "draft"
     db.session.commit()
@@ -462,7 +599,13 @@ def run_preflight(build_id: int) -> Dict[str, Any]:
         raise ValueError("Build is already running.")
     if not build.nodes:
         raise ValueError("Add nodes before running preflight.")
-    warnings = _validate_topology(build, [{"role": n.role} for n in build.nodes])
+    warnings = _validate_topology(
+        build,
+        [
+            {"role": n.role, "hostname": n.hostname, "address": n.address}
+            for n in build.nodes
+        ],
+    )
 
     build.status = "preflighting"
     db.session.commit()
@@ -473,6 +616,33 @@ def run_preflight(build_id: int) -> Dict[str, Any]:
             if build.build_profile_id else None
         )
         resolved = resolve_profile(profile_row)
+
+        # Resolve and integrity-check the selected CNI before changing any
+        # node. The same process-local cache is reused by image pre-pull and
+        # apply, while the digest protects fetches after a backend restart.
+        cni_descriptor = cni_registry.get(build.cni_plugin)
+        if cni_descriptor is None:
+            raise ValueError(
+                f"Selected CNI plugin '{build.cni_plugin}' is unavailable."
+            )
+        cni_descriptor.render(
+            build.cni_version or cni_descriptor.versions[0],
+            build.pod_cidr,
+            resolved,
+        )
+
+        # Fail in preflight, before any node is changed, when a selected
+        # add-on's pinned manifest is unavailable in the chosen repo mode.
+        for selection in build.addons_json or []:
+            descriptor = addon_registry.get(str(selection.get("id") or ""))
+            if descriptor is None:
+                raise ValueError(
+                    f"Selected add-on '{selection.get('id')}' is unavailable."
+                )
+            descriptor.render(
+                str(selection.get("version") or descriptor.versions[0]),
+                resolved,
+            )
 
         vsphere_results = preflight.vsphere_checks(build)
         node_results = preflight.run_node_preflight(
@@ -485,9 +655,10 @@ def run_preflight(build_id: int) -> Dict[str, Any]:
         # editing and re-running from the wizard.
         db.session.rollback()
         build.status = "preflight_failed"
-        build.error = f"Preflight crashed: {exc}"[:2000]
+        safe_error = scrub(str(exc))
+        build.error = f"Preflight crashed: {safe_error}"[:2000]
         db.session.commit()
-        raise ValueError(f"Preflight failed to run: {exc}") from exc
+        raise ValueError(f"Preflight failed to run: {safe_error}") from exc
 
     build.status = "preflight_passed" if merged["status"] != "fail" else "preflight_failed"
     build.error = None
@@ -584,6 +755,7 @@ def wizard_options() -> Dict[str, Any]:
     return {
         "k8sVersions": list(SUPPORTED_K8S_VERSIONS),
         "cniPlugins": cni_registry.catalog(),
+        "addons": addon_registry.catalog(),
         "osMatrix": os_adapters.supported_matrix(),
         "endpointModes": [
             {"id": "managed_haproxy",

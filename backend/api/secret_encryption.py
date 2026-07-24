@@ -8,12 +8,24 @@ import os
 
 from cryptography.fernet import Fernet, InvalidToken
 
+_INSECURE_DEVELOPMENT_KEY = "kubesight-dev-secret-change-me"
+
+
+def secret_encryption_key_configured() -> bool:
+    """Whether secrets are protected by an operator-provided key."""
+    raw = (
+        os.getenv("ALERT_ROUTING_SECRET_KEY")
+        or os.getenv("JWT_SECRET_KEY")
+        or ""
+    ).strip()
+    return bool(raw and raw != _INSECURE_DEVELOPMENT_KEY)
+
 
 def _fernet() -> Fernet:
     raw = (
         os.getenv("ALERT_ROUTING_SECRET_KEY")
         or os.getenv("JWT_SECRET_KEY")
-        or "kubesight-dev-secret-change-me"
+        or _INSECURE_DEVELOPMENT_KEY
     )
     digest = hashlib.sha256(raw.encode("utf-8")).digest()
     key = base64.urlsafe_b64encode(digest)
