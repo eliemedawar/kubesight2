@@ -140,6 +140,11 @@ export default function TopologyPage({
 
   const activeTopo = view.level === "namespace" ? nsTopo : clusterTopo;
   const hasGraph = Boolean(activeTopo && activeTopo.nodes && activeTopo.nodes.length);
+  // Once the cluster graph has mounted, keep the same viewer instance alive
+  // while drilling into a namespace. This preserves its fullscreen portal and
+  // shows loading/empty feedback inside the canvas instead of unmounting it.
+  const showViewer =
+    hasGraph || (view.level === "namespace" && clusterTopo !== null);
   const activeNodes = activeTopo?.nodes || [];
   const countKind = (kind) => activeNodes.filter((node) => node.kind === kind).length;
   const issueCount = activeNodes.filter(
@@ -239,23 +244,29 @@ export default function TopologyPage({
         </p>
       ) : null}
 
-      {loading && !hasGraph ? (
+      {showViewer ? (
+        <TopologyViewer
+          nodes={activeTopo?.nodes || []}
+          edges={activeTopo?.edges || []}
+          fillWidth
+          zoomable
+          loading={loading && !hasGraph}
+          emptyMessage={
+            error ||
+            accessError ||
+            "This namespace has no pods, services, or ingresses to map."
+          }
+          layoutDirection={view.level === "namespace" ? "packed" : "horizontal"}
+          onNodeClick={handleNodeClick}
+          nodeClickable={(node) => node.kind === "namespace"}
+        />
+      ) : loading ? (
         <LoadingState
           label={
             view.level === "namespace"
               ? `Building ${view.namespace} topology...`
               : "Building cluster topology..."
           }
-        />
-      ) : hasGraph ? (
-        <TopologyViewer
-          nodes={activeTopo.nodes}
-          edges={activeTopo.edges}
-          fillWidth
-          zoomable
-          layoutDirection={view.level === "namespace" ? "packed" : "horizontal"}
-          onNodeClick={handleNodeClick}
-          nodeClickable={(node) => node.kind === "namespace"}
         />
       ) : !loading && !error ? (
         <EmptyState

@@ -456,10 +456,13 @@ export default function TopologyViewer({
   fillWidth = false,
   allowFullscreen = true,
   zoomable = false,
+  loading = false,
+  emptyMessage = "No topology defined yet.",
   layoutDirection = "vertical",
   onNodeClick,
   nodeClickable,
 }) {
+  const hasNodes = Boolean(nodes?.length);
   const { positions, svgW, svgH } = useMemo(
     () => computeLayout(nodes || [], edges || [], layoutDirection),
     [nodes, edges, layoutDirection]
@@ -558,11 +561,7 @@ export default function TopologyViewer({
     };
     svg.addEventListener("wheel", onWheel, { passive: false });
     return () => svg.removeEventListener("wheel", onWheel);
-  }, [zoomable]);
-
-  if (!nodes || nodes.length === 0) {
-    return <p className="muted" style={{ fontSize: "0.875rem", fontStyle: "italic" }}>No topology defined yet.</p>;
-  }
+  }, [zoomable, fullscreen]);
 
   // Edge tone from real data: worst endpoint component health first (unhealthy
   // → danger, degraded → warn), then the existing scope encoding (external →
@@ -740,7 +739,7 @@ export default function TopologyViewer({
           )}
         </button>
       ) : null}
-      {zoomable ? (
+      {zoomable && hasNodes ? (
         <div className="topo-zoom" role="group" aria-label="Zoom controls">
           <output className="topo-zoom-level" aria-live="polite">
             ×{view.k < 10 ? view.k.toFixed(1) : Math.round(view.k)}
@@ -760,6 +759,15 @@ export default function TopologyViewer({
           <button type="button" className="topo-fs-btn" onClick={resetView} aria-label="Fit graph" title="Fit graph">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4" /></svg>
           </button>
+        </div>
+      ) : null}
+      {!hasNodes ? (
+        <div
+          className={`topo-viewer-state${loading ? " is-loading" : ""}`}
+          role="status"
+          aria-live="polite"
+        >
+          <span>{loading ? "Building topology…" : emptyMessage}</span>
         </div>
       ) : null}
       <svg ref={svgRef}

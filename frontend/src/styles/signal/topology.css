@@ -113,6 +113,29 @@
   bottom: 1rem;
   right: 1rem;
 }
+.topo-viewer-state {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  pointer-events: none;
+  text-align: center;
+}
+.topo-viewer-state span {
+  max-width: min(32rem, 80vw);
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  box-shadow: var(--shadow-sm);
+  font-size: 0.82rem;
+}
+.topo-viewer-state.is-loading span {
+  color: var(--text-subtle);
+}
 
 /* Drill-in affordance: clickable nodes (e.g. a namespace on the cluster view)
    accent their border on hover, echoing the read-only hover treatment above. */
