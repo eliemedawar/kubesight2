@@ -649,18 +649,28 @@ def cluster_topology(cluster_id: str):
     if err:
         return err
 
+    warnings = []
     if access:
-        try:
-            from ..k8s_provider import list_namespace_counts_from_k8s
+        from ..k8s_provider import list_namespace_counts_from_k8s
 
+        # Topology is an overview, so partial live inventory is still useful.
+        # Keep the cluster visible when one Kubernetes API group is temporarily
+        # unavailable instead of failing the entire page.
+        try:
             namespaces = list_namespace_counts_from_k8s(access).get("items", [])
+        except (K8sCommandError, ValueError, TypeError) as exc:
+            namespaces = []
+            warnings.append(f"Namespaces could not be loaded: {exc}")
+        try:
             nodes = list_nodes_from_k8s(access)
-            try:
-                issue_pods = cluster_pod_issues_from_k8s(access).get("pods", [])
-            except K8sCommandError:
-                issue_pods = []
-        except K8sCommandError as exc:
-            return error_response(f"Failed to build cluster topology: {exc}", 503)
+        except (K8sCommandError, ValueError, TypeError) as exc:
+            nodes = []
+            warnings.append(f"Nodes could not be loaded: {exc}")
+        try:
+            issue_pods = cluster_pod_issues_from_k8s(access).get("pods", [])
+        except (K8sCommandError, ValueError, TypeError) as exc:
+            issue_pods = []
+            warnings.append(f"Pod health could not be loaded: {exc}")
     else:
         namespaces = NAMESPACES.get(cluster_id)
         if namespaces is None:
@@ -680,7 +690,13 @@ def cluster_topology(cluster_id: str):
         cluster_id, _cluster_display_name(cluster_id), namespaces, nodes, issue_pods
     )
     return success_response(
-        {"clusterId": cluster_id, "level": "cluster", "topology": topology}
+        {
+            "clusterId": cluster_id,
+            "level": "cluster",
+            "topology": topology,
+            "warnings": warnings,
+            "partial": bool(warnings),
+        }
     )
 
 
@@ -707,17 +723,20 @@ def namespace_topology(cluster_id: str, namespace: str):
     if err:
         return err
 
+    warnings = []
     if access:
-        try:
-            pods = namespace_resource_list_from_k8s(access, namespace, "pods").get("pods", [])
-            services = namespace_resource_list_from_k8s(access, namespace, "services").get(
-                "services", []
-            )
-            ingresses = namespace_resource_list_from_k8s(access, namespace, "ingress").get(
-                "ingress", []
-            )
-        except K8sCommandError as exc:
-            return error_response(f"Failed to build namespace topology: {exc}", 503)
+        def _topology_resource(list_key: str):
+            try:
+                return namespace_resource_list_from_k8s(access, namespace, list_key).get(
+                    list_key, []
+                )
+            except (K8sCommandError, ValueError, TypeError) as exc:
+                warnings.append(f"{list_key.title()} could not be loaded: {exc}")
+                return []
+
+        pods = _topology_resource("pods")
+        services = _topology_resource("services")
+        ingresses = _topology_resource("ingress")
     else:
         namespaces = NAMESPACES.get(cluster_id)
         if namespaces is None:
@@ -730,6 +749,21 @@ def namespace_topology(cluster_id: str, namespace: str):
         services = resources.get("services") or []
         ingresses = resources.get("ingress") or []
 
+    if user and not is_admin(user):
+        visible = filter_namespace_resources(
+            user,
+            cluster_id,
+            {
+                "namespace": namespace,
+                "pods": pods,
+                "services": services,
+                "ingress": ingresses,
+            },
+        )
+        pods = visible.get("pods", [])
+        services = visible.get("services", [])
+        ingresses = visible.get("ingress", [])
+
     topology = build_namespace_topology(namespace, pods, services, ingresses)
     return success_response(
         {
@@ -737,6 +771,8 @@ def namespace_topology(cluster_id: str, namespace: str):
             "namespace": namespace,
             "level": "namespace",
             "topology": topology,
+            "warnings": warnings,
+            "partial": bool(warnings),
         }
     )
 

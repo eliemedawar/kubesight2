@@ -98,6 +98,13 @@
   stroke: var(--accent-strong);
   stroke-width: 1.5;
 }
+.topo-node--click:focus {
+  outline: none;
+}
+.topo-node--click:focus .topo-node-card {
+  stroke: var(--accent-strong);
+  stroke-width: 2;
+}
 
 /* ── Topology page chrome (standalone drill-down view) ─────────────────── */
 .topology-page .topo-breadcrumb {
@@ -139,12 +146,91 @@
   gap: 0.5rem;
 }
 .topology-page .topo-hint {
-  margin: 0 0 0.75rem;
+  margin: 0;
   color: var(--text-muted);
   font-size: 0.8rem;
+}
+.topology-page .topo-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 0 0 0.65rem;
+}
+.topology-page .topo-stat {
+  min-width: 0;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--bg-panel);
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+}
+.topology-page .topo-stat strong {
+  color: var(--text-strong);
+  font-size: 1.15rem;
+  line-height: 1;
+}
+.topology-page .topo-stat span {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+.topology-page .topo-stat--issue {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+}
+.topology-page .topo-stat--issue strong,
+.topology-page .topo-stat--issue span {
+  color: var(--warn);
+}
+.topology-page .topo-guide {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 0 0.75rem;
+}
+.topology-page .topo-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+.topology-page .topo-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.topology-page .topo-legend i {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+.topology-page .topo-legend .is-healthy { background: var(--ok); }
+.topology-page .topo-legend .is-degraded { background: var(--warn); }
+.topology-page .topo-legend .is-unhealthy { background: var(--danger); }
+.topology-page .topo-legend .is-unknown { background: var(--text-muted); }
+.topology-page .topo-partial-warning {
+  margin: 0 0 0.75rem;
 }
 /* Give the canvas a definite height so the zoomable SVG fills it (the graph
    letterboxes inside via the viewBox). Fullscreen is still available. */
 .topology-page .topo-viewer {
   height: min(72vh, 680px);
+}
+
+@media (max-width: 760px) {
+  .topology-page .topo-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .topology-page .topo-guide {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .topology-page .topo-legend {
+    justify-content: flex-start;
+  }
 }

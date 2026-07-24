@@ -37,6 +37,11 @@ def _worst(statuses: List[Optional[str]]) -> str:
     return min(present, key=lambda s: _SEVERITY.get(s, 3))
 
 
+def _description(*parts: Any) -> str:
+    """Join compact node metadata for the viewer tooltip."""
+    return " · ".join(str(part).strip() for part in parts if part not in (None, ""))
+
+
 def _node_component_status(node: Dict[str, Any]) -> str:
     """Map a node row (``node_health_from_k8s`` or the simple Ready/NotReady
     shape) onto the viewer's status vocabulary."""
@@ -133,6 +138,7 @@ def build_cluster_topology(
                     "kind": "namespace",
                     "namespace": name,
                     "componentStatus": health,
+                    "description": _description(name, sub, health.title()),
                 }
             )
             graph_edges.append({"id": f"e:{ns_hub}->{nid}", "sourceNodeId": ns_hub, "targetNodeId": nid})
@@ -165,6 +171,7 @@ def build_cluster_topology(
                     "type": _node_role(n),
                     "kind": "node",
                     "componentStatus": status,
+                    "description": _description(name, _node_role(n), status.title()),
                 }
             )
             graph_edges.append({"id": f"e:{node_hub}->{nid}", "sourceNodeId": node_hub, "targetNodeId": nid})
@@ -179,6 +186,19 @@ def build_cluster_topology(
         )
         graph_edges.append({"id": f"e:cluster->{node_hub}", "sourceNodeId": root_id, "targetNodeId": node_hub})
         graph_nodes.extend(node_entries)
+
+    # A cluster's summary must include workload health as well as physical node
+    # health. Otherwise a cluster with healthy nodes and crashing pods appears
+    # green at the root.
+    root_statuses = list(node_statuses)
+    if valid_namespaces:
+        root_statuses.extend(ns_statuses)
+    graph_nodes[0]["componentStatus"] = _worst(root_statuses) if root_statuses else UNKNOWN
+    graph_nodes[0]["description"] = _description(
+        cluster_name or cluster_id,
+        f"{len(valid_namespaces)} namespaces",
+        f"{len(valid_nodes)} nodes",
+    )
 
     return {"nodes": graph_nodes, "edges": graph_edges}
 
@@ -201,9 +221,29 @@ def _service_target_pod_names(service: Dict[str, Any], pods: List[Dict[str, Any]
     that isn't available (mock data, headless services), fall back to matching
     pods whose name is the service name or begins with ``<service>-``.
     """
+    pod_names = {str(pod.get("name")) for pod in pods if pod.get("name")}
     raw = service.get("targetPods")
     if isinstance(raw, str) and raw.strip() and raw.strip() != "-":
-        return [t.strip() for t in raw.split(",") if t.strip()]
+        # Endpoints can contain external IPs as well as Pod targetRefs. Only
+        # return targets that exist in the visible pod inventory.
+        return [
+            target
+            for target in (t.strip() for t in raw.split(","))
+            if target and target in pod_names
+        ]
+
+    selector = service.get("selector")
+    if isinstance(selector, dict) and selector:
+        selected = []
+        for pod in pods:
+            labels = pod.get("labels")
+            if not isinstance(labels, dict):
+                continue
+            if all(labels.get(key) == value for key, value in selector.items()):
+                if pod.get("name"):
+                    selected.append(str(pod["name"]))
+        if selected:
+            return selected
 
     name = service.get("name") or ""
     if not name:
@@ -216,82 +256,169 @@ def _service_target_pod_names(service: Dict[str, Any], pods: List[Dict[str, Any]
     return matches
 
 
+def _edge(
+    source: str,
+    target: str,
+    *,
+    protocol: Optional[str] = None,
+    scope: Optional[str] = None,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "id": f"e:{source}->{target}",
+        "sourceNodeId": source,
+        "targetNodeId": target,
+    }
+    if protocol:
+        result["protocol"] = protocol
+    if scope:
+        result["scope"] = scope
+    return result
+
+
 def build_namespace_topology(
     namespace: str,
     pods: List[Dict[str, Any]],
     services: List[Dict[str, Any]],
     ingresses: List[Dict[str, Any]],
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Level 2: flat pods + ``Ingress → Service → pod`` edges for one namespace."""
+    """Level 2: a connected ``Namespace → Ingress → Service → Pod`` map.
+
+    Resources without a normal parent are attached to the namespace root. This
+    keeps orphaned pods and internal-only services visible without leaving them
+    floating in an unrelated first row.
+    """
     graph_nodes: List[Dict[str, Any]] = []
     graph_edges: List[Dict[str, Any]] = []
 
+    root_id = f"namespace:{namespace}"
+    graph_nodes.append(
+        {
+            "id": root_id,
+            "name": namespace,
+            "type": "Namespace",
+            "kind": "namespace-root",
+            "namespace": namespace,
+            "componentStatus": UNKNOWN,
+        }
+    )
+
     pod_ids: Dict[str, str] = {}
+    pod_statuses: Dict[str, str] = {}
     for pod in pods:
         name = pod.get("name")
         if not name:
             continue
         pid = f"pod:{name}"
         pod_ids[name] = pid
+        pod_statuses[name] = _pod_component_status(pod.get("status"))
         graph_nodes.append(
             {
                 "id": pid,
                 "name": name,
                 "type": pod.get("status") or "Pod",
                 "kind": "pod",
-                "componentStatus": _pod_component_status(pod.get("status")),
+                "namespace": namespace,
+                "componentStatus": pod_statuses[name],
+                "description": _description(
+                    name,
+                    pod.get("status") or "Pod",
+                    pod.get("node"),
+                    pod.get("ready"),
+                ),
             }
         )
 
     svc_ids: Dict[str, str] = {}
+    svc_targets: Dict[str, List[str]] = {}
+    svc_statuses: Dict[str, str] = {}
     for svc in services:
         name = svc.get("name")
         if not name:
             continue
         sid = f"svc:{name}"
         svc_ids[name] = sid
+        targets = _service_target_pod_names(svc, pods)
+        svc_targets[name] = targets
+        target_statuses = [pod_statuses[target] for target in targets if target in pod_statuses]
+        svc_status = _worst(target_statuses) if target_statuses else UNKNOWN
+        svc_statuses[name] = svc_status
+        port_label = _service_ports_label(svc)
         graph_nodes.append(
             {
                 "id": sid,
                 "name": name,
                 "type": svc.get("type") or "Service",
                 "kind": "service",
-                "componentStatus": UNKNOWN,
+                "namespace": namespace,
+                "componentStatus": svc_status,
+                "description": _description(
+                    name,
+                    svc.get("type") or "Service",
+                    f"ports {port_label}" if port_label else None,
+                    f"{len(targets)} endpoints",
+                ),
             }
         )
-        port_label = _service_ports_label(svc)
-        for target in _service_target_pod_names(svc, pods):
+        for target in targets:
             tid = pod_ids.get(target)
             if not tid:
                 continue
-            edge = {"id": f"e:{sid}->{tid}", "sourceNodeId": sid, "targetNodeId": tid}
-            if port_label:
-                edge["protocol"] = port_label
-            graph_edges.append(edge)
+            graph_edges.append(_edge(sid, tid, protocol=port_label))
 
+    ingress_targets = set()
+    ingress_statuses: List[str] = []
     for ing in ingresses:
         name = ing.get("name")
         if not name:
             continue
         iid = f"ing:{name}"
+        backend = ing.get("backendService")
+        ingress_status = svc_statuses.get(backend, UNKNOWN)
+        ingress_statuses.append(ingress_status)
         graph_nodes.append(
             {
                 "id": iid,
                 "name": name,
                 "type": ing.get("host") or "Ingress",
                 "kind": "ingress",
-                "componentStatus": UNKNOWN,
+                "namespace": namespace,
+                "componentStatus": ingress_status,
+                "description": _description(
+                    name,
+                    ing.get("host") or "Ingress",
+                    ing.get("path"),
+                    f"to {backend}" if backend else None,
+                ),
             }
         )
-        backend = ing.get("backendService")
         if backend and backend in svc_ids:
-            graph_edges.append(
-                {
-                    "id": f"e:{iid}->{svc_ids[backend]}",
-                    "sourceNodeId": iid,
-                    "targetNodeId": svc_ids[backend],
-                    "scope": "external",
-                }
-            )
+            ingress_targets.add(backend)
+            graph_edges.append(_edge(iid, svc_ids[backend], scope="external"))
+        graph_edges.append(_edge(root_id, iid))
+
+    # Internal-only services and unselected pods remain part of one coherent
+    # hierarchy instead of floating beside ingress entrypoints.
+    for service_name, sid in svc_ids.items():
+        if service_name not in ingress_targets:
+            graph_edges.append(_edge(root_id, sid))
+
+    targeted_pods = {
+        target
+        for targets in svc_targets.values()
+        for target in targets
+        if target in pod_ids
+    }
+    for pod_name, pid in pod_ids.items():
+        if pod_name not in targeted_pods:
+            graph_edges.append(_edge(root_id, pid))
+
+    all_statuses = list(pod_statuses.values()) + list(svc_statuses.values()) + ingress_statuses
+    graph_nodes[0]["componentStatus"] = _worst(all_statuses) if all_statuses else UNKNOWN
+    graph_nodes[0]["description"] = _description(
+        namespace,
+        f"{len(pod_ids)} pods",
+        f"{len(svc_ids)} services",
+        f"{len(ingresses)} ingresses",
+    )
 
     return {"nodes": graph_nodes, "edges": graph_edges}

@@ -27,6 +27,7 @@ export default function TopologyPage({
   const [nsTopo, setNsTopo] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [warnings, setWarnings] = useState([]);
   // Monotonic request id so a slow response for a cluster/namespace the user has
   // already navigated away from can never overwrite the current view.
   const reqRef = useRef(0);
@@ -40,10 +41,14 @@ export default function TopologyPage({
     }
     const seq = ++reqRef.current;
     setError("");
+    setWarnings([]);
     setLoading(true);
     getClusterTopology(clusterId)
       .then((res) => {
-        if (seq === reqRef.current) setClusterTopo(res?.topology || EMPTY_GRAPH);
+        if (seq === reqRef.current) {
+          setClusterTopo(res?.topology || EMPTY_GRAPH);
+          setWarnings(res?.warnings || []);
+        }
       })
       .catch((err) => {
         if (seq === reqRef.current) setError(err.message || "Failed to load cluster topology.");
@@ -60,10 +65,14 @@ export default function TopologyPage({
       setView({ level: "namespace", namespace });
       setNsTopo(null);
       setError("");
+      setWarnings([]);
       setLoading(true);
       getNamespaceTopology(clusterId, namespace)
         .then((res) => {
-          if (seq === reqRef.current) setNsTopo(res?.topology || EMPTY_GRAPH);
+          if (seq === reqRef.current) {
+            setNsTopo(res?.topology || EMPTY_GRAPH);
+            setWarnings(res?.warnings || []);
+          }
         })
         .catch((err) => {
           if (seq === reqRef.current)
@@ -81,12 +90,14 @@ export default function TopologyPage({
     setView({ level: "cluster", namespace: "" });
     setNsTopo(null);
     setClusterTopo(null);
+    setWarnings([]);
     loadCluster();
   }, [clusterId, loadCluster]);
 
   const backToCluster = () => {
     reqRef.current += 1; // cancel any in-flight namespace load
     setError("");
+    setWarnings([]);
     setLoading(false);
     setView({ level: "cluster", namespace: "" });
   };
@@ -129,6 +140,34 @@ export default function TopologyPage({
 
   const activeTopo = view.level === "namespace" ? nsTopo : clusterTopo;
   const hasGraph = Boolean(activeTopo && activeTopo.nodes && activeTopo.nodes.length);
+  const activeNodes = activeTopo?.nodes || [];
+  const countKind = (kind) => activeNodes.filter((node) => node.kind === kind).length;
+  const issueCount = activeNodes.filter(
+    (node) =>
+      !["cluster", "group", "namespace-root"].includes(node.kind) &&
+      ["degraded", "unhealthy"].includes(node.componentStatus)
+  ).length;
+  const summary =
+    view.level === "namespace"
+      ? [
+          { label: "Pods", value: countKind("pod") },
+          { label: "Services", value: countKind("service") },
+          { label: "Ingresses", value: countKind("ingress") },
+          { label: "Health issues", value: issueCount, issue: issueCount > 0 },
+        ]
+      : [
+          { label: "Namespaces", value: countKind("namespace") },
+          { label: "Nodes", value: countKind("node") },
+          {
+            label: "Healthy",
+            value: activeNodes.filter(
+              (node) =>
+                ["namespace", "node"].includes(node.kind) &&
+                node.componentStatus === "healthy"
+            ).length,
+          },
+          { label: "Health issues", value: issueCount, issue: issueCount > 0 },
+        ];
 
   return (
     <div className="ops-page topology-page">
@@ -158,19 +197,47 @@ export default function TopologyPage({
             </button>
           ) : null}
           <button type="button" className="btn-outline" onClick={refresh} disabled={loading}>
-            Refresh
+            {loading ? "Refreshing…" : "Refresh"}
           </button>
         </div>
       </div>
 
-      <p className="topo-hint">
-        {view.level === "cluster"
-          ? "Click a namespace to open its pods · scroll to zoom · drag to pan"
-          : "Scroll to zoom · drag to pan"}
-      </p>
+      {hasGraph ? (
+        <>
+          <div className="topo-summary" aria-label="Topology summary">
+            {summary.map((item) => (
+              <div
+                key={item.label}
+                className={`topo-stat${item.issue ? " topo-stat--issue" : ""}`}
+              >
+                <strong>{item.value}</strong>
+                <span>{item.label}</span>
+              </div>
+            ))}
+          </div>
+          <div className="topo-guide">
+            <p className="topo-hint">
+              {view.level === "cluster"
+                ? "Select a namespace to inspect its traffic path. Scroll to zoom and drag to pan."
+                : "Traffic flows from the namespace through ingress and services to pods. Scroll to zoom and drag to pan."}
+            </p>
+            <div className="topo-legend" aria-label="Health legend">
+              <span><i className="is-healthy" />Healthy</span>
+              <span><i className="is-degraded" />Degraded</span>
+              <span><i className="is-unhealthy" />Unhealthy</span>
+              <span><i className="is-unknown" />Unknown</span>
+            </div>
+          </div>
+        </>
+      ) : null}
 
       {accessError ? <ErrorBanner message={accessError} /> : null}
       {error ? <ErrorBanner message={error} suppressAccessDenied={false} /> : null}
+      {warnings.length ? (
+        <p className="banner-message warning-banner topo-partial-warning">
+          Showing a partial topology. {warnings.join(" ")}
+        </p>
+      ) : null}
 
       {loading && !hasGraph ? (
         <LoadingState

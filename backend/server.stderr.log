@@ -7,3 +7,788 @@ Press CTRL+C to quit
  * Debugger is active!
  * Debugger PIN: 141-890-053
 127.0.0.1 - - [24/Jul/2026 15:03:24] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:04:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:05:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:06:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:07:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:08:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:09:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+ * Detected change in 'C:\\Users\\Elie Medawar\\Desktop\\kubesigh_1\\backend\\api\\routes\\clusters.py', reloading
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 141-890-053
+ * Detected change in 'C:\\Users\\Elie Medawar\\Desktop\\kubesigh_1\\backend\\api\\routes\\clusters.py', reloading
+Exception in thread Thread-3 (serve_forever):
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py", line 1082, in _bootstrap_inner
+    self._context.run(self.run)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py", line 1024, in run
+    self._target(*self._args, **self._kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\werkzeug\serving.py", line 820, in serve_forever
+    super().serve_forever(poll_interval=poll_interval)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\socketserver.py", line 235, in serve_forever
+    ready = selector.select(poll_interval)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\selectors.py", line 314, in select
+    r, w, _ = self._select(self._readers, self._writers, [], timeout)
+              ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\selectors.py", line 305, in _select
+    r, w, x = select.select(r, w, w, timeout)
+              ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+OSError: [WinError 10038] An operation was attempted on something that is not a socket
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 141-890-053
+ * Detected change in 'C:\\Users\\Elie Medawar\\Desktop\\kubesigh_1\\backend\\api\\routes\\clusters.py', reloading
+Exception in thread Thread-3 (serve_forever):
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py", line 1082, in _bootstrap_inner
+    self._context.run(self.run)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py", line 1024, in run
+    self._target(*self._args, **self._kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\werkzeug\serving.py", line 820, in serve_forever
+    super().serve_forever(poll_interval=poll_interval)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\socketserver.py", line 235, in serve_forever
+    ready = selector.select(poll_interval)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\selectors.py", line 314, in select
+    r, w, _ = self._select(self._readers, self._writers, [], timeout)
+              ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\selectors.py", line 305, in _select
+    r, w, x = select.select(r, w, w, timeout)
+              ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+OSError: [WinError 10038] An operation was attempted on something that is not a socket
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 141-890-053
+127.0.0.1 - - [24/Jul/2026 15:10:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:11:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:12:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:13:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:14:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:28] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:28] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:28] "GET /api/auth/me HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:28] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:29] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:31] "GET /api/clusters HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:32] "GET /api/settings HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:33] "GET /api/clusters HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:35] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:35] "GET /api/settings HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:35] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:35] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:35] "GET /api/auth/me HTTP/1.1" 200 -
+dashboard snapshot: failed to load nodes for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:15:39.024406   16376 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.032434   16376 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.035154   16376 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.037167   16376 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.039837   16376 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load pods for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:15:38.969846   14124 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:38.981503   14124 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:38.984506   14124 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:38.987504   14124 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:38.990264   14124 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load namespaces for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:15:39.199933    1856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.207664    1856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.211864    1856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.216138    1856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.218485    1856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load deployments for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:15:39.189191    6328 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.198919    6328 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.200933    6328 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.202883    6328 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.205237    6328 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load services for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:15:39.155908    3732 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.163850    3732 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.173498    3732 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.175992    3732 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:15:39.177893    3732 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+127.0.0.1 - - [24/Jul/2026 15:15:40] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:41] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:42] "GET /api/clusters HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:42] "GET /api/settings HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:42] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:42] "GET /api/auth/me HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:42] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:42] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:43] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:43] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:44] "GET /api/clusters HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:44] "GET /api/settings HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:44] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:44] "GET /api/auth/me HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:44] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:44] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:45] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:46] "GET /api/settings HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:46] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:46] "GET /api/clusters HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:46] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:46] "GET /api/auth/me HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:46] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:46] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:15:46] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:16:16] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:16:16] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:16:47] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+dashboard snapshot: failed to load nodes for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:16:47.327709   22144 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.335424   22144 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.335942   22144 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.340079   22144 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.341166   22144 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+127.0.0.1 - - [24/Jul/2026 15:16:47] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+dashboard snapshot: failed to load pods for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:16:47.349340   11856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.362547   11856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.364589   11856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.365753   11856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.366857   11856 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load namespaces for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:16:47.352750   22352 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.362042   22352 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.363330   22352 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.364589   22352 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.365753   22352 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load deployments for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:16:47.325918   25008 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.335424   25008 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.335942   25008 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.339679   25008 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.340590   25008 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load services for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:16:47.349844    9636 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.358632    9636 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.360308    9636 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.362547    9636 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:16:47.364589    9636 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+127.0.0.1 - - [24/Jul/2026 15:17:16] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:17:17] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:17:36] "GET /health HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:17:47] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:17:47] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:18:16] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:18:17] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+dashboard snapshot: failed to load nodes for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:18:17.391855   10488 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.395718   10488 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.397866   10488 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.399413   10488 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.401617   10488 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load pods for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:18:17.387717   19432 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.392880   19432 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.393890   19432 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.397358   19432 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.402567   19432 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load namespaces for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:18:17.332509   22668 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.347033   22668 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.348033   22668 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.349034   22668 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.351547   22668 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load deployments for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:18:17.359914   24776 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.364040   24776 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.366341   24776 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.367342   24776 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.369340   24776 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load services for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:18:17.403740   24816 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.407292   24816 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.410339   24816 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.413140   24816 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:18:17.414804   24816 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+127.0.0.1 - - [24/Jul/2026 15:18:47] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:18:47] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:19:16] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:19:17] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:03] "GET /health HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:06] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+dashboard snapshot: failed to load nodes for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:20:06.457635   15812 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.462230   15812 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.463834   15812 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.465479   15812 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.467081   15812 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load pods for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:20:06.445619    8104 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.450672    8104 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.452994    8104 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.454634    8104 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.455635    8104 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load namespaces for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:20:06.424975   25060 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.429400   25060 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.432224   25060 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.434493   25060 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.435541   25060 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load deployments for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:20:06.404992   13848 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.408991   13848 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.409997   13848 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.412000   13848 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.413001   13848 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+dashboard snapshot: failed to load services for cluster
+Traceback (most recent call last):
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\dashboard_k8s_snapshot.py", line 54, in _safe_json_items
+    result = json.loads(future.result()).get("items", [])
+                        ~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 447, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\Elie Medawar\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 217, in _run_for_access
+    return _run_kubectl(
+        args,
+    ...<2 lines>...
+        timeout=timeout,
+    )
+  File "C:\Users\Elie Medawar\Desktop\kubesigh_1\backend\api\k8s_provider.py", line 212, in _run_kubectl
+    raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+api.k8s_provider.K8sCommandError: E0724 15:20:06.399152   18048 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.417638   18048 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.418413   18048 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.440643   18048 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+E0724 15:20:06.443001   18048 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://192.168.45.134:6443/api?timeout=10s\": proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it."
+Unable to connect to the server: proxyconnect tcp: dial tcp 127.0.0.1:9: connectex: No connection could be made because the target machine actively refused it.
+127.0.0.1 - - [24/Jul/2026 15:20:54] "GET /api/dashboard/summary?clusterId=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:54] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:56] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:56] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:56] "GET /api/auth/me HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:56] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:58] "GET /api/cluster-builds HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:58] "GET /api/vsphere-connections HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:58] "GET /api/ssh-credentials HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:58] "GET /api/ssh-connection-profiles HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:58] "GET /api/build-profiles HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:58] "GET /api/cluster-builds/options HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:20:59] "GET /api/cluster-builds/4 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:00] "GET /api/settings HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:01] "GET /api/clusters HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:02] "POST /api/cluster-builds/4/retry HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:03] "GET /api/cluster-builds/4 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:05] "GET /api/alerts?cluster=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:05] "GET /api/cluster-builds/4/logs HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:10] "GET /api/audit-logs?limit=200 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:10] "GET /api/clusters HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:11] "GET /api/cluster-builds HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:11] "GET /api/ssh-credentials HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:11] "GET /api/cluster-builds/options HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:11] "GET /api/build-profiles HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:11] "GET /api/vsphere-connections HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:11] "GET /api/ssh-connection-profiles HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:27] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:56] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:59] "GET /api/clusters/custom-7/namespaces?lite=1 HTTP/1.1" 503 -
+127.0.0.1 - - [24/Jul/2026 15:21:59] "GET /api/clusters/custom-7/namespaces?counts=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:59] "GET /api/alerts?cluster=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:59] "GET /api/clusters/custom-7/namespaces?metrics=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:21:59] "GET /api/clusters/custom-7/topology HTTP/1.1" 503 -
+127.0.0.1 - - [24/Jul/2026 15:22:15] "GET /api/clusters/custom-13/namespaces?lite=1 HTTP/1.1" 503 -
+127.0.0.1 - - [24/Jul/2026 15:22:15] "GET /api/clusters/custom-13/namespaces?counts=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:15] "GET /api/alerts?cluster=custom-13 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:15] "GET /api/clusters/custom-13/namespaces?metrics=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:15] "GET /api/clusters/custom-13/topology HTTP/1.1" 503 -
+127.0.0.1 - - [24/Jul/2026 15:22:24] "GET /api/mobile-apps HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:26] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:26] "GET /api/vsphere-connections HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:26] "GET /api/ssh-credentials HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:26] "GET /api/cluster-builds HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:27] "GET /api/build-profiles HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:27] "GET /api/ssh-connection-profiles HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:27] "GET /api/cluster-builds/options HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:27] "GET /api/cluster-builds/4 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:22:56] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:23:12] "GET /health HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:23:27] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:23:56] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:25:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:26:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:27:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:28:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:29:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:30:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:31:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:32:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:33:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:34:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:35:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:21] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:21] "POST /api/change-bundles/draft HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:21] "GET /api/auth/me HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:21] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:24] "GET /api/clusters HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:32] "GET /api/settings HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:32] "GET /api/clusters/custom-7/namespaces?lite=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:32] "GET /api/clusters/custom-7/namespaces?counts=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:33] "GET /api/clusters/custom-7/topology HTTP/1.1" 503 -
+127.0.0.1 - - [24/Jul/2026 15:36:33] "GET /api/alerts?cluster=custom-7 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:33] "GET /api/clusters/custom-7/namespaces?metrics=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:35] "GET /api/clusters/custom-13/topology HTTP/1.1" 503 -
+127.0.0.1 - - [24/Jul/2026 15:36:35] "GET /api/clusters/custom-13/namespaces?counts=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:35] "GET /api/clusters/custom-13/namespaces?lite=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:36] "GET /api/alerts?cluster=custom-13 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:36] "GET /api/clusters/custom-13/namespaces?metrics=1 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:44] "GET /api/cluster-builds HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:44] "GET /api/vsphere-connections HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:44] "GET /api/build-profiles HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:44] "GET /api/ssh-credentials HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:44] "GET /api/cluster-builds/options HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:44] "GET /api/ssh-connection-profiles HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:44] "GET /api/cluster-builds/4 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:45] "POST /api/cluster-builds/4/retry HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:46] "GET /api/cluster-builds/4 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:48] "GET /api/cluster-builds/4/logs HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:36:51] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:37:00] "GET /api/cluster-builds/4 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:37:22] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:37:51] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:38:22] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:38:54] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:39:21] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:39:52] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:40:53] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:41:39] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:41:52] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:42:21] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:43:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:44:05] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -
+127.0.0.1 - - [24/Jul/2026 15:45:06] "GET /api/deployment-requests/mine?limit=100 HTTP/1.1" 200 -

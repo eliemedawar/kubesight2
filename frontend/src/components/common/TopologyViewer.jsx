@@ -181,25 +181,37 @@ export function computeLayout(nodes, edges) {
   }
 
   const H_GAP = NODE_W + 70;   // horizontal spacing within a layer
-  const V_GAP = NODE_H + 90;   // vertical spacing between layers
-  const maxCount = Math.max(1, ...layers.map((l) => (l ? l.length : 0)));
-  const rowWidth = (maxCount - 1) * H_GAP;
+  const V_GAP = NODE_H + 90;   // vertical spacing between rows/layers
+  // A single row containing every namespace/pod makes a real cluster several
+  // thousand pixels wide and therefore unreadably tiny when fit to the canvas.
+  // Wrap broad layers while keeping their logical rank grouped together.
+  const MAX_LAYER_COLUMNS = 5;
+  const maxColumns = Math.max(
+    1,
+    ...layers.map((layer) => Math.min(MAX_LAYER_COLUMNS, layer?.length || 0))
+  );
+  const rowWidth = (maxColumns - 1) * H_GAP;
 
   const positions = {};
-  layers.forEach((layer, r) => {
+  let yCursor = 0;
+  layers.forEach((layer) => {
     if (!layer) return;
-    const layerW = (layer.length - 1) * H_GAP;
-    const offsetX = (rowWidth - layerW) / 2; // center each layer
     layer.forEach((id, i) => {
-      positions[id] = { x: offsetX + i * H_GAP, y: r * V_GAP };
+      const row = Math.floor(i / MAX_LAYER_COLUMNS);
+      const col = i % MAX_LAYER_COLUMNS;
+      const rowStart = row * MAX_LAYER_COLUMNS;
+      const itemsInRow = Math.min(MAX_LAYER_COLUMNS, layer.length - rowStart);
+      const layerW = (itemsInRow - 1) * H_GAP;
+      const offsetX = (rowWidth - layerW) / 2;
+      positions[id] = { x: offsetX + col * H_GAP, y: yCursor + row * V_GAP };
     });
+    yCursor += Math.ceil(layer.length / MAX_LAYER_COLUMNS) * V_GAP;
   });
 
-  const layerCount = layers.length;
   return {
     positions,
     svgW: rowWidth + NODE_W + PAD * 2,
-    svgH: (layerCount - 1) * V_GAP + NODE_H + PAD * 2,
+    svgH: Math.max(0, yCursor - V_GAP) + NODE_H + PAD * 2,
   };
 }
 
@@ -225,6 +237,50 @@ function NodeGlyph({ kind, cx, cy, color }) {
     return (
       <g transform={`translate(${cx},${cy})`} aria-hidden="true">
         <path d="M 0 -4.8 L 4 -3.2 V 0.4 C 4 2.6 2.2 4.2 0 4.9 C -2.2 4.2 -4 2.6 -4 0.4 V -3.2 Z" {...common} />
+      </g>
+    );
+  }
+  if (kind === "cluster") {
+    return (
+      <g transform={`translate(${cx},${cy})`} aria-hidden="true">
+        <circle cx={0} cy={-3.8} r={1.5} {...common} />
+        <circle cx={-4.3} cy={3.5} r={1.5} {...common} />
+        <circle cx={4.3} cy={3.5} r={1.5} {...common} />
+        <path d="M 0 -2.2 V 0.2 M 0 0.2 L -3.2 2.4 M 0 0.2 L 3.2 2.4" {...common} />
+      </g>
+    );
+  }
+  if (kind === "namespace" || kind === "namespace-root" || kind === "group") {
+    return (
+      <g transform={`translate(${cx},${cy})`} aria-hidden="true">
+        <path d="M -5 -3.5 H -0.8 L 1 -1.7 H 5 V 4 H -5 Z" {...common} />
+      </g>
+    );
+  }
+  if (kind === "node") {
+    return (
+      <g transform={`translate(${cx},${cy})`} aria-hidden="true">
+        <rect x={-5} y={-4.5} width={10} height={3.5} rx={1} {...common} />
+        <rect x={-5} y={1} width={10} height={3.5} rx={1} {...common} />
+        <path d="M 2.5 -2.8 H 3 M 2.5 2.8 H 3" {...common} />
+      </g>
+    );
+  }
+  if (kind === "service") {
+    return (
+      <g transform={`translate(${cx},${cy})`} aria-hidden="true">
+        <circle cx={0} cy={0} r={2} {...common} />
+        <circle cx={-4.5} cy={-3.5} r={1.2} {...common} />
+        <circle cx={4.5} cy={-3.5} r={1.2} {...common} />
+        <circle cx={0} cy={5} r={1.2} {...common} />
+        <path d="M -3.5 -2.7 L -1.4 -1 M 3.5 -2.7 L 1.4 -1 M 0 2 V 3.8" {...common} />
+      </g>
+    );
+  }
+  if (kind === "ingress") {
+    return (
+      <g transform={`translate(${cx},${cy})`} aria-hidden="true">
+        <path d="M -5 4 V 0 A 5 5 0 0 1 5 0 V 4 M -2 4 V 0 A 2 2 0 0 1 2 0 V 4" {...common} />
       </g>
     );
   }
@@ -729,7 +785,7 @@ export default function TopologyViewer({
             const chip = CHIP_COLORS[chipToneFor(node)];
             const glyphKind = node.overlay === "client" || node.overlay === "transport"
               ? node.overlay
-              : "component";
+              : (node.kind || "component");
 
             const chipCX = pos.x + 27, chipCY = pos.y + NODE_H / 2;
             const textX = pos.x + 46;
@@ -741,6 +797,15 @@ export default function TopologyViewer({
                 key={node.id}
                 className={`topo-node${clickableNode ? " topo-node--click" : ""}`}
                 onClick={clickableNode ? () => handleNodeClick(node) : undefined}
+                onKeyDown={clickableNode ? (event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    handleNodeClick(node);
+                  }
+                } : undefined}
+                role={clickableNode ? "button" : undefined}
+                tabIndex={clickableNode ? 0 : undefined}
+                aria-label={clickableNode ? `Open ${node.name} namespace` : undefined}
                 style={clickableNode ? { cursor: "pointer" } : undefined}
                 title={node.description || node.name}
               >
