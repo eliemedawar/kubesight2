@@ -68,6 +68,16 @@ export const moveZohoFieldToSection = (fieldId, sectionName) =>
     body: { sectionName },
   });
 
+// --- Text -> Picklist conversion ---
+// Zoho cannot retype a field, so this creates a NEW one with a NEW cf_ api name.
+// The GET is the dry run: it reports every KubeSight setting still keyed on the
+// old name, which is the part that breaks silently.
+export const planZohoFieldConversion = (fieldId) =>
+  request(`/api/zoho/fields/${fieldId}/convert`);
+
+export const convertZohoField = (fieldId, payload) =>
+  request(`/api/zoho/fields/${fieldId}/convert`, { method: "POST", body: payload });
+
 // --- Option-source bindings (this dropdown's options come from Kubernetes) ---
 // The catalogue of source kinds plus every current binding, including the three
 // the sync owns (flagged `locked`).

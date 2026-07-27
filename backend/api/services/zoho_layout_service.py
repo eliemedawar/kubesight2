@@ -506,6 +506,23 @@ def _snapshot(layout_id: str, layout: Dict[str, Any], reason: str, actor: Option
     db.session.commit()
 
 
+def snapshot_layout(reason: str, actor: Optional[str] = None) -> Dict[str, Any]:
+    """Snapshot the live layout before a structural change made OUTSIDE the
+    whole-layout writer.
+
+    Only ``unassociate`` needs this: it removes a field through its own Desk
+    endpoint, so it never passes the writer's guards. Taking the snapshot first
+    is what keeps "we retired the wrong field" recoverable.
+    """
+    cfg, layout = _read_layout(fresh=True)
+    if not _sections_of(layout):
+        raise LayoutWriteError(
+            "Zoho returned a layout with no sections — refusing to change it."
+        )
+    _snapshot(str(layout.get("id") or cfg.layout_id), layout, reason, actor)
+    return layout
+
+
 def _plan(
     mutations: Sequence[Dict[str, Any]], row, cfg, layout: Dict[str, Any]
 ) -> Dict[str, Any]:

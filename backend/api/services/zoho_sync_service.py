@@ -216,6 +216,81 @@ def custom_environment_by_name(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# Every config column that stores a Zoho FIELD API NAME, with the label the
+# Settings tab shows for it. A field's api name is baked into the inbound
+# webhook contract, so anything that changes one has to name these.
+_API_NAME_COLUMNS: List[Tuple[str, str, str]] = [
+    ("app_field_api_name", "appFieldApiName", "Application field"),
+    ("environment_field_api_name", "environmentFieldApiName", "Environment field"),
+    ("tag_field_api_name", "tagFieldApiName", "Version / tag field"),
+    ("variable_field_api_name", "variableFieldApiName", "Variable field"),
+    ("value_field_api_name", "valueFieldApiName", "Variable value field"),
+]
+
+# `{cf_something}` inside an operator-authored Jenkins parameter map.
+_PARAM_TOKEN_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def describe_api_name_usage(api_name: str) -> Dict[str, Any]:
+    """Everything in KubeSight that still points at ``api_name``.
+
+    A Zoho field's type cannot change in place, so converting one means a NEW
+    field with a NEW ``cf_`` api name — and every reference to the old name goes
+    stale silently (the webhook simply stops carrying the key). This is the list
+    the conversion has to put in front of the operator.
+    """
+    name = str(api_name or "").strip()
+    row = get_or_create_config()
+    config_keys: List[Dict[str, str]] = []
+    if name:
+        for column, json_key, label in _API_NAME_COLUMNS:
+            if str(getattr(row, column, "") or "").strip() == name:
+                config_keys.append({"key": json_key, "column": column, "label": label})
+
+    params: List[Dict[str, str]] = []
+
+    def _scan(where: str, jenkins_params: Any) -> None:
+        if not isinstance(jenkins_params, dict):
+            return
+        for param, value in jenkins_params.items():
+            if name and name in _PARAM_TOKEN_RE.findall(str(value or "")):
+                params.append({"where": where, "param": str(param), "value": str(value)})
+
+    for entry in _custom_environment_list(row):
+        _scan(f"custom environment “{entry.get('name') or '?'}”", entry.get("jenkinsParams"))
+    for rule in _job_override_list(row):
+        target = rule.get("namespace") or "?"
+        deployments = rule.get("deployments") or []
+        if deployments:
+            target = f"{target}/{', '.join(str(d) for d in deployments)}"
+        _scan(f"job override “{target}”", rule.get("jenkinsParams"))
+
+    return {"apiName": name, "configKeys": config_keys, "jenkinsParams": params}
+
+
+def repoint_api_name(old_api_name: str, new_api_name: str) -> List[str]:
+    """Move the config columns that named ``old_api_name`` onto the new field.
+
+    Returns the JSON keys that changed. Only the plain ``*_field_api_name``
+    columns are rewritten — the ``{cf_*}`` tokens inside Jenkins parameter maps
+    are left alone on purpose: the Jenkins job on the other side may still expect
+    the old parameter, so that call is the operator's.
+    """
+    old, new = str(old_api_name or "").strip(), str(new_api_name or "").strip()
+    if not old or not new or old == new:
+        return []
+    row = get_or_create_config()
+    changed: List[str] = []
+    for column, json_key, _label in _API_NAME_COLUMNS:
+        if str(getattr(row, column, "") or "").strip() == old:
+            setattr(row, column, new)
+            changed.append(json_key)
+    if changed:
+        db.session.add(row)
+        db.session.commit()
+    return changed
+
+
 def _job_override_list(row: ZohoIntegration) -> List[Dict[str, Any]]:
     """Decode the operator's Jenkins job overrides for cluster targets.
 

@@ -36,6 +36,11 @@ _LAYOUT_TTL_SECONDS = int(os.getenv("ZOHO_LAYOUT_CACHE_TTL_SECONDS", "60"))
 _LAYOUT_STALE_SERVE_SECONDS = int(os.getenv("ZOHO_LAYOUT_CACHE_STALE_SECONDS", "600"))
 
 
+# The Desk module every DevOps Request field belongs to. Desk requires it as a
+# QUERY parameter on organizationFields (see :func:`_org_fields_url`).
+_MODULE = "tickets"
+
+
 def invalidate_layout_cache() -> None:
     """Drop cached layout reads — call after any write that changes the layout."""
     _LAYOUT_CACHE.invalidate("layout:")
@@ -344,16 +349,31 @@ def unassociate_field(cfg: ZohoConfig, field_id: str) -> Dict[str, Any]:
     return payload
 
 
-def _org_fields_url(cfg: ZohoConfig, field_id: Optional[str] = None) -> str:
+def _org_fields_url(
+    cfg: ZohoConfig, field_id: Optional[str] = None, module: Optional[str] = None
+) -> str:
+    """``/organizationFields`` with ``module`` in the QUERY STRING.
+
+    Verified against the live Desk API (2026-07-27): sending ``module`` only in
+    the JSON body fails with HTTP 422 "The mandatory parameter 'module' is
+    missing." — Desk reads it off the query string on every organizationFields
+    call, create included.
+    """
     base = cfg.api_base.rstrip("/")
     suffix = f"/{field_id}" if field_id else ""
-    return f"{base}/organizationFields{suffix}?orgId={cfg.org_id}"
+    query = {"orgId": cfg.org_id}
+    if module:
+        query["module"] = module
+    return f"{base}/organizationFields{suffix}?{urlencode(query)}"
 
 
 def _mutate_org_field(cfg: ZohoConfig, method: str, body: Dict[str, Any],
                       field_id: Optional[str] = None) -> Dict[str, Any]:
     _assert_layout_allowed(cfg)
-    url = _org_fields_url(cfg, field_id)
+    # The module rides in the query for every call. On create it also stays in
+    # the body (Desk's own example shows it there); on update the body is left
+    # exactly as the caller built it — only the URL gains the parameter.
+    url = _org_fields_url(cfg, field_id, module=str(body.get("module") or "") or _MODULE)
     data = json.dumps(body).encode("utf-8")
 
     def _do(tok: str) -> Tuple[int, Dict[str, Any]]:

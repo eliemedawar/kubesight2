@@ -25,7 +25,9 @@ from .zoho_sync_service import (
     _sanitize_value,
     _source_entries as svc_source_entries,
     _to_client_config,
+    describe_api_name_usage as svc_api_name_usage,
     get_or_create_config,
+    repoint_api_name as svc_repoint_api_name,
 )
 
 
@@ -232,7 +234,9 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
     section parameter, so placement is a second step: create the field, then move
     it with a whole-layout write. If that second step fails the field still
     exists — the result says where it actually landed rather than pretending
-    nothing happened.
+    nothing happened. ``afterFieldId`` puts the new field directly after a
+    sibling (the conversion uses it to sit the dropdown next to the text field
+    it replaces).
 
     Raises ValueError on bad input; ZohoError (403) if the token lacks CREATE.
     """
@@ -240,6 +244,7 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
     label = str(payload.get("label") or "").strip()
     field_type = str(payload.get("type") or "Text").strip()
     section_name = str(payload.get("sectionName") or "").strip()
+    after_field_id = str(payload.get("afterFieldId") or "").strip()
     if not label:
         raise ValueError("A field label is required.")
     if field_type not in CREATABLE_TYPES:
@@ -274,7 +279,9 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
 
     landed = _section_of_field(cfg, field_id) if field_id else None
     result["sectionName"] = landed
-    if landed == section_name:
+    # An explicit sibling means the order matters, so place even when Desk
+    # already dropped the field into the right section.
+    if landed == section_name and not after_field_id:
         return result
     if not field_id:
         result["warnings"].append(
@@ -292,7 +299,7 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
 
     try:
         layout_svc.apply_layout_write(
-            [layout_svc.place_field(field_id, section_name)],
+            [layout_svc.place_field(field_id, section_name, after_field_id=after_field_id or None)],
             reason="place_field",
             actor=actor,
         )
@@ -302,6 +309,239 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
             f"The field was created but stayed in '{landed}' — moving it into "
             f"'{section_name}' failed: {exc}"
         )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Text -> Picklist conversion.
+#
+# Zoho cannot change a field's type in place, so "convert" means: create a new
+# Picklist field, sit it next to the old one, optionally retire the old one —
+# and tell the operator loudly that the new field has a DIFFERENT cf_ api name,
+# because every KubeSight config key and Desk webhook payload keyed on the old
+# name goes quietly stale otherwise.
+# ---------------------------------------------------------------------------
+
+CONVERTIBLE_TYPES = {"Text", "Textarea", "Email", "Phone", "URL", "Number"}
+
+
+def _convertible(field: Dict[str, Any]) -> None:
+    field_type = str(field.get("type") or "")
+    if field_type == "Picklist":
+        raise ValueError("That field is already a dropdown.")
+    if field_type not in CONVERTIBLE_TYPES:
+        raise ValueError(
+            f"A {field_type or 'field'} cannot be converted to a dropdown "
+            f"(convertible types: {', '.join(sorted(CONVERTIBLE_TYPES))})."
+        )
+
+
+def _label_taken(layout: Dict[str, Any], label: str) -> bool:
+    """Whether any field on the layout already uses this display label.
+
+    The field being converted counts: it keeps its own label until it is
+    retired, and Zoho rejects a duplicate — so the replacement always needs a
+    different name.
+    """
+    target = label.casefold()
+    for section in layout.get("sections") or []:
+        for field in section.get("fields") or []:
+            current = field.get("displayLabel") or field.get("label") or ""
+            if str(current).casefold() == target:
+                return True
+    return False
+
+
+def _suggest_label(layout: Dict[str, Any], base: str) -> str:
+    """A free label near ``base``. The old field still holds ``base`` itself."""
+    if not _label_taken(layout, base):
+        return base
+    for candidate in (f"{base} (list)", f"{base} (dropdown)"):
+        if not _label_taken(layout, candidate):
+            return candidate
+    for n in range(2, 20):
+        candidate = f"{base} {n}"
+        if not _label_taken(layout, candidate):
+            return candidate
+    return base
+
+
+def plan_field_conversion(field_id: str) -> Dict[str, Any]:
+    """Read-only: what converting this field would involve, before anything runs.
+
+    The impact list is the point — it names every KubeSight setting still keyed
+    on the old api name, so the operator sees the cost before the new field
+    exists rather than after tickets start arriving without the key.
+    """
+    row, cfg = _config_and_cfg()
+    field = zoho_client.field_on_layout(cfg, str(field_id))
+    if field is None:
+        raise LookupError("That field is not on the DevOps Request layout.")
+    _convertible(field)
+
+    layout = zoho_client.get_layout(cfg)
+    label = field.get("displayLabel") or field.get("label") or field.get("apiName") or ""
+    api_name = str(field.get("apiName") or "")
+    return {
+        "field": {
+            "id": str(field_id),
+            "apiName": api_name,
+            "label": label,
+            "type": field.get("type"),
+            "required": bool(field.get("isMandatory")),
+        },
+        "sectionName": _section_of_field(cfg, str(field_id)),
+        "suggestedLabel": _suggest_label(layout, str(label)),
+        "impact": svc_api_name_usage(api_name),
+        "layoutWritesEnabled": layout_svc.writes_enabled(),
+    }
+
+
+def _conversion_warnings(
+    old: Dict[str, Any], new_api_name: str, impact: Dict[str, Any], repointed: List[str]
+) -> List[str]:
+    """The api-name change, spelled out per affected setting."""
+    old_api = str(old.get("apiName") or "")
+    warnings = [
+        f"The new field's api name is “{new_api_name}”, not “{old_api}” — Zoho cannot "
+        "change a field's type in place, so this is a different field. Update the Desk "
+        "workflow/webhook that posts DevOps Request tickets to send the new key."
+    ]
+    remaining = [k for k in impact.get("configKeys") or [] if k["key"] not in repointed]
+    if repointed:
+        warnings.append(
+            "KubeSight settings repointed at the new field: " + ", ".join(repointed) + "."
+        )
+    if remaining:
+        warnings.append(
+            "Still pointing at the old field: "
+            + ", ".join(f"{k['label']} ({k['key']})" for k in remaining)
+            + " — update them on the Settings tab."
+        )
+    for entry in impact.get("jenkinsParams") or []:
+        warnings.append(
+            f"Jenkins parameter “{entry['param']}” in {entry['where']} passes "
+            f"{entry['value']} — it will resolve empty until you point it at "
+            f"{{{new_api_name}}} (check the Jenkins job expects the same value)."
+        )
+    return warnings
+
+
+def convert_field_to_picklist(
+    field_id: str, payload: Dict[str, Any], actor: Optional[str] = None
+) -> Dict[str, Any]:
+    """Replace a free-text field with a dropdown, reporting every consequence.
+
+    Order matters: create + place first (the reversible part), then the optional
+    config repoint, then the optional retirement of the old field — so a failure
+    late in the sequence leaves the new field in place rather than a layout with
+    neither field usable. Every step's outcome is in the result.
+    """
+    row, cfg = _config_and_cfg()
+    field_id = str(field_id)
+    old = zoho_client.field_on_layout(cfg, field_id)
+    if old is None:
+        raise LookupError("That field is not on the DevOps Request layout.")
+    _convertible(old)
+
+    layout = zoho_client.get_layout(cfg)
+    old_label = str(old.get("displayLabel") or old.get("label") or old.get("apiName") or "")
+    old_api_name = str(old.get("apiName") or "")
+    label = str(payload.get("label") or "").strip() or _suggest_label(layout, old_label)
+    if _label_taken(layout, label):
+        raise ValueError(
+            f"A field named “{label}” already exists on this layout. Zoho requires "
+            "unique field labels, so give the dropdown a different name."
+        )
+    section_name = str(payload.get("sectionName") or "").strip() or (
+        _section_of_field(cfg, field_id) or ""
+    )
+
+    try:
+        created = create_field(
+            {
+                "label": label,
+                "type": "Picklist",
+                "values": payload.get("values") or [],
+                "required": bool(payload.get("required", old.get("isMandatory"))),
+                "sectionName": section_name,
+                # Sit the dropdown exactly where the text field is, so the ticket
+                # form does not visibly reshuffle for agents mid-migration.
+                "afterFieldId": field_id,
+            },
+            actor=actor,
+        )
+    except ZohoError as exc:
+        # Field labels are unique across the ORG, not just this layout, so the
+        # pre-check above cannot see a collision with a field on another layout.
+        # Say what to do about it instead of surfacing a bare 502.
+        if any(word in str(exc).lower() for word in ("duplicate", "already exists", "unique")):
+            raise ValueError(
+                f"Zoho already has a field named “{label}” (labels are unique across the "
+                "whole Desk org, not just this layout). Pick a different name."
+            ) from exc
+        raise
+    new_api_name = str(created.get("apiName") or "")
+    result: Dict[str, Any] = {
+        "newField": created,
+        "oldField": {"id": field_id, "apiName": old_api_name, "label": old_label},
+        "retired": False,
+        "repointed": [],
+        "binding": None,
+        "warnings": list(created.get("warnings") or []),
+    }
+
+    # Optional: bind the new dropdown to a live source straight away.
+    source_kind = str(payload.get("sourceKind") or "").strip()
+    if source_kind and created.get("id"):
+        try:
+            result["binding"] = set_field_binding(
+                str(created["id"]),
+                {
+                    "sourceKind": source_kind,
+                    "parentFieldId": payload.get("parentFieldId"),
+                    "label": label,
+                },
+            )
+        except (ValueError, LookupError, ZohoError) as exc:
+            result["warnings"].append(
+                f"The dropdown was created but its option source could not be set: {exc}"
+            )
+
+    if bool(payload.get("repointConfig")) and new_api_name:
+        result["repointed"] = svc_repoint_api_name(old_api_name, new_api_name)
+
+    impact = svc_api_name_usage(old_api_name)
+    result["impact"] = impact
+
+    # Optional: take the old field off the layout. Last, and snapshot first —
+    # unassociate goes through its own Desk endpoint, so it never passes the
+    # whole-layout writer's guards.
+    if bool(payload.get("retireOld")):
+        if not layout_svc.writes_enabled():
+            result["warnings"].append(
+                f"“{old_label}” was left on the layout: removing it needs layout writes, "
+                "which are disabled — set ZOHO_LAYOUT_WRITE_ENABLED=true."
+            )
+        else:
+            try:
+                layout_svc.snapshot_layout("field_conversion", actor)
+                zoho_client.unassociate_field(cfg, field_id)
+                result["retired"] = True
+            except (ZohoError, layout_svc.LayoutWriteError) as exc:
+                result["warnings"].append(
+                    f"The dropdown was created, but “{old_label}” could not be removed "
+                    f"from the layout: {exc}"
+                )
+    if not result["retired"]:
+        result["warnings"].append(
+            f"“{old_label}” is still on the form. Leave it until the Desk workflow sends "
+            "the new key, then retire it — its historical ticket data is unaffected."
+        )
+
+    result["warnings"] = _conversion_warnings(
+        old, new_api_name, impact, result["repointed"]
+    ) + result["warnings"]
     return result
 
 

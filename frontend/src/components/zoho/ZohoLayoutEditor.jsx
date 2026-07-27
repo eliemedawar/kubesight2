@@ -3,6 +3,7 @@ import EmptyState from "../common/EmptyState.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import ZohoAddSectionModal from "./ZohoAddSectionModal.jsx";
 import ZohoBindingModal from "./ZohoBindingModal.jsx";
+import ZohoConvertFieldModal from "./ZohoConvertFieldModal.jsx";
 import ZohoLayoutSection from "./ZohoLayoutSection.jsx";
 import ZohoSourcePicker from "./ZohoSourcePicker.jsx";
 import { IconAlert } from "./icons.jsx";
@@ -140,8 +141,7 @@ export default function ZohoLayoutEditor({
         initial: { label: field.label, required: field.required },
       });
     } else if (action === "convert") {
-      // Wired up with the Text -> Picklist conversion flow.
-      setNotice(`Converting "${field.label}" to a dropdown isn't available yet.`);
+      setModal({ mode: "convert", field });
     }
   };
 
@@ -277,6 +277,14 @@ export default function ZohoLayoutEditor({
         />
       ) : modal?.mode === "binding" ? (
         <ZohoBindingModal
+          field={modal.field}
+          onClose={closeModal}
+          onSaved={async (message) => {
+            await afterSave(message);
+          }}
+        />
+      ) : modal?.mode === "convert" ? (
+        <ZohoConvertFieldModal
           field={modal.field}
           onClose={closeModal}
           onSaved={async (message) => {

@@ -342,6 +342,55 @@ def move_field_section(field_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Text -> Picklist conversion. Zoho cannot retype a field, so this creates a new
+# one; GET returns the impact report to show BEFORE that happens.
+# ---------------------------------------------------------------------------
+
+@zoho_bp.route("/fields/<field_id>/convert", methods=["GET"])
+@require_permission("zoho:view")
+def plan_convert_field(field_id: str):
+    try:
+        return success_response(fields_svc.plan_field_conversion(field_id))
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+
+
+@zoho_bp.route("/fields/<field_id>/convert", methods=["POST"])
+@require_permission("zoho:manage")
+def convert_field(field_id: str):
+    payload = request.get_json(silent=True) or {}
+    actor = get_current_user()
+    try:
+        data = fields_svc.convert_field_to_picklist(
+            field_id, payload, actor=_actor_name(actor)
+        )
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+    log_audit(
+        "zoho_field_converted",
+        actor=actor,
+        target_type="zoho_field",
+        target_id=str(field_id),
+        details={
+            "oldApiName": (data.get("oldField") or {}).get("apiName"),
+            "newFieldId": (data.get("newField") or {}).get("id"),
+            "newApiName": (data.get("newField") or {}).get("apiName"),
+            "retired": data.get("retired"),
+            "repointed": data.get("repointed"),
+        },
+    )
+    return success_response(data, status_code=201)
+
+
+# ---------------------------------------------------------------------------
 # Option-source bindings — bind any picklist to a live KubeSight source.
 #
 # Preview is a POST because it carries the binding being edited (and because
