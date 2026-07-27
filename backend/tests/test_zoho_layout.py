@@ -430,7 +430,7 @@ def creatable(zoho, monkeypatch):
         # Desk rejects an unknown property outright ("An extra parameter 'X' is
         # found", HTTP 422), so the stub is strict about what it accepts. Note
         # `module` is NOT among them — it travels in the query string.
-        allowed = {"displayLabel", "type", "isMandatory", "layoutId"}
+        allowed = {"displayLabel", "type", "isMandatory", "layoutId", "maxLength"}
         extra = set(body) - allowed
         if extra:
             raise zoho_client.ZohoError(
@@ -438,6 +438,7 @@ def creatable(zoho, monkeypatch):
                 f"'{sorted(extra)[0]}' is found.",
                 422,
             )
+        zoho.setdefault("createdBodies", []).append(copy.deepcopy(body))
         new = {
             "id": "303",
             "apiName": "cf_region",
@@ -558,6 +559,7 @@ def test_create_field_without_section_does_not_write_layout(creatable, client, a
     assert resp.status_code == 201
     assert resp.get_json()["data"]["sectionName"] == "Case Information"
     assert creatable["patches"] == []
+    assert creatable["createdBodies"][0]["maxLength"] == "50"
 
 
 def test_create_field_reports_placement_failure_without_pretending(creatable, client, admin_token, monkeypatch):

@@ -170,6 +170,11 @@ def set_field_options(field_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 # Field types we let the UI create (maps to Zoho Desk fieldType values).
 CREATABLE_TYPES = {"Text", "Picklist", "Number", "Decimal", "Date", "DateTime", "Boolean", "Textarea", "Email", "Phone", "URL"}
 
+# Zoho Desk requires maxLength when creating a Text field and expects the
+# request value to be a numeric string (its response normalizes it to a number).
+_MAX_LENGTH_TYPES = {"Text"}
+_DEFAULT_MAX_LENGTH = 50
+
 
 def update_field(field_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Edit an existing field's label / required (needs Desk.settings.UPDATE)."""
@@ -266,6 +271,16 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
     }
     if not is_picklist:
         body["isMandatory"] = required
+    if field_type in _MAX_LENGTH_TYPES:
+        # Desk rejects a text field with no length ("Invalid maximum length for
+        # the field", HTTP 400 — verified live 2026-07-27). It is a real Desk
+        # property, not a KubeSight one, so the caller may override it.
+        try:
+            body["maxLength"] = str(
+                int(payload.get("maxLength") or _DEFAULT_MAX_LENGTH)
+            )
+        except (TypeError, ValueError):
+            raise ValueError("maxLength must be a number.")
     values = _normalize_option_list(payload.get("values") or []) if is_picklist else []
 
     try:
