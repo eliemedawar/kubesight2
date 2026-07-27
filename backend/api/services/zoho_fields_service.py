@@ -252,23 +252,33 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
 
     required = bool(payload.get("required", False))
     is_picklist = field_type == "Picklist"
+    # What Desk's create endpoint accepts is narrow, and it 422s on anything it
+    # does not want ("An extra parameter 'X' is found") — `module` goes in the
+    # query string, and a picklist's option list is not accepted here at all
+    # (both verified live 2026-07-27). `zoho_client` drops any further property
+    # Desk names. A picklist's required flag rides with its values instead, for
+    # the same reason update_field has to send it that way.
     body: Dict[str, Any] = {
-        # Zoho Desk requires the module; the DevOps Request layout is a Tickets layout.
-        "module": "tickets",
         "displayLabel": label,
         "type": field_type,
-        "isMandatory": required,
         # Place the new field on the DevOps Request layout only.
         "layoutId": cfg.layout_id,
     }
-    # A picklist's option list is NOT part of the create body: Desk answers
-    # "An extra parameter 'allowedValues' is found" (HTTP 422, verified live
-    # 2026-07-27). Options belong to the layout-field endpoint, the same place
-    # update_field has to go to flip a picklist's required flag — so the field is
-    # created bare and its values are published straight after.
+    if not is_picklist:
+        body["isMandatory"] = required
     values = _normalize_option_list(payload.get("values") or []) if is_picklist else []
 
-    created = zoho_client.create_org_field(cfg, body)
+    try:
+        created = zoho_client.create_org_field(cfg, body)
+    except ZohoError as exc:
+        # The type enum differs between Desk versions; name the culprit rather
+        # than handing back a raw 422.
+        if field_type.lower() in str(exc).lower() and "type" in str(exc).lower():
+            raise ValueError(
+                f"Zoho rejected the field type '{field_type}': {exc} "
+                "Pick another type — this org may not offer that one."
+            ) from exc
+        raise
     field_id = str(created.get("id") or "")
     result = {
         "id": field_id,
@@ -279,58 +289,64 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
         "warnings": [],
     }
 
-    if is_picklist and field_id:
-        try:
-            zoho_client.set_allowed_values(
-                cfg,
-                values,
-                field_id=field_id,
-                default_value=NONE_VALUE,
-                is_mandatory=required,
-            )
-            result["allowedValues"] = values
-        except ZohoError as exc:
-            # The field exists either way — say so rather than implying it doesn't.
-            result["warnings"].append(
-                f"The field was created, but its options could not be set: {exc} "
-                "Use “Manage options” on the field to add them."
-            )
-    if not section_name:
-        result["sectionName"] = _section_of_field(cfg, field_id) if field_id else None
-        return result
-
+    # 1. Placement. Desk associates the field with the layout itself (that is
+    #    what `layoutId` is for), so this only runs when the operator asked for a
+    #    specific section or ordering.
     landed = _section_of_field(cfg, field_id) if field_id else None
     result["sectionName"] = landed
-    # An explicit sibling means the order matters, so place even when Desk
-    # already dropped the field into the right section.
-    if landed == section_name and not after_field_id:
-        return result
-    if not field_id:
+    needs_move = bool(section_name) and (landed != section_name or bool(after_field_id))
+    if needs_move and not field_id:
         result["warnings"].append(
             "Zoho did not return an id for the new field, so it could not be moved "
             f"into '{section_name}'. Move it in Zoho Desk, or refresh and try again."
         )
-        return result
-    if not layout_svc.writes_enabled():
+    elif needs_move and not layout_svc.writes_enabled():
         result["warnings"].append(
             f"The field was created in '{landed}'. Moving it into '{section_name}' "
             "needs layout writes, which are disabled — review the dry-run and set "
             "ZOHO_LAYOUT_WRITE_ENABLED=true."
         )
-        return result
+    elif needs_move:
+        try:
+            layout_svc.apply_layout_write(
+                [layout_svc.place_field(
+                    field_id, section_name, after_field_id=after_field_id or None
+                )],
+                reason="place_field",
+                actor=actor,
+            )
+            result["sectionName"] = section_name
+        except (layout_svc.LayoutWriteError, ZohoError, PermissionError) as exc:
+            result["warnings"].append(
+                f"The field was created but stayed in '{landed}' — moving it into "
+                f"'{section_name}' failed: {exc}"
+            )
 
-    try:
-        layout_svc.apply_layout_write(
-            [layout_svc.place_field(field_id, section_name, after_field_id=after_field_id or None)],
-            reason="place_field",
-            actor=actor,
-        )
-        result["sectionName"] = section_name
-    except (layout_svc.LayoutWriteError, ZohoError, PermissionError) as exc:
-        result["warnings"].append(
-            f"The field was created but stayed in '{landed}' — moving it into "
-            f"'{section_name}' failed: {exc}"
-        )
+    # 2. Options LAST: set_allowed_values targets /layouts/{id}/fields/{id}, so
+    #    the field has to be on the layout before its values can be published.
+    if is_picklist and field_id:
+        if not result["sectionName"]:
+            result["warnings"].append(
+                "The field was created but is not on the DevOps Request layout, so its "
+                "options could not be published. Add it to the layout in Zoho Desk, then "
+                "use “Manage options”."
+            )
+        else:
+            try:
+                zoho_client.set_allowed_values(
+                    cfg,
+                    values,
+                    field_id=field_id,
+                    default_value=NONE_VALUE,
+                    is_mandatory=required,
+                )
+                result["allowedValues"] = values
+            except ZohoError as exc:
+                # The field exists either way — say so rather than implying it doesn't.
+                result["warnings"].append(
+                    f"The field was created, but its options could not be set: {exc} "
+                    "Use “Manage options” on the field to add them."
+                )
     return result
 
 

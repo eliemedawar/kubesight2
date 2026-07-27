@@ -14,7 +14,9 @@ decrypting the client secret / refresh token before calling in.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -23,6 +25,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
 from ..ttl_cache import TTLCache
+
+logger = logging.getLogger(__name__)
 
 _TIMEOUT_SECONDS = 20
 
@@ -39,6 +43,14 @@ _LAYOUT_STALE_SERVE_SECONDS = int(os.getenv("ZOHO_LAYOUT_CACHE_STALE_SECONDS", "
 # The Desk module every DevOps Request field belongs to. Desk requires it as a
 # QUERY parameter on organizationFields (see :func:`_org_fields_url`).
 _MODULE = "tickets"
+
+# Layout-body keys that may be dropped if Desk calls them extra. Deliberately
+# excludes `departmentId`, `isDefaultLayout`, `layoutName` and `sections`:
+# omitting one of those could move the layout between departments, demote the
+# department's default layout, or blank the form.
+_DROPPABLE_LAYOUT_KEYS = frozenset(
+    {"module", "skipDeptAccessValidation", "layoutDisplayName", "layoutDesc"}
+)
 
 
 def invalidate_layout_cache() -> None:
@@ -298,23 +310,45 @@ def update_layout(cfg: ZohoConfig, body: Dict[str, Any]) -> Dict[str, Any]:
     """
     _assert_layout_allowed(cfg)
     base = cfg.api_base.rstrip("/")
-    url = f"{base}/layouts/{cfg.layout_id}?{urlencode({'orgId': cfg.org_id})}"
-    data = json.dumps(body).encode("utf-8")
+    body = dict(body)
+    # `module` also in the query: on organizationFields Desk demands it there and
+    # nowhere else, so give the layout endpoint both chances. If it turns out to
+    # reject the body copy, the retry below clears it.
+    query = {"orgId": cfg.org_id}
+    if body.get("module"):
+        query["module"] = str(body["module"])
+    url = f"{base}/layouts/{cfg.layout_id}?{urlencode(query)}"
 
     def _do(tok: str) -> Tuple[int, Dict[str, Any]]:
         headers = _auth_headers(cfg, tok)
         headers["Content-Type"] = "application/json"
-        return _request("PATCH", url, headers=headers, body=data)
+        return _request("PATCH", url, headers=headers, body=json.dumps(body).encode("utf-8"))
 
     token = get_access_token(cfg)
-    status, payload = _do(token)
-    if status == 401:
-        token = get_access_token(cfg, force=True)
+    for _ in range(_MAX_EXTRA_PARAM_RETRIES):
         status, payload = _do(token)
-    if status not in (200, 201):
-        raise ZohoError(_error_detail("Updating the Zoho layout failed", status, payload), status)
-    invalidate_layout_cache()
-    return payload
+        if status == 401:
+            token = get_access_token(cfg, force=True)
+            status, payload = _do(token)
+        if status in (200, 201):
+            invalidate_layout_cache()
+            return payload
+        detail = _error_detail("Updating the Zoho layout failed", status, payload)
+        match = _EXTRA_PARAM_RE.search(detail) if status == 422 else None
+        rejected = match.group(1) if match else None
+        # Only decorative keys may be dropped. Silently omitting `departmentId`
+        # or `isDefaultLayout` could move the layout between departments or
+        # demote the department's default layout — the two things _build_body
+        # refuses to guess in the first place.
+        if rejected not in _DROPPABLE_LAYOUT_KEYS or rejected not in body:
+            raise ZohoError(detail, status)
+        logger.warning("Zoho rejected layout property %r; retrying without it.", rejected)
+        body.pop(rejected)
+    raise ZohoError(
+        "Updating the Zoho layout kept rejecting body properties "
+        f"({_MAX_EXTRA_PARAM_RETRIES} attempts). Nothing was written.",
+        422,
+    )
 
 
 def unassociate_field(cfg: ZohoConfig, field_id: str) -> Dict[str, Any]:
@@ -367,29 +401,60 @@ def _org_fields_url(
     return f"{base}/organizationFields{suffix}?{urlencode(query)}"
 
 
+# Desk names the offending key when it rejects a body property, e.g.
+# "An extra parameter 'module' is found."
+_EXTRA_PARAM_RE = re.compile(r"extra parameter '([^']+)' is found", re.IGNORECASE)
+# Bound on the drop-and-retry below — enough to clear a couple of unexpected
+# properties, never enough to loop.
+_MAX_EXTRA_PARAM_RETRIES = 4
+
+
 def _mutate_org_field(cfg: ZohoConfig, method: str, body: Dict[str, Any],
                       field_id: Optional[str] = None) -> Dict[str, Any]:
+    """Create/update an organization field, tolerating Desk's strict body schema.
+
+    ``organizationFields`` is strict in both directions: it 422s on a MISSING
+    required parameter and on an UNEXPECTED extra one, and which properties it
+    accepts varies by field type and Desk version. Since the error names the key
+    verbatim, an unexpected property is dropped and the call retried once per
+    offender instead of failing in the operator's face — the alternative is a
+    deploy cycle per rejected key. Anything else is raised as-is.
+    """
     _assert_layout_allowed(cfg)
-    # The module rides in the query for every call. On create it also stays in
-    # the body (Desk's own example shows it there); on update the body is left
-    # exactly as the caller built it — only the URL gains the parameter.
+    # `module` belongs in the QUERY only: absent from the URL Desk says it is
+    # missing, present in the body it says it is extra (both verified live,
+    # 2026-07-27).
+    body = {k: v for k, v in body.items() if k != "module"}
     url = _org_fields_url(cfg, field_id, module=str(body.get("module") or "") or _MODULE)
-    data = json.dumps(body).encode("utf-8")
 
     def _do(tok: str) -> Tuple[int, Dict[str, Any]]:
         headers = _auth_headers(cfg, tok)
         headers["Content-Type"] = "application/json"
-        return _request(method, url, headers=headers, body=data)
+        return _request(method, url, headers=headers, body=json.dumps(body).encode("utf-8"))
 
     token = get_access_token(cfg)
-    status, payload = _do(token)
-    if status == 401:
-        token = get_access_token(cfg, force=True)
+    for _ in range(_MAX_EXTRA_PARAM_RETRIES):
         status, payload = _do(token)
-    if status not in (200, 201):
-        raise ZohoError(_error_detail(f"{method} organizationFields failed", status, payload), status)
-    invalidate_layout_cache()
-    return payload
+        if status == 401:
+            token = get_access_token(cfg, force=True)
+            status, payload = _do(token)
+        if status in (200, 201):
+            invalidate_layout_cache()
+            return payload
+        detail = _error_detail(f"{method} organizationFields failed", status, payload)
+        match = _EXTRA_PARAM_RE.search(detail) if status == 422 else None
+        if not match or match.group(1) not in body:
+            raise ZohoError(detail, status)
+        rejected = match.group(1)
+        logger.warning(
+            "Zoho rejected organizationFields property %r; retrying without it.", rejected
+        )
+        body.pop(rejected)
+    raise ZohoError(
+        f"{method} organizationFields kept rejecting body properties "
+        f"({_MAX_EXTRA_PARAM_RETRIES} attempts). Nothing was created.",
+        422,
+    )
 
 
 def create_org_field(cfg: ZohoConfig, body: Dict[str, Any]) -> Dict[str, Any]:

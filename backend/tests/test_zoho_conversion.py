@@ -184,9 +184,10 @@ def test_convert_creates_a_picklist_beside_the_old_field(zoho, client, admin_tok
 
     body = zoho["created"][0]
     assert body["type"] == "Picklist"
-    assert body["module"] == "tickets"
-    # The option list is NOT in the create body — Desk 422s "An extra parameter
-    # 'allowedValues' is found". It goes through the layout-field endpoint after.
+    # Neither `module` nor the option list belongs in the create body — Desk 422s
+    # both as "An extra parameter '…' is found". Module rides in the query; the
+    # options go through the layout-field endpoint straight after.
+    assert "module" not in body
     assert "allowedValues" not in body
     assert zoho["options"] == [
         {"fieldId": "303", "values": ["-None-", "v1.2.3", "latest"],

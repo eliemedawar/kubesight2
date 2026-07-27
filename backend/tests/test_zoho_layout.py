@@ -428,8 +428,9 @@ def creatable(zoho, monkeypatch):
 
     def _create(cfg, body):
         # Desk rejects an unknown property outright ("An extra parameter 'X' is
-        # found", HTTP 422), so the stub is strict about what it accepts.
-        allowed = {"module", "displayLabel", "type", "isMandatory", "layoutId"}
+        # found", HTTP 422), so the stub is strict about what it accepts. Note
+        # `module` is NOT among them — it travels in the query string.
+        allowed = {"displayLabel", "type", "isMandatory", "layoutId"}
         extra = set(body) - allowed
         if extra:
             raise zoho_client.ZohoError(
@@ -452,12 +453,22 @@ def creatable(zoho, monkeypatch):
         zoho["layout"]["sections"][0]["fields"].append(new)
         return new
 
-    def _set_allowed_values(cfg, values, *, field_id=None, **kwargs):
-        zoho.setdefault("options", []).append({"fieldId": str(field_id), "values": list(values)})
+    def _set_allowed_values(cfg, values, *, field_id=None, is_mandatory=False, **kwargs):
+        zoho.setdefault("options", []).append(
+            {"fieldId": str(field_id), "values": list(values), "isMandatory": is_mandatory}
+        )
+        zoho["order"].append("options")
         return {}
 
+    def _update_layout(cfg, body):
+        zoho["patches"].append(copy.deepcopy(body))
+        zoho["order"].append("patch")
+        return {"id": LAYOUT_ID}
+
+    zoho["order"] = []
     monkeypatch.setattr(zoho_client, "create_org_field", _create)
     monkeypatch.setattr(zoho_client, "set_allowed_values", _set_allowed_values)
+    monkeypatch.setattr(zoho_client, "update_layout", _update_layout)
     return zoho
 
 
@@ -471,9 +482,56 @@ def test_create_picklist_publishes_options_separately(creatable, client, admin_t
     )
     assert resp.status_code == 201, resp.get_json()
     assert creatable["options"] == [
-        {"fieldId": "303", "values": ["-None-", "eu-west", "me-south"]}
+        {"fieldId": "303", "values": ["-None-", "eu-west", "me-south"], "isMandatory": False}
     ]
     assert resp.get_json()["data"]["warnings"] == []
+
+
+def test_picklist_required_flag_rides_with_the_values(creatable, client, admin_token):
+    """Desk 422s a bare isMandatory on a picklist through organizationFields —
+    the layout-field endpoint takes it alongside the option list."""
+    client.post(
+        "/api/zoho/fields",
+        json={"label": "Region", "type": "Picklist", "values": ["eu-west"], "required": True},
+        headers=auth_headers(admin_token),
+    )
+    assert creatable["options"][0]["isMandatory"] is True
+
+
+def test_options_are_published_only_after_the_field_reaches_its_section(creatable, client, admin_token):
+    """``set_allowed_values`` targets /layouts/{id}/fields/{id}, so publishing
+    before the placement write would hit a field that is not on the layout."""
+    resp = client.post(
+        "/api/zoho/fields",
+        json={"label": "Region", "type": "Picklist", "values": ["eu-west"],
+              "sectionName": "Deployment Information"},
+        headers=auth_headers(admin_token),
+    )
+    assert resp.status_code == 201, resp.get_json()
+    assert resp.get_json()["data"]["sectionName"] == "Deployment Information"
+    # The layout PATCH that moves the field happens before the option publish.
+    assert creatable["patches"] and creatable["options"]
+    assert creatable["order"] == ["patch", "options"]
+
+
+def test_picklist_options_are_skipped_when_the_field_never_reached_the_layout(
+    creatable, client, admin_token, monkeypatch
+):
+    """Desk may reject `layoutId`; publishing options at a field that is not on
+    the layout would fail confusingly, so say what actually happened."""
+    monkeypatch.setattr(
+        zoho_client, "get_layout", lambda cfg, fresh=False: {**_layout(), "sections": [
+            {"id": 1, "name": "Case Information", "i18NLabel": "Case Information", "fields": []}
+        ]},
+    )
+    resp = client.post(
+        "/api/zoho/fields",
+        json={"label": "Region", "type": "Picklist", "values": ["eu-west"]},
+        headers=auth_headers(admin_token),
+    )
+    assert resp.status_code == 201
+    assert creatable.get("options") in (None, [])
+    assert "not on the DevOps Request layout" in resp.get_json()["data"]["warnings"][0]
 
 
 def test_create_field_moves_into_requested_section(creatable, client, admin_token):
