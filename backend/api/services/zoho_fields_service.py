@@ -115,17 +115,46 @@ def get_layout_structure(fresh: bool = False) -> Dict[str, Any]:
     }
 
 
-def create_section(name: str, actor: Optional[str] = None) -> Dict[str, Any]:
-    """Add an empty section to the layout (whole-layout write — see layout_svc)."""
-    result = layout_svc.apply_layout_write(
-        [layout_svc.add_section(name)], reason="add_section", actor=actor
-    )
-    return {"name": str(name).strip(), "diff": result["diff"], "layoutId": result["layoutId"]}
+def _section_with_field_mutations(name: str, first_field_id: str):
+    """Build a valid section mutation; Zoho rejects sections with no fields."""
+    section_name = str(name or "").strip()
+    field_id = str(first_field_id or "").strip()
+    if not section_name:
+        raise layout_svc.LayoutWriteError("A section name is required.")
+    if not field_id:
+        raise layout_svc.LayoutWriteError(
+            "Choose the first field for the section. Zoho does not allow empty sections."
+        )
+    return section_name, field_id, [
+        layout_svc.add_section(section_name),
+        layout_svc.place_field(field_id, section_name),
+    ]
 
 
-def plan_section(name: str) -> Dict[str, Any]:
+def create_section(
+    name: str, first_field_id: str, actor: Optional[str] = None
+) -> Dict[str, Any]:
+    """Add a section and move its first field in the same whole-layout write."""
+    section_name, field_id, mutations = _section_with_field_mutations(name, first_field_id)
+    _row, cfg = _config_and_cfg()
+    if zoho_client.field_on_layout(cfg, field_id) is None:
+        raise LookupError("The selected first field is not on the DevOps Request layout.")
+    result = layout_svc.apply_layout_write(mutations, reason="add_section", actor=actor)
+    return {
+        "name": section_name,
+        "firstFieldId": field_id,
+        "diff": result["diff"],
+        "layoutId": result["layoutId"],
+    }
+
+
+def plan_section(name: str, first_field_id: str) -> Dict[str, Any]:
     """Dry-run for :func:`create_section` — the exact body, diff, and warnings."""
-    return layout_svc.plan_layout_write([layout_svc.add_section(name)])
+    _section_name, field_id, mutations = _section_with_field_mutations(name, first_field_id)
+    _row, cfg = _config_and_cfg()
+    if zoho_client.field_on_layout(cfg, field_id) is None:
+        raise LookupError("The selected first field is not on the DevOps Request layout.")
+    return layout_svc.plan_layout_write(mutations)
 
 
 def _normalize_option_list(values: Any) -> List[str]:

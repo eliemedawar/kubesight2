@@ -9,8 +9,9 @@ import { createZohoSection, planZohoLayout } from "../../api/zohoApi.js";
  * The preview step is not ceremony: Zoho's only section API replaces the entire
  * layout, so this is where the operator confirms nothing else moves.
  */
-export default function ZohoAddSectionModal({ onClose, onSaved }) {
+export default function ZohoAddSectionModal({ sections = [], onClose, onSaved }) {
   const [name, setName] = useState("");
+  const [fieldId, setFieldId] = useState("");
   const [plan, setPlan] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -20,7 +21,7 @@ export default function ZohoAddSectionModal({ onClose, onSaved }) {
     setBusy(true);
     setError("");
     try {
-      setPlan(await planZohoLayout({ sectionName: name.trim() }));
+      setPlan(await planZohoLayout({ sectionName: name.trim(), fieldId }));
     } catch (err) {
       setError(err.message || "Could not preview the change.");
     } finally {
@@ -32,7 +33,7 @@ export default function ZohoAddSectionModal({ onClose, onSaved }) {
     setBusy(true);
     setError("");
     try {
-      await createZohoSection(name.trim());
+      await createZohoSection(name.trim(), fieldId);
       onSaved(name.trim());
     } catch (err) {
       setError(err.message || "Could not add the section.");
@@ -97,11 +98,34 @@ export default function ZohoAddSectionModal({ onClose, onSaved }) {
                 layout at once — so KubeSight shows you the exact change before saving anything.
               </span>
             </label>
+            <label className="sg-zh-form-full">
+              First field
+              <select value={fieldId} onChange={(e) => setFieldId(e.target.value)} required>
+                <option value="">Select a field to move</option>
+                {sections.map((section) => (
+                  <optgroup key={section.id || section.name} label={section.name}>
+                    {(section.fields || []).map((field) => (
+                      <option key={field.id} value={field.id}>
+                        {field.label || field.apiName || field.id}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              <span className="field-hint">
+                Zoho does not allow empty sections. The selected field will move from its current
+                section into the new one as part of the same reviewed layout change.
+              </span>
+            </label>
             <div className="modal-actions">
               <button type="button" className="secondary" onClick={onClose}>
                 Cancel
               </button>
-              <button type="submit" className="primary" disabled={busy || !name.trim()}>
+              <button
+                type="submit"
+                className="primary"
+                disabled={busy || !name.trim() || !fieldId}
+              >
                 {busy ? "Checking…" : "Preview change"}
               </button>
             </div>

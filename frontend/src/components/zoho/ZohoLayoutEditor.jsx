@@ -293,6 +293,7 @@ export default function ZohoLayoutEditor({
         />
       ) : modal?.mode === "addSection" ? (
         <ZohoAddSectionModal
+          sections={layout?.sections || []}
           onClose={closeModal}
           onSaved={async (name) => {
             await afterSave(`Section "${name}" added.`);

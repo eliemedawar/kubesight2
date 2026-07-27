@@ -282,7 +282,14 @@ def plan_layout():
         name = str(payload.get("sectionName") or "").strip()
         if not name:
             return error_response("Send either 'mutations' or a 'sectionName'.", 400)
-        mutations = [layout_svc.add_section(name)]
+        try:
+            return success_response(fields_svc.plan_section(name, payload.get("fieldId")))
+        except layout_svc.LayoutWriteError as exc:
+            return _layout_write_error(exc)
+        except LookupError as exc:
+            return error_response(str(exc), 404)
+        except ZohoError as exc:
+            return error_response(str(exc), 502)
     try:
         return success_response(layout_svc.plan_layout_write(mutations))
     except layout_svc.LayoutWriteError as exc:
@@ -297,9 +304,13 @@ def create_section():
     payload = request.get_json(silent=True) or {}
     actor = get_current_user()
     try:
-        data = fields_svc.create_section(payload.get("name"), actor=_actor_name(actor))
+        data = fields_svc.create_section(
+            payload.get("name"), payload.get("fieldId"), actor=_actor_name(actor)
+        )
     except layout_svc.LayoutWriteError as exc:
         return _layout_write_error(exc)
+    except LookupError as exc:
+        return error_response(str(exc), 404)
     except PermissionError as exc:
         return error_response(str(exc), 409)
     except ZohoError as exc:
@@ -309,7 +320,11 @@ def create_section():
         actor=actor,
         target_type="zoho_layout",
         target_id=str(data.get("layoutId") or ""),
-        details={"name": data.get("name"), "diff": data.get("diff")},
+        details={
+            "name": data.get("name"),
+            "firstFieldId": data.get("firstFieldId"),
+            "diff": data.get("diff"),
+        },
     )
     return success_response(data, status_code=201)
 

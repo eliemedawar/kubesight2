@@ -345,28 +345,43 @@ def test_post_write_verification_catches_lost_field(zoho, monkeypatch):
 def test_plan_route_returns_body_without_writing(zoho, client, admin_token):
     resp = client.post(
         "/api/zoho/layout/plan",
-        json={"sectionName": "QA"},
+        json={"sectionName": "QA", "fieldId": "201"},
         headers=auth_headers(admin_token),
     )
     assert resp.status_code == 200
     data = resp.get_json()["data"]
     assert [s["name"] for s in data["body"]["sections"]][-1] == "QA"
+    assert [f["id"] for f in data["body"]["sections"][-1]["fields"]] == ["201"]
     assert data["diff"]["sectionsAdded"] == 1
     assert zoho["patches"] == []
 
 
 def test_create_section_route(zoho, client, admin_token):
     resp = client.post(
-        "/api/zoho/sections", json={"name": "QA"}, headers=auth_headers(admin_token)
+        "/api/zoho/sections",
+        json={"name": "QA", "fieldId": "201"},
+        headers=auth_headers(admin_token),
     )
     assert resp.status_code == 201, resp.get_json()
     assert [s["name"] for s in zoho["patches"][0]["sections"]][-1] == "QA"
+    assert [f["id"] for f in zoho["patches"][0]["sections"][-1]["fields"]] == ["201"]
+
+
+def test_create_section_requires_a_first_field(zoho, client, admin_token):
+    resp = client.post(
+        "/api/zoho/sections", json={"name": "QA"}, headers=auth_headers(admin_token)
+    )
+    assert resp.status_code == 400
+    assert "does not allow empty sections" in resp.get_json()["error"]
+    assert zoho["patches"] == []
 
 
 def test_create_section_blocked_when_writes_disabled(zoho, client, admin_token, monkeypatch):
     monkeypatch.delenv("ZOHO_LAYOUT_WRITE_ENABLED", raising=False)
     resp = client.post(
-        "/api/zoho/sections", json={"name": "QA"}, headers=auth_headers(admin_token)
+        "/api/zoho/sections",
+        json={"name": "QA", "fieldId": "201"},
+        headers=auth_headers(admin_token),
     )
     assert resp.status_code == 409
     assert "ZOHO_LAYOUT_WRITE_ENABLED" in resp.get_json()["error"]
@@ -376,7 +391,7 @@ def test_create_section_blocked_when_writes_disabled(zoho, client, admin_token, 
 def test_create_section_duplicate_is_400(zoho, client, admin_token):
     resp = client.post(
         "/api/zoho/sections",
-        json={"name": "Case Information"},
+        json={"name": "Case Information", "fieldId": "201"},
         headers=auth_headers(admin_token),
     )
     assert resp.status_code == 400
