@@ -140,13 +140,14 @@ def test_unassociate_posts_to_the_layout_field(wire):
     assert _query(call["url"]) == {"orgId": "854214247"}
 
 
-def test_layout_patch_carries_module_in_the_query_too(wire):
+def test_layout_patch_keeps_module_in_body_not_query(wire):
     zoho_client.update_layout(CFG, {"module": "tickets", "layoutName": "DevOps Request",
                                     "departmentId": "d1", "isDefaultLayout": False,
                                     "sections": []})
     call = wire[0]
     assert call["method"] == "PATCH"
-    assert _query(call["url"]) == {"orgId": "854214247", "module": "tickets"}
+    assert _query(call["url"]) == {"orgId": "854214247"}
+    assert call["body"]["module"] == "tickets"
 
 
 def test_layout_patch_drops_only_decorative_rejected_keys(wire, monkeypatch):

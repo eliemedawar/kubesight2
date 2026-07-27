@@ -311,13 +311,10 @@ def update_layout(cfg: ZohoConfig, body: Dict[str, Any]) -> Dict[str, Any]:
     _assert_layout_allowed(cfg)
     base = cfg.api_base.rstrip("/")
     body = dict(body)
-    # `module` also in the query: on organizationFields Desk demands it there and
-    # nowhere else, so give the layout endpoint both chances. If it turns out to
-    # reject the body copy, the retry below clears it.
-    query = {"orgId": cfg.org_id}
-    if body.get("module"):
-        query["module"] = str(body["module"])
-    url = f"{base}/layouts/{cfg.layout_id}?{urlencode(query)}"
+    # Unlike organizationFields, the layout endpoint rejects `module` in the
+    # query string ("Extra query parameter 'module' is present"). The layout
+    # schema carries it in the JSON body instead.
+    url = f"{base}/layouts/{cfg.layout_id}?{urlencode({'orgId': cfg.org_id})}"
 
     def _do(tok: str) -> Tuple[int, Dict[str, Any]]:
         headers = _auth_headers(cfg, tok)
