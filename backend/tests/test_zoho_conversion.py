@@ -78,7 +78,9 @@ def zoho(app, monkeypatch):
     db.session.add(row)
     db.session.commit()
 
-    state = {"layout": _layout(), "patches": [], "created": [], "unassociated": []}
+    state = {
+        "layout": _layout(), "patches": [], "created": [], "unassociated": [], "options": [],
+    }
 
     def _create(cfg, body):
         new = {
@@ -87,7 +89,7 @@ def zoho(app, monkeypatch):
             "displayLabel": body["displayLabel"],
             "type": body["type"],
             "isMandatory": body.get("isMandatory", False),
-            "allowedValues": body.get("allowedValues") or ["-None-"],
+            "allowedValues": ["-None-"],
             "defaultValue": "-None-",
             "sortBy": "userDefined",
             "isNested": False,
@@ -95,6 +97,15 @@ def zoho(app, monkeypatch):
         state["created"].append(copy.deepcopy(body))
         state["layout"]["sections"][0]["fields"].append(new)
         return new
+
+    def _set_allowed_values(cfg, values, *, field_id=None, **kwargs):
+        state["options"].append({"fieldId": str(field_id), "values": list(values), **kwargs})
+        for field in state["layout"]["sections"][0]["fields"]:
+            if str(field["id"]) == str(field_id):
+                field["allowedValues"] = list(values)
+        return {}
+
+    monkeypatch.setattr(zoho_client, "set_allowed_values", _set_allowed_values)
 
     def _unassociate(cfg, field_id):
         state["unassociated"].append(str(field_id))
@@ -174,7 +185,13 @@ def test_convert_creates_a_picklist_beside_the_old_field(zoho, client, admin_tok
     body = zoho["created"][0]
     assert body["type"] == "Picklist"
     assert body["module"] == "tickets"
-    assert body["allowedValues"] == ["-None-", "v1.2.3", "latest"]
+    # The option list is NOT in the create body — Desk 422s "An extra parameter
+    # 'allowedValues' is found". It goes through the layout-field endpoint after.
+    assert "allowedValues" not in body
+    assert zoho["options"] == [
+        {"fieldId": "303", "values": ["-None-", "v1.2.3", "latest"],
+         "default_value": "-None-", "is_mandatory": False}
+    ]
     # Placed directly after the field it replaces, so the form does not reshuffle.
     ids = [f["id"] for f in zoho["patches"][0]["sections"][0]["fields"]]
     assert ids == [ENV_FIELD, TAG_FIELD, "303", "203"]

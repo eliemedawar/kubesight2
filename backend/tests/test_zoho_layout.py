@@ -427,6 +427,16 @@ def creatable(zoho, monkeypatch):
     """Make create_org_field mint a field into the FIRST section, like Desk does."""
 
     def _create(cfg, body):
+        # Desk rejects an unknown property outright ("An extra parameter 'X' is
+        # found", HTTP 422), so the stub is strict about what it accepts.
+        allowed = {"module", "displayLabel", "type", "isMandatory", "layoutId"}
+        extra = set(body) - allowed
+        if extra:
+            raise zoho_client.ZohoError(
+                "POST organizationFields failed (HTTP 422): An extra parameter "
+                f"'{sorted(extra)[0]}' is found.",
+                422,
+            )
         new = {
             "id": "303",
             "apiName": "cf_region",
@@ -435,15 +445,35 @@ def creatable(zoho, monkeypatch):
             "isMandatory": body.get("isMandatory", False),
         }
         if body["type"] == "Picklist":
-            new["allowedValues"] = body.get("allowedValues") or ["-None-"]
+            new["allowedValues"] = ["-None-"]
             new["defaultValue"] = "-None-"
             new["sortBy"] = "userDefined"
             new["isNested"] = False
         zoho["layout"]["sections"][0]["fields"].append(new)
         return new
 
+    def _set_allowed_values(cfg, values, *, field_id=None, **kwargs):
+        zoho.setdefault("options", []).append({"fieldId": str(field_id), "values": list(values)})
+        return {}
+
     monkeypatch.setattr(zoho_client, "create_org_field", _create)
+    monkeypatch.setattr(zoho_client, "set_allowed_values", _set_allowed_values)
     return zoho
+
+
+def test_create_picklist_publishes_options_separately(creatable, client, admin_token):
+    """Desk's create endpoint refuses ``allowedValues`` — the option list is a
+    second call to the layout-field endpoint (verified live 2026-07-27)."""
+    resp = client.post(
+        "/api/zoho/fields",
+        json={"label": "Region", "type": "Picklist", "values": ["eu-west", "me-south"]},
+        headers=auth_headers(admin_token),
+    )
+    assert resp.status_code == 201, resp.get_json()
+    assert creatable["options"] == [
+        {"fieldId": "303", "values": ["-None-", "eu-west", "me-south"]}
+    ]
+    assert resp.get_json()["data"]["warnings"] == []
 
 
 def test_create_field_moves_into_requested_section(creatable, client, admin_token):

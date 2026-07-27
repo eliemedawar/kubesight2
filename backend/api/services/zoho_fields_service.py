@@ -250,18 +250,23 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
     if field_type not in CREATABLE_TYPES:
         raise ValueError(f"Unsupported field type '{field_type}'.")
 
+    required = bool(payload.get("required", False))
+    is_picklist = field_type == "Picklist"
     body: Dict[str, Any] = {
         # Zoho Desk requires the module; the DevOps Request layout is a Tickets layout.
         "module": "tickets",
         "displayLabel": label,
         "type": field_type,
-        "isMandatory": bool(payload.get("required", False)),
+        "isMandatory": required,
         # Place the new field on the DevOps Request layout only.
         "layoutId": cfg.layout_id,
     }
-    if field_type == "Picklist":
-        body["allowedValues"] = _normalize_option_list(payload.get("values") or [])
-        body["defaultValue"] = NONE_VALUE
+    # A picklist's option list is NOT part of the create body: Desk answers
+    # "An extra parameter 'allowedValues' is found" (HTTP 422, verified live
+    # 2026-07-27). Options belong to the layout-field endpoint, the same place
+    # update_field has to go to flip a picklist's required flag — so the field is
+    # created bare and its values are published straight after.
+    values = _normalize_option_list(payload.get("values") or []) if is_picklist else []
 
     created = zoho_client.create_org_field(cfg, body)
     field_id = str(created.get("id") or "")
@@ -273,6 +278,23 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
         "sectionName": None,
         "warnings": [],
     }
+
+    if is_picklist and field_id:
+        try:
+            zoho_client.set_allowed_values(
+                cfg,
+                values,
+                field_id=field_id,
+                default_value=NONE_VALUE,
+                is_mandatory=required,
+            )
+            result["allowedValues"] = values
+        except ZohoError as exc:
+            # The field exists either way — say so rather than implying it doesn't.
+            result["warnings"].append(
+                f"The field was created, but its options could not be set: {exc} "
+                "Use “Manage options” on the field to add them."
+            )
     if not section_name:
         result["sectionName"] = _section_of_field(cfg, field_id) if field_id else None
         return result
