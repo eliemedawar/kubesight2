@@ -192,6 +192,24 @@ def test_duplicate_section_name_rejected(zoho):
         svc.plan_layout_write([svc.add_section("case information")])
 
 
+def test_rename_section_keeps_id_fields_and_reports_one_change(zoho):
+    plan = svc.plan_layout_write([svc.rename_section("2", "Deployment details")])
+    renamed = plan["body"]["sections"][1]
+
+    assert renamed["id"] == 2
+    assert renamed["name"] == "Deployment details"
+    assert [field["id"] for field in renamed["fields"]] == ["201", "202"]
+    assert plan["diff"]["sectionsChanged"] == 1
+    row = next(item for item in plan["diff"]["sections"] if item["id"] == "2")
+    assert row["previousName"] == "Deployment Information"
+    assert row["name"] == "Deployment details"
+
+
+def test_rename_section_rejects_duplicate_name(zoho):
+    with pytest.raises(svc.LayoutWriteError, match="already exists"):
+        svc.plan_layout_write([svc.rename_section("2", "Case Information")])
+
+
 def test_mixed_section_ids_abort(zoho):
     """Synthesizing 1,2 next to real snowflake ids could collide two sections."""
     zoho["layout"]["sections"][1].pop("id")
@@ -398,6 +416,19 @@ def test_create_section_route_rejects_unsupported_operation(zoho, client, admin_
     assert zoho["patches"] == []
 
 
+def test_rename_section_route(zoho, client, admin_token):
+    resp = client.patch(
+        "/api/zoho/sections/2",
+        json={"name": "Deployment details"},
+        headers=auth_headers(admin_token),
+    )
+    assert resp.status_code == 200, resp.get_json()
+    sections = zoho["patches"][0]["sections"]
+    assert sections[1]["id"] == 2
+    assert sections[1]["name"] == "Deployment details"
+    assert [field["id"] for field in sections[1]["fields"]] == ["201", "202"]
+
+
 def test_viewer_cannot_write_layout(zoho, client, viewer_token):
     assert client.post(
         "/api/zoho/sections", json={"name": "QA"}, headers=auth_headers(viewer_token)
@@ -432,6 +463,41 @@ def test_move_unknown_field_is_404(zoho, client, admin_token):
         headers=auth_headers(admin_token),
     )
     assert resp.status_code == 404
+
+
+def test_delete_custom_field_route(zoho, client, admin_token, monkeypatch):
+    field = zoho["layout"]["sections"][1]["fields"][1]
+    field.update(
+        {
+            "apiName": "cf_deletable",
+            "displayLabel": "Deletable",
+            "isCustomField": True,
+            "isRemovable": True,
+        }
+    )
+    deleted = []
+    monkeypatch.setattr(
+        zoho_client, "delete_org_field", lambda cfg, field_id: deleted.append(str(field_id)) or {}
+    )
+
+    resp = client.delete("/api/zoho/fields/202", headers=auth_headers(admin_token))
+
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["data"]["deleted"] is True
+    assert deleted == ["202"]
+
+
+def test_delete_system_field_is_rejected(zoho, client, admin_token, monkeypatch):
+    monkeypatch.setattr(
+        zoho_client,
+        "delete_org_field",
+        lambda cfg, field_id: pytest.fail("system field deletion reached Zoho"),
+    )
+
+    resp = client.delete("/api/zoho/fields/101", headers=auth_headers(admin_token))
+
+    assert resp.status_code == 409
+    assert "system fields" in resp.get_json()["error"]
 
 
 # ---------------------------------------------------------------------------

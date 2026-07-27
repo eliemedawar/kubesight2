@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import EmptyState from "../common/EmptyState.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
+import ConfirmActionModal from "../inventory/ConfirmActionModal.jsx";
 import ZohoBindingModal from "./ZohoBindingModal.jsx";
 import ZohoConvertFieldModal from "./ZohoConvertFieldModal.jsx";
 import ZohoLayoutSection from "./ZohoLayoutSection.jsx";
+import ZohoRenameSectionModal from "./ZohoRenameSectionModal.jsx";
 import ZohoSourcePicker from "./ZohoSourcePicker.jsx";
 import { IconAlert } from "./icons.jsx";
 import { CREATABLE_TYPES, linesToValues, valuesToLines } from "./zohoFieldMeta";
 import {
   createZohoField,
+  deleteZohoField,
   getZohoLayout,
   setZohoFieldOptions,
   updateZohoField,
@@ -118,6 +121,19 @@ export default function ZohoLayoutEditor({
     }
   };
 
+  const confirmDeleteField = async () => {
+    setSaving(true);
+    setModalError("");
+    try {
+      const label = modal.field.label;
+      await deleteZohoField(modal.field.id);
+      await afterSave(`Field "${label}" permanently deleted from Zoho.`);
+    } catch (err) {
+      setModalError(err.message || "Failed to delete the field.");
+      setSaving(false);
+    }
+  };
+
   const onFieldAction = (action, field) => {
     if (action === "source") {
       setModal({ mode: "source" });
@@ -141,6 +157,8 @@ export default function ZohoLayoutEditor({
       });
     } else if (action === "convert") {
       setModal({ mode: "convert", field });
+    } else if (action === "delete") {
+      setModal({ mode: "deleteField", field });
     }
   };
 
@@ -246,11 +264,12 @@ export default function ZohoLayoutEditor({
 
       {(layout?.sections || []).map((section) => (
         <ZohoLayoutSection
-          key={section.name}
+          key={section.id || section.name}
           section={section}
           config={config}
           canManage={canManage}
           onAddField={(sectionName) => setModal({ mode: "addField", sectionName })}
+          onRename={(section) => setModal({ mode: "renameSection", section })}
           onAction={onFieldAction}
         />
       ))}
@@ -259,7 +278,27 @@ export default function ZohoLayoutEditor({
         <EmptyState message="No sections found on this layout." />
       ) : null}
 
-      {modal?.mode === "source" ? (
+      {modal?.mode === "deleteField" ? (
+        <ConfirmActionModal
+          open
+          title={`Delete “${modal.field.label}”?`}
+          message="This permanently deletes the custom field across the Zoho Desk organization, including its stored values. This cannot be undone and costs 500 Zoho API credits."
+          confirmLabel="Permanently delete field"
+          danger
+          busy={saving}
+          error={modalError}
+          onClose={closeModal}
+          onConfirm={confirmDeleteField}
+        />
+      ) : modal?.mode === "renameSection" ? (
+        <ZohoRenameSectionModal
+          section={modal.section}
+          onClose={closeModal}
+          onSaved={async (name) => {
+            await afterSave(`Section renamed to "${name}".`);
+          }}
+        />
+      ) : modal?.mode === "source" ? (
         <ZohoSourcePicker
           initialClusterId={config.sourceClusterId || ""}
           initialNamespaces={selectedNamespaces}

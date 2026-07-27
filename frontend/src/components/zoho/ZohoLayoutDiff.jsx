@@ -40,9 +40,9 @@ export default function ZohoLayoutDiff({ plan }) {
 
       <ul className="sg-zh-diff">
         {rows.map((row) => (
-          <li key={row.name} className={`sg-zh-diff-row sg-zh-diff-row--${row.change}`}>
+          <li key={row.id || row.name} className={`sg-zh-diff-row sg-zh-diff-row--${row.change}`}>
             <span className="sg-zh-diff-mark">{MARK[row.change] || "="}</span>
-            <span>{row.name}</span>
+            <span>{row.previousName ? `${row.previousName} → ${row.name}` : row.name}</span>
             <span className="muted">
               {row.change === "changed"
                 ? `${row.previousFieldCount} → ${row.fieldCount} fields`

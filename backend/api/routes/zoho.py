@@ -228,6 +228,28 @@ def update_field(field_id: str):
     return success_response(data)
 
 
+@zoho_bp.route("/fields/<field_id>", methods=["DELETE"])
+@require_permission("zoho:manage")
+def delete_field(field_id: str):
+    actor = get_current_user()
+    try:
+        data = fields_svc.delete_field(field_id)
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except ValueError as exc:
+        return error_response(str(exc), 409)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+    log_audit(
+        "zoho_field_deleted",
+        actor=actor,
+        target_type="zoho_field",
+        target_id=str(field_id),
+        details={"label": data.get("label"), "apiName": data.get("apiName")},
+    )
+    return success_response(data)
+
+
 @zoho_bp.route("/fields", methods=["POST"])
 @require_permission("zoho:manage")
 def create_field():
@@ -327,6 +349,31 @@ def create_section():
         },
     )
     return success_response(data, status_code=201)
+
+
+@zoho_bp.route("/sections/<section_id>", methods=["PATCH"])
+@require_permission("zoho:manage")
+def rename_section(section_id: str):
+    payload = request.get_json(silent=True) or {}
+    actor = get_current_user()
+    try:
+        data = fields_svc.rename_section(
+            section_id, payload.get("name"), actor=_actor_name(actor)
+        )
+    except layout_svc.LayoutWriteError as exc:
+        return _layout_write_error(exc)
+    except PermissionError as exc:
+        return error_response(str(exc), 409)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+    log_audit(
+        "zoho_section_renamed",
+        actor=actor,
+        target_type="zoho_layout_section",
+        target_id=str(section_id),
+        details={"name": data.get("name"), "diff": data.get("diff")},
+    )
+    return success_response(data)
 
 
 @zoho_bp.route("/fields/<field_id>/section", methods=["PUT"])

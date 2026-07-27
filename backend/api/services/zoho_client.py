@@ -464,6 +464,31 @@ def update_org_field(cfg: ZohoConfig, field_id: str, body: Dict[str, Any]) -> Di
     return _mutate_org_field(cfg, "PATCH", body, field_id=field_id)
 
 
+def delete_org_field(cfg: ZohoConfig, field_id: str) -> Dict[str, Any]:
+    """Permanently delete a custom field (needs Desk.fields.DELETE)."""
+    _assert_layout_allowed(cfg)
+    base = cfg.api_base.rstrip("/")
+    # `/fields` is the current Desk endpoint. The legacy organizationFields
+    # endpoint remains as a compatibility fallback for older Desk accounts.
+    urls = [
+        f"{base}/fields/{field_id}",
+        _org_fields_url(cfg, field_id, module=_MODULE),
+    ]
+    token = get_access_token(cfg)
+    for index, url in enumerate(urls):
+        status, payload = _request("DELETE", url, headers=_auth_headers(cfg, token))
+        if status == 401:
+            token = get_access_token(cfg, force=True)
+            status, payload = _request("DELETE", url, headers=_auth_headers(cfg, token))
+        if status in (200, 204):
+            invalidate_layout_cache()
+            return payload if isinstance(payload, dict) else {}
+        if index == 0 and status in (404, 405):
+            continue
+        raise ZohoError(_error_detail("Deleting the Zoho field failed", status, payload), status)
+    raise ZohoError("Deleting the Zoho field failed: no supported endpoint was available.", 404)
+
+
 def get_allowed_values(cfg: ZohoConfig) -> List[str]:
     """The current picklist values (including the leading ``-None-`` placeholder)."""
     field = get_field(cfg)

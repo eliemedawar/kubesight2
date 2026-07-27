@@ -99,6 +99,9 @@ export function fieldActions(field, role, canManage) {
   }
   // application / variable are auto-derived — no option editing, by design.
   actions.push({ key: "edit", label: "Edit", variant: "btn-ghost" });
+  if (field?.custom && field?.removable && !isSyncOwned(role)) {
+    actions.push({ key: "delete", label: "Delete", variant: "btn-ghost" });
+  }
   return actions;
 }
 

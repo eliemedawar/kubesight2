@@ -2,7 +2,14 @@ import ZohoFieldCard from "./ZohoFieldCard.jsx";
 import { fieldRole } from "./zohoFieldMeta";
 
 /** One layout section: its rule-and-label header plus the grid of field cards. */
-export default function ZohoLayoutSection({ section, config, canManage, onAddField, onAction }) {
+export default function ZohoLayoutSection({
+  section,
+  config,
+  canManage,
+  onAddField,
+  onRename,
+  onAction,
+}) {
   const fields = section.fields || [];
   return (
     <div>
@@ -12,13 +19,22 @@ export default function ZohoLayoutSection({ section, config, canManage, onAddFie
           {fields.length} field{fields.length === 1 ? "" : "s"}
         </span>
         {canManage ? (
-          <button
-            type="button"
-            className="link-button sg-zh-sectadd"
-            onClick={() => onAddField(section.name)}
-          >
-            + Add field here
-          </button>
+          <>
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => onRename(section)}
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              className="link-button sg-zh-sectadd"
+              onClick={() => onAddField(section.name)}
+            >
+              + Add field here
+            </button>
+          </>
         ) : null}
       </h4>
       {fields.length ? (

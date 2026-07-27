@@ -61,6 +61,9 @@ def _field_dict(
         "type": field.get("type"),
         "required": bool(field.get("isMandatory")),
         "custom": bool(field.get("isCustomField")),
+        "removable": bool(
+            field.get("isRemovable", field.get("isCustomField"))
+        ),
         "isPicklist": (field.get("type") == "Picklist"),
         "allowedValues": _allowed_values(field),
         "defaultValue": field.get("defaultValue"),
@@ -131,6 +134,25 @@ def plan_section(name: str, first_field_id: str) -> Dict[str, Any]:
         "Zoho Desk's API cannot add a section to an existing layout. "
         "Create the section in Zoho Desk, then refresh KubeSight."
     )
+
+
+def rename_section(
+    section_id: str, name: str, actor: Optional[str] = None
+) -> Dict[str, Any]:
+    """Rename an existing section through the guarded whole-layout writer."""
+    section_id = str(section_id or "").strip()
+    name = str(name or "").strip()
+    result = layout_svc.apply_layout_write(
+        [layout_svc.rename_section(section_id, name)],
+        reason="rename_section",
+        actor=actor,
+    )
+    return {
+        "id": section_id,
+        "name": name,
+        "diff": result["diff"],
+        "layoutId": result["layoutId"],
+    }
 
 
 def _normalize_option_list(values: Any) -> List[str]:
@@ -225,6 +247,56 @@ def update_field(field_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     auto = _auto_managed_ids(row)
     updated = zoho_client.field_on_layout(cfg, str(field_id)) or field
     return _field_dict(updated, auto)
+
+
+def delete_field(field_id: str) -> Dict[str, Any]:
+    """Permanently delete an eligible custom field from the Zoho organization."""
+    row, cfg = _config_and_cfg()
+    field_id = str(field_id)
+    field = zoho_client.field_on_layout(cfg, field_id)
+    if field is None:
+        raise LookupError("That field is not on the DevOps Request layout.")
+    if not bool(field.get("isCustomField")):
+        raise ValueError("Zoho system fields cannot be deleted.")
+    if field.get("isRemovable") is False:
+        raise ValueError("Zoho marks this field as non-removable.")
+
+    protected_ids = {
+        str(value)
+        for value in (row.app_field_id, row.environment_field_id, row.variable_field_id)
+        if value
+    }
+    if field_id in protected_ids:
+        raise ValueError(
+            "This field is configured for KubeSight synchronization. "
+            "Reconfigure the integration before deleting it."
+        )
+
+    bindings = sources.all_bindings(row)
+    if any(
+        binding.field_id == field_id or str(binding.parent_field_id or "") == field_id
+        for binding in bindings
+    ):
+        raise ValueError(
+            "This field participates in a live-source binding. Remove or reconfigure "
+            "the binding before deleting it."
+        )
+
+    api_name = str(field.get("apiName") or "")
+    impact = svc_api_name_usage(api_name)
+    if impact.get("configKeys") or impact.get("jenkinsParams"):
+        raise ValueError(
+            "This field is referenced by KubeSight configuration or Jenkins parameters. "
+            "Remove those references before deleting it."
+        )
+
+    zoho_client.delete_org_field(cfg, field_id)
+    return {
+        "id": field_id,
+        "apiName": api_name,
+        "label": field.get("displayLabel") or field.get("label") or api_name,
+        "deleted": True,
+    }
 
 
 def _section_of_field(cfg, field_id: str) -> Optional[str]:

@@ -291,6 +291,11 @@ def place_field(
     }
 
 
+def rename_section(section_id: str, name: str) -> Dict[str, Any]:
+    """Mutation: rename an existing section while retaining its Zoho id."""
+    return {"kind": "rename_section", "sectionId": str(section_id), "name": name}
+
+
 def _apply_add_section(
     sections: List[Dict[str, Any]], mutation: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -361,7 +366,48 @@ def _apply_place_field(
     }
 
 
-_MUTATIONS = {"add_section": _apply_add_section, "place_field": _apply_place_field}
+def _apply_rename_section(
+    sections: List[Dict[str, Any]], mutation: Dict[str, Any]
+) -> Dict[str, Any]:
+    section_id = str(mutation.get("sectionId") or "").strip()
+    name = str(mutation.get("name") or "").strip()
+    if not section_id:
+        raise LayoutWriteError("A section id is required.")
+    if not name:
+        raise LayoutWriteError("A section name is required.")
+    if len(name) > 50:
+        raise LayoutWriteError("Section names are limited to 50 characters.")
+
+    target = None
+    for index, section in enumerate(sections):
+        if str(_section_ordinal(section, index)) == section_id:
+            target = section
+            break
+    if target is None:
+        raise LayoutWriteError("That section is not on the DevOps Request layout.")
+
+    old_name = str(target.get("name") or "")
+    duplicate = _find_section(sections, name)
+    if duplicate is not None and duplicate is not target:
+        raise LayoutWriteError(f"A section named '{name}' already exists on this layout.")
+    if name == old_name:
+        raise LayoutWriteError("The new section name is unchanged.")
+
+    target["name"] = name
+    target["i18NLabel"] = name
+    return {
+        "addedSections": [name],
+        "removedSections": [old_name],
+        "addedFields": [],
+        "removedFields": [],
+    }
+
+
+_MUTATIONS = {
+    "add_section": _apply_add_section,
+    "place_field": _apply_place_field,
+    "rename_section": _apply_rename_section,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -454,22 +500,32 @@ def _diff(
     before: Sequence[Dict[str, Any]], after: Sequence[Dict[str, Any]]
 ) -> Dict[str, Any]:
     """A UI-friendly summary of what the write does."""
-    before_by_name = {str(s.get("name") or ""): s for s in before}
-    after_by_name = {str(s.get("name") or ""): s for s in after}
+    before_by_id = {str(_section_ordinal(s, i)): s for i, s in enumerate(before)}
+    after_by_id = {str(_section_ordinal(s, i)): s for i, s in enumerate(after)}
     rows = []
-    for name in list(before_by_name) + [n for n in after_by_name if n not in before_by_name]:
-        old, new = before_by_name.get(name), after_by_name.get(name)
+    for section_id in list(before_by_id) + [
+        sid for sid in after_by_id if sid not in before_by_id
+    ]:
+        old, new = before_by_id.get(section_id), after_by_id.get(section_id)
+        old_name = str(old.get("name") or "") if old is not None else ""
+        name = str(new.get("name") or "") if new is not None else old_name
         if new is None:
             change = "removed"
         elif old is None:
             change = "added"
-        elif len(_fields_of(old)) != len(_fields_of(new)) or _field_ids([old]) != _field_ids([new]):
+        elif (
+            old_name != name
+            or len(_fields_of(old)) != len(_fields_of(new))
+            or _field_ids([old]) != _field_ids([new])
+        ):
             change = "changed"
         else:
             change = "unchanged"
         rows.append(
             {
+                "id": section_id,
                 "name": name,
+                "previousName": old_name if old_name != name else None,
                 "change": change,
                 "fieldCount": len(_fields_of(new)) if new is not None else 0,
                 "previousFieldCount": len(_fields_of(old)) if old is not None else 0,

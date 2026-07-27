@@ -114,6 +114,15 @@ def test_update_field_sends_module_without_touching_the_body(wire):
     assert call["body"] == {"displayLabel": "Region (new)"}
 
 
+def test_delete_field_uses_the_current_fields_endpoint(wire):
+    zoho_client.delete_org_field(CFG, "303")
+
+    call = wire[0]
+    assert call["method"] == "DELETE"
+    assert call["url"] == "https://desk.zoho.com/api/v1/fields/303"
+    assert call["body"] is None
+
+
 def test_set_allowed_values_targets_the_layout_field(wire):
     zoho_client.set_allowed_values(
         CFG, ["-None-", "a"], field_id="9002", default_value="-None-", is_mandatory=True

@@ -111,6 +111,23 @@ describe("fieldActions", () => {
   it("offers nothing without manage permission", () => {
     expect(fieldActions(pick("201"), "environment", false)).toEqual([]);
   });
+
+  it("offers deletion only for removable custom fields that are not sync-owned", () => {
+    const custom = { id: "9", type: "Text", custom: true, removable: true };
+    expect(fieldActions(custom, "text", true).map((a) => a.key)).toEqual([
+      "convert",
+      "edit",
+      "delete",
+    ]);
+    expect(fieldActions({ ...custom, removable: false }, "text", true).map((a) => a.key)).toEqual([
+      "convert",
+      "edit",
+    ]);
+    expect(fieldActions({ ...custom, isPicklist: true }, "bound", true).map((a) => a.key)).toEqual([
+      "bind",
+      "edit",
+    ]);
+  });
 });
 
 describe("value line helpers", () => {

@@ -48,6 +48,9 @@ export const setZohoFieldOptions = (fieldId, payload) =>
 export const updateZohoField = (fieldId, payload) =>
   request(`/api/zoho/fields/${fieldId}`, { method: "PATCH", body: payload });
 
+export const deleteZohoField = (fieldId) =>
+  request(`/api/zoho/fields/${fieldId}`, { method: "DELETE" });
+
 export const createZohoField = (payload) =>
   request("/api/zoho/fields", { method: "POST", body: payload });
 
@@ -64,6 +67,9 @@ export const moveZohoFieldToSection = (fieldId, sectionName) =>
     method: "PUT",
     body: { sectionName },
   });
+
+export const renameZohoSection = (sectionId, name) =>
+  request(`/api/zoho/sections/${sectionId}`, { method: "PATCH", body: { name } });
 
 // --- Text -> Picklist conversion ---
 // Zoho cannot retype a field, so this creates a NEW one with a NEW cf_ api name.
