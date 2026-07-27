@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import EmptyState from "../common/EmptyState.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
-import ZohoAddSectionModal from "./ZohoAddSectionModal.jsx";
 import ZohoBindingModal from "./ZohoBindingModal.jsx";
 import ZohoConvertFieldModal from "./ZohoConvertFieldModal.jsx";
 import ZohoLayoutSection from "./ZohoLayoutSection.jsx";
@@ -29,7 +28,7 @@ export default function ZohoLayoutEditor({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  // modal state: { mode: 'options'|'editField'|'addField'|'source'|'addSection', field?, initial? }
+  // modal state: { mode: 'options'|'editField'|'addField'|'source', field?, initial? }
   const [modal, setModal] = useState(null);
   const [saving, setSaving] = useState(false);
   const [modalError, setModalError] = useState("");
@@ -178,13 +177,12 @@ export default function ZohoLayoutEditor({
         </div>
         {canManage ? (
           <div className="sg-zh-head-tools">
-            <button
-              type="button"
-              className="btn-ghost"
-              onClick={() => setModal({ mode: "addSection" })}
+            <span
+              className="muted"
+              title="Zoho Desk's API can update existing sections but cannot add one to an existing layout."
             >
-              Add section
-            </button>
+              Add sections in Zoho Desk, then refresh
+            </span>
             <button
               type="button"
               className="secondary"
@@ -289,14 +287,6 @@ export default function ZohoLayoutEditor({
           onClose={closeModal}
           onSaved={async (message) => {
             await afterSave(message);
-          }}
-        />
-      ) : modal?.mode === "addSection" ? (
-        <ZohoAddSectionModal
-          sections={layout?.sections || []}
-          onClose={closeModal}
-          onSaved={async (name) => {
-            await afterSave(`Section "${name}" added.`);
           }}
         />
       ) : modal ? (

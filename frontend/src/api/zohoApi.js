@@ -59,9 +59,6 @@ export const createZohoField = (payload) =>
 export const planZohoLayout = (payload) =>
   request("/api/zoho/layout/plan", { method: "POST", body: payload });
 
-export const createZohoSection = (name, fieldId) =>
-  request("/api/zoho/sections", { method: "POST", body: { name, fieldId } });
-
 export const moveZohoFieldToSection = (fieldId, sectionName) =>
   request(`/api/zoho/fields/${fieldId}/section`, {
     method: "PUT",
