@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import EmptyState from "../common/EmptyState.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import ConfirmActionModal from "../inventory/ConfirmActionModal.jsx";
+import ZohoAddSectionModal from "./ZohoAddSectionModal.jsx";
 import ZohoBindingModal from "./ZohoBindingModal.jsx";
 import ZohoConvertFieldModal from "./ZohoConvertFieldModal.jsx";
 import ZohoLayoutSection from "./ZohoLayoutSection.jsx";
@@ -102,11 +103,10 @@ export default function ZohoLayoutEditor({
     setSaving(true);
     setModalError("");
     try {
-      await api.setFieldOptions(modal.field.id, {
-        values: linesToValues(form.values),
-        defaultValue: form.defaultValue || "-None-",
-        isMandatory: form.required,
-      });
+      const payload = { values: linesToValues(form.values) };
+      if (can("fieldOptionDefaults")) payload.defaultValue = form.defaultValue || "-None-";
+      if (can("requiredFields")) payload.isMandatory = form.required;
+      await api.setFieldOptions(modal.field.id, payload);
       await afterSave(`Options updated for "${modal.field.label}".`);
     } catch (err) {
       setModalError(err.message || "Failed to update options.");
@@ -118,7 +118,9 @@ export default function ZohoLayoutEditor({
     setSaving(true);
     setModalError("");
     try {
-      await api.updateField(modal.field.id, { label: form.label, required: form.required });
+      const payload = { label: form.label };
+      if (can("requiredFields")) payload.required = form.required;
+      await api.updateField(modal.field.id, payload);
       await afterSave(`Field "${form.label}" updated.`);
     } catch (err) {
       setModalError(err.message || "Failed to update the field.");
@@ -130,9 +132,12 @@ export default function ZohoLayoutEditor({
     setSaving(true);
     setModalError("");
     try {
-      const payload = { label: form.label, type: form.type, required: form.required };
+      const payload = { label: form.label, type: form.type };
+      if (can("requiredFields")) payload.required = form.required;
       if (form.sectionName) payload.sectionName = form.sectionName;
-      if (form.type === "Picklist") payload.values = linesToValues(form.values);
+      if (["Picklist", "Select", "Cascading select"].includes(form.type)) {
+        payload.values = linesToValues(form.values);
+      }
       const created = await api.createField(payload);
       // Creating the field and placing it are two provider calls; if the placement
       // half failed the field still exists, so say where it actually landed.
@@ -155,8 +160,14 @@ export default function ZohoLayoutEditor({
     setModalError("");
     try {
       const label = modal.field.label;
-      await api.deleteField(modal.field.id);
-      await afterSave(`Field "${label}" permanently deleted from ${providerName}.`);
+      await api.deleteField(modal.field.id, {
+        deleteField: capabilities.deleteMode === "trash",
+      });
+      await afterSave(
+        capabilities.deleteMode === "trash"
+          ? `Field "${label}" moved to the ${providerName} trash.`
+          : `Field "${label}" permanently deleted from ${providerName}.`
+      );
     } catch (err) {
       setModalError(err.message || "Failed to delete the field.");
       setSaving(false);
@@ -192,6 +203,21 @@ export default function ZohoLayoutEditor({
       setModal({ mode: "moveField", field, sectionName });
     } else if (action === "delete") {
       setModal({ mode: "deleteField", field });
+    } else if (action === "remove") {
+      setModal({ mode: "removeField", field });
+    }
+  };
+
+  const confirmRemoveField = async () => {
+    setSaving(true);
+    setModalError("");
+    try {
+      const label = modal.field.label;
+      await api.deleteField(modal.field.id, { deleteField: false });
+      await afterSave(`Field "${label}" removed from this ${formNoun}.`);
+    } catch (err) {
+      setModalError(err.message || `Failed to remove the field from this ${formNoun}.`);
+      setSaving(false);
     }
   };
 
@@ -213,7 +239,7 @@ export default function ZohoLayoutEditor({
   if (loading) {
     return (
       <section className="card">
-        <h3>DevOps Request layout</h3>
+        <h3>DevOps Request {formNoun}</h3>
         <p className="muted">Reading the {formNoun} from {providerName}…</p>
       </section>
     );
@@ -222,7 +248,7 @@ export default function ZohoLayoutEditor({
   if (error) {
     return (
       <section className="card">
-        <h3>DevOps Request layout</h3>
+        <h3>DevOps Request {formNoun}</h3>
         <ErrorBanner message={error} />
         <button type="button" className="secondary" onClick={() => load(true)}>
           Retry
@@ -268,7 +294,7 @@ export default function ZohoLayoutEditor({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={`Search ${totalFields} fields…`}
-            aria-label="Search layout fields"
+            aria-label={`Search ${formNoun} fields`}
           />
         </label>
         <span className="sg-zh-count">
@@ -289,6 +315,15 @@ export default function ZohoLayoutEditor({
             >
               <IconHistory />
               Recovery
+            </button>
+          ) : null}
+          {canManage && can("createSections") ? (
+            <button
+              type="button"
+              className="primary"
+              onClick={() => setModal({ mode: "addSection" })}
+            >
+              + Add section
             </button>
           ) : null}
         </div>
@@ -363,26 +398,47 @@ export default function ZohoLayoutEditor({
       ))}
 
       {(layout?.sections || []).length === 0 ? (
-        <EmptyState message="No sections found on this layout." />
+        <EmptyState message={`No sections found on this ${formNoun}.`} />
       ) : normalizedQuery && visibleSections.length === 0 ? (
         <EmptyState message={`No fields match "${query.trim()}".`} />
       ) : null}
 
-      {modal?.mode === "deleteField" ? (
+      {modal?.mode === "removeField" ? (
         <ConfirmActionModal
           open
-          title={`Delete “${modal.field.label}”?`}
+          title={`Remove “${modal.field.label}” from this ${formNoun}?`}
+          message={`The field and its issue values remain in ${providerName}. This only removes it from the configured ${formNoun}, and an administrator can add it back later.`}
+          confirmLabel={`Remove from ${formNoun}`}
+          busy={saving}
+          error={modalError}
+          onClose={closeModal}
+          onConfirm={confirmRemoveField}
+        />
+      ) : modal?.mode === "deleteField" ? (
+        <ConfirmActionModal
+          open
+          title={
+            capabilities.deleteMode === "trash"
+              ? `Move “${modal.field.label}” to trash?`
+              : `Delete “${modal.field.label}”?`
+          }
           message={
             capabilities.deleteWarning ||
             `This permanently deletes the custom field across the ${providerName} organization, including its stored values. This cannot be undone.`
           }
-          confirmLabel="Permanently delete field"
+          confirmLabel={
+            capabilities.deleteMode === "trash"
+              ? `Move field to ${providerName} trash`
+              : "Permanently delete field"
+          }
           danger
           busy={saving}
           error={modalError}
           onClose={closeModal}
           onConfirm={confirmDeleteField}
         />
+      ) : modal?.mode === "addSection" ? (
+        <ZohoAddSectionModal onClose={closeModal} onSaved={afterSave} />
       ) : modal?.mode === "renameSection" ? (
         <ZohoRenameSectionModal
           section={modal.section}
@@ -463,6 +519,7 @@ function FieldModal({
   onSaveEdit,
   onSaveNew,
 }) {
+  const { name: providerName, can, api } = useTicketing();
   const [form, setForm] = useState(() => {
     if (modal.mode === "addField") {
       return {
@@ -476,7 +533,36 @@ function FieldModal({
     }
     return modal.initial || {};
   });
+  const [loadingDetails, setLoadingDetails] = useState(
+    modal.mode === "options" && can("lazyFieldOptions") && modal.field?.allowedValues == null
+  );
+  const [detailsError, setDetailsError] = useState("");
   const set = (k, v) => setForm((prev) => ({ ...prev, [k]: v }));
+
+  useEffect(() => {
+    if (!loadingDetails) return undefined;
+    let active = true;
+    api
+      .getField(modal.field.id)
+      .then((field) => {
+        if (!active) return;
+        setForm((previous) => ({
+          ...previous,
+          values: valuesToLines(field.allowedValues),
+          defaultValue: field.defaultValue || "-None-",
+          required: field.required,
+        }));
+      })
+      .catch((err) => {
+        if (active) setDetailsError(err.message || "Could not load this field's options.");
+      })
+      .finally(() => {
+        if (active) setLoadingDetails(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, loadingDetails, modal.field?.id]);
 
   const title =
     modal.mode === "options"
@@ -492,7 +578,8 @@ function FieldModal({
     else onSaveNew(form);
   };
 
-  const isPicklistCreate = modal.mode === "addField" && form.type === "Picklist";
+  const isPicklistCreate =
+    modal.mode === "addField" && ["Picklist", "Select", "Cascading select"].includes(form.type);
   // The default must be one of the options — a typed value that doesn't match
   // is silently coerced to -None- by the backend, which reads as a bug.
   const defaultChoices = ["-None-", ...linesToValues(form.values || "")];
@@ -519,11 +606,13 @@ function FieldModal({
             <span>
               {modal.mode === "options"
                 ? "This field's options are auto-published by the KubeSight sync — manual changes to the option list will be overwritten on the next sync."
-                : "This field's options are auto-published by the KubeSight sync. Label and required changes made here are kept."}
+                : `This field's options are auto-published by the KubeSight sync. ${
+                    can("requiredFields") ? "Label and required changes" : "Label changes"
+                  } made here are kept.`}
             </span>
           </p>
         ) : null}
-        {error ? <ErrorBanner message={error} /> : null}
+        {error || detailsError ? <ErrorBanner message={error || detailsError} /> : null}
 
         <form className="settings-form" onSubmit={submit}>
           {modal.mode === "addField" ? (
@@ -556,8 +645,9 @@ function FieldModal({
                   ))}
                 </select>
                 <span className="field-hint">
-                  Placing the field rewrites the whole layout — KubeSight verifies every existing
-                  field survives before saving.
+                  {can("layoutPlan")
+                    ? "Placing the field rewrites the whole layout — KubeSight verifies every existing field survives before saving."
+                    : `The field is created and added directly to this ${providerName} section.`}
                 </span>
               </label>
             </>
@@ -582,11 +672,19 @@ function FieldModal({
                   className="mono"
                 />
                 <span className="field-hint">
-                  <code>-None-</code> is kept automatically as the first option. No special
-                  characters / emojis (Zoho rejects them).
+                  {loadingDetails ? (
+                    `Loading the current options from ${providerName}…`
+                  ) : can("fieldOptionDefaults") ? (
+                    <>
+                      <code>-None-</code> is kept automatically as the first option. No special
+                      characters / emojis ({providerName} rejects them).
+                    </>
+                  ) : (
+                    `Options removed from this list are disabled in ${providerName} so existing issues keep their history.`
+                  )}
                 </span>
               </label>
-              {modal.mode === "options" ? (
+              {modal.mode === "options" && can("fieldOptionDefaults") ? (
                 <label>
                   Default value
                   <select
@@ -606,21 +704,27 @@ function FieldModal({
             </>
           ) : null}
 
-          <label className="checkbox-label">
-            <input
-              type="checkbox"
-              checked={Boolean(form.required)}
-              onChange={(e) => set("required", e.target.checked)}
-            />
-            Required field
-          </label>
+          {can("requiredFields") ? (
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={Boolean(form.required)}
+                onChange={(e) => set("required", e.target.checked)}
+              />
+              Required field
+            </label>
+          ) : null}
 
           <div className="modal-actions">
             <button type="button" className="secondary" onClick={onClose}>
               Cancel
             </button>
-            <button type="submit" className="primary" disabled={saving}>
-              {saving ? "Saving…" : "Save"}
+            <button
+              type="submit"
+              className="primary"
+              disabled={saving || loadingDetails || Boolean(detailsError)}
+            >
+              {saving ? "Saving…" : loadingDetails ? "Loading…" : "Save"}
             </button>
           </div>
         </form>

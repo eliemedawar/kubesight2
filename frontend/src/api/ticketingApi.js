@@ -54,6 +54,8 @@ export function makeTicketingApi(providerKey) {
     getLayout: (fresh = false) =>
       request(`${base}/layout`, { query: fresh ? { fresh: 1 } : undefined }),
 
+    getField: (fieldId) => request(`${base}/fields/${fieldId}`),
+
     setFieldOptions: (fieldId, payload) =>
       request(`${base}/fields/${fieldId}/options`, { method: "PUT", body: payload }),
 

@@ -83,7 +83,11 @@ export default function ZohoFieldCard({
                 {v}
               </span>
             ))}
-            {values.length === 0 ? <span className="muted">no options</span> : null}
+            {field.allowedValues == null ? (
+              <span className="muted">options load when opened</span>
+            ) : values.length === 0 ? (
+              <span className="muted">no options</span>
+            ) : null}
             {values.length > VALUE_CHIP_CAP ? (
               <span className="sg-zh-more">+{values.length - VALUE_CHIP_CAP} more</span>
             ) : null}

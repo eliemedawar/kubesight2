@@ -188,6 +188,122 @@ def cancel_build(build_id: int):
     return success_response(data)
 
 
+@cluster_builds_bp.route("/<int:build_id>/nodes", methods=["POST"])
+@require_permission("cluster_builds:create")
+def add_build_nodes(build_id: int):
+    """Attach worker machines to a finished build, ready for preflight."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = svc.add_worker_nodes(build_id, payload.get("nodes") or [])
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_nodes_added",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={
+            "name": data.get("name"),
+            "added": len(payload.get("nodes") or []),
+            "clusterId": data.get("resultClusterId"),
+        },
+    )
+    return success_response(data, status_code=201)
+
+
+@cluster_builds_bp.route("/<int:build_id>/nodes/<int:node_id>", methods=["DELETE"])
+@require_permission("cluster_builds:create")
+def remove_build_node(build_id: int, node_id: int):
+    try:
+        data = svc.remove_growth_node(build_id, node_id)
+    except LookupError as exc:
+        return error_response(str(exc) or "Node not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_node_removed",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={"nodeId": node_id},
+    )
+    return success_response(data)
+
+
+@cluster_builds_bp.route("/<int:build_id>/grow-preflight", methods=["POST"])
+@require_permission("cluster_builds:execute")
+def grow_preflight(build_id: int):
+    """Preflight only the machines being added to a live cluster."""
+    try:
+        result = svc.preflight_growth(build_id)
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_growth_preflight",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={"status": result.get("status")},
+    )
+    return success_response(result)
+
+
+@cluster_builds_bp.route("/<int:build_id>/grow", methods=["POST"])
+@require_permission("cluster_builds:execute")
+def grow_build(build_id: int):
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = svc.grow_build(
+            build_id,
+            ack_warnings=payload.get("ackWarnings"),
+            actor=_actor_name(),
+        )
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_grown",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={
+            "name": data.get("name"),
+            "clusterId": data.get("resultClusterId"),
+            "warningsAcked": bool(payload.get("ackWarnings")),
+        },
+    )
+    return success_response(data)
+
+
+@cluster_builds_bp.route("/<int:build_id>/kubeconfig", methods=["GET"])
+@require_permission("cluster_builds:kubeconfig")
+def build_kubeconfig(build_id: int):
+    """The cluster-admin kubeconfig for a cluster KubeSight built.
+
+    Every retrieval is audited: this hands over full control of the cluster,
+    outside KubeSight's own RBAC, for the life of the certificate.
+    """
+    try:
+        data = svc.build_kubeconfig(build_id)
+    except LookupError as exc:
+        return error_response(str(exc) or "Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_kubeconfig_downloaded",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={"clusterId": data.get("clusterId")},
+    )
+    return success_response(data)
+
+
 @cluster_builds_bp.route("/<int:build_id>/logs", methods=["GET"])
 @require_permission("cluster_builds:view")
 def build_logs(build_id: int):

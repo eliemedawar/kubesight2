@@ -822,6 +822,54 @@ button.sg-cb-step:hover { border-color: var(--accent); color: var(--accent-stron
 
 .sg-cb-addonline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
+/* ── Day two ────────────────────────────────────────────────────────── */
+.sg-cb-day2 {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 13px 18px; border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg-panel-strong);
+}
+.sg-cb-day2-label {
+  font-size: 10.5px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.sg-cb-day2-note {
+  flex-basis: 100%; font-size: 11.5px; line-height: 1.5; max-width: 78ch;
+}
+
+.sg-cb-grow { display: flex; flex-direction: column; gap: 14px; }
+.sg-cb-grow-lede { margin: 0; font-size: 12.5px; line-height: 1.55; max-width: 84ch; }
+.sg-cb-grow-queue { display: flex; flex-direction: column; gap: 8px; }
+.sg-cb-grow-queue-head {
+  display: flex; align-items: baseline; gap: 10px; font-size: 10.5px; font-weight: 800;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--text-muted);
+}
+.sg-cb-grow-queue-head .muted { letter-spacing: 0; text-transform: none; font-weight: 600; }
+.sg-cb-grow-list { max-height: 320px; }
+/* Growth picks a checkbox rather than a role: only workers can be added. The
+   checkbox sits beside the identity, so the name/guest pair needs its own
+   column — inheriting the row direction ran them together on one line. */
+.sg-cb-grow-pick { flex-direction: row; align-items: flex-start; gap: 10px; cursor: pointer; }
+.sg-cb-grow-pick input {
+  width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); flex: none;
+}
+.sg-cb-grow-pick > span {
+  display: flex; flex-direction: column; gap: 1px; min-width: 0;
+}
+.sg-cb-grow-error {
+  margin: 0; border-radius: var(--radius-md); padding: 10px 14px; font-size: 12.5px;
+  line-height: 1.5; color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.sg-cb-grow-manual { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sg-cb-grow-manual .sg-cb-input { width: auto; min-width: 190px; flex: 1; max-width: 300px; }
+.sg-cb-grow-run { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sg-cb-grow-verdict { font-size: 12.5px; font-weight: 700; }
+.sg-cb-grow-verdict.is-pass { color: var(--ok); }
+.sg-cb-grow-verdict.is-warn { color: var(--warn); }
+.sg-cb-grow-verdict.is-fail { color: var(--danger); }
+.sg-cb-grow-checks { display: flex; flex-direction: column; gap: 8px; }
+
 /* Log well — dark in BOTH themes (machine output reads as machine output) */
 .sg-cb-well { gap: 9px; }
 .sg-cb-well-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

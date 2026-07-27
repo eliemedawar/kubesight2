@@ -102,7 +102,14 @@ export function fieldActions(field, role, canManage, capabilities = {}) {
   // application / variable are auto-derived — no option editing, by design.
   actions.push({ key: "edit", label: "Edit", variant: "btn-ghost" });
   if (field?.custom && field?.removable && !isSyncOwned(role) && capabilities.deleteField !== false) {
-    actions.push({ key: "delete", label: "Delete permanently", variant: "btn-danger-ghost" });
+    if (capabilities.removeFieldFromForm) {
+      actions.push({ key: "remove", label: "Remove from screen", variant: "btn-ghost" });
+    }
+    actions.push({
+      key: "delete",
+      label: capabilities.deleteMode === "trash" ? "Move to trash" : "Delete permanently",
+      variant: "btn-danger-ghost",
+    });
   }
   return actions;
 }

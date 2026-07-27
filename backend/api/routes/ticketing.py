@@ -274,6 +274,18 @@ def source_deployments(provider_key: str):
 # editor component serves both.
 # ---------------------------------------------------------------------------
 
+@ticketing_bp.route("/<provider_key>/fields/<field_id>", methods=["GET"])
+@require_permission("ticketing:view")
+def get_field(provider_key: str, field_id: str):
+    provider = _provider(provider_key)
+    try:
+        return success_response(provider.fields.get_field(field_id))
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except provider.error as exc:
+        return error_response(str(exc), 502)
+
+
 @ticketing_bp.route("/<provider_key>/layout", methods=["GET"])
 @require_permission("ticketing:view")
 def get_layout(provider_key: str):

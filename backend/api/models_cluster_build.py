@@ -238,6 +238,12 @@ class ClusterBuild(db.Model):
     )
     started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # A completed build can be grown by adding workers. That run reuses the same
+    # phase machine, so it needs its own clock — and the original build's
+    # duration is banked at first completion, because a growth run rewrites
+    # finished_at and would otherwise turn "built in 18 min" into "built in 5 d".
+    growth_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    build_seconds = db.Column(db.Integer, nullable=True)
 
     nodes = db.relationship(
         "ClusterBuildNode",

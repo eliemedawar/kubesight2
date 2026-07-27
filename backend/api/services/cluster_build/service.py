@@ -139,6 +139,15 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
         "createdAt": _iso(build.created_at),
         "startedAt": _iso(build.started_at),
         "finishedAt": _iso(build.finished_at),
+        # Growth reuses the phase machine, so it needs its own clock; the
+        # original build's duration is banked and never recomputed.
+        "growthStartedAt": _iso(build.growth_started_at),
+        "buildSeconds": build.build_seconds,
+        "pendingNodeCount": sum(
+            1 for n in build.nodes
+            if n.status in ("pending", "preflight_passed", "preflight_failed")
+        ),
+        "canGrow": bool(build.status == "completed" and build.result_cluster_id),
         "nodeCounts": {
             "controlPlane": sum(1 for n in build.nodes if n.role == "control_plane"),
             "worker": sum(1 for n in build.nodes if n.role == "worker"),
@@ -474,82 +483,98 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         ssh_profile_service.get_profile(build.connection_profile_id)
 
 
+def _resolve_vsphere_inventory(
+    build: ClusterBuild, nodes_payload: List[Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """vCenter metadata for every picked VM, keyed by moid."""
+    moids = [str(n.get("vsphereVmMoid")) for n in nodes_payload if n.get("vsphereVmMoid")]
+    if not (moids and build.vsphere_connection_id):
+        return {}
+    try:
+        inventory = vsphere_service.get_inventory(build.vsphere_connection_id)
+    except VSphereError as exc:
+        raise ValueError(
+            f"vCenter inventory is unavailable ({exc}); the selected VMs "
+            "cannot be resolved. Retry when vCenter is reachable, or enter "
+            "the nodes as manual hosts."
+        ) from exc
+    return {item["moid"]: item for item in inventory}
+
+
+def _node_from_payload(
+    build: ClusterBuild,
+    payload: Dict[str, Any],
+    position: int,
+    inventory_by_moid: Dict[str, Dict[str, Any]],
+) -> ClusterBuildNode:
+    """One validated node. Shared by the draft-time replace and growth append
+    paths so a machine added later is resolved exactly like an original one."""
+    role = str(payload.get("role", "")).strip()
+    if role not in _ROLES:
+        raise ValueError(
+            f"node role must be one of: {', '.join(sorted(_ROLES))}."
+        )
+    node = ClusterBuildNode(role=role, position=position)
+    moid = str(payload.get("vsphereVmMoid") or "").strip()
+    vm = inventory_by_moid.get(moid) if moid else None
+    if moid and build.vsphere_connection_id and vm is None:
+        raise ValueError(
+            f"VM '{moid}' is no longer in the vCenter inventory — refresh "
+            "the VM picker and re-select it."
+        )
+    if vm:
+        node.vsphere_vm_moid = moid
+        node.vsphere_vm_name = vm.get("name")
+        node.vsphere_host = vm.get("esxiHost")
+        node.vsphere_datastore = vm.get("datastore")
+        node.vsphere_tools_status = vm.get("toolsRunState")
+        node.vsphere_power_state = vm.get("powerState")
+        node.vsphere_cpu = vm.get("cpuCount")
+        node.vsphere_memory_mb = vm.get("memoryMiB")
+        node.hostname = str(
+            payload.get("hostname") or vm.get("guestHostname") or vm.get("name") or ""
+        ).strip()
+    else:
+        node.hostname = str(payload.get("hostname") or "").strip()
+    if node.hostname:
+        node.hostname = _validate_dns_subdomain(node.hostname, "node hostname")
+
+    manual_address = str(payload.get("address") or "").strip()
+    tools_ip = (vm or {}).get("guestIp")
+    if manual_address:
+        node.address = _validate_node_address(manual_address)
+        node.address_source = "manual"
+    elif tools_ip:
+        node.address = _validate_node_address(str(tools_ip))
+        node.address_source = "vmware_tools"
+    else:
+        raise ValueError(
+            f"Node '{node.hostname or moid or position}': no address. VMware "
+            "Tools reported no IP — enter a manual management IP."
+        )
+
+    if payload.get("connectionProfileId"):
+        profile_id = int(payload["connectionProfileId"])
+        ssh_profile_service.get_profile(profile_id)
+        node.connection_profile_id = profile_id
+    return node
+
+
 def _apply_nodes_payload(build: ClusterBuild, nodes_payload: List[Dict[str, Any]]) -> None:
     """Replace the node set (draft-time only). vSphere metadata is captured
     from the connection's inventory when a moid is given; Tools-less VMs need
     a manual address."""
-    inventory_by_moid: Dict[str, Dict[str, Any]] = {}
-    moids = [str(n.get("vsphereVmMoid")) for n in nodes_payload if n.get("vsphereVmMoid")]
-    if moids and build.vsphere_connection_id:
-        try:
-            inventory = vsphere_service.get_inventory(build.vsphere_connection_id)
-        except VSphereError as exc:
-            raise ValueError(
-                f"vCenter inventory is unavailable ({exc}); the selected VMs "
-                "cannot be resolved. Retry when vCenter is reachable, or enter "
-                "the nodes as manual hosts."
-            ) from exc
-        inventory_by_moid = {item["moid"]: item for item in inventory}
+    inventory_by_moid = _resolve_vsphere_inventory(build, nodes_payload)
 
     seen_primary_cp = False
     seen_lb_master = False
     new_nodes: List[ClusterBuildNode] = []
     for position, payload in enumerate(nodes_payload):
-        role = str(payload.get("role", "")).strip()
-        if role not in _ROLES:
-            raise ValueError(
-                f"node role must be one of: {', '.join(sorted(_ROLES))}."
-            )
-        node = ClusterBuildNode(role=role, position=position)
-        moid = str(payload.get("vsphereVmMoid") or "").strip()
-        vm = inventory_by_moid.get(moid) if moid else None
-        if moid and build.vsphere_connection_id and vm is None:
-            raise ValueError(
-                f"VM '{moid}' is no longer in the vCenter inventory — refresh "
-                "the VM picker and re-select it."
-            )
-        if vm:
-            node.vsphere_vm_moid = moid
-            node.vsphere_vm_name = vm.get("name")
-            node.vsphere_host = vm.get("esxiHost")
-            node.vsphere_datastore = vm.get("datastore")
-            node.vsphere_tools_status = vm.get("toolsRunState")
-            node.vsphere_power_state = vm.get("powerState")
-            node.vsphere_cpu = vm.get("cpuCount")
-            node.vsphere_memory_mb = vm.get("memoryMiB")
-            node.hostname = str(
-                payload.get("hostname") or vm.get("guestHostname") or vm.get("name") or ""
-            ).strip()
-        else:
-            node.hostname = str(payload.get("hostname") or "").strip()
-        if node.hostname:
-            node.hostname = _validate_dns_subdomain(
-                node.hostname, "node hostname"
-            )
-
-        manual_address = str(payload.get("address") or "").strip()
-        tools_ip = (vm or {}).get("guestIp")
-        if manual_address:
-            node.address = _validate_node_address(manual_address)
-            node.address_source = "manual"
-        elif tools_ip:
-            node.address = _validate_node_address(str(tools_ip))
-            node.address_source = "vmware_tools"
-        else:
-            raise ValueError(
-                f"Node '{node.hostname or moid or position}': no address. VMware "
-                "Tools reported no IP — enter a manual management IP."
-            )
-
-        if payload.get("connectionProfileId"):
-            profile_id = int(payload["connectionProfileId"])
-            ssh_profile_service.get_profile(profile_id)
-            node.connection_profile_id = profile_id
-
-        if role == "control_plane" and payload.get("isPrimaryCp") and not seen_primary_cp:
+        node = _node_from_payload(build, payload, position, inventory_by_moid)
+        if node.role == "control_plane" and payload.get("isPrimaryCp") and not seen_primary_cp:
             node.is_primary_cp = True
             seen_primary_cp = True
-        if role == "loadbalancer" and payload.get("isLbMaster") and not seen_lb_master:
+        if node.role == "loadbalancer" and payload.get("isLbMaster") and not seen_lb_master:
             node.is_lb_master = True
             seen_lb_master = True
         new_nodes.append(node)
@@ -730,6 +755,232 @@ def start_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
     # its own session — refresh so the response reflects the outcome.
     db.session.refresh(build)
     return serialize_build(build, include_detail=True)
+
+
+# ---------------------------------------------------------------------------
+# Day two: growing a finished cluster
+#
+# The phase machine is already node-scoped and skips completed steps, so growth
+# reuses it wholesale rather than duplicating a join path: base_prep,
+# pull_images and join_workers pick up only the new machines, and init, CNI,
+# join_cp, onboard and add-ons all no-op. Only 'verify' is deliberately reopened
+# so the cluster is re-checked with the new machine in it.
+# ---------------------------------------------------------------------------
+
+def growth_nodes(build: ClusterBuild) -> List[ClusterBuildNode]:
+    """Machines added to a finished build that have not joined yet."""
+    return [
+        node for node in build.nodes
+        if node.status in ("pending", "preflight_passed", "preflight_failed")
+    ]
+
+
+def _require_growable(build: ClusterBuild) -> None:
+    if build.status != "completed":
+        raise ValueError(
+            "Only a completed build can be grown (current status: "
+            f"'{build.status}')."
+        )
+    if not build.result_cluster_id:
+        raise ValueError(
+            "This build never registered a cluster, so there is nothing to grow."
+        )
+
+
+def add_worker_nodes(build_id: int, nodes_payload: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Attach new worker machines to a finished build, ready for preflight.
+
+    Workers only. Growing the control plane changes etcd quorum arithmetic
+    (3 → 4 members is *worse* than 3) and adding a load balancer means
+    re-forming VRRP on a live VIP; neither is a safe side effect of an
+    "add machines" button, so both are refused with a reason.
+    """
+    build = get_build(build_id)
+    _require_growable(build)
+    if not nodes_payload:
+        raise ValueError("Select at least one machine to add.")
+
+    for payload in nodes_payload:
+        role = str(payload.get("role") or "worker").strip() or "worker"
+        if role != "worker":
+            raise ValueError(
+                "Only workers can be added to a running cluster. Changing the "
+                "control-plane or load-balancer tier of a live cluster is a "
+                "separate operation, because it re-forms etcd quorum or the VIP."
+            )
+
+    inventory_by_moid = _resolve_vsphere_inventory(build, nodes_payload)
+    existing_addresses = {node.address for node in build.nodes}
+    existing_moids = {node.vsphere_vm_moid for node in build.nodes if node.vsphere_vm_moid}
+    next_position = max((node.position for node in build.nodes), default=-1) + 1
+
+    added: List[ClusterBuildNode] = []
+    for offset, payload in enumerate(nodes_payload):
+        node = _node_from_payload(
+            build, {**payload, "role": "worker"}, next_position + offset, inventory_by_moid
+        )
+        if node.address in existing_addresses:
+            raise ValueError(
+                f"{node.hostname or node.address} is already part of this cluster."
+            )
+        if node.vsphere_vm_moid and node.vsphere_vm_moid in existing_moids:
+            raise ValueError(
+                f"{node.hostname or node.address} is already part of this cluster."
+            )
+        existing_addresses.add(node.address)
+        if node.vsphere_vm_moid:
+            existing_moids.add(node.vsphere_vm_moid)
+        node.build_id = build.id
+        node.status = "pending"
+        db.session.add(node)
+        added.append(node)
+
+    db.session.commit()
+    return serialize_build(build, include_detail=True)
+
+
+def remove_growth_node(build_id: int, node_id: int) -> Dict[str, Any]:
+    """Drop a machine that was added for growth but has not joined."""
+    build = get_build(build_id)
+    node = db.session.get(ClusterBuildNode, node_id)
+    if node is None or node.build_id != build.id:
+        raise LookupError("Node not found on this build.")
+    if node not in growth_nodes(build):
+        raise ValueError(
+            "Only a machine that has not joined yet can be removed here."
+        )
+    db.session.delete(node)
+    db.session.commit()
+    db.session.refresh(build)
+    return serialize_build(build, include_detail=True)
+
+
+def preflight_growth(build_id: int) -> Dict[str, Any]:
+    """Preflight only the machines being added.
+
+    The build keeps its 'completed' status throughout: a live cluster is not
+    "preflighting", and the wizard's status transitions would strand it.
+    """
+    build = get_build(build_id)
+    _require_growable(build)
+    pending = growth_nodes(build)
+    if not pending:
+        raise ValueError("Add machines before running preflight.")
+
+    profile_row = (
+        db.session.get(BuildProfile, build.build_profile_id)
+        if build.build_profile_id else None
+    )
+    resolved = resolve_profile(profile_row)
+    try:
+        vsphere_results = preflight.vsphere_checks(build, nodes=pending)
+        node_results = preflight.run_node_preflight(
+            build, resolved, lambda node: executor._target_for(build, node),
+            nodes=pending,
+        )
+        merged = preflight.merge_preflight(
+            build, vsphere_results, node_results, nodes=pending
+        )
+    except Exception as exc:
+        db.session.rollback()
+        safe_error = scrub(str(exc))
+        raise ValueError(f"Preflight failed to run: {safe_error}") from exc
+
+    merged["topologyWarnings"] = []
+    db.session.commit()
+    return merged
+
+
+def grow_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
+               actor: str = "") -> Dict[str, Any]:
+    """Run the phase machine again to prepare and join the added machines."""
+    build = get_build(build_id)
+    _require_growable(build)
+    pending = growth_nodes(build)
+    if not pending:
+        raise ValueError("Add machines before growing the cluster.")
+
+    unchecked = [n for n in pending if n.status == "pending"]
+    if unchecked:
+        raise ValueError(
+            "Run preflight on the new machines before growing the cluster."
+        )
+    failed = [n for n in pending if n.status == "preflight_failed"]
+    if failed:
+        names = ", ".join(n.hostname or n.address for n in failed)
+        raise ValueError(f"Preflight failed on: {names}. Fix and re-run.")
+    has_warnings = any(
+        (n.preflight_json or {}).get("status") == "warn" for n in pending
+    )
+    if has_warnings and not ack_warnings:
+        raise ValueError(
+            "Preflight raised warnings; pass ackWarnings to acknowledge them."
+        )
+    if ack_warnings:
+        build.warnings_ack_json = {
+            "acknowledgedBy": actor,
+            "acknowledgedAt": datetime.now(timezone.utc).isoformat(),
+            "notes": ack_warnings,
+        }
+
+    # Reopen verification so the cluster is re-checked with the new machines in
+    # it. Everything else that already completed stays completed and is skipped.
+    ClusterBuildStep.query.filter(
+        ClusterBuildStep.build_id == build.id,
+        ClusterBuildStep.phase == "verify",
+    ).update(
+        {"status": "pending", "error": None, "started_at": None, "finished_at": None},
+        synchronize_session=False,
+    )
+
+    build.status = "building"
+    build.error = None
+    build.growth_started_at = datetime.now(timezone.utc)
+    build.finished_at = None
+    db.session.commit()
+    executor.start_build_worker(build.id)
+    db.session.refresh(build)
+    return serialize_build(build, include_detail=True)
+
+
+# ---------------------------------------------------------------------------
+# Kubeconfig
+# ---------------------------------------------------------------------------
+
+def build_kubeconfig(build_id: int) -> Dict[str, Any]:
+    """The cluster-admin kubeconfig of the cluster this build produced.
+
+    This is full control of the cluster, outside KubeSight's own RBAC, for as
+    long as the certificate lives — hence its own permission and an audit entry
+    at the route.
+    """
+    from ...cluster_store import get_active_cluster_by_public_id, read_kubeconfig_file
+
+    build = get_build(build_id)
+    if build.status != "completed" or not build.result_cluster_id:
+        raise ValueError(
+            "This build has not produced a cluster, so it has no kubeconfig."
+        )
+    cluster = get_active_cluster_by_public_id(build.result_cluster_id)
+    if cluster is None:
+        raise LookupError(
+            "The cluster this build registered is no longer present in KubeSight."
+        )
+    try:
+        content = read_kubeconfig_file(cluster.id)
+    except (OSError, ValueError) as exc:
+        raise LookupError(f"The kubeconfig file could not be read: {exc}") from exc
+    if not content.strip():
+        raise LookupError("The stored kubeconfig is empty.")
+    # A suggested download name, so it must not carry path components: dots are
+    # legal in a cluster name but ".." is not something to hand to a filesystem.
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", build.name or "cluster")
+    safe_name = re.sub(r"\.{2,}", ".", safe_name).strip("-._")
+    return {
+        "filename": f"{safe_name or 'cluster'}-kubeconfig.yaml",
+        "content": content,
+        "clusterId": build.result_cluster_id,
+    }
 
 
 def retry_build(build_id: int) -> Dict[str, Any]:

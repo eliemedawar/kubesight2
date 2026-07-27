@@ -130,6 +130,21 @@ describe("fieldActions", () => {
       "edit",
     ]);
   });
+
+  it("keeps Jira screen removal separate from moving a field to trash", () => {
+    const custom = { id: "9", type: "Text", custom: true, removable: true };
+    const jira = {
+      convertField: false,
+      deleteField: true,
+      removeFieldFromForm: true,
+      deleteMode: "trash",
+    };
+    expect(fieldActions(custom, "text", true, jira).map(({ key, label }) => [key, label])).toEqual([
+      ["edit", "Edit"],
+      ["remove", "Remove from screen"],
+      ["delete", "Move to trash"],
+    ]);
+  });
 });
 
 describe("value line helpers", () => {

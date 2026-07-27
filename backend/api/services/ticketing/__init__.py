@@ -105,6 +105,17 @@ def _build_registry() -> Dict[str, Provider]:
                 # No whole-object rewrite to preview, so the dry-run is trivial.
                 "layoutPlan": False,
                 "layoutRecovery": False,
+                # The layout mirror skips option lists to avoid two Jira calls
+                # per dropdown; the editor fetches the selected field on demand.
+                "lazyFieldOptions": True,
+                # Requiredness belongs to Jira field configurations, not the
+                # screen resource this editor is scoped to.
+                "requiredFields": False,
+                "fieldOptionDefaults": False,
+                # Jira distinguishes a reversible screen removal from sending
+                # the custom field itself to the site-wide trash.
+                "removeFieldFromForm": True,
+                "deleteMode": "trash",
                 # No "change this field's type" flow — see zoho's convertField.
                 "convertField": False,
                 # Deleting a custom field is possible (soft-delete to the trash).
@@ -139,6 +150,11 @@ def _build_registry() -> Dict[str, Provider]:
                 "createSections": False,
                 "layoutPlan": True,
                 "layoutRecovery": True,
+                "lazyFieldOptions": False,
+                "requiredFields": True,
+                "fieldOptionDefaults": True,
+                "removeFieldFromForm": False,
+                "deleteMode": "permanent",
                 "convertField": True,
                 "deleteField": True,
                 "cascadeMode": "dependencyMapping",

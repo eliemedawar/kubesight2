@@ -1641,8 +1641,19 @@ export default function App() {
           <ClusterBuilderPage
             canCreate={hasPermission("cluster_builds:create")}
             canExecute={hasPermission("cluster_builds:execute")}
+            canDownloadKubeconfig={hasPermission("cluster_builds:kubeconfig")}
             canManageInfra={
               hasPermission("ssh_credentials:manage") || hasPermission("vsphere:manage")
+            }
+            // A finished build can hand off to the cluster it produced: select
+            // it so the Clusters page opens already scoped to it.
+            onOpenCluster={
+              isPageAllowed("clusters")
+                ? (clusterId) => {
+                  if (clusterId) setSelectedClusterId(clusterId);
+                  setActivePage("clusters");
+                }
+                : null
             }
           />
         );

@@ -88,11 +88,23 @@ def _worst(checks: List[Dict[str, Any]]) -> str:
 # vCenter-side checks (no SSH involved)
 # ---------------------------------------------------------------------------
 
-def vsphere_checks(build: ClusterBuild) -> Dict[int, List[Dict[str, Any]]]:
+def vsphere_checks(
+    build: ClusterBuild,
+    nodes: Optional[List[ClusterBuildNode]] = None,
+) -> Dict[int, List[Dict[str, Any]]]:
     """Per-node placement/sizing checks from the vSphere metadata captured when
-    nodes were added. Nodes without vSphere metadata (manual entry) get none."""
+    nodes were added. Nodes without vSphere metadata (manual entry) get none.
+
+    ``nodes`` narrows the checks to a subset — growing a live cluster must not
+    re-examine the machines already serving it. Anti-affinity still reads the
+    whole tier, because that is the question being asked.
+    """
+    subject_ids = {n.id for n in nodes} if nodes is not None else None
     results: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    vm_nodes = [n for n in build.nodes if n.vsphere_vm_moid]
+    vm_nodes = [
+        n for n in build.nodes
+        if n.vsphere_vm_moid and (subject_ids is None or n.id in subject_ids)
+    ]
 
     for node in vm_nodes:
         checks = results[node.id]
@@ -141,7 +153,10 @@ def vsphere_checks(build: ClusterBuild) -> Dict[int, List[Dict[str, Any]]]:
         ("control_plane", "vs_cp_affinity", "Control-plane host anti-affinity"),
         ("loadbalancer", "vs_lb_affinity", "Load-balancer host anti-affinity"),
     ):
-        tier = [n for n in vm_nodes if n.role == role and n.vsphere_host]
+        tier = [
+            n for n in build.nodes
+            if n.role == role and n.vsphere_vm_moid and n.vsphere_host
+        ]
         if len(tier) < 2:
             continue
         by_host: Dict[str, List[ClusterBuildNode]] = defaultdict(list)
@@ -149,6 +164,8 @@ def vsphere_checks(build: ClusterBuild) -> Dict[int, List[Dict[str, Any]]]:
             by_host[node.vsphere_host].append(node)
         colocated = {host: nodes for host, nodes in by_host.items() if len(nodes) > 1}
         for node in tier:
+            if subject_ids is not None and node.id not in subject_ids:
+                continue
             if colocated:
                 detail = "; ".join(
                     f"{host}: {', '.join(x.vsphere_vm_name or x.hostname for x in nodes)}"
@@ -165,7 +182,10 @@ def vsphere_checks(build: ClusterBuild) -> Dict[int, List[Dict[str, Any]]]:
                 results[node.id].append(_check(check_id, label, "pass"))
 
     # Shared datastore across control planes: warn (etcd co-located on one array).
-    cp_nodes = [n for n in vm_nodes if n.role == "control_plane" and n.vsphere_datastore]
+    cp_nodes = [
+        n for n in build.nodes
+        if n.role == "control_plane" and n.vsphere_vm_moid and n.vsphere_datastore
+    ]
     if len(cp_nodes) > 1:
         datastores = {n.vsphere_datastore for n in cp_nodes}
         for node in cp_nodes:
@@ -523,8 +543,15 @@ def run_node_preflight(
     build: ClusterBuild,
     profile: ResolvedProfile,
     target_builder,  # (node) -> SshTarget
+    nodes: Optional[List[ClusterBuildNode]] = None,
 ) -> Dict[int, Dict[str, Any]]:
-    """SSH-probe every node in parallel. Returns {node_id: {status, checks}}."""
+    """SSH-probe nodes in parallel. Returns {node_id: {status, checks}}.
+
+    ``nodes`` defaults to every node in the build. Pass a subset when growing a
+    live cluster: a running control plane legitimately holds :6443, so probing
+    it would report a port clash against the cluster it is already serving.
+    """
+    subjects = build.nodes if nodes is None else nodes
     from flask import current_app
 
     transport = get_transport()
@@ -536,7 +563,7 @@ def run_node_preflight(
     # threads still get an app context of their own because the real transport's
     # host-key verification reads/writes ssh_host_keys.
     jobs = []
-    for node in build.nodes:
+    for node in subjects:
         try:
             jobs.append((node.id, target_builder(node), _probe_script(build, node, profile)))
         except Exception as exc:  # noqa: BLE001 — a broken profile is a check result
@@ -568,7 +595,7 @@ def run_node_preflight(
         list(pool.map(_probe, jobs))
 
     cross = _uniqueness_checks(raw_facts, build)
-    for node in build.nodes:
+    for node in subjects:
         if node.id in results:  # SSH failure already recorded
             continue
         facts = raw_facts.get(node.id, {})
@@ -582,11 +609,16 @@ def merge_preflight(
     build: ClusterBuild,
     vsphere_results: Dict[int, List[Dict[str, Any]]],
     node_results: Dict[int, Dict[str, Any]],
+    nodes: Optional[List[ClusterBuildNode]] = None,
 ) -> Dict[str, Any]:
-    """Combine both halves, stamp per-node results, and compute the verdict."""
+    """Combine both halves, stamp per-node results, and compute the verdict.
+
+    Only the nodes under examination are stamped. Growing a cluster must not
+    rewrite a joined machine's status back to 'preflight_passed'.
+    """
     overall = "pass"
     per_node = []
-    for node in build.nodes:
+    for node in (build.nodes if nodes is None else nodes):
         checks = list(vsphere_results.get(node.id, []))
         node_result = node_results.get(node.id, {"status": "pass", "checks": []})
         checks.extend(node_result["checks"])

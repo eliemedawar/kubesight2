@@ -17,7 +17,9 @@ import {
   buildDuration,
   groupBuilds,
   formatClock,
+  isGrowing,
   railFromCurrentPhase,
+  runStartedAt,
   timeAgo,
 } from "../../utils/clusterBuilder.js";
 
@@ -32,7 +34,7 @@ function shapeSummary(build) {
 
 function InFlightStrip({ build, now, onOpen }) {
   const rail = railFromCurrentPhase(build);
-  const started = parseApiTime(build.startedAt);
+  const started = parseApiTime(runStartedAt(build));
   const elapsed = Number.isFinite(started) ? now - started : null;
   const position = rail.findIndex((cell) => cell.state === "now") + 1;
   const phaseLabel = build.currentPhase
@@ -41,7 +43,8 @@ function InFlightStrip({ build, now, onOpen }) {
   return (
     <div className="card sg-cb-flight" aria-live="polite">
       <div className="sg-cb-flight-top">
-        <LiveBadge label={build.status === "preflighting" ? "Preflighting" : "Building"} />
+        <LiveBadge label={build.status === "preflighting" ? "Preflighting"
+          : isGrowing(build) ? "Adding machines" : "Building"} />
         <h3>{build.name}</h3>
         <span className="muted sg-cb-mono sg-cb-flight-meta">
           v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}

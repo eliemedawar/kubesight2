@@ -32,6 +32,24 @@ export const cancelClusterBuild = (id) =>
 export const getClusterBuildLogs = (id, nodeId) =>
   request(`/api/cluster-builds/${id}/logs`, { query: nodeId ? { node: nodeId } : {} });
 
+// --- Day two: growing a finished cluster ------------------------------------
+
+export const addClusterBuildNodes = (id, nodes) =>
+  request(`/api/cluster-builds/${id}/nodes`, { method: "POST", body: { nodes } });
+
+export const removeClusterBuildNode = (id, nodeId) =>
+  request(`/api/cluster-builds/${id}/nodes/${nodeId}`, { method: "DELETE" });
+
+export const preflightClusterGrowth = (id) =>
+  request(`/api/cluster-builds/${id}/grow-preflight`, { method: "POST" });
+
+export const growClusterBuild = (id, payload = {}) =>
+  request(`/api/cluster-builds/${id}/grow`, { method: "POST", body: payload });
+
+/** The cluster-admin kubeconfig. Every retrieval is audited server-side. */
+export const getClusterBuildKubeconfig = (id) =>
+  request(`/api/cluster-builds/${id}/kubeconfig`);
+
 // --- vSphere connections ----------------------------------------------------
 
 export const listVSphereConnections = () => request("/api/vsphere-connections");

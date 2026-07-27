@@ -29,6 +29,8 @@ export default function ClusterBuilderPage({
   canCreate = false,
   canExecute = false,
   canManageInfra = false,
+  canDownloadKubeconfig = false,
+  onOpenCluster = null,
 }) {
   const [tab, setTab] = useState("floor");
   const [builds, setBuilds] = useState([]);
@@ -135,7 +137,10 @@ export default function ClusterBuilderPage({
       {tab === "floor" && selectedBuildId ? (
         <BuildDetail
           buildId={selectedBuildId}
+          canCreate={canCreate}
           canExecute={canExecute}
+          canDownloadKubeconfig={canDownloadKubeconfig}
+          onOpenCluster={onOpenCluster}
           notify={notify}
           onBack={() => { setSelectedBuildId(null); reloadBuilds(); }}
           onDeleted={() => { setSelectedBuildId(null); reloadBuilds(); }}

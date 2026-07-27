@@ -31,6 +31,7 @@ import pytest
 from api.db import db
 from api.models import JiraIntegration, ZohoInboundTicket
 from api.services import jira_client
+from api.services import jira_fields_service as fields
 from api.services import jira_sync_service as svc
 from api.services import ticketing
 from api.services import ticketing_targets as targets
@@ -497,6 +498,134 @@ def test_the_registry_reports_both_providers(app):
     assert described["zoho"]["capabilities"]["createSections"] is False
     assert described["jira"]["capabilities"]["convertField"] is False
     assert described["zoho"]["capabilities"]["convertField"] is True
+    assert described["jira"]["capabilities"]["lazyFieldOptions"] is True
+    assert described["jira"]["capabilities"]["requiredFields"] is False
+    assert described["jira"]["capabilities"]["removeFieldFromForm"] is True
+    assert described["jira"]["capabilities"]["deleteMode"] == "trash"
+
+
+def test_jira_field_details_load_options_only_when_requested(jira, monkeypatch):
+    field = {
+        "id": TAG_KEY,
+        "name": "Release tag",
+        "custom": True,
+        "type": jira_client.SELECT_TYPE,
+    }
+    monkeypatch.setattr(jira_client, "field_on_screen", lambda _cfg, _id: field)
+    monkeypatch.setattr(
+        jira_client,
+        "get_options",
+        lambda _cfg, _id: [
+            {"id": "1", "value": "v1", "disabled": False},
+            {"id": "2", "value": "retired", "disabled": True},
+        ],
+    )
+
+    result = fields.get_field(TAG_KEY)
+
+    assert result["allowedValues"] == ["v1"]
+    assert result["isPicklist"] is True
+
+
+def test_jira_layout_routes_create_tabs_and_distinguish_remove_from_trash(
+    app, client, admin_token, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        fields,
+        "create_section",
+        lambda name, field_id, actor=None: {
+            "id": "22",
+            "name": name,
+            "layoutId": "10120",
+            "diff": None,
+        },
+    )
+    monkeypatch.setattr(
+        fields,
+        "delete_field",
+        lambda field_id, payload=None: calls.append((field_id, payload))
+        or {
+            "id": field_id,
+            "removedFromScreen": True,
+            "deleted": bool((payload or {}).get("deleteField")),
+        },
+    )
+    monkeypatch.setattr(
+        fields,
+        "get_field",
+        lambda field_id: {
+            "id": field_id,
+            "label": "Release tag",
+            "allowedValues": ["v1"],
+        },
+    )
+    headers = auth_headers(admin_token)
+
+    loaded = client.get(f"/api/ticketing/jira/fields/{TAG_KEY}", headers=headers)
+    created = client.post(
+        "/api/ticketing/jira/sections",
+        headers=headers,
+        json={"name": "Deployment"},
+    )
+    removed = client.delete(
+        f"/api/ticketing/jira/fields/{TAG_KEY}",
+        headers=headers,
+        json={"deleteField": False},
+    )
+    trashed = client.delete(
+        f"/api/ticketing/jira/fields/{TAG_KEY}",
+        headers=headers,
+        json={"deleteField": True},
+    )
+
+    assert loaded.status_code == 200
+    assert loaded.get_json()["data"]["allowedValues"] == ["v1"]
+    assert created.status_code == 201
+    assert created.get_json()["data"]["name"] == "Deployment"
+    assert removed.status_code == trashed.status_code == 200
+    assert calls == [
+        (TAG_KEY, {"deleteField": False}),
+        (TAG_KEY, {"deleteField": True}),
+    ]
+
+
+def test_jira_move_rolls_the_field_back_if_the_target_tab_rejects_it(jira, monkeypatch):
+    sections = [
+        {"id": "10", "name": "General", "fields": [{"id": TAG_KEY}]},
+        {"id": "20", "name": "Deployment", "fields": []},
+    ]
+    monkeypatch.setattr(jira_client, "get_screen", lambda _cfg: {"sections": sections})
+    monkeypatch.setattr(
+        jira_client,
+        "field_on_screen",
+        lambda _cfg, _id: {
+            "id": TAG_KEY,
+            "name": "Release tag",
+            "custom": True,
+            "type": jira_client.TEXT_TYPE,
+        },
+    )
+    removed = []
+    added = []
+    monkeypatch.setattr(
+        jira_client,
+        "remove_field_from_tab",
+        lambda _cfg, tab_id, field_id: removed.append((tab_id, field_id)),
+    )
+
+    def add(_cfg, tab_id, field_id):
+        added.append((tab_id, field_id))
+        if tab_id == "20":
+            raise jira_client.JiraError("target rejected", 400)
+
+    monkeypatch.setattr(jira_client, "add_field_to_tab", add)
+
+    with pytest.raises(jira_client.JiraError):
+        fields.move_field_to_section(TAG_KEY, "Deployment")
+
+    assert removed == [("10", TAG_KEY)]
+    assert added == [("20", TAG_KEY), ("10", TAG_KEY)]
 
 
 def test_the_providers_endpoint_is_permission_gated(app, client, admin_token):

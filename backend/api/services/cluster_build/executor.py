@@ -75,6 +75,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(value: datetime) -> datetime:
+    """SQLite hands back naive datetimes; the stored value is always UTC.
+
+    Mirrors ``datetime_utils.serialize_utc_datetime`` so arithmetic against
+    ``_utcnow()`` cannot raise on a naive column value.
+    """
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
 def _tail(text: str) -> str:
     text = scrub(text or "")
     return text[-_LOG_TAIL_CHARS:]
@@ -1544,6 +1553,16 @@ def _run_build(app, build_id: int) -> None:
             _phase_addons(build, resolved, primary)
             _check_cancelled(build)
 
+            # Bank the original build's duration the first time it completes.
+            # A growth run rewrites finished_at, so without this the receipt
+            # would report the age of the cluster instead of how long it took.
+            finished = _utcnow()
+            banked = build.build_seconds
+            if banked is None and build.started_at:
+                banked = max(
+                    int((finished - _as_utc(build.started_at)).total_seconds()), 0
+                )
+
             # Complete only if cancellation has not won a concurrent race.
             # A conditional UPDATE prevents a late cancel request from being
             # overwritten between the final refresh and this commit.
@@ -1553,7 +1572,8 @@ def _run_build(app, build_id: int) -> None:
                 {
                     "status": "completed",
                     "error": None,
-                    "finished_at": _utcnow(),
+                    "finished_at": finished,
+                    "build_seconds": banked,
                     # Join secrets are dead weight (and risk) once the cluster
                     # stands.
                     "cert_key_cipher": None,

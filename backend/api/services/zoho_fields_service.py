@@ -118,6 +118,16 @@ def get_layout_structure(fresh: bool = False) -> Dict[str, Any]:
     }
 
 
+def get_field(field_id: str) -> Dict[str, Any]:
+    """Return one field in the same detailed shape as the layout response."""
+    wanted = str(field_id)
+    for section in get_layout_structure().get("sections") or []:
+        for field in section.get("fields") or []:
+            if str(field.get("id")) == wanted:
+                return field
+    raise LookupError("That field is not available in the configured Zoho Desk layout.")
+
+
 def create_section(
     name: str, first_field_id: str, actor: Optional[str] = None
 ) -> Dict[str, Any]:

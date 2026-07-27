@@ -83,6 +83,10 @@ PERMISSIONS = [
     ("cluster_builds:view", "View cluster builds"),
     ("cluster_builds:create", "Create and edit cluster builds"),
     ("cluster_builds:execute", "Run cluster build preflights and executions"),
+    (
+        "cluster_builds:kubeconfig",
+        "Download the cluster-admin kubeconfig of a cluster KubeSight built",
+    ),
     ("ssh_credentials:manage", "Manage SSH credentials and connection profiles"),
     ("vsphere:manage", "Manage vSphere connections and browse VM inventory"),
 ]
@@ -110,6 +114,7 @@ PERMISSION_GROUPS = [
         "label": "Cluster Builder",
         "keys": [
             "cluster_builds:view", "cluster_builds:create", "cluster_builds:execute",
+            "cluster_builds:kubeconfig",
             "ssh_credentials:manage", "vsphere:manage",
         ],
     },
@@ -200,6 +205,10 @@ DANGEROUS_PERMISSION_KEYS = {
     "service_blueprints:delete", "service_blueprints:deploy",
     "components:delete", "registries:manage", "mobile_apps:manage",
     "cluster_builds:create", "cluster_builds:execute",
+    # Handing out a cluster-admin kubeconfig is the most privileged thing this
+    # feature can do — it is full control of the cluster, outside KubeSight's
+    # own RBAC, for as long as the certificate lives.
+    "cluster_builds:kubeconfig",
     "ssh_credentials:manage", "vsphere:manage",
 }
 

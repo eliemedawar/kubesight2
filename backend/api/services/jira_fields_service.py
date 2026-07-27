@@ -155,6 +155,20 @@ def get_layout_structure(fresh: bool = False) -> Dict[str, Any]:
     }
 
 
+def get_field(field_id: str) -> Dict[str, Any]:
+    """Return one field with its option list populated for the edit modal.
+
+    The screen mirror deliberately omits Jira option lists because every dropdown
+    costs two additional Jira requests (context + options).  Fetching one field
+    on demand keeps the main layout fast without making "Manage options" mistake
+    an unloaded list for an empty one.
+    """
+    row, cfg = _config_and_cfg()
+    field = _find_field(cfg, field_id)
+    bindings = sources.bindings_by_field(row, PROVIDER)
+    return _field_dict(cfg, field, _auto_managed_ids(row), bindings, with_options=True)
+
+
 def _find_field(cfg, field_id: str) -> Dict[str, Any]:
     field = jira_client.field_on_screen(cfg, str(field_id))
     if field is None:
@@ -245,9 +259,25 @@ def move_field_to_section(
     if target is None:
         raise ValueError(f"No tab named “{target_name}” on this screen.")
     current_tab = _tab_of_field(cfg, field_id)
-    if current_tab and str(current_tab) != str(target.get("id")):
-        jira_client.remove_field_from_tab(cfg, current_tab, str(field_id))
-    jira_client.add_field_to_tab(cfg, str(target.get("id")), str(field_id))
+    target_id = str(target.get("id"))
+    if current_tab and str(current_tab) == target_id:
+        return {"id": str(field_id), "sectionName": target_name, "diff": None}
+
+    removed_from = str(current_tab) if current_tab else None
+    if removed_from:
+        jira_client.remove_field_from_tab(cfg, removed_from, str(field_id))
+    try:
+        jira_client.add_field_to_tab(cfg, target_id, str(field_id))
+    except Exception:
+        # Jira requires the field to leave its current tab before another tab
+        # accepts it. If the second call fails, best-effort rollback avoids
+        # silently leaving the field off the configured screen.
+        if removed_from:
+            try:
+                jira_client.add_field_to_tab(cfg, removed_from, str(field_id))
+            except Exception:
+                pass
+        raise
     return {"id": str(field_id), "sectionName": target_name, "diff": None}
 
 

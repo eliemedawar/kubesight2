@@ -123,14 +123,40 @@ export function freshness(value, now = Date.now(), staleAfterHours = STALE_AFTER
   };
 }
 
+function humanMinutes(ms) {
+  const minutes = Math.round(ms / 60000);
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+/** How long the original build took.
+ *
+ *  Prefers the duration banked at first completion: growing a cluster runs the
+ *  phase machine again and rewrites finishedAt, which would otherwise turn
+ *  "built in 18 min" into the age of the cluster.
+ */
 export function buildDuration(build) {
+  if (Number.isFinite(build?.buildSeconds) && build.buildSeconds > 0) {
+    return humanMinutes(build.buildSeconds * 1000);
+  }
   const started = parseApiTime(build?.startedAt);
   const finished = parseApiTime(build?.finishedAt);
   if (!Number.isFinite(started) || !Number.isFinite(finished)) return null;
   const ms = finished - started;
   if (!(ms > 0)) return null;
-  const minutes = Math.round(ms / 60000);
-  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+  return humanMinutes(ms);
+}
+
+/** A build that already produced a cluster and is running again is growing it.
+ *  No separate status is needed — that combination only happens on growth. */
+export function isGrowing(build) {
+  return Boolean(build?.status === "building" && build?.resultClusterId);
+}
+
+/** The clock a running build should show: its own run, not the cluster's age. */
+export function runStartedAt(build) {
+  return isGrowing(build) && build?.growthStartedAt
+    ? build.growthStartedAt
+    : build?.startedAt;
 }
 
 // ---------------------------------------------------------------------------

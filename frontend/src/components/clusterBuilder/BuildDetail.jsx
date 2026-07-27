@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Blueprint from "./Blueprint.jsx";
+import GrowPanel from "./GrowPanel.jsx";
 import PhaseRail from "./PhaseRail.jsx";
 import { AddonChips, LiveBadge, StatusPill } from "./common.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
@@ -21,12 +22,15 @@ import {
   buildProgress,
   failurePoint,
   formatClock,
+  isGrowing,
+  runStartedAt,
   addonDisplayName,
 } from "../../utils/clusterBuilder.js";
 import {
   cancelClusterBuild,
   deleteClusterBuild,
   getClusterBuild,
+  getClusterBuildKubeconfig,
   getClusterBuildLogs,
   retryClusterBuild,
 } from "../../api/clusterBuildsApi.js";
@@ -80,7 +84,68 @@ function FailureHero({ point, build, log, canExecute, onRetry, busy }) {
   );
 }
 
-function Receipt({ build, catalog, duration, addonStep, onOpenAddonLog }) {
+function DayTwo({
+  build, canCreate, canDownloadKubeconfig, onOpenCluster, onGrow, notify, busy, setBusy,
+}) {
+  const download = async () => {
+    setBusy(true);
+    try {
+      const { filename, content } = await getClusterBuildKubeconfig(build.id);
+      // Handing this to the browser rather than opening it: it is cluster-admin
+      // credentials and should not sit in a tab's history.
+      const url = URL.createObjectURL(new Blob([content], { type: "application/yaml" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      // Revoking in the same tick as the click can cancel the download before
+      // the browser has read the blob.
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      notify(`${filename} downloaded — this is cluster-admin access, and the download was recorded.`);
+    } catch (error) {
+      notify(error.message || String(error), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="sg-cb-day2">
+      <span className="sg-cb-day2-label">Day two</span>
+      {canCreate ? (
+        <button className="btn-outline btn-sm" type="button" onClick={onGrow}>
+          Add worker machines
+        </button>
+      ) : null}
+      {canDownloadKubeconfig ? (
+        <button className="btn-outline btn-sm" type="button" disabled={busy} onClick={download}>
+          Download kubeconfig
+        </button>
+      ) : null}
+      {onOpenCluster && build.resultClusterId ? (
+        <button
+          className="btn-outline btn-sm"
+          type="button"
+          onClick={() => onOpenCluster(build.resultClusterId)}
+        >
+          Open in Clusters
+        </button>
+      ) : null}
+      {canDownloadKubeconfig ? (
+        <span className="muted sg-cb-day2-note">
+          The kubeconfig is cluster-admin access outside KubeSight&apos;s own permissions —
+          every download is written to the audit log.
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function Receipt({
+  build, catalog, duration, addonStep, onOpenAddonLog, dayTwo,
+}) {
   const machineCount = (build.nodes || []).length;
   return (
     <>
@@ -94,6 +159,8 @@ function Receipt({ build, catalog, duration, addonStep, onOpenAddonLog }) {
           </p>
         </div>
       </div>
+
+      {dayTwo}
 
       <div className="sg-cb-facts">
         <div className="sg-cb-fact">
@@ -156,13 +223,17 @@ function Receipt({ build, catalog, duration, addonStep, onOpenAddonLog }) {
 
 export default function BuildDetail({
   buildId,
+  canCreate = false,
   canExecute,
+  canDownloadKubeconfig = false,
+  onOpenCluster = null,
   notify,
   onBack,
   onDeleted,
   addonCatalog = [],
   buildProfiles = [],
 }) {
+  const [growing, setGrowing] = useState(false);
   const [build, setBuild] = useState(null);
   const [logs, setLogs] = useState(null);
   // The step being viewed: {id, nodeId, phase}.
@@ -298,8 +369,9 @@ export default function BuildDetail({
   const logIsLive = viewedStep?.status === "running";
   // The lane switcher shows everyone working on the phase you are reading.
   const laneSteps = logStep ? steps.filter((step) => step.phase === logStep.phase) : [];
-  const started = parseApiTime(build.startedAt);
+  const started = parseApiTime(runStartedAt(build));
   const elapsed = Number.isFinite(started) ? now - started : null;
+  const isGrowthRun = isGrowing(build);
   const duration = buildDuration(build);
   const isDone = build.status === "completed";
   const buildProfile = buildProfiles.find(
@@ -329,7 +401,7 @@ export default function BuildDetail({
         <button className="btn-ghost" type="button" onClick={onBack}>← All builds</button>
         <h3>{build.name}</h3>
         {build.status === "building"
-          ? <LiveBadge label="Building" />
+          ? <LiveBadge label={isGrowthRun ? "Adding machines" : "Building"} />
           : <StatusPill status={build.status} />}
         <span className="muted sg-cb-mono sg-cb-detail-meta">
           v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}
@@ -420,6 +492,28 @@ export default function BuildDetail({
           duration={duration}
           addonStep={addonStep}
           onOpenAddonLog={() => addonStep && openLogs(addonStep)}
+          dayTwo={(
+            <DayTwo
+              build={build}
+              canCreate={canCreate}
+              canDownloadKubeconfig={canDownloadKubeconfig}
+              onOpenCluster={onOpenCluster}
+              onGrow={() => setGrowing(true)}
+              notify={notify}
+              busy={busy}
+              setBusy={setBusy}
+            />
+          )}
+        />
+      ) : null}
+
+      {isDone && growing ? (
+        <GrowPanel
+          build={build}
+          canExecute={canExecute}
+          notify={notify}
+          onChanged={load}
+          onClose={() => setGrowing(false)}
         />
       ) : null}
 

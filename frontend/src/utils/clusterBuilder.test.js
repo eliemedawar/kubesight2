@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addonProvenance,
   buildBlueprint,
+  buildDuration,
   bundleCoverage,
   deriveReadiness,
   draftBlueprint,
@@ -12,10 +13,12 @@ import {
   groupBuilds,
   groupChecks,
   hostByAddress,
+  isGrowing,
   phaseTimeline,
   preferredSources,
   preflightBlueprint,
   railFromCurrentPhase,
+  runStartedAt,
   shortDigest,
   sourceProfileSummary,
   sshPosture,
@@ -423,6 +426,48 @@ describe("failurePoint", () => {
 
   it("is null while nothing has failed", () => {
     expect(failurePoint({ steps: [{ id: 1, phase: "init", status: "running" }] })).toBeNull();
+  });
+});
+
+describe("growth", () => {
+  const grown = {
+    status: "building",
+    resultClusterId: "custom-7",
+    startedAt: "2026-07-22T08:00:00Z",
+    growthStartedAt: "2026-07-27T11:50:00Z",
+    buildSeconds: 18 * 60,
+    finishedAt: "2026-07-22T08:18:00Z",
+  };
+
+  it("reads a re-running finished build as growth, not a fresh build", () => {
+    expect(isGrowing(grown)).toBe(true);
+    expect(isGrowing({ ...grown, resultClusterId: null })).toBe(false);
+    expect(isGrowing({ ...grown, status: "completed" })).toBe(false);
+  });
+
+  it("clocks the growth run, not the age of the cluster", () => {
+    expect(runStartedAt(grown)).toBe("2026-07-27T11:50:00Z");
+    expect(runStartedAt({ ...grown, status: "completed" })).toBe("2026-07-22T08:00:00Z");
+    // A first build has no growth clock to fall back on.
+    expect(runStartedAt({ status: "building", startedAt: "2026-07-27T11:00:00Z" }))
+      .toBe("2026-07-27T11:00:00Z");
+  });
+
+  it("keeps reporting the original build time after a growth run", () => {
+    // Growth rewrites finishedAt; the banked duration is what the receipt shows.
+    expect(buildDuration({ ...grown, status: "completed",
+      finishedAt: "2026-07-27T12:04:00Z" })).toBe("18 min");
+  });
+
+  it("falls back to the timestamps when nothing was banked", () => {
+    expect(buildDuration({
+      startedAt: "2026-07-22T08:00:00Z", finishedAt: "2026-07-22T08:42:00Z",
+    })).toBe("42 min");
+    expect(buildDuration({ buildSeconds: 0, startedAt: null, finishedAt: null })).toBeNull();
+  });
+
+  it("formats a long build in hours", () => {
+    expect(buildDuration({ buildSeconds: 3 * 3600 + 25 * 60 })).toBe("3 h 25 min");
   });
 });
 
