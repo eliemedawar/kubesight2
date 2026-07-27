@@ -131,6 +131,40 @@ def test_picklist_object_values_are_not_normalized(zoho):
     assert status["isMandatory"] is True
 
 
+def test_new_picklist_placement_carries_values_in_layout_write(zoho):
+    """Desk rejects a newly associated picklist if its first layout entry has no values."""
+    plan = svc.plan_layout_write(
+        [
+            svc.place_field(
+                "303",
+                "Deployment Information",
+                field_data={
+                    "type": "Picklist",
+                    "allowedValues": ["-None-", "eu-west"],
+                    "defaultValue": "-None-",
+                    "sortBy": "userDefined",
+                    "isNested": False,
+                    "isMandatory": True,
+                },
+            )
+        ]
+    )
+    created = next(
+        field
+        for section in plan["body"]["sections"]
+        for field in section["fields"]
+        if field["id"] == "303"
+    )
+    assert created == {
+        "id": "303",
+        "isMandatory": True,
+        "allowedValues": ["-None-", "eu-west"],
+        "defaultValue": "-None-",
+        "sortBy": "userDefined",
+        "isNested": False,
+    }
+
+
 def test_plan_does_not_write(zoho):
     svc.plan_layout_write([svc.add_section("QA")])
     assert zoho["patches"] == []

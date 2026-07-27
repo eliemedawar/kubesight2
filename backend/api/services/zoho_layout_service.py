@@ -275,13 +275,19 @@ def add_section(name: str) -> Dict[str, Any]:
     return {"kind": "add_section", "name": name}
 
 
-def place_field(field_id: str, section_name: str, after_field_id: Optional[str] = None) -> Dict[str, Any]:
+def place_field(
+    field_id: str,
+    section_name: str,
+    after_field_id: Optional[str] = None,
+    field_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Mutation: move ``field_id`` into ``section_name`` (optionally after a sibling)."""
     return {
         "kind": "place_field",
         "fieldId": str(field_id),
         "sectionName": section_name,
         "afterFieldId": str(after_field_id) if after_field_id else None,
+        "fieldData": copy.deepcopy(field_data) if isinstance(field_data, dict) else None,
     }
 
 
@@ -327,8 +333,12 @@ def _apply_place_field(
     added: List[str] = []
     if field is None:
         # Desk normally auto-places a field created with `layoutId`, but if it
-        # did not, placing it is an ADD rather than a move.
-        field = {"id": field_id, "isMandatory": False}
+        # did not, placing it is an ADD rather than a move. Picklists must carry
+        # their values in this first layout write or Desk rejects the whole body.
+        supplied = mutation.get("fieldData")
+        field = copy.deepcopy(supplied) if isinstance(supplied, dict) else {}
+        field["id"] = field_id
+        field.setdefault("isMandatory", False)
         added.append(field_id)
     else:
         source["fields"] = [f for f in _fields_of(source) if str(f.get("id")) != field_id]

@@ -352,9 +352,23 @@ def create_field(payload: Dict[str, Any], actor: Optional[str] = None) -> Dict[s
         )
     elif needs_move:
         try:
+            field_data = None
+            if is_picklist:
+                field_data = {
+                    "id": field_id,
+                    "type": "Picklist",
+                    "allowedValues": values,
+                    "defaultValue": NONE_VALUE,
+                    "sortBy": "userDefined",
+                    "isNested": False,
+                    "isMandatory": required,
+                }
             layout_svc.apply_layout_write(
                 [layout_svc.place_field(
-                    field_id, section_name, after_field_id=after_field_id or None
+                    field_id,
+                    section_name,
+                    after_field_id=after_field_id or None,
+                    field_data=field_data,
                 )],
                 reason="place_field",
                 actor=actor,
