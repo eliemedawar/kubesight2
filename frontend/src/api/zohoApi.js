@@ -51,6 +51,49 @@ export const updateZohoField = (fieldId, payload) =>
 export const createZohoField = (payload) =>
   request("/api/zoho/fields", { method: "POST", body: payload });
 
+// --- Sections (Zoho only exposes these via a WHOLE-LAYOUT replace) ---
+// Always dry-run first: planZohoLayout returns the exact body the backend would
+// PATCH, plus a diff, so the operator confirms before the layout is rewritten.
+// POST rather than GET — `request` de-dupes concurrent identical GETs, and the
+// mutation list doesn't encode cleanly into a query string.
+export const planZohoLayout = (payload) =>
+  request("/api/zoho/layout/plan", { method: "POST", body: payload });
+
+export const createZohoSection = (name) =>
+  request("/api/zoho/sections", { method: "POST", body: { name } });
+
+export const moveZohoFieldToSection = (fieldId, sectionName) =>
+  request(`/api/zoho/fields/${fieldId}/section`, {
+    method: "PUT",
+    body: { sectionName },
+  });
+
+// --- Option-source bindings (this dropdown's options come from Kubernetes) ---
+// The catalogue of source kinds plus every current binding, including the three
+// the sync owns (flagged `locked`).
+export const getZohoOptionSources = () => request("/api/zoho/option-sources");
+
+// 404 = "no binding", which is a normal state, not an error to surface.
+export const getZohoFieldBinding = async (fieldId) => {
+  try {
+    return await request(`/api/zoho/fields/${fieldId}/binding`);
+  } catch (err) {
+    if (err.status === 404) return null;
+    throw err;
+  }
+};
+
+export const setZohoFieldBinding = (fieldId, payload) =>
+  request(`/api/zoho/fields/${fieldId}/binding`, { method: "PUT", body: payload });
+
+export const deleteZohoFieldBinding = (fieldId) =>
+  request(`/api/zoho/fields/${fieldId}/binding`, { method: "DELETE" });
+
+// POST, not GET: it carries the unsaved binding being edited, and `request`
+// de-dupes concurrent identical GETs (two drafts would collapse into one).
+export const previewZohoFieldBinding = (fieldId, payload) =>
+  request(`/api/zoho/fields/${fieldId}/binding/preview`, { method: "POST", body: payload });
+
 // --- Dropdown source picker (cluster + namespaces -> live deployments) ---
 export const getZohoSource = () => request("/api/zoho/source");
 

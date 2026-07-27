@@ -26,6 +26,7 @@ from .. import ssh_profile_service, vsphere_service
 from ..vsphere_client import VSphereError
 from . import addons as addon_registry
 from . import cni as cni_registry
+from .addons import metallb as metallb_addon
 from . import executor, os_adapters, preflight
 from .profiles import resolve as resolve_profile
 from .scrub import scrub
@@ -332,6 +333,36 @@ def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List
                 "addresses to be IP literals (invalid: "
                 f"{', '.join(invalid_addresses)})."
             )
+    metallb = next(
+        (
+            item for item in (build.addons_json or [])
+            if item.get("id") == "metallb"
+        ),
+        None,
+    )
+    if metallb is not None:
+        pools = list((metallb.get("config") or {}).get("addressPools") or [])
+        # A pool that swallows the API VIP or a node address hands MetalLB the
+        # power to take the cluster offline the first time someone creates a
+        # LoadBalancer service.
+        reserved = [
+            (str(build.vip_address or ""), "the API VIP"),
+        ] + [
+            (str(node.get("address") or ""),
+             f"node {node.get('hostname') or node.get('address')}")
+            for node in nodes
+        ]
+        collisions = [
+            label for address, label in reserved
+            if address and metallb_addon.pool_contains(pools, address)
+        ]
+        if collisions:
+            raise ValueError(
+                "The MetalLB address pool overlaps "
+                f"{', '.join(dict.fromkeys(collisions))}. Reserve a range that "
+                "no cluster address uses."
+            )
+
     if worker_count == 0:
         warnings.append("No worker nodes: workloads will need control-plane tolerations.")
     return warnings

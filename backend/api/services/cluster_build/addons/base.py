@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from ..cni.base import extract_images, rewrite_manifest_images
 from ..profiles import ResolvedProfile
@@ -34,6 +34,10 @@ def _data_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "data" / "addons"
 
 
+class AddonConfigError(ValueError):
+    """A rejected per-add-on configuration payload."""
+
+
 @dataclass(frozen=True)
 class AddonDescriptor:
     id: str
@@ -46,9 +50,24 @@ class AddonDescriptor:
     manifest_sha256: Tuple[str, ...]
     # kubectl argument strings. The executor supplies admin.conf and tracing.
     readiness_commands: Tuple[str, ...]
+    # Declarative description of ``config`` for the wizard. Add-ons that need
+    # no configuration leave this empty and reject any config sent to them.
+    config_fields: Tuple[Dict[str, Any], ...] = ()
 
     def bundled_path(self, version: str, filename: str) -> Path:
         return _data_dir() / self.id / version / filename
+
+    def normalize_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and canonicalize this add-on's ``config`` object.
+
+        The default add-on takes no configuration, so anything supplied is a
+        client mistake worth surfacing rather than dropping.
+        """
+        if config:
+            raise AddonConfigError(
+                f"{self.display_name} does not take any configuration."
+            )
+        return {}
 
     def _download(
         self,
@@ -137,7 +156,9 @@ class AddonDescriptor:
                 f"{self.display_name} {version}: bundled manifest(s) "
                 f"{', '.join(missing)} not found under "
                 f"{_data_dir() / self.id / version} and repo mode "
-                f"'{profile.repo_mode}' forbids an internet fallback."
+                f"'{profile.repo_mode}' forbids an internet fallback. Run "
+                "`python tools/fetch_cluster_build_bundles.py` on the "
+                "KubeSight host to populate it."
             )
 
         manifests: List[str] = []

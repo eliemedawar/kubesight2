@@ -189,6 +189,42 @@ from every build.
 Required images derive from `kubeadm config images list --kubernetes-version=X` plus the CNI
 descriptor's `required_images` — never a hand-maintained list.
 
+### 4.4 Add-ons (plugins)
+
+Add-ons follow the CNI descriptor model exactly: a closed catalog, version-pinned manifests,
+SHA-256 integrity, image rewriting to `addon_image_registry`, and a readiness gate. They install
+in phase 12, after the cluster is registered, so an add-on failure never costs you the cluster.
+
+| Add-on | Tier | Configuration | Proven by |
+|---|---|---|---|
+| Metrics Server | supported | none | a scoped kubelet-serving CSR approver, then `kubectl top nodes` must report **every** node |
+| NGINX Ingress Controller | supported | none | `ingressclass/nginx` exists, the Service is NodePort, and that NodePort answers HTTP from a node |
+| MetalLB (native L2) | best-effort | **address pool, required** | the pool is applied as `IPAddressPool` + `L2Advertisement`, then a throwaway `type: LoadBalancer` Service must receive an address **inside the pool** |
+
+MetalLB's pool is part of selecting it, not a post-build chore — without one, every LoadBalancer
+Service stays `<pending>`. The pool is validated for overlap with itself, with the API VIP, and
+with every node address, and TCP/UDP 7946 is added to the port preflight on cluster nodes.
+
+### 4.5 The bundle directory
+
+Manifests are read from `backend/api/data/{cni,addons}/<id>/<version>/` first and only fetched
+from the pinned URL when the repo mode allows it, so a populated bundle directory is what makes
+`offline` mode — and any network that cannot reach GitHub — work. It is populated by:
+
+```
+python tools/fetch_cluster_build_bundles.py            # download + verify all
+python tools/fetch_cluster_build_bundles.py --verify   # check what is bundled
+python tools/fetch_cluster_build_bundles.py --from-dir DIR   # air-gapped import
+python tools/fetch_cluster_build_bundles.py --cilium   # helm-render Cilium
+```
+
+Digests are enforced on every path, including `--from-dir`, and again on every read at build
+time. The catalog's manifests are committed, so a fresh checkout can build offline; the script is
+what adds a new version or repairs the directory. Cilium is the one entry with no upstream
+single-file manifest — `--cilium` renders it with `helm template` (helm is already in the backend
+image) and `apply_pod_cidr` rewrites `cluster-pool-ipv4-cidr` per build, refusing a manifest it
+cannot find that key in.
+
 ---
 
 ## 5. High availability
@@ -340,7 +376,7 @@ restart resumes rather than restarts.
 | 9 | `join_workers` | workers, batched | `kubeadm join` |
 | 10 | `verify` | cluster | all nodes Ready, CoreDNS running, **etcd 3-member healthy**, smoke pod, **API reachable through the VIP** |
 | 11 | `onboard` | backend | fetch `admin.conf`, rewrite server to `control_plane_endpoint`, `cluster_store` save, create `Cluster` row |
-| 12 | `addons` | optional | metrics-server, default StorageClass, ingress |
+| 12 | `addons` | optional | selected plugins in catalog order, each configured and then **functionally proven** — see §4.4 |
 
 Control planes join **serially, never in parallel** — concurrent etcd member additions are a
 reliable way to lose quorum on a fresh cluster.
@@ -497,5 +533,6 @@ and it tells you exactly why they are not ready to be a cluster.*
 
 IPAM integration for VIP allocation (fields reserved in `ClusterBuild` now, so the wizard gains
 a "reserve a VIP" button without a migration), kube-vip endpoint mode, VM creation/cloning from
-template, DRS anti-affinity rule creation, Cilium promotion to supported, offline bundle builder
-CLI, change-bundle-style approval gate before execute, cluster teardown.
+template, DRS anti-affinity rule creation, Cilium promotion to supported, change-bundle-style
+approval gate before execute, cluster teardown. (The offline bundle builder CLI shipped — see
+§4.5.)

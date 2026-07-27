@@ -39,6 +39,7 @@ from .. import ssh_profile_service
 from . import addons as addon_registry
 from . import cni as cni_registry
 from . import kubeadm, lb, onboard, os_adapters
+from .addons import metallb as metallb_addon
 from .cni.base import extract_images, rewrite_manifest_images
 from .profiles import resolve as resolve_profile
 from .scrub import scrub
@@ -1228,6 +1229,177 @@ def _wait_for_metrics(
     )
 
 
+_LB_PROBE_SERVICE = "kubesight-lb-probe"
+
+
+def _configure_metallb(
+    build: ClusterBuild,
+    target: SshTarget,
+    selection: Dict[str, object],
+    stream: _StreamTail,
+) -> None:
+    """Apply the address pool, then prove a Service actually gets an address.
+
+    Installing the manifests alone leaves MetalLB inert, so the pool is applied
+    here and a throwaway LoadBalancer Service must come back with an address
+    inside it before the phase is allowed to pass.
+    """
+    config = dict(selection.get("config") or {})
+    pools = list(config.get("addressPools") or [])
+    manifest = metallb_addon.METALLB.pool_manifest(config)
+    remote_path = "/etc/kubernetes/kubesight-addon-metallb-pool.yaml"
+
+    # The controller serves a validating webhook for these CRs. Its Deployment
+    # is Available a moment before the webhook Service has endpoints, so the
+    # first apply can lose the race with "connection refused".
+    def _apply_pool() -> bool:
+        _check_cancelled(build)
+        _upload_and_run_traced(
+            target,
+            remote_path,
+            manifest,
+            "kubectl --kubeconfig /etc/kubernetes/admin.conf "
+            f"apply -f {remote_path}",
+            timeout_s=120,
+            stream=stream,
+        )
+        return True
+
+    _wait_until(
+        _apply_pool,
+        timeout_s=300,
+        interval_s=10,
+        describe="the MetalLB webhook to accept the address pool",
+    )
+    stream.write(f"MetalLB pool {metallb_addon.POOL_NAME}: {', '.join(pools)}\n")
+
+    _kubectl(
+        target,
+        f"delete service {_LB_PROBE_SERVICE} --ignore-not-found",
+        timeout_s=60,
+        stream=stream,
+    )
+    try:
+        _kubectl(
+            target,
+            f"create service loadbalancer {_LB_PROBE_SERVICE} --tcp=80:80",
+            timeout_s=60,
+            stream=stream,
+        )
+        assigned: List[str] = []
+
+        def _address_assigned() -> bool:
+            _check_cancelled(build)
+            address = _kubectl(
+                target,
+                f"get service {_LB_PROBE_SERVICE} -o jsonpath="
+                "'{.status.loadBalancer.ingress[0].ip}'",
+                timeout_s=60,
+                stream=stream,
+            ).strip().strip("'")
+            if not address:
+                return False
+            assigned.append(address)
+            return True
+
+        _wait_until(
+            _address_assigned,
+            timeout_s=300,
+            interval_s=10,
+            describe="MetalLB to assign a LoadBalancer address",
+        )
+        address = assigned[-1]
+        if not metallb_addon.pool_contains(pools, address):
+            raise _PhaseFailed(
+                f"MetalLB assigned {address}, which is outside the configured "
+                f"pool ({', '.join(pools)})."
+            )
+        stream.write(f"LoadBalancer probe service received {address}.\n")
+    finally:
+        # Best effort: a leftover probe service would otherwise hold a pool
+        # address, and a retry deletes it up front anyway.
+        try:
+            _kubectl(
+                target,
+                f"delete service {_LB_PROBE_SERVICE} --ignore-not-found",
+                timeout_s=60,
+                stream=stream,
+            )
+        except (SshCommandError, SshConnectionError):
+            stream.write(
+                f"Warning: could not delete the {_LB_PROBE_SERVICE} service.\n"
+            )
+
+
+def _verify_ingress_data_path(
+    build: ClusterBuild,
+    target: SshTarget,
+    stream: _StreamTail,
+) -> None:
+    """Prove the ingress NodePort answers HTTP from outside the pod network.
+
+    No Ingress resource and no extra image are needed: the controller's default
+    server answers unmatched requests with 404, so any HTTP status line proves
+    kube-proxy, the CNI, and the controller are all carrying traffic.
+    """
+    node_port = _kubectl(
+        target,
+        "-n nginx-ingress get service nginx-ingress -o jsonpath="
+        "'{.spec.ports[?(@.name==\"http\")].nodePort}'",
+        timeout_s=60,
+        stream=stream,
+    ).strip().strip("'")
+    if not node_port.isdigit():
+        raise _PhaseFailed(
+            "The NGINX Ingress service exposes no http NodePort "
+            f"(got {node_port or 'nothing'})."
+        )
+
+    _, workers, _ = _nodes_by_role(build)
+    probe_host = (workers[0].address if workers else target.host)
+    url = f"http://{probe_host}:{node_port}/"
+    script = f"""set -e
+if command -v curl >/dev/null 2>&1; then
+  CODE=$(curl -s -o /dev/null -m 5 -w '%{{http_code}}' {url} || true)
+elif command -v wget >/dev/null 2>&1; then
+  CODE=$(wget -q -O /dev/null -T 5 --server-response {url} 2>&1 \
+    | awk '/^  HTTP\\//{{code=$2}} END{{print code}}')
+else
+  echo "SKIPPED no HTTP client"
+  exit 0
+fi
+if [ -z "$CODE" ] || [ "$CODE" = "000" ]; then
+  echo "no HTTP response from {url}"
+  exit 1
+fi
+echo "HTTP $CODE from {url}"
+"""
+
+    def _responds() -> bool:
+        _check_cancelled(build)
+        output = _run_traced(
+            target,
+            script,
+            timeout_s=60,
+            stream=stream,
+            display_command=f"probe the ingress NodePort at {url}",
+        ).output
+        if "SKIPPED" in output:
+            stream.write(
+                f"Warning: neither curl nor wget is installed on {target.host}; "
+                "skipping the ingress data-path probe.\n"
+            )
+            return True
+        return "HTTP " in output
+
+    _wait_until(
+        _responds,
+        timeout_s=300,
+        interval_s=10,
+        describe=f"the ingress NodePort at {url} to answer",
+    )
+
+
 def _phase_addons(
     build: ClusterBuild,
     resolved,
@@ -1309,11 +1481,15 @@ def _phase_addons(
                     raise _PhaseFailed(
                         "NGINX Ingress service is not exposed as NodePort."
                     )
+                _verify_ingress_data_path(build, target, stream)
+            elif addon_id == "metallb":
+                _configure_metallb(build, target, selection, stream)
         _check_cancelled(build)
         _step_done(step, stream.text())
     except _Cancelled:
         raise
     except (
+        addon_registry.AddonConfigError,
         addon_registry.AddonRenderError,
         SshCommandError,
         SshConnectionError,

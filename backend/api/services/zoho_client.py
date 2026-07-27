@@ -280,6 +280,70 @@ def field_on_layout(cfg: ZohoConfig, field_id: str) -> Optional[Dict[str, Any]]:
     return _find_field(get_layout(cfg), field_id)
 
 
+def update_layout(cfg: ZohoConfig, body: Dict[str, Any]) -> Dict[str, Any]:
+    """PATCH the whole layout — the ONLY way Desk exposes section editing.
+
+    ``PATCH /layouts/{id}`` is a WHOLE-LAYOUT REPLACE (verified against the
+    official OAS): the body must carry ``departmentId``, ``isDefaultLayout``,
+    ``layoutName``, ``module``, ``skipDeptAccessValidation`` and the complete
+    ``sections`` array. Any field omitted from ``sections[].fields[]`` is
+    unassociated from the layout, so callers MUST go through
+    ``zoho_layout_service`` — it rebuilds the body from a fresh read and refuses
+    to send one that drops a field. Needs ``Desk.settings.UPDATE``.
+    """
+    _assert_layout_allowed(cfg)
+    base = cfg.api_base.rstrip("/")
+    url = f"{base}/layouts/{cfg.layout_id}?{urlencode({'orgId': cfg.org_id})}"
+    data = json.dumps(body).encode("utf-8")
+
+    def _do(tok: str) -> Tuple[int, Dict[str, Any]]:
+        headers = _auth_headers(cfg, tok)
+        headers["Content-Type"] = "application/json"
+        return _request("PATCH", url, headers=headers, body=data)
+
+    token = get_access_token(cfg)
+    status, payload = _do(token)
+    if status == 401:
+        token = get_access_token(cfg, force=True)
+        status, payload = _do(token)
+    if status not in (200, 201):
+        raise ZohoError(_error_detail("Updating the Zoho layout failed", status, payload), status)
+    invalidate_layout_cache()
+    return payload
+
+
+def unassociate_field(cfg: ZohoConfig, field_id: str) -> Dict[str, Any]:
+    """Remove a field from the pinned layout WITHOUT deleting the field itself.
+
+    ``POST /layouts/{lid}/fields/{fid}/unassociate``. Used by the Text->Picklist
+    conversion to retire the old free-text field once its replacement is in
+    place; the field (and its ticket data) survives at org level.
+    """
+    _assert_layout_allowed(cfg)
+    base = cfg.api_base.rstrip("/")
+    url = (
+        f"{base}/layouts/{cfg.layout_id}/fields/{field_id}/unassociate"
+        f"?{urlencode({'orgId': cfg.org_id})}"
+    )
+
+    def _do(tok: str) -> Tuple[int, Dict[str, Any]]:
+        headers = _auth_headers(cfg, tok)
+        headers["Content-Type"] = "application/json"
+        return _request("POST", url, headers=headers, body=b"{}")
+
+    token = get_access_token(cfg)
+    status, payload = _do(token)
+    if status == 401:
+        token = get_access_token(cfg, force=True)
+        status, payload = _do(token)
+    if status not in (200, 201, 204):
+        raise ZohoError(
+            _error_detail("Removing the field from the layout failed", status, payload), status
+        )
+    invalidate_layout_cache()
+    return payload
+
+
 def _org_fields_url(cfg: ZohoConfig, field_id: Optional[str] = None) -> str:
     base = cfg.api_base.rstrip("/")
     suffix = f"/{field_id}" if field_id else ""

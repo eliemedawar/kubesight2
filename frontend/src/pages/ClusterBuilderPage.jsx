@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseApiTime } from "../lib/apiTime";
+import { addonSelectionError, ipRangeListError } from "../utils/addonConfig";
 import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
@@ -92,10 +93,18 @@ function AddonChips({ addons = [], catalog = [], empty = "None" }) {
       {addons.map((addon) => {
         const id = typeof addon === "string" ? addon : addon.id;
         const version = typeof addon === "object" ? addon.version : "";
+        // Configured values are part of what was chosen — a MetalLB pool
+        // decides which addresses the cluster will hand out.
+        const settings = Object.values((typeof addon === "object" && addon.config) || {})
+          .map((entry) => (Array.isArray(entry) ? entry.join(", ") : String(entry).trim()))
+          .filter(Boolean);
         return (
           <span className="sg-cb-chip" key={`${id}-${version}`}>
             {addonDisplayName(addon, catalog)}
             {version ? <span className="sg-cb-chip-version">v{version}</span> : null}
+            {settings.map((entry) => (
+              <span className="sg-cb-chip-version" key={entry}>{entry}</span>
+            ))}
           </span>
         );
       })}
@@ -201,11 +210,22 @@ function AddonSelector({ catalog = [], value = [], onChange }) {
       return;
     }
     const version = addon.defaultVersion || addon.versions?.[0] || "";
-    onChange([...value.filter((item) => item.id !== addon.id), { id: addon.id, version }]);
+    const config = {};
+    for (const field of addon.configFields || []) config[field.key] = "";
+    onChange([
+      ...value.filter((item) => item.id !== addon.id),
+      { id: addon.id, version, ...(addon.configFields?.length ? { config } : {}) },
+    ]);
   };
 
   const setVersion = (id, version) => {
     onChange(value.map((addon) => addon.id === id ? { ...addon, version } : addon));
+  };
+
+  const setConfigField = (id, key, text) => {
+    onChange(value.map((addon) => addon.id === id
+      ? { ...addon, config: { ...(addon.config || {}), [key]: text } }
+      : addon));
   };
 
   return (
@@ -246,6 +266,28 @@ function AddonSelector({ catalog = [], value = [], onChange }) {
                     </select>
                   </label>
                 ) : null}
+                {selected && (addon.configFields || []).map((field) => {
+                  const raw = selected.config?.[field.key];
+                  const text = Array.isArray(raw) ? raw.join("\n") : (raw || "");
+                  const error = text || !field.required
+                    ? (field.type === "ipRangeList" && text ? ipRangeListError(text) : "")
+                    : `${field.label} is required.`;
+                  return (
+                    <label className="sg-cb-addon-config" key={field.key}>
+                      <span>{field.label}</span>
+                      <textarea
+                        rows={2}
+                        value={text}
+                        placeholder={field.placeholder}
+                        aria-invalid={Boolean(error)}
+                        onChange={(e) => setConfigField(addon.id, field.key, e.target.value)}
+                      />
+                      {error
+                        ? <span className="sg-cb-field-error">{error}</span>
+                        : field.help ? <span className="sg-cb-field-hint">{field.help}</span> : null}
+                    </label>
+                  );
+                })}
               </div>
             );
           })}
@@ -1046,6 +1088,10 @@ function WizardTab({ options, infra, notify, onBuildLaunched }) {
   }, [basics.vsphereConnectionId, notify]);
 
   const targets = topologyTargets(basics);
+  const addonError = useMemo(
+    () => addonSelectionError(basics.addons, options?.addons || []),
+    [basics.addons, options],
+  );
   const counts = useMemo(() => {
     const all = { control_plane: 0, worker: 0, loadbalancer: 0 };
     Object.values(picked).forEach((p) => { all[p.role] += 1; });
@@ -1259,9 +1305,10 @@ function WizardTab({ options, infra, notify, onBuildLaunched }) {
             </Field>
           </div>
           <div className="sg-cb-form-actions">
+            {addonError ? <span className="sg-cb-field-error">{addonError}</span> : null}
             <button
               className="primary"
-              disabled={!basics.name || !basics.connectionProfileId ||
+              disabled={!basics.name || !basics.connectionProfileId || Boolean(addonError) ||
                 (basics.endpointMode === "managed_haproxy" ? !basics.vipAddress : !basics.controlPlaneEndpoint)}
               onClick={() => setStep(1)}
             >

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from .base import AddonDescriptor, AddonRenderError  # noqa: F401
+from .base import (  # noqa: F401
+    AddonConfigError,
+    AddonDescriptor,
+    AddonRenderError,
+)
 from .metallb import METALLB
 from .metrics_server import METRICS_SERVER
 from .nginx_ingress import NGINX_INGRESS
@@ -31,27 +35,34 @@ def catalog() -> List[Dict[str, Any]]:
             "versions": list(addon.versions),
             "defaultVersion": addon.versions[0],
             "default": False,
+            "configFields": [dict(field) for field in addon.config_fields],
         }
         for addon in available()
     ]
 
 
-def normalize_selection(value: Any) -> List[Dict[str, str]]:
+def normalize_selection(value: Any) -> List[Dict[str, Any]]:
     """Validate and canonicalize a build payload's ``addons`` list."""
     if value is None:
         return []
     if not isinstance(value, list):
         raise ValueError("addons must be a list.")
 
-    normalized: List[Dict[str, str]] = []
+    normalized: List[Dict[str, Any]] = []
     seen = set()
     for item in value:
+        config: Any = {}
         if isinstance(item, str):
             addon_id = item.strip()
             requested_version = ""
         elif isinstance(item, dict):
             addon_id = str(item.get("id") or "").strip()
             requested_version = str(item.get("version") or "").strip().lstrip("v")
+            config = item.get("config") or {}
+            if not isinstance(config, dict):
+                raise ValueError(
+                    f"Add-on '{addon_id}' config must be an object."
+                )
         else:
             raise ValueError("Each add-on must be an ID or an {id, version} object.")
 
@@ -68,5 +79,9 @@ def normalize_selection(value: Any) -> List[Dict[str, str]]:
                 f"choose from: {', '.join(descriptor.versions)}."
             )
         seen.add(addon_id)
-        normalized.append({"id": addon_id, "version": version})
+        entry: Dict[str, Any] = {"id": addon_id, "version": version}
+        normalized_config = descriptor.normalize_config(config)
+        if normalized_config:
+            entry["config"] = normalized_config
+        normalized.append(entry)
     return normalized

@@ -1110,56 +1110,100 @@ def _create_dependency_mapping(
     return str(new_id) if new_id else None
 
 
+def _remember_mapping_id(row: ZohoIntegration, child, mapping_id: Optional[str]) -> None:
+    """Store a new mapping's id where its child's configuration lives."""
+    if child.locked:
+        if str(child.field_id) == str(row.app_field_id or ""):
+            if mapping_id:
+                row.dependency_mapping_id = mapping_id
+        elif str(child.field_id) == str(row.variable_field_id or ""):
+            if mapping_id:
+                row.variable_mapping_id = mapping_id
+        return
+    from ..models import ZohoFieldBinding
+
+    binding_row = ZohoFieldBinding.query.get(child.row_id) if child.row_id else None
+    if binding_row is not None:
+        binding_row.mapping_id = mapping_id
+        db.session.add(binding_row)
+
+
+def _forget_mapping_id(row: ZohoIntegration, child) -> None:
+    """Clear the id of a mapping that was deleted and deliberately not recreated."""
+    if child.locked:
+        if str(child.field_id) == str(row.variable_field_id or ""):
+            row.variable_mapping_id = None
+        elif str(child.field_id) == str(row.app_field_id or ""):
+            row.dependency_mapping_id = None
+        return
+    from ..models import ZohoFieldBinding
+
+    binding_row = ZohoFieldBinding.query.get(child.row_id) if child.row_id else None
+    if binding_row is not None:
+        binding_row.mapping_id = None
+        db.session.add(binding_row)
+
+
 def _maybe_sync_cascade(
     row: ZohoIntegration,
     cfg: ZohoConfig,
-    entries: List[Dict[str, Any]],
-    vars_by_ns: Optional[Dict[str, Dict[str, List[str]]]] = None,
+    bindings: List[Any],
+    resolved: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Best-effort cascade sync (Environment→Application, then Application→Variable).
+    """Best-effort cascade sync over every parent→child pair the bindings declare.
 
-    Never raises — records the combined outcome + returns a dict.
+    Historically this was exactly Environment→Application→Variable; those two
+    pairs now arrive as ordinary bindings (synthesized from the config row), so
+    the wiring below is generic while their log wording is carried on the
+    binding itself. Never raises — records the combined outcome + returns a dict.
     """
+    from . import zoho_option_sources as sources
+
     if not row.cascade_enabled:
         _record_dependency(row, "skipped", "Cascade disabled in configuration.")
         return {"status": "skipped", "message": "Cascade disabled."}
-    if not (row.sync_application and row.app_field_id and row.sync_environment and row.environment_field_id):
-        msg = "Cascade needs both the Application and Environment fields published."
+    try:
+        active, teardown = sources.cascade_pairs(bindings)
+        # Only pairs whose BOTH ends published this run can be mapped — Zoho 422s
+        # a mapping naming a value it has not seen on the picklist.
+        active = [
+            (p, c) for p, c in active if p.field_id in resolved and c.field_id in resolved
+        ]
+    except ValueError as exc:  # a cycle in the declared parents
+        _record_dependency(row, "error", str(exc))
+        return {"status": "error", "message": str(exc)}
+    if not active and not teardown:
+        msg = "No cascade to configure — no published field names a parent field."
+        if row.app_field_id and row.environment_field_id:
+            msg = "Cascade needs both the Application and Environment fields published."
         _record_dependency(row, "skipped", msg)
         return {"status": "skipped", "message": msg}
     try:
-        env_map = _namespace_to_labels(entries)
-        manage_variables = bool(row.sync_variables and row.variable_field_id and vars_by_ns is not None)
-
-        # Delete BOTH managed mappings before creating either, then rebuild
+        # Delete EVERY managed mapping before creating any, then rebuild
         # parent-first. Recreating Environment→Application while Application
         # still parents the Application→Variable mapping trips Zoho's chain
         # check ("invalid child Id") and used to leave level 1 permanently gone.
-        pairs = [(str(row.environment_field_id), str(row.app_field_id))]
-        if row.variable_field_id:
-            pairs.append((str(row.app_field_id), str(row.variable_field_id)))
-        _delete_dependency_mappings(cfg, pairs)
-
-        new_id = _create_dependency_mapping(
-            cfg, str(row.environment_field_id), str(row.app_field_id), env_map
+        _delete_dependency_mappings(
+            cfg, [(p.field_id, c.field_id) for p, c in active + teardown]
         )
-        if new_id:
-            row.dependency_mapping_id = new_id
-        parts = [f"Cascade configured for {len(env_map)} namespace(s)."]
 
-        # Second level: Application → Variable (only when variables are published).
-        if manage_variables:
-            var_map = _app_to_variables(entries, vars_by_ns)
-            var_id = _create_dependency_mapping(
-                cfg, str(row.app_field_id), str(row.variable_field_id), var_map
+        parts = []
+        for parent, child in active:
+            child_options = resolved[child.field_id]
+            mapping = sources.align_by_parent(
+                child_options.by_parent, resolved[parent.field_id].canon, child_options.canon
             )
-            if var_id:
-                row.variable_mapping_id = var_id
-            parts.append(f"Variable lists mapped for {len(var_map)} application(s).")
-        elif row.variable_field_id and row.variable_mapping_id:
-            row.variable_mapping_id = None  # deleted above, not recreated
+            new_id = _create_dependency_mapping(cfg, parent.field_id, child.field_id, mapping)
+            _remember_mapping_id(row, child, new_id)
+            parts.append(
+                child.cascade_note.format(
+                    n=len(mapping), child=child.label, parent=parent.label
+                )
+            )
+        for _parent, child in teardown:
+            _forget_mapping_id(row, child)  # deleted above, not recreated
 
-        message = " ".join(parts)
+        message = " ".join(parts) if parts else "Cascade mappings cleared."
         _record_dependency(row, "ok", message)
         return {"status": "ok", "message": message}
     except ZohoError as exc:
@@ -1194,13 +1238,21 @@ def _preserved_field_attrs(cfg: ZohoConfig, field_id: str, new_values: List[str]
 
 
 def sync_now() -> Dict[str, Any]:
-    """Publish deployments -> Application field and namespaces -> Environment field,
-    then (best-effort) wire the Environment -> Application cascade.
+    """Publish every bound picklist's option list, then wire the cascades.
 
-    KubeSight is the source of truth for the option lists and always PATCHes the
-    full list. Each field's own default + required flag are read back first (best
-    effort) so publishing values does not reset them. Serialized behind the lock.
+    The Application / Environment / Variable fields are bindings like any other —
+    synthesized from this config row rather than stored — so the loop below is
+    what has always run for them: resolve a live source, read the field's own
+    default + required flag back (best effort) so publishing values does not
+    reset them, then PATCH the whole list. KubeSight is the source of truth for
+    the lists and always sends them complete. Serialized behind the lock.
+
+    A stored binding that fails degrades to a warning: one operator-added
+    dropdown must not stop the fields that drive production deploys. A failure
+    on one of the original three is still fatal to the run.
     """
+    from . import zoho_option_sources as sources
+
     with _sync_lock:
         row = get_or_create_config()
         if not row.enabled:
@@ -1214,73 +1266,81 @@ def sync_now() -> Dict[str, Any]:
             _record_sync(row, "error", str(exc), None)
             return {"status": "error", "message": str(exc), **serialize(row)}
 
-        app_values = _application_values(entries)
-        env_values = build_environment_values(row)
-        sync_vars = bool(row.sync_variables and row.variable_field_id)
-        vars_by_ns = _variables_for_entries(row, entries) if sync_vars else {}
-        variable_values = build_variable_values(entries, vars_by_ns) if sync_vars else []
+        ctx = sources.SourceContext(row, entries)
+        bindings = sources.all_bindings(row)
+        publishing = [b for b in bindings if b.enabled]
+        resolved: Dict[str, sources.ResolvedOptions] = {}
+        warnings: List[str] = []
+
+        def _degrade(binding, action: str, exc: Exception) -> None:
+            """Fatal for the original three, a warning for a stored binding."""
+            message = f"{action} the {binding.label} field: {exc}"
+            if binding.locked:
+                raise ValueError(message)
+            warnings.append(f"{message}.")
+            sources.record_result(binding, "error", message)
+
         try:
+            for binding in list(publishing):
+                try:
+                    resolved[binding.field_id] = sources.resolve(binding, ctx)
+                except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                    _degrade(binding, "Resolving", exc)
+                    publishing.remove(binding)
+
             # Read the fields' preserved attrs up front: one cached layout GET
             # serves them all, and each publish invalidates the layout cache.
-            sync_app = bool(row.sync_application and cfg.app_field_id)
-            sync_env = bool(row.sync_environment and row.environment_field_id)
-            app_attrs = _preserved_field_attrs(cfg, cfg.app_field_id, app_values) if sync_app else {}
-            env_attrs = _preserved_field_attrs(cfg, row.environment_field_id, env_values) if sync_env else {}
-            var_attrs = (
-                _preserved_field_attrs(cfg, row.variable_field_id, variable_values)
-                if sync_vars
-                else {}
-            )
+            attrs = {
+                b.field_id: _preserved_field_attrs(
+                    cfg, b.field_id, resolved[b.field_id].values
+                )
+                for b in publishing
+            }
 
-            def _publish(label: str, values: List[str], field_id: str, attrs: Dict[str, Any]) -> None:
-                # Name the failing field — "duplicate value" style rejections
-                # are meaningless without knowing which list Zoho refused.
+            parts: List[str] = []
+            counts: Dict[str, int] = {}
+            for binding in list(publishing):
+                options = resolved[binding.field_id]
                 try:
-                    zoho_client.set_allowed_values(cfg, values, field_id=field_id, **attrs)
+                    # Name the failing field — "duplicate value" style rejections
+                    # are meaningless without knowing which list Zoho refused.
+                    zoho_client.set_allowed_values(
+                        cfg, options.values, field_id=binding.field_id, **attrs[binding.field_id]
+                    )
                 except ZohoError as exc:
-                    raise ValueError(f"Publishing the {label} field: {exc}") from exc
-
-            parts = []
-            # Application field <- live deployments (only when the toggle is on).
-            deployments = 0
-            if sync_app:
-                _publish("Application", app_values, cfg.app_field_id, app_attrs)
-                deployments = max(0, len(app_values) - 1)  # exclude -None-
-                parts.append(f"{deployments} deployment(s) -> Application")
-
-            # Environment field <- selected namespaces (only when toggled on + configured).
-            namespaces = 0
-            if sync_env:
-                _publish("Environment", env_values, row.environment_field_id, env_attrs)
-                namespaces = max(0, len(env_values) - 1)
-                parts.append(f"{namespaces} namespace(s) -> Environment")
-
-            # Variable field <- env-var names of the published deployments.
-            variables = 0
-            if sync_vars:
-                _publish("Variable", variable_values, row.variable_field_id, var_attrs)
-                variables = max(0, len(variable_values) - 1)
-                parts.append(f"{variables} variable name(s) -> Variable")
+                    _degrade(binding, "Publishing", exc)
+                    publishing.remove(binding)
+                    resolved.pop(binding.field_id, None)
+                    continue
+                counts[binding.field_id] = options.count
+                parts.append(binding.publish_note.format(n=options.count, label=binding.label))
+                sources.record_result(
+                    binding, "ok", f"Published {options.count} value(s).", options.count
+                )
 
             if parts:
                 message = "Published " + "; ".join(parts) + " to Zoho."
             else:
                 message = "Nothing published — all field syncs are turned off."
+            if warnings:
+                message = f"{message} {' '.join(warnings)}"
+            deployments = counts.get(str(row.app_field_id or ""), 0)
             _record_sync(row, "ok", message, deployments)
         except (ZohoError, ValueError) as exc:
             _record_sync(row, "error", str(exc), None)
             return {"status": "error", "message": str(exc), **serialize(row)}
 
         # Cascade is best-effort and layered on top of the (already published) lists.
-        cascade = _maybe_sync_cascade(row, cfg, entries, vars_by_ns if sync_vars else None)
+        cascade = _maybe_sync_cascade(row, cfg, bindings, resolved)
         return {
             "status": "ok",
             "message": message,
             "deployments": deployments,
-            "namespaces": namespaces,
-            "variables": variables,
+            "namespaces": counts.get(str(row.environment_field_id or ""), 0),
+            "variables": counts.get(str(row.variable_field_id or ""), 0),
             "count": deployments,
             "cascade": cascade,
+            "warnings": warnings,
             **serialize(row),
         }
 

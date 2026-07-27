@@ -24,6 +24,7 @@ from api.migrate_rbac import (
 )
 from api.models import BuildProfile, ClusterBuild, ClusterBuildNode
 from api.services import ssh_profile_service
+from api.services.cluster_build import addons as addon_registry
 from api.services.cluster_build import executor, kubeadm
 from api.services.cluster_build import preflight as preflight_mod
 from api.services.cluster_build.addons.base import AddonDescriptor
@@ -31,6 +32,8 @@ from api.services.cluster_build.addons.metallb import METALLB
 from api.services.cluster_build.cni.base import CniDescriptor
 from api.services.cluster_build.cni.base import CniRenderError
 from api.services.cluster_build.cni.calico import CALICO
+from api.services.cluster_build.cni.cilium import CILIUM
+from api.services.cluster_build.cni.flannel import FLANNEL
 from api.services.cluster_build.os_adapters.base import (
     ScriptContext,
     containerd_config_script,
@@ -49,6 +52,39 @@ from tests.test_cluster_builds import (
 )
 
 _REAL_ADDON_LOAD_MANIFESTS = AddonDescriptor.load_manifests
+
+# MetalLB is inert without a pool, so every selection of it carries one. The
+# range sits clear of the node addresses (10.0.0.11/.21) and VIPs used above.
+METALLB_POOL = "10.0.0.240-10.0.0.250"
+METALLB_SELECTION = {
+    "id": "metallb",
+    "version": "0.16.1",
+    "config": {"addressPools": [METALLB_POOL]},
+}
+
+
+def add_addon_responders(fake, *, lb_address="10.0.0.240"):
+    """Fake output for the functional checks the add-ons phase runs.
+
+    Order matters — the transport takes the first matching responder, so the
+    narrow jsonpath queries have to be registered before the broad ones.
+    """
+    fake.add(
+        lambda h, s: "top nodes --no-headers" in s,
+        "cp-1 100m 5% 512Mi 10%\nw-1 100m 5% 512Mi 10%\n",
+    )
+    fake.add(lambda h, s: "jsonpath='{.spec.ports[?(@.name==\"http\")]" in s, "30080")
+    fake.add(lambda h, s: "get service nginx-ingress" in s, "NodePort")
+    fake.add(lambda h, s: "curl -s -o /dev/null" in s, "HTTP 404 from http://10.0.0.21:30080/\n")
+    fake.add(
+        lambda h, s: f"get service {executor._LB_PROBE_SERVICE}" in s,
+        lb_address,
+    )
+    fake.add(
+        lambda h, s: f"create service loadbalancer {executor._LB_PROBE_SERVICE}" in s,
+        f"service/{executor._LB_PROBE_SERVICE} created",
+    )
+    return fake
 
 
 def _test_ca_pem() -> str:
@@ -189,13 +225,23 @@ class TestAddonApi:
         assert catalog["nginx-ingress"]["defaultVersion"] == "5.5.4"
         assert catalog["metallb"]["defaultVersion"] == "0.16.1"
         assert catalog["metallb"]["supportTier"] == "best-effort"
-        assert "IPAddressPool" in catalog["metallb"]["description"]
+        assert catalog["metallb"]["configFields"] == [
+            {
+                "key": "addressPools",
+                "type": "ipRangeList",
+                "label": "LoadBalancer address pool",
+                "required": True,
+                "placeholder": "10.0.0.240-10.0.0.250",
+                "help": METALLB.config_fields[0]["help"],
+            }
+        ]
+        assert catalog["metrics-server"]["configFields"] == []
 
         payload = make_build_payload(
             addons=[
                 {"id": "metrics-server", "version": "0.7.2"},
                 {"id": "nginx-ingress", "version": "5.5.4"},
-                {"id": "metallb", "version": "0.16.1"},
+                dict(METALLB_SELECTION),
             ]
         )
         payload["connectionProfileId"] = ssh_profile["id"]
@@ -238,6 +284,108 @@ class TestAddonApi:
             "daemonset/speaker" in command
             for command in METALLB.readiness_commands
         )
+
+    @pytest.mark.parametrize(
+        "config,error",
+        [
+            (None, "at least one address pool"),
+            ({"addressPools": []}, "at least one address pool"),
+            ({"addressPools": ["10.0.0.250-10.0.0.240"]}, "ends before it starts"),
+            ({"addressPools": ["not-an-address"]}, "not a valid"),
+            (
+                {"addressPools": ["10.0.0.240-10.0.0.250", "10.0.0.245/32"]},
+                "overlap",
+            ),
+            ({"addressPools": ["10.0.0.240/28"], "speaker": True}, "Unknown MetalLB"),
+            ({"addressPools": ["10.0.0.0/24"]}, "overlaps"),  # swallows the nodes
+        ],
+    )
+    def test_metallb_pool_is_validated(
+        self, client, admin_token, ssh_profile, config, error
+    ):
+        selection = {"id": "metallb", "version": "0.16.1"}
+        if config is not None:
+            selection["config"] = config
+        payload = make_build_payload(
+            nodes=SINGLE_CP_NODES, addons=[selection]
+        )
+        payload["connectionProfileId"] = ssh_profile["id"]
+        response = client.post(
+            "/api/cluster-builds", json=payload, headers=auth_headers(admin_token)
+        )
+        assert response.status_code == 400
+        assert error.lower() in response.get_json()["error"].lower()
+
+    def test_metallb_pool_may_not_swallow_the_api_vip(
+        self, client, admin_token, ssh_profile
+    ):
+        payload = make_build_payload(
+            topology="single_cp",
+            endpoint_mode="managed_haproxy",
+            nodes=SINGLE_CP_MANAGED_LB_NODES,
+            vipAddress="10.0.1.9",
+            vipInterface="ens192",
+            addons=[{
+                "id": "metallb",
+                "version": "0.16.1",
+                "config": {"addressPools": ["10.0.1.0-10.0.1.20"]},
+            }],
+        )
+        payload.pop("controlPlaneEndpoint", None)
+        payload["connectionProfileId"] = ssh_profile["id"]
+        response = client.post(
+            "/api/cluster-builds", json=payload, headers=auth_headers(admin_token)
+        )
+        assert response.status_code == 400
+        assert "api vip" in response.get_json()["error"].lower()
+
+    def test_metallb_pool_entries_are_canonicalized(
+        self, client, admin_token, ssh_profile
+    ):
+        payload = make_build_payload(
+            nodes=SINGLE_CP_NODES,
+            addons=[{
+                "id": "metallb",
+                "version": "0.16.1",
+                # Whitespace, a host-bit-dirty CIDR, a bare address, and a
+                # newline-separated string are all shapes the wizard can
+                # produce. MetalLB itself accepts only CIDRs and ranges.
+                "config": {
+                    "addressPools":
+                        " 10.0.0.241/28 \n10.0.0.200 - 10.0.0.210\n10.0.0.99 ",
+                },
+            }],
+        )
+        payload["connectionProfileId"] = ssh_profile["id"]
+        response = client.post(
+            "/api/cluster-builds", json=payload, headers=auth_headers(admin_token)
+        )
+        assert response.status_code == 201, response.get_json()
+        assert response.get_json()["data"]["addons"] == [{
+            "id": "metallb",
+            "version": "0.16.1",
+            "config": {"addressPools": [
+                "10.0.0.240/28", "10.0.0.200-10.0.0.210", "10.0.0.99/32",
+            ]},
+        }]
+
+    def test_addons_without_configuration_reject_one(
+        self, client, admin_token, ssh_profile
+    ):
+        payload = make_build_payload(
+            nodes=SINGLE_CP_NODES,
+            addons=[{
+                "id": "metrics-server",
+                "version": "0.7.2",
+                "config": {"addressPools": ["10.0.0.240/28"]},
+            }],
+        )
+        payload["connectionProfileId"] = ssh_profile["id"]
+        response = client.post(
+            "/api/cluster-builds", json=payload, headers=auth_headers(admin_token)
+        )
+        assert response.status_code == 400
+        assert "does not take any configuration" in response.get_json()["error"]
 
     @pytest.mark.parametrize(
         "addons,error",
@@ -452,6 +600,101 @@ class TestAddonApi:
         )
         with pytest.raises(Exception, match="integrity"):
             bad.load_manifests("1.0.0", mirror)
+
+
+class TestBundledManifests:
+    """The shipped data directory is what makes offline mode real."""
+
+    def test_every_pinned_manifest_is_bundled_and_matches_its_digest(self):
+        offline = replace(default_profile(), repo_mode="offline")
+        missing = []
+        for descriptor in addon_registry.available():
+            for version in descriptor.versions:
+                for filename in descriptor.manifest_files:
+                    path = descriptor.bundled_path(version, filename)
+                    if not path.is_file():
+                        missing.append(str(path))
+        for descriptor in (CALICO, FLANNEL):
+            for version in descriptor.versions:
+                for filename in descriptor.manifest_files:
+                    path = descriptor.bundled_path(version, filename)
+                    if not path.is_file():
+                        missing.append(str(path))
+        assert not missing, (
+            "Missing bundled manifests — run "
+            "`python tools/fetch_cluster_build_bundles.py`:\n"
+            + "\n".join(missing)
+        )
+
+        # Offline mode never touches the network, and load_manifests re-checks
+        # the pinned digest against the bundled bytes on every read.
+        def _no_network(self, **kwargs):
+            raise AssertionError("offline mode must not download anything")
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(AddonDescriptor, "_download", _no_network)
+            patch.setattr(CniDescriptor, "_download", _no_network)
+            for descriptor in addon_registry.available():
+                for version in descriptor.versions:
+                    rendered = _REAL_ADDON_LOAD_MANIFESTS(
+                        descriptor, version, offline
+                    )
+                    assert len(rendered) == len(descriptor.manifest_files)
+            for descriptor in (CALICO, FLANNEL):
+                for version in descriptor.versions:
+                    assert CniDescriptor.load_manifests(
+                        descriptor, version, offline
+                    )
+
+    def test_bundled_calico_carries_the_build_pod_cidr(self):
+        offline = replace(default_profile(), repo_mode="offline")
+        # Unbound so the stand-in manifests the autouse fixture installs on the
+        # Calico class do not hide the bundled file.
+        manifest = CALICO.apply_pod_cidr(
+            CniDescriptor.load_manifests(CALICO, CALICO.versions[0], offline)[0],
+            "172.31.0.0/16",
+        )
+        assert 'value: "172.31.0.0/16"' in manifest
+        assert "# - name: CALICO_IPV4POOL_CIDR" not in manifest
+        # The rewrite must leave the document parseable, not just textually
+        # patched — a stray blank line here used to produce invalid YAML.
+        documents = [
+            document for document in yaml.safe_load_all(manifest)
+            if document is not None
+        ]
+        assert any(document.get("kind") == "DaemonSet" for document in documents)
+
+    def test_bundled_flannel_carries_the_build_pod_cidr(self):
+        offline = replace(default_profile(), repo_mode="offline")
+        manifest = FLANNEL.apply_pod_cidr(
+            CniDescriptor.load_manifests(FLANNEL, FLANNEL.versions[0], offline)[0],
+            "172.31.0.0/16",
+        )
+        assert '"Network": "172.31.0.0/16"' in manifest
+        assert "10.244.0.0/16" not in manifest
+
+    def test_cilium_rewrites_cluster_pool_cidr_and_rejects_unknown_manifests(self):
+        rendered = CILIUM.apply_pod_cidr(
+            "apiVersion: v1\n"
+            "kind: ConfigMap\n"
+            "data:\n"
+            '  cluster-pool-ipv4-cidr: "10.244.0.0/16"\n'
+            "  cluster-pool-ipv4-mask-size: \"24\"\n",
+            "172.31.0.0/16",
+        )
+        assert 'cluster-pool-ipv4-cidr: "172.31.0.0/16"' in rendered
+        assert 'cluster-pool-ipv4-mask-size: "24"' in rendered
+
+        with pytest.raises(CniRenderError, match="cluster-pool-ipv4-cidr"):
+            CILIUM.apply_pod_cidr("apiVersion: v1\nkind: ConfigMap\n", "10.244.0.0/16")
+
+    def test_cilium_is_bundled_only_and_says_how_to_render_it(self):
+        offline = replace(default_profile(), repo_mode="offline")
+        assert CILIUM.manifest_urls == ()
+        if CILIUM.bundled_path(CILIUM.versions[0], "cilium.yaml").is_file():
+            pytest.skip("a Cilium bundle is present in this checkout")
+        with pytest.raises(CniRenderError, match="bundled-only"):
+            CniDescriptor.load_manifests(CILIUM, CILIUM.versions[0], offline)
 
 
 class TestImageAndForwardProxy:
@@ -737,15 +980,7 @@ class TestAddonExecution:
             "10.0.0.11": ("cp-1", "control_plane"),
             "10.0.0.21": ("w-1", "worker"),
         }
-        fake = build_default_fake(hosts)
-        fake.add(
-            lambda h, s: "top nodes --no-headers" in s,
-            "cp-1 100m 5% 512Mi 10%\nw-1 100m 5% 512Mi 10%\n",
-        )
-        fake.add(
-            lambda h, s: "get service nginx-ingress" in s,
-            "NodePort",
-        )
+        fake = add_addon_responders(build_default_fake(hosts))
         set_transport_factory(lambda: fake)
 
         payload = make_build_payload(
@@ -754,7 +989,7 @@ class TestAddonExecution:
             addons=[
                 {"id": "metrics-server", "version": "0.7.2"},
                 {"id": "nginx-ingress", "version": "5.5.4"},
-                {"id": "metallb", "version": "0.16.1"},
+                dict(METALLB_SELECTION),
             ],
         )
         data = run_full_build(
@@ -825,6 +1060,33 @@ class TestAddonExecution:
         )
         assert not any("certificate approve" in script for script in scripts)
 
+        # The plugins are proven functional, not merely applied: an ingress
+        # NodePort that answers HTTP and a LoadBalancer service that receives
+        # an address out of the configured pool.
+        assert any("kubesight-addon-metallb-pool.yaml" in script for script in scripts)
+        pool_upload = next(
+            script for script in scripts
+            if "kubesight-addon-metallb-pool.yaml" in script and "base64 -d" in script
+        )
+        encoded = re.search(r"echo ([A-Za-z0-9+/=]+) \| base64 -d", pool_upload).group(1)
+        pool_manifest = base64.b64decode(encoded).decode("utf-8")
+        documents = list(yaml.safe_load_all(pool_manifest))
+        assert [document["kind"] for document in documents] == [
+            "IPAddressPool", "L2Advertisement",
+        ]
+        assert documents[0]["spec"]["addresses"] == [METALLB_POOL]
+        assert documents[0]["metadata"]["namespace"] == "metallb-system"
+        assert documents[1]["spec"]["ipAddressPools"] == [documents[0]["metadata"]["name"]]
+        assert any(
+            f"create service loadbalancer {executor._LB_PROBE_SERVICE}" in script
+            for script in scripts
+        )
+        assert any(
+            f"delete service {executor._LB_PROBE_SERVICE} --ignore-not-found" in script
+            for script in scripts
+        )
+        assert any("http://10.0.0.21:30080/" in script for script in scripts)
+
         logs = client.get(
             f"/api/cluster-builds/{data['id']}/logs",
             headers=auth_headers(admin_token),
@@ -852,7 +1114,7 @@ class TestAddonExecution:
             return False
 
         fake.responders.insert(0, (_first_service_check, "ClusterIP"))
-        fake.add(lambda h, s: "get service nginx-ingress" in s, "NodePort")
+        add_addon_responders(fake)
         set_transport_factory(lambda: fake)
 
         payload = make_build_payload(

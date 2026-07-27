@@ -132,6 +132,18 @@
   padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-md);
   background: var(--bg-panel); color: var(--text-strong); font: inherit;
 }
+.sg-cb-addon-config {
+  display: flex; flex-direction: column; gap: 5px;
+  border-top: 1px solid var(--border); padding-top: 9px;
+  color: var(--text-muted); font-size: 12px; font-weight: 600;
+}
+.sg-cb-addon-config textarea {
+  padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+  background: var(--bg-panel); color: var(--text-strong);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+  resize: vertical;
+}
+.sg-cb-addon-config textarea[aria-invalid="true"] { border-color: var(--danger); }
 
 .sg-cb-profile-section {
   grid-column: 1 / -1;

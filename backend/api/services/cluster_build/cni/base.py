@@ -77,6 +77,11 @@ class CniDescriptor:
     manifest_sha256: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     # DaemonSet the readiness gate waits on: (namespace, name).
     readiness_daemonset: Tuple[str, str] = ("kube-system", "")
+    # Appended to "manifest not bundled" errors: the command that fixes it.
+    bundle_hint: str = (
+        "Run `python tools/fetch_cluster_build_bundles.py` on the KubeSight "
+        "host to populate it."
+    )
 
     def bundled_path(self, version: str, filename: str) -> Path:
         return _data_dir() / self.id / version / filename
@@ -164,14 +169,14 @@ class CniDescriptor:
                     raise CniRenderError(
                         f"{self.display_name} {version}: bundled-only manifest "
                         f"'{filename}' was not found under "
-                        f"{_data_dir() / self.id / version}."
+                        f"{_data_dir() / self.id / version}. {self.bundle_hint}"
                     )
                 if profile.repo_mode == "offline":
                     raise CniRenderError(
                         f"{self.display_name} {version}: bundled manifest "
                         f"'{filename}' not found under "
                         f"{_data_dir() / self.id / version} and offline mode "
-                        "forbids fetching it."
+                        f"forbids fetching it. {self.bundle_hint}"
                     )
                 url = self.manifest_urls[index].format(version=version)
                 content = self._download(

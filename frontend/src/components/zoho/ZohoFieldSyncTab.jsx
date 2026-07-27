@@ -224,6 +224,7 @@ export default function ZohoFieldSyncTab({
   config,
   reloadKey,
   onSourceSaved,
+  onLayoutChanged,
   preview,
   previewLoading,
 }) {
@@ -235,6 +236,7 @@ export default function ZohoFieldSyncTab({
           config={config}
           reloadKey={reloadKey}
           onSourceSaved={onSourceSaved}
+          onLayoutChanged={onLayoutChanged}
         />
       </div>
       <div className="sg-zh-colside">

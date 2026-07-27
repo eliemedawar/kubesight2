@@ -1079,3 +1079,165 @@
 
 /* A custom environment tag in summaries — dashed to signal "virtual". */
 .sg-tag-custom { border-style: dashed; }
+
+/* ── Layout editor: sections, layout-write confirmation ─────────────────── */
+
+/* .sg-zh-sect is a flex row whose ::after hairline eats the free width, so the
+   per-section action has to be ordered AFTER it to sit on the right. */
+.sg-zh-sect > span:first-child { order: 0; }
+.sg-zh-scount { order: 1; color: var(--text-muted); font-weight: 500; }
+.sg-zh-sect::after { order: 2; }
+.sg-zh-sectadd {
+  order: 3;
+  flex: none;
+  /* Escape the uppercase/tracked treatment the section header applies. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+/* Wider than .modal-panel (42rem), narrower than .sg-zh-picker (60rem): the
+   raw request body needs room to be readable. */
+.sg-zh-modal--wide { width: min(48rem, 100%); }
+
+/* Explicit grid — NOT .settings-form, whose auto-fit columns stretch stacked
+   blocks like the diff into side-by-side columns. */
+.sg-zh-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.sg-zh-form > label { display: grid; gap: 0.35rem; align-content: start; }
+.sg-zh-form-full { grid-column: 1 / -1; }
+.sg-zh-form .modal-actions { grid-column: 1 / -1; }
+@media (max-width: 700px) {
+  .sg-zh-form { grid-template-columns: 1fr; }
+}
+
+.sg-zh-diffwrap { display: flex; flex-direction: column; gap: var(--space-3); }
+
+.sg-zh-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sg-zh-diff-row {
+  display: grid;
+  grid-template-columns: 1.25rem 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  background: var(--bg-panel);
+}
+.sg-zh-diff-row--added { background: var(--ok-soft); }
+.sg-zh-diff-row--changed { background: var(--info-soft); }
+.sg-zh-diff-row--removed { background: var(--danger-soft); }
+.sg-zh-diff-mark {
+  font-family: var(--font-mono);
+  font-weight: 800;
+  text-align: center;
+  color: var(--text-muted);
+}
+.sg-zh-diff-row--added .sg-zh-diff-mark { color: var(--ok); }
+.sg-zh-diff-row--removed .sg-zh-diff-mark { color: var(--danger); }
+
+.sg-zh-diffraw summary {
+  cursor: pointer;
+  font-size: 0.8125rem;
+  color: var(--text-subtle);
+}
+.sg-zh-diffraw summary:focus-visible { outline: none; box-shadow: var(--ring); }
+.sg-zh-diffpre {
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  max-height: 18rem;
+  overflow: auto;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.sg-zh-diffpre:focus-visible { outline: none; box-shadow: var(--ring); }
+
+/* ── Layout editor: option-source bindings ─────────────────────────────── */
+
+/* Manual list vs live source. `.routing-option` is authored for a div, so the
+   button versions need the type reset that a <button> otherwise inherits. */
+.sg-zh-srcmode {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: var(--space-3);
+}
+@media (max-width: 700px) {
+  .sg-zh-srcmode { grid-template-columns: 1fr; }
+}
+.sg-zh-srcmode .routing-option {
+  gap: 0.25rem;
+  align-content: start;
+  text-align: left;
+  font: inherit;
+  color: var(--text-main);
+  cursor: pointer;
+}
+.sg-zh-srcmode .routing-option span {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+.sg-zh-srcmode .routing-option:hover { border-color: var(--accent-border); }
+
+/* Explicit grid, NOT .settings-form — its auto-fit columns would stretch the
+   stacked source/parent/preview blocks side by side. */
+.sg-zh-srcbox {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.sg-zh-srcbox > label { display: grid; gap: 0.35rem; }
+
+.sg-zh-srcprev {
+  display: grid;
+  gap: 0.5rem;
+  padding: var(--space-3);
+  background: var(--bg-inset);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+}
+.sg-zh-srcprev-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-subtle);
+}
+.sg-zh-srcprev-head .muted {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+}
+.sg-zh-preview-vals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  max-height: 9rem;
+  overflow: auto;
+}
+
+/* A field whose options come from a live source. Info/teal, not red — the red
+   budget belongs to alerts. */
+.sg-tag-bound {
+  border-color: var(--info-border);
+  background: var(--info-soft);
+  color: var(--info);
+}
+.sg-tag-off { border-style: dashed; opacity: 0.7; }

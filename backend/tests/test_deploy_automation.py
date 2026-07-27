@@ -1064,6 +1064,9 @@ def test_cascade_resync_rebuilds_chain_parent_first(app, monkeypatch):
     row.app_field_id = APP_F
     row.environment_field_id = ENV_F
     row.variable_field_id = VAR_F
+    # The namespace has to be a PUBLISHED Environment value: a mapping naming a
+    # parent value Zoho never saw on the picklist is rejected, so it is skipped.
+    row.selected_namespaces = json.dumps(["verto-sit"])
     db.session.add(row)
     db.session.commit()
 
@@ -1113,7 +1116,15 @@ def test_cascade_resync_rebuilds_chain_parent_first(app, monkeypatch):
 
     entries = [{"id": 1, "namespace": "verto-sit", "name": "svc-a", "label": "svc-a"}]
     vars_by_ns = {"verto-sit": {"svc-a": ["LOG_LEVEL"]}}
-    result = svc._maybe_sync_cascade(row, cfg, entries, vars_by_ns)
+    # The cascade now runs over resolved bindings; the three legacy fields are
+    # synthesized from the config row above.
+    from api.services import zoho_option_sources as sources
+
+    ctx = sources.SourceContext(row, entries)
+    monkeypatch.setattr(svc, "_variables_for_entries", lambda *a, **k: vars_by_ns)
+    bindings = sources.all_bindings(row)
+    resolved = {b.field_id: sources.resolve(b, ctx) for b in bindings}
+    result = svc._maybe_sync_cascade(row, cfg, bindings, resolved)
 
     assert result["status"] == "ok", result
     assert created_order == [(ENV_F, APP_F), (APP_F, VAR_F)], "must rebuild parent-first"

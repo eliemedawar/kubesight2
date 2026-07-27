@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import EmptyState from "../common/EmptyState.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
+import ZohoAddSectionModal from "./ZohoAddSectionModal.jsx";
+import ZohoBindingModal from "./ZohoBindingModal.jsx";
+import ZohoLayoutSection from "./ZohoLayoutSection.jsx";
 import ZohoSourcePicker from "./ZohoSourcePicker.jsx";
 import { IconAlert } from "./icons.jsx";
+import { CREATABLE_TYPES, linesToValues, valuesToLines } from "./zohoFieldMeta";
 import {
   createZohoField,
   getZohoLayout,
@@ -10,27 +14,13 @@ import {
   updateZohoField,
 } from "../../api/zohoApi.js";
 
-const CREATABLE_TYPES = ["Text", "Textarea", "Picklist", "Number", "Decimal", "Date", "DateTime", "Boolean", "Email", "Phone", "URL"];
-
-// Values are stored one-per-line in the editor; -None- is managed by the backend.
-const linesToValues = (text) =>
-  text.split("\n").map((l) => l.trim()).filter((l) => l && l !== "-None-");
-const valuesToLines = (values) =>
-  (values || []).filter((v) => v !== "-None-").join("\n");
-
-const VALUE_CHIP_CAP = 8;
-
 export default function ZohoLayoutEditor({
   canManage = false,
   config = {},
   reloadKey = 0,
   onSourceSaved,
+  onLayoutChanged,
 }) {
-  const envFieldId = String(config.environmentFieldId || "");
-  const appFieldId = String(config.appFieldId || "");
-  // Only special-cased while the variable sync owns the field — with the sync
-  // off, its options stay manually manageable like any other picklist.
-  const variableFieldId = config.syncVariables ? String(config.variableFieldId || "") : "";
   const selectedNamespaces = config.selectedNamespaces || [];
   const customEnvironments = config.customEnvironments || [];
   const [layout, setLayout] = useState(null);
@@ -38,10 +28,12 @@ export default function ZohoLayoutEditor({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  // modal state: { mode: 'options'|'editField'|'addField', field?, section? }
+  // modal state: { mode: 'options'|'editField'|'addField'|'source'|'addSection', field?, initial? }
   const [modal, setModal] = useState(null);
   const [saving, setSaving] = useState(false);
   const [modalError, setModalError] = useState("");
+
+  const sectionNames = (layout?.sections || []).map((s) => s.name).filter(Boolean);
 
   const load = useCallback(async (fresh = false) => {
     setLoading(true);
@@ -71,6 +63,7 @@ export default function ZohoLayoutEditor({
     setNotice(msg);
     closeModal();
     await load(true);
+    onLayoutChanged?.();
   };
 
   const saveOptions = async (form) => {
@@ -106,12 +99,49 @@ export default function ZohoLayoutEditor({
     setModalError("");
     try {
       const payload = { label: form.label, type: form.type, required: form.required };
+      if (form.sectionName) payload.sectionName = form.sectionName;
       if (form.type === "Picklist") payload.values = linesToValues(form.values);
-      await createZohoField(payload);
-      await afterSave(`Field "${form.label}" created.`);
+      const created = await createZohoField(payload);
+      // Creating the field and placing it are two Zoho calls; if the placement
+      // half failed the field still exists, so say where it actually landed.
+      const warning = (created?.warnings || [])[0];
+      await afterSave(
+        warning
+          ? `Field "${form.label}" created — ${warning}`
+          : `Field "${form.label}" created${
+              created?.sectionName ? ` in ${created.sectionName}` : ""
+            }.`
+      );
     } catch (err) {
       setModalError(err.message || "Failed to create the field.");
       setSaving(false);
+    }
+  };
+
+  const onFieldAction = (action, field) => {
+    if (action === "source") {
+      setModal({ mode: "source" });
+    } else if (action === "options") {
+      setModal({
+        mode: "options",
+        field,
+        initial: {
+          values: valuesToLines(field.allowedValues),
+          defaultValue: field.defaultValue || "-None-",
+          required: field.required,
+        },
+      });
+    } else if (action === "bind") {
+      setModal({ mode: "binding", field });
+    } else if (action === "edit") {
+      setModal({
+        mode: "editField",
+        field,
+        initial: { label: field.label, required: field.required },
+      });
+    } else if (action === "convert") {
+      // Wired up with the Text -> Picklist conversion flow.
+      setNotice(`Converting "${field.label}" to a dropdown isn't available yet.`);
     }
   };
 
@@ -128,7 +158,7 @@ export default function ZohoLayoutEditor({
     return (
       <section className="card">
         <h3>DevOps Request layout</h3>
-        <ErrorBanner message={error} onDismiss={() => setError("")} />
+        <ErrorBanner message={error} />
         <button type="button" className="secondary" onClick={() => load(true)}>
           Retry
         </button>
@@ -147,9 +177,22 @@ export default function ZohoLayoutEditor({
           </p>
         </div>
         {canManage ? (
-          <button type="button" className="secondary" onClick={() => setModal({ mode: "addField" })}>
-            Add field
-          </button>
+          <div className="sg-zh-head-tools">
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => setModal({ mode: "addSection" })}
+            >
+              Add section
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setModal({ mode: "addField" })}
+            >
+              Add field
+            </button>
+          </div>
         ) : null}
       </div>
 
@@ -204,115 +247,14 @@ export default function ZohoLayoutEditor({
       ) : null}
 
       {(layout?.sections || []).map((section) => (
-        <div key={section.name}>
-          <h4 className="sg-zh-sect">{section.name}</h4>
-          <div className="sg-zh-fgrid">
-            {section.fields.map((field) => {
-              const values = (field.allowedValues || []).filter((v) => v !== "-None-");
-              return (
-                <div key={field.id || field.apiName} className="sg-zh-field">
-                  <header>
-                    <div className="sg-zh-fname">
-                      <b>
-                        {field.label}
-                        {field.required ? (
-                          <span className="sg-zh-req" title="Required">*</span>
-                        ) : null}
-                      </b>
-                      <span className="sg-zh-fapi">{field.apiName}</span>
-                    </div>
-                    <div className="sg-zh-fbadges">
-                      <span className="sg-tag">{field.type}</span>
-                      {field.autoManaged ? (
-                        <span
-                          className="status-pill ok"
-                          title="Published by the KubeSight sync (deployments / namespaces). Manual edits here are overwritten on the next sync."
-                        >
-                          auto-synced
-                        </span>
-                      ) : null}
-                    </div>
-                  </header>
-
-                  {field.isPicklist ? (
-                    <>
-                      <div className="sg-zh-tags sg-zh-fvals">
-                        {values.slice(0, VALUE_CHIP_CAP).map((v) => (
-                          <span key={v} className="sg-tag">{v}</span>
-                        ))}
-                        {values.length === 0 ? <span className="muted">no options</span> : null}
-                        {values.length > VALUE_CHIP_CAP ? (
-                          <span className="sg-zh-more">+{values.length - VALUE_CHIP_CAP} more</span>
-                        ) : null}
-                      </div>
-                      {String(field.id) === appFieldId ? (
-                        <div className="sg-zh-fhint">
-                          Auto-derived live from the selected namespaces' deployments — manage it via
-                          “Choose namespaces” on the Environment field.
-                        </div>
-                      ) : null}
-                      {String(field.id) === variableFieldId ? (
-                        <div className="sg-zh-fhint">
-                          Auto-derived live from the chosen deployments' env variables — the same
-                          name across deployments becomes one option, and picking an Application on
-                          the ticket narrows the list to that app's variables. Populates on the
-                          next sync.
-                        </div>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  {canManage ? (
-                    <footer>
-                      {field.isPicklist && String(field.id) === envFieldId ? (
-                        <button
-                          type="button"
-                          className="btn-outline"
-                          onClick={() => setModal({ mode: "source" })}
-                        >
-                          Choose namespaces
-                        </button>
-                      ) : field.isPicklist &&
-                        (String(field.id) === appFieldId ||
-                          String(field.id) === variableFieldId) ? null : field.isPicklist ? (
-                        <button
-                          type="button"
-                          className="btn-ghost"
-                          onClick={() =>
-                            setModal({
-                              mode: "options",
-                              field,
-                              initial: {
-                                values: valuesToLines(field.allowedValues),
-                                defaultValue: field.defaultValue || "-None-",
-                                required: field.required,
-                              },
-                            })
-                          }
-                        >
-                          Manage options
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        className="btn-ghost"
-                        onClick={() =>
-                          setModal({
-                            mode: "editField",
-                            field,
-                            initial: { label: field.label, required: field.required },
-                          })
-                        }
-                      >
-                        Edit
-                      </button>
-                    </footer>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        <ZohoLayoutSection
+          key={section.name}
+          section={section}
+          config={config}
+          canManage={canManage}
+          onAddField={(sectionName) => setModal({ mode: "addField", sectionName })}
+          onAction={onFieldAction}
+        />
       ))}
 
       {(layout?.sections || []).length === 0 ? (
@@ -333,9 +275,26 @@ export default function ZohoLayoutEditor({
             onSourceSaved?.(data);
           }}
         />
+      ) : modal?.mode === "binding" ? (
+        <ZohoBindingModal
+          field={modal.field}
+          onClose={closeModal}
+          onSaved={async (message) => {
+            await afterSave(message);
+          }}
+        />
+      ) : modal?.mode === "addSection" ? (
+        <ZohoAddSectionModal
+          onClose={closeModal}
+          onSaved={async (name) => {
+            await afterSave(`Section "${name}" added.`);
+          }}
+        />
       ) : modal ? (
         <FieldModal
           modal={modal}
+          sectionNames={sectionNames}
+          creatableTypes={layout?.creatableTypes || CREATABLE_TYPES}
           saving={saving}
           error={modalError}
           onClose={closeModal}
@@ -348,10 +307,27 @@ export default function ZohoLayoutEditor({
   );
 }
 
-function FieldModal({ modal, saving, error, onClose, onSaveOptions, onSaveEdit, onSaveNew }) {
+function FieldModal({
+  modal,
+  sectionNames,
+  creatableTypes,
+  saving,
+  error,
+  onClose,
+  onSaveOptions,
+  onSaveEdit,
+  onSaveNew,
+}) {
   const [form, setForm] = useState(() => {
     if (modal.mode === "addField") {
-      return { label: "", type: "Text", required: false, values: "" };
+      return {
+        label: "",
+        type: "Text",
+        required: false,
+        values: "",
+        // Pre-selected when the operator used a section's own "Add field here".
+        sectionName: modal.sectionName || sectionNames[0] || "",
+      };
     }
     return modal.initial || {};
   });
@@ -372,12 +348,16 @@ function FieldModal({ modal, saving, error, onClose, onSaveOptions, onSaveEdit, 
   };
 
   const isPicklistCreate = modal.mode === "addField" && form.type === "Picklist";
+  // The default must be one of the options — a typed value that doesn't match
+  // is silently coerced to -None- by the backend, which reads as a bug.
+  const defaultChoices = ["-None-", ...linesToValues(form.values || "")];
 
   return (
     <div className="modal-overlay" role="presentation" onClick={onClose}>
       <section
         className="card modal-panel"
         role="dialog"
+        aria-modal="true"
         aria-label={title}
         onClick={(e) => e.stopPropagation()}
       >
@@ -398,7 +378,7 @@ function FieldModal({ modal, saving, error, onClose, onSaveOptions, onSaveEdit, 
             </span>
           </p>
         ) : null}
-        {error ? <ErrorBanner message={error} onDismiss={() => {}} /> : null}
+        {error ? <ErrorBanner message={error} /> : null}
 
         <form className="settings-form" onSubmit={submit}>
           {modal.mode === "addField" ? (
@@ -410,12 +390,29 @@ function FieldModal({ modal, saving, error, onClose, onSaveOptions, onSaveEdit, 
               <label>
                 Type
                 <select value={form.type} onChange={(e) => set("type", e.target.value)}>
-                  {CREATABLE_TYPES.map((t) => (
+                  {creatableTypes.map((t) => (
                     <option key={t} value={t}>
                       {t}
                     </option>
                   ))}
                 </select>
+              </label>
+              <label>
+                Section
+                <select
+                  value={form.sectionName}
+                  onChange={(e) => set("sectionName", e.target.value)}
+                >
+                  {sectionNames.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+                <span className="field-hint">
+                  Placing the field rewrites the whole layout — KubeSight verifies every existing
+                  field survives before saving.
+                </span>
               </label>
             </>
           ) : null}
@@ -446,10 +443,18 @@ function FieldModal({ modal, saving, error, onClose, onSaveOptions, onSaveEdit, 
               {modal.mode === "options" ? (
                 <label>
                   Default value
-                  <input
-                    value={form.defaultValue || "-None-"}
+                  <select
+                    value={
+                      defaultChoices.includes(form.defaultValue) ? form.defaultValue : "-None-"
+                    }
                     onChange={(e) => set("defaultValue", e.target.value)}
-                  />
+                  >
+                    {defaultChoices.map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               ) : null}
             </>

@@ -539,6 +539,9 @@ export default function ZohoSyncPage({ canManage = false }) {
             if (updated) setConfig((prev) => ({ ...(prev || {}), ...updated }));
             await refreshPreview();
           }}
+          // A layout edit can change which fields the sync publishes into, so
+          // the preview beside the editor has to be re-read too.
+          onLayoutChanged={refreshPreview}
           preview={preview}
           previewLoading={previewLoading}
         />

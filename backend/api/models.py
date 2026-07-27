@@ -1990,6 +1990,83 @@ class ZohoInboundTicket(db.Model):
     )
 
 
+class ZohoLayoutSnapshot(db.Model):
+    """The raw Zoho layout as it looked immediately before a whole-layout write.
+
+    ``PATCH /layouts/{id}`` replaces the entire layout, so a writer bug could
+    strip fields or sections from the live ticket form with no undo. One snapshot
+    is taken before every write (newest :data:`
+    api.services.zoho_layout_service._SNAPSHOT_RETENTION` kept per layout), which
+    turns "we destroyed the production layout" into "restore from the snapshot".
+    """
+
+    __tablename__ = "zoho_layout_snapshots"
+
+    id = db.Column(db.Integer, primary_key=True)
+    layout_id = db.Column(db.String(64), nullable=False, index=True)
+    # Why the write happened: "add_section", "place_field", "field_conversion"…
+    reason = db.Column(db.String(80), nullable=True)
+    actor = db.Column(db.String(120), nullable=True)
+    payload = db.Column(db.JSON, nullable=True)
+    taken_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        index=True,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ZohoFieldBinding(db.Model):
+    """Binds one Zoho picklist to a live KubeSight option source.
+
+    The Application / Environment / Variable fields have always been published
+    from live cluster reads, but through three hardcoded blocks in the sync. A
+    binding row generalizes that to any picklist on the layout: pick a source
+    kind (see ``zoho_option_sources``), optionally name a parent field, and the
+    sync publishes its values every run — exactly like the original three.
+
+    The original three are deliberately NOT stored here: they are synthesized in
+    memory from :class:`ZohoIntegration`'s own columns/toggles each sync, so the
+    production integration keeps the identical code path and there is no data
+    migration to get wrong. A row targeting one of those field ids is refused.
+    """
+
+    __tablename__ = "zoho_field_bindings"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # One binding per field — two writers on the same picklist would race.
+    field_id = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    # Cached from the layout for display only; the field id is the identity.
+    api_name = db.Column(db.String(120), nullable=True)
+    label = db.Column(db.String(255), nullable=True)
+    # A key from zoho_option_sources.SOURCE_KINDS ("namespaces", "deployments"…).
+    source_kind = db.Column(db.String(40), nullable=False)
+    # JSON-encoded provider parameters ({} for every kind shipped so far).
+    params = db.Column(db.Text, nullable=True)
+    # Optional cascade parent: picking a value there filters this field's options.
+    parent_field_id = db.Column(db.String(64), nullable=True)
+    # Zoho's id for the parent->this dependency mapping, when one was created.
+    mapping_id = db.Column(db.String(64), nullable=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+
+    last_status = db.Column(db.String(16), nullable=True)  # ok | error | skipped
+    last_message = db.Column(db.Text, nullable=True)
+    last_count = db.Column(db.Integer, nullable=True)
+    last_synced_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class ZohoDeploymentSnapshot(db.Model):
     """Stable id for a live deployment the Zoho Application picklist publishes.
 

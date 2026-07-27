@@ -15,6 +15,7 @@ from ..decorators import require_permission
 from ..response import error_response, success_response
 from ..services import deploy_automation_service as automation_svc
 from ..services import zoho_fields_service as fields_svc
+from ..services import zoho_layout_service as layout_svc
 from ..services import zoho_sync_service as svc
 from ..services.deploy_automation_service import AutomationError
 from ..services.zoho_client import ZohoError
@@ -231,8 +232,9 @@ def update_field(field_id: str):
 @require_permission("zoho:manage")
 def create_field():
     payload = request.get_json(silent=True) or {}
+    actor = get_current_user()
     try:
-        data = fields_svc.create_field(payload)
+        data = fields_svc.create_field(payload, actor=_actor_name(actor))
     except ValueError as exc:
         return error_response(str(exc), 400)
     except ZohoError as exc:
@@ -240,12 +242,178 @@ def create_field():
         return error_response(str(exc), 502)
     log_audit(
         "zoho_field_created",
-        actor=get_current_user(),
+        actor=actor,
         target_type="zoho_field",
         target_id=str(data.get("id") or ""),
-        details={"label": data.get("label"), "type": data.get("type")},
+        details={
+            "label": data.get("label"),
+            "type": data.get("type"),
+            "sectionName": data.get("sectionName"),
+            "warnings": data.get("warnings"),
+        },
     )
     return success_response(data, status_code=201)
+
+
+# ---------------------------------------------------------------------------
+# Sections + field placement.
+#
+# Zoho only exposes section editing through a WHOLE-LAYOUT replace, so both
+# routes go through zoho_layout_service's guarded writer and both are gated by
+# ZOHO_LAYOUT_WRITE_ENABLED. `/layout/plan` is the read-only dry-run that shows
+# the exact body first.
+# ---------------------------------------------------------------------------
+
+def _actor_name(actor) -> str:
+    return str(getattr(actor, "username", "") or getattr(actor, "email", "") or "")
+
+
+def _layout_write_error(exc: Exception, status: int = 400):
+    return error_response(str(exc), status)
+
+
+@zoho_bp.route("/layout/plan", methods=["POST"])
+@require_permission("zoho:manage")
+def plan_layout():
+    """Dry-run a layout change: returns the exact PATCH body, a diff, and warnings."""
+    payload = request.get_json(silent=True) or {}
+    mutations = payload.get("mutations")
+    if not isinstance(mutations, list) or not mutations:
+        name = str(payload.get("sectionName") or "").strip()
+        if not name:
+            return error_response("Send either 'mutations' or a 'sectionName'.", 400)
+        mutations = [layout_svc.add_section(name)]
+    try:
+        return success_response(layout_svc.plan_layout_write(mutations))
+    except layout_svc.LayoutWriteError as exc:
+        return _layout_write_error(exc)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+
+
+@zoho_bp.route("/sections", methods=["POST"])
+@require_permission("zoho:manage")
+def create_section():
+    payload = request.get_json(silent=True) or {}
+    actor = get_current_user()
+    try:
+        data = fields_svc.create_section(payload.get("name"), actor=_actor_name(actor))
+    except layout_svc.LayoutWriteError as exc:
+        return _layout_write_error(exc)
+    except PermissionError as exc:
+        return error_response(str(exc), 409)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+    log_audit(
+        "zoho_section_created",
+        actor=actor,
+        target_type="zoho_layout",
+        target_id=str(data.get("layoutId") or ""),
+        details={"name": data.get("name"), "diff": data.get("diff")},
+    )
+    return success_response(data, status_code=201)
+
+
+@zoho_bp.route("/fields/<field_id>/section", methods=["PUT"])
+@require_permission("zoho:manage")
+def move_field_section(field_id: str):
+    payload = request.get_json(silent=True) or {}
+    actor = get_current_user()
+    try:
+        data = fields_svc.move_field_to_section(
+            field_id, str(payload.get("sectionName") or ""), actor=_actor_name(actor)
+        )
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except layout_svc.LayoutWriteError as exc:
+        return _layout_write_error(exc)
+    except PermissionError as exc:
+        return error_response(str(exc), 409)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+    log_audit(
+        "zoho_field_placed",
+        actor=actor,
+        target_type="zoho_field",
+        target_id=str(field_id),
+        details={"sectionName": data.get("sectionName")},
+    )
+    return success_response(data)
+
+
+# ---------------------------------------------------------------------------
+# Option-source bindings — bind any picklist to a live KubeSight source.
+#
+# Preview is a POST because it carries the binding being edited (and because
+# client.js de-dupes concurrent identical GETs, which would collapse two
+# previews of different drafts into one).
+# ---------------------------------------------------------------------------
+
+@zoho_bp.route("/option-sources", methods=["GET"])
+@require_permission("zoho:view")
+def option_sources():
+    return success_response(fields_svc.list_option_sources())
+
+
+@zoho_bp.route("/fields/<field_id>/binding", methods=["GET"])
+@require_permission("zoho:view")
+def get_field_binding(field_id: str):
+    data = fields_svc.get_field_binding(field_id)
+    if data is None:
+        return error_response("That field has no option source.", 404)
+    return success_response(data)
+
+
+@zoho_bp.route("/fields/<field_id>/binding", methods=["PUT"])
+@require_permission("zoho:manage")
+def set_field_binding(field_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = fields_svc.set_field_binding(field_id, payload)
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+    log_audit(
+        "zoho_field_binding_set",
+        actor=get_current_user(),
+        target_type="zoho_field",
+        target_id=str(field_id),
+        details={
+            "sourceKind": data.get("sourceKind"),
+            "parentFieldId": data.get("parentFieldId"),
+            "enabled": data.get("enabled"),
+        },
+    )
+    return success_response(data)
+
+
+@zoho_bp.route("/fields/<field_id>/binding", methods=["DELETE"])
+@require_permission("zoho:manage")
+def delete_field_binding(field_id: str):
+    if not fields_svc.delete_field_binding(field_id):
+        return error_response("That field has no option source.", 404)
+    log_audit(
+        "zoho_field_binding_deleted",
+        actor=get_current_user(),
+        target_type="zoho_field",
+        target_id=str(field_id),
+    )
+    return success_response({"deleted": True, "fieldId": str(field_id)})
+
+
+@zoho_bp.route("/fields/<field_id>/binding/preview", methods=["POST"])
+@require_permission("zoho:view")
+def preview_field_binding(field_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        return success_response(fields_svc.preview_field_binding(field_id, payload))
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
 
 
 @zoho_bp.route("/inbound-tickets", methods=["GET"])
