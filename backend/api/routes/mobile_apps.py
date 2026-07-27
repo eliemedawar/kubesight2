@@ -30,12 +30,13 @@ def list_apps():
 @mobile_apps_bp.route("/environments", methods=["GET"])
 @require_permission("mobile_apps:manage")
 def list_environments():
-    """Custom Zoho environment names the register/edit form offers as the
-    zohoEnvironment dropdown. Gated by mobile_apps:manage (not zoho:view)
-    because it exists solely for that manage-only form."""
-    from ..services import zoho_sync_service
+    """Custom environment names the register/edit form offers as the
+    zohoEnvironment dropdown. They come from the deploy surface shared by every
+    ticketing provider, not from Zoho specifically. Gated by mobile_apps:manage
+    (not ticketing:view) because it exists solely for that manage-only form."""
+    from ..services import ticketing_targets
 
-    return success_response({"items": zoho_sync_service.custom_environment_names()})
+    return success_response({"items": ticketing_targets.custom_environment_names()})
 
 
 @mobile_apps_bp.route("", methods=["POST"])

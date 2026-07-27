@@ -897,16 +897,21 @@ def _fail_or_retry_download(build: MobileAppBuild, message: str) -> None:
 
 
 def _notify_build_ready(app: MobileApplication, build: MobileAppBuild) -> None:
-    """Zoho comment on the originating ticket once the binary is in KubeSight."""
+    """Comment on the originating ticket once the binary is in KubeSight.
+
+    Routed through the ticketing registry — the ticket may have come from Zoho
+    Desk or Jira, and only its own row knows which.
+    """
     if not build.ticket_record_id:
         return
     ticket = ZohoInboundTicket.query.get(build.ticket_record_id)
     if not (ticket and ticket.ticket_id):
         return
-    from .zoho_sync_service import post_ticket_comment
+    from . import ticketing
 
     size_mb = round((build.file_size or 0) / (1024 * 1024), 1)
-    post_ticket_comment(
+    ticketing.post_comment(
+        ticket.provider or "zoho",
         ticket.ticket_id,
         f"The {build.platform} build ({build.file_name}, {size_mb} MB, version "
         f"{build.version or 'n/a'}) is now available in KubeSight → Mobile Applications "
@@ -1295,9 +1300,9 @@ def _report_publish_outcome(
     if build.ticket_record_id:
         ticket = ZohoInboundTicket.query.get(build.ticket_record_id)
         if ticket and ticket.ticket_id:
-            from .zoho_sync_service import post_ticket_comment
+            from . import ticketing
 
-            post_ticket_comment(ticket.ticket_id, comment)
+            ticketing.post_comment(ticket.provider or "zoho", ticket.ticket_id, comment)
 
 
 # ---------------------------------------------------------------------------

@@ -249,8 +249,15 @@ def update_field(field_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return _field_dict(updated, auto)
 
 
-def delete_field(field_id: str) -> Dict[str, Any]:
-    """Permanently delete an eligible custom field from the Zoho organization."""
+def delete_field(field_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Permanently delete an eligible custom field from the Zoho organization.
+
+    ``payload`` is accepted and ignored so both providers' field editors call one
+    signature. Jira uses it to distinguish "take off the screen" from "delete the
+    field"; Desk has no such split — removing a field from a layout is a separate
+    endpoint (``unassociate``, used by the conversion flow), and this route has
+    always meant the destructive one.
+    """
     row, cfg = _config_and_cfg()
     field_id = str(field_id)
     field = zoho_client.field_on_layout(cfg, field_id)

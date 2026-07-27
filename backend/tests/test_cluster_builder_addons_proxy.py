@@ -40,11 +40,12 @@ from api.services.cluster_build.os_adapters.base import (
 )
 from api.services.cluster_build.profiles import default_profile, resolve
 from api.services.cluster_build.scrub import scrub
-from api.services.ssh import set_transport_factory
+from api.services.ssh import SshConnectionError, set_transport_factory
 
 from tests.test_cluster_builds import (
     SINGLE_CP_NODES,
     SINGLE_CP_MANAGED_LB_NODES,
+    FakeSshTransport,
     auth_headers,
     build_default_fake,
     make_build_payload,
@@ -266,6 +267,38 @@ class TestAddonApi:
         )
         assert response.status_code == 200
         assert response.get_json()["data"]["addons"] == []
+
+    def test_catalog_reports_manifest_provenance(self, client, admin_token):
+        """The wizard shows where each manifest came from, so an offline build
+        can be told apart from one that needs an internet fallback."""
+        options = client.get(
+            "/api/cluster-builds/options", headers=auth_headers(admin_token)
+        ).get_json()["data"]
+        catalog = {item["id"]: item for item in options["addons"]}
+
+        for addon in addon_registry.available():
+            entry = catalog[addon.id]
+            assert entry["manifestDigests"] == [
+                {"file": filename, "sha256": digest}
+                for filename, digest in zip(
+                    addon.manifest_files, addon.manifest_sha256
+                )
+            ]
+            # Every digest is a full SHA-256 — the UI shortens it for display.
+            assert all(
+                re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                for item in entry["manifestDigests"]
+            )
+            # Bundled versions are the ones actually vendored on this host.
+            assert entry["bundledVersions"] == [
+                version
+                for version in addon.versions
+                if all(
+                    addon.bundled_path(version, filename).is_file()
+                    for filename in addon.manifest_files
+                )
+            ]
+            assert set(entry["bundledVersions"]) <= set(entry["versions"])
 
     def test_metallb_descriptor_is_integrity_pinned(self):
         assert METALLB.versions == ("0.16.1",)
@@ -1211,6 +1244,10 @@ class TestAddonExecution:
 def test_addons_column_migration_is_idempotent(app):
     with db.engine.begin() as connection:
         connection.execute(text("ALTER TABLE cluster_builds DROP COLUMN addons_json"))
+        for column in ("last_test_at", "last_test_status", "last_test_message"):
+            connection.execute(
+                text(f"ALTER TABLE ssh_connection_profiles DROP COLUMN {column}")
+            )
     before = {
         column["name"] for column in inspect(db.engine).get_columns("cluster_builds")
     }
@@ -1222,3 +1259,64 @@ def test_addons_column_migration_is_idempotent(app):
         column["name"] for column in inspect(db.engine).get_columns("cluster_builds")
     }
     assert "addons_json" in columns
+    profile_columns = {
+        column["name"]
+        for column in inspect(db.engine).get_columns("ssh_connection_profiles")
+    }
+    assert {"last_test_at", "last_test_status", "last_test_message"} <= profile_columns
+
+
+class TestSshProfileTestBookkeeping:
+    """A route's last proof and its age drive the readiness bar."""
+
+    def test_profile_starts_untested(self, ssh_profile):
+        assert ssh_profile["lastTestAt"] is None
+        assert ssh_profile["lastTestStatus"] is None
+        assert ssh_profile["lastTestMessage"] is None
+
+    def test_successful_test_is_recorded(self, client, admin_token, ssh_profile):
+        fake = FakeSshTransport()
+        fake.add(lambda h, s: "uname -sr" in s, "kubesight\nLinux 5.15.0\n")
+        set_transport_factory(lambda: fake)
+
+        response = client.post(
+            f"/api/ssh-connection-profiles/{ssh_profile['id']}/test",
+            json={"host": "10.0.0.21"},
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 200
+        assert response.get_json()["data"]["status"] == "ok"
+
+        listed = client.get(
+            "/api/ssh-connection-profiles", headers=auth_headers(admin_token)
+        ).get_json()["data"]["items"]
+        row = next(item for item in listed if item["id"] == ssh_profile["id"])
+        assert row["lastTestStatus"] == "ok"
+        assert row["lastTestAt"] is not None
+        assert "10.0.0.21" in row["lastTestMessage"]
+        assert "kubesight" in row["lastTestMessage"]
+
+    def test_failed_test_is_recorded_without_leaking_secrets(
+        self, client, admin_token, ssh_profile
+    ):
+        fake = FakeSshTransport()
+        fake.add(
+            lambda h, s: True,
+            SshConnectionError("Authentication failed for 10.0.0.99"),
+        )
+        set_transport_factory(lambda: fake)
+
+        response = client.post(
+            f"/api/ssh-connection-profiles/{ssh_profile['id']}/test",
+            json={"host": "10.0.0.99"},
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 200
+        assert response.get_json()["data"]["status"] == "failed"
+
+        row = ssh_profile_service.serialize_profile(
+            ssh_profile_service.get_profile(ssh_profile["id"])
+        )
+        assert row["lastTestStatus"] == "failed"
+        assert row["lastTestMessage"].startswith("10.0.0.99: ")
+        assert "BEGIN KEY" not in row["lastTestMessage"]

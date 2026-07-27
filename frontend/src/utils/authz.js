@@ -141,9 +141,9 @@ export const NAV_PAGES = [
     section: "Administration",
   },
   {
-    key: "zohoSync",
-    label: "Zoho Integration",
-    permission: "zoho:view",
+    key: "ticketing",
+    label: "Ticketing",
+    permission: "ticketing:view",
     section: "Administration",
   },
   { key: "settings", label: "Settings", permission: "settings:view", section: "Administration" },
@@ -1023,8 +1023,8 @@ export function pageAllowed(user, pageKey) {
       return hasPermission(user, "settings:view");
     case "imageRegistries":
       return hasPermission(user, "registries:view");
-    case "zohoSync":
-      return hasPermission(user, "zoho:view");
+    case "ticketing":
+      return hasPermission(user, "ticketing:view");
     case "mobileApps":
       return hasPermission(user, "mobile_apps:view");
     case "userManagement":

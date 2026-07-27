@@ -487,28 +487,41 @@ const PAGE_TOURS = {
     },
   ],
 
-  zohoSync: [
+  // The Ticketing tab has two shapes: the provider picker, and one provider's
+  // workspace. The picker's steps run when no provider is open (the cards are on
+  // screen); the workspace steps only match once one is.
+  ticketing: [
+    {
+      target: ".sg-tk-grid",
+      title: "Ticketing",
+      body: "Pick the platform your deployment tickets come from. Jira and Zoho Desk both feed the same pipeline — tickets in, Jenkins deploys, outcome written back.",
+    },
+    {
+      target: ".sg-tk-note",
+      title: "One deploy surface",
+      body: "The source cluster, its namespaces, the custom environments and the Jenkins router are configured once and shared by both providers.",
+    },
     {
       target: ".sg-zh-cmdbar",
-      title: "Zoho Integration",
-      body: "Deployment tickets flow from Zoho Desk into Jenkins deployments. The pill shows whether the integration is on.",
+      title: "The integration",
+      body: "Deployment tickets flow from your ticketing platform into Jenkins deployments. The pill shows whether this integration is on.",
     },
     {
       target: ".sg-zh-copy",
       title: "Refresh",
-      body: "Re-read the config, live deployments, Zoho layout, and ticket log.",
+      body: "Re-read the config, live deployments, the ticket form, and the ticket log.",
     },
     {
       target: ".sg-zh-cmdactions .secondary",
       title: "Test connection",
-      body: "Verify KubeSight can reach your Zoho Desk org before relying on the sync.",
-      when: (ctx) => ctx.hasPermission("zoho:manage"),
+      body: "Verify KubeSight can reach the platform before relying on the sync.",
+      when: (ctx) => ctx.hasPermission("ticketing:manage"),
     },
     {
       target: ".sg-zh-cmdactions .primary",
       title: "Sync now",
       body: "Trigger an immediate field sync instead of waiting for the next scheduled run.",
-      when: (ctx) => ctx.hasPermission("zoho:manage"),
+      when: (ctx) => ctx.hasPermission("ticketing:manage"),
     },
     {
       target: ".sg-zh-subtabs",

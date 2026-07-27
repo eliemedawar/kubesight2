@@ -1,5 +1,6 @@
 import { HealthRow, healthTone } from "./ZohoHealthRow.jsx";
 import { StatusPill, timeAgo } from "./common.jsx";
+import { useTicketing } from "../ticketing/TicketingContext.jsx";
 import { ACTIVE_RUN_STATUSES } from "./ZohoRunDetail.jsx";
 
 const RUN_EVENT_TEXT = {
@@ -76,6 +77,7 @@ const TONE_COLOR = {
 };
 
 export default function ZohoOverviewTab({ config, tickets, runs }) {
+  const { name: providerName } = useTicketing();
   const feed = buildFeed({ config, tickets, runs });
   const checks = [
     config?.lastTestStatus === "ok",
@@ -97,7 +99,7 @@ export default function ZohoOverviewTab({ config, tickets, runs }) {
         <div className="sg-zh-health">
           <HealthRow
             tone={healthTone(config?.lastTestStatus)}
-            title="Connection to Zoho Desk"
+            title={`Connection to ${providerName}`}
             message={
               config?.lastTestMessage ||
               (config?.lastTestStatus ? "" : "Never tested — run a connection test.")

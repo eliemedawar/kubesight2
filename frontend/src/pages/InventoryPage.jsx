@@ -2,6 +2,7 @@ import { lazy, Suspense, useState } from "react";
 
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
+import HelmChartCatalog from "../components/inventory/HelmChartCatalog.jsx";
 import TemplateMarketplace from "../components/inventory/TemplateMarketplace.jsx";
 import { getWizardTemplate } from "../api/inventoryApi.js";
 import { applyImportToWizard } from "../api/deploymentFormsApi.js";
@@ -43,11 +44,13 @@ export default function InventoryPage({
   defaultClusterId = "",
   canRegister = false,
   canDeploy = false,
+  canHelmView = false,
   canHelmInstall = false,
   canManageTemplates = false,
   isAdmin = false,
   onRefresh,
 }) {
+  const [activeSection, setActiveSection] = useState("templates");
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardInitialState, setWizardInitialState] = useState(null);
@@ -144,32 +147,77 @@ export default function InventoryPage({
   return (
     <div className="ops-page inventory-page template-marketplace-page">
       <PageTitle
-        title="Inventory Templates"
-        subtitle="Choose a template or start from scratch to deploy workloads to your clusters. View deployed applications in Resources."
-        actionLabel={canDeploy ? "Start From Scratch" : canAddApp ? "Add Application" : undefined}
+        title={activeSection === "helm" ? "Inventory · Helm Charts" : "Inventory Templates"}
+        subtitle={
+          activeSection === "helm"
+            ? "Import reusable charts and deploy them by supplying only target details and exposed values."
+            : "Choose a template or start from scratch to deploy workloads to your clusters. View deployed applications in Resources."
+        }
+        actionLabel={
+          activeSection === "templates"
+            ? canDeploy
+              ? "Start From Scratch"
+              : canAddApp
+                ? "Add Application"
+                : undefined
+            : undefined
+        }
         onAction={
-          canDeploy
-            ? openWizardFromScratch
-            : canAddApp
-              ? () => setAddModalOpen(true)
-              : undefined
+          activeSection === "templates"
+            ? canDeploy
+              ? openWizardFromScratch
+              : canAddApp
+                ? () => setAddModalOpen(true)
+                : undefined
+            : undefined
         }
       />
 
       {templateError ? <p className="banner-message error">{templateError}</p> : null}
 
-      <TemplateMarketplace
-        canDeploy={canDeploy}
-        canManageTemplates={canManageTemplates}
-        isAdmin={isAdmin}
-        clusterOptions={clusterSelectOptions}
-        defaultClusterId={resolvedDefaultClusterId}
-        busy={templateBusy}
-        onStartFromScratch={openWizardFromScratch}
-        onSelectTemplate={openWizardFromTemplate}
-        onGenerateForm={canDeploy ? (template) => setGenerateFormTemplate(template) : undefined}
-        onImportForm={canDeploy ? () => setImportFormOpen(true) : undefined}
-      />
+      {canHelmView ? (
+        <nav className="inventory-section-tabs" aria-label="Inventory sections">
+          <button
+            type="button"
+            className={activeSection === "templates" ? "active" : ""}
+            aria-current={activeSection === "templates" ? "page" : undefined}
+            onClick={() => setActiveSection("templates")}
+          >
+            Deployment Templates
+          </button>
+          <button
+            type="button"
+            className={activeSection === "helm" ? "active" : ""}
+            aria-current={activeSection === "helm" ? "page" : undefined}
+            onClick={() => setActiveSection("helm")}
+          >
+            Helm Charts
+          </button>
+        </nav>
+      ) : null}
+
+      {activeSection === "helm" && canHelmView ? (
+        <HelmChartCatalog
+          canDeploy={canHelmInstall}
+          canManage={canManageTemplates}
+          clusterOptions={clusterSelectOptions}
+          defaultClusterId={resolvedDefaultClusterId}
+          onDeployed={() => onRefresh?.()}
+        />
+      ) : (
+        <TemplateMarketplace
+          canDeploy={canDeploy}
+          canManageTemplates={canManageTemplates}
+          isAdmin={isAdmin}
+          clusterOptions={clusterSelectOptions}
+          defaultClusterId={resolvedDefaultClusterId}
+          busy={templateBusy}
+          onStartFromScratch={openWizardFromScratch}
+          onSelectTemplate={openWizardFromTemplate}
+          onGenerateForm={canDeploy ? (template) => setGenerateFormTemplate(template) : undefined}
+          onImportForm={canDeploy ? () => setImportFormOpen(true) : undefined}
+        />
+      )}
 
       {addModalOpen ? (
         <Suspense fallback={null}>

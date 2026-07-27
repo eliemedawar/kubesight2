@@ -3,7 +3,7 @@ import ErrorBanner from "../common/ErrorBanner.jsx";
 import ZohoOptionSourceForm from "./ZohoOptionSourceForm.jsx";
 import useZohoOptionSources from "./useZohoOptionSources.js";
 import { IconAlert } from "./icons.jsx";
-import { deleteZohoFieldBinding, setZohoFieldBinding } from "../../api/zohoApi.js";
+import { useTicketing } from "../ticketing/TicketingContext.jsx";
 
 /**
  * Turn one dropdown's options from a hand-typed list into a live source (or
@@ -14,6 +14,7 @@ import { deleteZohoFieldBinding, setZohoFieldBinding } from "../../api/zohoApi.j
  * currently holds — the sync simply stops rewriting them.
  */
 export default function ZohoBindingModal({ field, onClose, onSaved }) {
+  const { name: providerName, api } = useTicketing();
   const { sources, loading, error: catalogError, parentsFor } = useZohoOptionSources();
   const existing = field.binding && !field.binding.locked ? field.binding : null;
   const [mode, setMode] = useState(existing ? "live" : "manual");
@@ -30,7 +31,7 @@ export default function ZohoBindingModal({ field, onClose, onSaved }) {
     setError("");
     try {
       if (mode === "manual") {
-        if (existing) await deleteZohoFieldBinding(field.id);
+        if (existing) await api.deleteFieldBinding(field.id);
         onSaved(
           existing
             ? `“${field.label}” is back to a manual option list.`
@@ -38,7 +39,7 @@ export default function ZohoBindingModal({ field, onClose, onSaved }) {
         );
         return;
       }
-      await setZohoFieldBinding(field.id, {
+      await api.setFieldBinding(field.id, {
         sourceKind: draft.sourceKind,
         parentFieldId: draft.parentFieldId || undefined,
         label: field.label,
@@ -113,8 +114,8 @@ export default function ZohoBindingModal({ field, onClose, onSaved }) {
               <p className="sg-zh-note">
                 <IconAlert />
                 <span>
-                  The sync replaces this field's whole option list. Any value typed by hand in Zoho
-                  Desk — or here — is overwritten on the next run.
+                  The sync replaces this field's whole option list. Any value typed by hand in{" "}
+                  {providerName} — or here — is overwritten on the next run.
                 </span>
               </p>
             </>

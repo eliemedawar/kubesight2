@@ -390,6 +390,72 @@ def test_post_write_verification_catches_lost_field(zoho, monkeypatch):
         svc.apply_layout_write([svc.add_section("QA")])
 
 
+def test_recovery_list_and_plan_compare_snapshot_with_live_layout(zoho):
+    svc.apply_layout_write(
+        [svc.rename_section("2", "Deployment details")],
+        reason="rename_section",
+        actor="admin",
+    )
+    # The recorder does not mutate its live read after a PATCH, so simulate the
+    # renamed layout an operator would now be looking at.
+    zoho["layout"]["sections"][1]["name"] = "Deployment details"
+    zoho["layout"]["sections"][1]["i18NLabel"] = "Deployment details"
+
+    snapshots = svc.list_layout_snapshots()
+    assert len(snapshots) == 1
+    assert snapshots[0]["reason"] == "rename_section"
+    assert snapshots[0]["sectionCount"] == 2
+    assert snapshots[0]["fieldCount"] == 4
+
+    plan = svc.plan_snapshot_restore(snapshots[0]["id"])
+    assert plan["snapshot"]["id"] == snapshots[0]["id"]
+    assert plan["body"]["sections"][1]["name"] == "Deployment Information"
+    assert plan["diff"]["sectionsChanged"] == 1
+    assert plan["diff"]["fieldsDropped"] == []
+    assert plan["diff"]["fieldsAdded"] == []
+
+
+def test_restore_snapshots_current_layout_then_verifies_restored_shape(zoho, monkeypatch):
+    svc.apply_layout_write(
+        [svc.rename_section("2", "Deployment details")],
+        reason="rename_section",
+        actor="admin",
+    )
+    zoho["layout"]["sections"][1]["name"] = "Deployment details"
+    zoho["layout"]["sections"][1]["i18NLabel"] = "Deployment details"
+    recovery_id = svc.list_layout_snapshots()[0]["id"]
+
+    def _apply_restore(cfg, body):
+        zoho["patches"].append(copy.deepcopy(body))
+        zoho["layout"] = {**zoho["layout"], **copy.deepcopy(body)}
+        return {"id": LAYOUT_ID}
+
+    monkeypatch.setattr(zoho_client, "update_layout", _apply_restore)
+    result = svc.restore_layout_snapshot(recovery_id, actor="operator")
+
+    assert result["applied"] is True
+    assert zoho["layout"]["sections"][1]["name"] == "Deployment Information"
+    snapshots = svc.list_layout_snapshots()
+    assert len(snapshots) == 2
+    assert snapshots[0]["reason"] == f"before_restore_{recovery_id}"
+
+
+def test_restore_rejects_snapshot_from_another_layout(zoho):
+    db.session.add(
+        ZohoLayoutSnapshot(
+            provider="zoho",
+            layout_id="another-layout",
+            reason="test",
+            payload=_layout(),
+        )
+    )
+    db.session.commit()
+    snapshot = ZohoLayoutSnapshot.query.filter_by(layout_id="another-layout").one()
+
+    with pytest.raises(LookupError, match="does not belong"):
+        svc.plan_snapshot_restore(snapshot.id)
+
+
 # ---------------------------------------------------------------------------
 # Routes: sections + field placement
 # ---------------------------------------------------------------------------
@@ -463,6 +529,42 @@ def test_move_unknown_field_is_404(zoho, client, admin_token):
         headers=auth_headers(admin_token),
     )
     assert resp.status_code == 404
+
+
+def test_ticketing_recovery_routes_list_plan_and_restore(zoho, client, admin_token, monkeypatch):
+    svc.apply_layout_write(
+        [svc.rename_section("2", "Deployment details")],
+        reason="rename_section",
+        actor="admin",
+    )
+    zoho["layout"]["sections"][1]["name"] = "Deployment details"
+    zoho["layout"]["sections"][1]["i18NLabel"] = "Deployment details"
+
+    listed = client.get(
+        "/api/ticketing/zoho/layout/snapshots",
+        headers=auth_headers(admin_token),
+    )
+    assert listed.status_code == 200, listed.get_json()
+    snapshot_id = listed.get_json()["data"]["items"][0]["id"]
+
+    planned = client.post(
+        f"/api/ticketing/zoho/layout/snapshots/{snapshot_id}/plan",
+        headers=auth_headers(admin_token),
+    )
+    assert planned.status_code == 200, planned.get_json()
+    assert planned.get_json()["data"]["body"]["sections"][1]["name"] == "Deployment Information"
+
+    def _apply_restore(cfg, body):
+        zoho["layout"] = {**zoho["layout"], **copy.deepcopy(body)}
+        return {"id": LAYOUT_ID}
+
+    monkeypatch.setattr(zoho_client, "update_layout", _apply_restore)
+    restored = client.post(
+        f"/api/ticketing/zoho/layout/snapshots/{snapshot_id}/restore",
+        headers=auth_headers(admin_token),
+    )
+    assert restored.status_code == 200, restored.get_json()
+    assert restored.get_json()["data"]["applied"] is True
 
 
 def test_delete_custom_field_route(zoho, client, admin_token, monkeypatch):

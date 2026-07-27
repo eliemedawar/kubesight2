@@ -13,6 +13,7 @@ import pytest
 
 from api.db import db
 from api.models import ZohoIntegration, ZohoLayoutSnapshot
+from api.services import ticketing_targets as targets
 from api.services import zoho_client
 from api.services import zoho_fields_service as fields_svc
 from api.services import zoho_sync_service as svc
@@ -67,15 +68,17 @@ def zoho(app, monkeypatch):
     row.org_id = "org-1"
     row.environment_field_id = ENV_FIELD
     row.tag_field_api_name = "cf_tag"
-    row.custom_environments = json.dumps(
+    db.session.add(row)
+    source = targets.get_or_create_config()
+    source.custom_environments = json.dumps(
         [{"name": "POS-UAT", "applications": ["pos"], "jenkinsJobPath": "pos-deploy",
           "jenkinsParams": {"repotag": "{cf_tag}", "msName": "{app}"}}]
     )
-    row.job_overrides = json.dumps(
+    source.job_overrides = json.dumps(
         [{"namespace": "common-dev", "deployments": ["persona-ms"],
           "jenkinsJobPath": "f/persona", "jenkinsParams": {"TAG": "{cf_tag}"}}]
     )
-    db.session.add(row)
+    db.session.add(source)
     db.session.commit()
 
     state = {
@@ -232,9 +235,9 @@ def test_jenkins_param_tokens_are_reported_but_never_rewritten(zoho, client, adm
 
     assert _warning_with(data, "custom environment “POS-UAT”")
     assert _warning_with(data, "job override “common-dev/persona-ms”")
-    row = svc.get_or_create_config()
-    assert json.loads(row.custom_environments)[0]["jenkinsParams"]["repotag"] == "{cf_tag}"
-    assert json.loads(row.job_overrides)[0]["jenkinsParams"]["TAG"] == "{cf_tag}"
+    source = targets.get_or_create_config()
+    assert json.loads(source.custom_environments)[0]["jenkinsParams"]["repotag"] == "{cf_tag}"
+    assert json.loads(source.job_overrides)[0]["jenkinsParams"]["TAG"] == "{cf_tag}"
 
 
 def test_old_field_is_kept_by_default_and_says_why(zoho, client, admin_token):

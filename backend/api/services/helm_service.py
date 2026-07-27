@@ -39,6 +39,24 @@ class HelmNotInstalledError(HelmCommandError):
     pass
 
 
+def _prepare_chart_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve a reusable chart id to an ephemeral local archive and values file.
+
+    The catalog service owns stored chart content; the existing Helm command
+    path continues to operate on the same local archive shape as uploaded tgz
+    charts.
+    """
+    try:
+        from .helm_chart_template_service import (
+            ChartTemplateError,
+            prepare_chart_template_payload,
+        )
+
+        return prepare_chart_template_payload(payload)
+    except ChartTemplateError as exc:
+        raise HelmCommandError(str(exc)) from exc
+
+
 def _helm_binary() -> str:
     return os.getenv("HELM_BINARY", "helm")
 
@@ -326,6 +344,10 @@ def render_template(
     run_helm_fn: Optional[RunHelmFn] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     try:
+        payload = _prepare_chart_payload(payload)
+    except HelmCommandError as exc:
+        return None, str(exc), 400
+    try:
         ensure_helm_installed()
     except HelmNotInstalledError as exc:
         return None, str(exc), 503
@@ -383,6 +405,10 @@ def dry_run_release(
     *,
     run_helm_fn: Optional[RunHelmFn] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    try:
+        payload = _prepare_chart_payload(payload)
+    except HelmCommandError as exc:
+        return None, str(exc), 400
     cluster_id = (payload.get("clusterId") or payload.get("cluster") or "").strip()
     namespace = (payload.get("namespace") or "").strip()
     if user and not can_access_namespace(user, cluster_id, namespace):
@@ -464,6 +490,10 @@ def release_exists_from_payload(
     payload: Dict[str, Any],
     run_helm_fn: Optional[RunHelmFn] = None,
 ) -> bool:
+    try:
+        payload = _prepare_chart_payload(payload)
+    except HelmCommandError:
+        return False
     if payload.get("isUpgrade"):
         return True
     if payload.get("isInstall"):
@@ -490,6 +520,10 @@ def install_or_upgrade_release(
     *,
     run_helm_fn: Optional[RunHelmFn] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    try:
+        payload = _prepare_chart_payload(payload)
+    except HelmCommandError as exc:
+        return None, str(exc), 400
     cluster_id = (payload.get("clusterId") or payload.get("cluster") or "").strip()
     namespace = (payload.get("namespace") or "").strip()
     release_name = (payload.get("releaseName") or payload.get("release_name") or "").strip().lower()

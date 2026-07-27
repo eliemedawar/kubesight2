@@ -1,9 +1,10 @@
 import { useState } from "react";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import ZohoLayoutDiff from "./ZohoLayoutDiff.jsx";
-import { planZohoLayout, renameZohoSection } from "../../api/zohoApi.js";
+import { useTicketing } from "../ticketing/TicketingContext.jsx";
 
 export default function ZohoRenameSectionModal({ section, onClose, onSaved }) {
+  const { name: providerName, can, api } = useTicketing();
   const [name, setName] = useState(section?.name || "");
   const [plan, setPlan] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -11,11 +12,15 @@ export default function ZohoRenameSectionModal({ section, onClose, onSaved }) {
 
   const preview = async (event) => {
     event.preventDefault();
+    if (!can("layoutPlan")) {
+      await commit();
+      return;
+    }
     setBusy(true);
     setError("");
     try {
       setPlan(
-        await planZohoLayout({
+        await api.planLayout({
           mutations: [
             {
               kind: "rename_section",
@@ -36,7 +41,7 @@ export default function ZohoRenameSectionModal({ section, onClose, onSaved }) {
     setBusy(true);
     setError("");
     try {
-      await renameZohoSection(section.id, name.trim());
+      await api.renameSection(section.id, name.trim());
       onSaved(name.trim());
     } catch (err) {
       setError(err.message || "Could not rename the section.");
@@ -93,7 +98,11 @@ export default function ZohoRenameSectionModal({ section, onClose, onSaved }) {
                 required
               />
               <span className="field-hint">
-                Renaming keeps the existing Zoho section ID and all fields in that section.
+                Renaming keeps the existing {providerName} section ID and all fields in that
+                section.
+                {can("layoutPlan")
+                  ? " You will preview the exact whole-layout write before saving."
+                  : ""}
               </span>
             </label>
             <div className="modal-actions">
@@ -105,7 +114,7 @@ export default function ZohoRenameSectionModal({ section, onClose, onSaved }) {
                 className="primary"
                 disabled={busy || !name.trim() || unchanged}
               >
-                {busy ? "Checking…" : "Preview change"}
+                {busy ? "Saving…" : can("layoutPlan") ? "Preview change" : "Rename section"}
               </button>
             </div>
           </form>

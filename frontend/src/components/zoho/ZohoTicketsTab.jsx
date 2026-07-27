@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import EmptyState from "../common/EmptyState.jsx";
+import { useTicketing } from "../ticketing/TicketingContext.jsx";
 import { IconChevronRight, IconPlay, IconTrash } from "./icons.jsx";
 import { CopyButton } from "./common.jsx";
 import { ACTIVE_RUN_STATUSES, RunDetail, RunStatusPill } from "./ZohoRunDetail.jsx";
@@ -28,6 +29,7 @@ export default function ZohoTicketsTab({
   onDeleteTicket,
   deletingTicketId,
 }) {
+  const { name: providerName } = useTicketing();
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState(() => new Set());
@@ -108,7 +110,7 @@ export default function ZohoTicketsTab({
         ) : (
           <span className="status-pill warn">Webhook open — no secret</span>
         )}
-        <span className="sg-zh-hookstrip-text">Zoho posts new tickets to</span>
+        <span className="sg-zh-hookstrip-text">{providerName} posts new tickets to</span>
         <span className="sg-zh-hookurl mono">{webhookUrl}</span>
         <CopyButton text={webhookUrl} label="Copy" className="sg-zh-hookcopy" />
       </div>
@@ -138,7 +140,9 @@ export default function ZohoTicketsTab({
         {ticketsLoading ? (
           <p className="muted">Loading…</p>
         ) : tickets.length === 0 ? (
-          <EmptyState message="No tickets received yet — configure the Zoho workflow rule to POST to the webhook above." />
+          <EmptyState
+            message={`No tickets received yet — configure the ${providerName} webhook to POST to the URL above.`}
+          />
         ) : visible.length === 0 ? (
           <EmptyState message="No tickets match the current filter." />
         ) : (

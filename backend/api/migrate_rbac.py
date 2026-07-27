@@ -72,6 +72,12 @@ def _migrate_cluster_build_columns() -> None:
     existing one, so deployed databases need this small idempotent migration.
     """
     _add_column_if_missing("cluster_builds", "addons_json", "JSON")
+    for col, sql_type in [
+        ("last_test_at", "DATETIME"),
+        ("last_test_status", "VARCHAR(16)"),
+        ("last_test_message", "TEXT"),
+    ]:
+        _add_column_if_missing("ssh_connection_profiles", col, sql_type)
 
 
 def _sanitize_legacy_build_profile_proxies() -> None:
@@ -289,6 +295,58 @@ def _prune_obsolete_permissions() -> None:
     for perm in obsolete:
         db.session.delete(perm)
     db.session.commit()
+
+
+def _migrate_renamed_permissions() -> None:
+    """Carry role grants across a permission KEY rename, before pruning drops the old one.
+
+    ``_prune_obsolete_permissions`` deletes any permission row missing from
+    ``rbac_data.PERMISSIONS``, which silently strips the grant from every role
+    that held it. When a key is renamed rather than retired (``zoho:*`` became
+    ``ticketing:*`` when the tab grew a second provider), the grant has to be
+    re-pointed first. Idempotent: a role that already holds the new key is left
+    alone, and a deployment with no old rows is a no-op.
+    """
+    from .models import Permission, Role
+
+    renames = {
+        "zoho:view": "ticketing:view",
+        "zoho:manage": "ticketing:manage",
+    }
+    old_rows = Permission.query.filter(Permission.key.in_(renames.keys())).all()
+    if not old_rows:
+        return
+
+    # Migrations run BEFORE ``seed_defaults`` creates the new Permission rows, and
+    # the prune below would drop the old ones in this same pass — so the
+    # replacements have to exist now. ``_seed_permissions`` later fills in the
+    # canonical description on these rows.
+    from .rbac_data import PERMISSIONS
+
+    descriptions = dict(PERMISSIONS)
+    new_by_key = {
+        perm.key: perm
+        for perm in Permission.query.filter(Permission.key.in_(renames.values())).all()
+    }
+    for new_key in renames.values():
+        if new_key not in new_by_key:
+            perm = Permission(key=new_key, description=descriptions.get(new_key, ""))
+            db.session.add(perm)
+            new_by_key[new_key] = perm
+    db.session.flush()
+
+    carried = 0
+    for role in Role.query.all():
+        held = {perm.key for perm in role.permissions}
+        for old in old_rows:
+            replacement = new_by_key.get(renames[old.key])
+            if old.key in held and replacement is not None and replacement.key not in held:
+                role.permissions.append(replacement)
+                held.add(replacement.key)
+                carried += 1
+    db.session.commit()
+    if carried:
+        logger.info("Carried %s role grant(s) from zoho:* to ticketing:*.", carried)
 
 
 def _sync_role_permissions() -> None:
@@ -638,6 +696,69 @@ def _migrate_zoho_integration_columns() -> None:
         _add_column_if_missing("zoho_inbound_tickets", "variable_value", "TEXT")
 
 
+def _migrate_ticketing_tables() -> None:
+    """Make the Zoho-only integration multi-provider (Zoho + Jira).
+
+    Two idempotent steps:
+
+    1. Stamp ``provider`` on the tables Zoho used to own outright. Existing rows
+       predate Jira, so the backfill is unconditionally ``'zoho'``.
+    2. Seed :class:`~api.models.TicketingDeployConfig` — the now-shared deploy
+       surface — from the live Zoho row, ONCE. The columns moved verbatim (same
+       names, same JSON encodings), so this is a copy. Guarded on the shared row
+       not existing yet, so a later Zoho edit never overwrites shared state.
+
+    Nothing is dropped from ``zoho_integration``: the old columns stay as a
+    readable record of where the values came from, and as the fallback the
+    seeder reads on a fresh database.
+    """
+    tables = inspect(db.engine).get_table_names()
+
+    for table in ("zoho_inbound_tickets", "zoho_field_bindings", "zoho_layout_snapshots"):
+        if table not in tables:
+            continue
+        fresh = "provider" not in _table_columns(table)
+        _add_column_if_missing(table, "provider", "VARCHAR(16) DEFAULT 'zoho'")
+        if fresh:
+            # A DEFAULT on ADD COLUMN backfills on SQLite but the explicit UPDATE
+            # keeps PostgreSQL and any NULL-tolerant path consistent.
+            with db.engine.begin() as conn:
+                conn.execute(text(f"UPDATE {table} SET provider = 'zoho' WHERE provider IS NULL"))
+
+    if "ticketing_deploy_config" not in tables or "zoho_integration" not in tables:
+        return
+    with db.engine.begin() as conn:
+        existing = conn.execute(
+            text("SELECT COUNT(*) FROM ticketing_deploy_config WHERE id = 1")
+        ).scalar()
+        if existing:
+            return
+        legacy = conn.execute(
+            text(
+                "SELECT source_cluster_id, selected_namespaces, selected_deployments, "
+                "custom_environments, job_overrides FROM zoho_integration WHERE id = 1"
+            )
+        ).first()
+        conn.execute(
+            text(
+                "INSERT INTO ticketing_deploy_config "
+                "(id, source_cluster_id, selected_namespaces, selected_deployments, "
+                " custom_environments, job_overrides, created_at, updated_at) "
+                "VALUES (1, :cluster, :namespaces, :deployments, :custom, :overrides, "
+                " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "cluster": legacy[0] if legacy else None,
+                "namespaces": legacy[1] if legacy else None,
+                "deployments": legacy[2] if legacy else None,
+                "custom": legacy[3] if legacy else None,
+                "overrides": legacy[4] if legacy else None,
+            },
+        )
+    if legacy and any(legacy):
+        logger.info("Seeded the shared ticketing deploy config from the Zoho integration row.")
+
+
 def _migrate_deploy_automation_columns() -> None:
     """Column adds for the deploy-automation tables (created 2026-07-08).
 
@@ -752,6 +873,7 @@ def run_migrations() -> None:
     _migrate_cluster_build_columns()
     _sanitize_legacy_build_profile_proxies()
     _migrate_zoho_integration_columns()
+    _migrate_ticketing_tables()
     _migrate_deploy_automation_columns()
     _migrate_mobile_app_columns()
     _backfill_build_signature_state()
@@ -780,4 +902,6 @@ def run_migrations() -> None:
     migrate_all_users_legacy_rules()
     run_alert_routing_migrations()
     _sync_role_permissions()
+    # Must run BEFORE the prune: it reads the old rows the prune is about to drop.
+    _migrate_renamed_permissions()
     _prune_obsolete_permissions()

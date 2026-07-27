@@ -1,4 +1,4 @@
-// Shared vocabulary for the Zoho layout editor.
+// Shared vocabulary for the ticketing form editor (Zoho Desk layout / Jira screen).
 //
 // The Environment / Application / Variable fields are special-cased: the sync
 // owns their option lists, so the editor offers "Choose namespaces" on one and
@@ -83,7 +83,7 @@ export const isSyncOwned = (role) =>
  * Footer buttons for a field card, as data rather than a nested ternary.
  * `action` is dispatched by the editor; `null` roles simply get no options button.
  */
-export function fieldActions(field, role, canManage) {
+export function fieldActions(field, role, canManage, capabilities = {}) {
   if (!canManage) return [];
   const actions = [];
   if (role === "environment") {
@@ -94,13 +94,15 @@ export function fieldActions(field, role, canManage) {
   } else if (role === "bound") {
     // No manual option editing: the next sync would overwrite it anyway.
     actions.push({ key: "bind", label: "Live source", variant: "btn-outline" });
-  } else if (role === "text") {
+  } else if (role === "text" && capabilities.convertField) {
+    // Only Zoho Desk has the create-replacement-and-repoint flow behind this;
+    // offering it elsewhere would open a modal whose endpoint answers 501.
     actions.push({ key: "convert", label: "Convert to dropdown", variant: "btn-ghost" });
   }
   // application / variable are auto-derived — no option editing, by design.
   actions.push({ key: "edit", label: "Edit", variant: "btn-ghost" });
-  if (field?.custom && field?.removable && !isSyncOwned(role)) {
-    actions.push({ key: "delete", label: "Delete", variant: "btn-ghost" });
+  if (field?.custom && field?.removable && !isSyncOwned(role) && capabilities.deleteField !== false) {
+    actions.push({ key: "delete", label: "Delete permanently", variant: "btn-danger-ghost" });
   }
   return actions;
 }

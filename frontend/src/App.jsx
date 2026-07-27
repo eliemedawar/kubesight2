@@ -85,7 +85,7 @@ const MyRequestsPage = lazy(() => import("./pages/MyRequestsPage.jsx"));
 const ChangeBundlesPage = lazy(() => import("./pages/ChangeBundlesPage.jsx"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
 const ImageRegistriesPage = lazy(() => import("./pages/ImageRegistriesPage.jsx"));
-const ZohoSyncPage = lazy(() => import("./pages/ZohoSyncPage.jsx"));
+const TicketingPage = lazy(() => import("./pages/TicketingPage.jsx"));
 const MobileAppsPage = lazy(() => import("./pages/MobileAppsPage.jsx"));
 const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
@@ -1489,6 +1489,7 @@ export default function App() {
             defaultClusterId={selectedClusterId}
             canRegister={hasPermission("inventory:register")}
             canDeploy={hasPermission("apps:deploy")}
+            canHelmView={hasPermission("helm:view")}
             canHelmInstall={hasPermission("helm:install")}
             canManageTemplates={hasPermission("inventory:update")}
             isAdmin={isAdmin}
@@ -1631,8 +1632,8 @@ export default function App() {
         );
       case "imageRegistries":
         return <ImageRegistriesPage canManage={hasPermission("registries:manage")} />;
-      case "zohoSync":
-        return <ZohoSyncPage canManage={hasPermission("zoho:manage")} />;
+      case "ticketing":
+        return <TicketingPage canManage={hasPermission("ticketing:manage")} />;
       case "mobileApps":
         return <MobileAppsPage canManage={hasPermission("mobile_apps:manage")} canPublish={isAdmin} />;
       case "clusterBuilder":

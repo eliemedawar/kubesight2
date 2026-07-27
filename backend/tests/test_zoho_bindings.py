@@ -12,6 +12,7 @@ import pytest
 
 from api.db import db
 from api.models import ZohoFieldBinding, ZohoIntegration
+from api.services import ticketing_targets as targets
 from api.services import zoho_client
 from api.services import zoho_option_sources as sources
 from api.services import zoho_sync_service as svc
@@ -67,9 +68,11 @@ def zoho(app, monkeypatch):
     row.sync_environment = True
     row.sync_variables = False
     row.cascade_enabled = True
-    row.source_cluster_id = CLUSTER
-    row.selected_namespaces = json.dumps(["payments", "checkout"])
     db.session.add(row)
+    source = targets.get_or_create_config()
+    source.source_cluster_id = CLUSTER
+    source.selected_namespaces = json.dumps(["payments", "checkout"])
+    db.session.add(source)
     db.session.commit()
 
     state = {"publishes": [], "mapping_creates": [], "mapping_deletes": []}
@@ -351,9 +354,9 @@ def test_preview_resolves_without_publishing(zoho, client, admin_token):
 
 
 def test_preview_reports_a_missing_source_instead_of_failing(zoho, client, admin_token):
-    row = svc.get_or_create_config()
-    row.source_cluster_id = ""
-    row.selected_namespaces = json.dumps([])
+    source = targets.get_or_create_config()
+    source.source_cluster_id = ""
+    source.selected_namespaces = json.dumps([])
     db.session.commit()
 
     data = client.post(

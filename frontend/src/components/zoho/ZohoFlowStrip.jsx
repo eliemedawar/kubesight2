@@ -8,6 +8,7 @@ import {
 } from "./icons.jsx";
 import { ACTIVE_RUN_STATUSES } from "./ZohoRunDetail.jsx";
 import { timeAgo } from "./common.jsx";
+import { useTicketing } from "../ticketing/TicketingContext.jsx";
 
 // Tone ranking for connectors: a link inherits the worse of its two nodes.
 const TONE_RANK = { ok: 0, info: 1, muted: 2, warn: 3, danger: 4 };
@@ -35,7 +36,7 @@ function Node({ icon: Icon, title, metric, sub, tone, pill, onClick }) {
 }
 
 // The integration drawn as the pipeline it is:
-// cluster → field sync → Zoho Desk → inbound tickets → deploy automation.
+// cluster → field sync → the ticketing system → inbound tickets → deploy automation.
 // Each node carries its own health; clicking a node opens the room that manages it.
 export default function ZohoFlowStrip({
   config,
@@ -47,6 +48,7 @@ export default function ZohoFlowStrip({
   jenkins,
   onNavigate,
 }) {
+  const { name: providerName, formNoun } = useTicketing();
   const enabled = Boolean(config?.enabled);
   const namespaces = config?.selectedNamespaces || [];
 
@@ -72,7 +74,7 @@ export default function ZohoFlowStrip({
     ? "Failed"
     : "Never ran";
 
-  // Zoho Desk (published dropdowns)
+  // The ticketing system itself (published dropdowns)
   const previewCount = preview?.count ?? 0;
   const namespaceCount = (preview?.namespaces || []).length;
   const zohoTone =
@@ -128,11 +130,11 @@ export default function ZohoFlowStrip({
       target: "overview",
     },
     {
-      key: "zoho",
+      key: "provider",
       icon: IconGrid,
-      title: "Zoho Desk",
+      title: providerName,
       metric: previewLoading ? "…" : `${previewCount} apps · ${namespaceCount} envs`,
-      sub: "DevOps Request layout",
+      sub: `DevOps Request ${formNoun}`,
       tone: zohoTone,
       pill: zohoPill,
       target: "fieldsync",
@@ -161,8 +163,10 @@ export default function ZohoFlowStrip({
 
   return (
     <div className="sg-zh-flow" role="group" aria-label="Integration pipeline">
-      {nodes.map((node, index) => (
-        <span key={node.key} className="sg-zh-fseg">
+      {nodes.map(({ key, ...node }, index) => (
+        // `key` is pulled out of the spread: React 19 warns when a key arrives
+        // via {...props} instead of as its own attribute.
+        <span key={key} className="sg-zh-fseg">
           {index > 0 ? (
             <span
               className={`sg-zh-flink sg-zh-flink--${worseTone(nodes[index - 1].tone, node.tone)}`}

@@ -24,13 +24,13 @@ zoho_bp = Blueprint("zoho", __name__, url_prefix="/api/zoho")
 
 
 @zoho_bp.route("/config", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def get_config():
     return success_response(svc.get_config_dict())
 
 
 @zoho_bp.route("/config", methods=["PUT"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def update_config():
     payload = request.get_json(silent=True) or {}
     try:
@@ -48,13 +48,13 @@ def update_config():
 
 
 @zoho_bp.route("/test", methods=["POST"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def test_connection():
     return success_response(svc.test_connection())
 
 
 @zoho_bp.route("/sync", methods=["POST"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def sync_now():
     try:
         result = svc.sync_now()
@@ -71,7 +71,7 @@ def sync_now():
 
 
 @zoho_bp.route("/preview", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def preview():
     fresh = request.args.get("fresh") in ("1", "true")
     return success_response(svc.build_preview(fresh=fresh))
@@ -80,11 +80,11 @@ def preview():
 # ---------------------------------------------------------------------------
 # Dropdown source picker — choose a cluster + which of its namespaces feed the
 # Environment dropdown; the Application dropdown then holds those namespaces'
-# live deployments. Gated by the existing zoho:* permissions.
+# live deployments. Gated by the ticketing:* permissions.
 # ---------------------------------------------------------------------------
 
 @zoho_bp.route("/source", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def get_source():
     cfg = svc.get_config_dict()
     return success_response(
@@ -100,7 +100,7 @@ def get_source():
 
 
 @zoho_bp.route("/source", methods=["PUT"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def update_source():
     payload = request.get_json(silent=True) or {}
     cluster_id = payload.get("clusterId")
@@ -141,13 +141,13 @@ def update_source():
 
 
 @zoho_bp.route("/source/clusters", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def source_clusters():
     return success_response({"items": svc.list_source_clusters()})
 
 
 @zoho_bp.route("/source/clusters/<cluster_id>/namespaces", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def source_namespaces(cluster_id: str):
     try:
         names = svc.list_source_namespaces(cluster_id)
@@ -157,7 +157,7 @@ def source_namespaces(cluster_id: str):
 
 
 @zoho_bp.route("/source/deployments", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def source_deployments():
     cluster_id = request.args.get("clusterId", "")
     ns_arg = request.args.get("namespaces", "")
@@ -175,7 +175,7 @@ def source_deployments():
 # ---------------------------------------------------------------------------
 
 @zoho_bp.route("/layout", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def get_layout():
     fresh = request.args.get("fresh") in ("1", "true")
     try:
@@ -185,7 +185,7 @@ def get_layout():
 
 
 @zoho_bp.route("/fields/<field_id>/options", methods=["PUT"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def set_field_options(field_id: str):
     payload = request.get_json(silent=True) or {}
     try:
@@ -207,7 +207,7 @@ def set_field_options(field_id: str):
 
 
 @zoho_bp.route("/fields/<field_id>", methods=["PATCH"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def update_field(field_id: str):
     payload = request.get_json(silent=True) or {}
     try:
@@ -229,7 +229,7 @@ def update_field(field_id: str):
 
 
 @zoho_bp.route("/fields/<field_id>", methods=["DELETE"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def delete_field(field_id: str):
     actor = get_current_user()
     try:
@@ -251,7 +251,7 @@ def delete_field(field_id: str):
 
 
 @zoho_bp.route("/fields", methods=["POST"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def create_field():
     payload = request.get_json(silent=True) or {}
     actor = get_current_user()
@@ -295,7 +295,7 @@ def _layout_write_error(exc: Exception, status: int = 400):
 
 
 @zoho_bp.route("/layout/plan", methods=["POST"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def plan_layout():
     """Dry-run a layout change: returns the exact PATCH body, a diff, and warnings."""
     payload = request.get_json(silent=True) or {}
@@ -320,8 +320,52 @@ def plan_layout():
         return error_response(str(exc), 502)
 
 
+@zoho_bp.route("/layout/snapshots", methods=["GET"])
+@require_permission("ticketing:view")
+def list_layout_snapshots():
+    limit = request.args.get("limit", 10, type=int)
+    return success_response({"items": layout_svc.list_layout_snapshots(limit)})
+
+
+@zoho_bp.route("/layout/snapshots/<int:snapshot_id>/plan", methods=["POST"])
+@require_permission("ticketing:view")
+def plan_layout_snapshot_restore(snapshot_id: int):
+    try:
+        return success_response(layout_svc.plan_snapshot_restore(snapshot_id))
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except layout_svc.LayoutWriteError as exc:
+        return _layout_write_error(exc)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+
+
+@zoho_bp.route("/layout/snapshots/<int:snapshot_id>/restore", methods=["POST"])
+@require_permission("ticketing:manage")
+def restore_layout_snapshot(snapshot_id: int):
+    actor = get_current_user()
+    try:
+        data = layout_svc.restore_layout_snapshot(snapshot_id, actor=_actor_name(actor))
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except layout_svc.LayoutWriteError as exc:
+        return _layout_write_error(exc)
+    except PermissionError as exc:
+        return error_response(str(exc), 409)
+    except ZohoError as exc:
+        return error_response(str(exc), 502)
+    log_audit(
+        "zoho_layout_snapshot_restored",
+        actor=actor,
+        target_type="zoho_layout",
+        target_id=str(data.get("layoutId") or ""),
+        details={"snapshotId": snapshot_id, "diff": data.get("diff")},
+    )
+    return success_response(data)
+
+
 @zoho_bp.route("/sections", methods=["POST"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def create_section():
     payload = request.get_json(silent=True) or {}
     actor = get_current_user()
@@ -352,7 +396,7 @@ def create_section():
 
 
 @zoho_bp.route("/sections/<section_id>", methods=["PATCH"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def rename_section(section_id: str):
     payload = request.get_json(silent=True) or {}
     actor = get_current_user()
@@ -377,7 +421,7 @@ def rename_section(section_id: str):
 
 
 @zoho_bp.route("/fields/<field_id>/section", methods=["PUT"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def move_field_section(field_id: str):
     payload = request.get_json(silent=True) or {}
     actor = get_current_user()
@@ -409,7 +453,7 @@ def move_field_section(field_id: str):
 # ---------------------------------------------------------------------------
 
 @zoho_bp.route("/fields/<field_id>/convert", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def plan_convert_field(field_id: str):
     try:
         return success_response(fields_svc.plan_field_conversion(field_id))
@@ -422,7 +466,7 @@ def plan_convert_field(field_id: str):
 
 
 @zoho_bp.route("/fields/<field_id>/convert", methods=["POST"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def convert_field(field_id: str):
     payload = request.get_json(silent=True) or {}
     actor = get_current_user()
@@ -461,13 +505,13 @@ def convert_field(field_id: str):
 # ---------------------------------------------------------------------------
 
 @zoho_bp.route("/option-sources", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def option_sources():
     return success_response(fields_svc.list_option_sources())
 
 
 @zoho_bp.route("/fields/<field_id>/binding", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def get_field_binding(field_id: str):
     data = fields_svc.get_field_binding(field_id)
     if data is None:
@@ -476,7 +520,7 @@ def get_field_binding(field_id: str):
 
 
 @zoho_bp.route("/fields/<field_id>/binding", methods=["PUT"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def set_field_binding(field_id: str):
     payload = request.get_json(silent=True) or {}
     try:
@@ -502,7 +546,7 @@ def set_field_binding(field_id: str):
 
 
 @zoho_bp.route("/fields/<field_id>/binding", methods=["DELETE"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def delete_field_binding(field_id: str):
     if not fields_svc.delete_field_binding(field_id):
         return error_response("That field has no option source.", 404)
@@ -516,7 +560,7 @@ def delete_field_binding(field_id: str):
 
 
 @zoho_bp.route("/fields/<field_id>/binding/preview", methods=["POST"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def preview_field_binding(field_id: str):
     payload = request.get_json(silent=True) or {}
     try:
@@ -528,7 +572,7 @@ def preview_field_binding(field_id: str):
 
 
 @zoho_bp.route("/inbound-tickets", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def inbound_tickets():
     limit = request.args.get("limit", 50)
     return success_response({"items": svc.list_inbound_tickets(limit=limit)})
@@ -539,13 +583,13 @@ def inbound_tickets():
 # ---------------------------------------------------------------------------
 
 @zoho_bp.route("/jenkins", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def get_jenkins():
     return success_response(automation_svc.get_jenkins_dict())
 
 
 @zoho_bp.route("/jenkins", methods=["PUT"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def update_jenkins():
     payload = request.get_json(silent=True) or {}
     try:
@@ -563,20 +607,20 @@ def update_jenkins():
 
 
 @zoho_bp.route("/jenkins/test", methods=["POST"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def test_jenkins():
     return success_response(automation_svc.test_jenkins())
 
 
 @zoho_bp.route("/automation/runs", methods=["GET"])
-@require_permission("zoho:view")
+@require_permission("ticketing:view")
 def list_automation_runs():
     limit = request.args.get("limit", 50, type=int)
     return success_response({"items": automation_svc.list_runs(limit=limit)})
 
 
 @zoho_bp.route("/automation/runs", methods=["POST"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def start_automation_run():
     payload = request.get_json(silent=True) or {}
     ticket_record_id = payload.get("ticketRecordId")
@@ -592,7 +636,7 @@ def start_automation_run():
 
 
 @zoho_bp.route("/automation/runs/<int:run_id>/cancel", methods=["POST"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def cancel_automation_run(run_id: int):
     try:
         data = automation_svc.cancel_run(run_id, user=get_current_user())
@@ -602,7 +646,7 @@ def cancel_automation_run(run_id: int):
 
 
 @zoho_bp.route("/inbound-tickets/<int:record_id>", methods=["DELETE"])
-@require_permission("zoho:manage")
+@require_permission("ticketing:manage")
 def delete_inbound_ticket(record_id: int):
     info = svc.delete_inbound_ticket(record_id)
     if info is None:

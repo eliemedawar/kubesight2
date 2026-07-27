@@ -1,0 +1,1280 @@
+"""Reusable Helm chart catalog and Kubernetes-manifest-to-chart conversion."""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import tarfile
+from copy import deepcopy
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
+
+import yaml
+
+from ..audit import log_audit
+from ..db import db
+from ..models import HelmChartTemplate
+
+MAX_IMPORT_BYTES = 10 * 1024 * 1024
+MAX_IMPORT_FILES = 500
+MAX_VARIABLES = 250
+WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}
+SENSITIVE_KEY_RE = re.compile(
+    r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|"
+    r"private[_-]?key|credential|client[_-]?secret|auth)",
+    re.IGNORECASE,
+)
+SAFE_FILE_RE = re.compile(r"^[A-Za-z0-9._/@+-]+$")
+RUNTIME_METADATA_KEYS = {
+    "creationTimestamp",
+    "deletionGracePeriodSeconds",
+    "deletionTimestamp",
+    "generation",
+    "managedFields",
+    "resourceVersion",
+    "selfLink",
+    "uid",
+}
+
+
+class ChartTemplateError(ValueError):
+    pass
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return (slug or "helm-chart")[:100]
+
+
+def _unique_slug(value: str) -> str:
+    base = _slugify(value)
+    candidate = base
+    suffix = 2
+    while HelmChartTemplate.query.filter_by(slug=candidate).first():
+        candidate = f"{base[:110 - len(str(suffix))]}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _clean_text(value: Any, limit: int) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _summary(row: HelmChartTemplate) -> Dict[str, Any]:
+    definition = row.definition or {}
+    return {
+        "id": row.slug,
+        "name": row.name,
+        "description": row.description or "",
+        "version": row.version or "0.1.0",
+        "appVersion": row.app_version or "",
+        "sourceType": row.source_type,
+        "sourceRef": row.source_ref or "",
+        "variableCount": len(definition.get("variables") or []),
+        "requiredVariableCount": sum(
+            1 for item in definition.get("variables") or [] if item.get("required")
+        ),
+        "resourceCount": int(definition.get("resourceCount") or 0),
+        "warnings": definition.get("warnings") or [],
+        "createdBy": row.created_by,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _detail(row: HelmChartTemplate) -> Dict[str, Any]:
+    definition = row.definition or {}
+    return {
+        **_summary(row),
+        "variables": definition.get("variables") or [],
+        "defaultValues": definition.get("values") or {},
+    }
+
+
+def list_chart_templates() -> List[Dict[str, Any]]:
+    rows = HelmChartTemplate.query.order_by(
+        HelmChartTemplate.name.asc(), HelmChartTemplate.id.asc()
+    ).all()
+    return [_summary(row) for row in rows]
+
+
+def get_chart_template(slug: str) -> Optional[Dict[str, Any]]:
+    row = HelmChartTemplate.query.filter_by(slug=slug).first()
+    return _detail(row) if row else None
+
+
+def _get_row(slug: str) -> HelmChartTemplate:
+    row = HelmChartTemplate.query.filter_by(slug=slug).first()
+    if not row:
+        raise ChartTemplateError("Helm chart template not found.")
+    return row
+
+
+def _safe_chart_path(path: str) -> str:
+    normalized = str(path or "").replace("\\", "/").lstrip("/")
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        raise ChartTemplateError("Chart contains an unsafe file path.")
+    if not all(SAFE_FILE_RE.match(part) for part in parts):
+        raise ChartTemplateError(f"Chart file path is not supported: {normalized}")
+    return "/".join(parts)
+
+
+def _encode_files(files: Dict[str, bytes]) -> Dict[str, str]:
+    total = 0
+    if len(files) > MAX_IMPORT_FILES:
+        raise ChartTemplateError(f"Charts may contain at most {MAX_IMPORT_FILES} files.")
+    encoded: Dict[str, str] = {}
+    for raw_path, content in files.items():
+        path = _safe_chart_path(raw_path)
+        total += len(content)
+        if total > MAX_IMPORT_BYTES:
+            raise ChartTemplateError("Chart content exceeds the 10 MiB import limit.")
+        encoded[path] = base64.b64encode(content).decode("ascii")
+    return encoded
+
+
+def _decode_files(definition: Dict[str, Any]) -> Dict[str, bytes]:
+    decoded: Dict[str, bytes] = {}
+    for raw_path, content in (definition.get("files") or {}).items():
+        path = _safe_chart_path(raw_path)
+        try:
+            decoded[path] = base64.b64decode(content, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ChartTemplateError(f"Stored chart file is invalid: {path}") from exc
+    return decoded
+
+
+def _persist(
+    *,
+    name: str,
+    description: str,
+    version: str,
+    app_version: str,
+    source_type: str,
+    source_ref: str,
+    files: Dict[str, bytes],
+    values: Dict[str, Any],
+    variables: List[Dict[str, Any]],
+    warnings: List[str],
+    resource_count: int,
+    actor_user_id: Optional[int],
+) -> Dict[str, Any]:
+    clean_name = _clean_text(name, 120)
+    if not clean_name:
+        raise ChartTemplateError("Chart name is required.")
+    row = HelmChartTemplate(
+        slug=_unique_slug(clean_name),
+        name=clean_name,
+        description=_clean_text(description, 500) or None,
+        version=_clean_text(version, 64) or "0.1.0",
+        app_version=_clean_text(app_version, 64) or None,
+        source_type=source_type,
+        source_ref=_clean_text(source_ref, 1000) or None,
+        definition={
+            "files": _encode_files(files),
+            "values": values,
+            "variables": variables[:MAX_VARIABLES],
+            "warnings": warnings,
+            "resourceCount": resource_count,
+        },
+        created_by=actor_user_id,
+    )
+    db.session.add(row)
+    db.session.commit()
+    log_audit(
+        "helm_chart_template_created",
+        actor_user_id=actor_user_id,
+        target_type="helm_chart_template",
+        target_id=row.slug,
+        details={
+            "name": row.name,
+            "sourceType": source_type,
+            "variableCount": len(variables),
+            "resourceCount": resource_count,
+        },
+    )
+    return _detail(row)
+
+
+def delete_chart_template(
+    slug: str, actor_user_id: Optional[int] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    row = HelmChartTemplate.query.filter_by(slug=slug).first()
+    if not row:
+        return None, "Helm chart template not found.", 404
+    name = row.name
+    db.session.delete(row)
+    db.session.commit()
+    log_audit(
+        "helm_chart_template_deleted",
+        actor_user_id=actor_user_id,
+        target_type="helm_chart_template",
+        target_id=slug,
+        details={"name": name},
+    )
+    return {"id": slug, "deleted": True}, None, 200
+
+
+def _clean_resource(doc: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = deepcopy(doc)
+    cleaned.pop("status", None)
+    metadata = cleaned.get("metadata")
+    if isinstance(metadata, dict):
+        for key in RUNTIME_METADATA_KEYS:
+            metadata.pop(key, None)
+        metadata.pop("namespace", None)
+        annotations = metadata.get("annotations")
+        if isinstance(annotations, dict):
+            annotations.pop("kubectl.kubernetes.io/last-applied-configuration", None)
+            if not annotations:
+                metadata.pop("annotations", None)
+    return cleaned
+
+
+def _resource_identity(doc: Dict[str, Any]) -> Tuple[str, str, str]:
+    metadata = doc.get("metadata") or {}
+    return (
+        str(doc.get("apiVersion") or ""),
+        str(doc.get("kind") or ""),
+        str(metadata.get("name") or ""),
+    )
+
+
+def _safe_key(value: str) -> str:
+    key = re.sub(r"[^a-zA-Z0-9_]+", "_", value).strip("_").lower()
+    if not key or key[0].isdigit():
+        key = f"value_{key}"
+    return key[:80]
+
+
+def _value_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    return "string"
+
+
+def _set_nested(target: Dict[str, Any], path: Sequence[str], value: Any) -> None:
+    cursor = target
+    for part in path[:-1]:
+        child = cursor.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            cursor[part] = child
+        cursor = child
+    cursor[path[-1]] = value
+
+
+def _get_nested(target: Dict[str, Any], path: Sequence[str], default: Any = None) -> Any:
+    cursor: Any = target
+    for part in path:
+        if not isinstance(cursor, dict) or part not in cursor:
+            return default
+        cursor = cursor[part]
+    return cursor
+
+
+class _VariableBuilder:
+    def __init__(self) -> None:
+        self.values: Dict[str, Any] = {"variables": {}}
+        self.variables: List[Dict[str, Any]] = []
+        self._keys: set[str] = set()
+        self._sentinel_index = 0
+
+    def add(
+        self,
+        parent: Dict[str, Any] | List[Any],
+        field: str | int,
+        *,
+        key: str,
+        label: str,
+        default: Any,
+        category: str,
+        required: bool = False,
+        sensitive: bool = False,
+        transform: str = "",
+    ) -> None:
+        if len(self.variables) >= MAX_VARIABLES:
+            if sensitive:
+                parent[field] = ""
+                raise ChartTemplateError(
+                    f"Chart exceeds the {MAX_VARIABLES}-value limit before all secrets "
+                    "could be exposed safely."
+                )
+            return
+        base = _safe_key(key)
+        unique = base
+        suffix = 2
+        while unique in self._keys:
+            unique = f"{base[:72]}_{suffix}"
+            suffix += 1
+        self._keys.add(unique)
+        self._sentinel_index += 1
+        sentinel = f"__KUBESIGHT_HELM_VARIABLE_{self._sentinel_index}__"
+        parent[field] = sentinel
+        safe_default = "" if sensitive else default
+        self.values["variables"][unique] = safe_default
+        self.variables.append(
+            {
+                "key": unique,
+                "path": f"variables.{unique}",
+                "label": label,
+                "type": _value_type(default),
+                "default": safe_default,
+                "required": bool(required or sensitive),
+                "sensitive": bool(sensitive),
+                "category": category,
+                "_sentinel": sentinel,
+                "_transform": transform,
+            }
+        )
+
+
+def _pod_spec(doc: Dict[str, Any]) -> Dict[str, Any]:
+    spec = doc.get("spec") or {}
+    if doc.get("kind") == "CronJob":
+        return (
+            (((spec.get("jobTemplate") or {}).get("spec") or {}).get("template") or {}).get("spec")
+            or {}
+        )
+    return ((spec.get("template") or {}).get("spec") or {})
+
+
+def _walk_scalar_paths(value: Any, prefix: Tuple[Any, ...] = ()) -> Iterable[Tuple[Tuple[Any, ...], Any]]:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from _walk_scalar_paths(child, prefix + (key,))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from _walk_scalar_paths(child, prefix + (index,))
+    elif value is not None:
+        yield prefix, value
+
+
+def _path_value(value: Any, path: Sequence[Any]) -> Any:
+    cursor = value
+    for part in path:
+        if isinstance(part, int):
+            if not isinstance(cursor, list) or part >= len(cursor):
+                return object()
+        elif not isinstance(cursor, dict) or part not in cursor:
+            return object()
+        cursor = cursor[part]
+    return cursor
+
+
+def _path_parent(value: Any, path: Sequence[Any]) -> Tuple[Any, Any]:
+    cursor = value
+    for part in path[:-1]:
+        cursor = cursor[part]
+    return cursor, path[-1]
+
+
+def _known_variables(doc: Dict[str, Any], identity: str, builder: _VariableBuilder) -> set[Tuple[Any, ...]]:
+    added: set[Tuple[Any, ...]] = set()
+    kind = str(doc.get("kind") or "")
+    spec = doc.get("spec") or {}
+    if kind in {"Deployment", "StatefulSet"} and "replicas" in spec:
+        builder.add(
+            spec,
+            "replicas",
+            key=f"{identity}_replicas",
+            label=f"{identity} replicas",
+            default=spec["replicas"],
+            category="Scaling",
+        )
+        added.add(("spec", "replicas"))
+
+    pod_spec = _pod_spec(doc)
+    for index, container in enumerate(pod_spec.get("containers") or []):
+        if not isinstance(container, dict):
+            continue
+        container_name = str(container.get("name") or f"container-{index + 1}")
+        base_path: Tuple[Any, ...]
+        if kind == "CronJob":
+            base_path = (
+                "spec", "jobTemplate", "spec", "template", "spec", "containers", index
+            )
+        else:
+            base_path = ("spec", "template", "spec", "containers", index)
+        if container.get("image"):
+            builder.add(
+                container,
+                "image",
+                key=f"{identity}_{container_name}_image",
+                label=f"{container_name} image",
+                default=container["image"],
+                category="Images",
+            )
+            added.add(base_path + ("image",))
+        for env_index, env in enumerate(container.get("env") or []):
+            if not isinstance(env, dict) or "value" not in env:
+                continue
+            env_name = str(env.get("name") or f"ENV_{env_index + 1}")
+            sensitive = bool(SENSITIVE_KEY_RE.search(env_name))
+            builder.add(
+                env,
+                "value",
+                key=f"{identity}_{container_name}_env_{env_name}",
+                label=env_name,
+                default=env.get("value") or "",
+                category="Environment",
+                required=sensitive,
+                sensitive=sensitive,
+            )
+            added.add(base_path + ("env", env_index, "value"))
+        resources = container.get("resources") or {}
+        for section in ("requests", "limits"):
+            values = resources.get(section) or {}
+            for resource_name in ("cpu", "memory"):
+                if resource_name not in values:
+                    continue
+                builder.add(
+                    values,
+                    resource_name,
+                    key=f"{identity}_{container_name}_{section}_{resource_name}",
+                    label=f"{container_name} {resource_name} {section}",
+                    default=values[resource_name],
+                    category="Resources",
+                )
+                added.add(base_path + ("resources", section, resource_name))
+
+    if kind == "Service":
+        for index, port in enumerate(spec.get("ports") or []):
+            if not isinstance(port, dict):
+                continue
+            for field in ("port", "targetPort"):
+                if field in port and isinstance(port[field], (str, int)):
+                    builder.add(
+                        port,
+                        field,
+                        key=f"{identity}_{field}_{index + 1}",
+                        label=f"Service {field} {index + 1}",
+                        default=port[field],
+                        category="Networking",
+                    )
+                    added.add(("spec", "ports", index, field))
+
+    if kind == "Ingress":
+        for index, rule in enumerate(spec.get("rules") or []):
+            if isinstance(rule, dict) and rule.get("host"):
+                builder.add(
+                    rule,
+                    "host",
+                    key=f"{identity}_host_{index + 1}",
+                    label=f"Ingress host {index + 1}",
+                    default=rule["host"],
+                    category="Networking",
+                )
+                added.add(("spec", "rules", index, "host"))
+
+    if kind == "PersistentVolumeClaim":
+        requests = ((spec.get("resources") or {}).get("requests") or {})
+        if requests.get("storage"):
+            builder.add(
+                requests,
+                "storage",
+                key=f"{identity}_storage",
+                label=f"{identity} storage size",
+                default=requests["storage"],
+                category="Storage",
+            )
+            added.add(("spec", "resources", "requests", "storage"))
+
+    if kind == "ConfigMap":
+        for field in ("data", "binaryData"):
+            data = doc.get(field) or {}
+            for key in list(data):
+                builder.add(
+                    data,
+                    key,
+                    key=f"{identity}_{field}_{key}",
+                    label=f"{identity} {key}",
+                    default=data[key],
+                    category="Configuration",
+                )
+                added.add((field, key))
+
+    if kind == "Secret":
+        for field in ("data", "stringData"):
+            data = doc.get(field) or {}
+            for key in list(data):
+                builder.add(
+                    data,
+                    key,
+                    key=f"{identity}_{key}",
+                    label=f"{identity} {key}",
+                    default="",
+                    category="Secrets",
+                    required=True,
+                    sensitive=True,
+                    transform="b64enc" if field == "data" else "",
+                )
+                added.add((field, key))
+    return added
+
+
+def _different_scalar_paths(base: Any, variants: Sequence[Any]) -> List[Tuple[Any, ...]]:
+    paths: List[Tuple[Any, ...]] = []
+    for path, value in _walk_scalar_paths(base):
+        if any(_path_value(variant, path) != value for variant in variants):
+            paths.append(path)
+    return paths
+
+
+def _render_manifest_template(doc: Dict[str, Any], variables: Sequence[Dict[str, Any]]) -> str:
+    dumped = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+    for item in variables:
+        sentinel = item.get("_sentinel")
+        if not sentinel or sentinel not in dumped:
+            continue
+        value_ref = f".Values.{item['path']}"
+        if item.get("required"):
+            expression = f'required "{item["label"]} is required" {value_ref}'
+        else:
+            expression = value_ref
+        if item.get("_transform") == "b64enc":
+            expression = f"{expression} | b64enc"
+        if item.get("type") == "string":
+            expression = f"{expression} | quote"
+        dumped = dumped.replace(sentinel, "{{ " + expression + " }}")
+    return dumped
+
+
+def _public_variables(variables: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {key: value for key, value in item.items() if not key.startswith("_")}
+        for item in variables
+    ]
+
+
+def _manifest_files(payload: Dict[str, Any]) -> List[Tuple[str, str]]:
+    raw_files = payload.get("files")
+    if isinstance(raw_files, list):
+        result: List[Tuple[str, str]] = []
+        total = 0
+        for index, item in enumerate(raw_files):
+            if not isinstance(item, dict):
+                continue
+            name = _clean_text(item.get("name") or f"manifest-{index + 1}.yaml", 255)
+            content = str(item.get("content") or "")
+            total += len(content.encode("utf-8"))
+            if total > MAX_IMPORT_BYTES:
+                raise ChartTemplateError("YAML content exceeds the 10 MiB import limit.")
+            if content.strip():
+                result.append((name, content))
+        return result
+    yaml_text = str(payload.get("yaml") or payload.get("yamlContent") or "")
+    return [("manifests.yaml", yaml_text)] if yaml_text.strip() else []
+
+
+def _convert_manifest_files(
+    source_files: Sequence[Tuple[str, str]],
+    *,
+    requested_name: str = "",
+) -> Tuple[str, Dict[str, bytes], Dict[str, Any], List[Dict[str, Any]], List[str], int]:
+    if not source_files:
+        raise ChartTemplateError("At least one Kubernetes YAML file is required.")
+
+    grouped: Dict[Tuple[str, str, str], List[Tuple[str, Dict[str, Any]]]] = {}
+    warnings: List[str] = []
+    for filename, content in source_files:
+        try:
+            docs = list(yaml.safe_load_all(content))
+        except yaml.YAMLError as exc:
+            raise ChartTemplateError(f"Invalid YAML in {filename}: {exc}") from exc
+        for doc in docs:
+            if not isinstance(doc, dict) or not doc.get("kind"):
+                continue
+            cleaned = _clean_resource(doc)
+            identity = _resource_identity(cleaned)
+            if not identity[1] or not identity[2]:
+                warnings.append(f"Skipped an unnamed {identity[1] or 'resource'} in {filename}.")
+                continue
+            grouped.setdefault(identity, []).append((filename, cleaned))
+
+    if not grouped:
+        raise ChartTemplateError("No named Kubernetes resources were found.")
+
+    inferred_name = requested_name
+    if not inferred_name:
+        workload = next((key for key in grouped if key[1] in WORKLOAD_KINDS), None)
+        inferred_name = (workload or next(iter(grouped)))[2]
+    name = _clean_text(inferred_name, 120)
+    slug = _slugify(name)
+    builder = _VariableBuilder()
+    template_files: Dict[str, bytes] = {}
+
+    for index, (resource_key, entries) in enumerate(grouped.items(), start=1):
+        _, kind, resource_name = resource_key
+        base = deepcopy(entries[0][1])
+        identity = _safe_key(f"{kind}_{resource_name}")
+        known_paths = _known_variables(base, identity, builder)
+        if len(entries) > 1:
+            variant_names = ", ".join(entry[0] for entry in entries[1:])
+            warnings.append(
+                f"{kind}/{resource_name} appeared in multiple files. The first version is the "
+                f"default and differing scalar fields from {variant_names} became values."
+            )
+            for path in _different_scalar_paths(entries[0][1], [entry[1] for entry in entries[1:]]):
+                if path in known_paths or not path:
+                    continue
+                try:
+                    parent, field = _path_parent(base, path)
+                    default = entries[0][1]
+                    for part in path:
+                        default = default[part]
+                except (KeyError, IndexError, TypeError):
+                    continue
+                if not isinstance(default, (str, int, float, bool)):
+                    continue
+                path_label = " ".join(str(part) for part in path if not isinstance(part, int))
+                sensitive = bool(SENSITIVE_KEY_RE.search(path_label))
+                builder.add(
+                    parent,
+                    field,
+                    key=f"{identity}_{'_'.join(str(p) for p in path)}",
+                    label=f"{kind}/{resource_name} {path_label}",
+                    default=default,
+                    category="Variant values",
+                    required=sensitive,
+                    sensitive=sensitive,
+                )
+
+        relative = f"templates/{index:03d}-{_slugify(kind)}-{_slugify(resource_name)}.yaml"
+        template_files[relative] = _render_manifest_template(base, builder.variables).encode("utf-8")
+
+    public_variables = _public_variables(builder.variables)
+    if len(builder.variables) >= MAX_VARIABLES:
+        warnings.append(f"Only the first {MAX_VARIABLES} generated variables were retained.")
+    chart_yaml = {
+        "apiVersion": "v2",
+        "name": slug,
+        "description": f"Imported Kubernetes resources for {name}",
+        "type": "application",
+        "version": "0.1.0",
+        "appVersion": "1.0.0",
+    }
+    template_files["Chart.yaml"] = yaml.safe_dump(chart_yaml, sort_keys=False).encode("utf-8")
+    template_files["values.yaml"] = yaml.safe_dump(
+        builder.values, sort_keys=False, default_flow_style=False
+    ).encode("utf-8")
+    return name, template_files, builder.values, public_variables, warnings, len(grouped)
+
+
+def import_yaml_chart(
+    payload: Dict[str, Any], actor_user_id: Optional[int] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    try:
+        name, files, values, variables, warnings, count = _convert_manifest_files(
+            _manifest_files(payload), requested_name=_clean_text(payload.get("name"), 120)
+        )
+        data = _persist(
+            name=name,
+            description=_clean_text(payload.get("description"), 500)
+            or "Converted from Kubernetes YAML",
+            version="0.1.0",
+            app_version="1.0.0",
+            source_type="yaml",
+            source_ref=", ".join(name for name, _ in _manifest_files(payload))[:1000],
+            files=files,
+            values=values,
+            variables=variables,
+            warnings=warnings,
+            resource_count=count,
+            actor_user_id=actor_user_id,
+        )
+        return data, None, 201
+    except ChartTemplateError as exc:
+        return None, str(exc), 400
+
+
+def _flatten_values(
+    value: Any, prefix: Tuple[str, ...] = ()
+) -> Iterable[Tuple[Tuple[str, ...], Any]]:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from _flatten_values(child, prefix + (str(key),))
+    elif isinstance(value, list):
+        # Lists are kept as one YAML-friendly value to avoid asking for dozens of
+        # indexes. The deploy form offers a YAML textarea for these.
+        yield prefix, value
+    else:
+        yield prefix, value
+
+
+def _schema_for_path(schema: Dict[str, Any], path: Sequence[str]) -> Dict[str, Any]:
+    cursor = schema if isinstance(schema, dict) else {}
+    for part in path:
+        cursor = (cursor.get("properties") or {}).get(part) or {}
+    return cursor if isinstance(cursor, dict) else {}
+
+
+def _path_required(schema: Dict[str, Any], path: Sequence[str]) -> bool:
+    cursor = schema if isinstance(schema, dict) else {}
+    for part in path:
+        if part in (cursor.get("required") or []):
+            return True
+        cursor = (cursor.get("properties") or {}).get(part) or {}
+    return False
+
+
+def _is_sensitive_value(schema: Dict[str, Any], path: Sequence[str]) -> bool:
+    node = _schema_for_path(schema, path)
+    return bool(
+        any(SENSITIVE_KEY_RE.search(part) for part in path)
+        or str(node.get("format") or "").lower() in {"password", "secret"}
+        or node.get("writeOnly")
+        or node.get("x-sensitive")
+    )
+
+
+def _scrub_chart_values(
+    values: Dict[str, Any], schema: Dict[str, Any]
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[str]]:
+    cleaned = deepcopy(values)
+    variables: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    flattened = list(_flatten_values(values))
+    # Sensitive leaves are processed first so a very large values.yaml can
+    # never crowd credentials out of the safe, required-input surface.
+    flattened.sort(
+        key=lambda item: not _is_sensitive_value(schema, item[0])
+    )
+    for path, default in flattened:
+        if not path:
+            continue
+        sensitive = _is_sensitive_value(schema, path)
+        if len(variables) >= MAX_VARIABLES:
+            if sensitive:
+                raise ChartTemplateError(
+                    f"Chart contains more than {MAX_VARIABLES} values and cannot "
+                    "expose all sensitive values safely."
+                )
+            continue
+        schema_node = _schema_for_path(schema, path)
+        required = sensitive or _path_required(schema, path)
+        safe_default = "" if sensitive else default
+        if sensitive:
+            _set_nested(cleaned, path, "")
+            warnings.append(f"Stored default for sensitive value '{'.'.join(path)}' was removed.")
+        value_type = schema_node.get("type") or (
+            "array" if isinstance(default, list) else _value_type(default)
+        )
+        variables.append(
+            {
+                "key": "_".join(_safe_key(part) for part in path),
+                "path": ".".join(path),
+                "label": schema_node.get("title") or " ".join(path),
+                "description": schema_node.get("description") or "",
+                "type": value_type,
+                "default": safe_default,
+                "required": bool(required),
+                "sensitive": bool(sensitive),
+                "category": path[0].replace("_", " ").title(),
+            }
+        )
+    if len(flattened) > MAX_VARIABLES:
+        warnings.append(f"Only the first {MAX_VARIABLES} chart values are editable in the form.")
+    return cleaned, variables, warnings
+
+
+def _read_chart_directory(chart_root: Path) -> Dict[str, bytes]:
+    files: Dict[str, bytes] = {}
+    total = 0
+    for path in sorted(chart_root.rglob("*")):
+        if not path.is_file() or path.is_symlink() or ".git" in path.parts:
+            continue
+        relative = path.relative_to(chart_root).as_posix()
+        content = path.read_bytes()
+        total += len(content)
+        if len(files) >= MAX_IMPORT_FILES:
+            raise ChartTemplateError(f"Charts may contain at most {MAX_IMPORT_FILES} files.")
+        if total > MAX_IMPORT_BYTES:
+            raise ChartTemplateError("Chart content exceeds the 10 MiB import limit.")
+        files[relative] = content
+    return files
+
+
+def _scrub_schema_secrets(schema: Any, prefix: Tuple[str, ...] = ()) -> None:
+    if not isinstance(schema, dict):
+        return
+    if (
+        any(SENSITIVE_KEY_RE.search(part) for part in prefix)
+        or str(schema.get("format") or "").lower() in {"password", "secret"}
+        or schema.get("writeOnly")
+        or schema.get("x-sensitive")
+    ):
+        for key in ("default", "examples", "enum", "const"):
+            schema.pop(key, None)
+    for key, child in (schema.get("properties") or {}).items():
+        _scrub_schema_secrets(child, prefix + (str(key),))
+    if isinstance(schema.get("items"), dict):
+        _scrub_schema_secrets(schema["items"], prefix + ("item",))
+
+
+def _scrub_static_secret_templates(
+    files: Dict[str, bytes],
+    values: Dict[str, Any],
+    variables: List[Dict[str, Any]],
+) -> List[str]:
+    """Remove literal values from static Secret manifests in an imported chart."""
+    warnings: List[str] = []
+    counter = 0
+    kind_re = re.compile(r"(?m)^\s*kind:\s*Secret\s*(?:#.*)?$")
+    section_re = re.compile(r"^(\s*)(data|stringData):\s*(?:#.*)?$")
+    entry_re = re.compile(r"^(\s+)([^:#][^:]*):\s*(.*?)\s*$")
+
+    for path, raw in list(files.items()):
+        if not path.startswith("templates/") or not path.lower().endswith((".yaml", ".yml")):
+            continue
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        documents = re.split(r"(?m)(^---\s*$)", content)
+        changed = False
+        for doc_index in range(0, len(documents), 2):
+            document = documents[doc_index]
+            if not kind_re.search(document):
+                continue
+            lines = document.splitlines()
+            section = ""
+            section_indent = -1
+            for line_index, line in enumerate(lines):
+                section_match = section_re.match(line)
+                if section_match:
+                    section_indent = len(section_match.group(1))
+                    section = section_match.group(2)
+                    continue
+                if not section:
+                    continue
+                entry_match = entry_re.match(line)
+                if not entry_match or len(entry_match.group(1)) <= section_indent:
+                    if line.strip() and len(line) - len(line.lstrip()) <= section_indent:
+                        section = ""
+                    continue
+                key = entry_match.group(2).strip().strip("'\"")
+                literal = entry_match.group(3).strip()
+                if not literal or "{{" in literal:
+                    continue
+                if len(variables) >= MAX_VARIABLES:
+                    raise ChartTemplateError(
+                        f"Chart exceeds the {MAX_VARIABLES}-value limit before all "
+                        "literal Secret values could be exposed safely."
+                    )
+                counter += 1
+                variable_key = _safe_key(
+                    f"{Path(path).stem}_{key}_{counter}"
+                )
+                values.setdefault("kubesightSecrets", {})[variable_key] = ""
+                variables.append(
+                    {
+                        "key": variable_key,
+                        "path": f"kubesightSecrets.{variable_key}",
+                        "label": f"{Path(path).stem} {key}",
+                        "description": "Literal Secret value removed during import.",
+                        "type": "string",
+                        "default": "",
+                        "required": True,
+                        "sensitive": True,
+                        "category": "Secrets",
+                    }
+                )
+                value_ref = f'.Values.kubesightSecrets.{variable_key}'
+                expression = f'required "{key} is required" {value_ref}'
+                if section == "data":
+                    expression += " | b64enc"
+                expression += " | quote"
+                lines[line_index] = (
+                    f"{entry_match.group(1)}{entry_match.group(2)}: "
+                    "{{ " + expression + " }}"
+                )
+                if literal.startswith(("|", ">")):
+                    entry_indent = len(entry_match.group(1))
+                    for continuation in range(line_index + 1, len(lines)):
+                        continuation_line = lines[continuation]
+                        if (
+                            continuation_line.strip()
+                            and len(continuation_line) - len(continuation_line.lstrip())
+                            <= entry_indent
+                        ):
+                            break
+                        lines[continuation] = ""
+                changed = True
+                warnings.append(
+                    f"Literal Secret value '{key}' in {path} was removed and made required."
+                )
+            documents[doc_index] = "\n".join(lines) + (
+                "\n" if document.endswith("\n") else ""
+            )
+        if changed:
+            files[path] = "".join(documents).encode("utf-8")
+    return warnings
+
+
+def _import_existing_chart(
+    chart_root: Path,
+    *,
+    payload: Dict[str, Any],
+    source_ref: str,
+    actor_user_id: Optional[int],
+) -> Dict[str, Any]:
+    try:
+        metadata = yaml.safe_load((chart_root / "Chart.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ChartTemplateError(f"Chart.yaml could not be read: {exc}") from exc
+    values_path = chart_root / "values.yaml"
+    try:
+        values = yaml.safe_load(values_path.read_text(encoding="utf-8")) if values_path.exists() else {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ChartTemplateError(f"values.yaml could not be read: {exc}") from exc
+    if not isinstance(values, dict):
+        raise ChartTemplateError("values.yaml must contain a YAML object.")
+    schema: Dict[str, Any] = {}
+    schema_path = chart_root / "values.schema.json"
+    if schema_path.exists():
+        try:
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            schema = {}
+
+    scrubbed, variables, warnings = _scrub_chart_values(values, schema)
+    _scrub_schema_secrets(schema)
+    files = _read_chart_directory(chart_root)
+    for path in list(files):
+        filename = Path(path).name.lower()
+        if (
+            filename.startswith("values")
+            and filename.endswith((".yaml", ".yml"))
+            and path != "values.yaml"
+        ):
+            files.pop(path, None)
+            warnings.append(
+                f"Excluded optional values file '{path}' because environment values may contain secrets."
+            )
+    warnings.extend(_scrub_static_secret_templates(files, scrubbed, variables))
+    files["values.yaml"] = yaml.safe_dump(scrubbed, sort_keys=False).encode("utf-8")
+    if schema and "values.schema.json" in files:
+        files["values.schema.json"] = json.dumps(schema, indent=2).encode("utf-8")
+    name = _clean_text(payload.get("name"), 120) or _clean_text(metadata.get("name"), 120)
+    if not name:
+        raise ChartTemplateError("Chart.yaml does not contain a chart name.")
+    return _persist(
+        name=name,
+        description=_clean_text(payload.get("description"), 500)
+        or _clean_text(metadata.get("description"), 500),
+        version=_clean_text(metadata.get("version"), 64) or "0.1.0",
+        app_version=_clean_text(metadata.get("appVersion"), 64),
+        source_type="git-chart",
+        source_ref=source_ref,
+        files=files,
+        values=scrubbed,
+        variables=variables,
+        warnings=warnings,
+        resource_count=len([path for path in files if path.startswith("templates/")]),
+        actor_user_id=actor_user_id,
+    )
+
+
+def _validate_git_url(raw_url: str) -> str:
+    url = _clean_text(raw_url, 1000)
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ChartTemplateError("Git repository URL must be a valid HTTPS URL.")
+    if parsed.username or parsed.password:
+        raise ChartTemplateError("Do not embed credentials in the Git URL.")
+    if parsed.query or parsed.fragment:
+        raise ChartTemplateError("Git repository URL cannot contain a query string or fragment.")
+    return url
+
+
+def _write_askpass(directory: str) -> str:
+    path = os.path.join(directory, "kubesight-git-askpass.sh")
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(
+            "#!/bin/sh\n"
+            'case \"$1\" in\n'
+            '  *sername*) printf \"%s\" \"$KUBESIGHT_GIT_USERNAME\" ;;\n'
+            '  *) printf \"%s\" \"$KUBESIGHT_GIT_TOKEN\" ;;\n'
+            "esac\n"
+        )
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    return path
+
+
+def _git_clone(payload: Dict[str, Any], destination: str, askpass_dir: str) -> str:
+    url = _validate_git_url(payload.get("repositoryUrl") or payload.get("url"))
+    ref = _clean_text(payload.get("ref") or payload.get("branch"), 200)
+    token = str(payload.get("token") or payload.get("accessToken") or "")
+    username = _clean_text(payload.get("username"), 255) or "oauth2"
+    command = [
+        "git",
+        "-c",
+        "credential.helper=",
+        "clone",
+        "--depth",
+        "1",
+        "--no-tags",
+        "--single-branch",
+        "--filter=blob:none",
+    ]
+    if ref:
+        command.extend(["--branch", ref])
+    command.extend(["--", url, destination])
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": _write_askpass(askpass_dir),
+            "KUBESIGHT_GIT_USERNAME": username,
+            "KUBESIGHT_GIT_TOKEN": token,
+        }
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=90,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise ChartTemplateError("Git is not installed on the backend server.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ChartTemplateError("Git clone timed out after 90 seconds.") from exc
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "Git clone failed.").strip()
+        for secret in (token, username):
+            if secret:
+                message = message.replace(secret, "[redacted]")
+        raise ChartTemplateError(message[:1000])
+    return url
+
+
+@contextmanager
+def _private_import_directory() -> Iterable[str]:
+    """Create a private, disposable Git workspace without tempfile's Windows ACL.
+
+    Python 3.14's ``TemporaryDirectory`` uses a restrictive Windows creation mode
+    that can make child creation fail under some service/sandbox identities. A
+    random exclusive directory with inherited Windows ACLs avoids that issue;
+    POSIX receives explicit owner-only permissions.
+    """
+    parent = Path(os.getenv("KUBESIGHT_TEMP_DIR") or os.getcwd()).resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    path: Optional[Path] = None
+    for _ in range(10):
+        candidate = parent / f".kubesight-git-import-{secrets.token_hex(12)}"
+        try:
+            candidate.mkdir(mode=0o777 if os.name == "nt" else 0o700)
+            path = candidate
+            break
+        except FileExistsError:
+            continue
+    if path is None:
+        raise ChartTemplateError("Unable to allocate a private Git import directory.")
+    try:
+        yield str(path)
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _resolve_repo_path(repo_root: Path, requested: str) -> Path:
+    relative = str(requested or "").replace("\\", "/").strip("/")
+    if relative and any(part == ".." for part in relative.split("/")):
+        raise ChartTemplateError("Repository path cannot contain '..'.")
+    target = (repo_root / relative).resolve()
+    root = repo_root.resolve()
+    if target != root and root not in target.parents:
+        raise ChartTemplateError("Repository path is outside the cloned repository.")
+    if not target.exists():
+        raise ChartTemplateError("The selected path does not exist in the repository.")
+    return target
+
+
+def import_git_chart(
+    payload: Dict[str, Any], actor_user_id: Optional[int] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    try:
+        with _private_import_directory() as temp_dir:
+            repo_root = Path(temp_dir) / "repository"
+            url = _git_clone(payload, str(repo_root), temp_dir)
+            selected = _resolve_repo_path(repo_root, payload.get("path") or "")
+            import_type = _clean_text(payload.get("importType"), 20).lower() or "auto"
+            chart_root: Optional[Path] = selected if (selected / "Chart.yaml").is_file() else None
+            if not chart_root and import_type in {"auto", "chart"}:
+                candidates = [
+                    path.parent
+                    for path in selected.rglob("Chart.yaml")
+                    if ".git" not in path.parts
+                ]
+                if len(candidates) == 1:
+                    chart_root = candidates[0]
+                elif len(candidates) > 1:
+                    raise ChartTemplateError(
+                        "Multiple Helm charts were found. Specify the chart directory in Repository path."
+                    )
+            if import_type == "chart" and not chart_root:
+                raise ChartTemplateError(
+                    "No Chart.yaml was found. Specify the existing chart directory."
+                )
+            ref = _clean_text(payload.get("ref") or payload.get("branch"), 200)
+            repo_path = _clean_text(payload.get("path"), 500)
+            source_ref = f"{url}{f'#{ref}' if ref else ''}{f':{repo_path}' if repo_path else ''}"
+            if chart_root and import_type != "yaml":
+                return _import_existing_chart(
+                    chart_root,
+                    payload=payload,
+                    source_ref=source_ref,
+                    actor_user_id=actor_user_id,
+                ), None, 201
+
+            yaml_paths = [
+                path
+                for path in selected.rglob("*")
+                if path.is_file()
+                and not path.is_symlink()
+                and path.suffix.lower() in {".yaml", ".yml"}
+                and ".git" not in path.parts
+            ]
+            if not yaml_paths:
+                raise ChartTemplateError("No Chart.yaml or Kubernetes YAML files were found.")
+            source_files: List[Tuple[str, str]] = []
+            total = 0
+            for path in yaml_paths[:MAX_IMPORT_FILES]:
+                content = path.read_text(encoding="utf-8")
+                total += len(content.encode("utf-8"))
+                if total > MAX_IMPORT_BYTES:
+                    raise ChartTemplateError("YAML content exceeds the 10 MiB import limit.")
+                source_files.append((path.relative_to(selected).as_posix(), content))
+            name, files, values, variables, warnings, count = _convert_manifest_files(
+                source_files, requested_name=_clean_text(payload.get("name"), 120)
+            )
+            return _persist(
+                name=name,
+                description=_clean_text(payload.get("description"), 500)
+                or "Converted from Kubernetes YAML in Git",
+                version="0.1.0",
+                app_version="1.0.0",
+                source_type="git-yaml",
+                source_ref=source_ref,
+                files=files,
+                values=values,
+                variables=variables,
+                warnings=warnings,
+                resource_count=count,
+                actor_user_id=actor_user_id,
+            ), None, 201
+    except ChartTemplateError as exc:
+        return None, str(exc), 400
+    except (OSError, UnicodeError) as exc:
+        return None, f"Unable to read the Git repository: {exc}", 400
+
+
+def chart_archive_base64(slug: str) -> str:
+    row = _get_row(slug)
+    files = _decode_files(row.definition or {})
+    root = _slugify(row.name)
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+        for relative, content in sorted(files.items()):
+            info = tarfile.TarInfo(name=f"{root}/{relative}")
+            info.size = len(content)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(content))
+    return base64.b64encode(stream.getvalue()).decode("ascii")
+
+
+def _coerce_value(value: Any, variable: Dict[str, Any]) -> Any:
+    value_type = variable.get("type")
+    if value_type == "integer":
+        return int(value)
+    if value_type == "number":
+        return float(value)
+    if value_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        lowered = str(value).strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+        raise ValueError("must be true or false")
+    if value_type in {"array", "object"} and isinstance(value, str):
+        parsed = yaml.safe_load(value)
+        if value_type == "array" and not isinstance(parsed, list):
+            raise ValueError("must be a YAML list")
+        if value_type == "object" and not isinstance(parsed, dict):
+            raise ValueError("must be a YAML object")
+        return parsed
+    return "" if value is None else str(value)
+
+
+def build_values_yaml(slug: str, answers: Dict[str, Any]) -> str:
+    row = _get_row(slug)
+    definition = row.definition or {}
+    values = deepcopy(definition.get("values") or {})
+    variables = definition.get("variables") or []
+    answer_map = answers if isinstance(answers, dict) else {}
+    for variable in variables:
+        path = str(variable.get("path") or "")
+        if not path:
+            continue
+        raw = answer_map.get(path, answer_map.get(variable.get("key"), variable.get("default")))
+        if variable.get("required") and (raw is None or str(raw).strip() == ""):
+            raise ChartTemplateError(f"{variable.get('label') or path} is required.")
+        if (
+            not variable.get("required")
+            and (raw is None or str(raw).strip() == "")
+            and variable.get("default") in (None, "")
+        ):
+            # Preserve an intentionally empty/null optional chart default. This
+            # matters for schema-typed optional numbers and objects, where
+            # coercing an untouched empty form field would otherwise fail.
+            continue
+        try:
+            coerced = _coerce_value(raw, variable)
+        except (TypeError, ValueError) as exc:
+            raise ChartTemplateError(
+                f"{variable.get('label') or path} {str(exc)}."
+            ) from exc
+        _set_nested(values, path.split("."), coerced)
+    return yaml.safe_dump(values, sort_keys=False, default_flow_style=False)
+
+
+def prepare_chart_template_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    source = str(payload.get("chartSource") or payload.get("chart_source") or "").lower()
+    if source != "template":
+        return payload
+    slug = _clean_text(
+        payload.get("chartTemplateId") or payload.get("chart_template_id"), 120
+    )
+    if not slug:
+        raise ChartTemplateError("chartTemplateId is required.")
+    row = _get_row(slug)
+    prepared = dict(payload)
+    prepared.update(
+        {
+            "chartSource": "local",
+            "chartArchiveBase64": chart_archive_base64(slug),
+            "valuesYaml": build_values_yaml(slug, payload.get("values") or {}),
+            "chartName": row.name,
+            "chartVersion": row.version,
+        }
+    )
+    return prepared

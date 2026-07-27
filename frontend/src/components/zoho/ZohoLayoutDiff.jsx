@@ -12,6 +12,7 @@ const MARK = { added: "+", removed: "−", changed: "~", unchanged: "=" };
 export default function ZohoLayoutDiff({ plan }) {
   const diff = plan?.diff || {};
   const rows = diff.sections || [];
+  const added = diff.fieldsAdded || [];
   const dropped = diff.fieldsDropped || [];
 
   return (
@@ -33,6 +34,9 @@ export default function ZohoLayoutDiff({ plan }) {
         ) : null}
         <span className="status-pill muted">{diff.sectionsUnchanged || 0} unchanged</span>
         <span className="status-pill muted">{diff.fieldsCarried || 0} fields carried over</span>
+        {added.length ? (
+          <span className="status-pill info">{added.length} fields re-associated</span>
+        ) : null}
         {dropped.length ? (
           <span className="status-pill danger">{dropped.length} fields dropped</span>
         ) : null}

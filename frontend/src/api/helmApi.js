@@ -26,6 +26,28 @@ export function searchHelmCharts({ clusterId, repo, q }) {
   return request("/api/helm/charts", { query: { clusterId, repo, q } });
 }
 
+export function listHelmChartTemplates() {
+  return request("/api/helm/chart-templates");
+}
+
+export function getHelmChartTemplate(templateId) {
+  return request(`/api/helm/chart-templates/${encodeURIComponent(templateId)}`);
+}
+
+export function importHelmChartFromYaml(payload) {
+  return request("/api/helm/chart-templates/import/yaml", { method: "POST", body: payload });
+}
+
+export function importHelmChartFromGit(payload) {
+  return request("/api/helm/chart-templates/import/git", { method: "POST", body: payload });
+}
+
+export function deleteHelmChartTemplate(templateId) {
+  return request(`/api/helm/chart-templates/${encodeURIComponent(templateId)}`, {
+    method: "DELETE",
+  });
+}
+
 export function renderHelmTemplate(payload) {
   return request("/api/helm/template", { method: "POST", body: payload });
 }

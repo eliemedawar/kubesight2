@@ -4,7 +4,7 @@ import ZohoOptionSourceForm from "./ZohoOptionSourceForm.jsx";
 import useZohoOptionSources from "./useZohoOptionSources.js";
 import { IconAlert } from "./icons.jsx";
 import { linesToValues } from "./zohoFieldMeta";
-import { convertZohoField, planZohoFieldConversion } from "../../api/zohoApi.js";
+import { useTicketingApi } from "../ticketing/TicketingContext.jsx";
 
 const STEPS = ["The dropdown", "What it breaks", "Done"];
 
@@ -18,6 +18,7 @@ const STEPS = ["The dropdown", "What it breaks", "Done"];
  * with no error anywhere.
  */
 export default function ZohoConvertFieldModal({ field, onClose, onSaved }) {
+  const api = useTicketingApi();
   const { sources, parentsFor } = useZohoOptionSources();
   const [plan, setPlan] = useState(null);
   const [step, setStep] = useState(0);
@@ -39,7 +40,7 @@ export default function ZohoConvertFieldModal({ field, onClose, onSaved }) {
 
   useEffect(() => {
     let cancelled = false;
-    planZohoFieldConversion(field.id)
+    api.planFieldConversion(field.id)
       .then((data) => {
         if (cancelled) return;
         setPlan(data);
@@ -76,7 +77,7 @@ export default function ZohoConvertFieldModal({ field, onClose, onSaved }) {
         payload.sourceKind = form.sourceKind;
         if (form.parentFieldId) payload.parentFieldId = form.parentFieldId;
       }
-      setResult(await convertZohoField(field.id, payload));
+      setResult(await api.convertField(field.id, payload));
       setStep(2);
     } catch (err) {
       setError(err.message || "Could not convert the field.");

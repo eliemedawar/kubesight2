@@ -110,7 +110,7 @@ class SourceContext:
     per deployment and only the ``env_vars`` kind wants it.
     """
 
-    def __init__(self, row: ZohoIntegration, entries: List[Dict[str, Any]], fresh: bool = False):
+    def __init__(self, row, entries: List[Dict[str, Any]], fresh: bool = False):
         self.row = row
         self.entries = entries
         self.fresh = fresh
@@ -265,7 +265,7 @@ class Binding:
 
 
 # Field ids owned by the integration config; a binding row may not target them.
-def legacy_field_ids(row: ZohoIntegration) -> Dict[str, str]:
+def legacy_field_ids(row) -> Dict[str, str]:
     return {
         "application": str(row.app_field_id or ""),
         "environment": str(row.environment_field_id or ""),
@@ -273,7 +273,7 @@ def legacy_field_ids(row: ZohoIntegration) -> Dict[str, str]:
     }
 
 
-def _legacy_bindings(row: ZohoIntegration) -> List[Binding]:
+def _legacy_bindings(row) -> List[Binding]:
     """The original three, in their original publish order.
 
     Order is load-bearing: Application, then Environment, then Variable is what
@@ -349,15 +349,26 @@ def _from_row(row: ZohoFieldBinding) -> Binding:
     )
 
 
-def all_bindings(row: ZohoIntegration) -> List[Binding]:
+def all_bindings(row, provider: str = "zoho") -> List[Binding]:
     """Every binding this sync should consider — legacy three first, then rows.
 
     Disabled bindings are included on purpose: the cascade needs them to tear
     down a mapping whose child was switched off.
+
+    ``row`` is the provider's integration config. It is duck-typed on purpose:
+    :class:`~api.models.ZohoIntegration` and :class:`~api.models.JiraIntegration`
+    both carry ``*_field_id``, ``*_field_api_name`` and the three ``sync_*``
+    toggles under identical names, which is all :func:`_legacy_bindings` reads —
+    so the same synthesis produces the same three locked bindings either way.
     """
     out = _legacy_bindings(row)
     taken = {b.field_id for b in out}
-    for stored in ZohoFieldBinding.query.order_by(ZohoFieldBinding.id).all():
+    stored_rows = (
+        ZohoFieldBinding.query.filter_by(provider=provider)
+        .order_by(ZohoFieldBinding.id)
+        .all()
+    )
+    for stored in stored_rows:
         field_id = str(stored.field_id)
         if field_id in taken or stored.source_kind not in SOURCE_KINDS:
             continue
@@ -450,17 +461,19 @@ def serialize(binding: Binding) -> Dict[str, Any]:
     }
 
 
-def get_binding_row(field_id: str) -> Optional[ZohoFieldBinding]:
-    return ZohoFieldBinding.query.filter_by(field_id=str(field_id)).first()
+def get_binding_row(field_id: str, provider: str = "zoho") -> Optional[ZohoFieldBinding]:
+    return ZohoFieldBinding.query.filter_by(
+        field_id=str(field_id), provider=provider
+    ).first()
 
 
-def bindings_by_field(row: ZohoIntegration) -> Dict[str, Dict[str, Any]]:
+def bindings_by_field(row, provider: str = "zoho") -> Dict[str, Dict[str, Any]]:
     """``{field id: serialized binding}`` — one query, no N+1 from the layout view."""
-    return {b.field_id: serialize(b) for b in all_bindings(row)}
+    return {b.field_id: serialize(b) for b in all_bindings(row, provider)}
 
 
 def upsert_binding(
-    row: ZohoIntegration,
+    row,
     field_id: str,
     source_kind: str,
     *,
@@ -469,10 +482,14 @@ def upsert_binding(
     params: Optional[Dict[str, Any]] = None,
     parent_field_id: Optional[str] = None,
     enabled: bool = True,
+    provider: str = "zoho",
 ) -> ZohoFieldBinding:
     """Create or replace one field's binding. Callers validate first (see
     ``zoho_fields_service.set_field_binding``) — this only writes."""
-    stored = get_binding_row(field_id) or ZohoFieldBinding(field_id=str(field_id))
+    stored = get_binding_row(field_id, provider) or ZohoFieldBinding(
+        field_id=str(field_id), provider=provider
+    )
+    stored.provider = provider
     stored.source_kind = source_kind
     stored.label = label or stored.label
     stored.api_name = api_name or stored.api_name
@@ -484,8 +501,8 @@ def upsert_binding(
     return stored
 
 
-def delete_binding(field_id: str) -> bool:
-    stored = get_binding_row(field_id)
+def delete_binding(field_id: str, provider: str = "zoho") -> bool:
+    stored = get_binding_row(field_id, provider)
     if stored is None:
         return False
     db.session.delete(stored)

@@ -1,11 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import ErrorBanner from "../common/ErrorBanner.jsx";
-import {
-  getZohoSourceClusters,
-  getZohoSourceDeployments,
-  getZohoSourceNamespaces,
-  updateZohoSource,
-} from "../../api/zohoApi.js";
+import { useTicketingApi } from "../ticketing/TicketingContext.jsx";
 
 /**
  * Modal to choose the dropdown source: a cluster + which of its namespaces feed
@@ -27,6 +22,7 @@ export default function ZohoSourcePicker({
   onClose,
   onSaved,
 }) {
+  const api = useTicketingApi();
   const [clusters, setClusters] = useState([]);
   const [clusterId, setClusterId] = useState(initialClusterId);
   const [namespaces, setNamespaces] = useState([]);
@@ -82,7 +78,7 @@ export default function ZohoSourcePicker({
     (async () => {
       setLoadingClusters(true);
       try {
-        const res = await getZohoSourceClusters();
+        const res = await api.getSourceClusters();
         if (!cancelled) setClusters(res.items || []);
       } catch (err) {
         if (!cancelled) setError(err.message || "Failed to load clusters.");
@@ -104,7 +100,7 @@ export default function ZohoSourcePicker({
     setLoadingNs(true);
     setError("");
     try {
-      const res = await getZohoSourceNamespaces(id);
+      const res = await api.getSourceNamespaces(id);
       setNamespaces(res.namespaces || []);
     } catch (err) {
       setNamespaces([]);
@@ -130,7 +126,7 @@ export default function ZohoSourcePicker({
     setLoadingPreview(true);
     (async () => {
       try {
-        const res = await getZohoSourceDeployments(clusterId, chosen);
+        const res = await api.getSourceDeployments(clusterId, chosen);
         if (cancelled) return;
         const nextGroups = res.groups || [];
         setGroups(nextGroups);
@@ -342,7 +338,7 @@ export default function ZohoSourcePicker({
         if (!sel || sel.all) deployments[ns] = { all: true };
         else deployments[ns] = { all: false, names: [...sel.names] };
       }
-      const data = await updateZohoSource({
+      const data = await api.updateSource({
         clusterId,
         namespaces: [...selected],
         deployments,

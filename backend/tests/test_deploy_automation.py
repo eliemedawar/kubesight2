@@ -1066,8 +1066,14 @@ def test_cascade_resync_rebuilds_chain_parent_first(app, monkeypatch):
     row.variable_field_id = VAR_F
     # The namespace has to be a PUBLISHED Environment value: a mapping naming a
     # parent value Zoho never saw on the picklist is rejected, so it is skipped.
-    row.selected_namespaces = json.dumps(["verto-sit"])
     db.session.add(row)
+    # The deploy surface is shared across ticketing providers, so the namespace
+    # selection lives on its own row.
+    from api.services import ticketing_targets
+
+    source = ticketing_targets.get_or_create_config()
+    source.selected_namespaces = json.dumps(["verto-sit"])
+    db.session.add(source)
     db.session.commit()
 
     cfg = ZohoConfig(

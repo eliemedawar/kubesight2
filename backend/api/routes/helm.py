@@ -19,8 +19,14 @@ from ..services.helm_service import (
     search_charts,
     uninstall_release,
     update_repositories,
-    expected_confirmation,
     _resolve_access,
+)
+from ..services.helm_chart_template_service import (
+    delete_chart_template,
+    get_chart_template,
+    import_git_chart,
+    import_yaml_chart,
+    list_chart_templates,
 )
 
 helm_bp = Blueprint("helm", __name__, url_prefix="/api/helm")
@@ -36,6 +42,19 @@ def _cluster_id() -> str:
 
 def _namespace() -> str:
     return request.args.get("namespace") or ""
+
+
+def _catalog_chart_metadata(body: dict) -> tuple:
+    template_id = body.get("chartTemplateId") or body.get("chart_template_id")
+    template = get_chart_template(str(template_id)) if template_id else None
+    return (
+        body.get("chartName")
+        or body.get("chart_name")
+        or (template or {}).get("name"),
+        body.get("chartVersion")
+        or body.get("chart_version")
+        or (template or {}).get("version"),
+    )
 
 
 @helm_bp.route("/status", methods=["GET"])
@@ -116,6 +135,57 @@ def helm_search_charts():
         return error_response(str(exc), 400)
 
 
+@helm_bp.route("/chart-templates", methods=["GET"])
+@require_permission("helm:view")
+def helm_chart_templates():
+    return success_response(list_chart_templates())
+
+
+@helm_bp.route("/chart-templates/<slug>", methods=["GET"])
+@require_permission("helm:view")
+def helm_chart_template_detail(slug: str):
+    template = get_chart_template(slug)
+    if not template:
+        return error_response("Helm chart template not found.", 404)
+    return success_response(template)
+
+
+@helm_bp.route("/chart-templates/import/yaml", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_import_yaml():
+    user = get_current_user()
+    data, err, status = import_yaml_chart(
+        _body(), actor_user_id=user.id if user else None
+    )
+    if err:
+        return error_response(err, status)
+    return success_response(data, status_code=status)
+
+
+@helm_bp.route("/chart-templates/import/git", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_import_git():
+    user = get_current_user()
+    data, err, status = import_git_chart(
+        _body(), actor_user_id=user.id if user else None
+    )
+    if err:
+        return error_response(err, status)
+    return success_response(data, status_code=status)
+
+
+@helm_bp.route("/chart-templates/<slug>", methods=["DELETE"])
+@require_permission("inventory:update")
+def helm_chart_template_delete(slug: str):
+    user = get_current_user()
+    data, err, status = delete_chart_template(
+        slug, actor_user_id=user.id if user else None
+    )
+    if err:
+        return error_response(err, status)
+    return success_response(data)
+
+
 @helm_bp.route("/template", methods=["POST"])
 @require_permission("helm:view")
 def helm_template():
@@ -145,13 +215,14 @@ def helm_install():
     if err:
         return error_response(err, status)
 
+    chart_name, chart_version = _catalog_chart_metadata(body)
     create_or_update_from_helm(
         user,
         cluster_id=body.get("clusterId") or body.get("cluster"),
         namespace=body.get("namespace"),
         release_name=body.get("releaseName") or body.get("release_name"),
-        chart_name=body.get("chartName") or body.get("chart_name"),
-        chart_version=body.get("chartVersion") or body.get("chart_version"),
+        chart_name=chart_name,
+        chart_version=chart_version,
         owner_team=body.get("ownerTeam") or body.get("owner_team"),
         environment=body.get("environment"),
         criticality=body.get("criticality"),
@@ -171,13 +242,14 @@ def helm_upgrade():
     if err:
         return error_response(err, status)
 
+    chart_name, chart_version = _catalog_chart_metadata(body)
     create_or_update_from_helm(
         user,
         cluster_id=body.get("clusterId") or body.get("cluster"),
         namespace=body.get("namespace"),
         release_name=body.get("releaseName") or body.get("release_name"),
-        chart_name=body.get("chartName") or body.get("chart_name"),
-        chart_version=body.get("chartVersion") or body.get("chart_version"),
+        chart_name=chart_name,
+        chart_version=chart_version,
         owner_team=body.get("ownerTeam") or body.get("owner_team"),
         environment=body.get("environment"),
         criticality=body.get("criticality"),

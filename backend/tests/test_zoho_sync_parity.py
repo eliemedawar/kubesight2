@@ -18,6 +18,7 @@ import pytest
 
 from api.db import db
 from api.models import ZohoIntegration
+from api.services import ticketing_targets as targets
 from api.services import zoho_client
 from api.services import zoho_sync_service as svc
 
@@ -60,11 +61,15 @@ def zoho(app, monkeypatch):
     row.sync_environment = True
     row.sync_variables = True
     row.cascade_enabled = True
-    row.source_cluster_id = CLUSTER
-    row.selected_namespaces = json.dumps(["payments", "checkout"])
-    row.selected_deployments = None
-    row.custom_environments = None
     db.session.add(row)
+    # The deploy surface is shared across ticketing providers, so it lives on
+    # its own row rather than on the Zoho config.
+    source = targets.get_or_create_config()
+    source.source_cluster_id = CLUSTER
+    source.selected_namespaces = json.dumps(["payments", "checkout"])
+    source.selected_deployments = None
+    source.custom_environments = None
+    db.session.add(source)
     db.session.commit()
 
     state = {"publishes": [], "mapping_deletes": [], "mapping_creates": []}

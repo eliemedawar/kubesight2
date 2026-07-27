@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 from ..db import db
 from ..models import ZohoDeploymentSnapshot, ZohoInboundTicket, ZohoIntegration
 from ..secret_encryption import decrypt_secret, encrypt_secret
+from . import ticketing_targets as targets
 from . import zoho_client
 from .zoho_client import ZohoConfig, ZohoError
 
@@ -112,12 +113,9 @@ def serialize(row: ZohoIntegration) -> Dict[str, Any]:
         "syncVariables": bool(row.sync_variables),
         "statusFilter": _status_list(row),
         "syncIntervalMinutes": int(row.sync_interval_minutes or 30),
-        # Live-cluster dropdown source + cascade.
-        "sourceClusterId": row.source_cluster_id or "",
-        "selectedNamespaces": _namespace_list(row),
-        "selectedDeployments": _deployment_selection(row),
-        "customEnvironments": _custom_environment_list(row),
-        "jobOverrides": _job_override_list(row),
+        # Live-cluster dropdown source — shared with every other ticketing
+        # provider, so it comes from ticketing_targets rather than this row.
+        **targets.serialize(),
         "cascadeEnabled": bool(row.cascade_enabled),
         "dependencyMappingId": row.dependency_mapping_id or "",
         "lastDependencyStatus": row.last_dependency_status,
@@ -148,72 +146,46 @@ def _status_list(row: ZohoIntegration) -> List[str]:
     return [s.strip() for s in (row.status_filter or "").split(",") if s.strip()]
 
 
-def _namespace_list(row: ZohoIntegration) -> List[str]:
-    """Decode the operator's chosen namespaces (stored JSON-encoded, order-stable)."""
-    raw = row.selected_namespaces
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except (ValueError, TypeError):
-        # Tolerate a legacy comma-separated value.
-        parsed = [p.strip() for p in str(raw).split(",")]
-    return [str(n).strip() for n in parsed if str(n).strip()] if isinstance(parsed, list) else []
+# --- The shared deploy surface ---------------------------------------------
+# Source cluster, namespaces, deployments, custom environments and Jenkins job
+# overrides describe what KUBESIGHT can deploy, not what Zoho looks like, so they
+# live on the shared ticketing_targets row (Jira reads the identical selection).
+# These wrappers keep the call sites — and the exported names other modules and
+# the tests import — unchanged; the ``row`` argument is accepted and ignored so
+# the sync loop can keep passing the config it already has in hand.
+
+def _namespace_list(row: Optional[ZohoIntegration] = None) -> List[str]:
+    """The operator's chosen namespaces (shared across providers)."""
+    return targets.namespace_list()
 
 
-def _deployment_selection(row: ZohoIntegration) -> Dict[str, Any]:
-    """Decode the per-namespace deployment selection.
-
-    Shape: ``{namespace: {"all": bool, "names": [str]}}``. A namespace absent from
-    the map publishes ALL its live deployments (dynamic default).
-    """
-    raw = row.selected_deployments
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except (ValueError, TypeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+def _deployment_selection(row: Optional[ZohoIntegration] = None) -> Dict[str, Any]:
+    """Per-namespace deployment selection: ``{namespace: {"all", "names"}}``."""
+    return targets.deployment_selection()
 
 
-def _custom_environment_list(row: ZohoIntegration) -> List[Dict[str, Any]]:
-    """Decode the operator's custom (non-cluster) environments.
+def _custom_environment_list(row: Optional[ZohoIntegration] = None) -> List[Dict[str, Any]]:
+    """Custom (non-cluster) environments: ``[{name, applications, jenkins*}]``."""
+    return targets.custom_environment_list()
 
-    Shape: ``[{"name", "applications", "jenkinsJobPath", "jenkinsParams"}]``.
-    """
-    raw = row.custom_environments
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except (ValueError, TypeError):
-        return []
-    return parsed if isinstance(parsed, list) else []
+
+def _source_cluster_id(row: Optional[ZohoIntegration] = None) -> str:
+    """The cluster the dropdowns are read from (shared across providers)."""
+    return (targets.source_cluster_id() or "").strip()
 
 
 def custom_environment_names() -> List[str]:
     """Names of the operator's custom (non-cluster) environments, in stored
     order. Used by Mobile Applications to offer the environment binding as a
     dropdown instead of free text."""
-    return [
-        str(entry.get("name", "")).strip()
-        for entry in _custom_environment_list(get_or_create_config())
-        if str(entry.get("name", "")).strip()
-    ]
+    return targets.custom_environment_names()
 
 
 def custom_environment_by_name(name: str) -> Optional[Dict[str, Any]]:
-    """The custom-environment entry whose name matches ``name`` (Zoho compares
-    picklist values case-insensitively, so match casefolded). Used by deploy
-    automation to find a run's Jenkins routing."""
-    target = str(name or "").strip().casefold()
-    if not target:
-        return None
-    for entry in _custom_environment_list(get_or_create_config()):
-        if str(entry.get("name", "")).casefold() == target:
-            return entry
-    return None
+    """The custom-environment entry whose name matches ``name`` (dropdown values
+    compare case-insensitively, so match casefolded). Used by deploy automation
+    to find a run's Jenkins routing."""
+    return targets.custom_environment_by_name(name)
 
 
 # Every config column that stores a Zoho FIELD API NAME, with the label the
@@ -291,45 +263,16 @@ def repoint_api_name(old_api_name: str, new_api_name: str) -> List[str]:
     return changed
 
 
-def _job_override_list(row: ZohoIntegration) -> List[Dict[str, Any]]:
-    """Decode the operator's Jenkins job overrides for cluster targets.
-
-    Shape: ``[{"namespace", "deployments", "jenkinsJobPath", "jenkinsParams"}]``
-    — an empty ``deployments`` list means the whole namespace.
-    """
-    raw = row.job_overrides
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except (ValueError, TypeError):
-        return []
-    return parsed if isinstance(parsed, list) else []
+def _job_override_list(row: Optional[ZohoIntegration] = None) -> List[Dict[str, Any]]:
+    """Jenkins job overrides for cluster targets (shared across providers)."""
+    return targets.job_override_list()
 
 
 def job_override_for(namespace: str, deployment: str) -> Optional[Dict[str, Any]]:
     """The Jenkins job-override rule for a cluster target, or None (= the
-    global router). A rule naming the deployment beats a whole-namespace rule.
-    Matched casefolded — the values round-trip through Zoho, which compares
-    picklist values case-insensitively. Used by deploy automation when a run
-    actually needs a build (the image tag is not in the registry)."""
-    ns = str(namespace or "").strip().casefold()
-    dep = str(deployment or "").strip().casefold()
-    if not ns:
-        return None
-    ns_wide: Optional[Dict[str, Any]] = None
-    for entry in _job_override_list(get_or_create_config()):
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("namespace", "")).strip().casefold() != ns:
-            continue
-        deps = [str(d).strip().casefold() for d in entry.get("deployments") or []]
-        if deps:
-            if dep and dep in deps:
-                return entry
-        elif ns_wide is None:
-            ns_wide = entry
-    return ns_wide
+    global router). Used by deploy automation when a run actually needs a build
+    (the image tag is not in the registry)."""
+    return targets.job_override_for(namespace, deployment)
 
 
 def _normalize_job_overrides(value: Any) -> List[Dict[str, Any]]:
@@ -476,34 +419,13 @@ def set_source(
     a namespace left unspecified publishes all of its deployments dynamically.
     Raises ValueError on a custom name colliding with a namespace or on
     ambiguous job overrides.
+
+    The source itself is shared with every other ticketing provider, so the write
+    goes to ``ticketing_targets``; the response is still this provider's full
+    config view (the settings form round-trips the whole thing).
     """
-    row = get_or_create_config()
-    row.source_cluster_id = (str(cluster_id).strip() if cluster_id else None) or None
-    clean: List[str] = []
-    seen = set()
-    for ns in namespaces or []:
-        name = str(ns).strip()
-        if name and name not in seen:
-            seen.add(name)
-            clean.append(name)
-    if custom_environments is not None:
-        row.custom_environments = json.dumps(
-            _normalize_custom_environments(custom_environments, reserved=seen)
-        )
-    if job_overrides is not None:
-        # Keep only rules for namespaces still chosen (same as deployments).
-        rules = [r for r in _normalize_job_overrides(job_overrides) if r["namespace"] in seen]
-        row.job_overrides = json.dumps(rules)
-    row.selected_namespaces = json.dumps(clean)
-    if deployments is not None:
-        # Keep only selections for namespaces still chosen.
-        normalized = {
-            ns: sel for ns, sel in _normalize_deployment_selection(deployments).items() if ns in seen
-        }
-        row.selected_deployments = json.dumps(normalized)
-    db.session.add(row)
-    db.session.commit()
-    return serialize(row)
+    targets.set_source(cluster_id, namespaces, deployments, custom_environments, job_overrides)
+    return serialize(get_or_create_config())
 
 
 def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -566,35 +488,10 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "cascadeEnabled" in payload:
         row.cascade_enabled = bool(payload.get("cascadeEnabled"))
 
-    # Dropdown source may also be edited from the main config form.
-    if "sourceClusterId" in payload:
-        value = payload.get("sourceClusterId")
-        row.source_cluster_id = (str(value).strip() if value else None) or None
-    if "selectedNamespaces" in payload:
-        value = payload.get("selectedNamespaces")
-        if isinstance(value, (list, tuple)):
-            names = [str(v).strip() for v in value if str(v).strip()]
-        else:
-            names = [p.strip() for p in str(value or "").split(",") if p.strip()]
-        row.selected_namespaces = json.dumps(names)
-    if "selectedDeployments" in payload:
-        row.selected_deployments = json.dumps(
-            _normalize_deployment_selection(payload.get("selectedDeployments"))
-        )
-    if "customEnvironments" in payload:
-        try:
-            row.custom_environments = json.dumps(
-                _normalize_custom_environments(
-                    payload.get("customEnvironments"), reserved=set(_namespace_list(row))
-                )
-            )
-        except ValueError as exc:
-            errors.append(str(exc))
-    if "jobOverrides" in payload:
-        try:
-            row.job_overrides = json.dumps(_normalize_job_overrides(payload.get("jobOverrides")))
-        except ValueError as exc:
-            errors.append(str(exc))
+    # Dropdown source may also be edited from the main config form. It is shared
+    # with every other provider, so it is staged onto the shared row — uncommitted,
+    # so the rollback below still undoes it if anything here fails to validate.
+    errors.extend(targets.apply_config_payload(payload))
 
     # Secrets: set only when a non-empty value is supplied; explicit clear flags wipe.
     _apply_secret(payload, "clientSecret", "clearClientSecret", row, "client_secret_encrypted")
@@ -876,7 +773,7 @@ def _source_entries(row: ZohoIntegration, fresh: bool = False) -> List[Dict[str,
     configured or a cluster read fails, so the caller (sync/preview) can surface
     a clear message instead of publishing nothing.
     """
-    cluster_id = (row.source_cluster_id or "").strip()
+    cluster_id = _source_cluster_id()
     customs = _custom_environment_list(row)
     if not cluster_id and not customs:
         raise ValueError("No source selected. Pick a cluster and namespaces (or add custom environments) first.")
@@ -970,7 +867,7 @@ def _variables_for_entries(
     for change). Best-effort: read failures degrade to an empty map per
     namespace — variables are additive on top of an otherwise-good sync.
     """
-    cluster_id = (row.source_cluster_id or "").strip()
+    cluster_id = _source_cluster_id()
     # Custom (non-cluster) entries have no live spec to read env vars from.
     namespaces = sorted({e["namespace"] for e in entries if not e.get("custom")})
     if not cluster_id or not namespaces:
@@ -1090,7 +987,7 @@ def build_preview(fresh: bool = False) -> Dict[str, Any]:
             "label": e["label"],
             "deploymentName": e["name"],
             "namespace": e["namespace"],
-            "clusterId": CUSTOM_SOURCE_CLUSTER if e.get("custom") else (row.source_cluster_id or ""),
+            "clusterId": CUSTOM_SOURCE_CLUSTER if e.get("custom") else _source_cluster_id(),
             "custom": bool(e.get("custom")),
             "variables": _entry_variables(e, vars_by_ns) if manage_variables else [],
         }
@@ -1099,7 +996,7 @@ def build_preview(fresh: bool = False) -> Dict[str, Any]:
     app_values = _application_values(entries)
     variable_values = build_variable_values(entries, vars_by_ns) if manage_variables else [NONE_VALUE]
     return {
-        "sourceClusterId": row.source_cluster_id or "",
+        "sourceClusterId": _source_cluster_id(),
         "selectedNamespaces": _namespace_list(row),
         "selectedDeployments": _deployment_selection(row),
         "customEnvironments": _custom_environment_list(row),
@@ -1532,7 +1429,7 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     tag_field = row.tag_field_api_name or "cf_tag"
     variable_field = row.variable_field_api_name or "cf_variable"
     value_field = row.value_field_api_name or "cf_value"
-    source_cluster = (row.source_cluster_id or "").strip()
+    source_cluster = _source_cluster_id()
 
     ticket_id = _extract(payload, "ticketId", "id", "ticket_id")
     ticket_number = _extract(payload, "ticketNumber", "number", "ticket_number")
@@ -1743,9 +1640,18 @@ def delete_inbound_ticket(record_id: int) -> Optional[Dict[str, Any]]:
     return info
 
 
-def list_inbound_tickets(limit: int = 50) -> List[Dict[str, Any]]:
+def list_inbound_tickets(limit: int = 50, provider: Optional[str] = "zoho") -> List[Dict[str, Any]]:
+    """The newest inbound tickets, narrowed to one provider (Zoho by default).
+
+    The intake log is shared — deploy automation reads it the same way whatever
+    delivered the ticket — so each provider's tab shows only its own deliveries.
+    Pass ``provider=None`` for the whole log.
+    """
+    query = ZohoInboundTicket.query
+    if provider:
+        query = query.filter(ZohoInboundTicket.provider == provider)
     rows = (
-        ZohoInboundTicket.query.order_by(ZohoInboundTicket.received_at.desc())
+        query.order_by(ZohoInboundTicket.received_at.desc())
         .limit(max(1, min(int(limit or 50), 200)))
         .all()
     )
@@ -1768,6 +1674,7 @@ def list_inbound_tickets(limit: int = 50) -> List[Dict[str, Any]]:
         out.append(
             {
                 "id": r.id,
+                "provider": r.provider or "zoho",
                 "ticketId": r.ticket_id,
                 "ticketNumber": r.ticket_number,
                 "subject": r.subject,

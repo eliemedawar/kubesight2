@@ -18,7 +18,7 @@ import "./styles/signal/catalog.css";
 import "./styles/signal/alerts.css";
 import "./styles/signal/requests.css";
 import "./styles/signal/topology.css";
-import "./styles/signal/zoho.css";
+import "./styles/signal/ticketing.css";
 import "./styles/signal/mobileApps.css";
 import "./styles/signal/clusterBuilder.css";
 import "./styles/signal/settings.css";

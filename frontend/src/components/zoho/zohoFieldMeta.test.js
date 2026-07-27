@@ -91,16 +91,19 @@ describe("fieldActions", () => {
     expect(fieldActions(pick("203"), "variable", true).map((a) => a.key)).toEqual(["edit"]);
   });
 
+  // Conversion is a per-provider capability (Zoho Desk has the flow, Jira does
+  // not), so the tests that expect it pass the capability in explicitly.
+  const CONVERTS = { convertField: true, deleteField: true };
+
   it("offers Manage options on a plain picklist and conversion on text", () => {
     expect(fieldActions(pick("9"), "picklist", true).map((a) => a.key)).toEqual([
       "options",
       "bind",
       "edit",
     ]);
-    expect(fieldActions({ id: "9", type: "Text" }, "text", true).map((a) => a.key)).toEqual([
-      "convert",
-      "edit",
-    ]);
+    expect(
+      fieldActions({ id: "9", type: "Text" }, "text", true, CONVERTS).map((a) => a.key)
+    ).toEqual(["convert", "edit"]);
   });
 
   it("drops manual option editing once a field is bound to a live source", () => {
@@ -114,15 +117,14 @@ describe("fieldActions", () => {
 
   it("offers deletion only for removable custom fields that are not sync-owned", () => {
     const custom = { id: "9", type: "Text", custom: true, removable: true };
-    expect(fieldActions(custom, "text", true).map((a) => a.key)).toEqual([
+    expect(fieldActions(custom, "text", true, CONVERTS).map((a) => a.key)).toEqual([
       "convert",
       "edit",
       "delete",
     ]);
-    expect(fieldActions({ ...custom, removable: false }, "text", true).map((a) => a.key)).toEqual([
-      "convert",
-      "edit",
-    ]);
+    expect(
+      fieldActions({ ...custom, removable: false }, "text", true, CONVERTS).map((a) => a.key)
+    ).toEqual(["convert", "edit"]);
     expect(fieldActions({ ...custom, isPicklist: true }, "bound", true).map((a) => a.key)).toEqual([
       "bind",
       "edit",

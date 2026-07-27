@@ -25,6 +25,23 @@ def get(addon_id: str) -> Optional[AddonDescriptor]:
     return _BY_ID.get(addon_id)
 
 
+def bundled_versions(addon: AddonDescriptor) -> List[str]:
+    """Versions whose every pinned manifest is already vendored on this host.
+
+    A version that is not bundled can still install when the build profile
+    allows an internet fallback, but an offline build needs the bundle — so the
+    wizard says which is which instead of failing at the add-ons phase.
+    """
+    return [
+        version
+        for version in addon.versions
+        if all(
+            addon.bundled_path(version, filename).is_file()
+            for filename in addon.manifest_files
+        )
+    ]
+
+
 def catalog() -> List[Dict[str, Any]]:
     return [
         {
@@ -36,6 +53,13 @@ def catalog() -> List[Dict[str, Any]]:
             "defaultVersion": addon.versions[0],
             "default": False,
             "configFields": [dict(field) for field in addon.config_fields],
+            # Provenance for the wizard: every manifest is pinned to a digest,
+            # and offline builds need the bundle to be present.
+            "manifestDigests": [
+                {"file": filename, "sha256": digest}
+                for filename, digest in zip(addon.manifest_files, addon.manifest_sha256)
+            ],
+            "bundledVersions": bundled_versions(addon),
         }
         for addon in available()
     ]

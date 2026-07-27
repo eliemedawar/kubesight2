@@ -1,99 +1,21 @@
-import { useCallback, useEffect, useState } from "react";
-import ErrorBanner from "../components/common/ErrorBanner.jsx";
-import { IconRefresh } from "../components/zoho/icons.jsx";
-import { minutesToNextSync, timeAgo } from "../components/zoho/common.jsx";
-import ZohoFlowStrip from "../components/zoho/ZohoFlowStrip.jsx";
-import ZohoOverviewTab from "../components/zoho/ZohoOverviewTab.jsx";
-import ZohoFieldSyncTab from "../components/zoho/ZohoFieldSyncTab.jsx";
-import ZohoTicketsTab from "../components/zoho/ZohoTicketsTab.jsx";
-import ZohoSettingsTab from "../components/zoho/ZohoSettingsTab.jsx";
-import { ACTIVE_RUN_STATUSES } from "../components/zoho/ZohoRunDetail.jsx";
-import {
-  cancelAutomationRun,
-  deleteZohoInboundTicket,
-  getJenkinsConfig,
-  getZohoConfig,
-  getZohoPreview,
-  listAutomationRuns,
-  listZohoInboundTickets,
-  startAutomationRun,
-  syncZohoNow,
-  testJenkinsConnection,
-  testZohoConnection,
-  updateJenkinsConfig,
-  updateZohoConfig,
-} from "../api/zohoApi.js";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import ErrorBanner from "../common/ErrorBanner.jsx";
+import { minutesToNextSync, timeAgo } from "../zoho/common.jsx";
+import { IconArrowLeft, IconRefresh } from "../zoho/icons.jsx";
+import ZohoFieldSyncTab from "../zoho/ZohoFieldSyncTab.jsx";
+import ZohoFlowStrip from "../zoho/ZohoFlowStrip.jsx";
+import ZohoOverviewTab from "../zoho/ZohoOverviewTab.jsx";
+import { ACTIVE_RUN_STATUSES } from "../zoho/ZohoRunDetail.jsx";
+import ZohoTicketsTab from "../zoho/ZohoTicketsTab.jsx";
+import TicketingSettingsTab from "./TicketingSettingsTab.jsx";
+import { useTicketing } from "./TicketingContext.jsx";
+import { configPayload, emptyForm, formFromConfig } from "./settingsSchema.js";
 
-// Config keys the settings form owns. Secrets are write-only: blank = keep current.
-const EMPTY_FORM = {
-  enabled: false,
-  orgId: "",
-  layoutId: "",
-  appFieldId: "",
-  appFieldApiName: "cf_application",
-  environmentFieldId: "",
-  environmentFieldApiName: "cf_environment",
-  tagFieldApiName: "cf_tag",
-  variableFieldId: "",
-  variableFieldApiName: "cf_variable",
-  valueFieldApiName: "cf_value",
-  apiBase: "https://desk.zoho.com/api/v1",
-  accountsBase: "https://accounts.zoho.com",
-  tokenEndpoint: "https://accounts.zoho.com/oauth/v2/token",
-  departmentId: "",
-  statusFilter: "active,degraded",
-  syncIntervalMinutes: 30,
-  syncApplication: true,
-  syncEnvironment: true,
-  syncVariables: false,
-  cascadeEnabled: true,
-  clientId: "",
-  clientSecret: "",
-  refreshToken: "",
-  inboundSecret: "",
-  ticketWritebackEnabled: false,
-  ticketStatusStarted: "Open",
-  ticketStatusDeployed: "Closed",
-  ticketStatusFailed: "Failed",
-  ticketStatusCancelled: "Canceled",
-  ticketOwnerEmail: "zagent@areeba.com",
-};
-
-function formFromConfig(cfg) {
-  return {
-    enabled: Boolean(cfg.enabled),
-    orgId: cfg.orgId || "",
-    layoutId: cfg.layoutId || "",
-    appFieldId: cfg.appFieldId || "",
-    appFieldApiName: cfg.appFieldApiName || "cf_application",
-    environmentFieldId: cfg.environmentFieldId || "",
-    environmentFieldApiName: cfg.environmentFieldApiName || "cf_environment",
-    tagFieldApiName: cfg.tagFieldApiName || "cf_tag",
-    variableFieldId: cfg.variableFieldId || "",
-    variableFieldApiName: cfg.variableFieldApiName || "cf_variable",
-    valueFieldApiName: cfg.valueFieldApiName || "cf_value",
-    apiBase: cfg.apiBase || "https://desk.zoho.com/api/v1",
-    accountsBase: cfg.accountsBase || "https://accounts.zoho.com",
-    tokenEndpoint: cfg.tokenEndpoint || "https://accounts.zoho.com/oauth/v2/token",
-    departmentId: cfg.departmentId || "",
-    statusFilter: (cfg.statusFilter || []).join(", "),
-    syncIntervalMinutes: cfg.syncIntervalMinutes || 30,
-    syncApplication: cfg.syncApplication !== false,
-    syncEnvironment: cfg.syncEnvironment !== false,
-    syncVariables: Boolean(cfg.syncVariables),
-    cascadeEnabled: cfg.cascadeEnabled !== false,
-    clientId: cfg.clientId || "",
-    clientSecret: "",
-    refreshToken: "",
-    inboundSecret: "",
-    ticketWritebackEnabled: Boolean(cfg.ticketWritebackEnabled),
-    ticketStatusStarted: cfg.ticketStatusStarted || "Open",
-    ticketStatusDeployed: cfg.ticketStatusDeployed || "Closed",
-    ticketStatusFailed: cfg.ticketStatusFailed || "Failed",
-    ticketStatusCancelled: cfg.ticketStatusCancelled || "Canceled",
-    ticketOwnerEmail: cfg.ticketOwnerEmail || "",
-  };
-}
+// One provider's workspace: command bar → flow strip → four rooms. This is the
+// page the Ticketing tab opens when a provider card is picked, and it is
+// provider-agnostic — everything vendor-specific reaches it through
+// `useTicketing()` (the bound API client, the capability flags, and the form
+// schema that decides which settings inputs exist).
 
 const TABS = [
   { key: "overview", label: "Overview" },
@@ -102,7 +24,9 @@ const TABS = [
   { key: "settings", label: "Settings" },
 ];
 
-export default function ZohoSyncPage({ canManage = false }) {
+export default function ProviderWorkspace({ canManage = false, onBack }) {
+  const { key: providerKey, name: providerName, formNoun, api } = useTicketing();
+
   const [config, setConfig] = useState(null);
   const [preview, setPreview] = useState(null);
   const [tickets, setTickets] = useState([]);
@@ -113,12 +37,13 @@ export default function ZohoSyncPage({ canManage = false }) {
   const [notice, setNotice] = useState("");
   const [tab, setTab] = useState("overview");
 
-  const [form, setForm] = useState(EMPTY_FORM);
+  const blankForm = useMemo(() => emptyForm(providerKey), [providerKey]);
+  const [form, setForm] = useState(blankForm);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  // Bumped by the Refresh button; the layout editor reloads (cache-bypassing)
+  // Bumped by the Refresh button; the form editor reloads (cache-bypassing)
   // whenever it changes.
   const [layoutReloadKey, setLayoutReloadKey] = useState(0);
   const [deletingTicketId, setDeletingTicketId] = useState(null);
@@ -134,53 +59,56 @@ export default function ZohoSyncPage({ canManage = false }) {
 
   const webhookUrl =
     typeof window !== "undefined"
-      ? `${window.location.origin.replace(/\/$/, "")}/api/zoho/inbound`
-      : "/api/zoho/inbound";
+      ? `${window.location.origin.replace(/\/$/, "")}/api/ticketing/${providerKey}/inbound`
+      : `/api/ticketing/${providerKey}/inbound`;
 
-  const load = useCallback(async (fresh = false) => {
-    setLoading(true);
-    setPreviewLoading(true);
-    setTicketsLoading(true);
-    setError("");
-    // Fire everything at once, but only gate the page shell on the config (a
-    // fast DB read). The preview (live cluster reads) and the ticket log stream
-    // into their sections when they arrive.
-    const previewPromise = getZohoPreview(fresh).catch(() => null);
-    // The backend prunes the inbound log to the 10 newest tickets on every
-    // webhook delivery — ask for exactly that window.
-    const ticketsPromise = listZohoInboundTickets(10).catch(() => ({ items: [] }));
-    const jenkinsPromise = getJenkinsConfig().catch(() => null);
-    const runsPromise = listAutomationRuns(50).catch(() => ({ items: [] }));
-    try {
-      const cfg = await getZohoConfig();
-      setConfig(cfg);
-      setForm(formFromConfig(cfg));
-    } catch (err) {
-      setError(err.message || "Failed to load the Zoho integration.");
-    } finally {
-      setLoading(false);
-    }
-    previewPromise.then((prev) => {
-      setPreview(prev);
-      setPreviewLoading(false);
-    });
-    ticketsPromise.then((inbound) => {
-      setTickets(inbound?.items || []);
-      setTicketsLoading(false);
-    });
-    jenkinsPromise.then((jk) => setJenkins(jk));
-    runsPromise.then((res) => {
-      setRuns(res?.items || []);
-      setRunsLoading(false);
-    });
-  }, []);
+  const load = useCallback(
+    async (fresh = false) => {
+      setLoading(true);
+      setPreviewLoading(true);
+      setTicketsLoading(true);
+      setError("");
+      // Fire everything at once, but only gate the page shell on the config (a
+      // fast DB read). The preview (live cluster reads) and the ticket log stream
+      // into their sections when they arrive.
+      const previewPromise = api.getPreview(fresh).catch(() => null);
+      // The backend prunes the inbound log to the 10 newest tickets on every
+      // webhook delivery — ask for exactly that window.
+      const ticketsPromise = api.listInboundTickets(10).catch(() => ({ items: [] }));
+      const jenkinsPromise = api.getJenkinsConfig().catch(() => null);
+      const runsPromise = api.listAutomationRuns(50).catch(() => ({ items: [] }));
+      try {
+        const cfg = await api.getConfig();
+        setConfig(cfg);
+        setForm(formFromConfig(providerKey, cfg));
+      } catch (err) {
+        setError(err.message || `Failed to load the ${providerName} integration.`);
+      } finally {
+        setLoading(false);
+      }
+      previewPromise.then((prev) => {
+        setPreview(prev);
+        setPreviewLoading(false);
+      });
+      ticketsPromise.then((inbound) => {
+        setTickets(inbound?.items || []);
+        setTicketsLoading(false);
+      });
+      jenkinsPromise.then((jk) => setJenkins(jk));
+      runsPromise.then((res) => {
+        setRuns(res?.items || []);
+        setRunsLoading(false);
+      });
+    },
+    [api, providerKey, providerName]
+  );
 
   useEffect(() => {
     load();
   }, [load]);
 
   // Manual refresh: reload everything, bypassing the server-side read caches,
-  // and tell the layout editor to re-read Zoho too.
+  // and tell the form editor to re-read the provider too.
   const runRefresh = async () => {
     setRefreshing(true);
     setNotice("");
@@ -199,18 +127,18 @@ export default function ZohoSyncPage({ canManage = false }) {
     if (!hasActiveRun) return undefined;
     const timer = setInterval(async () => {
       try {
-        const res = await listAutomationRuns(50);
+        const res = await api.listAutomationRuns(50);
         setRuns(res?.items || []);
       } catch {
         /* transient — next poll retries */
       }
     }, 10000);
     return () => clearInterval(timer);
-  }, [hasActiveRun]);
+  }, [hasActiveRun, api]);
 
   const refreshRuns = async () => {
     try {
-      const res = await listAutomationRuns(50);
+      const res = await api.listAutomationRuns(50);
       setRuns(res?.items || []);
     } catch {
       /* best-effort */
@@ -221,7 +149,7 @@ export default function ZohoSyncPage({ canManage = false }) {
     setSavingJenkins(true);
     setError("");
     try {
-      const updated = await updateJenkinsConfig(payload);
+      const updated = await api.updateJenkinsConfig(payload);
       setJenkins(updated);
       setNotice("Jenkins connection saved.");
       return true;
@@ -238,7 +166,7 @@ export default function ZohoSyncPage({ canManage = false }) {
     setError("");
     setNotice("");
     try {
-      const result = await testJenkinsConnection();
+      const result = await api.testJenkinsConnection();
       setJenkins((prev) => ({ ...(prev || {}), ...result }));
       if (result.status === "ok") {
         setNotice(result.message || "Jenkins connection OK.");
@@ -257,7 +185,7 @@ export default function ZohoSyncPage({ canManage = false }) {
     setNotice("");
     setStartingTicketId(ticket.id);
     try {
-      await startAutomationRun(ticket.id);
+      await api.startAutomationRun(ticket.id);
       setNotice(`Automation started for ${ticket.ticketNumber || ticket.ticketId || "the ticket"}.`);
       await refreshRuns();
     } catch (err) {
@@ -274,7 +202,7 @@ export default function ZohoSyncPage({ canManage = false }) {
     setError("");
     setCancellingRunId(run.id);
     try {
-      await cancelAutomationRun(run.id);
+      await api.cancelAutomationRun(run.id);
       await refreshRuns();
     } catch (err) {
       setError(err.message || "Failed to cancel the run.");
@@ -292,7 +220,7 @@ export default function ZohoSyncPage({ canManage = false }) {
     setNotice("");
     setDeletingTicketId(ticket.id);
     try {
-      await deleteZohoInboundTicket(ticket.id);
+      await api.deleteInboundTicket(ticket.id);
       setTickets((prev) => prev.filter((t) => t.id !== ticket.id));
     } catch (err) {
       setError(err.message || "Failed to delete the inbound ticket.");
@@ -305,7 +233,7 @@ export default function ZohoSyncPage({ canManage = false }) {
 
   const refreshPreview = async () => {
     try {
-      setPreview(await getZohoPreview());
+      setPreview(await api.getPreview());
     } catch {
       /* preview is best-effort */
     }
@@ -316,44 +244,9 @@ export default function ZohoSyncPage({ canManage = false }) {
     setError("");
     setNotice("");
     try {
-      const payload = {
-        enabled: form.enabled,
-        orgId: form.orgId,
-        layoutId: form.layoutId,
-        appFieldId: form.appFieldId,
-        appFieldApiName: form.appFieldApiName,
-        environmentFieldId: form.environmentFieldId,
-        environmentFieldApiName: form.environmentFieldApiName,
-        tagFieldApiName: form.tagFieldApiName,
-        variableFieldId: form.variableFieldId,
-        variableFieldApiName: form.variableFieldApiName,
-        valueFieldApiName: form.valueFieldApiName,
-        apiBase: form.apiBase,
-        accountsBase: form.accountsBase,
-        tokenEndpoint: form.tokenEndpoint,
-        departmentId: form.departmentId,
-        statusFilter: form.statusFilter,
-        syncIntervalMinutes: Number(form.syncIntervalMinutes) || 30,
-        syncApplication: form.syncApplication,
-        syncEnvironment: form.syncEnvironment,
-        syncVariables: form.syncVariables,
-        cascadeEnabled: form.cascadeEnabled,
-        clientId: form.clientId,
-        ticketWritebackEnabled: form.ticketWritebackEnabled,
-        ticketStatusStarted: form.ticketStatusStarted,
-        ticketStatusDeployed: form.ticketStatusDeployed,
-        ticketStatusFailed: form.ticketStatusFailed,
-        ticketStatusCancelled: form.ticketStatusCancelled,
-        ticketOwnerEmail: form.ticketOwnerEmail,
-      };
-      // Secrets: only send when the operator typed one (blank keeps current).
-      if (form.clientSecret.trim()) payload.clientSecret = form.clientSecret.trim();
-      if (form.refreshToken.trim()) payload.refreshToken = form.refreshToken.trim();
-      if (form.inboundSecret.trim()) payload.inboundSecret = form.inboundSecret.trim();
-
-      const updated = await updateZohoConfig(payload);
+      const updated = await api.updateConfig(configPayload(providerKey, form));
       setConfig(updated);
-      setForm(formFromConfig(updated));
+      setForm(formFromConfig(providerKey, updated));
       setNotice("Configuration saved.");
       refreshPreview();
     } catch (err) {
@@ -368,7 +261,7 @@ export default function ZohoSyncPage({ canManage = false }) {
     setError("");
     setNotice("");
     try {
-      const result = await testZohoConnection();
+      const result = await api.testConnection();
       if (result.status === "ok") {
         setNotice(result.message || "Connection successful.");
       } else {
@@ -387,7 +280,7 @@ export default function ZohoSyncPage({ canManage = false }) {
     setError("");
     setNotice("");
     try {
-      const result = await syncZohoNow();
+      const result = await api.syncNow();
       if (result.status === "ok") {
         setNotice(result.message || "Sync complete.");
       } else {
@@ -402,12 +295,20 @@ export default function ZohoSyncPage({ canManage = false }) {
     }
   };
 
+  const backButton = (
+    <button type="button" className="btn-ghost sg-zh-back" onClick={onBack}>
+      <IconArrowLeft />
+      All providers
+    </button>
+  );
+
   if (loading) {
     return (
       <div className="zoho-page">
         <header className="sg-zh-cmdbar">
           <div>
-            <h2 className="sg-zh-cmdtitle">Zoho Integration</h2>
+            {backButton}
+            <h2 className="sg-zh-cmdtitle">{providerName}</h2>
           </div>
         </header>
         <p className="muted">Loading…</p>
@@ -416,8 +317,15 @@ export default function ZohoSyncPage({ canManage = false }) {
   }
 
   const enabled = Boolean(config?.enabled);
-  const dirty = JSON.stringify(form) !== JSON.stringify(formFromConfig(config || {}));
+  const dirty = JSON.stringify(form) !== JSON.stringify(formFromConfig(providerKey, config || {}));
   const nextSync = minutesToNextSync(config);
+  // Which config key names the account/site, per provider — the subtitle's
+  // "connected to what" line.
+  const scopeLabel = config?.orgId
+    ? { label: "Desk org", value: config.orgId }
+    : config?.projectKey
+    ? { label: "Project", value: config.projectKey }
+    : null;
 
   // Attention badge on the Tickets & runs tab: unresolved tickets + runs
   // waiting on a human.
@@ -430,16 +338,17 @@ export default function ZohoSyncPage({ canManage = false }) {
       {/* ------------------------------------------------ Command bar ------ */}
       <header className="sg-zh-cmdbar">
         <div>
+          {backButton}
           <h2 className="sg-zh-cmdtitle">
-            Zoho Integration
+            {providerName}
             <span className={`status-pill ${enabled ? "ok" : "muted"}`}>
               {enabled ? "On" : "Off"}
             </span>
           </h2>
           <p className="sg-zh-cmdsub">
-            {config?.orgId ? (
+            {scopeLabel ? (
               <>
-                Desk org <span className="mono">{config.orgId}</span>
+                {scopeLabel.label} <span className="mono">{scopeLabel.value}</span>
               </>
             ) : (
               "Not connected yet"
@@ -460,7 +369,7 @@ export default function ZohoSyncPage({ canManage = false }) {
             className="btn-ghost sg-zh-copy"
             onClick={runRefresh}
             disabled={refreshing}
-            title="Re-read the config, live deployments, Zoho layout and ticket log"
+            title={`Re-read the config, live deployments, ${providerName} ${formNoun} and ticket log`}
           >
             <IconRefresh className={refreshing ? "sg-zh-spin" : undefined} />
             {refreshing ? "Refreshing…" : "Refresh"}
@@ -507,7 +416,7 @@ export default function ZohoSyncPage({ canManage = false }) {
       />
 
       {/* ------------------------------------------------ Sub-tabs --------- */}
-      <nav className="sg-zh-subtabs" role="tablist" aria-label="Zoho integration sections">
+      <nav className="sg-zh-subtabs" role="tablist" aria-label={`${providerName} integration sections`}>
         {TABS.map((t) => (
           <button
             key={t.key}
@@ -539,7 +448,7 @@ export default function ZohoSyncPage({ canManage = false }) {
             if (updated) setConfig((prev) => ({ ...(prev || {}), ...updated }));
             await refreshPreview();
           }}
-          // A layout edit can change which fields the sync publishes into, so
+          // A form edit can change which fields the sync publishes into, so
           // the preview beside the editor has to be re-read too.
           onLayoutChanged={refreshPreview}
           preview={preview}
@@ -566,7 +475,7 @@ export default function ZohoSyncPage({ canManage = false }) {
       ) : null}
 
       {tab === "settings" ? (
-        <ZohoSettingsTab
+        <TicketingSettingsTab
           canManage={canManage}
           config={config}
           form={form}
@@ -574,7 +483,7 @@ export default function ZohoSyncPage({ canManage = false }) {
           onSaveConfig={saveConfig}
           savingConfig={saving}
           dirty={dirty}
-          onDiscard={() => setForm(formFromConfig(config || {}))}
+          onDiscard={() => setForm(formFromConfig(providerKey, config || {}))}
           webhookUrl={webhookUrl}
           jenkins={jenkins}
           onSaveJenkins={saveJenkins}

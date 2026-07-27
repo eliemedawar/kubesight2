@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { getZohoOptionSources } from "../../api/zohoApi.js";
+import { useTicketingApi } from "../ticketing/TicketingContext.jsx";
 
 /**
  * The option-source catalogue + every current binding.
@@ -9,6 +9,7 @@ import { getZohoOptionSources } from "../../api/zohoApi.js";
  * grouped by (deployments group by namespace, env vars group by deployment).
  */
 export default function useZohoOptionSources() {
+  const api = useTicketingApi();
   const [sources, setSources] = useState([]);
   const [bindings, setBindings] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -18,7 +19,7 @@ export default function useZohoOptionSources() {
     setLoading(true);
     setError("");
     try {
-      const data = await getZohoOptionSources();
+      const data = await api.getOptionSources();
       setSources(data?.sources || []);
       setBindings(data?.bindings || []);
     } catch (err) {

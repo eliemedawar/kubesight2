@@ -1,13 +1,35 @@
 import { VALUE_CHIP_CAP, fieldActions, fieldHint } from "./zohoFieldMeta";
+import { useTicketing } from "../ticketing/TicketingContext.jsx";
+import ZohoActionMenu from "./ZohoActionMenu.jsx";
 
 /**
- * One field on the layout mirror. Purely presentational — every button just
+ * One field on the form mirror. Purely presentational — every button just
  * dispatches its action key back to the editor, which owns the modals.
  */
-export default function ZohoFieldCard({ field, role, canManage, onAction }) {
+export default function ZohoFieldCard({
+  field,
+  role,
+  canManage,
+  sectionName,
+  sectionNames,
+  onAction,
+}) {
+  const { capabilities } = useTicketing();
   const values = (field.allowedValues || []).filter((v) => v !== "-None-");
   const hint = fieldHint(role, field);
-  const actions = fieldActions(field, role, canManage);
+  const actions = fieldActions(field, role, canManage, capabilities);
+  if (canManage && sectionNames.some((name) => name !== sectionName)) {
+    const editIndex = actions.findIndex((action) => action.key === "edit");
+    actions.splice(editIndex < 0 ? actions.length : editIndex + 1, 0, {
+      key: "move",
+      label: "Move to section",
+      variant: "btn-ghost",
+    });
+  }
+  const primaryAction = actions.find((action) => action.key === "edit");
+  const secondaryActions = actions
+    .filter((action) => action.key !== "edit")
+    .map((action) => ({ ...action, danger: action.key === "delete" }));
   const binding = field.binding && !field.binding.locked ? field.binding : null;
 
   return (
@@ -72,16 +94,20 @@ export default function ZohoFieldCard({ field, role, canManage, onAction }) {
 
       {actions.length ? (
         <footer>
-          {actions.map((action) => (
+          {primaryAction ? (
             <button
-              key={action.key}
               type="button"
-              className={action.variant}
-              onClick={() => onAction(action.key, field)}
+              className="btn-ghost"
+              onClick={() => onAction(primaryAction.key, field, sectionName)}
             >
-              {action.label}
+              {primaryAction.label}
             </button>
-          ))}
+          ) : null}
+          <ZohoActionMenu
+            label={`More actions for ${field.label}`}
+            items={secondaryActions}
+            onAction={(action) => onAction(action, field, sectionName)}
+          />
         </footer>
       ) : null}
     </div>

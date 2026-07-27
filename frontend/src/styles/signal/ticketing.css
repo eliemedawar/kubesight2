@@ -1,6 +1,96 @@
-/* Signal page-specific styles — Zoho integration (shared vocabulary lives in screens.css).
-   Structure: command bar → flow strip → sub-tabs → one room at a time
-   (Overview / Field sync / Tickets & runs / Settings). */
+/* Signal page-specific styles — Ticketing (shared vocabulary lives in screens.css).
+   Structure: provider picker → command bar → flow strip → sub-tabs → one room at
+   a time (Overview / Field sync / Tickets & runs / Settings).
+
+   The `sg-zh-` prefix predates the second provider and is kept deliberately: the
+   classes are on components shared by both, and renaming ~150 selectors across
+   the markup would be churn with no behavioural change. New provider-picker
+   classes use `sg-tk-`. */
+
+/* ── Provider picker ────────────────────────────────────────────── */
+.sg-tk-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: var(--space-4);
+}
+.sg-tk-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: stretch;
+  text-align: left;
+  width: 100%;
+  padding: var(--space-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.sg-tk-card:hover,
+.sg-tk-card:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.sg-tk-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+.sg-tk-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  background: var(--bg-app, var(--bg-elevated));
+  color: var(--accent);
+}
+.sg-tk-card-icon svg { width: 1.1rem; height: 1.1rem; }
+.sg-tk-card-name {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sg-tk-card-name b { font-size: 1.05rem; }
+.sg-tk-card-name .muted { font-size: 0.85rem; }
+.sg-tk-card-detail {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  /* A long sync-error message must not stretch the card past its column. */
+  overflow-wrap: anywhere;
+}
+.sg-tk-card-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
+}
+.sg-tk-card-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+.sg-tk-card-cta svg { width: 1rem; height: 1rem; }
+.sg-tk-note { margin-top: var(--space-4); font-size: 0.85rem; }
+
+/* Back to the picker, above the provider title. */
+.sg-zh-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.35rem;
+  padding-inline: 0;
+  font-size: 0.85rem;
+}
+.sg-zh-back svg { width: 0.95rem; height: 0.95rem; }
 
 .zoho-page > .card { margin-bottom: var(--space-4); }
 .zoho-page > .card:last-child { margin-bottom: 0; }
@@ -663,6 +753,71 @@
 .sg-zh-zcaption b { color: var(--text-subtle); }
 
 /* ── Layout editor ──────────────────────────────────────────────── */
+.sg-zh-layout-guide {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-top: 0.85rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius-md);
+  background: var(--info-soft);
+  color: var(--text-subtle);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+.sg-zh-layout-guide > svg {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  color: var(--info);
+}
+.sg-zh-layout-guide > span { flex: 1; }
+.sg-zh-layout-guide button,
+.sg-zh-layout-tool-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+.sg-zh-layout-guide button svg,
+.sg-zh-layout-tool-actions button svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.sg-zh-layout-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-top: 0.8rem;
+}
+.sg-zh-layout-search {
+  position: relative;
+  flex: 1;
+  min-width: 12rem;
+}
+.sg-zh-layout-search > svg {
+  position: absolute;
+  left: 0.7rem;
+  top: 50%;
+  width: 0.9rem;
+  height: 0.9rem;
+  color: var(--text-muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.sg-zh-layout-search input {
+  width: 100%;
+  min-height: 2.25rem;
+  padding-left: 2.1rem;
+}
+.sg-zh-layout-tool-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
 .sg-zh-src {
   display: flex;
   align-items: center;
@@ -687,18 +842,49 @@
 }
 .sg-zh-src-sep { color: var(--border-strong); }
 
+.sg-zh-section { min-width: 0; }
 .sg-zh-sect {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.45rem;
   margin: 1.35rem 0 0.7rem;
+}
+.sg-zh-sect h4 {
+  margin: 0;
   font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
-.sg-zh-sect::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+.sg-zh-sect-line {
+  flex: 1;
+  height: 1px;
+  margin: 0 0.2rem;
+  background: var(--border-soft);
+}
+.sg-zh-sect-toggle,
+.sg-zh-menu-trigger {
+  display: inline-grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  min-width: 1.9rem;
+  padding: 0;
+}
+.sg-zh-sect-toggle svg,
+.sg-zh-menu-trigger svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+.sg-zh-sect-toggle svg { transition: transform var(--dur-fast) var(--ease); }
+.sg-zh-sect-toggle.is-collapsed svg { transform: rotate(-90deg); }
+.sg-zh-sectadd {
+  flex: none;
+  min-height: 1.9rem;
+  padding: 0.25rem 0.65rem;
+  font-size: 0.6875rem;
+}
 
 .sg-zh-fgrid {
   display: grid;
@@ -760,12 +946,56 @@
 
 .sg-zh-field > footer {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 0.4rem;
-  flex-wrap: wrap;
   margin-top: auto;
   padding-top: 0.7rem;
 }
 .sg-zh-field > footer button { font-size: 0.75rem; padding: 0.3rem 0.8rem; }
+
+.sg-zh-menu {
+  position: relative;
+  flex: none;
+}
+.sg-zh-field > footer .sg-zh-menu-trigger,
+.sg-zh-sect .sg-zh-menu-trigger { padding: 0; }
+.sg-zh-menu-popover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 0.25rem);
+  min-width: 11.5rem;
+  padding: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-lg);
+}
+.sg-zh-menu-popover--right { right: 0; }
+.sg-zh-menu-popover--left { left: 0; }
+.sg-zh-menu-popover > button {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+}
+.sg-zh-menu-popover > button:hover {
+  background: var(--bg-panel-strong);
+  color: var(--text-strong);
+}
+.sg-zh-menu-popover > button.sg-zh-menu-danger { color: var(--danger); }
+.sg-zh-menu-popover > button.sg-zh-menu-danger:hover { background: var(--danger-soft); }
+.sg-zh-menu-popover > button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* Warning note inside modals (auto-managed fields). */
 .sg-zh-note {
@@ -1082,19 +1312,11 @@
 
 /* ── Layout editor: sections, layout-write confirmation ─────────────────── */
 
-/* .sg-zh-sect is a flex row whose ::after hairline eats the free width, so the
-   per-section action has to be ordered AFTER it to sit on the right. */
-.sg-zh-sect > span:first-child { order: 0; }
-.sg-zh-scount { order: 1; color: var(--text-muted); font-weight: 500; }
-.sg-zh-sect::after { order: 2; }
-.sg-zh-sectadd {
-  order: 3;
-  flex: none;
-  /* Escape the uppercase/tracked treatment the section header applies. */
-  text-transform: none;
-  letter-spacing: normal;
+.sg-zh-scount {
+  color: var(--text-muted);
   font-size: 0.6875rem;
-  font-weight: 600;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* Wider than .modal-panel (42rem), narrower than .sg-zh-picker (60rem): the
@@ -1166,6 +1388,85 @@
   line-height: 1.5;
 }
 .sg-zh-diffpre:focus-visible { outline: none; box-shadow: var(--ring); }
+
+/* Recovery browser: metadata first, exact restore diff second. */
+.sg-zh-modal--recovery { width: min(54rem, 100%); }
+.sg-zh-modal--recovery .modal-header > div { min-width: 0; }
+.sg-zh-modal--recovery .modal-header p { margin: 0.2rem 0 0; }
+.sg-zh-recovery-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: min(60vh, 34rem);
+  overflow: auto;
+}
+.sg-zh-recovery-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.9rem;
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  color: var(--text-subtle);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sg-zh-recovery-row:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-panel-strong);
+}
+.sg-zh-recovery-row > span:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.sg-zh-recovery-row b {
+  color: var(--text-strong);
+  font-size: 0.8125rem;
+}
+.sg-zh-recovery-row small,
+.sg-zh-recovery-counts {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.sg-zh-recovery-view {
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.sg-zh-recovery-selected {
+  display: flex;
+  align-items: baseline;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel-strong);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.sg-zh-recovery-selected b { color: var(--text-strong); }
+
+@media (max-width: 760px) {
+  .sg-zh-layout-guide,
+  .sg-zh-layout-tools {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .sg-zh-layout-tool-actions { flex-wrap: wrap; }
+  .sg-zh-layout-tools > .sg-zh-count { align-self: flex-start; }
+  .sg-zh-sect-line { display: none; }
+  .sg-zh-sect { flex-wrap: wrap; }
+  .sg-zh-sect h4 { flex: 1; }
+  .sg-zh-recovery-row { grid-template-columns: 1fr auto; }
+  .sg-zh-recovery-counts { grid-column: 1 / -1; grid-row: 2; }
+}
 
 /* ── Layout editor: option-source bindings ─────────────────────────────── */
 

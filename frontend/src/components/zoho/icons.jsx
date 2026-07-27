@@ -1,4 +1,4 @@
-// Inline stroke icons (Lucide outlines) shared by the Zoho screens.
+// Inline stroke icons (Lucide outlines) shared by the Ticketing screens.
 const base = {
   viewBox: "0 0 24 24",
   fill: "none",
@@ -115,6 +115,22 @@ export const IconArrowRight = (props) => (
   </svg>
 );
 
+export const IconArrowLeft = (props) => (
+  <svg {...base} {...props}>
+    <path d="M19 12H5" />
+    <path d="m12 19-7-7 7-7" />
+  </svg>
+);
+
+export const IconPlug = (props) => (
+  <svg {...base} {...props}>
+    <path d="M12 22v-5" />
+    <path d="M9 8V2" />
+    <path d="M15 8V2" />
+    <path d="M18 8v3a6 6 0 0 1-12 0V8z" />
+  </svg>
+);
+
 export const IconChevronRight = (props) => (
   <svg {...base} {...props}>
     <path d="m9 6 6 6-6 6" />
@@ -125,5 +141,27 @@ export const IconSearch = (props) => (
   <svg {...base} {...props}>
     <circle cx="11" cy="11" r="7" />
     <path d="m21 21-4.35-4.35" />
+  </svg>
+);
+
+export const IconMoreVertical = (props) => (
+  <svg {...base} {...props}>
+    <circle cx="12" cy="5" r="1" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+export const IconChevronDown = (props) => (
+  <svg {...base} {...props}>
+    <path d="m6 9 6 6 6-6" />
+  </svg>
+);
+
+export const IconHistory = (props) => (
+  <svg {...base} {...props}>
+    <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+    <path d="M3 3v5h5" />
+    <path d="M12 7v5l3 2" />
   </svg>
 );

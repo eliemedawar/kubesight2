@@ -1009,6 +1009,41 @@ class UserTemplate(db.Model):
     creator = db.relationship("User", foreign_keys=[created_by])
 
 
+class HelmChartTemplate(db.Model):
+    """Reusable Helm charts imported from Kubernetes YAML or Git.
+
+    ``definition`` contains the chart's relative files (base64 encoded), the
+    scrubbed default values, generated input descriptors, and import warnings.
+    Git credentials are deliberately never part of this model.
+    """
+
+    __tablename__ = "helm_chart_templates"
+
+    id = db.Column(db.Integer, primary_key=True)
+    slug = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    name = db.Column(db.String(120), nullable=False)
+    description = db.Column(db.String(500), nullable=True)
+    version = db.Column(db.String(64), nullable=False, default="0.1.0")
+    app_version = db.Column(db.String(64), nullable=True)
+    source_type = db.Column(db.String(32), nullable=False)
+    source_ref = db.Column(db.String(1000), nullable=True)
+    definition = db.Column(db.JSON, nullable=False, default=dict)
+    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    creator = db.relationship("User", foreign_keys=[created_by])
+
+
 class DeploymentRequest(db.Model):
     """A user request to deploy or change something in a cluster.
 
@@ -1951,13 +1986,17 @@ class ZohoIntegration(db.Model):
 
 
 class ZohoInboundTicket(db.Model):
-    """Audit log of DevOps Request tickets Zoho pushed to KubeSight's webhook.
+    """Audit log of DevOps Request tickets a ticketing provider pushed to the webhook.
 
     Each row records the raw picklist value, the parsed AppService id + tag, and
     whether it resolved to a live AppService. This is the intake precursor to the
     (later) deploy-automation state machine — for now it captures and resolves,
     nothing more. ``ticket_id`` is unique so duplicate webhook deliveries for the
     same ticket coalesce instead of stacking.
+
+    Despite the name (kept so the live table is not renamed under a running
+    deployment) the row is provider-neutral: ``provider`` says which integration
+    delivered it, and deploy automation reads the same columns either way.
     """
 
     __tablename__ = "zoho_inbound_tickets"
@@ -1966,6 +2005,12 @@ class ZohoInboundTicket(db.Model):
     )
 
     id = db.Column(db.Integer, primary_key=True)
+    # "zoho" | "jira" — which provider's webhook delivered this ticket. Existing
+    # rows predate Jira and are all Zoho, hence the default.
+    provider = db.Column(db.String(16), nullable=False, default="zoho", index=True)
+    # Unique across providers: a Zoho ticket id and a Jira issue id never collide
+    # (Jira's are project-prefixed keys / numeric ids from a different space), and
+    # a single unique index keeps duplicate deliveries coalescing as before.
     ticket_id = db.Column(db.String(64), nullable=True, unique=True, index=True)
     ticket_number = db.Column(db.String(64), nullable=True)
     subject = db.Column(db.Text, nullable=True)
@@ -2003,6 +2048,9 @@ class ZohoLayoutSnapshot(db.Model):
     __tablename__ = "zoho_layout_snapshots"
 
     id = db.Column(db.Integer, primary_key=True)
+    # "zoho" | "jira" — Jira takes the same before-write snapshot of a screen's
+    # tabs, since reordering tabs there is also a whole-object rewrite.
+    provider = db.Column(db.String(16), nullable=False, default="zoho", index=True)
     layout_id = db.Column(db.String(64), nullable=False, index=True)
     # Why the write happened: "add_section", "place_field", "field_conversion"…
     reason = db.Column(db.String(80), nullable=True)
@@ -2034,7 +2082,14 @@ class ZohoFieldBinding(db.Model):
     __tablename__ = "zoho_field_bindings"
 
     id = db.Column(db.Integer, primary_key=True)
-    # One binding per field — two writers on the same picklist would race.
+    # "zoho" | "jira" — which provider's field this binds. The option SOURCES are
+    # provider-neutral (they read Kubernetes); only the publish call differs.
+    provider = db.Column(db.String(16), nullable=False, default="zoho", index=True)
+    # One binding per field — two writers on the same picklist would race. The
+    # index stays globally unique rather than (provider, field_id): Zoho field ids
+    # are bare digits and Jira's are "customfield_NNNNN", so the two id spaces
+    # cannot collide, and keeping the original index avoids rebuilding it under a
+    # live SQLite deployment.
     field_id = db.Column(db.String(64), nullable=False, unique=True, index=True)
     # Cached from the layout for display only; the field id is the identity.
     api_name = db.Column(db.String(120), nullable=True)
@@ -2532,6 +2587,173 @@ class MobileAppPublish(db.Model):
         onupdate=lambda: datetime.now(timezone.utc),
     )
     finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+
+class TicketingDeployConfig(db.Model):
+    """What KubeSight can deploy — shared by every ticketing provider.
+
+    The dropdown *source* (a cluster, its namespaces, which deployments to
+    publish), the custom non-cluster environments and the Jenkins job overrides
+    describe KubeSight's own deploy surface, not Zoho's or Jira's. They lived on
+    :class:`ZohoIntegration` while Zoho was the only provider; a second provider
+    would otherwise mean configuring the same clusters twice and two sources of
+    truth for deploy routing.
+
+    Single row (id is always 1), seeded once from the existing Zoho row by
+    ``migrate_rbac._migrate_ticketing_tables``. The columns keep their original
+    names and JSON encodings so the migration is a copy, not a transform.
+    """
+
+    __tablename__ = "ticketing_deploy_config"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    # The cluster whose live deployments feed the Application dropdown, and the
+    # namespaces the operator picked out of it (JSON-encoded list of names).
+    source_cluster_id = db.Column(db.String(120), nullable=True)
+    selected_namespaces = db.Column(db.Text, nullable=True)
+    # Per-namespace deployment selection (JSON): {namespace: {"all": bool, "names": [...]}}.
+    # A namespace absent from the map (or {"all": true}) publishes ALL its live
+    # deployments — future ones auto-included.
+    selected_deployments = db.Column(db.Text, nullable=True)
+    # Custom (non-cluster) Environment entries (JSON-encoded list). Each entry:
+    # {"name": "POS-UAT", "applications": ["pos"], "jenkinsJobPath": "pos-deploy",
+    #  "jenkinsParams": {"msName": "{app}", "repotag": "{tag}", ...}}. An inbound
+    # ticket for one of these routes straight to Jenkins — there is no live
+    # cluster deployment behind it.
+    custom_environments = db.Column(db.Text, nullable=True)
+    # Jenkins job overrides for CLUSTER targets (JSON-encoded list of rules):
+    # [{"namespace": ..., "deployments": [...], "jenkinsJobPath": ..., "jenkinsParams": {...}}].
+    # A rule naming the deployment beats a whole-namespace rule.
+    job_overrides = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class JiraIntegration(db.Model):
+    """Configuration for the Jira ticketing provider — the Zoho row's counterpart.
+
+    Same contract as :class:`ZohoIntegration` (publish live cluster options into
+    the ticket form's dropdowns, take tickets back through a webhook, write the
+    deploy outcome onto the issue), against Jira's very different primitives:
+
+    ==================  ==========================  =============================
+    Concept             Zoho Desk                   Jira
+    ==================  ==========================  =============================
+    Form structure      layout -> sections          screen -> tabs
+    Dropdown values     field ``allowedValues``     custom-field *context* options
+    Cascade             ``/dependencyMappings``     one cascading-select field
+    Auth                OAuth self-client refresh   API token (Cloud) / PAT (DC)
+    Outcome write-back  set ``status`` directly     execute a named *transition*
+    ==================  ==========================  =============================
+
+    The deploy surface itself (source cluster/namespaces/deployments, custom
+    environments, Jenkins job overrides) is NOT here — it is shared, on
+    :class:`TicketingDeployConfig`.
+    """
+
+    __tablename__ = "jira_integration"
+
+    id = db.Column(db.Integer, primary_key=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=False)
+
+    # --- Connection ---
+    # Site root, e.g. "https://areeba.atlassian.net" (no /rest suffix).
+    base_url = db.Column(db.String(255), nullable=False, default="")
+    # "cloud" -> /rest/api/3 + Basic email:apiToken; "server" -> /rest/api/2 +
+    # Bearer personal access token. Cloud is the common case.
+    deployment_type = db.Column(db.String(16), nullable=False, default="cloud")
+    # Account email the API token belongs to (Basic auth username). Unused for
+    # Bearer/PAT auth on Server/DC.
+    email = db.Column(db.String(255), nullable=False, default="")
+    api_token_encrypted = db.Column(db.Text, nullable=True)
+
+    # --- Scope: which project / issue type / screen this integration owns ---
+    project_key = db.Column(db.String(64), nullable=False, default="")
+    issue_type_id = db.Column(db.String(64), nullable=True)
+    # Jira places fields on SCREENS (screen -> tabs -> fields); the screen is the
+    # closest analogue of a Zoho layout and is the single object every structural
+    # write is guarded to.
+    screen_id = db.Column(db.String(64), nullable=False, default="")
+
+    # --- Managed fields (Jira ids look like "customfield_10050") ---
+    # In Jira a custom field's id IS its webhook key, so *_field_id and
+    # *_field_api_name normally carry the same value; both are kept so the
+    # provider-neutral inbound resolver reads one shape for Zoho and Jira.
+    app_field_id = db.Column(db.String(64), nullable=False, default="")
+    app_field_api_name = db.Column(db.String(120), nullable=False, default="")
+    environment_field_id = db.Column(db.String(64), nullable=True)
+    environment_field_api_name = db.Column(db.String(120), nullable=False, default="")
+    # Free-text field carrying the version/tag on the issue.
+    tag_field_api_name = db.Column(db.String(120), nullable=False, default="")
+    variable_field_id = db.Column(db.String(64), nullable=True)
+    variable_field_api_name = db.Column(db.String(120), nullable=False, default="")
+    value_field_api_name = db.Column(db.String(120), nullable=False, default="")
+
+    # --- Cascade ---
+    # Jira has no cross-field dependency API: a dependent dropdown is ONE
+    # cascading-select field whose parent options carry child options. When this
+    # names such a field and cascade_enabled is on, the sync publishes the whole
+    # environment -> application tree into it (and an inbound issue reads the
+    # environment from `.value` and the application from `.child.value`). Blank =
+    # the two flat single-select fields above are published independently.
+    cascade_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    cascade_field_id = db.Column(db.String(64), nullable=True)
+    cascade_field_api_name = db.Column(db.String(120), nullable=False, default="")
+    last_dependency_status = db.Column(db.String(16), nullable=True)  # ok | error | skipped
+    last_dependency_message = db.Column(db.Text, nullable=True)
+
+    # --- Inbound webhook ---
+    inbound_secret_encrypted = db.Column(db.Text, nullable=True)
+
+    # --- Sync behaviour (mirrors the Zoho toggles) ---
+    sync_interval_minutes = db.Column(db.Integer, nullable=False, default=30)
+    sync_application = db.Column(db.Boolean, nullable=False, default=True)
+    sync_environment = db.Column(db.Boolean, nullable=False, default=True)
+    sync_variables = db.Column(db.Boolean, nullable=False, default=False)
+
+    # --- Issue write-back (deploy automation -> Jira issue) ---
+    # Jira cannot be told "set status = Deployed": a status change is a workflow
+    # TRANSITION, looked up by name on the issue's own transition list. These are
+    # transition names, matched case-insensitively.
+    ticket_writeback_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    transition_started = db.Column(db.String(120), nullable=False, default="In Progress")
+    transition_deployed = db.Column(db.String(120), nullable=False, default="Done")
+    transition_failed = db.Column(db.String(120), nullable=False, default="Done")
+    transition_cancelled = db.Column(db.String(120), nullable=False, default="Done")
+    # Assignee for automated issues; resolved to an accountId at call time.
+    ticket_owner_email = db.Column(db.String(255), nullable=False, default="")
+
+    # --- Last-run bookkeeping (identical shape to ZohoIntegration) ---
+    last_sync_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_sync_status = db.Column(db.String(16), nullable=True)  # ok | error
+    last_sync_message = db.Column(db.Text, nullable=True)
+    last_synced_count = db.Column(db.Integer, nullable=True)
+    last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_test_status = db.Column(db.String(16), nullable=True)
+    last_test_message = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 # Cluster Builder tables live in their own module; re-exported here so the

@@ -38,7 +38,7 @@ import re
 import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from sqlalchemy import and_
@@ -645,9 +645,21 @@ def serialize_run(run: DeployAutomationRun) -> Dict[str, Any]:
     }
 
 
-def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
+def list_runs(limit: int = 50, provider: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The newest automation runs, optionally narrowed to one ticketing provider.
+
+    A run is provider-agnostic — it only knows its intake row — so the filter is
+    a join onto that row's ``provider``. Runs started manually against a target
+    (no ticket) have no provider and are therefore excluded when one is asked
+    for, which is what a provider's own tab should show.
+    """
+    query = DeployAutomationRun.query
+    if provider:
+        query = query.join(
+            ZohoInboundTicket, DeployAutomationRun.ticket_record_id == ZohoInboundTicket.id
+        ).filter(ZohoInboundTicket.provider == provider)
     rows = (
-        DeployAutomationRun.query.order_by(DeployAutomationRun.id.desc())
+        query.order_by(DeployAutomationRun.id.desc())
         .limit(max(1, min(int(limit or 50), 200)))
         .all()
     )
@@ -804,12 +816,19 @@ def _container_names(run: DeployAutomationRun) -> List[str]:
     return [c.strip() for c in (run.container_name or "").split(",") if c.strip()]
 
 
-def _zoho_ticket_id(run: DeployAutomationRun) -> Optional[str]:
-    """The Desk ticket id (not KubeSight's row id) for write-back, if any."""
+def _ticket_ref(run: DeployAutomationRun) -> Tuple[Optional[str], Optional[str]]:
+    """``(provider, ticket id)`` for write-back — the vendor's id, not our row id.
+
+    The provider comes off the intake row rather than any run column: a run is
+    provider-agnostic by design, and the ticket is the only thing that knows
+    which system it came from.
+    """
     if not run.ticket_record_id:
-        return None
+        return None, None
     rec = ZohoInboundTicket.query.get(run.ticket_record_id)
-    return rec.ticket_id if rec else None
+    if rec is None:
+        return None, None
+    return (rec.provider or "zoho"), rec.ticket_id
 
 
 def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
@@ -819,10 +838,10 @@ def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
     configured status label, with a plain-text comment (and a resolution on
     terminal outcomes) describing what happened.
     """
-    from .zoho_sync_service import report_ticket_outcome
+    from . import ticketing
 
-    ticket_id = _zoho_ticket_id(run)
-    if not ticket_id:
+    provider, ticket_id = _ticket_ref(run)
+    if not (provider and ticket_id):
         return
     who = run.ticket_number or f"run #{run.id}"
     env_run = _is_env_run(run)
@@ -877,7 +896,9 @@ def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
             f"{run.namespace}. {run.error or ''}".strip()
         )
     try:
-        report_ticket_outcome(ticket_id, outcome, comment=comment, resolution=resolution)
+        ticketing.report_outcome(
+            provider, ticket_id, outcome, comment=comment, resolution=resolution
+        )
     except Exception:  # write-back must never affect the run
         pass
 
@@ -1197,7 +1218,7 @@ def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> Non
     whole deploy; it is triggered with the entry's parameter map and build
     success is the run's outcome.
     """
-    from .zoho_sync_service import custom_environment_by_name
+    from .ticketing_targets import custom_environment_by_name
 
     _set_step(run, "image_check", "skip", "custom environment — no live cluster image to gate on")
 
@@ -1287,7 +1308,7 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     # router call: its own job path (blank = the router job) and parameter map
     # (empty = the standard contract). Only the BUILD trigger changes — the
     # registry gate above and the deploy/rollout stages after stay the same.
-    from .zoho_sync_service import job_override_for
+    from .ticketing_targets import job_override_for
 
     override = job_override_for(run.namespace, run.deployment_name) or {}
     override_path = str(override.get("jenkinsJobPath") or "").strip()

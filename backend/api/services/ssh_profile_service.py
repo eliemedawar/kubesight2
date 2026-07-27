@@ -151,6 +151,9 @@ def serialize_profile(row: SshConnectionProfile) -> Dict[str, Any]:
         "commandTimeoutS": row.command_timeout_s,
         "retryCount": row.retry_count,
         "retryBackoffS": row.retry_backoff_s,
+        "lastTestAt": _iso(row.last_test_at),
+        "lastTestStatus": row.last_test_status,
+        "lastTestMessage": row.last_test_message,
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
     }
@@ -303,6 +306,16 @@ def build_target(
     )
 
 
+def _record_profile_test(
+    profile: SshConnectionProfile, status: str, message: str
+) -> None:
+    """Stamp the outcome so the UI can show how stale a route's proof is."""
+    profile.last_test_at = datetime.now(timezone.utc)
+    profile.last_test_status = status
+    profile.last_test_message = (message or "")[:2000] or None
+    db.session.commit()
+
+
 def test_profile(profile_id: int, host: str) -> Dict[str, Any]:
     """Connect to ``host`` through the profile and prove login + escalation."""
     profile = get_profile(profile_id)
@@ -320,12 +333,21 @@ def test_profile(profile_id: int, host: str) -> Dict[str, Any]:
             (datetime.now(timezone.utc) - started).total_seconds() * 1000
         )
         lines = [line for line in result.output.strip().splitlines() if line.strip()]
+        effective_user = lines[0] if lines else ""
+        kernel = lines[1] if len(lines) > 1 else ""
+        _record_profile_test(
+            profile,
+            "ok",
+            f"{host}: connected as {effective_user or 'unknown user'}"
+            f"{f' ({kernel}, {elapsed_ms} ms)' if kernel else f' ({elapsed_ms} ms)'}",
+        )
         return {
             "status": "ok",
-            "effectiveUser": lines[0] if lines else "",
-            "kernel": lines[1] if len(lines) > 1 else "",
+            "effectiveUser": effective_user,
+            "kernel": kernel,
             "latencyMs": elapsed_ms,
         }
     except (SshConnectionError, Exception) as exc:  # noqa: BLE001
         message = getattr(exc, "output", "") or str(exc)
+        _record_profile_test(profile, "failed", f"{host}: {exc}")
         return {"status": "failed", "error": str(exc), "output": message[:2000]}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { previewZohoFieldBinding } from "../../api/zohoApi.js";
+import { useTicketingApi } from "../ticketing/TicketingContext.jsx";
 
 /**
  * Pick where a dropdown's options come from: a source kind, an optional cascade
@@ -16,6 +16,7 @@ export default function ZohoOptionSourceForm({
   value,
   onChange,
 }) {
+  const api = useTicketingApi();
   const { sourceKind, parentFieldId } = value;
   const kind = sources.find((s) => s.key === sourceKind);
   const parents = parentsFor(sourceKind);
@@ -44,7 +45,8 @@ export default function ZohoOptionSourceForm({
     let cancelled = false;
     setPreviewing(true);
     setPreviewError("");
-    previewZohoFieldBinding(fieldId, { sourceKind, parentFieldId: parentFieldId || undefined })
+    api
+      .previewFieldBinding(fieldId, { sourceKind, parentFieldId: parentFieldId || undefined })
       .then((data) => {
         if (cancelled) return;
         setPreview(data);

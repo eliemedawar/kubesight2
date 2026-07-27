@@ -97,6 +97,12 @@ class SshConnectionProfile(db.Model):
     command_timeout_s = db.Column(db.Integer, nullable=False, default=600)
     retry_count = db.Column(db.Integer, nullable=False, default=2)
     retry_backoff_s = db.Column(db.Integer, nullable=False, default=5)
+    # Last-test bookkeeping (RegistryConnection.last_test_* convention). A route
+    # that passed once and has not been exercised since is the usual cause of a
+    # build dying in node preparation, so the age is worth surfacing.
+    last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_test_status = db.Column(db.String(16), nullable=True)
+    last_test_message = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = db.Column(
         db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow

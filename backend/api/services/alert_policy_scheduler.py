@@ -111,13 +111,13 @@ def _scheduler_loop(app: Flask) -> None:
             logger.exception("Bundle rollout watch tick failed")
         try:
             with app.app_context():
-                from .zoho_sync_service import run_due_sync
+                from . import ticketing
 
-                # Self-gating: only runs when the integration is enabled and its
-                # configured interval has elapsed since the last sync.
-                run_due_sync()
+                # Self-gating per provider: each only runs when its integration
+                # is enabled and its configured interval has elapsed.
+                ticketing.run_due_syncs()
         except Exception:
-            logger.exception("Zoho field-sync tick failed")
+            logger.exception("Ticketing field-sync tick failed")
         try:
             with app.app_context():
                 from .deploy_automation_service import advance_runs

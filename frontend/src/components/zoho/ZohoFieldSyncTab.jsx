@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import EmptyState from "../common/EmptyState.jsx";
+import { useTicketing } from "../ticketing/TicketingContext.jsx";
 import ZohoLayoutEditor from "./ZohoLayoutEditor.jsx";
 
 const AGENT_LIST_CAP = 6;
@@ -7,6 +8,7 @@ const AGENT_LIST_CAP = 6;
 // Simulated Zoho Desk ticket form: pick an Environment, watch the Application
 // list narrow exactly the way the cascade narrows it for the agent.
 function AgentPreview({ preview, previewLoading, cascadeOn }) {
+  const { name: providerName } = useTicketing();
   const namespaces = preview?.namespaces || [];
   const items = preview?.items || [];
   const manageVariables = Boolean(preview?.manageVariables);
@@ -42,7 +44,7 @@ function AgentPreview({ preview, previewLoading, cascadeOn }) {
         <EmptyState message="Nothing published yet — pick a cluster and namespaces first." />
       ) : (
         <div className="sg-zh-zform">
-          <div className="sg-zh-zform-title">Zoho Desk · New DevOps Request</div>
+          <div className="sg-zh-zform-title">{providerName} · New DevOps Request</div>
           <label className="sg-zh-zfield">
             Environment
             <select value={activeEnv} onChange={(e) => setEnv(e.target.value)}>
@@ -131,6 +133,7 @@ function AgentPreview({ preview, previewLoading, cascadeOn }) {
 }
 
 function PublishedValues({ preview, previewLoading }) {
+  const { name: providerName } = useTicketing();
   const [filter, setFilter] = useState("");
   const items = preview?.items || [];
   const query = filter.trim().toLowerCase();
@@ -168,14 +171,15 @@ function PublishedValues({ preview, previewLoading }) {
         </div>
       </div>
       <p className="muted">
-        Every name/namespace pairing published into the Zoho <code>Application</code> field
+        Every name/namespace pairing published into the {providerName} <code>Application</code>{" "}
+        field
         {preview?.sourceClusterId ? (
           <>
             {" "}
             from cluster <code>{preview.sourceClusterId}</code>
           </>
         ) : null}
-        . Names shared across namespaces appear once in Zoho.
+        . Names shared across namespaces appear once in {providerName}.
       </p>
       {previewLoading ? (
         <p className="muted">Loading…</p>

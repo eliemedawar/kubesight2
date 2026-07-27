@@ -537,6 +537,7 @@ def _diff(
         "sectionsChanged": sum(1 for r in rows if r["change"] == "changed"),
         "sectionsUnchanged": sum(1 for r in rows if r["change"] == "unchanged"),
         "fieldsCarried": len(_field_ids(after)),
+        "fieldsAdded": sorted(set(_field_ids(after)) - set(_field_ids(before))),
         "fieldsDropped": sorted(set(_field_ids(before)) - set(_field_ids(after))),
     }
 
@@ -553,6 +554,7 @@ def _snapshot(layout_id: str, layout: Dict[str, Any], reason: str, actor: Option
     """Persist the pre-write layout so a bad PATCH is recoverable, not terminal."""
     db.session.add(
         ZohoLayoutSnapshot(
+            provider="zoho",
             layout_id=str(layout_id),
             reason=reason[:80],
             actor=(actor or "")[:120],
@@ -587,6 +589,174 @@ def snapshot_layout(reason: str, actor: Optional[str] = None) -> Dict[str, Any]:
         )
     _snapshot(str(layout.get("id") or cfg.layout_id), layout, reason, actor)
     return layout
+
+
+def _snapshot_summary(snapshot: ZohoLayoutSnapshot) -> Dict[str, Any]:
+    payload = snapshot.payload if isinstance(snapshot.payload, dict) else {}
+    sections = _sections_of(payload)
+    return {
+        "id": snapshot.id,
+        "layoutId": snapshot.layout_id,
+        "reason": snapshot.reason or "layout_write",
+        "actor": snapshot.actor or "",
+        "takenAt": snapshot.taken_at.isoformat() if snapshot.taken_at else None,
+        "sectionCount": len(sections),
+        "fieldCount": len(_field_ids(sections)),
+    }
+
+
+def list_layout_snapshots(limit: int = _SNAPSHOT_RETENTION) -> List[Dict[str, Any]]:
+    """Newest pre-write snapshots for the configured Zoho layout.
+
+    The list deliberately returns metadata only. The raw layout is exposed only
+    through the restore plan, where it is rebuilt into the exact request body
+    and compared with the current live layout before an operator can apply it.
+    """
+    row = get_or_create_config()
+    layout_id = str(row.layout_id or "").strip()
+    if not layout_id:
+        return []
+    rows = (
+        ZohoLayoutSnapshot.query.filter_by(provider="zoho", layout_id=layout_id)
+        .order_by(ZohoLayoutSnapshot.taken_at.desc(), ZohoLayoutSnapshot.id.desc())
+        .limit(max(1, min(int(limit or _SNAPSHOT_RETENTION), _SNAPSHOT_RETENTION)))
+        .all()
+    )
+    return [_snapshot_summary(snapshot) for snapshot in rows]
+
+
+def _snapshot_for_restore(snapshot_id: int, layout_id: str) -> ZohoLayoutSnapshot:
+    try:
+        snapshot = ZohoLayoutSnapshot.query.get(int(snapshot_id))
+    except (TypeError, ValueError):
+        snapshot = None
+    if (
+        snapshot is None
+        or (snapshot.provider or "zoho") != "zoho"
+        or str(snapshot.layout_id) != str(layout_id)
+    ):
+        raise LookupError("That recovery snapshot does not belong to this Zoho layout.")
+    if not isinstance(snapshot.payload, dict) or not _sections_of(snapshot.payload):
+        raise LayoutWriteError("That recovery snapshot does not contain a usable layout.")
+    return snapshot
+
+
+def _validate_restore_sections(sections: Sequence[Dict[str, Any]]) -> None:
+    """Basic integrity checks before a stored layout is allowed near Zoho."""
+    _assert_consistent_section_ids(sections)
+    names = [str(section.get("name") or "").strip() for section in sections]
+    if any(not name for name in names):
+        raise LayoutWriteError("The recovery snapshot contains an unnamed section.")
+    folded = [name.casefold() for name in names]
+    if len(folded) != len(set(folded)):
+        raise LayoutWriteError("The recovery snapshot contains duplicate section names.")
+    field_ids = _field_ids(sections)
+    duplicates = sorted({field_id for field_id in field_ids if field_ids.count(field_id) > 1})
+    if duplicates:
+        raise LayoutWriteError(
+            "The recovery snapshot contains duplicate field(s): " + ", ".join(duplicates) + "."
+        )
+
+
+def _plan_snapshot_restore(
+    snapshot_id: int, row, cfg, current_layout: Dict[str, Any]
+) -> Dict[str, Any]:
+    layout_id = str(current_layout.get("id") or cfg.layout_id)
+    snapshot = _snapshot_for_restore(snapshot_id, layout_id)
+    current_sections = _sections_of(current_layout)
+    restore_sections = copy.deepcopy(_sections_of(snapshot.payload))
+    if not current_sections:
+        raise LayoutWriteError(
+            "Zoho returned a layout with no sections — refusing to restore over it."
+        )
+    _validate_restore_sections(restore_sections)
+
+    # Keep the live layout's identity/default/department flags. Only the section
+    # tree comes from the snapshot; stale identity metadata must never move or
+    # reclassify the configured layout.
+    body, dropped = _build_body(current_layout, restore_sections, row)
+    diff = _diff(current_sections, restore_sections)
+    warnings: List[str] = []
+    if dropped:
+        warnings.append(
+            "Returned in the snapshot but not echoed back: "
+            + ", ".join(dropped)
+            + "."
+        )
+    if diff["fieldsDropped"]:
+        warnings.append(
+            "Restoring this snapshot removes "
+            + str(len(diff["fieldsDropped"]))
+            + " field(s) added to the layout after the snapshot."
+        )
+    if diff["fieldsAdded"]:
+        warnings.append(
+            "Restoring this snapshot re-associates "
+            + str(len(diff["fieldsAdded"]))
+            + " older field(s). A field deleted organization-wide cannot be recovered here."
+        )
+    if not writes_enabled():
+        warnings.append(
+            f"Layout writes are disabled. Set {_WRITE_ENABLED_VAR}=true before restoring."
+        )
+    return {
+        "layoutId": layout_id,
+        "layoutName": current_layout.get("name")
+        or current_layout.get("layoutName")
+        or "DevOps Request",
+        "snapshot": _snapshot_summary(snapshot),
+        "body": body,
+        "diff": diff,
+        "droppedKeys": dropped,
+        "writesEnabled": writes_enabled(),
+        "warnings": warnings,
+    }
+
+
+def plan_snapshot_restore(snapshot_id: int) -> Dict[str, Any]:
+    """Preview restoring one snapshot without writing to Zoho."""
+    row = get_or_create_config()
+    cfg = _to_client_config(row)
+    current = zoho_client.get_layout(cfg, fresh=True)
+    return _plan_snapshot_restore(snapshot_id, row, cfg, current)
+
+
+def restore_layout_snapshot(snapshot_id: int, actor: Optional[str] = None) -> Dict[str, Any]:
+    """Restore a snapshot, after preserving the current live layout as a new snapshot."""
+    if not writes_enabled():
+        raise PermissionError(
+            "Layout writes are disabled. Review the recovery preview, then set "
+            f"{_WRITE_ENABLED_VAR}=true to enable restores."
+        )
+    with _sync_lock:
+        row = get_or_create_config()
+        cfg = _to_client_config(row)
+        current = zoho_client.get_layout(cfg, fresh=True)
+        plan = _plan_snapshot_restore(snapshot_id, row, cfg, current)
+
+        _snapshot(
+            plan["layoutId"],
+            current,
+            f"before_restore_{snapshot_id}",
+            actor,
+        )
+        zoho_client.update_layout(cfg, plan["body"])
+
+        verify = zoho_client.get_layout(cfg, fresh=True)
+        sent_sections = _sections_of({"sections": plan["body"]["sections"]})
+        live_sections = _sections_of(verify)
+        sent_ids = set(_field_ids(sent_sections))
+        live_ids = set(_field_ids(live_sections))
+        if sent_ids != live_ids or _section_names(sent_sections) != _section_names(live_sections):
+            raise LayoutWriteError(
+                "Zoho accepted the restore but the live layout does not match the snapshot. "
+                "The pre-restore layout was preserved as the newest recovery snapshot."
+            )
+        return {
+            **plan,
+            "applied": True,
+            "verifiedFields": len(live_ids),
+        }
 
 
 def _plan(
