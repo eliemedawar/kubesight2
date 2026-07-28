@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 
 import {
   addHelmChartVersion,
+  discoverHelmGitPaths,
+  discoverHelmGitRefs,
   importHelmChartFromArchive,
   importHelmChartFromGit,
   importHelmChartFromYaml,
@@ -50,6 +52,11 @@ export default function HelmChartImportModal({
   const [imported, setImported] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [gitRefs, setGitRefs] = useState([]);
+  const [gitPaths, setGitPaths] = useState([]);
+  const [gitDiscoveryBusy, setGitDiscoveryBusy] = useState("");
+  const [gitDiscoveryError, setGitDiscoveryError] = useState("");
+  const [gitPathsTruncated, setGitPathsTruncated] = useState(false);
 
   useEffect(() => {
     if (!open) {
@@ -64,6 +71,11 @@ export default function HelmChartImportModal({
       setImported(null);
       setBusy(false);
       setError("");
+      setGitRefs([]);
+      setGitPaths([]);
+      setGitDiscoveryBusy("");
+      setGitDiscoveryError("");
+      setGitPathsTruncated(false);
     }
   }, [open]);
 
@@ -71,6 +83,63 @@ export default function HelmChartImportModal({
 
   const versionMode = Boolean(targetTemplate?.id);
   const activeMode = versionMode ? "archive" : mode;
+
+  const updateGitConnectionField = (field, value) => {
+    setGit((previous) => ({
+      ...previous,
+      [field]: value,
+      ref: "",
+      path: "",
+    }));
+    setGitRefs([]);
+    setGitPaths([]);
+    setGitPathsTruncated(false);
+    setGitDiscoveryError("");
+  };
+
+  const loadGitPaths = async (ref, connection = git) => {
+    setGitDiscoveryBusy("paths");
+    setGitDiscoveryError("");
+    setGitPaths([]);
+    setGitPathsTruncated(false);
+    try {
+      const result = await discoverHelmGitPaths({ ...connection, ref });
+      setGitPaths(result.paths || []);
+      setGitPathsTruncated(Boolean(result.truncated));
+    } catch (err) {
+      setGitDiscoveryError(err.message || "Unable to load repository paths.");
+    } finally {
+      setGitDiscoveryBusy("");
+    }
+  };
+
+  const loadGitRepository = async () => {
+    if (!git.repositoryUrl.trim()) {
+      setGitDiscoveryError("Enter the HTTPS repository URL first.");
+      return;
+    }
+    setGitDiscoveryBusy("refs");
+    setGitDiscoveryError("");
+    setGitRefs([]);
+    setGitPaths([]);
+    setGitPathsTruncated(false);
+    try {
+      const result = await discoverHelmGitRefs(git);
+      const refs = result.refs || [];
+      const selectedRef =
+        result.defaultRef && refs.some((item) => item.name === result.defaultRef)
+          ? result.defaultRef
+          : refs[0]?.name || "";
+      setGitRefs(refs);
+      setGit((previous) => ({ ...previous, ref: selectedRef, path: "" }));
+      if (selectedRef) {
+        await loadGitPaths(selectedRef, git);
+      }
+    } catch (err) {
+      setGitDiscoveryError(err.message || "Unable to load repository branches and tags.");
+      setGitDiscoveryBusy("");
+    }
+  };
 
   const submit = async (event) => {
     event.preventDefault();
@@ -356,33 +425,110 @@ export default function HelmChartImportModal({
                       type="url"
                       value={git.repositoryUrl}
                       onChange={(event) =>
-                        setGit((previous) => ({ ...previous, repositoryUrl: event.target.value }))
+                        updateGitConnectionField("repositoryUrl", event.target.value)
                       }
                       placeholder="https://github.com/organization/repository.git"
                     />
                   </label>
                   <div className="helm-form-grid">
                     <label>
-                      Branch or tag <span className="muted">(optional)</span>
+                      Git username <span className="muted">(private repositories)</span>
                       <input
-                        value={git.ref}
+                        autoComplete="username"
+                        value={git.username}
                         onChange={(event) =>
-                          setGit((previous) => ({ ...previous, ref: event.target.value }))
+                          updateGitConnectionField("username", event.target.value)
                         }
-                        placeholder="main"
+                        placeholder="oauth2 or your username"
                       />
                     </label>
                     <label>
-                      Repository path <span className="muted">(optional)</span>
+                      Personal access token <span className="muted">(optional)</span>
                       <input
-                        value={git.path}
+                        type="password"
+                        autoComplete="new-password"
+                        value={git.token}
                         onChange={(event) =>
-                          setGit((previous) => ({ ...previous, path: event.target.value }))
+                          updateGitConnectionField("token", event.target.value)
                         }
-                        placeholder="deploy/helm/my-app"
                       />
                     </label>
                   </div>
+                  <div className="helm-git-discovery">
+                    <button
+                      type="button"
+                      className="btn-outline"
+                      disabled={Boolean(gitDiscoveryBusy) || !git.repositoryUrl.trim()}
+                      onClick={loadGitRepository}
+                    >
+                      {gitDiscoveryBusy === "refs"
+                        ? "Loading branches & tags…"
+                        : gitDiscoveryBusy === "paths"
+                          ? "Loading repository paths…"
+                          : gitRefs.length
+                            ? "Reload repository"
+                            : "Connect & load repository"}
+                    </button>
+                    {gitRefs.length ? (
+                      <span className="muted">
+                        {gitRefs.length} branch/tag reference
+                        {gitRefs.length === 1 ? "" : "s"} found
+                      </span>
+                    ) : null}
+                  </div>
+                  {gitDiscoveryError ? (
+                    <p className="banner-message error">{gitDiscoveryError}</p>
+                  ) : null}
+                  <div className="helm-form-grid">
+                    <label>
+                      Branch or tag
+                      <SearchableSelect
+                        value={git.ref}
+                        disabled={!gitRefs.length || Boolean(gitDiscoveryBusy)}
+                        placeholder={
+                          gitDiscoveryBusy === "refs"
+                            ? "Loading branches and tags…"
+                            : "Connect to load branches and tags"
+                        }
+                        searchPlaceholder="Search branches and tags…"
+                        onChange={(event) => {
+                          const ref = event.target.value;
+                          setGit((previous) => ({ ...previous, ref, path: "" }));
+                          loadGitPaths(ref);
+                        }}
+                        options={gitRefs.map((item) => ({
+                          value: item.name,
+                          label: item.label,
+                        }))}
+                      />
+                    </label>
+                    <label>
+                      Repository path
+                      <SearchableSelect
+                        value={git.path}
+                        disabled={!gitPaths.length || Boolean(gitDiscoveryBusy)}
+                        placeholder={
+                          gitDiscoveryBusy === "paths"
+                            ? "Loading repository paths…"
+                            : "Select a repository path"
+                        }
+                        searchPlaceholder="Search repository paths…"
+                        onChange={(event) =>
+                          setGit((previous) => ({ ...previous, path: event.target.value }))
+                        }
+                        options={gitPaths.map((item) => ({
+                          value: item.path,
+                          label: item.label,
+                        }))}
+                      />
+                    </label>
+                  </div>
+                  {gitPathsTruncated ? (
+                    <p className="form-help">
+                      Showing the first 2,000 repository directories. Narrow the repository if the
+                      required path is not listed.
+                    </p>
+                  ) : null}
                   <label>
                     Content type
                     <SearchableSelect
@@ -396,33 +542,9 @@ export default function HelmChartImportModal({
                       <option value="yaml">Raw Kubernetes YAML</option>
                     </SearchableSelect>
                   </label>
-                  <div className="helm-form-grid">
-                    <label>
-                      Git username <span className="muted">(private repositories)</span>
-                      <input
-                        autoComplete="username"
-                        value={git.username}
-                        onChange={(event) =>
-                          setGit((previous) => ({ ...previous, username: event.target.value }))
-                        }
-                        placeholder="oauth2 or your username"
-                      />
-                    </label>
-                    <label>
-                      Personal access token <span className="muted">(optional)</span>
-                      <input
-                        type="password"
-                        autoComplete="new-password"
-                        value={git.token}
-                        onChange={(event) =>
-                          setGit((previous) => ({ ...previous, token: event.target.value }))
-                        }
-                      />
-                    </label>
-                  </div>
                   <p className="form-help">
-                    The token is used only for this clone request, cleared immediately, and never
-                    saved in KubeSight.
+                    Credentials are sent only for repository requests, never saved in KubeSight,
+                    and cleared when the import completes or this dialog closes.
                   </p>
                 </>
               )}

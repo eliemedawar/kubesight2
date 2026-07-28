@@ -69,6 +69,14 @@ export function importHelmChartFromGit(payload) {
   return request("/api/helm/chart-templates/import/git", { method: "POST", body: payload });
 }
 
+export function discoverHelmGitRefs(payload) {
+  return request("/api/helm/chart-templates/git/refs", { method: "POST", body: payload });
+}
+
+export function discoverHelmGitPaths(payload) {
+  return request("/api/helm/chart-templates/git/paths", { method: "POST", body: payload });
+}
+
 export function importHelmChartFromArchive(payload) {
   return request("/api/helm/chart-templates/import/archive", {
     method: "POST",

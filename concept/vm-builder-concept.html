@@ -228,8 +228,10 @@ tbody tr:hover{background:var(--bg-panel-strong)}
   border:1px solid var(--border-strong);background:var(--bg-panel)}
 .field input:focus,.field select:focus,.field textarea:focus{outline:none;
   border-color:var(--accent);box-shadow:var(--ring)}
+.field input[readonly]{background:var(--bg-inset);border-style:dashed;color:var(--text-muted)}
 .field .under{margin-top:6px;font-size:11px;color:var(--text-muted)}
 .span2{grid-column:1/-1}
+.span-wide{grid-column:span 2}
 
 .purpose{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
 .opt{text-align:left;padding:12px 13px;border-radius:var(--r-md);border:1px solid var(--border);
@@ -260,7 +262,7 @@ tbody tr:hover{background:var(--bg-panel-strong)}
   border-radius:var(--r-md);background:var(--bg-panel-strong);margin-bottom:8px}
 .keyrow .mono{font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .well{background:var(--bg-well);color:#d6d3cd;border-radius:var(--r-md);padding:14px 16px;
-  font:400 12px/1.7 var(--font-mono);overflow:auto}
+  font:400 12px/1.7 var(--font-mono);overflow:auto;white-space:pre-wrap;tab-size:2}
 .well .k{color:#8fb8ff} .well .s{color:#a5d6a7} .well .c{color:#7c7f85} .well .w{color:#f0c674}
 
 /* ── translation rail ────────────────────────────────────────────────── */
@@ -365,6 +367,7 @@ tbody tr:hover{background:var(--bg-panel-strong)}
 .matrix tbody td:first-child{font-weight:600}
 .leak{display:flex;gap:10px;align-items:flex-start;margin-top:12px;font-size:12px;
   color:var(--text-subtle);max-width:82ch}
+.leak .pill,.thesis .pill{flex:none;white-space:nowrap}
 
 /* ── responsive ──────────────────────────────────────────────────────── */
 @media (max-width:1300px){
@@ -385,6 +388,7 @@ tbody tr:hover{background:var(--bg-panel-strong)}
   .page{padding:20px 16px 56px}
   .topbar{padding:0 16px}
   .kpis,.cands,.provgrid,.grid2,.grid3{grid-template-columns:1fr}
+  .span-wide{grid-column:auto}
   .who-name,.who-role{display:none}
   .disk{grid-template-columns:1fr 1fr;gap:8px}
   .hero h1{font-size:23px}
@@ -514,9 +518,9 @@ tbody tr:hover{background:var(--bg-panel-strong)}
       <section class="view" id="v-new">
         <div class="thesis">
           <span class="pill p-accent plain">Provider-neutral</span>
-          <p>Everything on the left is written once, in your own vocabulary. <b>The rail on the right
-             shows exactly how it lands</b> on the target you pick — change the target and nothing
-             on the left has to change.</p>
+          <p>The spec is written once, in your own vocabulary. <b>The placement panel shows exactly
+             how it lands</b> on the target you pick — change the target and nothing in the spec has
+             to change.</p>
         </div>
 
         <div class="sheet">
@@ -545,7 +549,7 @@ tbody tr:hover{background:var(--bg-panel-strong)}
               <div class="block-head"><div><h3>Name &amp; count</h3>
                 <div class="hint">Names are generated from the pattern, then reserved in the fleet before anything is created.</div></div></div>
               <div class="grid3">
-                <div class="field span2" style="grid-column:span 2">
+                <div class="field span-wide">
                   <label for="pattern">Name pattern</label>
                   <input id="pattern" value="k8s-prd-w{n}">
                   <div class="under">Tokens: <span class="mono">{n}</span> index ·
@@ -738,12 +742,12 @@ tbody tr:hover{background:var(--bg-panel-strong)}
               <div class="cost">
                 <div>
                   <div class="eyebrow">Estimated · 3 machines</div>
-                  <b id="costVal">$924</b>
+                  <b id="costVal">$1,083</b>
                   <div class="hint" id="costNote">per month, on-demand</div>
                 </div>
                 <div style="text-align:right">
-                  <div class="hint" id="costUnit">$308 / machine</div>
-                  <div class="hint" id="costAlt">Cheapest target: SimpliVity, $612</div>
+                  <div class="hint" id="costUnit">$361 / machine</div>
+                  <div class="hint" id="costAlt">Cheapest allowed: SimpliVity, $615</div>
                 </div>
               </div>
             </div>
@@ -796,8 +800,9 @@ tbody tr:hover{background:var(--bg-panel-strong)}
               <span>Spreads across 3 ESXi hosts, so no two workers share a failure domain.
                 RF2 replication already covers the data disks.</span></div>
             <div class="cand-foot">
-              <div><div class="eyebrow">Chargeback</div>
-                <b class="mono" style="font-size:15px">$612 / mo</b></div>
+              <div><div class="eyebrow">3 machines / month</div>
+                <b class="mono" style="font-size:15px">$615</b>
+                <span class="hint">chargeback</span></div>
               <span class="pill p-accent">Recommended</span>
             </div>
           </article>
@@ -818,8 +823,9 @@ tbody tr:hover{background:var(--bg-panel-strong)}
               <span>Memory headroom drops to 12% after this build. Fine today, tight if you grow
                 the cluster next quarter.</span></div>
             <div class="cand-foot">
-              <div><div class="eyebrow">Chargeback</div>
-                <b class="mono" style="font-size:15px">$648 / mo</b></div>
+              <div><div class="eyebrow">3 machines / month</div>
+                <b class="mono" style="font-size:15px">$651</b>
+                <span class="hint">chargeback</span></div>
               <span class="pill p-ok">Fits</span>
             </div>
           </article>
@@ -840,8 +846,9 @@ tbody tr:hover{background:var(--bg-panel-strong)}
               <span>Capacity is never the problem here — cost and the 34 ms hop back to the
                 on-prem control plane are. Request a quota bump before going past 5 machines.</span></div>
             <div class="cand-foot">
-              <div><div class="eyebrow">On-demand</div>
-                <b class="mono" style="font-size:15px">$924 / mo</b></div>
+              <div><div class="eyebrow">3 machines / month</div>
+                <b class="mono" style="font-size:15px">$1,083</b>
+                <span class="hint">on-demand</span></div>
               <span class="pill p-ok">Fits</span>
             </div>
           </article>
@@ -862,8 +869,9 @@ tbody tr:hover{background:var(--bg-panel-strong)}
               <span>Lab hardware with no redundant power. Allowed for Staging and Lab, not for a
                 machine tagged Production.</span></div>
             <div class="cand-foot">
-              <div><div class="eyebrow">Chargeback</div>
-                <b class="mono" style="font-size:15px">$204 / mo</b></div>
+              <div><div class="eyebrow">3 machines / month</div>
+                <b class="mono" style="font-size:15px">$209</b>
+                <span class="hint">lab chargeback</span></div>
               <span class="pill p-warn">Policy mismatch</span>
             </div>
           </article>
@@ -1168,27 +1176,27 @@ document.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', 
 
 /* ── fleet rows ───────────────────────────────────────────────────────── */
 const FLEET = [
-  { n: 'k8s-prd-w03', pv: 'SVT', where: 'OMNI-BEY-01 · esxi-bey-05', shape: '8 vCPU / 32 GiB', ip: '10.42.7.33',
-    use: 'Kubernetes worker', cpu: 0, cost: '$204', state: ['p-info', 'First boot'], spark: '2,16 8,15 14,16 20,14 26,15 32,13' },
-  { n: 'k8s-prd-w02', pv: 'SVT', where: 'OMNI-BEY-01 · esxi-bey-04', shape: '8 vCPU / 32 GiB', ip: '10.42.7.32',
-    use: 'Kubernetes worker', cpu: 61, cost: '$204', state: ['p-ok', 'Running'], spark: '2,14 8,9 14,11 20,6 26,8 32,5' },
-  { n: 'ora-prd-db01', pv: 'VMW', where: 'vcsa-dr-01 · RP-Databases', shape: '16 vCPU / 64 GiB', ip: '10.42.3.11',
+  { n: 'k8s-prd-w03', own: 'Production East · Platform Eng', pv: 'SVT', where: 'OMNI-BEY-01 · esxi-bey-05', shape: '8 vCPU / 32 GiB', ip: '10.42.7.33',
+    use: 'Kubernetes worker', cpu: 0, cost: '$205', state: ['p-info', 'First boot'], spark: '2,16 8,15 14,16 20,14 26,15 32,13' },
+  { n: 'k8s-prd-w02', own: 'Production East · Platform Eng', pv: 'SVT', where: 'OMNI-BEY-01 · esxi-bey-04', shape: '8 vCPU / 32 GiB', ip: '10.42.7.32',
+    use: 'Kubernetes worker', cpu: 61, cost: '$205', state: ['p-ok', 'Running'], spark: '2,14 8,9 14,11 20,6 26,8 32,5' },
+  { n: 'ora-prd-db01', own: 'Core Banking', pv: 'VMW', where: 'vcsa-dr-01 · RP-Databases', shape: '16 vCPU / 64 GiB', ip: '10.42.3.11',
     use: 'Database host', cpu: 78, cost: '$486', state: ['p-warn', 'Drifted'], spark: '2,12 8,7 14,9 20,4 26,3 32,4' },
-  { n: 'edge-api-a1', pv: 'AWS', where: 'me-south-1a · m6i.xlarge', shape: '4 vCPU / 16 GiB', ip: '10.90.1.24',
+  { n: 'edge-api-a1', own: 'Digital Channels', pv: 'AWS', where: 'me-south-1a · m6i.xlarge', shape: '4 vCPU / 16 GiB', ip: '10.90.1.24',
     use: 'API gateway', cpu: 34, cost: '$154', state: ['p-ok', 'Running'], spark: '2,13 8,12 14,10 20,12 26,9 32,11' },
-  { n: 'edge-api-a2', pv: 'AWS', where: 'me-south-1b · m6i.xlarge', shape: '4 vCPU / 16 GiB', ip: '10.90.2.19',
+  { n: 'edge-api-a2', own: 'Digital Channels', pv: 'AWS', where: 'me-south-1b · m6i.xlarge', shape: '4 vCPU / 16 GiB', ip: '10.90.2.19',
     use: 'API gateway', cpu: 29, cost: '$154', state: ['p-ok', 'Running'], spark: '2,14 8,13 14,12 20,13 26,11 32,12' },
-  { n: 'build-runner-7', pv: 'PMX', where: 'pmx-lab · node-02', shape: '8 vCPU / 16 GiB', ip: '10.10.0.57',
+  { n: 'build-runner-7', own: 'Platform Eng', pv: 'PMX', where: 'pmx-lab · node-02', shape: '8 vCPU / 16 GiB', ip: '10.10.0.57',
     use: 'Jenkins agent', cpu: 92, cost: '$68', state: ['p-ok', 'Running'], spark: '2,9 8,4 14,6 20,2 26,3 32,2' },
-  { n: 'jump-bey-01', pv: 'SVT', where: 'OMNI-BEY-01 · esxi-bey-01', shape: '2 vCPU / 4 GiB', ip: '172.19.4.8',
+  { n: 'jump-bey-01', own: 'Platform Eng', pv: 'SVT', where: 'OMNI-BEY-01 · esxi-bey-01', shape: '2 vCPU / 4 GiB', ip: '172.19.4.8',
     use: 'Jump host', cpu: 4, cost: '$46', state: ['p-bad', 'Past expiry'], spark: '2,16 8,16 14,15 20,16 26,16 32,15' },
-  { n: 'ceph-osd-04', pv: 'BM', where: 'iLO pool · dl380-r9', shape: '32 vCPU / 256 GiB', ip: '10.42.9.14',
+  { n: 'ceph-osd-04', own: 'Infrastructure', pv: 'BM', where: 'iLO pool · dl380-r9', shape: '32 vCPU / 256 GiB', ip: '10.42.9.14',
     use: 'Storage node', cpu: 47, cost: '$0', state: ['p-ok', 'Running'], spark: '2,11 8,10 14,12 20,9 26,10 32,8' },
 ];
 document.getElementById('fleetBody').innerHTML = FLEET.map(m => `
   <tr>
     <td><div class="cellstack"><div class="pv">${m.pv}</div><div>
-      <b>${m.n}</b><div class="hint">${m.use === 'Kubernetes worker' ? 'Production East' : '—'}</div></div></div></td>
+      <b>${m.n}</b><div class="hint">${m.own}</div></div></div></td>
     <td class="mono" style="font-size:12px;color:var(--text-subtle)">${m.where}</td>
     <td class="mono" style="font-size:12px">${m.shape}</td>
     <td class="mono" style="font-size:12px;color:var(--text-subtle)">${m.ip}</td>
@@ -1419,7 +1427,9 @@ function render() {
     const priced = Object.values(TARGETS)
       .filter(x => !x.blocked && !x.policy && x.cost() > 0)
       .sort((a, b) => a.cost() - b.cost())[0];
-    return `Cheapest allowed: ${priced.short}, ${money(priced.cost() * spec.count)}`;
+    return priced === t
+      ? 'Cheapest allowed target'
+      : `Cheapest allowed: ${priced.short}, ${money(priced.cost() * spec.count)}`;
   })();
   document.getElementById('costVal').style.color = t.blocked ? 'var(--text-muted)' : '';
 

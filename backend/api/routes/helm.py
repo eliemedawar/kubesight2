@@ -26,6 +26,8 @@ from ..services.helm_chart_template_service import (
     add_chart_version,
     delete_chart_template,
     delete_chart_version,
+    discover_git_paths,
+    discover_git_refs,
     get_chart_template,
     import_archive_chart,
     import_git_chart,
@@ -217,6 +219,24 @@ def helm_chart_template_import_git():
     if err:
         return error_response(err, status)
     return success_response(data, status_code=status)
+
+
+@helm_bp.route("/chart-templates/git/refs", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_git_refs():
+    data, err, status = discover_git_refs(_body())
+    if err:
+        return error_response(err, status)
+    return success_response(data)
+
+
+@helm_bp.route("/chart-templates/git/paths", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_git_paths():
+    data, err, status = discover_git_paths(_body())
+    if err:
+        return error_response(err, status)
+    return success_response(data)
 
 
 @helm_bp.route("/chart-templates/import/archive", methods=["POST"])

@@ -246,6 +246,125 @@ def test_git_existing_chart_is_imported_and_token_is_not_persisted(
     assert "should-be-removed" not in json.dumps(detail)
 
 
+def test_git_repository_discovery_lists_refs_and_paths(
+    client, admin_token, viewer_token
+):
+    remote_output = (
+        "ref: refs/heads/main\tHEAD\n"
+        "1111111111111111111111111111111111111111\tHEAD\n"
+        "1111111111111111111111111111111111111111\trefs/heads/main\n"
+        "2222222222222222222222222222222222222222\trefs/heads/feature/chart\n"
+        "3333333333333333333333333333333333333333\trefs/tags/v1.0.0\n"
+        "4444444444444444444444444444444444444444\trefs/tags/v1.0.0^{}\n"
+    )
+    with patch(
+        "api.services.helm_chart_template_service.subprocess.run"
+    ) as run:
+        run.return_value.returncode = 0
+        run.return_value.stdout = remote_output
+        run.return_value.stderr = ""
+        response = client.post(
+            "/api/helm/chart-templates/git/refs",
+            headers=auth_headers(admin_token),
+            json={
+                "repositoryUrl": "https://git.example/team/platform.git",
+                "username": "git-user",
+                "token": "one-time-token",
+            },
+        )
+    assert response.status_code == 200, response.get_json()
+    discovered = response.get_json()["data"]
+    assert discovered["defaultRef"] == "main"
+    assert discovered["refs"] == [
+        {"name": "main", "type": "branch", "label": "main (branch)"},
+        {
+            "name": "feature/chart",
+            "type": "branch",
+            "label": "feature/chart (branch)",
+        },
+        {"name": "v1.0.0", "type": "tag", "label": "v1.0.0 (tag)"},
+    ]
+    assert run.call_args.kwargs["env"]["KUBESIGHT_GIT_TOKEN"] == "one-time-token"
+
+    def fake_clone(payload, destination, askpass_dir):
+        root = Path(destination)
+        (root / "deploy" / "chart").mkdir(parents=True)
+        (root / "deploy" / "manifests").mkdir(parents=True)
+        (root / "docs").mkdir()
+        (root / "deploy" / "chart" / "Chart.yaml").write_text(
+            "apiVersion: v2\nname: platform\nversion: 1.0.0\n",
+            encoding="utf-8",
+        )
+        (root / "deploy" / "manifests" / "deployment.yaml").write_text(
+            DEPLOYMENT_DEV,
+            encoding="utf-8",
+        )
+        return payload["repositoryUrl"]
+
+    with patch(
+        "api.services.helm_chart_template_service._git_clone",
+        side_effect=fake_clone,
+    ):
+        response = client.post(
+            "/api/helm/chart-templates/git/paths",
+            headers=auth_headers(admin_token),
+            json={
+                "repositoryUrl": "https://git.example/team/platform.git",
+                "ref": "main",
+                "token": "one-time-token",
+            },
+        )
+    assert response.status_code == 200, response.get_json()
+    paths = response.get_json()["data"]["paths"]
+    assert paths[0] == {
+        "path": "",
+        "label": "/ (repository root)",
+        "kind": "root",
+    }
+    assert {
+        "path": "deploy/chart",
+        "label": "deploy/chart/ (Helm chart)",
+        "kind": "chart",
+    } in paths
+    assert {
+        "path": "deploy/manifests",
+        "label": "deploy/manifests/ (contains YAML)",
+        "kind": "yaml",
+    } in paths
+
+    denied = client.post(
+        "/api/helm/chart-templates/git/refs",
+        headers=auth_headers(viewer_token),
+        json={"repositoryUrl": "https://git.example/team/platform.git"},
+    )
+    assert denied.status_code == 403
+
+
+def test_git_repository_discovery_redacts_credentials(client, admin_token):
+    with patch(
+        "api.services.helm_chart_template_service.subprocess.run"
+    ) as run:
+        run.return_value.returncode = 128
+        run.return_value.stdout = ""
+        run.return_value.stderr = (
+            "fatal: authentication failed for git-user using top-secret-token"
+        )
+        response = client.post(
+            "/api/helm/chart-templates/git/refs",
+            headers=auth_headers(admin_token),
+            json={
+                "repositoryUrl": "https://git.example/team/platform.git",
+                "username": "git-user",
+                "token": "top-secret-token",
+            },
+        )
+    assert response.status_code == 400
+    serialized = json.dumps(response.get_json())
+    assert "top-secret-token" not in serialized
+    assert "git-user" not in serialized
+    assert serialized.count("[redacted]") == 2
+
+
 CHART_ENTRIES = {
     "areeba-txm/Chart.yaml": (
         "apiVersion: v2\nname: areeba-txm\nversion: 0.1.0\nappVersion: '1.4.2'\n"

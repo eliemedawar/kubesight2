@@ -30,6 +30,7 @@ from ..models import HelmChartTemplate, HelmChartTemplateVersion
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_FILES = 500
 MAX_VARIABLES = 250
+MAX_GIT_PATHS = 2000
 # Archiver leftovers that would otherwise be stored inside the chart.
 ARCHIVE_JUNK_FILES = {".DS_Store", "Thumbs.db"}
 ARCHIVE_JUNK_DIRS = {"__MACOSX", ".git"}
@@ -340,6 +341,8 @@ def _chart_inspection(files: Dict[str, bytes]) -> Dict[str, Any]:
                     keys = sorted(str(key) for key in loaded)
             except (UnicodeDecodeError, yaml.YAMLError):
                 keys = []
+            # The parsed contents are attached per request in ``_detail`` instead of
+            # being stored here, so the catalog listing stays small.
             values_files.append(
                 {
                     "path": path,
@@ -1510,11 +1513,34 @@ def _write_askpass(directory: str) -> str:
     return path
 
 
+def _git_environment(
+    payload: Dict[str, Any], askpass_dir: str
+) -> Tuple[Dict[str, str], str, str]:
+    token = str(payload.get("token") or payload.get("accessToken") or "")
+    username = _clean_text(payload.get("username"), 255) or "oauth2"
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": _write_askpass(askpass_dir),
+            "KUBESIGHT_GIT_USERNAME": username,
+            "KUBESIGHT_GIT_TOKEN": token,
+        }
+    )
+    return env, token, username
+
+
+def _redact_git_message(message: str, *secrets_to_redact: str) -> str:
+    redacted = str(message or "")
+    for secret in secrets_to_redact:
+        if secret:
+            redacted = redacted.replace(secret, "[redacted]")
+    return redacted[:1000]
+
+
 def _git_clone(payload: Dict[str, Any], destination: str, askpass_dir: str) -> str:
     url = _validate_git_url(payload.get("repositoryUrl") or payload.get("url"))
     ref = _clean_text(payload.get("ref") or payload.get("branch"), 200)
-    token = str(payload.get("token") or payload.get("accessToken") or "")
-    username = _clean_text(payload.get("username"), 255) or "oauth2"
     command = [
         "git",
         "-c",
@@ -1529,15 +1555,7 @@ def _git_clone(payload: Dict[str, Any], destination: str, askpass_dir: str) -> s
     if ref:
         command.extend(["--branch", ref])
     command.extend(["--", url, destination])
-    env = os.environ.copy()
-    env.update(
-        {
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_ASKPASS": _write_askpass(askpass_dir),
-            "KUBESIGHT_GIT_USERNAME": username,
-            "KUBESIGHT_GIT_TOKEN": token,
-        }
-    )
+    env, token, username = _git_environment(payload, askpass_dir)
     try:
         completed = subprocess.run(
             command,
@@ -1553,10 +1571,7 @@ def _git_clone(payload: Dict[str, Any], destination: str, askpass_dir: str) -> s
         raise ChartTemplateError("Git clone timed out after 90 seconds.") from exc
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout or "Git clone failed.").strip()
-        for secret in (token, username):
-            if secret:
-                message = message.replace(secret, "[redacted]")
-        raise ChartTemplateError(message[:1000])
+        raise ChartTemplateError(_redact_git_message(message, token, username))
     return url
 
 
@@ -1599,6 +1614,152 @@ def _resolve_subpath(root_dir: Path, requested: str, *, label: str) -> Path:
     if not target.exists():
         raise ChartTemplateError(f"The selected path does not exist in the {label}.")
     return target
+
+
+def discover_git_refs(
+    payload: Dict[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """List remote branches and tags without cloning repository contents."""
+    try:
+        with _private_import_directory() as temp_dir:
+            url = _validate_git_url(payload.get("repositoryUrl") or payload.get("url"))
+            env, token, username = _git_environment(payload, temp_dir)
+            command = [
+                "git",
+                "-c",
+                "credential.helper=",
+                "ls-remote",
+                "--symref",
+                url,
+                "HEAD",
+                "refs/heads/*",
+                "refs/tags/*",
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                    env=env,
+                )
+            except FileNotFoundError as exc:
+                raise ChartTemplateError("Git is not installed on the backend server.") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise ChartTemplateError(
+                    "Git repository lookup timed out after 30 seconds."
+                ) from exc
+            if completed.returncode != 0:
+                message = (
+                    completed.stderr
+                    or completed.stdout
+                    or "Unable to read Git branches and tags."
+                ).strip()
+                raise ChartTemplateError(
+                    _redact_git_message(message, token, username)
+                )
+
+            default_ref = ""
+            refs: List[Dict[str, str]] = []
+            seen = set()
+            for line in completed.stdout.splitlines():
+                if line.startswith("ref: "):
+                    parts = line[5:].split("\t", 1)
+                    if len(parts) == 2 and parts[1] == "HEAD":
+                        default_ref = parts[0].removeprefix("refs/heads/")
+                    continue
+                parts = line.split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                full_name = parts[1]
+                if full_name.endswith("^{}"):
+                    continue
+                if full_name.startswith("refs/heads/"):
+                    ref_type = "branch"
+                    name = full_name.removeprefix("refs/heads/")
+                elif full_name.startswith("refs/tags/"):
+                    ref_type = "tag"
+                    name = full_name.removeprefix("refs/tags/")
+                else:
+                    continue
+                key = (ref_type, name)
+                if not name or key in seen:
+                    continue
+                seen.add(key)
+                refs.append(
+                    {
+                        "name": name,
+                        "type": ref_type,
+                        "label": f"{name} ({ref_type})",
+                    }
+                )
+
+            refs.sort(
+                key=lambda item: (
+                    item["type"] != "branch",
+                    item["name"] != default_ref,
+                    item["name"].lower(),
+                )
+            )
+            if not refs:
+                raise ChartTemplateError(
+                    "The repository has no branches or tags to import."
+                )
+            if not default_ref:
+                default_ref = refs[0]["name"]
+            return {"refs": refs, "defaultRef": default_ref}, None, 200
+    except ChartTemplateError as exc:
+        return None, str(exc), 400
+    except OSError as exc:
+        return None, f"Unable to inspect the Git repository: {exc}", 400
+
+
+def _list_git_repository_paths(repo_root: Path) -> Tuple[List[Dict[str, str]], bool]:
+    paths: List[Dict[str, str]] = [
+        {"path": "", "label": "/ (repository root)", "kind": "root"}
+    ]
+    truncated = False
+    for current, directories, filenames in os.walk(repo_root, followlinks=False):
+        current_path = Path(current)
+        directories[:] = sorted(
+            directory
+            for directory in directories
+            if directory != ".git" and not (current_path / directory).is_symlink()
+        )
+        if current_path == repo_root:
+            continue
+        relative = current_path.relative_to(repo_root).as_posix()
+        if "Chart.yaml" in filenames:
+            kind = "chart"
+            label = f"{relative}/ (Helm chart)"
+        elif any(Path(filename).suffix.lower() in {".yaml", ".yml"} for filename in filenames):
+            kind = "yaml"
+            label = f"{relative}/ (contains YAML)"
+        else:
+            kind = "directory"
+            label = f"{relative}/"
+        paths.append({"path": relative, "label": label, "kind": kind})
+        if len(paths) >= MAX_GIT_PATHS:
+            truncated = True
+            break
+    return paths, truncated
+
+
+def discover_git_paths(
+    payload: Dict[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Shallow-clone a selected ref and return safe directory choices."""
+    try:
+        with _private_import_directory() as temp_dir:
+            repo_root = Path(temp_dir) / "repository"
+            _git_clone(payload, str(repo_root), temp_dir)
+            paths, truncated = _list_git_repository_paths(repo_root)
+            return {"paths": paths, "truncated": truncated}, None, 200
+    except ChartTemplateError as exc:
+        return None, str(exc), 400
+    except OSError as exc:
+        return None, f"Unable to inspect the Git repository: {exc}", 400
 
 
 def _discover_chart_root(

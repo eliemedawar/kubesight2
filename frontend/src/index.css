@@ -7581,6 +7581,17 @@ kbd {
   font-size: var(--font-size-xs);
 }
 
+.helm-git-discovery {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.helm-git-discovery .muted {
+  font-size: var(--font-size-xs);
+}
+
 .helm-variable-section {
   display: grid;
   gap: var(--space-3);
