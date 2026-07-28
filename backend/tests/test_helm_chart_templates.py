@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import tarfile
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -238,6 +239,280 @@ def test_git_existing_chart_is_imported_and_token_is_not_persisted(
     assert password["required"] is True
     assert password["default"] == ""
     assert "should-be-removed" not in json.dumps(detail)
+
+
+CHART_ENTRIES = {
+    "areeba-txm/Chart.yaml": (
+        "apiVersion: v2\nname: areeba-txm\nversion: 0.1.0\nappVersion: '1.4.2'\n"
+        "type: application\ndescription: Transaction manager\n"
+    ),
+    "areeba-txm/values.yaml": (
+        "replicas: 2\nimage:\n  repository: example/orders\n"
+        "  tag: latest\ncredentials:\n  password: should-be-removed\n"
+    ),
+    "areeba-txm/values-prod.yaml": (
+        "replicas: 6\ncredentials:\n  password: prod-password-must-vanish\n"
+    ),
+    "areeba-txm/values-uat.yml": "replicas: 2\n",
+    "areeba-txm/templates/deployment.yaml": (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: '{{ .Release.Name }}'\n"
+    ),
+    "areeba-txm/templates/service.yaml": (
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: '{{ .Release.Name }}'\n"
+    ),
+    "areeba-txm/templates/_helpers.tpl": '{{- define "areeba-txm.name" -}}txm{{- end -}}',
+    "__MACOSX/areeba-txm/._Chart.yaml": "junk",
+    "areeba-txm/.DS_Store": "junk",
+}
+
+
+def _zip_base64(entries: dict, **kwargs) -> str:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path, content in entries.items():
+            archive.writestr(path, content, **kwargs)
+    return base64.b64encode(stream.getvalue()).decode("ascii")
+
+
+def _tgz_base64(entries: dict) -> str:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+        for path, content in entries.items():
+            raw = content.encode("utf-8")
+            info = tarfile.TarInfo(name=f"./{path}")
+            info.size = len(raw)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(raw))
+    return base64.b64encode(stream.getvalue()).decode("ascii")
+
+
+def _import_archive(client, token, entries, **payload):
+    return client.post(
+        "/api/helm/chart-templates/import/archive",
+        headers=auth_headers(token),
+        json={
+            "filename": "chart.zip",
+            "archiveBase64": _zip_base64(entries),
+            **payload,
+        },
+    )
+
+
+def test_zip_archive_with_chart_is_imported_and_secrets_are_scrubbed(client, admin_token):
+    response = _import_archive(client, admin_token, CHART_ENTRIES)
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["sourceType"] == "archive-chart"
+    assert data["name"] == "areeba-txm"
+    assert data["version"] == "0.1.0"
+    assert data["appVersion"] == "1.4.2"
+    assert data["description"] == "Transaction manager"
+    assert data["sourceRef"] == "chart.zip"
+
+    chart = data["chart"]
+    assert chart["apiVersion"] == "v2"
+    assert chart["type"] == "application"
+    assert chart["hasChartYaml"] and chart["hasValuesYaml"]
+    assert data["templateCount"] == 3
+    kinds = {item["path"]: item["kinds"] for item in chart["templates"]}
+    assert kinds["templates/deployment.yaml"] == ["Deployment"]
+    assert kinds["templates/service.yaml"] == ["Service"]
+    assert kinds["templates/_helpers.tpl"] == []
+
+    # Environment values files are detected, described, and kept without secrets.
+    assert data["valuesFileCount"] == 2
+    environments = {item["path"]: item for item in chart["valuesFiles"]}
+    assert set(environments) == {"values-prod.yaml", "values-uat.yml"}
+    assert environments["values-prod.yaml"]["environment"] == "prod"
+    assert environments["values-prod.yaml"]["keyCount"] == 2
+    assert environments["values-uat.yml"]["environment"] == "uat"
+    assert "prod-password-must-vanish" not in json.dumps(data)
+
+    detail = client.get(
+        f"/api/helm/chart-templates/{data['id']}",
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]
+    password = next(
+        item for item in detail["variables"] if item["path"] == "credentials.password"
+    )
+    assert password["required"] is True
+    assert "should-be-removed" not in json.dumps(detail)
+
+
+def test_tgz_archive_is_imported_with_chart_metadata(client, admin_token, app):
+    response = client.post(
+        "/api/helm/chart-templates/import/archive",
+        headers=auth_headers(admin_token),
+        json={
+            "filename": "areeba-txm-0.1.0-323a1ece9b87.tgz",
+            "archiveBase64": _tgz_base64(CHART_ENTRIES),
+        },
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["sourceType"] == "archive-chart"
+    assert data["name"] == "areeba-txm"
+    assert data["version"] == "0.1.0"
+    assert data["sourceRef"] == "areeba-txm-0.1.0-323a1ece9b87.tgz"
+    assert data["templateCount"] == 3
+    assert data["valuesFileCount"] == 2
+    assert "prod-password-must-vanish" not in json.dumps(data)
+
+    # The detected environment values files stay part of the deployable package.
+    with app.app_context():
+        packaged = base64.b64decode(chart_archive_base64(data["id"]))
+    with tarfile.open(fileobj=io.BytesIO(packaged), mode="r:gz") as archive:
+        names = archive.getnames()
+        contents = "\n".join(
+            archive.extractfile(member).read().decode("utf-8", errors="ignore")
+            for member in archive.getmembers()
+            if member.isfile()
+        )
+    assert any(name.endswith("values-prod.yaml") for name in names)
+    assert any(name.endswith("templates/deployment.yaml") for name in names)
+    assert "prod-password-must-vanish" not in contents
+
+
+def test_zip_archive_of_raw_manifests_is_converted(client, admin_token):
+    response = _import_archive(
+        client,
+        admin_token,
+        {
+            "manifests/dev.yaml": DEPLOYMENT_DEV,
+            "manifests/prod.yaml": DEPLOYMENT_PROD_AND_SERVICE,
+            "manifests/secret.yaml": SECRET,
+        },
+        name="Payments Platform",
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["sourceType"] == "archive-yaml"
+    assert data["resourceCount"] == 3
+
+    detail = client.get(
+        f"/api/helm/chart-templates/{data['id']}",
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]
+    serialized = json.dumps(detail)
+    assert "do-not-store-this" not in serialized
+    assert "database-password-must-not-persist" not in serialized
+
+
+def test_archive_with_multiple_charts_is_resolved_by_path(client, admin_token):
+    entries = {
+        "bundle/charts/alpha/Chart.yaml": "apiVersion: v2\nname: alpha\nversion: 1.0.0\n",
+        "bundle/charts/beta/Chart.yaml": "apiVersion: v2\nname: beta\nversion: 2.0.0\n",
+        "bundle/charts/beta/templates/configmap.yaml": (
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: beta\n"
+        ),
+    }
+    ambiguous = _import_archive(client, admin_token, entries)
+    assert ambiguous.status_code == 400
+    assert "Multiple Helm charts" in ambiguous.get_json()["error"]
+
+    missing_path = _import_archive(client, admin_token, entries, path="bundle/charts/gamma")
+    assert missing_path.status_code == 400
+    assert "does not exist in the archive" in missing_path.get_json()["error"]
+
+    resolved = _import_archive(client, admin_token, entries, path="bundle/charts/beta")
+    assert resolved.status_code == 201, resolved.get_json()
+    data = resolved.get_json()["data"]
+    assert data["name"] == "beta"
+    assert data["version"] == "2.0.0"
+    assert data["sourceRef"] == "chart.zip:bundle/charts/beta"
+    assert data["templateCount"] == 1
+    assert any("no values.yaml" in warning for warning in data["warnings"])
+
+
+def test_zip_archive_rejects_traversal_and_bad_input(client, admin_token):
+    traversal = _import_archive(
+        client, admin_token, {"../escaped/Chart.yaml": "apiVersion: v2\nname: bad\n"}
+    )
+    assert traversal.status_code == 400
+    assert "escapes the archive root" in traversal.get_json()["error"]
+
+    not_a_zip = client.post(
+        "/api/helm/chart-templates/import/archive",
+        headers=auth_headers(admin_token),
+        json={
+            "filename": "chart.zip",
+            "archiveBase64": base64.b64encode(b"not a zip file").decode("ascii"),
+        },
+    )
+    assert not_a_zip.status_code == 400
+    assert "not a valid .zip archive" in not_a_zip.get_json()["error"]
+
+    wrong_extension = _import_archive(
+        client, admin_token, {"app.yaml": DEPLOYMENT_DEV}, filename="chart.rar"
+    )
+    assert wrong_extension.status_code == 400
+    assert "are supported" in wrong_extension.get_json()["error"]
+
+    not_an_archive = client.post(
+        "/api/helm/chart-templates/import/archive",
+        headers=auth_headers(admin_token),
+        json={
+            "filename": "chart.tgz",
+            "archiveBase64": base64.b64encode(b"plain text, not compressed").decode("ascii"),
+        },
+    )
+    assert not_an_archive.status_code == 400
+    assert "not a recognised archive" in not_an_archive.get_json()["error"]
+
+    empty = _import_archive(client, admin_token, {"__MACOSX/._app.yaml": "junk"})
+    assert empty.status_code == 400
+    assert "importable files" in empty.get_json()["error"]
+
+    missing = client.post(
+        "/api/helm/chart-templates/import/archive",
+        headers=auth_headers(admin_token),
+        json={"filename": "chart.zip"},
+    )
+    assert missing.status_code == 400
+    assert "required" in missing.get_json()["error"]
+
+
+def test_zip_archive_import_requires_permission(client, viewer_token):
+    response = _import_archive(client, viewer_token, {"app.yaml": DEPLOYMENT_DEV})
+    assert response.status_code == 403
+
+
+def test_archive_rejects_decompression_bombs_in_both_formats(client, admin_token):
+    oversized = "a: b\n" * 3_000_000  # ~14 MiB uncompressed, compresses tiny
+    for filename, encoder in (("chart.zip", _zip_base64), ("chart.tgz", _tgz_base64)):
+        response = client.post(
+            "/api/helm/chart-templates/import/archive",
+            headers=auth_headers(admin_token),
+            json={
+                "filename": filename,
+                "archiveBase64": encoder({"bomb.yaml": oversized}),
+            },
+        )
+        assert response.status_code == 400
+        assert "10 MiB import limit" in response.get_json()["error"]
+
+
+def test_tgz_archive_rejects_symlinked_members(client, admin_token):
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+        chart = b"apiVersion: v2\nname: linked\nversion: 1.0.0\n"
+        info = tarfile.TarInfo(name="linked/Chart.yaml")
+        info.size = len(chart)
+        archive.addfile(info, io.BytesIO(chart))
+        link = tarfile.TarInfo(name="linked/passwd")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        archive.addfile(link)
+    response = client.post(
+        "/api/helm/chart-templates/import/archive",
+        headers=auth_headers(admin_token),
+        json={
+            "filename": "linked.tgz",
+            "archiveBase64": base64.b64encode(stream.getvalue()).decode("ascii"),
+        },
+    )
+    assert response.status_code == 400
+    assert "link" in response.get_json()["error"]
 
 
 def test_saved_chart_uses_existing_helm_preview_pipeline(client, admin_token):

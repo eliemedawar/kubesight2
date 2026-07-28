@@ -24,6 +24,7 @@ from ..services.helm_service import (
 from ..services.helm_chart_template_service import (
     delete_chart_template,
     get_chart_template,
+    import_archive_chart,
     import_git_chart,
     import_yaml_chart,
     list_chart_templates,
@@ -167,6 +168,18 @@ def helm_chart_template_import_yaml():
 def helm_chart_template_import_git():
     user = get_current_user()
     data, err, status = import_git_chart(
+        _body(), actor_user_id=user.id if user else None
+    )
+    if err:
+        return error_response(err, status)
+    return success_response(data, status_code=status)
+
+
+@helm_bp.route("/chart-templates/import/archive", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_import_archive():
+    user = get_current_user()
+    data, err, status = import_archive_chart(
         _body(), actor_user_id=user.id if user else None
     )
     if err:

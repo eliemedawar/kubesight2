@@ -42,6 +42,13 @@ export function importHelmChartFromGit(payload) {
   return request("/api/helm/chart-templates/import/git", { method: "POST", body: payload });
 }
 
+export function importHelmChartFromArchive(payload) {
+  return request("/api/helm/chart-templates/import/archive", {
+    method: "POST",
+    body: payload,
+  });
+}
+
 export function deleteHelmChartTemplate(templateId) {
   return request(`/api/helm/chart-templates/${encodeURIComponent(templateId)}`, {
     method: "DELETE",
@@ -77,11 +84,12 @@ export function getHelmConfirmationPhrase(payload) {
 }
 
 export async function readChartArchiveAsBase64(file) {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  // Chunked so multi-megabyte archives do not build the string byte by byte.
+  const chunkSize = 0x8000;
   let binary = "";
-  bytes.forEach((b) => {
-    binary += String.fromCharCode(b);
-  });
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + chunkSize));
+  }
   return btoa(binary);
 }

@@ -4,14 +4,9 @@ import {
   deleteHelmChartTemplate,
   listHelmChartTemplates,
 } from "../../api/helmApi.js";
+import HelmChartContents, { helmSourceLabel } from "./HelmChartContents.jsx";
 import HelmChartDeployModal from "./HelmChartDeployModal.jsx";
 import HelmChartImportModal from "./HelmChartImportModal.jsx";
-
-const SOURCE_LABELS = {
-  yaml: "Deployment YAMLs",
-  "git-yaml": "Git · Kubernetes YAML",
-  "git-chart": "Git · Helm chart",
-};
 
 export default function HelmChartCatalog({
   canDeploy = false,
@@ -67,7 +62,7 @@ export default function HelmChartCatalog({
         <div>
           <h2 id="helm-chart-catalog-title">Helm Charts</h2>
           <p className="muted">
-            Reusable charts imported from deployment YAMLs or Git. Defaults are preserved,
+            Reusable charts imported from deployment YAMLs, a chart archive, or Git. Defaults are preserved,
             while sensitive values must be supplied for every deployment.
           </p>
         </div>
@@ -86,7 +81,7 @@ export default function HelmChartCatalog({
           <div className="helm-chart-empty__icon" aria-hidden="true">⌘</div>
           <h3>No reusable Helm charts yet</h3>
           <p className="muted">
-            Import several Kubernetes YAMLs, an existing chart, or raw manifests from Git.
+            Import several Kubernetes YAMLs, a packaged chart archive, or raw manifests from Git.
           </p>
           {canManage ? (
             <button type="button" className="btn-primary" onClick={() => setImportOpen(true)}>
@@ -121,9 +116,15 @@ export default function HelmChartCatalog({
               {template.description || "Reusable Helm chart"}
             </p>
             <div className="helm-chart-card__meta">
-              <span>{SOURCE_LABELS[template.sourceType] || template.sourceType}</span>
+              <span>{helmSourceLabel(template)}</span>
               <span>{template.resourceCount || 0} resources</span>
               <span>{template.variableCount || 0} values</span>
+              {template.valuesFileCount ? (
+                <span>
+                  {template.valuesFileCount} env values file
+                  {template.valuesFileCount === 1 ? "" : "s"}
+                </span>
+              ) : null}
               {template.requiredVariableCount ? (
                 <span className="helm-chart-card__required">
                   {template.requiredVariableCount} required
@@ -132,6 +133,13 @@ export default function HelmChartCatalog({
                 <span className="helm-chart-card__ready">Ready with defaults</span>
               )}
             </div>
+            <details className="helm-chart-card__contents">
+              <summary>
+                Chart contents · {template.templateCount || 0} template
+                {template.templateCount === 1 ? "" : "s"}
+              </summary>
+              <HelmChartContents template={template} compact />
+            </details>
             {(template.warnings || []).length ? (
               <details className="helm-chart-card__warnings">
                 <summary>{template.warnings.length} import warning{template.warnings.length === 1 ? "" : "s"}</summary>

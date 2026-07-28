@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import zipfile
 from copy import deepcopy
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +28,12 @@ from ..models import HelmChartTemplate
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_FILES = 500
 MAX_VARIABLES = 250
+# Archiver leftovers that would otherwise be stored inside the chart.
+ARCHIVE_JUNK_FILES = {".DS_Store", "Thumbs.db"}
+ARCHIVE_JUNK_DIRS = {"__MACOSX", ".git"}
+ARCHIVE_SUFFIXES = (".zip", ".tgz", ".tar.gz")
+ARCHIVE_SUFFIX_LABEL = ".zip, .tgz, or .tar.gz"
+TEMPLATE_KIND_RE = re.compile(r"(?m)^\s*kind:\s*[\"']?([A-Za-z][A-Za-z0-9.-]*)[\"']?\s*(?:#.*)?$")
 WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}
 SENSITIVE_KEY_RE = re.compile(
     r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|"
@@ -71,6 +78,7 @@ def _clean_text(value: Any, limit: int) -> str:
 
 def _summary(row: HelmChartTemplate) -> Dict[str, Any]:
     definition = row.definition or {}
+    chart = definition.get("chart") or {}
     return {
         "id": row.slug,
         "name": row.name,
@@ -79,6 +87,9 @@ def _summary(row: HelmChartTemplate) -> Dict[str, Any]:
         "appVersion": row.app_version or "",
         "sourceType": row.source_type,
         "sourceRef": row.source_ref or "",
+        "chart": chart,
+        "templateCount": len(chart.get("templates") or []),
+        "valuesFileCount": len(chart.get("valuesFiles") or []),
         "variableCount": len(definition.get("variables") or []),
         "requiredVariableCount": sum(
             1 for item in definition.get("variables") or [] if item.get("required")
@@ -127,6 +138,69 @@ def _safe_chart_path(path: str) -> str:
     if not all(SAFE_FILE_RE.match(part) for part in parts):
         raise ChartTemplateError(f"Chart file path is not supported: {normalized}")
     return "/".join(parts)
+
+
+def _is_environment_values_file(path: str) -> bool:
+    """True for optional per-environment values files such as ``values-prod.yaml``."""
+    if path == "values.yaml" or path.startswith("templates/"):
+        return False
+    name = Path(path).name.lower()
+    return name.startswith("values") and name.endswith((".yaml", ".yml"))
+
+
+def _values_file_environment(path: str) -> str:
+    stem = Path(path).stem
+    label = re.sub(r"^values", "", stem, flags=re.IGNORECASE).strip(" -_.")
+    return label or "values"
+
+
+def _chart_inspection(files: Dict[str, bytes]) -> Dict[str, Any]:
+    """Describe a stored chart: Chart.yaml metadata, templates and values files."""
+    metadata: Dict[str, Any] = {}
+    if files.get("Chart.yaml"):
+        try:
+            loaded = yaml.safe_load(files["Chart.yaml"].decode("utf-8"))
+            metadata = loaded if isinstance(loaded, dict) else {}
+        except (UnicodeDecodeError, yaml.YAMLError):
+            metadata = {}
+
+    templates: List[Dict[str, Any]] = []
+    values_files: List[Dict[str, Any]] = []
+    for path in sorted(files):
+        if path.startswith("templates/"):
+            kinds: List[str] = []
+            if path.lower().endswith((".yaml", ".yml")):
+                try:
+                    kinds = sorted(set(TEMPLATE_KIND_RE.findall(files[path].decode("utf-8"))))
+                except UnicodeDecodeError:
+                    kinds = []
+            templates.append({"path": path, "kinds": kinds})
+        elif _is_environment_values_file(path):
+            keys: List[str] = []
+            try:
+                loaded = yaml.safe_load(files[path].decode("utf-8"))
+                if isinstance(loaded, dict):
+                    keys = sorted(str(key) for key in loaded)
+            except (UnicodeDecodeError, yaml.YAMLError):
+                keys = []
+            values_files.append(
+                {
+                    "path": path,
+                    "environment": _values_file_environment(path),
+                    "keyCount": len(keys),
+                    "topLevelKeys": keys[:25],
+                }
+            )
+
+    return {
+        "apiVersion": str(metadata.get("apiVersion") or ""),
+        "type": str(metadata.get("type") or ""),
+        "hasChartYaml": "Chart.yaml" in files,
+        "hasValuesYaml": "values.yaml" in files,
+        "templates": templates,
+        "valuesFiles": values_files,
+        "fileCount": len(files),
+    }
 
 
 def _encode_files(files: Dict[str, bytes]) -> Dict[str, str]:
@@ -186,6 +260,7 @@ def _persist(
             "variables": variables[:MAX_VARIABLES],
             "warnings": warnings,
             "resourceCount": resource_count,
+            "chart": _chart_inspection(files),
         },
         created_by=actor_user_id,
     )
@@ -926,10 +1001,42 @@ def _scrub_static_secret_templates(
     return warnings
 
 
+def _scrub_environment_values_files(files: Dict[str, bytes]) -> List[str]:
+    """Keep ``values-<environment>.yaml`` files, minus any sensitive literals.
+
+    Environment files are worth showing and reusing, but they routinely carry
+    passwords, so every sensitive leaf is blanked before the file is stored.
+    """
+    warnings: List[str] = []
+    for path in sorted(files):
+        if not _is_environment_values_file(path):
+            continue
+        try:
+            loaded = yaml.safe_load(files[path].decode("utf-8"))
+        except (UnicodeDecodeError, yaml.YAMLError):
+            loaded = None
+        if not isinstance(loaded, dict):
+            files.pop(path, None)
+            warnings.append(f"Excluded '{path}' because it is not a values mapping.")
+            continue
+        removed = 0
+        for value_path, _ in list(_flatten_values(loaded)):
+            if value_path and any(SENSITIVE_KEY_RE.search(part) for part in value_path):
+                _set_nested(loaded, value_path, "")
+                removed += 1
+        files[path] = yaml.safe_dump(loaded, sort_keys=False).encode("utf-8")
+        if removed:
+            warnings.append(
+                f"Removed {removed} sensitive value{'' if removed == 1 else 's'} from '{path}'."
+            )
+    return warnings
+
+
 def _import_existing_chart(
     chart_root: Path,
     *,
     payload: Dict[str, Any],
+    source_type: str,
     source_ref: str,
     actor_user_id: Optional[int],
 ) -> Dict[str, Any]:
@@ -955,17 +1062,13 @@ def _import_existing_chart(
     scrubbed, variables, warnings = _scrub_chart_values(values, schema)
     _scrub_schema_secrets(schema)
     files = _read_chart_directory(chart_root)
-    for path in list(files):
-        filename = Path(path).name.lower()
-        if (
-            filename.startswith("values")
-            and filename.endswith((".yaml", ".yml"))
-            and path != "values.yaml"
-        ):
-            files.pop(path, None)
-            warnings.append(
-                f"Excluded optional values file '{path}' because environment values may contain secrets."
-            )
+    if not values_path.exists():
+        warnings.append(
+            "The chart has no values.yaml, so only the values you supply at deploy time apply."
+        )
+    if not any(path.startswith("templates/") for path in files):
+        warnings.append("The chart has no templates/ directory and renders no resources.")
+    warnings.extend(_scrub_environment_values_files(files))
     warnings.extend(_scrub_static_secret_templates(files, scrubbed, variables))
     files["values.yaml"] = yaml.safe_dump(scrubbed, sort_keys=False).encode("utf-8")
     if schema and "values.schema.json" in files:
@@ -979,7 +1082,7 @@ def _import_existing_chart(
         or _clean_text(metadata.get("description"), 500),
         version=_clean_text(metadata.get("version"), 64) or "0.1.0",
         app_version=_clean_text(metadata.get("appVersion"), 64),
-        source_type="git-chart",
+        source_type=source_type,
         source_ref=source_ref,
         files=files,
         values=scrubbed,
@@ -1094,17 +1197,63 @@ def _private_import_directory() -> Iterable[str]:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def _resolve_repo_path(repo_root: Path, requested: str) -> Path:
+def _resolve_subpath(root_dir: Path, requested: str, *, label: str) -> Path:
     relative = str(requested or "").replace("\\", "/").strip("/")
     if relative and any(part == ".." for part in relative.split("/")):
-        raise ChartTemplateError("Repository path cannot contain '..'.")
-    target = (repo_root / relative).resolve()
-    root = repo_root.resolve()
+        raise ChartTemplateError(f"{label.capitalize()} path cannot contain '..'.")
+    target = (root_dir / relative).resolve()
+    root = root_dir.resolve()
     if target != root and root not in target.parents:
-        raise ChartTemplateError("Repository path is outside the cloned repository.")
+        raise ChartTemplateError(f"The selected path is outside the {label}.")
     if not target.exists():
-        raise ChartTemplateError("The selected path does not exist in the repository.")
+        raise ChartTemplateError(f"The selected path does not exist in the {label}.")
     return target
+
+
+def _discover_chart_root(
+    selected: Path, import_type: str, *, path_hint: str
+) -> Optional[Path]:
+    """Locate a packaged Helm chart under ``selected``, honouring the import type."""
+    if (selected / "Chart.yaml").is_file():
+        return selected
+    chart_root: Optional[Path] = None
+    if import_type in {"auto", "chart"}:
+        candidates = [
+            path.parent for path in selected.rglob("Chart.yaml") if ".git" not in path.parts
+        ]
+        if len(candidates) == 1:
+            chart_root = candidates[0]
+        elif len(candidates) > 1:
+            raise ChartTemplateError(
+                f"Multiple Helm charts were found. Specify the chart directory in {path_hint}."
+            )
+    if import_type == "chart" and not chart_root:
+        raise ChartTemplateError(
+            "No Chart.yaml was found. Specify the existing chart directory."
+        )
+    return chart_root
+
+
+def _collect_yaml_source_files(selected: Path) -> List[Tuple[str, str]]:
+    yaml_paths = [
+        path
+        for path in sorted(selected.rglob("*"))
+        if path.is_file()
+        and not path.is_symlink()
+        and path.suffix.lower() in {".yaml", ".yml"}
+        and ".git" not in path.parts
+    ]
+    if not yaml_paths:
+        raise ChartTemplateError("No Chart.yaml or Kubernetes YAML files were found.")
+    source_files: List[Tuple[str, str]] = []
+    total = 0
+    for path in yaml_paths[:MAX_IMPORT_FILES]:
+        content = path.read_text(encoding="utf-8")
+        total += len(content.encode("utf-8"))
+        if total > MAX_IMPORT_BYTES:
+            raise ChartTemplateError("YAML content exceeds the 10 MiB import limit.")
+        source_files.append((path.relative_to(selected).as_posix(), content))
+    return source_files
 
 
 def import_git_chart(
@@ -1114,25 +1263,13 @@ def import_git_chart(
         with _private_import_directory() as temp_dir:
             repo_root = Path(temp_dir) / "repository"
             url = _git_clone(payload, str(repo_root), temp_dir)
-            selected = _resolve_repo_path(repo_root, payload.get("path") or "")
+            selected = _resolve_subpath(
+                repo_root, payload.get("path") or "", label="cloned repository"
+            )
             import_type = _clean_text(payload.get("importType"), 20).lower() or "auto"
-            chart_root: Optional[Path] = selected if (selected / "Chart.yaml").is_file() else None
-            if not chart_root and import_type in {"auto", "chart"}:
-                candidates = [
-                    path.parent
-                    for path in selected.rglob("Chart.yaml")
-                    if ".git" not in path.parts
-                ]
-                if len(candidates) == 1:
-                    chart_root = candidates[0]
-                elif len(candidates) > 1:
-                    raise ChartTemplateError(
-                        "Multiple Helm charts were found. Specify the chart directory in Repository path."
-                    )
-            if import_type == "chart" and not chart_root:
-                raise ChartTemplateError(
-                    "No Chart.yaml was found. Specify the existing chart directory."
-                )
+            chart_root = _discover_chart_root(
+                selected, import_type, path_hint="Repository path"
+            )
             ref = _clean_text(payload.get("ref") or payload.get("branch"), 200)
             repo_path = _clean_text(payload.get("path"), 500)
             source_ref = f"{url}{f'#{ref}' if ref else ''}{f':{repo_path}' if repo_path else ''}"
@@ -1140,28 +1277,12 @@ def import_git_chart(
                 return _import_existing_chart(
                     chart_root,
                     payload=payload,
+                    source_type="git-chart",
                     source_ref=source_ref,
                     actor_user_id=actor_user_id,
                 ), None, 201
 
-            yaml_paths = [
-                path
-                for path in selected.rglob("*")
-                if path.is_file()
-                and not path.is_symlink()
-                and path.suffix.lower() in {".yaml", ".yml"}
-                and ".git" not in path.parts
-            ]
-            if not yaml_paths:
-                raise ChartTemplateError("No Chart.yaml or Kubernetes YAML files were found.")
-            source_files: List[Tuple[str, str]] = []
-            total = 0
-            for path in yaml_paths[:MAX_IMPORT_FILES]:
-                content = path.read_text(encoding="utf-8")
-                total += len(content.encode("utf-8"))
-                if total > MAX_IMPORT_BYTES:
-                    raise ChartTemplateError("YAML content exceeds the 10 MiB import limit.")
-                source_files.append((path.relative_to(selected).as_posix(), content))
+            source_files = _collect_yaml_source_files(selected)
             name, files, values, variables, warnings, count = _convert_manifest_files(
                 source_files, requested_name=_clean_text(payload.get("name"), 120)
             )
@@ -1184,6 +1305,202 @@ def import_git_chart(
         return None, str(exc), 400
     except (OSError, UnicodeError) as exc:
         return None, f"Unable to read the Git repository: {exc}", 400
+
+
+def _decode_archive(payload: Dict[str, Any]) -> bytes:
+    raw = payload.get("archiveBase64") or payload.get("archive_base64") or ""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ChartTemplateError(f"An archive file ({ARCHIVE_SUFFIX_LABEL}) is required.")
+    encoded = re.sub(r"\s+", "", raw)
+    # Reject oversized uploads before decoding them into memory.
+    if len(encoded) > (MAX_IMPORT_BYTES // 3 + 1) * 4:
+        raise ChartTemplateError("The archive exceeds the 10 MiB import limit.")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ChartTemplateError("The uploaded archive could not be decoded.") from exc
+    if not data:
+        raise ChartTemplateError("The uploaded archive is empty.")
+    if len(data) > MAX_IMPORT_BYTES:
+        raise ChartTemplateError("The archive exceeds the 10 MiB import limit.")
+    return data
+
+
+def _archive_member_path(name: str) -> Optional[str]:
+    """Return a safe relative path for an archive entry, or None when skippable."""
+    normalized = str(name or "").replace("\\", "/")
+    if not normalized or normalized.endswith("/"):
+        return None
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        raise ChartTemplateError(f"The archive entry uses an absolute path: {name}")
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        raise ChartTemplateError(f"The archive entry escapes the archive root: {name}")
+    if parts[-1] in ARCHIVE_JUNK_FILES or set(parts[:-1]) & ARCHIVE_JUNK_DIRS:
+        return None
+    return "/".join(parts)
+
+
+class _ArchiveWriter:
+    """Writes archive members to disk under a shared file-count and byte budget."""
+
+    def __init__(self, destination: Path) -> None:
+        self._destination = destination
+        self._remaining = MAX_IMPORT_BYTES
+        self.written = 0
+
+    def add(self, relative: str, declared_size: int, handle: Any) -> None:
+        self.written += 1
+        if self.written > MAX_IMPORT_FILES:
+            raise ChartTemplateError(f"Archives may contain at most {MAX_IMPORT_FILES} files.")
+        if declared_size > self._remaining:
+            raise ChartTemplateError("Archive content exceeds the 10 MiB import limit.")
+        # Read one byte past the remaining budget so a header that understates
+        # a member's size cannot smuggle a decompression bomb past the limit.
+        content = handle.read(self._remaining + 1)
+        if len(content) > self._remaining:
+            raise ChartTemplateError("Archive content exceeds the 10 MiB import limit.")
+        self._remaining -= len(content)
+        target = self._destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+
+def _extract_zip_archive(data: bytes, writer: _ArchiveWriter) -> None:
+    try:
+        opened = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise ChartTemplateError("The uploaded file is not a valid .zip archive.") from exc
+    with opened as archive:
+        for info in archive.infolist():
+            if info.flag_bits & 0x1:
+                raise ChartTemplateError("Password-protected archives are not supported.")
+            if info.is_dir():
+                continue
+            relative = _archive_member_path(info.filename)
+            if relative is None:
+                continue
+            if stat.S_ISLNK(info.external_attr >> 16):
+                raise ChartTemplateError(
+                    f"The archive contains a symbolic link, which is not supported: {relative}"
+                )
+            try:
+                with archive.open(info) as handle:
+                    writer.add(relative, info.file_size, handle)
+            except (zipfile.BadZipFile, EOFError, RuntimeError) as exc:
+                raise ChartTemplateError(
+                    f"The archive entry could not be read: {relative}"
+                ) from exc
+
+
+def _extract_tar_archive(data: bytes, writer: _ArchiveWriter) -> None:
+    try:
+        opened = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz")
+    except (tarfile.TarError, EOFError, OSError) as exc:
+        raise ChartTemplateError(
+            "The uploaded file is not a valid .tgz or .tar.gz archive."
+        ) from exc
+    with opened as archive:
+        for member in archive:
+            if member.isdir():
+                continue
+            if member.issym() or member.islnk():
+                raise ChartTemplateError(
+                    f"The archive contains a link, which is not supported: {member.name}"
+                )
+            if not member.isfile():
+                # Devices, FIFOs and sockets never belong in a chart.
+                continue
+            relative = _archive_member_path(member.name)
+            if relative is None:
+                continue
+            try:
+                handle = archive.extractfile(member)
+                if handle is None:
+                    continue
+                with handle:
+                    writer.add(relative, member.size, handle)
+            except (tarfile.TarError, EOFError) as exc:
+                raise ChartTemplateError(
+                    f"The archive entry could not be read: {relative}"
+                ) from exc
+
+
+def _extract_archive(data: bytes, filename: str, destination: Path) -> None:
+    """Safely extract a .zip, .tgz or .tar.gz upload into ``destination``."""
+    writer = _ArchiveWriter(destination)
+    if data[:2] == b"PK":
+        _extract_zip_archive(data, writer)
+    elif data[:2] == b"\x1f\x8b":
+        _extract_tar_archive(data, writer)
+    elif filename.lower().endswith(".zip"):
+        # Reuse zipfile's own diagnostics for a truncated or corrupt .zip.
+        _extract_zip_archive(data, writer)
+    else:
+        raise ChartTemplateError(
+            f"The uploaded file is not a recognised archive ({ARCHIVE_SUFFIX_LABEL})."
+        )
+    if not writer.written:
+        raise ChartTemplateError("The archive does not contain any importable files.")
+
+
+def import_archive_chart(
+    payload: Dict[str, Any], actor_user_id: Optional[int] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Import a chart or raw Kubernetes manifests from an uploaded archive."""
+    try:
+        filename = _clean_text(payload.get("filename") or payload.get("fileName"), 255)
+        if filename and not filename.lower().endswith(ARCHIVE_SUFFIXES):
+            raise ChartTemplateError(f"Only {ARCHIVE_SUFFIX_LABEL} archives are supported.")
+        data = _decode_archive(payload)
+        with _private_import_directory() as temp_dir:
+            archive_root = Path(temp_dir) / "archive"
+            archive_root.mkdir(parents=True, exist_ok=True)
+            _extract_archive(data, filename, archive_root)
+            selected = _resolve_subpath(
+                archive_root, payload.get("path") or "", label="archive"
+            )
+            import_type = _clean_text(payload.get("importType"), 20).lower() or "auto"
+            chart_root = _discover_chart_root(
+                selected, import_type, path_hint="Path inside archive"
+            )
+            archive_path = _clean_text(payload.get("path"), 500)
+            source_ref = (
+                f"{filename or 'uploaded-archive'}"
+                f"{f':{archive_path}' if archive_path else ''}"
+            )
+            if chart_root and import_type != "yaml":
+                return _import_existing_chart(
+                    chart_root,
+                    payload=payload,
+                    source_type="archive-chart",
+                    source_ref=source_ref,
+                    actor_user_id=actor_user_id,
+                ), None, 201
+
+            source_files = _collect_yaml_source_files(selected)
+            name, files, values, variables, warnings, count = _convert_manifest_files(
+                source_files, requested_name=_clean_text(payload.get("name"), 120)
+            )
+            return _persist(
+                name=name,
+                description=_clean_text(payload.get("description"), 500)
+                or "Converted from Kubernetes YAML in an uploaded archive",
+                version="0.1.0",
+                app_version="1.0.0",
+                source_type="archive-yaml",
+                source_ref=source_ref,
+                files=files,
+                values=values,
+                variables=variables,
+                warnings=warnings,
+                resource_count=count,
+                actor_user_id=actor_user_id,
+            ), None, 201
+    except ChartTemplateError as exc:
+        return None, str(exc), 400
+    except (OSError, UnicodeError) as exc:
+        return None, f"Unable to read the archive: {exc}", 400
 
 
 def chart_archive_base64(slug: str) -> str:
