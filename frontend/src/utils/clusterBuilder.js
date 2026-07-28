@@ -902,7 +902,9 @@ export function shortDigest(digest) {
 
 /** Where this add-on's manifest comes from at the selected version. */
 export function addonProvenance(catalogEntry, version) {
-  const digests = catalogEntry?.manifestDigests || [];
+  const digests = catalogEntry?.manifestDigestsByVersion?.[version]
+    || catalogEntry?.manifestDigests
+    || [];
   const bundled = (catalogEntry?.bundledVersions || []).includes(version);
   return {
     bundled,
@@ -910,4 +912,39 @@ export function addonProvenance(catalogEntry, version) {
     manifestCount: digests.length,
     text: bundled ? "bundled" : "downloads on build",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Kubernetes-version compatibility
+//
+// CNI plugins and add-ons support a moving window of Kubernetes minors, so the
+// catalog ships the whole matrix and the wizard narrows it to whatever the user
+// picked. Offering an incompatible pairing and failing at preflight would be a
+// worse experience than never offering it.
+// ---------------------------------------------------------------------------
+
+/** "1.32.4" / "v1.32.4" → "1.32"; anything unparseable → "". */
+export function k8sMinorOf(version) {
+  const match = /^v?(\d+)\.(\d+)(?:\.\d+)?$/.exec(String(version || "").trim());
+  return match ? `${match[1]}.${match[2]}` : "";
+}
+
+/** Catalog-entry versions validated on this Kubernetes version, newest first. */
+export function versionsForK8s(catalogEntry, k8sVersion) {
+  const versions = catalogEntry?.versions || [];
+  const minor = k8sMinorOf(k8sVersion);
+  const matrix = catalogEntry?.k8sMinorsByVersion;
+  // No matrix (older backend) means no basis to filter — show everything
+  // rather than silently emptying the picker.
+  if (!minor || !matrix) return [...versions];
+  return versions.filter((version) => (matrix[version] || []).includes(minor));
+}
+
+export function defaultVersionForK8s(catalogEntry, k8sVersion) {
+  return versionsForK8s(catalogEntry, k8sVersion)[0] || "";
+}
+
+/** CNI plugins with at least one version usable on this Kubernetes version. */
+export function cniPluginsForK8s(catalog = [], k8sVersion) {
+  return catalog.filter((plugin) => versionsForK8s(plugin, k8sVersion).length > 0);
 }

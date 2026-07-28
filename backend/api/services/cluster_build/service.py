@@ -449,13 +449,52 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
             f"{', '.join(d.id for d in cni_registry.available())}."
         )
     build.cni_plugin = cni_plugin
-    cni_version = str(payload.get("cniVersion", build.cni_version or "") or "").strip()
+    # CNI support windows move with Kubernetes, so the default is the newest
+    # release validated on *this build's* minor — not simply the newest release.
+    # Picking versions[0] blindly would pair a 1.29 build with a Calico that
+    # dropped 1.29, and the mismatch would only surface at the CNI phase.
+    k8s_minor = k8s_versions.minor_of(build.k8s_version)
+    # Only a cniVersion in *this* payload counts as the caller's explicit
+    # choice. A value carried over from the row is a default the server derived
+    # earlier, so changing a draft's Kubernetes version re-derives it instead of
+    # failing on a pin the user never asked for.
+    requested_cni_version = str(payload.get("cniVersion") or "").strip()
+    cni_version = requested_cni_version or str(build.cni_version or "").strip()
     if cni_version and cni_version not in descriptor.versions:
+        if requested_cni_version:
+            raise ValueError(
+                f"cniVersion for {descriptor.display_name} must be one of: "
+                f"{', '.join(descriptor.versions)}."
+            )
+        cni_version = ""
+    if cni_version and not requested_cni_version and not descriptor.supports_k8s_minor(
+        cni_version, k8s_minor
+    ):
+        cni_version = ""  # stale carry-over; fall through to the default below
+    if not cni_version:
+        cni_version = descriptor.default_version_for_k8s_minor(k8s_minor)
+        if not cni_version:
+            usable = ", ".join(
+                d.display_name for d in cni_registry.available()
+                if d.versions_for_k8s_minor(k8s_minor)
+            )
+            raise ValueError(
+                f"{descriptor.display_name} has no version validated on "
+                f"Kubernetes {k8s_minor}. "
+                + (f"Choose one of: {usable}." if usable
+                   else "No CNI plugin covers that Kubernetes version.")
+            )
+    elif not descriptor.supports_k8s_minor(cni_version, k8s_minor):
+        usable = descriptor.versions_for_k8s_minor(k8s_minor)
         raise ValueError(
-            f"cniVersion for {descriptor.display_name} must be one of: "
-            f"{', '.join(descriptor.versions)}."
+            f"{descriptor.display_name} {cni_version} is not validated on "
+            f"Kubernetes {k8s_minor}. "
+            + (
+                f"Use {', '.join(usable)} instead." if usable
+                else "No version of this CNI covers that Kubernetes version."
+            )
         )
-    build.cni_version = cni_version or descriptor.versions[0]
+    build.cni_version = cni_version
 
     build.pod_cidr = _validate_cidr(
         payload.get("podCidr", build.pod_cidr or descriptor.default_pod_cidr), "podCidr"
@@ -466,10 +505,14 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
     if "addons" in payload and "plugins" in payload:
         raise ValueError("Use either addons or plugins, not both.")
     if "addons" in payload:
-        build.addons_json = addon_registry.normalize_selection(payload.get("addons"))
+        build.addons_json = addon_registry.normalize_selection(
+            payload.get("addons"), k8s_minor
+        )
     elif "plugins" in payload:
         # Friendly alias for callers using the UI's "Plugins & add-ons" label.
-        build.addons_json = addon_registry.normalize_selection(payload.get("plugins"))
+        build.addons_json = addon_registry.normalize_selection(
+            payload.get("plugins"), k8s_minor
+        )
 
     for key, attr in (
         ("vsphereConnectionId", "vsphere_connection_id"),

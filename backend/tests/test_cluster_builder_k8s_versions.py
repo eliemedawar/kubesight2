@@ -9,6 +9,7 @@ it suppresses outbound calls under Flask TESTING by default.
 
 from __future__ import annotations
 
+import hashlib
 import urllib.error
 
 import pytest
@@ -23,6 +24,8 @@ from api.services.cluster_build import lb as lb_mod
 from api.services.cluster_build import preflight as preflight_mod
 from api.services.cluster_build import service as build_service
 from api.services.cluster_build import os_adapters
+from api.services.cluster_build import cni as cni_registry
+from api.services.cluster_build.addons.metrics_server import METRICS_SERVER
 from api.services.cluster_build.cni.calico import CALICO
 from api.services.cluster_build.profiles import default_profile, resolve
 
@@ -432,7 +435,11 @@ class TestValidationMatchesOptions:
     def test_backend_rejects_what_the_wizard_would_never_offer(
         self, client, admin_token, ssh_profile
     ):
-        for version in ("1.12.0", "1.36.0", "1.32.4-rc.1", "latest", "1.32"):
+        disabled = next(
+            record.fallback_patch for record in k8s_versions.SUPPORTED_MINORS
+            if not record.enabled
+        )
+        for version in ("1.12.0", disabled, "1.32.4-rc.1", "latest", "1.32"):
             response = client.post(
                 "/api/cluster-builds",
                 json=_payload("bad", version, ssh_profile["id"]),
@@ -739,6 +746,190 @@ class TestCreationScripts:
 
 
 # ---------------------------------------------------------------------------
+# Per-version CNI / add-on compatibility
+# ---------------------------------------------------------------------------
+
+class TestCompatibilityMatrix:
+    def test_every_enabled_minor_has_a_cni_and_is_fully_pinned(self):
+        """The gate that makes enabling a minor safe: nothing may be exposed
+        without a digest-pinned CNI release validated on it."""
+        for minor in ENABLED_MINORS:
+            usable = [
+                descriptor for descriptor in cni_registry.available()
+                if descriptor.versions_for_k8s_minor(minor)
+            ]
+            assert usable, f"Kubernetes {minor} is enabled with no usable CNI"
+            for descriptor in usable:
+                for version in descriptor.versions_for_k8s_minor(minor):
+                    digests = descriptor.manifest_sha256.get(version, ())
+                    if descriptor.manifest_urls:
+                        assert len(digests) == len(descriptor.manifest_files), (
+                            f"{descriptor.id} {version} is not digest-pinned"
+                        )
+
+    def test_disabled_minors_are_never_offered_a_version(self):
+        for record in k8s_versions.SUPPORTED_MINORS:
+            if record.enabled:
+                continue
+            for descriptor in cni_registry.available():
+                assert descriptor.versions_for_k8s_minor(record.minor) == [] or \
+                    record.blockers, record.minor
+
+    def test_calico_releases_cover_disjoint_kubernetes_windows(self):
+        assert CALICO.versions_for_k8s_minor("1.36") == ["3.32.1"]
+        assert CALICO.versions_for_k8s_minor("1.34") == ["3.32.1"]
+        assert CALICO.versions_for_k8s_minor("1.32") == ["3.28.2", "3.27.4"]
+        # 3.32 dropped the old minors and 3.28 never had the new ones.
+        assert not CALICO.supports_k8s_minor("3.32.1", "1.29")
+        assert not CALICO.supports_k8s_minor("3.28.2", "1.36")
+
+    def test_metrics_server_releases_split_at_1_34(self):
+        assert METRICS_SERVER.versions_for_k8s_minor("1.36") == ["0.9.0"]
+        assert METRICS_SERVER.versions_for_k8s_minor("1.32") == ["0.7.2"]
+        assert METRICS_SERVER.digests_for("0.9.0") != \
+            METRICS_SERVER.digests_for("0.7.2")
+
+    @pytest.mark.parametrize("minor", ENABLED_MINORS)
+    def test_the_vendored_manifests_exist_for_every_enabled_minor(self, minor):
+        """Offline builds need the bytes on disk, not just a pinned URL."""
+        version = CALICO.default_version_for_k8s_minor(minor)
+        assert version
+        for filename in CALICO.manifest_files:
+            assert CALICO.bundled_path(version, filename).is_file(), (
+                f"calico {version} is not vendored for Kubernetes {minor}"
+            )
+
+    def test_calico_3_32_1_matches_its_pinned_digest(self):
+        """The digest is computed from the vendored bytes, so a corrupted or
+        swapped manifest fails here rather than on a live cluster."""
+        path = CALICO.bundled_path("3.32.1", "calico.yaml")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert actual == CALICO.manifest_sha256["3.32.1"][0]
+
+    def test_calico_3_32_1_renders_with_the_build_pod_cidr(self):
+        rendered = CALICO.render("3.32.1", "10.99.0.0/16", default_profile())
+        blob = "\n".join(rendered)
+        assert 'value: "10.99.0.0/16"' in blob
+        assert "192.168.0.0/16" not in blob
+        documents = [doc for doc in yaml.safe_load_all(blob) if doc]
+        assert len(documents) > 1
+        # The readiness gate the executor waits on must exist in the manifest.
+        namespace, daemonset = CALICO.readiness_daemonset
+        assert any(
+            doc.get("kind") == "DaemonSet"
+            and doc.get("metadata", {}).get("name") == daemonset
+            for doc in documents
+        )
+        assert all("v3.32.1" in image for image in CALICO.required_images(
+            "3.32.1", default_profile()
+        ))
+
+    def test_the_catalog_publishes_the_matrix_for_the_wizard(
+        self, client, admin_token
+    ):
+        data = client.get(
+            "/api/cluster-builds/options", headers=auth_headers(admin_token)
+        ).get_json()["data"]
+
+        calico = next(p for p in data["cniPlugins"] if p["id"] == "calico")
+        assert calico["k8sMinorsByVersion"]["3.32.1"] == ["1.34", "1.35", "1.36"]
+        assert "1.36" not in calico["k8sMinorsByVersion"]["3.28.2"]
+
+        metrics = next(a for a in data["addons"] if a["id"] == "metrics-server")
+        assert metrics["k8sMinorsByVersion"]["0.9.0"] == ["1.34", "1.35", "1.36"]
+        # Every offered Kubernetes version must have a usable CNI in the payload.
+        for version in data["k8sVersions"]:
+            minor = ".".join(version.split(".")[:2])
+            assert any(
+                any(minor in minors
+                    for minors in plugin["k8sMinorsByVersion"].values())
+                for plugin in data["cniPlugins"]
+            ), version
+
+
+class TestVersionAwareSelection:
+    def test_the_default_cni_version_follows_the_kubernetes_version(
+        self, client, admin_token, ssh_profile, app
+    ):
+        for minor, expected in (("1.36", "3.32.1"), ("1.32", "3.28.2")):
+            created = client.post(
+                "/api/cluster-builds",
+                json=_payload(f"cni-{minor}", f"{minor}.4", ssh_profile["id"]),
+                headers=auth_headers(admin_token),
+            )
+            assert created.status_code == 201, created.get_json()
+            with app.app_context():
+                row = db.session.get(ClusterBuild, created.get_json()["data"]["id"])
+                assert row.cni_version == expected, minor
+
+    def test_an_incompatible_cni_version_is_rejected_at_create(
+        self, client, admin_token, ssh_profile
+    ):
+        payload = _payload("bad-cni", "1.36.0", ssh_profile["id"])
+        payload["cniVersion"] = "3.28.2"
+        response = client.post(
+            "/api/cluster-builds", json=payload,
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 400
+        error = response.get_json()["error"]
+        assert "3.28.2" in error and "1.36" in error and "3.32.1" in error
+
+    def test_the_default_addon_version_follows_the_kubernetes_version(
+        self, client, admin_token, ssh_profile
+    ):
+        for minor, expected in (("1.36", "0.9.0"), ("1.32", "0.7.2")):
+            payload = _payload(f"addon-{minor}", f"{minor}.4", ssh_profile["id"])
+            payload["addons"] = ["metrics-server"]
+            response = client.post(
+                "/api/cluster-builds", json=payload,
+                headers=auth_headers(admin_token),
+            )
+            assert response.status_code == 201, response.get_json()
+            assert response.get_json()["data"]["addons"] == [
+                {"id": "metrics-server", "version": expected}
+            ], minor
+
+    def test_an_incompatible_addon_version_is_rejected_at_create(
+        self, client, admin_token, ssh_profile
+    ):
+        payload = _payload("bad-addon", "1.36.0", ssh_profile["id"])
+        payload["addons"] = [{"id": "metrics-server", "version": "0.7.2"}]
+        response = client.post(
+            "/api/cluster-builds", json=payload,
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 400
+        assert "0.9.0" in response.get_json()["error"]
+
+    def test_changing_a_drafts_kubernetes_version_realigns_its_cni(
+        self, client, admin_token, ssh_profile, app
+    ):
+        """Editing 1.32 → 1.36 must not leave the draft on a Calico that
+        cannot serve 1.36."""
+        created = client.post(
+            "/api/cluster-builds",
+            json=_payload("realign", "1.32.4", ssh_profile["id"]),
+            headers=auth_headers(admin_token),
+        ).get_json()["data"]
+        with app.app_context():
+            assert db.session.get(
+                ClusterBuild, created["id"]
+            ).cni_version == "3.28.2"
+
+        response = client.put(
+            f"/api/cluster-builds/{created['id']}",
+            json=_payload("realign", "1.36.0", ssh_profile["id"]),
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 200, response.get_json()
+        with app.app_context():
+            assert db.session.get(
+                ClusterBuild, created["id"]
+            ).cni_version == "3.32.1"
+
+
+# ---------------------------------------------------------------------------
 # Preflight gates the version before provisioning
 # ---------------------------------------------------------------------------
 
@@ -750,7 +941,9 @@ def _build_for(minor: str, **overrides) -> ClusterBuild:
         "endpoint_mode": "manual_endpoint",
         "control_plane_endpoint": "10.0.0.100:6443",
         "cni_plugin": "calico",
-        "cni_version": CALICO.versions[0],
+        # The Calico release validated on *this* minor — 3.32.1 covers
+        # 1.34-1.36 and 3.28.2 the older ones, so there is no single default.
+        "cni_version": CALICO.default_version_for_k8s_minor(minor),
         "pod_cidr": "10.244.0.0/16",
         "service_cidr": "10.96.0.0/12",
     }
@@ -789,41 +982,48 @@ class TestPreflightVersionGate:
         # The recorded blocker is surfaced, not a bare refusal.
         assert any(blocker[:20] in detail for blocker in disabled.blockers)
 
-    def test_a_cni_that_does_not_cover_the_minor_fails(self, app):
-        minor = ENABLED_MINORS[0]
-        original = CALICO.supported_k8s_minors
-        object.__setattr__(CALICO, "supported_k8s_minors", ("1.99",))
-        try:
+    def test_a_cni_version_that_does_not_cover_the_minor_fails(self, app):
+        """Real pairing, no patching: Calico 3.28.2 cannot serve 1.36, and
+        3.32.1 cannot serve 1.29. Each must be refused on the other's minor."""
+        cases = [("1.36", "3.28.2"), (ENABLED_MINORS[-1], "3.32.1")]
+        for minor, cni_version in cases:
             with app.app_context():
                 checks = preflight_mod.version_checks(
-                    _build_for(minor), default_profile()
+                    _build_for(minor, cni_version=cni_version), default_profile()
                 )
-        finally:
-            object.__setattr__(CALICO, "supported_k8s_minors", original)
-        assert _statuses(checks)["k8s_cni_support"] == "fail"
+            statuses = _statuses(checks)
+            assert statuses["k8s_cni_support"] == "fail", (minor, cni_version)
+            detail = next(
+                c for c in checks if c["id"] == "k8s_cni_support"
+            )["detail"]
+            assert cni_version in detail and minor in detail
 
-    def test_an_addon_that_does_not_cover_the_minor_fails(self, app):
-        minor = ENABLED_MINORS[0]
-        build = _build_for(
-            minor, addons_json=[{"id": "metrics-server", "version": "0.7.2"}]
-        )
+    def test_an_addon_version_that_does_not_cover_the_minor_fails(self, app):
+        # Metrics Server 0.9.0 serves 1.34+; 0.7.2 serves the older minors.
         with app.app_context():
-            assert _statuses(
-                preflight_mod.version_checks(build, default_profile())
-            )["k8s_addon_support"] == "pass"
+            assert _statuses(preflight_mod.version_checks(
+                _build_for(
+                    "1.36",
+                    addons_json=[{"id": "metrics-server", "version": "0.9.0"}],
+                ),
+                default_profile(),
+            ))["k8s_addon_support"] == "pass"
 
-        from api.services.cluster_build.addons import metrics_server as ms
-        original = ms.METRICS_SERVER.supported_k8s_minors
-        object.__setattr__(ms.METRICS_SERVER, "supported_k8s_minors", ("1.99",))
-        try:
-            with app.app_context():
-                assert _statuses(
-                    preflight_mod.version_checks(build, default_profile())
-                )["k8s_addon_support"] == "fail"
-        finally:
-            object.__setattr__(
-                ms.METRICS_SERVER, "supported_k8s_minors", original
-            )
+            assert _statuses(preflight_mod.version_checks(
+                _build_for(
+                    "1.36",
+                    addons_json=[{"id": "metrics-server", "version": "0.7.2"}],
+                ),
+                default_profile(),
+            ))["k8s_addon_support"] == "fail"
+
+            assert _statuses(preflight_mod.version_checks(
+                _build_for(
+                    ENABLED_MINORS[-1],
+                    addons_json=[{"id": "metrics-server", "version": "0.9.0"}],
+                ),
+                default_profile(),
+            ))["k8s_addon_support"] == "fail"
 
     def test_offline_mode_requires_the_vendored_manifests(self, app, tmp_path):
         minor = ENABLED_MINORS[0]

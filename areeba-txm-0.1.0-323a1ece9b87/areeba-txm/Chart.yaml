@@ -1,0 +1,6 @@
+apiVersion: v2
+appVersion: 323a1ece9b87
+description: Areeba TM (Transaction Manager) - ATM/POS terminal driving & switching
+name: areeba-txm
+type: application
+version: 0.1.0-323a1ece9b87

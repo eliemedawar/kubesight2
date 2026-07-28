@@ -70,7 +70,7 @@ CILIUM = _Cilium(
     manifest_files=("cilium.yaml",),
     manifest_urls=(),  # bundled-only: render helm template to data/cni/cilium/<ver>/
     readiness_daemonset=("kube-system", "cilium"),
-    supported_k8s_minors=("1.29", "1.30", "1.31", "1.32"),
+    k8s_minors_by_version={"1.16.3": ("1.29", "1.30", "1.31", "1.32")},
     bundle_hint=(
         "Cilium ships no single-file manifest — render one with "
         "`python tools/fetch_cluster_build_bundles.py --cilium` (needs helm) "

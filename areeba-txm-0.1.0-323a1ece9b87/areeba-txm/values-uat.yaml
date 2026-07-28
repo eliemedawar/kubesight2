@@ -1,0 +1,46 @@
+# Overrides for UAT. Deployed by CI only after a manual approval gate on a
+# specific, already-Dev-tested image tag - see deploy/ci/Jenkinsfile stage
+# "Promote to UAT". The image tag is NOT rebuilt here, only re-deployed.
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 3Gi
+
+persistence:
+  objectStore:
+    size: 5Gi
+  emergency:
+    size: 5Gi
+  logs:
+    size: 10Gi
+
+tmoptions:
+  envOverrides:
+    PCEPAR_DB_IP: "txm-postgres.areeba-tm-uat.svc.cluster.local"
+    PCEPAR_DB_PORT: "5432"
+    PCEPAR_DB_NAME: "txm"
+    PCEPAR_DB_USER: "txm"
+    PCEPAR_DB_EMERGENCY_IP: "txm-postgres.areeba-tm-uat.svc.cluster.local"
+    PCEPAR_DB_MIGRATION_IP: "txm-postgres.areeba-tm-uat.svc.cluster.local"
+    PCEPAR_HSM_ADDRESS: "txm-hsm-uat.example.internal"   # TODO: real UAT HSM endpoint
+    PCEPAR_HSM_TYPE: Thales
+    PCECTR_DEVELOPMENT_MODE: "false"
+    PCEPAR_DEPLOYMENT_COLOR: BLUE
+    PCEPAR_SERVER_TOPOLOGY: UAT.Farm.Cluster
+
+ingress:
+  enabled: true
+  hosts:
+    - host: txm-uat.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

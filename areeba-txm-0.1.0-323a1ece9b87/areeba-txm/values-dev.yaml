@@ -1,0 +1,57 @@
+# Overrides for the Dev cluster. Deployed automatically by CI on every merge
+# to main - see deploy/ci/Jenkinsfile stage "Deploy to Dev".
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: "0.5"
+    memory: 1Gi
+  limits:
+    cpu: "1"
+    memory: 2Gi
+
+persistence:
+  objectStore:
+    size: 1Gi
+  emergency:
+    size: 1Gi
+  logs:
+    size: 2Gi
+
+tmoptions:
+  # See values.yaml: this is the override MAP (order-independent), applied
+  # by name on top of the ordered tmoptions.nonSecret list - never rename
+  # this back to "nonSecret" here.
+  envOverrides:
+    PCEPAR_DB_IP: "txm-postgres.areeba-tm-dev.svc.cluster.local"
+    PCEPAR_DB_PORT: "5432"
+    PCEPAR_DB_NAME: "txm"
+    PCEPAR_DB_USER: "txm"
+    # Actual data lives in the "public" schema (restored from a known-good
+    # local instance - see deploy/POSTGRES_SETUP.md "Restoring from a known-
+    # good local instance"), not a "txm" schema. PCEPAR_DB_EMERGENCY_OWNER/
+    # PCEPAR_DB_MIGRATION_OWNER cascade from this via ${PCEPAR_DB_OWNER} in
+    # the base tmoptions.nonSecret list, so overriding this one key is enough.
+    PCEPAR_DB_OWNER: "public"
+    PCEPAR_DB_EMERGENCY_IP: "txm-postgres.areeba-tm-dev.svc.cluster.local"
+    PCEPAR_DB_MIGRATION_IP: "txm-postgres.areeba-tm-dev.svc.cluster.local"
+    PCEPAR_HSM_ADDRESS: "172.18.152.251"   # shipped default (ThalesEmu) - fine for Dev
+    PCEPAR_HSM_TYPE: ThalesEmu
+    PCECTR_DEVELOPMENT_MODE: "true"
+    PCEPAR_DEPLOYMENT_COLOR: BLUE
+    # Matches the PROCESSINGCENTER row actually seeded in the DB (restored
+    # from a known-good local instance under the shipped default "Alpha" -
+    # see deploy/POSTGRES_SETUP.md). A custom name here ("Dev.Farm.Cluster")
+    # fails startup with "requested entry ... was not found in ...
+    # PROCESSINGCENTER" unless a matching row is also inserted. Once
+    # createDB (not restore) is the real provisioning path, this can go
+    # back to an environment-specific name paired with the right seed data.
+    PCEPAR_SERVER_TOPOLOGY: Alpha.Farm.Cluster
+
+ingress:
+  enabled: true
+  hosts:
+    - host: txm-dev.example.internal
+      paths:
+        - path: /
+          pathType: Prefix

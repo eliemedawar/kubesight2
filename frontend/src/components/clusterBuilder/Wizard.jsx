@@ -14,11 +14,14 @@ import { addonSelectionError, ipRangeListError } from "../../utils/addonConfig.j
 import {
   ROLE_LABELS,
   addonProvenance,
+  cniPluginsForK8s,
+  defaultVersionForK8s,
   draftBlueprint,
   groupChecks,
   hostByAddress,
   preferredSources,
   preflightBlueprint,
+  versionsForK8s,
 } from "../../utils/clusterBuilder.js";
 import {
   createClusterBuild,
@@ -190,6 +193,9 @@ function ChoiceCard({ selected, title, shape, description, onSelect }) {
 // ---------------------------------------------------------------------------
 
 function ShapeStep({ options, basics, setBasic }) {
+  // CNI support windows move with Kubernetes, so only plugins with a version
+  // validated on the selected release are offered.
+  const compatibleCnis = cniPluginsForK8s(options.cniPlugins || [], basics.k8sVersion);
   return (
     <div className="card sg-cb-card sg-cb-fields">
       <Field
@@ -303,14 +309,22 @@ function ShapeStep({ options, basics, setBasic }) {
           <span className="cv">defaults are fine — open to change</span>
         </summary>
         <div className="sg-cb-adv-body">
-          <Field label="CNI plugin" htmlFor="cb-cni">
+          <Field
+            label="CNI plugin"
+            htmlFor="cb-cni"
+            hint={
+              compatibleCnis.length < (options.cniPlugins || []).length
+                ? `Showing plugins validated on Kubernetes ${basics.k8sVersion}.`
+                : ""
+            }
+          >
             <select
               id="cb-cni"
               className="sg-cb-input"
               value={basics.cniPlugin}
               onChange={(event) => setBasic("cniPlugin", event.target.value)}
             >
-              {options.cniPlugins.map((plugin) => (
+              {compatibleCnis.map((plugin) => (
                 <option key={plugin.id} value={plugin.id}>
                   {plugin.displayName} ({plugin.supportTier})
                 </option>
@@ -569,7 +583,7 @@ function ManualHosts({ manualNodes, setManualNodes }) {
 // Step 3 — Add-ons
 // ---------------------------------------------------------------------------
 
-function AddonShelf({ catalog, value, onChange }) {
+function AddonShelf({ catalog, value, onChange, k8sVersion }) {
   const selectedById = new Map(value.map((addon) => [addon.id, addon]));
 
   const toggle = (entry, checked) => {
@@ -577,7 +591,10 @@ function AddonShelf({ catalog, value, onChange }) {
       onChange(value.filter((item) => item.id !== entry.id));
       return;
     }
-    const version = entry.defaultVersion || entry.versions?.[0] || "";
+    const version = defaultVersionForK8s(entry, k8sVersion)
+      || entry.defaultVersion
+      || entry.versions?.[0]
+      || "";
     const config = {};
     for (const field of entry.configFields || []) config[field.key] = "";
     onChange([
@@ -603,9 +620,17 @@ function AddonShelf({ catalog, value, onChange }) {
     <div className="sg-cb-shelf">
       {catalog.map((entry) => {
         const selected = selectedById.get(entry.id);
-        const version = selected?.version || entry.defaultVersion || entry.versions?.[0] || "";
+        // Only versions validated on the chosen Kubernetes release; an add-on
+        // with none is shown but cannot be selected, so the reason is visible
+        // rather than the add-on silently vanishing from the shelf.
+        const usableVersions = versionsForK8s(entry, k8sVersion);
+        const version = selected?.version
+          || usableVersions[0]
+          || entry.defaultVersion
+          || entry.versions?.[0]
+          || "";
         const provenance = addonProvenance(entry, version);
-        const installable = (entry.versions || []).length > 0;
+        const installable = usableVersions.length > 0;
         return (
           <div key={entry.id} className={`sg-cb-addon ${selected ? "is-on" : ""}`}>
             <label className="sg-cb-addon-head">
@@ -621,10 +646,15 @@ function AddonShelf({ catalog, value, onChange }) {
                   {entry.supportTier ? <span className="sg-cb-tierchip">{entry.supportTier}</span> : null}
                 </span>
                 {entry.description ? <span className="ad">{entry.description}</span> : null}
+                {!installable && (entry.versions || []).length ? (
+                  <span className="ad">
+                    No version is validated on Kubernetes {k8sVersion}.
+                  </span>
+                ) : null}
               </span>
             </label>
 
-            {selected && (entry.versions || []).length ? (
+            {selected && usableVersions.length ? (
               <div className="sg-cb-addon-row">
                 <span>Version</span>
                 <select
@@ -633,7 +663,7 @@ function AddonShelf({ catalog, value, onChange }) {
                   value={version}
                   onChange={(event) => setVersion(entry.id, event.target.value)}
                 >
-                  {entry.versions.map((candidate) => (
+                  {usableVersions.map((candidate) => (
                     <option key={candidate} value={candidate}>v{candidate}</option>
                   ))}
                 </select>
@@ -847,6 +877,43 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
       buildProfileId: buildProfile ? String(buildProfile.id) : "",
     }));
   }, [options, infra]);
+
+  // Changing the Kubernetes version can strand a CNI plugin or add-on version
+  // that the new release does not cover. Realign those here rather than letting
+  // the user carry an invisible mismatch to preflight. The Kubernetes version
+  // itself is never rewritten — only what depends on it.
+  useEffect(() => {
+    if (!options || !basics.k8sVersion) return;
+    const catalog = options.cniPlugins || [];
+    const usableCnis = cniPluginsForK8s(catalog, basics.k8sVersion);
+    const addonCatalog = options.addons || [];
+
+    setBasics((previous) => {
+      const next = { ...previous };
+      let changed = false;
+
+      if (usableCnis.length && !usableCnis.some((p) => p.id === previous.cniPlugin)) {
+        next.cniPlugin = usableCnis[0].id;
+        changed = true;
+      }
+
+      const addons = [];
+      for (const addon of previous.addons) {
+        const entry = addonCatalog.find((item) => item.id === addon.id);
+        if (!entry) { addons.push(addon); continue; }
+        const usable = versionsForK8s(entry, basics.k8sVersion);
+        if (!usable.length) { changed = true; continue; }  // drop: unsupported
+        if (!usable.includes(addon.version)) {
+          addons.push({ ...addon, version: usable[0] });
+          changed = true;
+        } else {
+          addons.push(addon);
+        }
+      }
+      if (changed) next.addons = addons;
+      return changed ? next : previous;
+    });
+  }, [options, basics.k8sVersion]);
 
   useEffect(() => {
     let ignore = false;
@@ -1081,6 +1148,7 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
                 catalog={options.addons || []}
                 value={basics.addons}
                 onChange={(addons) => setBasic("addons", addons)}
+                k8sVersion={basics.k8sVersion}
               />
             </div>
           ) : null}

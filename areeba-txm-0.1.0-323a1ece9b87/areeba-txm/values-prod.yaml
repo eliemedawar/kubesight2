@@ -1,0 +1,57 @@
+# Overrides for PROD. Deployed only via change-managed promotion of an
+# image tag that has already passed Dev and UAT sign-off - see
+# deploy/ci/Jenkinsfile stage "Promote to PROD". Never build directly to
+# this environment.
+replicaCount: 3
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 3Gi
+  limits:
+    cpu: "4"
+    memory: 4Gi
+
+persistence:
+  objectStore:
+    size: 10Gi
+    storageClassName: "fast-ssd"   # TODO: set to real prod storage class
+  emergency:
+    size: 10Gi
+    storageClassName: "fast-ssd"
+  logs:
+    size: 20Gi
+
+tmoptions:
+  envOverrides:
+    PCEPAR_DB_IP: "txm-postgres.areeba-tm-prod.svc.cluster.local"
+    PCEPAR_DB_PORT: "5432"
+    PCEPAR_DB_NAME: "txm"
+    PCEPAR_DB_USER: "txm"
+    PCEPAR_DB_EMERGENCY_IP: "txm-postgres.areeba-tm-prod.svc.cluster.local"
+    PCEPAR_DB_MIGRATION_IP: "txm-postgres.areeba-tm-prod.svc.cluster.local"
+    PCEPAR_HSM_ADDRESS: "txm-hsm-prod.example.internal"   # TODO: real PROD HSM endpoint
+    PCEPAR_HSM_TYPE: Thales
+    PCEPAR_HSM_TLS_ENABLED: "true"
+    PCEPAR_HSM_MUTUAL_TLS_ENABLED: "true"
+    PCECTR_DEVELOPMENT_MODE: "false"
+    PCEPAR_DEPLOYMENT_COLOR: BLUE
+    PCEPAR_SERVER_TOPOLOGY: PROD.Farm.Cluster
+
+ingress:
+  enabled: true
+  hosts:
+    - host: txm.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: txm-prod-tls
+      hosts:
+        - txm.example.com
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+terminationGracePeriodSeconds: 180  # PROD gets a longer drain window

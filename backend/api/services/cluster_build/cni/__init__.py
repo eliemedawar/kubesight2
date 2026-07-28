@@ -43,6 +43,14 @@ def get(plugin_id: str) -> Optional[CniDescriptor]:
 
 
 def catalog() -> List[dict]:
+    """Plugin catalog for the wizard.
+
+    ``k8sMinorsByVersion`` lets the wizard narrow the plugin and version lists
+    to whatever the user picked on the Kubernetes-version row, so an
+    incompatible pairing is never offered in the first place. The options
+    payload is fetched once, before that choice exists, which is why the whole
+    matrix ships rather than a pre-filtered list.
+    """
     return [
         {
             "id": d.id,
@@ -51,6 +59,10 @@ def catalog() -> List[dict]:
             "versions": list(d.versions),
             "defaultVersion": d.versions[0],
             "defaultPodCidr": d.default_pod_cidr,
+            "k8sMinorsByVersion": {
+                version: list(d.supported_k8s_minors(version))
+                for version in d.versions
+            },
         }
         for d in available()
     ]

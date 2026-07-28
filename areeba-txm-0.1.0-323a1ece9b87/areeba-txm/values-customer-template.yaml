@@ -1,0 +1,86 @@
+# Starting point for a customer's plain-Kubernetes environment (not
+# OpenShift, external Oracle DB rather than the Postgres we run for our own
+# Dev/UAT/PROD). Copy this to values-<customer>-<env>.yaml, fill in every
+# CHANGEME, and see CUSTOMER_DEPLOYMENT_GUIDE.md for how it's applied.
+#
+# Everything not overridden here inherits from the base values.yaml -
+# resources, probes, persistence sizes, security contexts, etc. are all
+# already generic/portable defaults; only the customer-specific bits below
+# need to change.
+
+replicaCount: 1
+
+image:
+  repository: CHANGEME   # e.g. nexus.customer.example.com:5003/areeba/txm-server
+  tag: CHANGEME           # the exact tag build-and-release.sh printed for this release
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: txm-registry-credentials   # see CUSTOMER_DEPLOYMENT_GUIDE.md step "image pull secret"
+
+# Plain Kubernetes has no SCC/namespace-scoped GID range like OpenShift, so
+# (unlike our own OpenShift namespaces, which leave this unset and let the
+# SCC auto-assign a GID) an explicit fsGroup is required here. 0 is normally
+# fine on vanilla Kubernetes - override if the customer's own admission
+# policy (Kyverno/OPA) disallows it too.
+podSecurityContext:
+  fsGroup: 0
+  fsGroupChangePolicy: OnRootMismatch
+
+# Plain Kubernetes: use ingress, not openshift.route.
+openshift:
+  enabled: false
+  route:
+    enabled: false
+
+ingress:
+  enabled: true
+  className: CHANGEME   # e.g. nginx - confirm the customer's ingress controller class
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt   # if they use cert-manager
+  hosts:
+    - host: CHANGEME   # e.g. txm-dev.areeba.internal
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - hosts: ["CHANGEME"]
+    #   secretName: txm-tls   # must already exist in-namespace, or be created by cert-manager
+
+persistence:
+  objectStore:
+    storageClassName: CHANGEME   # "" = cluster default; set explicitly if they have >1 StorageClass
+  emergency:
+    storageClassName: CHANGEME
+  logs:
+    storageClassName: CHANGEME
+
+tmoptions:
+  envOverrides:
+    # --- Oracle connection (see CUSTOMER_ORACLE_DB_GUIDE.md) ---
+    PCECTR_DB_TYPE: "oracle"
+    PCEPAR_DB_IP: "CHANGEME"          # Oracle Farm cluster SCAN listener / host
+    PCEPAR_DB_PORT: "1521"
+    PCEPAR_DB_NAME: "CHANGEME"        # SID - see note below if they only give you a Service Name
+    PCEPAR_DB_USER: "CHANGEME"        # schema/user provisioned for TM (see Oracle guide)
+    PCEPAR_DB_OWNER: "CHANGEME"       # usually same as PCEPAR_DB_USER for Oracle
+    PCEPAR_DB_EMERGENCY_IP: "CHANGEME"
+    PCEPAR_DB_MIGRATION_IP: "CHANGEME"
+    # NOTE: PCEPAR_DB_ORACLE_JDBC_URL in the base tmoptions.orig is
+    # SID-style: jdbc:oracle:thin:@host:port:SID. If the customer's Oracle
+    # Farm only exposes a Service Name (common on RAC/SCAN setups), this
+    # needs the Service Name URL form instead
+    # (jdbc:oracle:thin:@//host:port/serviceName) - add a full override
+    # here as PCEPAR_DB_ORACLE_JDBC_URL if so, don't assume SID works.
+
+    # --- HSM (production TM needs a real HSM, not the ThalesEmu dev default) ---
+    PCEPAR_HSM_ADDRESS: "CHANGEME"
+    PCEPAR_HSM_TYPE: "CHANGEME"       # e.g. Thales, Utimaco - confirm exact supported value with DN
+
+    # --- Topology / environment identity ---
+    PCEPAR_DEPLOYMENT_COLOR: "CHANGEME"
+    PCEPAR_SERVER_TOPOLOGY: "CHANGEME"   # must match a seeded PROCESSINGCENTER row - see Oracle guide
+    PCECTR_DEVELOPMENT_MODE: "false"     # true only for the customer's own dev/test env
+
+secrets:
+  existingSecretName: txm-secrets   # customer creates this out-of-band - see CUSTOMER_DEPLOYMENT_GUIDE.md

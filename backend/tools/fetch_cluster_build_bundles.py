@@ -75,10 +75,12 @@ def _pins() -> List[Pin]:
     pins: List[Pin] = []
     for descriptor in addon_registry.available():
         for version in descriptor.versions:
+            # Digests are keyed by version: two versions of one add-on ship
+            # different bytes for the same filename.
             for filename, url, digest in zip(
                 descriptor.manifest_files,
                 descriptor.manifest_urls,
-                descriptor.manifest_sha256,
+                descriptor.digests_for(version),
             ):
                 pins.append(Pin(
                     kind="addons",

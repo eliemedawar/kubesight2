@@ -366,26 +366,29 @@ def version_checks(
     checks.append(_kubeadm_config_check(build, profile))
 
     descriptor = cni_registry.get(build.cni_plugin)
+    cni_version = build.cni_version or (
+        descriptor.versions[0] if descriptor is not None else ""
+    )
     if descriptor is None:
         checks.append(_check(
             "k8s_cni_support", "CNI supports this Kubernetes minor", "fail",
             f"CNI plugin '{build.cni_plugin}' is unavailable.",
         ))
-    elif record.minor not in descriptor.supported_k8s_minors:
+    elif not descriptor.supports_k8s_minor(cni_version, record.minor):
+        usable = descriptor.versions_for_k8s_minor(record.minor)
         checks.append(_check(
             "k8s_cni_support", "CNI supports this Kubernetes minor", "fail",
-            f"{descriptor.display_name} "
-            f"{build.cni_version or descriptor.versions[0]} is not validated on "
-            f"Kubernetes {record.minor} (validated: "
-            f"{', '.join(descriptor.supported_k8s_minors) or 'none'}).",
-            "Pick a Kubernetes version this CNI supports, or pin a CNI release "
-            "that upstream tests against this minor.",
+            f"{descriptor.display_name} {cni_version} is not validated on "
+            f"Kubernetes {record.minor} (this version covers: "
+            f"{', '.join(descriptor.supported_k8s_minors(cni_version)) or 'nothing'}).",
+            f"Use {descriptor.display_name} {', '.join(usable)} instead." if usable
+            else "No vendored release of this CNI covers that Kubernetes "
+                 "version; choose another plugin or Kubernetes version.",
         ))
     else:
         checks.append(_check(
             "k8s_cni_support", "CNI supports this Kubernetes minor", "pass",
-            f"{descriptor.display_name} "
-            f"{build.cni_version or descriptor.versions[0]} on Kubernetes "
+            f"{descriptor.display_name} {cni_version} on Kubernetes "
             f"{record.minor}.",
         ))
 
@@ -394,11 +397,14 @@ def version_checks(
         addon = addon_registry.get(str((selection or {}).get("id") or ""))
         if addon is None:
             unsupported.append(f"'{(selection or {}).get('id')}' is unavailable")
-        elif record.minor not in addon.supported_k8s_minors:
+            continue
+        addon_version = str(selection.get("version") or addon.versions[0])
+        if not addon.supports_k8s_minor(addon_version, record.minor):
+            usable = addon.versions_for_k8s_minor(record.minor)
             unsupported.append(
-                f"{addon.display_name} "
-                f"{selection.get('version') or addon.versions[0]} is not "
-                f"validated on Kubernetes {record.minor}"
+                f"{addon.display_name} {addon_version} is not validated on "
+                f"Kubernetes {record.minor}"
+                + (f" (use {', '.join(usable)})" if usable else "")
             )
     if build.addons_json:
         checks.append(_check(

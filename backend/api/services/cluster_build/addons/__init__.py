@@ -54,19 +54,44 @@ def catalog() -> List[Dict[str, Any]]:
             "default": False,
             "configFields": [dict(field) for field in addon.config_fields],
             # Provenance for the wizard: every manifest is pinned to a digest,
-            # and offline builds need the bundle to be present.
+            # and offline builds need the bundle to be present. Digests are
+            # per version, so the default version's set is shown here and the
+            # whole map travels alongside it.
             "manifestDigests": [
                 {"file": filename, "sha256": digest}
-                for filename, digest in zip(addon.manifest_files, addon.manifest_sha256)
+                for filename, digest in zip(
+                    addon.manifest_files, addon.digests_for(addon.versions[0])
+                )
             ],
+            "manifestDigestsByVersion": {
+                version: [
+                    {"file": filename, "sha256": digest}
+                    for filename, digest in zip(
+                        addon.manifest_files, addon.digests_for(version)
+                    )
+                ]
+                for version in addon.versions
+            },
             "bundledVersions": bundled_versions(addon),
+            # Lets the wizard hide versions that cannot serve the Kubernetes
+            # version the user picked (see the CNI catalog for the same idea).
+            "k8sMinorsByVersion": {
+                version: list(addon.supported_k8s_minors(version))
+                for version in addon.versions
+            },
         }
         for addon in available()
     ]
 
 
-def normalize_selection(value: Any) -> List[Dict[str, Any]]:
-    """Validate and canonicalize a build payload's ``addons`` list."""
+def normalize_selection(value: Any, k8s_minor: str = "") -> List[Dict[str, Any]]:
+    """Validate and canonicalize a build payload's ``addons`` list.
+
+    ``k8s_minor`` scopes version selection to the build's Kubernetes minor: the
+    default version becomes the newest one validated on that minor, and an
+    explicitly requested version that does not cover it is rejected here rather
+    than at the add-ons phase, after the cluster already exists.
+    """
     if value is None:
         return []
     if not isinstance(value, list):
@@ -96,11 +121,32 @@ def normalize_selection(value: Any) -> List[Dict[str, Any]]:
             raise ValueError(f"Unknown add-on '{addon_id}'. Choose from: {choices}.")
         if addon_id in seen:
             raise ValueError(f"Add-on '{addon_id}' was selected more than once.")
-        version = requested_version or descriptor.versions[0]
+        if k8s_minor and not requested_version:
+            version = descriptor.default_version_for_k8s_minor(k8s_minor)
+            if not version:
+                raise ValueError(
+                    f"{descriptor.display_name} has no version validated on "
+                    f"Kubernetes {k8s_minor}. Deselect it or choose a different "
+                    "Kubernetes version."
+                )
+        else:
+            version = requested_version or descriptor.versions[0]
         if version not in descriptor.versions:
             raise ValueError(
                 f"Version {version} is not supported for {descriptor.display_name}; "
                 f"choose from: {', '.join(descriptor.versions)}."
+            )
+        if k8s_minor and not descriptor.supports_k8s_minor(version, k8s_minor):
+            usable = descriptor.versions_for_k8s_minor(k8s_minor)
+            raise ValueError(
+                f"{descriptor.display_name} {version} is not validated on "
+                f"Kubernetes {k8s_minor}. "
+                + (
+                    f"Use {', '.join(usable)} instead."
+                    if usable
+                    else "No version of this add-on covers that Kubernetes "
+                         "version; deselect it or choose another."
+                )
             )
         seen.add(addon_id)
         entry: Dict[str, Any] = {"id": addon_id, "version": version}

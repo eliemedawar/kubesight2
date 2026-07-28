@@ -6,10 +6,15 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+import yaml
+
 from api.services.helm_chart_template_service import (
+    ChartTemplateError,
     _scrub_static_secret_templates,
     build_values_yaml,
     chart_archive_base64,
+    prepare_chart_template_payload,
 )
 from tests.conftest import auth_headers
 
@@ -298,6 +303,145 @@ def _import_archive(client, token, entries, **payload):
     )
 
 
+REALISTIC_VALUES = """
+replicaCount: 1
+image:
+  repository: registry.example.internal/areeba/txm
+  tag: ""
+# A list of Secret *names* - a reference, not credential material.
+imagePullSecrets:
+  - name: registry-credentials
+podAnnotations: {}
+nodeSelector: {}
+tmoptions:
+  nonSecret:
+    - name: PCEPAR_DB_IP
+      value: "localhost"
+    - name: PCEPAR_DB_PORT
+      value: "5432"
+  envOverrides: {}
+secrets:
+  existingSecretName: "txm-secrets"
+database:
+  host: pg.internal
+  password: must-not-persist
+extra:
+  clientSecret: also-must-not-persist
+"""
+
+CHART_WITH_REFERENCES = {
+    "txm/Chart.yaml": (
+        "apiVersion: v2\nname: txm\nversion: 1.0.0\nappVersion: '2.0'\n"
+        "description: Reference-heavy chart\n"
+    ),
+    "txm/values.yaml": REALISTIC_VALUES,
+    "txm/values-prod.yaml": "replicaCount: 6\nimagePullSecrets:\n  - name: prod-creds\n",
+    "txm/templates/statefulset.yaml": (
+        "apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: txm\n"
+    ),
+}
+
+
+def test_credential_references_are_not_treated_as_secrets(client, admin_token, app):
+    """`imagePullSecrets`, `nonSecret` and `existingSecretName` name or disclaim a
+    credential; only real material may be blanked and forced at deploy time."""
+    response = _import_archive(
+        client, admin_token, CHART_WITH_REFERENCES, filename="txm-1.0.0.tgz"
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    variables = {item["path"]: item for item in data["variables"]}
+
+    for path in ("imagePullSecrets", "tmoptions.nonSecret", "secrets.existingSecretName"):
+        assert path in variables, path
+        assert variables[path]["sensitive"] is False, path
+        assert variables[path]["required"] is False, path
+    assert variables["imagePullSecrets"]["default"] == [{"name": "registry-credentials"}]
+    assert variables["imagePullSecrets"]["type"] == "array"
+    assert variables["secrets.existingSecretName"]["default"] == "txm-secrets"
+    assert len(variables["tmoptions.nonSecret"]["default"]) == 2
+
+    for path in ("database.password", "extra.clientSecret"):
+        assert variables[path]["sensitive"] is True, path
+        assert variables[path]["required"] is True, path
+        assert variables[path]["default"] == "", path
+    assert "must-not-persist" not in json.dumps(data)
+
+    # Declared-but-empty maps stay editable instead of vanishing from the form.
+    for path in ("podAnnotations", "nodeSelector", "tmoptions.envOverrides"):
+        assert variables[path]["type"] == "object", path
+        assert variables[path]["default"] == {}, path
+
+    # Untouched chart defaults must reach values.yaml as real structures.
+    with app.app_context():
+        built = yaml.safe_load(
+            build_values_yaml(data["id"], {"database.password": "x", "extra.clientSecret": "y"})
+        )
+    assert built["imagePullSecrets"] == [{"name": "registry-credentials"}]
+    assert isinstance(built["tmoptions"]["nonSecret"], list)
+    assert len(built["tmoptions"]["nonSecret"]) == 2
+    assert built["tmoptions"]["envOverrides"] == {}
+    assert built["secrets"] == {"existingSecretName": "txm-secrets"}
+    assert built["database"]["password"] == "x"
+
+
+def test_edited_list_and_object_values_round_trip(client, admin_token, app):
+    slug = _import_archive(
+        client, admin_token, CHART_WITH_REFERENCES, filename="txm-1.0.0.tgz"
+    ).get_json()["data"]["id"]
+    with app.app_context():
+        built = yaml.safe_load(
+            build_values_yaml(
+                slug,
+                {
+                    "database.password": "x",
+                    "extra.clientSecret": "y",
+                    # The form edits these as YAML/JSON text.
+                    "imagePullSecrets": '[{"name": "other-creds"}]',
+                    "podAnnotations": "team: payments",
+                    "nodeSelector": "",
+                },
+            )
+        )
+    assert built["imagePullSecrets"] == [{"name": "other-creds"}]
+    assert built["podAnnotations"] == {"team": "payments"}
+    assert built["nodeSelector"] == {}
+
+    with app.app_context():
+        try:
+            build_values_yaml(slug, {"database.password": "x", "extra.clientSecret": "y",
+                                     "imagePullSecrets": "just-a-string"})
+        except Exception as exc:  # noqa: BLE001
+            assert "must be a YAML list" in str(exc)
+        else:
+            raise AssertionError("a scalar must not be accepted for a list value")
+
+
+def test_chart_files_are_stored_byte_for_byte_when_nothing_is_scrubbed(client, admin_token, app):
+    """A chart with no sensitive defaults keeps its files exactly as uploaded, so
+    values.yaml comments survive the round trip."""
+    entries = dict(CHART_WITH_REFERENCES)
+    entries["txm/values.yaml"] = (
+        "# Base defaults - never fork the chart per environment.\n"
+        "replicaCount: 1   # see README before scaling\n"
+        "imagePullSecrets:\n  - name: registry-credentials\n"
+    )
+    slug = _import_archive(client, admin_token, entries, filename="txm-1.0.0.tgz").get_json()[
+        "data"
+    ]["id"]
+    with app.app_context():
+        packaged = base64.b64decode(chart_archive_base64(slug))
+    with tarfile.open(fileobj=io.BytesIO(packaged), mode="r:gz") as archive:
+        stored = {
+            member.name.split("/", 1)[1]: archive.extractfile(member).read().decode("utf-8")
+            for member in archive.getmembers()
+            if member.isfile()
+        }
+    assert stored["values.yaml"] == entries["txm/values.yaml"]
+    assert "# see README before scaling" in stored["values.yaml"]
+    assert stored["values-prod.yaml"] == entries["txm/values-prod.yaml"]
+
+
 def test_zip_archive_with_chart_is_imported_and_secrets_are_scrubbed(client, admin_token):
     response = _import_archive(client, admin_token, CHART_ENTRIES)
     assert response.status_code == 201, response.get_json()
@@ -325,6 +469,8 @@ def test_zip_archive_with_chart_is_imported_and_secrets_are_scrubbed(client, adm
     assert set(environments) == {"values-prod.yaml", "values-uat.yml"}
     assert environments["values-prod.yaml"]["environment"] == "prod"
     assert environments["values-prod.yaml"]["keyCount"] == 2
+    assert environments["values-prod.yaml"]["values"]["replicas"] == 6
+    assert environments["values-prod.yaml"]["values"]["credentials"]["password"] == ""
     assert environments["values-uat.yml"]["environment"] == "uat"
     assert "prod-password-must-vanish" not in json.dumps(data)
 
@@ -711,6 +857,59 @@ def test_deploy_pipeline_uses_the_requested_chart_version(client, admin_token):
     assert response.status_code == 200, response.get_json()
     assert "replicaCount: 2" in captured["values"], captured
     assert "replicaCount: 7" not in captured["values"]
+
+
+def test_selected_environment_values_are_merged_before_manual_overrides(
+    client, admin_token, app
+):
+    entries = _chart_entries(
+        "1.0.0",
+        replicas=2,
+        extra={
+            "areeba-txm/values-dev.yaml": (
+                "replicaCount: 4\n"
+                "resources:\n"
+                "  requests:\n"
+                "    cpu: 500m\n"
+            ),
+        },
+    )
+    slug = _import_archive(
+        client, admin_token, entries, filename="areeba-txm-1.0.0.tgz"
+    ).get_json()["data"]["id"]
+
+    with app.app_context():
+        selected = yaml.safe_load(
+            build_values_yaml(slug, {}, values_file="values-dev.yaml")
+        )
+        overridden = yaml.safe_load(
+            build_values_yaml(
+                slug,
+                {"replicaCount": 9},
+                values_file="values-dev.yaml",
+            )
+        )
+
+        assert selected["replicaCount"] == 4
+        assert selected["resources"]["requests"]["cpu"] == "500m"
+        assert overridden["replicaCount"] == 9
+        assert overridden["resources"]["requests"]["cpu"] == "500m"
+
+        prepared = prepare_chart_template_payload(
+            {
+                "chartSource": "template",
+                "chartTemplateId": slug,
+                "valuesFile": "values-dev.yaml",
+                "values": {"replicaCount": 7},
+            }
+        )
+        prepared_values = yaml.safe_load(prepared["valuesYaml"])
+        assert prepared["valuesFile"] == "values-dev.yaml"
+        assert prepared_values["replicaCount"] == 7
+        assert prepared_values["resources"]["requests"]["cpu"] == "500m"
+
+        with pytest.raises(ChartTemplateError, match="not available"):
+            build_values_yaml(slug, {}, values_file="../values-prod.yaml")
 
 
 def test_saved_chart_uses_existing_helm_preview_pipeline(client, admin_token):

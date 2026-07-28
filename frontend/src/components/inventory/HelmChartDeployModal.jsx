@@ -24,6 +24,32 @@ function initialFieldValue(variable) {
   return value;
 }
 
+function valueAtPath(values, path) {
+  let current = values;
+  for (const part of String(path || "").split(".")) {
+    if (!current || typeof current !== "object" || !(part in current)) {
+      return { found: false, value: undefined };
+    }
+    current = current[part];
+  }
+  return { found: true, value: current };
+}
+
+function initialValues(detail, valuesFile = "") {
+  const selected = (detail?.chart?.valuesFiles || []).find((item) => item.path === valuesFile);
+  return Object.fromEntries(
+    (detail?.variables || []).map((variable) => {
+      const environmentValue = valueAtPath(selected?.values, variable.path);
+      return [
+        variable.path,
+        initialFieldValue(
+          environmentValue.found ? { ...variable, default: environmentValue.value } : variable,
+        ),
+      ];
+    }),
+  );
+}
+
 function VariableField({ variable, value, onChange }) {
   const id = `helm-variable-${variable.key}`;
   const common = {
@@ -88,6 +114,7 @@ export default function HelmChartDeployModal({
   const [clusterId, setClusterId] = useState(resolvedCluster);
   const [namespace, setNamespace] = useState("");
   const [releaseName, setReleaseName] = useState("");
+  const [valuesFile, setValuesFile] = useState("");
   const [values, setValues] = useState({});
   const [step, setStep] = useState("configure");
   const [preview, setPreview] = useState(null);
@@ -114,14 +141,8 @@ export default function HelmChartDeployModal({
             .replace(/^-+|-+$/g, "")
             .slice(0, 53),
         );
-        setValues(
-          Object.fromEntries(
-            (result.variables || []).map((variable) => [
-              variable.path,
-              initialFieldValue(variable),
-            ]),
-          ),
-        );
+        setValuesFile("");
+        setValues(initialValues(result));
       })
       .catch((err) => {
         if (!cancelled) setError(err.message || "Failed to load the Helm chart.");
@@ -141,6 +162,7 @@ export default function HelmChartDeployModal({
       setClusterId(resolvedCluster);
       setNamespace("");
       setReleaseName("");
+      setValuesFile("");
       setValues({});
       setStep("configure");
       setPreview(null);
@@ -170,6 +192,7 @@ export default function HelmChartDeployModal({
     clusterId,
     namespace,
     releaseName,
+    valuesFile,
     values,
   };
 
@@ -239,7 +262,10 @@ export default function HelmChartDeployModal({
                 </span>
                 <SearchableSelect
                   value={version || detail?.version || ""}
-                  onChange={(event) => setVersion(event.target.value)}
+                  onChange={(event) => {
+                    setValuesFile("");
+                    setVersion(event.target.value);
+                  }}
                 >
                   {versions.map((item) => (
                     <option key={item.version} value={item.version}>
@@ -249,6 +275,30 @@ export default function HelmChartDeployModal({
                     </option>
                   ))}
                 </SearchableSelect>
+              </label>
+            ) : null}
+
+            {(detail?.chart?.valuesFiles || []).length ? (
+              <label className="helm-version-picker">
+                <span>Environment values</span>
+                <SearchableSelect
+                  value={valuesFile}
+                  onChange={(event) => {
+                    const selected = event.target.value;
+                    setValuesFile(selected);
+                    setValues(initialValues(detail, selected));
+                  }}
+                >
+                  <option value="">Base values.yaml</option>
+                  {(detail.chart.valuesFiles || []).map((item) => (
+                    <option key={item.path} value={item.path}>
+                      {item.environment} · {item.path}
+                    </option>
+                  ))}
+                </SearchableSelect>
+                <small className="form-help">
+                  The selected file is applied first. Any value changed below overrides it.
+                </small>
               </label>
             ) : null}
 

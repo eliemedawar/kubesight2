@@ -1,0 +1,15 @@
+TM ({{ .Chart.Name }}) release "{{ .Release.Name }}" deployed to namespace {{ .Release.Namespace }}.
+
+Image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+
+Check rollout status:
+  kubectl rollout status statefulset/{{ include "txm.fullname" . }} -n {{ .Release.Namespace }}
+
+Tail logs:
+  kubectl logs -f {{ include "txm.fullname" . }}-0 -n {{ .Release.Namespace }}
+
+Before trusting this in UAT/PROD, confirm:
+  - the liveness/readiness probe path in values.yaml matches TM's real health endpoint
+  - install/tmoptions is actually being populated correctly from env/ConfigMap
+    (see the NOTE in templates/statefulset.yaml)
+  - the preStop graceful-stop command matches TM's real shutdown procedure

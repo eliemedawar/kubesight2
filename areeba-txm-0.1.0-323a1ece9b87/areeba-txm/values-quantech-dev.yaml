@@ -1,0 +1,74 @@
+# Overrides for the quantech-areeba-tm-dev namespace - a clean-room
+# validation deploy of the new balaaahmad/Areeba-TM delivery repo, built
+# from the "Areeba-sdp-devhandler-assembly" module, on its own Postgres
+# instance (db/user/schema "qttxm"). Same OpenShift cluster
+# (itz-5jqv2r) and same Nexus registry as our other internal
+# Dev/UAT/Prod namespaces - just a separate namespace/DB so this doesn't
+# touch the already-working areeba-tm-dev instance.
+#
+# fullnameOverride: TM auto-registers a per-node Configuration section keyed
+# by "<topology>.<pod-fqdn>" (e.g. Alpha.Farm.Cluster.<statefulset>-0.
+# <statefulset>-headless.<namespace>.svc.cluster.local) - that column is
+# varchar(120). This namespace's longer name (quantech-areeba-tm-dev) plus
+# the default release-derived fullname pushed the real string to 126 chars,
+# failing at startup with "value too long for type character varying(120)"
+# on the CONFIGURATION table. Confirmed by computing the exact string length
+# against both this environment and the working areeba-tm-dev one (99 chars
+# there, comfortably under the limit). Shortening the fullname here is the
+# fix - see templates/_helpers.tpl for the fullnameOverride support this
+# needed (didn't exist before, added as part of this fix).
+fullnameOverride: "txm-qtdev"
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: "0.5"
+    memory: 1Gi
+  limits:
+    cpu: "1"
+    memory: 2Gi
+
+persistence:
+  objectStore:
+    size: 1Gi
+  emergency:
+    size: 1Gi
+  logs:
+    size: 2Gi
+
+tmoptions:
+  envOverrides:
+    PCEPAR_DB_IP: "txm-postgres.quantech-areeba-tm-dev.svc.cluster.local"
+    PCEPAR_DB_PORT: "5432"
+    PCEPAR_DB_NAME: "qttxm"
+    PCEPAR_DB_USER: "qttxm"
+    PCEPAR_DB_OWNER: "qttxm"   # schema created explicitly, matching the DB/user name (see deploy/POSTGRES_SETUP.md pattern)
+    # This repo's shipped tmoptions.orig hardcodes "currentSchema=public" in
+    # PCEPAR_DB_POSTGRESQL_JDBC_URL specifically (NOT ${PCEPAR_DB_OWNER} -
+    # unlike the EMERGENCY/MIGRATION JDBC URLs, which correctly do use their
+    # respective ${..._OWNER} variables - a real inconsistency in this
+    # repo's template, confirmed by inspecting the rendered ConfigMap after
+    # hitting `relation "systeminformation" does not exist` at startup: TM
+    # was connecting with currentSchema=public while all data lives in the
+    # qttxm schema). Override the whole URL to point at the real schema.
+    PCEPAR_DB_POSTGRESQL_JDBC_URL: "jdbc:postgresql://${PCEPAR_DB_IP}:${PCEPAR_DB_PORT}/${PCEPAR_DB_NAME}?gssEncMode=allow&currentSchema=qttxm&ApplicationName=${PCEPAR_DB_APPLICATION_NAME}"
+    PCEPAR_DB_EMERGENCY_IP: "txm-postgres.quantech-areeba-tm-dev.svc.cluster.local"
+    PCEPAR_DB_MIGRATION_IP: "txm-postgres.quantech-areeba-tm-dev.svc.cluster.local"
+    PCEPAR_HSM_ADDRESS: "172.18.152.251"   # shipped default (ThalesEmu) - fine for a dev clean-room validation
+    PCEPAR_HSM_TYPE: ThalesEmu
+    PCECTR_DEVELOPMENT_MODE: "true"
+    PCEPAR_DEPLOYMENT_COLOR: BLUE
+    # NOT seeded by any shipped DML script in this repo (confirmed - no
+    # `INSERT INTO PROCESSINGCENTER` exists anywhere in DML/sqlscripts).
+    # The OLD repo's "Alpha" row came from a restored real data dump, not
+    # DML. For this fresh createDB, the ALPHA/OMEGA rows were inserted
+    # manually to match this value - see chat history for the exact insert.
+    PCEPAR_SERVER_TOPOLOGY: Alpha.Farm.Cluster
+
+ingress:
+  enabled: false   # using openshift.route instead - same as our other internal namespaces
+openshift:
+  enabled: true
+  route:
+    enabled: true

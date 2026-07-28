@@ -1,0 +1,28 @@
+# Non-secret half of tmoptions. Rendered as a single properties-style file
+# (tmoptions.env) because that's the format install/updatefilelist.sh
+# expects to sed-substitute ${PCEPAR_*} tokens from - see
+# deploy/README.md "tmoptions". Credentials (DB passwords, initial admin
+# password) are NEVER here - they come from the Secret named in
+# .Values.secrets.existingSecretName, merged with this file by
+# deploy/docker/entrypoint.sh at container start.
+#
+# tmoptions.nonSecret is an ORDERED LIST, not a map, and rendered here via
+# `range` over that list (preserves order) rather than over a map (Go
+# templates always sort map keys alphabetically) - install.sh eval's the
+# merged file top-to-bottom, and several keys self-reference earlier ones
+# via ${PCEPAR_...}, so file order matters. See values.yaml's comment on
+# tmoptions.nonSecret and deploy/README.md "tmoptions" for the full story.
+# tmoptions.envOverrides (a plain map - fine, order doesn't matter for
+# overrides) is applied by name on top of the list's defaults.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "txm.fullname" . }}-config
+  labels:
+    {{- include "txm.labels" . | nindent 4 }}
+data:
+  tmoptions.env: |
+    {{- range .Values.tmoptions.nonSecret }}
+    {{- $override := index $.Values.tmoptions.envOverrides .name }}
+    {{ .name }}={{ if $override }}{{ $override }}{{ else }}{{ .value }}{{ end }}
+    {{- end }}

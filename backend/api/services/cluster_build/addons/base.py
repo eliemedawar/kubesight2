@@ -12,7 +12,7 @@ import ssl
 import threading
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -47,18 +47,43 @@ class AddonDescriptor:
     versions: Tuple[str, ...]
     manifest_files: Tuple[str, ...]
     manifest_urls: Tuple[str, ...]
-    manifest_sha256: Tuple[str, ...]
+    # Digests keyed by add-on version, each a tuple parallel to
+    # ``manifest_files``. Keyed by version because two versions of the same
+    # add-on ship different bytes for the same filename — a single flat tuple
+    # would pin one version's digests onto every version and fail the integrity
+    # check for all but one of them.
+    manifest_sha256: Dict[str, Tuple[str, ...]]
     # kubectl argument strings. The executor supplies admin.conf and tracing.
     readiness_commands: Tuple[str, ...]
     # Declarative description of ``config`` for the wizard. Add-ons that need
     # no configuration leave this empty and reject any config sent to them.
     config_fields: Tuple[Dict[str, Any], ...] = ()
-    # Kubernetes minors ("1.32") this add-on's pinned manifests are validated
-    # against; preflight fails the build before provisioning otherwise.
-    supported_k8s_minors: Tuple[str, ...] = ()
+    # Kubernetes minors each add-on *version* is validated against. Per version
+    # for the same reason as the CNI descriptors: support windows move.
+    k8s_minors_by_version: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
 
     def bundled_path(self, version: str, filename: str) -> Path:
         return _data_dir() / self.id / version / filename
+
+    def digests_for(self, version: str) -> Tuple[str, ...]:
+        return self.manifest_sha256.get(version, ())
+
+    def supported_k8s_minors(self, version: str) -> Tuple[str, ...]:
+        return self.k8s_minors_by_version.get(version, ())
+
+    def supports_k8s_minor(self, version: str, minor: str) -> bool:
+        return minor in self.supported_k8s_minors(version)
+
+    def versions_for_k8s_minor(self, minor: str) -> List[str]:
+        """This add-on's versions validated on ``minor``, newest first."""
+        return [
+            version for version in self.versions
+            if self.supports_k8s_minor(version, minor)
+        ]
+
+    def default_version_for_k8s_minor(self, minor: str) -> str:
+        candidates = self.versions_for_k8s_minor(minor)
+        return candidates[0] if candidates else ""
 
     def normalize_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Validate and canonicalize this add-on's ``config`` object.
@@ -128,14 +153,16 @@ class AddonDescriptor:
                 f"{self.display_name} {version} is not in the tested version set "
                 f"({', '.join(self.versions)})."
             )
+        digests = self.digests_for(version)
         if not (
             len(self.manifest_files)
             == len(self.manifest_urls)
-            == len(self.manifest_sha256)
+            == len(digests)
         ):
             raise AddonRenderError(
-                f"{self.display_name} descriptor is invalid: every manifest file "
-                "must have one pinned URL and SHA-256 digest."
+                f"{self.display_name} {version} descriptor is invalid: every "
+                "manifest file must have one pinned URL and one SHA-256 digest "
+                "recorded for this version."
             )
 
         sources = [
@@ -148,7 +175,7 @@ class AddonDescriptor:
             for filename, url_template, digest in zip(
                 self.manifest_files,
                 self.manifest_urls,
-                self.manifest_sha256,
+                digests,
             )
         ]
         missing = [

@@ -36,5 +36,8 @@ FLANNEL = _Flannel(
         ),
     },
     readiness_daemonset=("kube-flannel", "kube-flannel-ds"),
-    supported_k8s_minors=("1.29", "1.30", "1.31", "1.32"),
+    # No Flannel release is vendored for Kubernetes 1.33+, so the wizard offers
+    # Flannel only on the older minors rather than pairing it with a Kubernetes
+    # version nobody validated it against.
+    k8s_minors_by_version={"0.25.6": ("1.29", "1.30", "1.31", "1.32")},
 )

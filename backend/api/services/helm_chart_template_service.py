@@ -42,6 +42,21 @@ SENSITIVE_KEY_RE = re.compile(
     r"private[_-]?key|credential|client[_-]?secret|auth)",
     re.IGNORECASE,
 )
+# Keys that only *point at* a credential, or opt out of being one, never hold the
+# material itself: `imagePullSecrets` is a list of Secret names, `secrets.
+# existingSecretName` names a Secret created out of band, and `tmoptions.nonSecret`
+# says so outright. Blanking those breaks the chart and demands pointless input.
+SENSITIVE_REFERENCE_RE = re.compile(
+    r"^(?:"
+    r"non[_-]?(?:secret|credential)s?"
+    r"|image[_-]?pull[_-]?secrets?"
+    r"|(?:existing|external)[_-]?(?:secret|credential|token)[a-z0-9_-]*"
+    r"|[a-z0-9_-]*(?:secret|token|credential|password)s?[_-]?(?:name|names|ref|refs)"
+    r"|(?:secret|token|credential|auth)s?[_-]?(?:enabled|type|mode|provider|store|class|namespace)"
+    r"|auth[_-]?(?:enabled|type|mode|url|endpoint|method|header|headers|proxy)"
+    r")$",
+    re.IGNORECASE,
+)
 SAFE_FILE_RE = re.compile(r"^[A-Za-z0-9._/@+-]+$")
 RUNTIME_METADATA_KEYS = {
     "creationTimestamp",
@@ -190,7 +205,10 @@ def _detail(row: HelmChartTemplate, version: str = "") -> Dict[str, Any]:
     definition = _definition_for(row, version)
     selected = _clean_text(version, 64) or (row.version or "0.1.0")
     entry = next((item for item in versions if item["version"] == selected), None)
-    chart = definition.get("chart") or {}
+    chart = deepcopy(definition.get("chart") or {})
+    environment_values = _environment_values_files(definition)
+    for item in chart.get("valuesFiles") or []:
+        item["values"] = deepcopy(environment_values.get(item.get("path")) or {})
     return {
         **_summary(row, versions=versions),
         "version": selected,
@@ -262,6 +280,21 @@ def _safe_chart_path(path: str) -> str:
     if not all(SAFE_FILE_RE.match(part) for part in parts):
         raise ChartTemplateError(f"Chart file path is not supported: {normalized}")
     return "/".join(parts)
+
+
+def _is_sensitive_key_path(parts: Sequence[Any]) -> bool:
+    """True when a values path names credential material rather than a pointer.
+
+    The decision is made on the leaf key: a reference or opt-out name wins even
+    inside a section called ``secrets``, while a genuinely sensitive leaf stays
+    sensitive wherever it sits.
+    """
+    names = [str(part) for part in parts if not isinstance(part, int)]
+    if not names:
+        return False
+    if SENSITIVE_REFERENCE_RE.match(names[-1].strip()):
+        return False
+    return any(SENSITIVE_KEY_RE.search(name) for name in names)
 
 
 def _is_environment_values_file(path: str) -> bool:
@@ -367,6 +400,33 @@ def _decode_files(definition: Dict[str, Any]) -> Dict[str, bytes]:
         except (ValueError, TypeError) as exc:
             raise ChartTemplateError(f"Stored chart file is invalid: {path}") from exc
     return decoded
+
+
+def _environment_values_files(definition: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return the scrubbed values mappings users may select at deploy time."""
+    files = _decode_files(definition)
+    values_files: Dict[str, Dict[str, Any]] = {}
+    for path, content in files.items():
+        if not _is_environment_values_file(path):
+            continue
+        try:
+            loaded = yaml.safe_load(content.decode("utf-8"))
+        except (UnicodeDecodeError, yaml.YAMLError):
+            loaded = None
+        if isinstance(loaded, dict):
+            values_files[path] = loaded
+    return values_files
+
+
+def _merge_values(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply Helm-style map merging: maps merge, other values replace."""
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _merge_values(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
 
 
 def _persist(
@@ -663,6 +723,10 @@ def _value_type(value: Any) -> str:
         return "integer"
     if isinstance(value, float):
         return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
     return "string"
 
 
@@ -823,7 +887,7 @@ def _known_variables(doc: Dict[str, Any], identity: str, builder: _VariableBuild
             if not isinstance(env, dict) or "value" not in env:
                 continue
             env_name = str(env.get("name") or f"ENV_{env_index + 1}")
-            sensitive = bool(SENSITIVE_KEY_RE.search(env_name))
+            sensitive = _is_sensitive_key_path((env_name,))
             builder.add(
                 env,
                 "value",
@@ -1041,7 +1105,7 @@ def _convert_manifest_files(
                 if not isinstance(default, (str, int, float, bool)):
                     continue
                 path_label = " ".join(str(part) for part in path if not isinstance(part, int))
-                sensitive = bool(SENSITIVE_KEY_RE.search(path_label))
+                sensitive = _is_sensitive_key_path(path)
                 builder.add(
                     parent,
                     field,
@@ -1104,14 +1168,15 @@ def import_yaml_chart(
 def _flatten_values(
     value: Any, prefix: Tuple[str, ...] = ()
 ) -> Iterable[Tuple[Tuple[str, ...], Any]]:
-    if isinstance(value, dict):
+    if isinstance(value, dict) and value:
         for key, child in value.items():
             yield from _flatten_values(child, prefix + (str(key),))
-    elif isinstance(value, list):
-        # Lists are kept as one YAML-friendly value to avoid asking for dozens of
-        # indexes. The deploy form offers a YAML textarea for these.
-        yield prefix, value
     else:
+        # Lists are kept as one YAML-friendly value to avoid asking for dozens of
+        # indexes, and an empty mapping is a leaf as well so declared-but-empty
+        # keys (`podAnnotations: {}`, `tmoptions.envOverrides: {}`) stay editable
+        # instead of disappearing from the form. The deploy form offers a YAML
+        # textarea for both.
         yield prefix, value
 
 
@@ -1134,7 +1199,7 @@ def _path_required(schema: Dict[str, Any], path: Sequence[str]) -> bool:
 def _is_sensitive_value(schema: Dict[str, Any], path: Sequence[str]) -> bool:
     node = _schema_for_path(schema, path)
     return bool(
-        any(SENSITIVE_KEY_RE.search(part) for part in path)
+        _is_sensitive_key_path(path)
         or str(node.get("format") or "").lower() in {"password", "secret"}
         or node.get("writeOnly")
         or node.get("x-sensitive")
@@ -1170,9 +1235,7 @@ def _scrub_chart_values(
         if sensitive:
             _set_nested(cleaned, path, "")
             warnings.append(f"Stored default for sensitive value '{'.'.join(path)}' was removed.")
-        value_type = schema_node.get("type") or (
-            "array" if isinstance(default, list) else _value_type(default)
-        )
+        value_type = schema_node.get("type") or _value_type(default)
         variables.append(
             {
                 "key": "_".join(_safe_key(part) for part in path),
@@ -1212,7 +1275,7 @@ def _scrub_schema_secrets(schema: Any, prefix: Tuple[str, ...] = ()) -> None:
     if not isinstance(schema, dict):
         return
     if (
-        any(SENSITIVE_KEY_RE.search(part) for part in prefix)
+        _is_sensitive_key_path(prefix)
         or str(schema.get("format") or "").lower() in {"password", "secret"}
         or schema.get("writeOnly")
         or schema.get("x-sensitive")
@@ -1345,11 +1408,13 @@ def _scrub_environment_values_files(files: Dict[str, bytes]) -> List[str]:
             continue
         removed = 0
         for value_path, _ in list(_flatten_values(loaded)):
-            if value_path and any(SENSITIVE_KEY_RE.search(part) for part in value_path):
+            if value_path and _is_sensitive_key_path(value_path):
                 _set_nested(loaded, value_path, "")
                 removed += 1
-        files[path] = yaml.safe_dump(loaded, sort_keys=False).encode("utf-8")
         if removed:
+            # Only rewrite when something was actually blanked: an untouched file
+            # keeps its original bytes, comments included.
+            files[path] = yaml.safe_dump(loaded, sort_keys=False).encode("utf-8")
             warnings.append(
                 f"Removed {removed} sensitive value{'' if removed == 1 else 's'} from '{path}'."
             )
@@ -1394,7 +1459,10 @@ def _prepare_existing_chart(
         warnings.append("The chart has no templates/ directory and renders no resources.")
     warnings.extend(_scrub_environment_values_files(files))
     warnings.extend(_scrub_static_secret_templates(files, scrubbed, variables))
-    files["values.yaml"] = yaml.safe_dump(scrubbed, sort_keys=False).encode("utf-8")
+    if scrubbed != values or not values_path.exists():
+        # Same rule as the environment files: a chart with nothing to scrub is
+        # stored exactly as uploaded, so its values.yaml comments survive.
+        files["values.yaml"] = yaml.safe_dump(scrubbed, sort_keys=False).encode("utf-8")
     if schema and "values.schema.json" in files:
         files["values.schema.json"] = json.dumps(schema, indent=2).encode("utf-8")
     name = _clean_text(payload.get("name"), 120) or _clean_text(metadata.get("name"), 120)
@@ -1857,27 +1925,62 @@ def _coerce_value(value: Any, variable: Dict[str, Any]) -> Any:
         if lowered in {"false", "0", "no", "off"}:
             return False
         raise ValueError("must be true or false")
-    if value_type in {"array", "object"} and isinstance(value, str):
-        parsed = yaml.safe_load(value)
+    if value_type in {"array", "object"}:
+        empty: Any = [] if value_type == "array" else {}
+        if value is None:
+            return empty
+        if isinstance(value, str):
+            # The form edits these as YAML/JSON text; an emptied field means an
+            # empty collection.
+            parsed = yaml.safe_load(value) if value.strip() else empty
+        else:
+            # Already structured (an untouched chart default): never str() it,
+            # or the rendered values.yaml gets a Python repr instead of a list.
+            parsed = value
         if value_type == "array" and not isinstance(parsed, list):
-            raise ValueError("must be a YAML list")
+            raise ValueError("must be a YAML list, for example: - name: my-secret")
         if value_type == "object" and not isinstance(parsed, dict):
-            raise ValueError("must be a YAML object")
+            raise ValueError("must be a YAML object, for example: key: value")
         return parsed
     return "" if value is None else str(value)
 
 
-def build_values_yaml(slug: str, answers: Dict[str, Any], version: str = "") -> str:
+def build_values_yaml(
+    slug: str,
+    answers: Dict[str, Any],
+    version: str = "",
+    values_file: str = "",
+) -> str:
     row = _get_row(slug)
     definition = _definition_for(row, version)
     values = deepcopy(definition.get("values") or {})
+    selected_values_file = _clean_text(values_file, 500)
+    if selected_values_file:
+        environment_values = _environment_values_files(definition)
+        if selected_values_file not in environment_values:
+            raise ChartTemplateError(
+                f"Environment values file '{selected_values_file}' is not available for this chart version."
+            )
+        values = _merge_values(values, environment_values[selected_values_file])
     variables = definition.get("variables") or []
     answer_map = answers if isinstance(answers, dict) else {}
     for variable in variables:
         path = str(variable.get("path") or "")
         if not path:
             continue
-        raw = answer_map.get(path, answer_map.get(variable.get("key"), variable.get("default")))
+        key = variable.get("key")
+        if path in answer_map:
+            raw = answer_map[path]
+        elif key in answer_map:
+            raw = answer_map[key]
+        else:
+            # Base defaults are already in ``values`` and a selected environment
+            # file has already been merged over them. Reapplying each variable's
+            # base default here would erase the selected environment.
+            raw = _get_nested(values, path.split("."), variable.get("default"))
+            if variable.get("required") and (raw is None or str(raw).strip() == ""):
+                raise ChartTemplateError(f"{variable.get('label') or path} is required.")
+            continue
         if variable.get("required") and (raw is None or str(raw).strip() == ""):
             raise ChartTemplateError(f"{variable.get('label') or path} is required.")
         if (
@@ -1916,13 +2019,22 @@ def prepare_chart_template_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     ) or (row.version or "")
     _definition_for(row, version)
     prepared = dict(payload)
+    values_file = _clean_text(
+        payload.get("valuesFile") or payload.get("values_file"), 500
+    )
     prepared.update(
         {
             "chartSource": "local",
             "chartArchiveBase64": chart_archive_base64(slug, version),
-            "valuesYaml": build_values_yaml(slug, payload.get("values") or {}, version),
+            "valuesYaml": build_values_yaml(
+                slug,
+                payload.get("values") or {},
+                version,
+                values_file,
+            ),
             "chartName": row.name,
             "chartVersion": version or row.version,
+            "valuesFile": values_file,
         }
     )
     return prepared

@@ -1,0 +1,1478 @@
+<title>KubeSight — Machine Builder Concept</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════════════
+   KubeSight — Machine Builder concept
+   Design system: Signal v3 (design-system/MASTER.md). Tokens mirror
+   frontend/src/index.css so this mock can be lifted into the app.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --bg-main:#f8f7f5; --bg-panel:#fff; --bg-panel-strong:#faf9f7;
+  --bg-interactive:#f3f2ef; --bg-inset:#f4f3f0; --bg-well:#101113;
+  --text-strong:#131417; --text-main:#1a1b1e; --text-subtle:#494b52; --text-muted:#6e7076;
+  --accent:#ff2929; --accent-hover:#e31b1b; --accent-strong:#d71f1f;
+  --accent-soft:rgba(255,41,41,.09); --accent-border:rgba(255,41,41,.35);
+  --ok:#178a45; --ok-soft:rgba(23,138,69,.1); --ok-border:rgba(23,138,69,.3);
+  --warn:#a66104; --warn-soft:rgba(166,97,4,.1); --warn-border:rgba(166,97,4,.3);
+  --danger:#d71f1f; --danger-soft:rgba(215,31,31,.09); --danger-border:rgba(215,31,31,.3);
+  --info:#0e7490; --info-soft:rgba(14,116,144,.1); --info-border:rgba(14,116,144,.28);
+  --border:#e9e7e3; --border-soft:#f0efeb; --border-strong:#d8d6d0;
+  --shadow-sm:0 1px 2px rgba(26,27,30,.05);
+  --shadow-md:0 2px 8px rgba(26,27,30,.06),0 1px 2px rgba(26,27,30,.05);
+  --shadow-lg:0 24px 60px -12px rgba(26,27,30,.14),0 4px 14px rgba(26,27,30,.06);
+  --ring:0 0 0 3px rgba(255,41,41,.15);
+  --sidebar:#fff; --sidebar-border:var(--border); --track:#eceae6;
+  --font-display:"Plus Jakarta Sans","Segoe UI Variable Display",Inter,system-ui,sans-serif;
+  --font-sans:Inter,"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --font-mono:"IBM Plex Mono","Cascadia Mono",ui-monospace,Consolas,monospace;
+  --r-sm:.5rem; --r-md:.75rem; --r-lg:1.125rem; --r-xl:1.375rem; --r-full:999px;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg-main:#101112; --bg-panel:#17181a; --bg-panel-strong:#1c1d20;
+    --bg-interactive:#2a2b30; --bg-inset:#0b0c0d; --bg-well:#0b0c0d;
+    --text-strong:#fafaf9; --text-main:#ececea; --text-subtle:#b9bab6; --text-muted:#85868c;
+    --accent:#ff3b3b; --accent-hover:#ff5a52; --accent-strong:#ff7a70;
+    --accent-soft:rgba(255,59,59,.14); --accent-border:rgba(255,59,59,.42);
+    --ok:#2fbe6b; --ok-soft:rgba(47,190,107,.14); --ok-border:rgba(47,190,107,.34);
+    --warn:#f0a32b; --warn-soft:rgba(240,163,43,.14); --warn-border:rgba(240,163,43,.34);
+    --danger:#ff4d4d; --danger-soft:rgba(255,77,77,.14); --danger-border:rgba(255,77,77,.34);
+    --info:#2cb8dc; --info-soft:rgba(44,184,220,.14); --info-border:rgba(44,184,220,.32);
+    --border:rgba(250,250,249,.1); --border-soft:rgba(250,250,249,.06); --border-strong:rgba(250,250,249,.18);
+    --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+    --shadow-md:0 2px 10px rgba(0,0,0,.45);
+    --shadow-lg:0 24px 60px -12px rgba(0,0,0,.6);
+    --ring:0 0 0 3px rgba(255,59,59,.24);
+    --sidebar:#141416; --track:rgba(250,250,249,.1);
+  }
+}
+:root[data-theme="dark"]{
+  --bg-main:#101112; --bg-panel:#17181a; --bg-panel-strong:#1c1d20;
+  --bg-interactive:#2a2b30; --bg-inset:#0b0c0d; --bg-well:#0b0c0d;
+  --text-strong:#fafaf9; --text-main:#ececea; --text-subtle:#b9bab6; --text-muted:#85868c;
+  --accent:#ff3b3b; --accent-hover:#ff5a52; --accent-strong:#ff7a70;
+  --accent-soft:rgba(255,59,59,.14); --accent-border:rgba(255,59,59,.42);
+  --ok:#2fbe6b; --ok-soft:rgba(47,190,107,.14); --ok-border:rgba(47,190,107,.34);
+  --warn:#f0a32b; --warn-soft:rgba(240,163,43,.14); --warn-border:rgba(240,163,43,.34);
+  --danger:#ff4d4d; --danger-soft:rgba(255,77,77,.14); --danger-border:rgba(255,77,77,.34);
+  --info:#2cb8dc; --info-soft:rgba(44,184,220,.14); --info-border:rgba(44,184,220,.32);
+  --border:rgba(250,250,249,.1); --border-soft:rgba(250,250,249,.06); --border-strong:rgba(250,250,249,.18);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+  --shadow-md:0 2px 10px rgba(0,0,0,.45);
+  --shadow-lg:0 24px 60px -12px rgba(0,0,0,.6);
+  --ring:0 0 0 3px rgba(255,59,59,.24);
+  --sidebar:#141416; --track:rgba(250,250,249,.1);
+}
+:root[data-theme="light"]{
+  --bg-main:#f8f7f5; --bg-panel:#fff; --bg-panel-strong:#faf9f7;
+  --bg-interactive:#f3f2ef; --bg-inset:#f4f3f0; --bg-well:#101113;
+  --text-strong:#131417; --text-main:#1a1b1e; --text-subtle:#494b52; --text-muted:#6e7076;
+  --accent:#ff2929; --accent-hover:#e31b1b; --accent-strong:#d71f1f;
+  --accent-soft:rgba(255,41,41,.09); --accent-border:rgba(255,41,41,.35);
+  --ok:#178a45; --ok-soft:rgba(23,138,69,.1); --ok-border:rgba(23,138,69,.3);
+  --warn:#a66104; --warn-soft:rgba(166,97,4,.1); --warn-border:rgba(166,97,4,.3);
+  --danger:#d71f1f; --danger-soft:rgba(215,31,31,.09); --danger-border:rgba(215,31,31,.3);
+  --info:#0e7490; --info-soft:rgba(14,116,144,.1); --info-border:rgba(14,116,144,.28);
+  --border:#e9e7e3; --border-soft:#f0efeb; --border-strong:#d8d6d0;
+  --shadow-sm:0 1px 2px rgba(26,27,30,.05);
+  --shadow-md:0 2px 8px rgba(26,27,30,.06),0 1px 2px rgba(26,27,30,.05);
+  --shadow-lg:0 24px 60px -12px rgba(26,27,30,.14),0 4px 14px rgba(26,27,30,.06);
+  --ring:0 0 0 3px rgba(255,41,41,.15);
+  --sidebar:#fff; --track:#eceae6;
+}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg-main);color:var(--text-main);
+  font:400 14px/1.5 var(--font-sans);-webkit-font-smoothing:antialiased}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer;background:none;border:0}
+:focus-visible{outline:none;box-shadow:var(--ring);border-radius:var(--r-sm)}
+h1,h2,h3,h4{font-family:var(--font-display);letter-spacing:-.025em;margin:0;text-wrap:balance}
+.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+.num{font-variant-numeric:tabular-nums}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* ── shell ───────────────────────────────────────────────────────────── */
+.app{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh}
+.rail{position:sticky;top:0;height:100vh;background:var(--sidebar);
+  border-right:1px solid var(--sidebar-border);padding:20px 14px;display:flex;flex-direction:column;gap:2px}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 8px 22px}
+.brand-mark{width:28px;height:28px;border-radius:var(--r-full);background:var(--accent);flex:none;
+  display:grid;place-items:center;box-shadow:0 0 0 4px var(--accent-soft)}
+.brand-mark::after{content:"";width:9px;height:9px;border-radius:var(--r-full);background:#fff}
+.brand b{font-family:var(--font-display);font-weight:800;font-size:15px;letter-spacing:-.03em}
+.nav-group{margin:14px 8px 6px;font-size:10px;font-weight:700;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--text-muted)}
+.nav-item{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;
+  border-radius:var(--r-full);color:var(--text-subtle);font-weight:500;text-align:left;
+  transition:background var(--ease) 150ms}
+.nav-item:hover{background:var(--bg-interactive)}
+.nav-item .dot{width:6px;height:6px;border-radius:var(--r-full);background:var(--border-strong);flex:none}
+.nav-item.on{background:var(--accent-soft);color:var(--accent-strong);font-weight:600}
+.nav-item.on .dot{background:var(--accent)}
+.rail-foot{margin-top:auto;padding:12px 10px 0;border-top:1px solid var(--border-soft);
+  font-size:11px;color:var(--text-muted)}
+
+.topbar{position:sticky;top:0;z-index:20;height:60px;display:flex;align-items:center;
+  justify-content:space-between;gap:16px;padding:0 28px;background:var(--bg-panel);
+  border-bottom:1px solid var(--border)}
+.crumb{color:var(--text-muted);font-size:13px}
+.crumb b{color:var(--text-main);font-weight:600}
+.topbar-right{display:flex;align-items:center;gap:12px}
+.icon-btn{width:32px;height:32px;border-radius:var(--r-full);border:1px solid var(--border);
+  display:grid;place-items:center;color:var(--text-subtle);font-size:13px}
+.icon-btn:hover{background:var(--bg-interactive)}
+.who{display:flex;align-items:center;gap:9px}
+.who-name{font-weight:600;font-size:13px;line-height:1.2}
+.who-role{font-size:11px;color:var(--text-muted)}
+.avatar{width:32px;height:32px;border-radius:var(--r-full);background:var(--accent-soft);
+  color:var(--accent-strong);display:grid;place-items:center;font-weight:700;font-size:13px}
+
+.page{padding:26px 28px 72px;max-width:1560px}
+.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:22px}
+.hero h1{font-size:28px;font-weight:800}
+.hero p{margin:6px 0 0;color:var(--text-subtle);max-width:62ch}
+.tabs{display:flex;gap:4px;padding:4px;background:var(--bg-panel);border:1px solid var(--border);
+  border-radius:var(--r-full);width:max-content;max-width:100%;overflow-x:auto;margin-bottom:22px}
+.tab{padding:8px 15px;border-radius:var(--r-full);color:var(--text-subtle);font-weight:600;
+  font-size:13px;white-space:nowrap}
+.tab:hover{color:var(--text-main)}
+.tab.on{background:var(--accent);color:#fff;box-shadow:var(--shadow-sm)}
+.view{display:none}
+.view.on{display:block;animation:rise 260ms var(--ease)}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* ── primitives ──────────────────────────────────────────────────────── */
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:var(--r-full);
+  font-weight:600;font-size:13px;border:1px solid transparent;transition:all var(--ease) 150ms}
+.btn-primary{background:var(--accent);color:#fff;box-shadow:0 4px 12px -3px var(--accent-border)}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-quiet{border-color:var(--border);background:var(--bg-panel);color:var(--text-main)}
+.btn-quiet:hover{background:var(--bg-interactive)}
+.btn-sm{padding:6px 12px;font-size:12px}
+.card{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--r-lg);
+  box-shadow:var(--shadow-sm)}
+.pad{padding:20px}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:var(--r-full);
+  font-size:11px;font-weight:700;letter-spacing:.01em;border:1px solid transparent}
+.pill::before{content:"";width:5px;height:5px;border-radius:var(--r-full);background:currentColor}
+.pill.plain::before{display:none}
+.p-ok{color:var(--ok);background:var(--ok-soft);border-color:var(--ok-border)}
+.p-warn{color:var(--warn);background:var(--warn-soft);border-color:var(--warn-border)}
+.p-bad{color:var(--danger);background:var(--danger-soft);border-color:var(--danger-border)}
+.p-info{color:var(--info);background:var(--info-soft);border-color:var(--info-border)}
+.p-accent{color:var(--accent-strong);background:var(--accent-soft);border-color:var(--accent-border)}
+.p-mute{color:var(--text-muted);background:var(--bg-interactive);border-color:var(--border)}
+.eyebrow{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted)}
+.hint{color:var(--text-muted);font-size:12px}
+.sub{color:var(--text-subtle);font-size:13px}
+.bar{height:5px;border-radius:var(--r-full);background:var(--track);overflow:hidden}
+.bar>i{display:block;height:100%;border-radius:inherit;background:var(--text-subtle)}
+.bar>i.ok{background:var(--ok)} .bar>i.warn{background:var(--warn)}
+.bar>i.bad{background:var(--danger)} .bar>i.accent{background:var(--accent)}
+.sect-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:0 0 12px}
+.sect-head h2{font-size:17px;font-weight:700}
+
+/* provider code tile — providers are identified by type, never by vendor colour */
+.pv{display:inline-grid;place-items:center;width:34px;height:34px;flex:none;border-radius:10px;
+  background:var(--bg-inset);border:1px solid var(--border);color:var(--text-subtle);
+  font-family:var(--font-mono);font-size:10px;font-weight:600;letter-spacing:.02em}
+.pv.lg{width:42px;height:42px;font-size:12px;border-radius:12px}
+.pv.on{background:var(--accent-soft);border-color:var(--accent-border);color:var(--accent-strong)}
+
+/* ── fleet ───────────────────────────────────────────────────────────── */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
+.kpi{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--r-lg);
+  padding:16px 18px;box-shadow:var(--shadow-sm)}
+.kpi b{display:block;font-family:var(--font-display);font-size:26px;font-weight:800;
+  letter-spacing:-.03em;margin:6px 0 2px;font-variant-numeric:tabular-nums}
+.kpi .split{display:flex;gap:3px;margin-top:10px}
+.kpi .split span{height:4px;border-radius:var(--r-full);background:var(--text-subtle);opacity:.85}
+.filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.chip{padding:6px 12px;border-radius:var(--r-full);border:1px solid var(--border);
+  background:var(--bg-panel);color:var(--text-subtle);font-size:12px;font-weight:600}
+.chip:hover{background:var(--bg-interactive)}
+.chip.on{background:var(--text-strong);border-color:var(--text-strong);color:var(--bg-panel)}
+.search{flex:1;min-width:180px;max-width:280px;padding:7px 13px;border-radius:var(--r-full);
+  border:1px solid var(--border);background:var(--bg-panel)}
+.search::placeholder{color:var(--text-muted)}
+.tablewrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--bg-panel)}
+table{width:100%;border-collapse:collapse;min-width:920px}
+thead th{background:var(--bg-panel-strong);border-bottom:1px solid var(--border);text-align:left;
+  padding:10px 16px;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--text-muted);white-space:nowrap}
+tbody td{border-bottom:1px solid var(--border-soft);padding:12px 16px;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--bg-panel-strong)}
+.cellstack{display:flex;align-items:center;gap:11px}
+.cellstack b{font-weight:600}
+.right{text-align:right}
+.spark{display:block}
+
+/* ── order sheet (new machine) ───────────────────────────────────────── */
+.thesis{display:flex;align-items:center;gap:14px;padding:12px 18px;margin-bottom:16px;
+  border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--r-md);
+  background:var(--bg-panel)}
+.thesis p{margin:0;font-size:13px;color:var(--text-subtle)}
+.thesis b{color:var(--text-main)}
+.sheet{display:grid;grid-template-columns:minmax(0,1fr) 396px;gap:18px;align-items:start}
+.block{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--r-lg);
+  padding:20px;box-shadow:var(--shadow-sm);margin-bottom:14px}
+.block-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:16px}
+.block-head h3{font-size:15px;font-weight:700}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.field label{display:block;font-size:12px;font-weight:600;color:var(--text-subtle);margin-bottom:6px}
+.field input,.field select,.field textarea{width:100%;padding:9px 12px;border-radius:var(--r-md);
+  border:1px solid var(--border-strong);background:var(--bg-panel)}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;
+  border-color:var(--accent);box-shadow:var(--ring)}
+.field .under{margin-top:6px;font-size:11px;color:var(--text-muted)}
+.span2{grid-column:1/-1}
+
+.purpose{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.opt{text-align:left;padding:12px 13px;border-radius:var(--r-md);border:1px solid var(--border);
+  background:var(--bg-panel);transition:all var(--ease) 150ms}
+.opt:hover{border-color:var(--border-strong);background:var(--bg-panel-strong)}
+.opt.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:var(--ring)}
+.opt b{display:block;font-size:13px;font-weight:650;margin-bottom:3px}
+.opt small{color:var(--text-muted);font-size:11px;line-height:1.35;display:block}
+
+.stepper{display:flex;align-items:center;gap:0;border:1px solid var(--border-strong);
+  border-radius:var(--r-full);overflow:hidden;width:max-content;background:var(--bg-panel)}
+.stepper button{width:34px;height:34px;color:var(--text-subtle);font-size:15px;font-weight:600}
+.stepper button:hover{background:var(--bg-interactive);color:var(--accent-strong)}
+.stepper .val{min-width:74px;text-align:center;font-family:var(--font-mono);font-size:13px;
+  font-weight:600;font-variant-numeric:tabular-nums;border-left:1px solid var(--border);
+  border-right:1px solid var(--border);padding:7px 4px}
+.ratio{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap}
+
+.disk{display:grid;grid-template-columns:1.1fr .8fr 1fr 1.2fr 34px;gap:10px;align-items:end;
+  padding:12px 0;border-bottom:1px solid var(--border-soft)}
+.disk:last-of-type{border-bottom:0}
+.disk .kill{width:30px;height:30px;border-radius:var(--r-full);border:1px solid var(--border);
+  color:var(--text-muted);display:grid;place-items:center}
+.disk .kill:hover{color:var(--danger);border-color:var(--danger-border);background:var(--danger-soft)}
+.addrow{margin-top:10px}
+
+.keyrow{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);
+  border-radius:var(--r-md);background:var(--bg-panel-strong);margin-bottom:8px}
+.keyrow .mono{font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.well{background:var(--bg-well);color:#d6d3cd;border-radius:var(--r-md);padding:14px 16px;
+  font:400 12px/1.7 var(--font-mono);overflow:auto}
+.well .k{color:#8fb8ff} .well .s{color:#a5d6a7} .well .c{color:#7c7f85} .well .w{color:#f0c674}
+
+/* ── translation rail ────────────────────────────────────────────────── */
+.railcol{position:sticky;top:78px;display:flex;flex-direction:column;gap:14px}
+.pane{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--r-lg);
+  box-shadow:var(--shadow-md);overflow:hidden}
+.pane-head{padding:15px 18px;border-bottom:1px solid var(--border);display:flex;
+  align-items:center;justify-content:space-between;gap:10px}
+.pane-head h3{font-size:14px;font-weight:700}
+.pane-body{padding:16px 18px}
+.targets{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:14px 18px 0}
+.tgt{display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 6px;
+  border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-panel);
+  font-size:10px;font-weight:600;color:var(--text-muted);line-height:1.2;text-align:center}
+.tgt:hover{background:var(--bg-panel-strong);border-color:var(--border-strong)}
+.tgt.on{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-strong)}
+.tgt.off{opacity:.5}
+.trans{display:grid;grid-template-columns:112px minmax(0,1fr);gap:4px 12px;align-items:baseline}
+.trans dt{font-size:11px;font-weight:600;color:var(--text-muted);padding:5px 0}
+.trans dd{margin:0;padding:5px 0;font-family:var(--font-mono);font-size:12px;
+  color:var(--text-strong);word-break:break-word;font-variant-numeric:tabular-nums}
+.trans dd em{font-style:normal;color:var(--text-muted)}
+.arrowline{display:flex;align-items:center;gap:10px;padding:12px 18px;background:var(--bg-panel-strong);
+  border-top:1px solid var(--border-soft);border-bottom:1px solid var(--border-soft);font-size:12px}
+.arrowline .from{font-family:var(--font-mono);font-weight:600;color:var(--text-strong)}
+.arrowline .to{font-family:var(--font-mono);font-weight:600;color:var(--accent-strong)}
+.arrowline .ar{color:var(--text-muted)}
+.cost{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding:14px 18px;
+  border-top:1px solid var(--border-soft)}
+.cost b{font-family:var(--font-display);font-size:24px;font-weight:800;letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums;display:block}
+.checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.checks li{display:grid;grid-template-columns:18px minmax(0,1fr);gap:9px;padding:7px 0;
+  border-bottom:1px solid var(--border-soft);font-size:12px;align-items:start}
+.checks li:last-child{border-bottom:0}
+.checks .g{color:var(--ok);font-weight:700;line-height:1.4}
+.checks .a{color:var(--warn);font-weight:700;line-height:1.4}
+.checks b{font-weight:600;display:block}
+.checks small{color:var(--text-muted);font-size:11px}
+.gate{padding:14px 18px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:9px}
+.gate .btn{justify-content:center;width:100%}
+.ready{display:flex;align-items:center;justify-content:space-between;font-size:12px;margin-bottom:2px}
+
+/* ── placement ───────────────────────────────────────────────────────── */
+.cands{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.cand{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--r-lg);
+  padding:18px;box-shadow:var(--shadow-sm);display:flex;flex-direction:column;gap:14px}
+.cand.pick{border-color:var(--accent-border);box-shadow:0 0 0 3px var(--accent-soft),var(--shadow-md)}
+.cand.no{opacity:.72}
+.cand-top{display:flex;align-items:flex-start;gap:12px}
+.cand-top h3{font-size:15px;font-weight:700}
+.ring{--v:0;width:46px;height:46px;flex:none;border-radius:var(--r-full);
+  background:conic-gradient(var(--rc,var(--ok)) calc(var(--v)*1%),var(--track) 0);
+  display:grid;place-items:center;position:relative}
+.ring::before{content:"";position:absolute;inset:5px;border-radius:inherit;background:var(--bg-panel)}
+.ring span{position:relative;font-family:var(--font-display);font-size:13px;font-weight:800;
+  font-variant-numeric:tabular-nums}
+.gauge{display:grid;grid-template-columns:56px minmax(0,1fr) 62px;gap:10px;align-items:center;
+  font-size:11px;color:var(--text-muted);margin-bottom:7px}
+.gauge b{color:var(--text-subtle);font-weight:600}
+.gauge .v{text-align:right;font-family:var(--font-mono);color:var(--text-subtle);
+  font-variant-numeric:tabular-nums}
+.cand-foot{margin-top:auto;padding-top:13px;border-top:1px solid var(--border-soft);
+  display:flex;align-items:center;justify-content:space-between;gap:10px}
+.cand-note{font-size:12px;color:var(--text-subtle);display:flex;gap:7px;align-items:flex-start}
+
+/* ── provisioning ────────────────────────────────────────────────────── */
+.runlayout{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:18px;align-items:start}
+.live{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:700;color:var(--info)}
+.live::before{content:"";width:7px;height:7px;border-radius:var(--r-full);background:var(--info);
+  box-shadow:0 0 0 4px var(--info-soft);animation:beat 1.6s var(--ease) infinite}
+@keyframes beat{50%{box-shadow:0 0 0 8px transparent}}
+.mrow{padding:15px 0;border-bottom:1px solid var(--border-soft)}
+.mrow:last-child{border-bottom:0;padding-bottom:0}
+.mrow-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:11px}
+.phases{display:flex;align-items:center;gap:0;overflow-x:auto;padding-bottom:2px}
+.ph{display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:var(--r-full);
+  font-size:11px;font-weight:600;white-space:nowrap;color:var(--text-muted);
+  background:var(--bg-interactive);border:1px solid transparent}
+.ph.done{color:var(--ok);background:var(--ok-soft);border-color:var(--ok-border)}
+.ph.now{color:var(--info);background:var(--info-soft);border-color:var(--info-border)}
+.ph-link{width:12px;height:1px;background:var(--border-strong);flex:none}
+.handoff{display:flex;align-items:center;gap:14px;padding:16px 18px;border-radius:var(--r-lg);
+  border:1px dashed var(--accent-border);background:var(--accent-soft)}
+.handoff p{margin:2px 0 0;font-size:12px;color:var(--text-subtle)}
+.handoff h3{font-size:14px;font-weight:700}
+
+/* ── providers ───────────────────────────────────────────────────────── */
+.provgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:22px}
+.prov{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--r-lg);
+  padding:18px;box-shadow:var(--shadow-sm)}
+.prov-top{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}
+.prov-top h3{font-size:15px;font-weight:700}
+.kv{display:grid;grid-template-columns:1fr auto;gap:5px 12px;font-size:12px;
+  padding-top:12px;border-top:1px solid var(--border-soft);margin-top:12px}
+.kv dt{color:var(--text-muted)} .kv dd{margin:0;text-align:right;font-family:var(--font-mono);
+  font-size:11px;color:var(--text-subtle);font-variant-numeric:tabular-nums}
+.matrix td:not(:first-child),.matrix th:not(:first-child){text-align:center}
+.matrix .y{color:var(--ok);font-weight:700}
+.matrix .n{color:var(--text-muted)}
+.matrix .p{color:var(--warn);font-weight:700}
+.matrix tbody td:first-child{font-weight:600}
+.leak{display:flex;gap:10px;align-items:flex-start;margin-top:12px;font-size:12px;
+  color:var(--text-subtle);max-width:82ch}
+
+/* ── responsive ──────────────────────────────────────────────────────── */
+@media (max-width:1300px){
+  .sheet,.runlayout{grid-template-columns:minmax(0,1fr)}
+  .railcol{position:static}
+  .cands,.provgrid{grid-template-columns:repeat(2,1fr)}
+  .kpis{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:980px){
+  .app{grid-template-columns:64px minmax(0,1fr)}
+  .brand b,.nav-item span,.nav-group,.rail-foot{display:none}
+  .brand,.nav-item{justify-content:center}
+  .purpose{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:760px){
+  .app{grid-template-columns:minmax(0,1fr)}
+  .rail{display:none}
+  .page{padding:20px 16px 56px}
+  .topbar{padding:0 16px}
+  .kpis,.cands,.provgrid,.grid2,.grid3{grid-template-columns:1fr}
+  .who-name,.who-role{display:none}
+  .disk{grid-template-columns:1fr 1fr;gap:8px}
+  .hero h1{font-size:23px}
+}
+</style>
+
+<div class="app">
+  <nav class="rail">
+    <div class="brand"><div class="brand-mark"></div><b>KubeSight</b></div>
+
+    <div class="nav-group">Platform</div>
+    <button class="nav-item"><i class="dot"></i><span>Overview</span></button>
+    <button class="nav-item"><i class="dot"></i><span>Clusters</span></button>
+    <button class="nav-item"><i class="dot"></i><span>Inventory</span></button>
+
+    <div class="nav-group">Operations</div>
+    <button class="nav-item on"><i class="dot"></i><span>Machine Builder</span></button>
+    <button class="nav-item"><i class="dot"></i><span>Cluster Builder</span></button>
+    <button class="nav-item"><i class="dot"></i><span>Upgrade Center</span></button>
+
+    <div class="nav-group">Signals</div>
+    <button class="nav-item"><i class="dot"></i><span>Alerts</span></button>
+    <button class="nav-item"><i class="dot"></i><span>Audit</span></button>
+
+    <div class="rail-foot">Control plane · v1.4.0<br>6 providers connected</div>
+  </nav>
+
+  <main>
+    <header class="topbar">
+      <div class="crumb">Operations / <b>Machine Builder</b></div>
+      <div class="topbar-right">
+        <button class="icon-btn" id="themeBtn" title="Switch theme" aria-label="Switch theme">◐</button>
+        <button class="icon-btn" title="Help">?</button>
+        <div class="who">
+          <div><div class="who-name">Elie Medawar</div><div class="who-role">Platform administrator</div></div>
+          <div class="avatar">EM</div>
+        </div>
+      </div>
+    </header>
+
+    <div class="page">
+      <div class="hero">
+        <div>
+          <h1>Machine Builder</h1>
+          <p>Describe a machine once. Choose where it lands. KubeSight speaks SimpliVity, vSphere,
+             AWS, Azure, Proxmox and bare metal on your behalf.</p>
+        </div>
+        <div style="display:flex;gap:9px">
+          <button class="btn btn-quiet" data-go="providers">Providers</button>
+          <button class="btn btn-primary" data-go="new">＋ New machine</button>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab on" data-view="fleet">Fleet</button>
+        <button class="tab" data-view="new">New machine</button>
+        <button class="tab" data-view="place">Placement</button>
+        <button class="tab" data-view="run">Provisioning</button>
+        <button class="tab" data-view="providers">Providers</button>
+      </div>
+
+      <!-- ══════════════ FLEET ══════════════ -->
+      <section class="view on" id="v-fleet">
+        <div class="kpis">
+          <div class="kpi">
+            <div class="eyebrow">Machines under management</div>
+            <b>147</b>
+            <div class="hint">across 6 providers · 4 sites</div>
+            <div class="split" title="SimpliVity 68 · vSphere 39 · AWS 24 · Proxmox 11 · Bare metal 5">
+              <span style="flex:68"></span><span style="flex:39;opacity:.65"></span>
+              <span style="flex:24;opacity:.5"></span><span style="flex:11;opacity:.38"></span>
+              <span style="flex:5;opacity:.26"></span>
+            </div>
+          </div>
+          <div class="kpi">
+            <div class="eyebrow">Capacity headroom</div>
+            <b>34%</b>
+            <div class="hint">on-prem · 512 vCPU / 1.9 TiB free</div>
+            <div class="bar" style="margin-top:12px"><i class="warn" style="width:66%"></i></div>
+          </div>
+          <div class="kpi">
+            <div class="eyebrow">Monthly spend</div>
+            <b>$18,420</b>
+            <div class="hint">$4,180 cloud · $14,240 internal chargeback</div>
+            <div class="bar" style="margin-top:12px"><i class="accent" style="width:23%"></i></div>
+          </div>
+          <div class="kpi">
+            <div class="eyebrow">Needs attention</div>
+            <b>5</b>
+            <div class="hint">3 drifted from spec · 2 past expiry date</div>
+            <div style="margin-top:10px"><span class="pill p-warn">Drift</span>
+              <span class="pill p-bad" style="margin-left:5px">Expired</span></div>
+          </div>
+        </div>
+
+        <div class="sect-head">
+          <div><h2>Fleet</h2><div class="hint">One list, every provider. The provider is a column — not a different tool.</div></div>
+          <button class="btn btn-quiet btn-sm">Export CSV</button>
+        </div>
+
+        <div class="filters">
+          <button class="chip on">All 147</button>
+          <button class="chip">SimpliVity 68</button>
+          <button class="chip">vSphere 39</button>
+          <button class="chip">AWS 24</button>
+          <button class="chip">Proxmox 11</button>
+          <button class="chip">Bare metal 5</button>
+          <button class="chip">Needs attention 5</button>
+          <input class="search" placeholder="Name, IP, tag, owner…" aria-label="Search fleet">
+        </div>
+
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Machine</th><th>Where it lives</th><th>Shape</th><th>Address</th>
+                <th>Purpose</th><th>CPU · 24h</th><th class="right">Cost / mo</th><th>State</th>
+              </tr>
+            </thead>
+            <tbody id="fleetBody"></tbody>
+          </table>
+        </div>
+        <div class="hint" style="margin-top:12px">Showing 8 of 147 · sorted by last change</div>
+      </section>
+
+      <!-- ══════════════ NEW MACHINE ══════════════ -->
+      <section class="view" id="v-new">
+        <div class="thesis">
+          <span class="pill p-accent plain">Provider-neutral</span>
+          <p>Everything on the left is written once, in your own vocabulary. <b>The rail on the right
+             shows exactly how it lands</b> on the target you pick — change the target and nothing
+             on the left has to change.</p>
+        </div>
+
+        <div class="sheet">
+          <div>
+            <!-- purpose -->
+            <div class="block">
+              <div class="block-head">
+                <div><h3>What is this machine for?</h3>
+                  <div class="hint">Purpose sets sane defaults for shape, disks and hardening — all still editable.</div></div>
+                <span class="pill p-mute plain" id="draftTag">Draft saved 12s ago</span>
+              </div>
+              <div class="purpose" id="purposeGrid">
+                <button class="opt on" data-purpose="worker" data-cpu="8" data-ram="32">
+                  <b>Kubernetes worker</b><small>8 vCPU · 32 GiB · joins a build</small></button>
+                <button class="opt" data-purpose="cp" data-cpu="4" data-ram="8">
+                  <b>Control plane</b><small>4 vCPU · 8 GiB · anti-affinity on</small></button>
+                <button class="opt" data-purpose="db" data-cpu="16" data-ram="64">
+                  <b>Database host</b><small>16 vCPU · 64 GiB · fast disk</small></button>
+                <button class="opt" data-purpose="jump" data-cpu="2" data-ram="4">
+                  <b>Jump host</b><small>2 vCPU · 4 GiB · public ingress</small></button>
+              </div>
+            </div>
+
+            <!-- identity -->
+            <div class="block">
+              <div class="block-head"><div><h3>Name &amp; count</h3>
+                <div class="hint">Names are generated from the pattern, then reserved in the fleet before anything is created.</div></div></div>
+              <div class="grid3">
+                <div class="field span2" style="grid-column:span 2">
+                  <label for="pattern">Name pattern</label>
+                  <input id="pattern" value="k8s-prd-w{n}">
+                  <div class="under">Tokens: <span class="mono">{n}</span> index ·
+                    <span class="mono">{site}</span> · <span class="mono">{env}</span></div>
+                </div>
+                <div class="field">
+                  <label>How many</label>
+                  <div class="stepper">
+                    <button data-step="count" data-by="-1" aria-label="One fewer machine">−</button>
+                    <span class="val" id="countVal">3</span>
+                    <button data-step="count" data-by="1" aria-label="One more machine">＋</button>
+                  </div>
+                </div>
+                <div class="field span2">
+                  <label>Will be created as</label>
+                  <div class="mono" id="namePreview" style="font-size:12.5px;color:var(--text-strong)"></div>
+                </div>
+                <div class="field">
+                  <label for="env">Environment</label>
+                  <select id="env"><option>Production</option><option>Staging</option><option>Lab</option></select>
+                </div>
+                <div class="field">
+                  <label for="owner">Owner</label>
+                  <select id="owner"><option>Platform Engineering</option><option>Core Banking</option><option>Data</option></select>
+                </div>
+                <div class="field">
+                  <label for="expiry">Delete after</label>
+                  <select id="expiry"><option>Never — permanent</option><option>30 days</option><option>7 days</option></select>
+                </div>
+              </div>
+            </div>
+
+            <!-- shape -->
+            <div class="block">
+              <div class="block-head"><div><h3>Shape</h3>
+                <div class="hint">Given in vCPU and GiB. Each provider gets the nearest real offering — shown in the rail.</div></div></div>
+              <div class="grid2">
+                <div class="field">
+                  <label>vCPU</label>
+                  <div class="stepper">
+                    <button data-step="cpu" data-by="-1" aria-label="Fewer vCPU">−</button>
+                    <span class="val" id="cpuVal">8</span>
+                    <button data-step="cpu" data-by="1" aria-label="More vCPU">＋</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Memory</label>
+                  <div class="stepper">
+                    <button data-step="ram" data-by="-1" aria-label="Less memory">−</button>
+                    <span class="val" id="ramVal">32 GiB</span>
+                    <button data-step="ram" data-by="1" aria-label="More memory">＋</button>
+                  </div>
+                </div>
+              </div>
+              <div class="ratio">
+                <span class="eyebrow">Ratio</span>
+                <span class="pill p-info plain mono" id="ratioPill">1 : 4 — general purpose</span>
+                <span class="hint" id="ratioNote">Maps to the general-purpose family on every cloud target.</span>
+              </div>
+            </div>
+
+            <!-- storage -->
+            <div class="block">
+              <div class="block-head"><div><h3>Disks</h3>
+                <div class="hint">Add as many as the target supports. The rail flags any provider that can’t honour this layout.</div></div>
+                <span class="pill p-mute plain mono">660 GiB total</span></div>
+              <div class="disk">
+                <div class="field"><label>Mount</label><input value="/" readonly></div>
+                <div class="field"><label>Size</label><input value="80 GiB"></div>
+                <div class="field"><label>Tier</label>
+                  <select><option>Standard SSD</option><option>Performance SSD</option></select></div>
+                <div class="field"><label>Notes</label><input value="Root — from image" readonly></div>
+                <button class="kill" disabled title="The root disk can’t be removed" style="opacity:.4">×</button>
+              </div>
+              <div class="disk">
+                <div class="field"><label>Mount</label><input value="/var/lib/containerd"></div>
+                <div class="field"><label>Size</label><input value="400 GiB"></div>
+                <div class="field"><label>Tier</label>
+                  <select><option>Performance SSD</option><option>Standard SSD</option></select></div>
+                <div class="field"><label>Notes</label><input value="Image + layer cache"></div>
+                <button class="kill" aria-label="Remove this disk">×</button>
+              </div>
+              <div class="disk">
+                <div class="field"><label>Mount</label><input value="/var/log"></div>
+                <div class="field"><label>Size</label><input value="180 GiB"></div>
+                <div class="field"><label>Tier</label>
+                  <select><option>Standard SSD</option><option>Performance SSD</option></select></div>
+                <div class="field"><label>Notes</label><input value="Retention 14d"></div>
+                <button class="kill" aria-label="Remove this disk">×</button>
+              </div>
+              <button class="btn btn-quiet btn-sm addrow">＋ Add disk</button>
+            </div>
+
+            <!-- network -->
+            <div class="block">
+              <div class="block-head"><div><h3>Network</h3>
+                <div class="hint">Pick the network by what it is for. KubeSight resolves it to a VLAN, a subnet or a VNet per target.</div></div></div>
+              <div class="grid3">
+                <div class="field">
+                  <label for="net">Attach to</label>
+                  <select id="net">
+                    <option>Production workloads — 10.42.0.0/16</option>
+                    <option>Management — 10.10.0.0/24</option>
+                    <option>DMZ — 172.19.4.0/24</option>
+                  </select>
+                  <div class="under" id="netResolved">Resolves to <span class="mono">VLAN 412</span> on this target</div>
+                </div>
+                <div class="field">
+                  <label for="ipmode">Addressing</label>
+                  <select id="ipmode"><option>Reserve from IPAM pool</option><option>DHCP</option><option>Static — enter below</option></select>
+                  <div class="under">26 addresses free in the pool</div>
+                </div>
+                <div class="field">
+                  <label for="fw">Reachable from</label>
+                  <select id="fw"><option>Internal only</option><option>Internal + VPN</option><option>Public (bastion rules)</option></select>
+                  <div class="under">Applies the matching security group / firewall policy</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- image + access -->
+            <div class="block">
+              <div class="block-head"><div><h3>Operating system &amp; access</h3>
+                <div class="hint">One OS choice; the rail resolves it to a template, an AMI or an image reference.</div></div></div>
+              <div class="grid2">
+                <div class="field">
+                  <label for="os">Image</label>
+                  <select id="os">
+                    <option>Ubuntu 24.04 LTS — hardened, containerd baked</option>
+                    <option>Rocky Linux 9.4 — hardened</option>
+                    <option>RHEL 9.4 — subscription attached</option>
+                  </select>
+                  <div class="under">Built weekly by the golden-image pipeline · CIS Level 1</div>
+                </div>
+                <div class="field">
+                  <label for="user">Login user</label>
+                  <input id="user" value="kubesight">
+                  <div class="under">Password login disabled; sudo without password</div>
+                </div>
+                <div class="field span2">
+                  <label>SSH keys</label>
+                  <div class="keyrow">
+                    <span class="pill p-ok plain">Default</span>
+                    <b style="font-size:13px">platform-ops</b>
+                    <span class="mono">ed25519 SHA256:9k2Lm…4Tqf</span>
+                    <span class="hint" style="margin-left:auto">Used by 141 machines</span>
+                  </div>
+                  <div class="keyrow">
+                    <span class="pill p-mute plain">Added</span>
+                    <b style="font-size:13px">emedawer</b>
+                    <span class="mono">ed25519 SHA256:Pv7Xz…9Rce</span>
+                    <button class="btn btn-quiet btn-sm" style="margin-left:auto">Remove</button>
+                  </div>
+                  <button class="btn btn-quiet btn-sm addrow">＋ Add key</button>
+                </div>
+                <div class="field span2">
+                  <label>First-boot script <span class="hint" style="font-weight:400">— runs identically on every provider via cloud-init</span></label>
+                  <div class="well">#cloud-config
+<span class="c">// generated from purpose: Kubernetes worker — edit freely</span>
+<span class="k">write_files</span>:
+  - path: /etc/modules-load.d/k8s.conf
+    content: |
+      br_netfilter
+<span class="k">runcmd</span>:
+  - [ sysctl, -w, net.ipv4.ip_forward=1 ]
+  - [ systemctl, enable, --now, containerd ]
+  - [ /usr/local/bin/kubesight-register, <span class="s">--role=worker</span> ]</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── rail ── -->
+          <aside class="railcol">
+            <div class="pane">
+              <div class="pane-head">
+                <div><h3>Where it lands</h3><div class="hint">Pick a target — the spec doesn’t change</div></div>
+                <button class="btn btn-quiet btn-sm" data-go="place">Compare</button>
+              </div>
+              <div class="targets" id="targetGrid"></div>
+              <div class="arrowline">
+                <span class="from" id="fromSpec">8 vCPU / 32 GiB</span>
+                <span class="ar">→</span>
+                <span class="to" id="toSpec">m6i.2xlarge</span>
+              </div>
+              <div class="pane-body">
+                <div class="eyebrow" style="margin-bottom:10px">Translated for <span id="transFor">AWS EC2</span></div>
+                <dl class="trans" id="transList"></dl>
+              </div>
+              <div class="cost">
+                <div>
+                  <div class="eyebrow">Estimated · 3 machines</div>
+                  <b id="costVal">$924</b>
+                  <div class="hint" id="costNote">per month, on-demand</div>
+                </div>
+                <div style="text-align:right">
+                  <div class="hint" id="costUnit">$308 / machine</div>
+                  <div class="hint" id="costAlt">Cheapest target: SimpliVity, $612</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="pane">
+              <div class="pane-head"><h3>Before we create anything</h3>
+                <span class="pill p-ok" id="gatePill">5 of 6 clear</span></div>
+              <div class="pane-body">
+                <ul class="checks" id="checkList"></ul>
+              </div>
+              <div class="gate">
+                <div class="ready"><b style="font-weight:600">Ready to create</b>
+                  <span class="hint" id="readyPct">83%</span></div>
+                <div class="bar"><i class="ok" id="readyBar" style="width:83%"></i></div>
+                <button class="btn btn-primary" data-go="run">Create 3 machines</button>
+                <button class="btn btn-quiet">Save as blueprint</button>
+                <div class="hint" style="text-align:center">Every command KubeSight runs is written to the audit log.</div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ══════════════ PLACEMENT ══════════════ -->
+      <section class="view" id="v-place">
+        <div class="sect-head">
+          <div><h2>Where should these 3 machines go?</h2>
+            <div class="hint">Same spec — <span class="mono">3 × 8 vCPU / 32 GiB / 660 GiB</span>, production network —
+              scored against every connected provider.</div></div>
+          <div style="display:flex;gap:9px">
+            <button class="btn btn-quiet btn-sm">Weighting: balanced</button>
+            <button class="btn btn-primary btn-sm">Use recommended</button>
+          </div>
+        </div>
+
+        <div class="cands">
+          <article class="cand pick">
+            <div class="cand-top">
+              <div class="pv lg">SVT</div>
+              <div style="flex:1"><h3>HPE SimpliVity</h3>
+                <div class="hint mono">OMNI-BEY-01 · Beirut DC</div></div>
+              <div class="ring" style="--v:94"><span>94</span></div>
+            </div>
+            <div>
+              <div class="gauge"><b>vCPU</b><div class="bar"><i class="ok" style="width:58%"></i></div><span class="v">214 free</span></div>
+              <div class="gauge"><b>Memory</b><div class="bar"><i class="ok" style="width:61%"></i></div><span class="v">890 GiB</span></div>
+              <div class="gauge"><b>Storage</b><div class="bar"><i class="warn" style="width:72%"></i></div><span class="v">4.1 TiB</span></div>
+            </div>
+            <div class="cand-note"><span class="pill p-ok plain">✓</span>
+              <span>Spreads across 3 ESXi hosts, so no two workers share a failure domain.
+                RF2 replication already covers the data disks.</span></div>
+            <div class="cand-foot">
+              <div><div class="eyebrow">Chargeback</div>
+                <b class="mono" style="font-size:15px">$612 / mo</b></div>
+              <span class="pill p-accent">Recommended</span>
+            </div>
+          </article>
+
+          <article class="cand">
+            <div class="cand-top">
+              <div class="pv lg">VMW</div>
+              <div style="flex:1"><h3>VMware vSphere</h3>
+                <div class="hint mono">vcsa-dr-01 · Zouk DR</div></div>
+              <div class="ring" style="--v:71;--rc:var(--warn)"><span>71</span></div>
+            </div>
+            <div>
+              <div class="gauge"><b>vCPU</b><div class="bar"><i class="ok" style="width:44%"></i></div><span class="v">168 free</span></div>
+              <div class="gauge"><b>Memory</b><div class="bar"><i class="warn" style="width:78%"></i></div><span class="v">312 GiB</span></div>
+              <div class="gauge"><b>Storage</b><div class="bar"><i class="ok" style="width:51%"></i></div><span class="v">9.8 TiB</span></div>
+            </div>
+            <div class="cand-note"><span class="pill p-warn plain">!</span>
+              <span>Memory headroom drops to 12% after this build. Fine today, tight if you grow
+                the cluster next quarter.</span></div>
+            <div class="cand-foot">
+              <div><div class="eyebrow">Chargeback</div>
+                <b class="mono" style="font-size:15px">$648 / mo</b></div>
+              <span class="pill p-ok">Fits</span>
+            </div>
+          </article>
+
+          <article class="cand">
+            <div class="cand-top">
+              <div class="pv lg">AWS</div>
+              <div style="flex:1"><h3>AWS EC2</h3>
+                <div class="hint mono">me-south-1 · Bahrain</div></div>
+              <div class="ring" style="--v:66;--rc:var(--warn)"><span>66</span></div>
+            </div>
+            <div>
+              <div class="gauge"><b>vCPU quota</b><div class="bar"><i class="warn" style="width:75%"></i></div><span class="v">40 of 64</span></div>
+              <div class="gauge"><b>Memory</b><div class="bar"><i class="ok" style="width:20%"></i></div><span class="v">elastic</span></div>
+              <div class="gauge"><b>Storage</b><div class="bar"><i class="ok" style="width:20%"></i></div><span class="v">elastic</span></div>
+            </div>
+            <div class="cand-note"><span class="pill p-warn plain">!</span>
+              <span>Capacity is never the problem here — cost and the 34 ms hop back to the
+                on-prem control plane are. Request a quota bump before going past 5 machines.</span></div>
+            <div class="cand-foot">
+              <div><div class="eyebrow">On-demand</div>
+                <b class="mono" style="font-size:15px">$924 / mo</b></div>
+              <span class="pill p-ok">Fits</span>
+            </div>
+          </article>
+
+          <article class="cand">
+            <div class="cand-top">
+              <div class="pv lg">PMX</div>
+              <div style="flex:1"><h3>Proxmox VE</h3>
+                <div class="hint mono">pmx-lab · Beirut lab rack</div></div>
+              <div class="ring" style="--v:58;--rc:var(--warn)"><span>58</span></div>
+            </div>
+            <div>
+              <div class="gauge"><b>vCPU</b><div class="bar"><i class="ok" style="width:39%"></i></div><span class="v">72 free</span></div>
+              <div class="gauge"><b>Memory</b><div class="bar"><i class="ok" style="width:46%"></i></div><span class="v">196 GiB</span></div>
+              <div class="gauge"><b>Storage</b><div class="bar"><i class="warn" style="width:81%"></i></div><span class="v">1.2 TiB</span></div>
+            </div>
+            <div class="cand-note"><span class="pill p-warn plain">!</span>
+              <span>Lab hardware with no redundant power. Allowed for Staging and Lab, not for a
+                machine tagged Production.</span></div>
+            <div class="cand-foot">
+              <div><div class="eyebrow">Chargeback</div>
+                <b class="mono" style="font-size:15px">$204 / mo</b></div>
+              <span class="pill p-warn">Policy mismatch</span>
+            </div>
+          </article>
+
+          <article class="cand no">
+            <div class="cand-top">
+              <div class="pv lg">AZR</div>
+              <div style="flex:1"><h3>Microsoft Azure</h3>
+                <div class="hint mono">uaenorth · Dubai</div></div>
+              <div class="ring" style="--v:0;--rc:var(--danger)"><span>—</span></div>
+            </div>
+            <div>
+              <div class="gauge"><b>vCPU quota</b><div class="bar"><i style="width:8%"></i></div><span class="v">100 free</span></div>
+              <div class="gauge"><b>Network</b><div class="bar"><i class="bad" style="width:100%"></i></div><span class="v">no route</span></div>
+              <div class="gauge"><b>Storage</b><div class="bar"><i style="width:20%"></i></div><span class="v">elastic</span></div>
+            </div>
+            <div class="cand-note"><span class="pill p-bad plain">×</span>
+              <span>No peering between <span class="mono">uaenorth</span> and the production network,
+                so these machines could never reach the control plane. Peer the VNet to unblock.</span></div>
+            <div class="cand-foot">
+              <button class="btn btn-quiet btn-sm">Open network request</button>
+              <span class="pill p-bad">Blocked</span>
+            </div>
+          </article>
+
+          <article class="cand no">
+            <div class="cand-top">
+              <div class="pv lg">BM</div>
+              <div style="flex:1"><h3>Bare metal</h3>
+                <div class="hint mono">Redfish · iLO pool</div></div>
+              <div class="ring" style="--v:0;--rc:var(--danger)"><span>—</span></div>
+            </div>
+            <div>
+              <div class="gauge"><b>Hosts</b><div class="bar"><i class="bad" style="width:94%"></i></div><span class="v">1 of 3</span></div>
+              <div class="gauge"><b>Memory</b><div class="bar"><i class="ok" style="width:30%"></i></div><span class="v">768 GiB</span></div>
+              <div class="gauge"><b>Storage</b><div class="bar"><i class="ok" style="width:35%"></i></div><span class="v">14 TiB</span></div>
+            </div>
+            <div class="cand-note"><span class="pill p-bad plain">×</span>
+              <span>Only one host is unclaimed and this request needs three. Two more arrive in the
+                pool once <span class="mono">DEC-7891</span> is decommissioned.</span></div>
+            <div class="cand-foot">
+              <button class="btn btn-quiet btn-sm">Reserve when free</button>
+              <span class="pill p-bad">Not enough hosts</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ══════════════ PROVISIONING ══════════════ -->
+      <section class="view" id="v-run">
+        <div class="runlayout">
+          <div>
+            <div class="card pad" style="margin-bottom:14px">
+              <div class="sect-head" style="margin-bottom:14px">
+                <div><h2>k8s-prd-w01 → w03</h2>
+                  <div class="hint">HPE SimpliVity · OMNI-BEY-01 · started by Elie Medawar, 3m 41s ago</div></div>
+                <span class="live">Provisioning</span>
+              </div>
+              <div class="bar" style="height:6px"><i class="accent" style="width:62%"></i></div>
+              <div class="hint" style="margin-top:8px">2 of 3 machines reachable · 1 running first-boot</div>
+
+              <div class="mrow">
+                <div class="mrow-top">
+                  <div class="cellstack"><div class="pv">SVT</div>
+                    <div><b>k8s-prd-w01</b>
+                      <div class="hint mono">10.42.7.31 · esxi-bey-03 · DS-PROD-01</div></div></div>
+                  <span class="pill p-ok">Ready · 2m 18s</span>
+                </div>
+                <div class="phases">
+                  <span class="ph done">Reserved</span><i class="ph-link"></i>
+                  <span class="ph done">Cloned</span><i class="ph-link"></i>
+                  <span class="ph done">Customised</span><i class="ph-link"></i>
+                  <span class="ph done">Booted</span><i class="ph-link"></i>
+                  <span class="ph done">First boot</span><i class="ph-link"></i>
+                  <span class="ph done">SSH reachable</span><i class="ph-link"></i>
+                  <span class="ph done">In inventory</span>
+                </div>
+              </div>
+
+              <div class="mrow">
+                <div class="mrow-top">
+                  <div class="cellstack"><div class="pv">SVT</div>
+                    <div><b>k8s-prd-w02</b>
+                      <div class="hint mono">10.42.7.32 · esxi-bey-04 · DS-PROD-01</div></div></div>
+                  <span class="pill p-ok">Ready · 2m 26s</span>
+                </div>
+                <div class="phases">
+                  <span class="ph done">Reserved</span><i class="ph-link"></i>
+                  <span class="ph done">Cloned</span><i class="ph-link"></i>
+                  <span class="ph done">Customised</span><i class="ph-link"></i>
+                  <span class="ph done">Booted</span><i class="ph-link"></i>
+                  <span class="ph done">First boot</span><i class="ph-link"></i>
+                  <span class="ph done">SSH reachable</span><i class="ph-link"></i>
+                  <span class="ph done">In inventory</span>
+                </div>
+              </div>
+
+              <div class="mrow">
+                <div class="mrow-top">
+                  <div class="cellstack"><div class="pv">SVT</div>
+                    <div><b>k8s-prd-w03</b>
+                      <div class="hint mono">10.42.7.33 · esxi-bey-05 · DS-PROD-01</div></div></div>
+                  <span class="pill p-info">First boot · 41s</span>
+                </div>
+                <div class="phases">
+                  <span class="ph done">Reserved</span><i class="ph-link"></i>
+                  <span class="ph done">Cloned</span><i class="ph-link"></i>
+                  <span class="ph done">Customised</span><i class="ph-link"></i>
+                  <span class="ph done">Booted</span><i class="ph-link"></i>
+                  <span class="ph now">First boot</span><i class="ph-link"></i>
+                  <span class="ph">SSH reachable</span><i class="ph-link"></i>
+                  <span class="ph">In inventory</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="handoff">
+              <div class="pv lg">K8s</div>
+              <div style="flex:1">
+                <h3>Hand these workers to a cluster</h3>
+                <p>Two machines already satisfy the pending <b>Production East</b> growth request.
+                   Cluster Builder can pick them up the moment the third reports in.</p>
+              </div>
+              <button class="btn btn-primary">Open Cluster Builder</button>
+            </div>
+          </div>
+
+          <aside class="railcol">
+            <div class="pane">
+              <div class="pane-head"><h3>Provider calls</h3>
+                <span class="pill p-mute plain mono">w03</span></div>
+              <div class="well" style="border-radius:0;max-height:392px">
+<span class="c">// every call is recorded against this run · 14:22:07</span>
+<span class="k">svt</span> reserve  <span class="s">3 slots</span> federation=OMNI-BEY-01
+<span class="k">svt</span> policy   spread hosts=[esxi-bey-03,04,05] <span class="s">ok</span>
+<span class="k">ipam</span> claim   10.42.7.31-33 vlan=412 <span class="s">ok</span>
+<span class="k">svt</span> clone    tpl-ubuntu-2404-k8s → k8s-prd-w03
+         datastore=DS-PROD-01 rf=2 thin=true
+<span class="k">svt</span> reconfig cpu=8 mem=32768 <span class="s">ok</span>
+<span class="k">svt</span> disk     add 400G tier=perf  <span class="s">ok</span>
+<span class="k">svt</span> disk     add 180G tier=std   <span class="s">ok</span>
+<span class="k">svt</span> customise guestinfo.userdata=<span class="s">4.1 KiB</span>
+<span class="k">svt</span> power-on <span class="s">ok</span> uuid=42011f9c-7d3a
+<span class="k">guest</span> wait   cloud-init status… <span class="w">running</span>
+<span class="c">  [  41.2s] modules-load: br_netfilter loaded</span>
+<span class="c">  [  46.8s] containerd.service enabled</span>
+<span class="c">  [  52.1s] kubesight-register --role=worker</span>
+<span class="k">ssh</span> probe   22/tcp <span class="w">waiting</span>
+              </div>
+            </div>
+
+            <div class="pane">
+              <div class="pane-head"><h3>If something fails</h3></div>
+              <div class="pane-body">
+                <ul class="checks">
+                  <li><span class="g">✓</span><div><b>Names and addresses release automatically</b>
+                    <small>A failed machine hands its IP back to the pool instead of parking it.</small></div></li>
+                  <li><span class="g">✓</span><div><b>Partial builds keep what worked</b>
+                    <small>w01 and w02 stay; only the failed machine is retried or removed.</small></div></li>
+                  <li><span class="a">↺</span><div><b>Retry runs the same spec</b>
+                    <small>The blueprint is stored, so a retry is byte-identical — no drift.</small></div></li>
+                </ul>
+                <button class="btn btn-quiet btn-sm" style="margin-top:12px;width:100%;justify-content:center">
+                  Download run log</button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ══════════════ PROVIDERS ══════════════ -->
+      <section class="view" id="v-providers">
+        <div class="sect-head">
+          <div><h2>Connected providers</h2>
+            <div class="hint">Configured once under Settings, then referenced by every machine and cluster build.</div></div>
+          <button class="btn btn-primary btn-sm">＋ Connect provider</button>
+        </div>
+
+        <div class="provgrid">
+          <article class="prov">
+            <div class="prov-top"><div class="pv lg">SVT</div>
+              <div style="flex:1"><h3>HPE SimpliVity</h3><div class="hint">OmniStack API · Beirut DC</div></div>
+              <span class="pill p-ok">Healthy</span></div>
+            <div class="hint">Federation <span class="mono">OMNI-BEY-01</span> · 4 hosts, 2 datastores discovered</div>
+            <dl class="kv">
+              <dt>Machines here</dt><dd>68</dd>
+              <dt>vCPU free</dt><dd>214</dd>
+              <dt>Last sync</dt><dd>42s ago</dd>
+            </dl>
+          </article>
+
+          <article class="prov">
+            <div class="prov-top"><div class="pv lg">VMW</div>
+              <div style="flex:1"><h3>VMware vSphere</h3><div class="hint">vCenter 8.0 U2 · Zouk DR</div></div>
+              <span class="pill p-ok">Healthy</span></div>
+            <div class="hint">2 clusters · 6 resource pools · 4 datastores</div>
+            <dl class="kv">
+              <dt>Machines here</dt><dd>39</dd>
+              <dt>vCPU free</dt><dd>168</dd>
+              <dt>Last sync</dt><dd>1m ago</dd>
+            </dl>
+          </article>
+
+          <article class="prov">
+            <div class="prov-top"><div class="pv lg">AWS</div>
+              <div style="flex:1"><h3>AWS EC2</h3><div class="hint">me-south-1 · role assumed</div></div>
+              <span class="pill p-warn">Quota tight</span></div>
+            <div class="hint">3 subnets · 2 security groups · gp3 default</div>
+            <dl class="kv">
+              <dt>Machines here</dt><dd>24</dd>
+              <dt>vCPU quota</dt><dd>40 / 64</dd>
+              <dt>Last sync</dt><dd>2m ago</dd>
+            </dl>
+          </article>
+
+          <article class="prov">
+            <div class="prov-top"><div class="pv lg">AZR</div>
+              <div style="flex:1"><h3>Microsoft Azure</h3><div class="hint">uaenorth · service principal</div></div>
+              <span class="pill p-warn">No route</span></div>
+            <div class="hint">VNet not peered to the production network — machines would be isolated</div>
+            <dl class="kv">
+              <dt>Machines here</dt><dd>0</dd>
+              <dt>vCPU quota</dt><dd>100</dd>
+              <dt>Last sync</dt><dd>3m ago</dd>
+            </dl>
+          </article>
+
+          <article class="prov">
+            <div class="prov-top"><div class="pv lg">PMX</div>
+              <div style="flex:1"><h3>Proxmox VE</h3><div class="hint">pmx-lab · API token</div></div>
+              <span class="pill p-ok">Healthy</span></div>
+            <div class="hint">3 nodes · local-zfs · Lab and Staging only by policy</div>
+            <dl class="kv">
+              <dt>Machines here</dt><dd>11</dd>
+              <dt>vCPU free</dt><dd>72</dd>
+              <dt>Last sync</dt><dd>55s ago</dd>
+            </dl>
+          </article>
+
+          <article class="prov">
+            <div class="prov-top"><div class="pv lg">BM</div>
+              <div style="flex:1"><h3>Bare metal</h3><div class="hint">Redfish · HPE iLO 6</div></div>
+              <span class="pill p-info">1 host free</span></div>
+            <div class="hint">PXE + kickstart · claimed hosts appear as machines like any other</div>
+            <dl class="kv">
+              <dt>Machines here</dt><dd>5</dd>
+              <dt>Hosts unclaimed</dt><dd>1</dd>
+              <dt>Last sync</dt><dd>6m ago</dd>
+            </dl>
+          </article>
+        </div>
+
+        <div class="sect-head">
+          <div><h2>Where the abstraction leaks</h2>
+            <div class="hint">One form can’t hide every difference. This is the honest map of what each provider will and won’t do.</div></div>
+        </div>
+        <div class="tablewrap">
+          <table class="matrix">
+            <thead>
+              <tr><th>Capability</th><th>SVT</th><th>VMW</th><th>AWS</th><th>AZR</th><th>PMX</th><th>BM</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Extra disks at create</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="p">fixed</td></tr>
+              <tr><td>Resize CPU / RAM without reboot</td><td class="y">✓</td><td class="y">✓</td><td class="n">—</td><td class="n">—</td><td class="p">CPU</td><td class="n">—</td></tr>
+              <tr><td>Grow a disk in place</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">—</td></tr>
+              <tr><td>Anti-affinity across hardware</td><td class="y">✓</td><td class="y">✓</td><td class="p">AZ only</td><td class="p">AZ only</td><td class="p">manual</td><td class="y">✓</td></tr>
+              <tr><td>Snapshot before change</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">—</td></tr>
+              <tr><td>Backup policy attached at create</td><td class="y">✓</td><td class="p">via SRM</td><td class="y">✓</td><td class="y">✓</td><td class="n">—</td><td class="n">—</td></tr>
+              <tr><td>Tags written back to the provider</td><td class="p">notes</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="p">notes</td><td class="n">—</td></tr>
+              <tr><td>cloud-init first boot</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="p">kickstart</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="leak"><span class="pill p-info plain">Why it matters</span>
+          <span>When you pick a target that can’t do something your spec asks for, the rail says so
+            before you create anything — it doesn’t silently drop the requirement. Bare metal, for
+            example, takes the shape it has: the rail switches from “translate” to “match a host”.</span></div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script>
+/* ── theme toggle ─────────────────────────────────────────────────────── */
+document.getElementById('themeBtn').addEventListener('click', () => {
+  const root = document.documentElement;
+  const dark = root.getAttribute('data-theme') === 'dark' ||
+    (!root.hasAttribute('data-theme') && matchMedia('(prefers-color-scheme: dark)').matches);
+  root.setAttribute('data-theme', dark ? 'light' : 'dark');
+});
+
+/* ── view switching ───────────────────────────────────────────────────── */
+const tabs = [...document.querySelectorAll('.tab')];
+function show(name) {
+  tabs.forEach(t => t.classList.toggle('on', t.dataset.view === name));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === 'v' + '-' + name));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  try { history.replaceState(null, '', '#' + name); } catch (e) { /* sandboxed host */ }
+}
+tabs.forEach(t => t.addEventListener('click', () => show(t.dataset.view)));
+document.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', () => show(b.dataset.go)));
+
+/* ── fleet rows ───────────────────────────────────────────────────────── */
+const FLEET = [
+  { n: 'k8s-prd-w03', pv: 'SVT', where: 'OMNI-BEY-01 · esxi-bey-05', shape: '8 vCPU / 32 GiB', ip: '10.42.7.33',
+    use: 'Kubernetes worker', cpu: 0, cost: '$204', state: ['p-info', 'First boot'], spark: '2,16 8,15 14,16 20,14 26,15 32,13' },
+  { n: 'k8s-prd-w02', pv: 'SVT', where: 'OMNI-BEY-01 · esxi-bey-04', shape: '8 vCPU / 32 GiB', ip: '10.42.7.32',
+    use: 'Kubernetes worker', cpu: 61, cost: '$204', state: ['p-ok', 'Running'], spark: '2,14 8,9 14,11 20,6 26,8 32,5' },
+  { n: 'ora-prd-db01', pv: 'VMW', where: 'vcsa-dr-01 · RP-Databases', shape: '16 vCPU / 64 GiB', ip: '10.42.3.11',
+    use: 'Database host', cpu: 78, cost: '$486', state: ['p-warn', 'Drifted'], spark: '2,12 8,7 14,9 20,4 26,3 32,4' },
+  { n: 'edge-api-a1', pv: 'AWS', where: 'me-south-1a · m6i.xlarge', shape: '4 vCPU / 16 GiB', ip: '10.90.1.24',
+    use: 'API gateway', cpu: 34, cost: '$154', state: ['p-ok', 'Running'], spark: '2,13 8,12 14,10 20,12 26,9 32,11' },
+  { n: 'edge-api-a2', pv: 'AWS', where: 'me-south-1b · m6i.xlarge', shape: '4 vCPU / 16 GiB', ip: '10.90.2.19',
+    use: 'API gateway', cpu: 29, cost: '$154', state: ['p-ok', 'Running'], spark: '2,14 8,13 14,12 20,13 26,11 32,12' },
+  { n: 'build-runner-7', pv: 'PMX', where: 'pmx-lab · node-02', shape: '8 vCPU / 16 GiB', ip: '10.10.0.57',
+    use: 'Jenkins agent', cpu: 92, cost: '$68', state: ['p-ok', 'Running'], spark: '2,9 8,4 14,6 20,2 26,3 32,2' },
+  { n: 'jump-bey-01', pv: 'SVT', where: 'OMNI-BEY-01 · esxi-bey-01', shape: '2 vCPU / 4 GiB', ip: '172.19.4.8',
+    use: 'Jump host', cpu: 4, cost: '$46', state: ['p-bad', 'Past expiry'], spark: '2,16 8,16 14,15 20,16 26,16 32,15' },
+  { n: 'ceph-osd-04', pv: 'BM', where: 'iLO pool · dl380-r9', shape: '32 vCPU / 256 GiB', ip: '10.42.9.14',
+    use: 'Storage node', cpu: 47, cost: '$0', state: ['p-ok', 'Running'], spark: '2,11 8,10 14,12 20,9 26,10 32,8' },
+];
+document.getElementById('fleetBody').innerHTML = FLEET.map(m => `
+  <tr>
+    <td><div class="cellstack"><div class="pv">${m.pv}</div><div>
+      <b>${m.n}</b><div class="hint">${m.use === 'Kubernetes worker' ? 'Production East' : '—'}</div></div></div></td>
+    <td class="mono" style="font-size:12px;color:var(--text-subtle)">${m.where}</td>
+    <td class="mono" style="font-size:12px">${m.shape}</td>
+    <td class="mono" style="font-size:12px;color:var(--text-subtle)">${m.ip}</td>
+    <td class="sub">${m.use}</td>
+    <td><div style="display:flex;align-items:center;gap:9px">
+      <svg class="spark" width="34" height="18" viewBox="0 0 34 18" aria-hidden="true">
+        <polyline points="${m.spark}" fill="none" stroke="${m.cpu > 85 ? 'var(--warn)' : 'var(--text-muted)'}"
+          stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="mono" style="font-size:12px;color:var(--text-subtle)">${m.cpu ? m.cpu + '%' : '—'}</span></div></td>
+    <td class="right mono" style="font-size:12px">${m.cost}</td>
+    <td><span class="pill ${m.state[0]}">${m.state[1]}</span></td>
+  </tr>`).join('');
+
+/* ── the spec, and how each provider hears it ─────────────────────────── */
+const CPUS = [2, 4, 8, 16, 32], RAMS = [4, 8, 16, 32, 64, 128, 256];
+const spec = { cpu: 8, ram: 32, count: 3, target: 'aws', disk: 660 };
+
+const AWS_FAM = { 2: ['c6i', 'compute optimised'], 4: ['m6i', 'general purpose'], 8: ['r6i', 'memory optimised'] };
+const AZR_FAM = { 2: ['F', 's_v2'], 4: ['D', 'as_v5'], 8: ['E', 'as_v5'] };
+const AWS_RATE = { c6i: 0.0425, m6i: 0.0528, r6i: 0.0672 };   // $/vCPU-hour, me-south-1
+const AZR_RATE = { F: 0.0448, D: 0.0546, E: 0.0705 };
+const EBS = 0.08, AZDISK = 0.10;                              // $/GiB-month
+const PREM = { cpu: 12, ram: 2, disk: 0.068 };                // on-prem internal chargeback
+
+function ratio() { const r = spec.ram / spec.cpu; return r <= 2 ? 2 : r >= 8 ? 8 : 4; }
+
+const TARGETS = {
+  svt: {
+    code: 'SVT', short: 'SimpliVity', name: 'HPE SimpliVity', scope: 'OMNI-BEY-01 · Beirut DC',
+    offer: () => `custom ${spec.cpu} vCPU / ${spec.ram} GiB`,
+    rows: () => [
+      ['Placement', `federation OMNI-BEY-01<br><em>spread across esxi-bey-03/04/05</em>`],
+      ['From', 'tpl-ubuntu-2404-k8s <em>· template</em>'],
+      ['Datastore', 'DS-PROD-01 <em>· thin, RF2</em>'],
+      ['Disks', '80G root · 400G perf · 180G std'],
+      ['Network', 'VLAN 412 <em>· vSwitch prod-dvs</em>'],
+      ['Addresses', '10.42.7.31 → .33 <em>· IPAM claim</em>'],
+      ['First boot', 'guestinfo.userdata <em>· cloud-init</em>'],
+      ['Backup', 'policy Daily-14d <em>· attached at create</em>'],
+    ],
+    cost: () => spec.cpu * PREM.cpu + spec.ram * PREM.ram + spec.disk * PREM.disk,
+    note: 'per month, internal chargeback',
+  },
+  vmw: {
+    code: 'VMW', short: 'vSphere', name: 'VMware vSphere', scope: 'vcsa-dr-01 · Zouk DR',
+    offer: () => `custom ${spec.cpu} vCPU / ${spec.ram} GiB`,
+    rows: () => [
+      ['Placement', 'cluster CL-DR-01 <em>· pool RP-K8s</em>'],
+      ['From', 'tpl-ubuntu-2404-k8s <em>· content library</em>'],
+      ['Datastore', 'DS-DR-SSD-02 <em>· thin</em>'],
+      ['Disks', '80G root · 400G SSD · 180G SSD'],
+      ['Network', 'dvpg-prod-412 <em>· distributed port group</em>'],
+      ['Addresses', '10.42.7.31 → .33 <em>· IPAM claim</em>'],
+      ['First boot', 'vApp properties <em>· cloud-init</em>'],
+      ['Backup', 'SRM protection group <em>· manual step</em>'],
+    ],
+    cost: () => spec.cpu * PREM.cpu + spec.ram * PREM.ram + spec.disk * PREM.disk + 12,
+    note: 'per month, internal chargeback',
+  },
+  aws: {
+    code: 'AWS', short: 'AWS', name: 'AWS EC2', scope: 'me-south-1 · Bahrain',
+    offer: () => {
+      const [fam] = AWS_FAM[ratio()];
+      const size = { 2: 'large', 4: 'xlarge', 8: '2xlarge', 16: '4xlarge', 32: '8xlarge' }[spec.cpu];
+      return `${fam}.${size}`;
+    },
+    rows: () => {
+      const [fam, kind] = AWS_FAM[ratio()];
+      return [
+        ['Instance type', `${TARGETS.aws.offer()} <em>· ${kind}</em>`],
+        ['Placement', 'me-south-1a/1b/1c <em>· one per AZ</em>'],
+        ['From', 'ami-0f3c81d47a2be <em>· golden image</em>'],
+        ['Volumes', '80G gp3 · 400G gp3 3000 IOPS · 180G gp3'],
+        ['Network', 'subnet-0a41c9 <em>· VPC vpc-prod</em>'],
+        ['Addresses', 'private only <em>· no public IP</em>'],
+        ['First boot', 'UserData <em>· cloud-init</em>'],
+        ['Backup', 'AWS Backup plan Daily-14d'],
+      ];
+    },
+    cost: () => {
+      const [fam] = AWS_FAM[ratio()];
+      return spec.cpu * AWS_RATE[fam] * 730 + spec.disk * EBS;
+    },
+    note: 'per month, on-demand',
+  },
+  azr: {
+    code: 'AZR', short: 'Azure', name: 'Microsoft Azure', scope: 'uaenorth · Dubai',
+    blocked: 'No VNet peering to the production network',
+    offer: () => {
+      const [letter, suffix] = AZR_FAM[ratio()];
+      return `Standard_${letter}${spec.cpu}${suffix}`;
+    },
+    rows: () => [
+      ['VM size', `${TARGETS.azr.offer()}`],
+      ['Placement', 'uaenorth <em>· availability zones 1-3</em>'],
+      ['From', 'kubesight-ubuntu-2404 <em>· shared gallery</em>'],
+      ['Disks', '80G PremiumSSD · 400G PremiumSSD · 180G StandardSSD'],
+      ['Network', 'vnet-uaen-01/snet-app <em>· not peered</em>'],
+      ['Addresses', 'unreachable from 10.42.0.0/16'],
+      ['First boot', 'customData <em>· cloud-init</em>'],
+      ['Backup', 'Recovery Services vault rsv-prod'],
+    ],
+    cost: () => {
+      const [letter] = AZR_FAM[ratio()];
+      return spec.cpu * AZR_RATE[letter] * 730 + spec.disk * AZDISK;
+    },
+    note: 'per month, pay as you go',
+  },
+  pmx: {
+    code: 'PMX', short: 'Proxmox', name: 'Proxmox VE', scope: 'pmx-lab · Beirut lab rack',
+    policy: 'Lab and Staging only',
+    offer: () => `${spec.cpu} cores / ${spec.ram * 1024} MiB`,
+    rows: () => [
+      ['Placement', 'pmx-lab node-01/02/03'],
+      ['From', 'template 9001 <em>· ubuntu-2404-cloud</em>'],
+      ['Storage', 'local-zfs <em>· virtio-scsi single</em>'],
+      ['Disks', 'scsi0 80G · scsi1 400G · scsi2 180G'],
+      ['Network', 'vmbr0 tag=412 <em>· virtio</em>'],
+      ['Addresses', '10.42.7.31 → .33 <em>· IPAM claim</em>'],
+      ['First boot', 'cicustom snippet <em>· cloud-init</em>'],
+      ['Backup', 'not available on this target'],
+    ],
+    cost: () => (spec.cpu * PREM.cpu + spec.ram * PREM.ram + spec.disk * PREM.disk) * 0.34,
+    note: 'per month, lab chargeback',
+  },
+  bm: {
+    code: 'BM', short: 'Bare metal', name: 'Bare metal', scope: 'Redfish · iLO pool',
+    blocked: 'Only 1 host unclaimed, 3 needed',
+    offer: () => 'match a host ≥ spec',
+    rows: () => [
+      ['Match', `hosts with ≥ ${spec.cpu} cores and ≥ ${spec.ram} GiB`],
+      ['Candidate', 'dl380-r11 <em>· 48 cores / 384 GiB</em>'],
+      ['From', 'PXE + kickstart <em>· ks-ubuntu-2404</em>'],
+      ['Disks', 'hardware RAID as built <em>· not resizable</em>'],
+      ['Network', 'bond0.412 <em>· LACP, 2 × 25 GbE</em>'],
+      ['Addresses', '10.42.7.31 → .33 <em>· IPAM claim</em>'],
+      ['First boot', 'kickstart %post <em>· not cloud-init</em>'],
+      ['Backup', 'not available on this target'],
+    ],
+    cost: () => 0,
+    note: 'owned hardware, no recurring charge',
+  },
+};
+
+const CHECKS = {
+  base: () => [
+    ['g', 'Names are free', `${namesList().join(', ')} not used anywhere in the fleet`],
+    ['g', 'Addresses reserved', '26 free in the production pool — 3 held for this build'],
+    ['g', 'SSH keys valid', '2 keys, both current, neither expiring within 90 days'],
+  ],
+  svt: () => [
+    ['g', 'Capacity fits', `3 × ${spec.cpu}/${spec.ram} leaves 41% headroom on OMNI-BEY-01`],
+    ['g', 'Failure domains', 'One machine per ESXi host — esxi-bey-03, 04, 05'],
+    ['a', 'Storage crosses 75%', 'DS-PROD-01 reaches 78% after this build. Still safe, worth watching.'],
+  ],
+  vmw: () => [
+    ['g', 'Capacity fits', 'RP-K8s admits the request with 168 vCPU free'],
+    ['a', 'Memory headroom', 'Drops to 12% on CL-DR-01 after this build'],
+    ['a', 'Backup is manual', 'vSphere needs an SRM protection group added after create'],
+  ],
+  aws: () => [
+    ['a', 'vCPU quota', `40 of 64 used — this build needs ${spec.cpu * spec.count} more. Raise the quota first.`],
+    ['g', 'Spread across AZs', 'me-south-1a, 1b, 1c — one machine each'],
+    ['a', 'Latency to control plane', '34 ms to the on-prem API server. Fine for workers, not for etcd.'],
+  ],
+  azr: () => [
+    ['a', 'No network route', 'uaenorth VNet is not peered to 10.42.0.0/16 — blocks creation'],
+    ['g', 'Quota available', '100 vCPU free in the subscription'],
+    ['a', 'Latency unknown', 'Cannot be measured until the VNet is peered'],
+  ],
+  pmx: () => [
+    ['a', 'Policy mismatch', 'Lab hardware is not approved for machines tagged Production'],
+    ['g', 'Capacity fits', '72 vCPU and 196 GiB free across 3 nodes'],
+    ['a', 'No backup policy', 'Proxmox target cannot attach one at create'],
+  ],
+  bm: () => [
+    ['a', 'Not enough hosts', '1 of 3 needed hosts is unclaimed'],
+    ['g', 'Shape available', 'dl380-r11 exceeds the requested shape'],
+    ['a', 'Disks are fixed', 'Hardware RAID is taken as built — the 3-disk layout is ignored'],
+  ],
+};
+
+const money = n => '$' + Math.round(n).toLocaleString('en-US');
+function namesList() {
+  const pat = document.getElementById('pattern').value || 'vm-{n}';
+  return Array.from({ length: spec.count }, (_, i) =>
+    pat.replace('{n}', String(i + 1).padStart(2, '0')).replace('{site}', 'bey').replace('{env}', 'prd'));
+}
+
+function paintTargets() {
+  document.getElementById('targetGrid').innerHTML = Object.entries(TARGETS).map(([k, t]) => `
+    <button class="tgt ${k === spec.target ? 'on' : ''} ${t.blocked ? 'off' : ''}" data-target="${k}"
+      title="${t.blocked ? t.blocked : t.scope}">
+      <span class="pv ${k === spec.target ? 'on' : ''}" style="width:26px;height:26px;font-size:9px">${t.code}</span>
+      ${t.short}</button>`).join('');
+  document.querySelectorAll('[data-target]').forEach(b =>
+    b.addEventListener('click', () => { spec.target = b.dataset.target; render(); }));
+}
+
+function render() {
+  const t = TARGETS[spec.target];
+
+  document.getElementById('cpuVal').textContent = spec.cpu;
+  document.getElementById('ramVal').textContent = spec.ram + ' GiB';
+  document.getElementById('countVal').textContent = spec.count;
+  document.getElementById('namePreview').textContent = namesList().join('  ·  ');
+
+  const r = ratio();
+  const label = { 2: 'compute heavy', 4: 'general purpose', 8: 'memory heavy' }[r];
+  const exact = spec.ram / spec.cpu;
+  document.getElementById('ratioPill').textContent =
+    `1 : ${exact % 1 ? exact.toFixed(1) : exact} — ${label}`;
+  document.getElementById('ratioNote').textContent = r === 4
+    ? 'Maps to the general-purpose family on every cloud target.'
+    : `Maps to the ${label.replace(' heavy', '-optimised')} family — ${AWS_FAM[r][0]} on AWS, ${AZR_FAM[r][0]}-series on Azure.`;
+
+  document.getElementById('fromSpec').textContent = `${spec.cpu} vCPU / ${spec.ram} GiB`;
+  document.getElementById('toSpec').textContent = t.offer();
+  document.getElementById('transFor').textContent = t.name;
+  document.getElementById('transList').innerHTML =
+    t.rows().map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+
+  const per = t.cost(), total = per * spec.count;
+  document.getElementById('costVal').textContent = per ? money(total) : 'No charge';
+  document.getElementById('costNote').textContent = t.note;
+  document.getElementById('costUnit').textContent = per ? `${money(per)} / machine` : 'owned hardware';
+  document.getElementById('costAlt').textContent = (() => {
+    const priced = Object.values(TARGETS)
+      .filter(x => !x.blocked && !x.policy && x.cost() > 0)
+      .sort((a, b) => a.cost() - b.cost())[0];
+    return `Cheapest allowed: ${priced.short}, ${money(priced.cost() * spec.count)}`;
+  })();
+  document.getElementById('costVal').style.color = t.blocked ? 'var(--text-muted)' : '';
+
+  const checks = [...CHECKS.base(), ...CHECKS[spec.target]()];
+  document.getElementById('checkList').innerHTML = checks.map(([s, title, body]) => `
+    <li><span class="${s}">${s === 'g' ? '✓' : '!'}</span>
+      <div><b>${title}</b><small>${body}</small></div></li>`).join('');
+
+  const clear = checks.filter(c => c[0] === 'g').length;
+  const pct = Math.round(clear / checks.length * 100);
+  const gate = document.getElementById('gatePill');
+  gate.textContent = `${clear} of ${checks.length} clear`;
+  gate.className = 'pill ' + (t.blocked ? 'p-bad' : clear === checks.length ? 'p-ok' : 'p-warn');
+  document.getElementById('readyPct').textContent = t.blocked ? 'blocked' : pct + '%';
+  const bar = document.getElementById('readyBar');
+  bar.style.width = (t.blocked ? 100 : pct) + '%';
+  bar.className = t.blocked ? 'bad' : pct === 100 ? 'ok' : 'warn';
+
+  const cta = document.querySelector('.gate .btn-primary');
+  cta.textContent = t.blocked ? `Blocked on ${t.short}` : `Create ${spec.count} machine${spec.count > 1 ? 's' : ''}`;
+  cta.disabled = !!t.blocked;
+  cta.style.opacity = t.blocked ? .45 : 1;
+
+  document.getElementById('netResolved').innerHTML = 'Resolves to <span class="mono">' +
+    ({ svt: 'VLAN 412', vmw: 'dvpg-prod-412', aws: 'subnet-0a41c9', azr: 'snet-app', pmx: 'vmbr0 tag 412', bm: 'bond0.412' }[spec.target]) +
+    '</span> on this target';
+
+  paintTargets();
+}
+
+/* steppers */
+document.querySelectorAll('[data-step]').forEach(b => b.addEventListener('click', () => {
+  const by = +b.dataset.by, k = b.dataset.step;
+  if (k === 'cpu') { const i = CPUS.indexOf(spec.cpu) + by; if (CPUS[i]) spec.cpu = CPUS[i]; }
+  if (k === 'ram') { const i = RAMS.indexOf(spec.ram) + by; if (RAMS[i]) spec.ram = RAMS[i]; }
+  if (k === 'count') spec.count = Math.min(9, Math.max(1, spec.count + by));
+  render();
+}));
+
+/* purpose presets drive the shape */
+document.querySelectorAll('#purposeGrid .opt').forEach(o => o.addEventListener('click', () => {
+  document.querySelectorAll('#purposeGrid .opt').forEach(x => x.classList.remove('on'));
+  o.classList.add('on');
+  spec.cpu = +o.dataset.cpu; spec.ram = +o.dataset.ram;
+  render();
+}));
+
+document.getElementById('pattern').addEventListener('input', render);
+document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.chip').forEach(x => x.classList.remove('on'));
+  c.classList.add('on');
+}));
+
+render();
+if (location.hash) { const n = location.hash.slice(1); if (tabs.some(t => t.dataset.view === n)) show(n); }
+</script>

@@ -75,10 +75,13 @@ class CniDescriptor:
     manifest_files: Tuple[str, ...]      # filenames under data/cni/<id>/<ver>/
     manifest_urls: Tuple[str, ...]       # pinned upstream, {version} templated
     manifest_sha256: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
-    # Kubernetes minors ("1.32") this plugin's pinned manifests are validated
-    # against. Preflight fails a build whose minor is absent, so a newly enabled
-    # Kubernetes minor cannot quietly reuse a CNI manifest nobody tested on it.
-    supported_k8s_minors: Tuple[str, ...] = ()
+    # Kubernetes minors ("1.32") each CNI *version* is validated against, keyed
+    # by version. Per version, not per plugin: a CNI release supports a moving
+    # window, so Calico 3.32 covers 1.34-1.36 while 3.28.2 covers the older
+    # minors and neither covers the other's. Preflight fails a build whose minor
+    # is absent, so a newly enabled Kubernetes minor cannot quietly reuse a
+    # manifest nobody tested on it.
+    k8s_minors_by_version: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     # DaemonSet the readiness gate waits on: (namespace, name).
     readiness_daemonset: Tuple[str, str] = ("kube-system", "")
     # Appended to "manifest not bundled" errors: the command that fixes it.
@@ -89,6 +92,28 @@ class CniDescriptor:
 
     def bundled_path(self, version: str, filename: str) -> Path:
         return _data_dir() / self.id / version / filename
+
+    def supported_k8s_minors(self, version: str) -> Tuple[str, ...]:
+        return self.k8s_minors_by_version.get(version, ())
+
+    def supports_k8s_minor(self, version: str, minor: str) -> bool:
+        return minor in self.supported_k8s_minors(version)
+
+    def versions_for_k8s_minor(self, minor: str) -> List[str]:
+        """This plugin's versions validated on ``minor``, newest first.
+
+        Empty means the plugin cannot serve that Kubernetes minor at all, which
+        is what removes it from the wizard rather than letting a user pick a
+        pairing that only fails later.
+        """
+        return [
+            version for version in self.versions
+            if self.supports_k8s_minor(version, minor)
+        ]
+
+    def default_version_for_k8s_minor(self, minor: str) -> str:
+        candidates = self.versions_for_k8s_minor(minor)
+        return candidates[0] if candidates else ""
 
     def _download(
         self,

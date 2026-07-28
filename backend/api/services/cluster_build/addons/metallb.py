@@ -167,15 +167,23 @@ METALLB = _MetalLb(
     # compatibility policy classifies these combinations as best effort.
     support_tier="best-effort",
     versions=("0.16.1",),
-    supported_k8s_minors=("1.29", "1.30", "1.31", "1.32"),
+    # MetalLB publishes no per-minor matrix, so this records what KubeSight
+    # treats as installable rather than an upstream guarantee — hence the
+    # best-effort tier above. 0.16.1 is the current release and is contemporary
+    # with Kubernetes 1.34-1.36.
+    k8s_minors_by_version={
+        "0.16.1": ("1.29", "1.30", "1.31", "1.32", "1.34", "1.35", "1.36"),
+    },
     manifest_files=("metallb-native.yaml",),
     manifest_urls=(
         "https://raw.githubusercontent.com/metallb/metallb/"
         "v{version}/config/manifests/metallb-native.yaml",
     ),
-    manifest_sha256=(
-        "bf25feebb7582ca7df845efd52ffbc2960d6cbf4cfc972f47fded9f788b67f0b",
-    ),
+    manifest_sha256={
+        "0.16.1": (
+            "bf25feebb7582ca7df845efd52ffbc2960d6cbf4cfc972f47fded9f788b67f0b",
+        ),
+    },
     readiness_commands=(
         "wait --for=condition=Established "
         "customresourcedefinition/ipaddresspools.metallb.io --timeout=120s",

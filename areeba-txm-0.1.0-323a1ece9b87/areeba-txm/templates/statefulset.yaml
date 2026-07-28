@@ -1,0 +1,163 @@
+# StatefulSet, not Deployment: TM keeps local on-disk state per instance
+# (JTA/Narayana transaction log under bin/ObjectStore, emergency-cash
+# journal under emergency/). Each replica needs its own stable identity and
+# its own PersistentVolumeClaim - a plain Deployment with a shared/ephemeral
+# volume would risk transaction-log corruption or lost emergency-cash
+# records on rollout/reschedule. See deploy/README.md "Statefulness".
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "txm.fullname" . }}
+  labels:
+    {{- include "txm.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "txm.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "txm.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0   # bump manually for a canary partition rollout in PROD
+  template:
+    metadata:
+      labels:
+        {{- include "txm.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "txm.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: txm
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext  | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ required "image.tag is required - pass the immutable build tag being promoted" .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.httpPort }}
+            {{- range .Values.service.extraPorts }}
+            - name: {{ .name }}
+              containerPort: {{ .targetPort }}
+            {{- end }}
+          # entrypoint.sh (baked into the image) merges these two files into
+          # runtime/install/tmoptions and runs updatefilelist.sh against a
+          # fresh copy of dist/ before execing bin/run - see
+          # deploy/README.md "tmoptions" and deploy/docker/entrypoint.sh.
+          # This replaces a plain envFrom, because TM's install scripts
+          # template config files once at startup rather than reading env
+          # vars live.
+          env:
+            - name: TMOPTIONS_CONFIGMAP_PATH
+              value: /opt/txm/config/tmoptions.env
+            - name: TMOPTIONS_SECRET_PATH
+              value: /opt/txm/secrets/tmoptions-secret.env
+          lifecycle:
+            preStop:
+              # Let TM stop accepting new terminal connections and drain
+              # in-flight transactions before Kubernetes sends SIGTERM.
+              exec:
+                command: ["/opt/txm/runtime/bin/run", "--graceful-stop"]  # TODO: confirm actual graceful-stop invocation with DN ops docs
+          startupProbe:
+            {{- toYaml .Values.probes.startup | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: objectstore
+              mountPath: /opt/txm/runtime/bin/ObjectStore
+            - name: emergency
+              mountPath: /opt/txm/runtime/emergency
+            - name: logs
+              mountPath: /opt/txm/runtime/logs
+            - name: config
+              mountPath: /opt/txm/config
+              readOnly: true
+            - name: secrets
+              mountPath: /opt/txm/secrets
+              readOnly: true
+            - name: keystore
+              mountPath: /opt/txm/keystore
+              readOnly: true
+      volumes:
+        # Rebuilt from the image's dist/ on every container start by
+        # entrypoint.sh - not persisted, so it must not hold ObjectStore/
+        # emergency/logs (those are separate PVCs mounted on top, below).
+        - name: config
+          configMap:
+            name: {{ include "txm.fullname" . }}-config
+        - name: secrets
+          secret:
+            secretName: {{ .Values.secrets.existingSecretName }}
+            items:
+              - key: tmoptions-secret.env
+                path: tmoptions-secret.env
+        - name: keystore
+          secret:
+            secretName: {{ .Values.secrets.existingSecretName }}
+            items:
+              - key: keystore.ks
+                path: keystore.ks
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    {{- if .Values.persistence.objectStore.enabled }}
+    - metadata:
+        name: objectstore
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.persistence.objectStore.storageClassName }}
+        storageClassName: {{ .Values.persistence.objectStore.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.objectStore.size }}
+    {{- end }}
+    {{- if .Values.persistence.emergency.enabled }}
+    - metadata:
+        name: emergency
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.persistence.emergency.storageClassName }}
+        storageClassName: {{ .Values.persistence.emergency.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.emergency.size }}
+    {{- end }}
+    {{- if .Values.persistence.logs.enabled }}
+    - metadata:
+        name: logs
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.persistence.logs.storageClassName }}
+        storageClassName: {{ .Values.persistence.logs.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.logs.size }}
+    {{- end }}

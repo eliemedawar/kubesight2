@@ -4,6 +4,10 @@ import {
   buildBlueprint,
   buildDuration,
   bundleCoverage,
+  cniPluginsForK8s,
+  defaultVersionForK8s,
+  k8sMinorOf,
+  versionsForK8s,
   deriveReadiness,
   draftBlueprint,
   expectedPhases,
@@ -681,5 +685,72 @@ describe("add-on provenance", () => {
       total: 2, bundled: 1, complete: false,
     });
     expect(bundleCoverage([entry])).toMatchObject({ complete: true });
+  });
+});
+
+describe("Kubernetes-version compatibility", () => {
+  const calico = {
+    id: "calico",
+    displayName: "Calico",
+    versions: ["3.32.1", "3.28.2", "3.27.4"],
+    k8sMinorsByVersion: {
+      "3.32.1": ["1.34", "1.35", "1.36"],
+      "3.28.2": ["1.29", "1.30", "1.31", "1.32"],
+      "3.27.4": ["1.29", "1.30", "1.31", "1.32"],
+    },
+  };
+  const flannel = {
+    id: "flannel",
+    displayName: "Flannel",
+    versions: ["0.25.6"],
+    k8sMinorsByVersion: { "0.25.6": ["1.29", "1.30", "1.31", "1.32"] },
+  };
+
+  it("reads the minor out of a patch version", () => {
+    expect(k8sMinorOf("1.32.4")).toBe("1.32");
+    expect(k8sMinorOf("v1.36.0")).toBe("1.36");
+    expect(k8sMinorOf("1.32")).toBe("1.32");
+    expect(k8sMinorOf("garbage")).toBe("");
+    expect(k8sMinorOf(undefined)).toBe("");
+  });
+
+  it("keeps only the versions validated on the chosen release", () => {
+    expect(versionsForK8s(calico, "1.36.0")).toEqual(["3.32.1"]);
+    expect(versionsForK8s(calico, "1.32.13")).toEqual(["3.28.2", "3.27.4"]);
+    expect(versionsForK8s(flannel, "1.36.0")).toEqual([]);
+  });
+
+  it("defaults to the newest compatible version, not the newest overall", () => {
+    expect(defaultVersionForK8s(calico, "1.32.13")).toBe("3.28.2");
+    expect(defaultVersionForK8s(calico, "1.36.0")).toBe("3.32.1");
+    expect(defaultVersionForK8s(flannel, "1.36.0")).toBe("");
+  });
+
+  it("hides plugins that cannot serve the chosen release", () => {
+    expect(cniPluginsForK8s([calico, flannel], "1.36.0").map((p) => p.id))
+      .toEqual(["calico"]);
+    expect(cniPluginsForK8s([calico, flannel], "1.32.13").map((p) => p.id))
+      .toEqual(["calico", "flannel"]);
+  });
+
+  it("shows everything when the backend sends no matrix", () => {
+    // An older backend has no k8sMinorsByVersion; emptying the picker would be
+    // worse than showing an unfiltered list.
+    const legacy = { id: "calico", versions: ["3.28.2"] };
+    expect(versionsForK8s(legacy, "1.36.0")).toEqual(["3.28.2"]);
+    expect(cniPluginsForK8s([legacy], "1.36.0")).toHaveLength(1);
+  });
+
+  it("picks the digest set matching the selected version", () => {
+    const entry = {
+      versions: ["0.9.0", "0.7.2"],
+      bundledVersions: ["0.9.0", "0.7.2"],
+      manifestDigestsByVersion: {
+        "0.9.0": [{ file: "components.yaml", sha256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b" }],
+        "0.7.2": [{ file: "components.yaml", sha256: "f103539a54ed72efe66616afc74a8bfaed651703cb3918797599046af5617441" }],
+      },
+    };
+    expect(addonProvenance(entry, "0.9.0").digest).toBe("sha256:1cec…c79b");
+    expect(addonProvenance(entry, "0.7.2").digest).toBe("sha256:f103…7441");
   });
 });

@@ -1,0 +1,610 @@
+# Base defaults, common to every environment. Environment-specific overrides
+# live in values-dev.yaml / values-uat.yaml / values-prod.yaml and are passed
+# with `-f` (later files win) - never fork the chart per environment.
+
+replicaCount: 1   # see deploy/README.md "Statefulness" note before scaling >1
+
+image:
+  repository: registry.example.internal/areeba/txm-server   # TODO: real registry
+  tag: ""            # REQUIRED at deploy time: immutable tag, e.g. git SHA or
+                     # semver (1.4.2-build.9). Never use "latest".
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: registry-credentials
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+
+# Deliberately no runAsUser AND no fsGroup here. On OpenShift, the
+# "restricted"/"restricted-v2" SCC assigns an arbitrary UID *and* a
+# namespace-specific supplemental-groups range per project (see
+# `oc get project <ns> -o yaml`, annotation
+# openshift.io/sa.scc.supplemental-groups) - GID 0 is normally NOT in that
+# range and gets hard-rejected at admission
+# (".spec.securityContext.fsGroup: Invalid value: 0: 0 is not an allowed
+# group" - hit for real deploying to quantech-areeba-tm-dev). Leaving
+# fsGroup unset lets OpenShift auto-assign one from the namespace's actual
+# allowed range. The image itself (see deploy/docker/Dockerfile) is built
+# GID-0/group-writable so it works under whatever UID/GID actually gets
+# assigned there, and under the image's own "txm" user on plain
+# Kubernetes. On plain Kubernetes (no SCC), there's no such restriction -
+# set an explicit fsGroup in values-customer-*.yaml there instead (0 is
+# fine unless a hardened Kyverno/OPA policy also disallows it).
+podSecurityContext:
+  fsGroupChangePolicy: OnRootMismatch
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 3Gi
+
+service:
+  type: ClusterIP
+  httpPort: 8080
+  # Add any additional terminal-driving/switch TCP ports TM listens on here.
+  extraPorts: []
+  # - name: iso8583-visa
+  #   port: 9001
+  #   targetPort: 9001
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: txm.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# OpenShift-native alternative to ingress.*. OpenShift's router honors
+# plain Ingress objects too, but Route is idiomatic and gets you an
+# edge/TLS-terminated URL on the cluster's default wildcard domain for
+# free - handy for a quick test cluster with no real DNS/cert-manager set
+# up yet. Set exactly one of ingress.enabled / openshift.route.enabled.
+openshift:
+  enabled: false      # set true when deploying to OpenShift
+  route:
+    enabled: false    # set true (with openshift.enabled) to create a Route
+    host: ""           # "" = let OpenShift assign one on the default wildcard domain
+    tls:
+      termination: edge   # edge | passthrough | reencrypt
+
+# JTA/Narayana transaction log + emergency-cash journal persistence.
+# TM keeps local on-disk state (bin/ObjectStore, emergency/) that must
+# survive pod restarts/rescheduling - see deploy/README.md "Statefulness".
+persistence:
+  objectStore:
+    enabled: true
+    size: 5Gi
+    storageClassName: ""   # "" = cluster default
+  emergency:
+    enabled: true
+    size: 5Gi
+    storageClassName: ""
+  logs:
+    enabled: true
+    size: 10Gi
+    storageClassName: ""
+
+# Non-secret half of install/tmoptions (see deploy/README.md "tmoptions").
+# Rendered into a ConfigMap as tmoptions.env, merged at container start with
+# the Secret's tmoptions-secret.env, then run through
+# install/updatefilelist.sh - see templates/configmap.yaml and
+# deploy/docker/entrypoint.sh. Never put PCEPAR_*_USER/_PW,
+# PCEPAR_INITIAL_PASSWORD, or anything else credential-shaped here - those
+# belong in secrets.* / the externally-managed Secret below.
+#
+# Base defaults below are non-secret keys straight from
+# install/tmoptions.orig that stay the same across environments; per-env
+# overrides (endpoints, HSM address, DB host, topology, log level) live in
+# values-dev/uat/prod.yaml.
+tmoptions:
+  # Ordered list, NOT a map. install/install.sh consumes install/tmoptions
+  # via `set -a; eval "$(cat tmoptions | ...)"; set +a` - i.e. it evaluates
+  # the file top-to-bottom as shell, so keys that self-reference earlier
+  # ones via ${PCEPAR_...} depend on file ORDER. A Helm map would render
+  # alphabetically instead (Go template map iteration is always sorted),
+  # silently breaking those references. This list preserves the exact
+  # order of the real generated tmoptions.orig (from a real
+  # `gradlew :Areeba-sdp-devhandler-assembly:installDist`) instead.
+  #
+  # Per-environment overrides go in tmoptions.envOverrides (a plain map -
+  # order doesn't matter there since it's just applied on top of this list
+  # by name at render time, see templates/configmap.yaml). Don't redefine
+  # tmoptions.nonSecret in values-dev/uat/prod.yaml - Helm replaces whole
+  # lists on override rather than merging them, which would silently drop
+  # every other key.
+  #
+  # Two values below are deliberately different from the shipped default:
+  # PCEPAR_PCE_HOME (matches this chart's container layout, not the
+  # product's own /opt/pcestd default). PCEPAR_CARDDATA_CONNECTION does not
+  # exist in this repo's tmoptions.orig (that override applied only to the
+  # other, 4.1-based delivery repo's build.gradle customization).
+  nonSecret:
+  - name: PCEPAR_ISO20022_ADDRESS
+    value: "http://localhost:1235/iso20022"
+  - name: PCEPAR_ISO20022_PROXY_HOST
+    value: "NULL"
+  - name: PCEPAR_ISO20022_PROXY_PORT
+    value: "NULL"
+  - name: PCEPAR_AMEX_ENDPOINTS
+    value: "127.0.0.1:15626"
+  - name: PCEPAR_CHANNEL_AMEX_CONNECTION
+    value: "http://localhost:8580"
+  - name: PCEPAR_BICISO_OUT_ENDPOINTS
+    value: "127.0.0.1:15724"
+  - name: PCEPAR_CHANNEL_BICISO_CONNECTION
+    value: "http://localhost:8580"
+  - name: PCEPAR_CUP_ENDPOINTS
+    value: "127.0.0.1:15823"
+  - name: PCEPAR_CHANNEL_CUP_CONNECTION
+    value: "http://localhost:8580"
+  - name: PCEPAR_DINERS_ENDPOINTS
+    value: "127.0.0.1:8013"
+  - name: PCEPAR_HISO_OUT_ENDPOINTS
+    value: "127.0.0.1:15624"
+  - name: PCEPAR_HISO_BASE24_BRIDGE_ENDPOINTS
+    value: "127.0.0.1:15625"
+  - name: PCEPAR_CHANNEL_HISCO_CONNECTION
+    value: "http://localhost:8580"
+  - name: PCEPAR_MASTERCARDDIRECT_ENDPOINTS
+    value: "127.0.0.1:15825"
+  - name: PCEPAR_MASTERCARDDMS_ENDPOINTS
+    value: "127.0.0.1:15723"
+  - name: PCEPAR_CHANNEL_MASTERCARDDMS_CONNECTION
+    value: "http://localhost:8580"
+  - name: PCEPAR_VISADMS_ENDPOINTS
+    value: "127.0.0.1:15623"
+  - name: PCEPAR_CHANNEL_VISADMS_CONNECTION
+    value: "http://localhost:8580"
+  - name: PCEPAR_VISASMS_ENDPOINTS
+    value: "127.0.0.1:15619"
+  - name: PCEPAR_VISASMS2_ENDPOINTS
+    value: "127.0.0.1:15629"
+  - name: PCEPAR_CHANNEL_VISASMS2_CONNECTION
+    value: "http://localhost:8580"
+  - name: DS_DEFAULT_DATASOURCE
+    value: "PCE_JDBC_TX_DATASOURCE"
+  - name: DS_DEFAULT_BUSINESS_DATASOURCE
+    value: "TM_BUSINESS_DATASOURCE"
+  - name: DS_OVERRIDE_TM_BUSINESS_DATASOURCE
+    value: "PCE_JDBC_TX_DATASOURCE"
+  - name: PCEPAR_SERVER_LINE
+    value: ""
+  - name: PCEPAR_DB_POSTGRESQL_USE_MERGE
+    value: "false"
+  - name: PCEPAR_OCM_CORS_ENABLED
+    value: "false"
+  - name: PCEPAR_OCM_CORS_ALLOWED_DOMAIN
+    value: ""
+  - name: PCEPAR_OCM_CORS_ALLOWED_ORIGIN
+    value: "*"
+  - name: PCEPAR_PCE_EMERGENCYPATH
+    value: "emergency"
+  - name: PCEPAR_DISABLE_DB_MERGE
+    value: "false"
+  - name: PCEPAR_PCE_SYSLOGHOST
+    value: "127.0.0.1"
+  - name: PCEPAR_PCE_SYSLOGPORT
+    value: "514"
+  - name: PCEPAR_PCE_SYSLOGPROTOCOL
+    value: "UDP"
+  - name: PCEPAR_PCE_SYSLOGKEYSTORE
+    value: "jetty_tls"
+  - name: PCEPAR_PCE_SYSLOGTRUSTSTORE
+    value: "jetty_tls"
+  - name: PCEPAR_LDAP_HOSTNAME
+    value: "ldap.example.com"
+  - name: PCEPAR_LDAP_TIMEOUT
+    value: "30000"
+  - name: PCEPAR_LDAP_BIND_DN
+    value: "uid=manager,cn=sysaccounts,dc=example,dc=com"
+  - name: PCEPAR_LDAP_USER_SEARCH_BASE
+    value: "cn=users,cn=accounts,dc=example,dc=com"
+  - name: PCEPAR_LDAP_GROUP_SEARCH_BASE
+    value: "cn=groups,cn=accounts,dc=example,dc=com"
+  - name: PCEPAR_LDAP_GROUP_MEMBER_IS_USER_ATTRIBUTE
+    value: "false"
+  - name: PCEPAR_LDAP_GROUP_NAME_ATTRIBUTE_ID
+    value: "cn"
+  - name: PCEPAR_LDAP_GROUP_MEMBER_NAME_ATTRIBUTE_ID
+    value: "member"
+  - name: PCEPAR_LDAP_USER_SEARCH_SCOPE
+    value: "SUBTREE"
+  - name: PCEPAR_LDAP_GROUP_SEARCH_SCOPE
+    value: "SUBTREE"
+  - name: PCEPAR_LDAP_PORT
+    value: "389"
+  - name: PCEPAR_LDAP_USETLS
+    value: "true"
+  - name: PCEPAR_LDAP_USER_NAME_ATTRIBUTE_ID
+    value: "uid"
+  - name: PCEPAR_LDAP_USESSL
+    value: "false"
+  - name: PCEPAR_LDAP_TRUSTSTORE
+    value: ""
+  - name: PCEPAR_LDAP_POOL_MAX_WAIT_DURATION
+    value: "PT5S"
+  - name: PCEPAR_LDAP_POOL_BLOCK_WHEN_EXHAUSTED
+    value: "true"
+  - name: PCEPAR_LDAP_POOL_MIN_IDLE
+    value: "1"
+  - name: PCEPAR_LDAP_POOL_MAX_IDLE
+    value: "2"
+  - name: PCEPAR_LDAP_POOL_MAX_TOTAL
+    value: "10"
+  - name: PCEPAR_LDAP_FALLBACK_ENABLED
+    value: "false"
+  - name: PCEPAR_LDAP_FALLBACK_HOSTNAME
+    value: "fallback.ldap.example.com"
+  - name: PCEPAR_LDAP_FALLBACK_TIMEOUT
+    value: "5000"
+  - name: PCEPAR_LDAP_FALLBACK_BIND_DN
+    value: "uid=manager,cn=sysaccounts,dc=example,dc=com"
+  - name: PCEPAR_LDAP_FALLBACK_PORT
+    value: "389"
+  - name: PCEPAR_LDAP_FALLBACK_USETLS
+    value: "true"
+  - name: PCEPAR_LDAP_FALLBACK_USESSL
+    value: "false"
+  - name: PCEPAR_LDAP_FALLBACK_TRUSTSTORE
+    value: ""
+  - name: PCEPAR_MEMORY_CACHE_TYPE
+    value: "local"
+  - name: PCEPAR_MEMORY_CACHE_LISTEN_ADDR
+    value: "localhost"
+  - name: PCEPAR_MEMORY_CACHE_LISTEN_PORT
+    value: "47500"
+  - name: PCEPAR_MEMORY_CACHE_TRUSTSTORE_NAME
+    value: ""
+  - name: PCEPAR_MEMORY_CACHE_ADVERTISE_ADDR
+    value: "localhost:47500"
+  - name: PCEPAR_MEMORY_CACHE_DFL_EXPIRE_DURATION
+    value: "PT24H"
+  - name: PCEPAR_MEMORY_CACHE_DFL_CACHEMODE
+    value: "REPLICATED"
+  - name: PCEPAR_MEMORY_CACHE_DFL_NO_OF_BACKUPS
+    value: "1"
+  - name: PCEPAR_MEMORY_CACHE_DFL_MEM_INITIAL_SIZE
+    value: "40M"
+  - name: PCEPAR_MEMORY_CACHE_DFL_MEM_MAX_SIZE
+    value: "100M"
+  - name: PCEPAR_PAYMENTCONNECTOR_TRANSPORT
+    value: ""
+  - name: PCEPAR_JOURNAL_MODE
+    value: "SINGLE"
+  - name: PCEPAR_SYSTEM
+    value: ""
+  - name: DS_OVERRIDE_PCE_JOURNAL_WRITE_DATASOURCE
+    value: "PCE_JDBC_TX_DATASOURCE"
+  - name: DS_OVERRIDE_PCE_JOURNAL_MIGRATION_DATASOURCE
+    value: "PCE_MIGRATION_DATASOURCE"
+  - name: DS_OVERRIDE_PCE_JOURNAL_READ_DATASOURCE
+    value: "PCE_JDBC_TX_DATASOURCE"
+  - name: PCEPAR_DB_EMERGENCY_IP
+    value: "${PCEPAR_DB_IP}"
+  - name: PCEPAR_DB_EMERGENCY_PORT
+    value: "${PCEPAR_DB_PORT}"
+  - name: PCEPAR_DB_EMERGENCY_USER
+    value: "${PCEPAR_DB_USER}"
+  - name: PCEPAR_DB_EMERGENCY_OWNER
+    value: "${PCEPAR_DB_OWNER}"
+  - name: PCEPAR_DB_EMERGENCY_NAME
+    value: "${PCEPAR_DB_NAME}"
+  - name: PCEPAR_DB_EMERGENCY_ORACLE_JDBC_DRIVER
+    value: "${PCEPAR_DB_ORACLE_JDBC_DRIVER}"
+  - name: PCEPAR_DB_EMERGENCY_ORACLE_JDBC_URL
+    value: "jdbc:oracle:thin:@${PCEPAR_DB_EMERGENCY_IP}:${PCEPAR_DB_EMERGENCY_PORT}:${PCEPAR_DB_EMERGENCY_NAME}"
+  - name: PCEPAR_DB_EMERGENCY_PROP_connectionProperties
+    value: ""
+  - name: PCEPAR_DB_EMERGENCY_POSTGRESQL_JDBC_URL
+    value: "jdbc:postgresql://${PCEPAR_DB_EMERGENCY_IP}:${PCEPAR_DB_EMERGENCY_PORT}/${PCEPAR_DB_EMERGENCY_NAME}?gssEncMode=allow&currentSchema=${PCEPAR_DB_EMERGENCY_OWNER}&ApplicationName=${PCEPAR_DB_APPLICATION_NAME}"
+  - name: PCEPAR_DB_EMERGENCY_POSTGRESQL_JDBC_DRIVER
+    value: "${PCEPAR_DB_POSTGRESQL_JDBC_DRIVER}"
+  - name: PCEPAR_DB_EMERGENCY_MIN_POOL_SIZE
+    value: "${PCEPAR_DB_MIN_POOL_SIZE}"
+  - name: PCEPAR_DB_EMERGENCY_MAX_POOL_SIZE
+    value: "${PCEPAR_DB_MAX_POOL_SIZE}"
+  - name: PCEPAR_DB_EMERGENCY_INITIAL_POOL_SIZE
+    value: "${PCEPAR_DB_INITIAL_POOL_SIZE}"
+  - name: PCEPAR_DB_MIGRATION_IP
+    value: "${PCEPAR_DB_IP}"
+  - name: PCEPAR_DB_MIGRATION_PORT
+    value: "${PCEPAR_DB_PORT}"
+  - name: PCEPAR_DB_MIGRATION_USER
+    value: "${PCEPAR_DB_USER}"
+  - name: PCEPAR_DB_MIGRATION_OWNER
+    value: "${PCEPAR_DB_OWNER}"
+  - name: PCEPAR_DB_MIGRATION_NAME
+    value: "${PCEPAR_DB_NAME}"
+  - name: PCEPAR_DB_MIGRATION_ORACLE_JDBC_DRIVER
+    value: "${PCEPAR_DB_ORACLE_JDBC_DRIVER}"
+  - name: PCEPAR_DB_MIGRATION_ORACLE_JDBC_URL
+    value: "jdbc:oracle:thin:@${PCEPAR_DB_MIGRATION_IP}:${PCEPAR_DB_MIGRATION_PORT}:${PCEPAR_DB_MIGRATION_NAME}"
+  - name: PCEPAR_DB_MIGRATION_PROP_connectionProperties
+    value: ""
+  - name: PCEPAR_DB_MIGRATION_POSTGRESQL_JDBC_URL
+    value: "jdbc:postgresql://${PCEPAR_DB_MIGRATION_IP}:${PCEPAR_DB_MIGRATION_PORT}/${PCEPAR_DB_MIGRATION_NAME}?gssEncMode=allow&currentSchema=${PCEPAR_DB_MIGRATION_OWNER}&ApplicationName=${PCEPAR_DB_APPLICATION_NAME}"
+  - name: PCEPAR_DB_MIGRATION_POSTGRESQL_JDBC_DRIVER
+    value: "${PCEPAR_DB_POSTGRESQL_JDBC_DRIVER}"
+  - name: PCEPAR_DB_MIGRATION_MIN_POOL_SIZE
+    value: "${PCEPAR_DB_MIN_POOL_SIZE}"
+  - name: PCEPAR_DB_MIGRATION_MAX_POOL_SIZE
+    value: "${PCEPAR_DB_MAX_POOL_SIZE}"
+  - name: PCEPAR_DB_MIGRATION_INITIAL_POOL_SIZE
+    value: "${PCEPAR_DB_INITIAL_POOL_SIZE}"
+  - name: PCEPAR_SIM_SCRIPTS
+    value: "${PCEPAR_BASE_DIR}/simulator-scripts"
+  - name: PCEPAR_CRITICAL_RESOURCES
+    value: "install/critical-resources.json"
+  - name: PCEPAR_PCE_HOME
+    value: "/opt/txm/runtime"
+  - name: PCEPAR_LOG_PATH
+    value: "./logs"
+  - name: PCEPAR_GRACEFUL_SHUTDOWN
+    value: "true"
+  - name: PCEPAR_METRICS_FARMTAG
+    value: "false"
+  - name: PCEPAR_METRICS_COLORTAG
+    value: "false"
+  - name: PCEPAR_DEPLOYMENT_COLOR
+    value: "BLUE"
+  - name: PCEPAR_DEPLOYMENT_NUMBER
+    value: "CREATE"
+  - name: PCEPAR_SERVER_TOPOLOGY
+    value: "Alpha.Farm.Cluster"
+  - name: PCECTR_DEVELOPMENT_MODE
+    value: "false"
+  - name: PCEPAR_DIRECT_SHUTDOWN_ON_STARTUP_FAILURE
+    value: "false"
+  - name: PCECTR_DB_TYPE
+    value: "postgresql"
+  - name: PCEPAR_DB_IP
+    value: "localhost"
+  - name: PCEPAR_DB_PORT
+    value: "5432"
+  - name: PCEPAR_DB_NAME
+    value: "ruegen"
+  - name: PCEPAR_DB_USER
+    value: "ruegen"
+  - name: PCEPAR_DB_OWNER
+    value: "${PCEPAR_DB_USER}"
+  - name: PCEPAR_DB_APPLICATION_NAME
+    value: "TXM"
+  - name: PCEPAR_DB_MIN_POOL_SIZE
+    value: "1"
+  - name: PCEPAR_DB_MAX_POOL_SIZE
+    value: "50"
+  - name: PCEPAR_DB_INITIAL_POOL_SIZE
+    value: "10"
+  - name: PCEPAR_DB_PROP_connectionProperties
+    value: ""
+  - name: PCEPAR_DB_ORACLE_PROP_implicitCachingEnabled
+    value: "true"
+  - name: PCEPAR_DB_ORACLE_PROP_maxStatements
+    value: "300"
+  - name: PCEPAR_DB_INIT_SQL
+    value: ""
+  - name: PCEPAR_DB_ACQUISITION_TIMEOUT
+    value: "PT30S"
+  - name: PCEPAR_DB_VALIDATION_TIMEOUT
+    value: "PT5M"
+  - name: PCEPAR_DB_VALIDATOR_TIMEOUT
+    value: "PT5S"
+  - name: PCEPAR_DB_IDLE_VALIDATION_TIMEOUT
+    value: "PT0S"
+  - name: PCEPAR_DB_ORACLE_JDBC_URL
+    value: "jdbc:oracle:thin:@${PCEPAR_DB_IP}:${PCEPAR_DB_PORT}:${PCEPAR_DB_NAME}"
+  - name: PCEPAR_DB_ORACLE_JDBC_DRIVER
+    value: "oracle.jdbc.xa.client.OracleXADataSource"
+  - name: PCEPAR_DB_POSTGRESQL_JDBC_URL
+    value: "jdbc:postgresql://${PCEPAR_DB_IP}:${PCEPAR_DB_PORT}/${PCEPAR_DB_NAME}?gssEncMode=allow&currentSchema=${PCEPAR_DB_OWNER}&ApplicationName=${PCEPAR_DB_APPLICATION_NAME}"
+  - name: PCEPAR_DB_POSTGRESQL_JDBC_DRIVER
+    value: "org.postgresql.xa.PGXADataSource"
+  - name: PCEPAR_DB_COCKROACH_JDBC_URL
+    value: "jdbc:postgresql://${PCEPAR_DB_IP}:${PCEPAR_DB_PORT}/${PCEPAR_DB_NAME}"
+  - name: PCEPAR_DB_COCKROACH_JDBC_DRIVER
+    value: "org.postgresql.xa.PGXADataSource"
+  - name: PCECTR_SQL_REPLACE_FILE
+    value: "\"$PCEPAR_PCE_HOME/database/preparer/cfg/sql.replace\""
+  - name: PCEPAR_JTA_DEFAULT_TIMEOUT
+    value: "60"
+  - name: PCEPAR_LISTEN_ADR_MANAGED
+    value: "0.0.0.0"
+  - name: PCEPAR_LISTEN_PORT_HTTP_MANAGED
+    value: "8080"
+  - name: PCEPAR_LISTEN_PORT_HTTPS_MANAGED
+    value: "8443"
+  - name: PCEPAR_LISTEN_PORT_HTTPS_ENABLED
+    value: "false"
+  - name: PCEPAR_LISTEN_PORT_HTTPS_MUTUAL_ENABLED
+    value: "false"
+  - name: PCEPAR_HTTPS_CONNECTION_IDLE_TIMEOUT
+    value: "30000"
+  - name: PCEPAR_HTTP_MIN_THREADS
+    value: "8"
+  - name: PCEPAR_HTTP_MAX_THREADS
+    value: "50"
+  - name: PCEPAR_HTTP_THREAD_IDLE_TIMEOUT
+    value: "60000"
+  - name: PCEPAR_HTTP_CONNECTION_IDLE_TIMEOUT
+    value: "30000"
+  - name: PCEPAR_HTTP_SESSION_COOKIENAME
+    value: "JSESSIONID"
+  - name: PCEPAR_HTTP_SESSION_COOKIESECURE
+    value: ""
+  - name: PCEPAR_INTERNODE_SITE
+    value: ""
+  - name: PCEPAR_OCM_CONTENT_SECURITY_POLICY
+    value: "\"base-uri 'self'; default-src 'self'; img-src 'self' http://*.openstreetmap.org data:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'self'; form-action http: https:; worker-src blob:; script-src http://*.openstreetmap.org 'self'\""
+  - name: PCEPAR_PRIMEFACES_CONTENT_SECURITY_POLICY
+    value: "true"
+  - name: PCEPAR_CORS_RESPONSE_FILTER_ENABLED
+    value: "false"
+  - name: PCEPAR_CORS_RESPONSE_FILTER_ALLOWED_DOMAIN
+    value: ""
+  - name: PCEPAR_CORS_RESPONSE_FILTER_ALLOWED_ORIGIN
+    value: "*"
+  - name: PCEPAR_CORS_RESPONSE_FILTER_ALLOWED_METHODS
+    value: "\" GET, POST, DELETE, PUT\""
+  - name: PCEPAR_CORS_RESPONSE_FILTER_ALLOWED_HEADERS
+    value: "Content-Type,Authorization"
+  - name: PCEPAR_CORS_RESPONSE_FILTER_EXPOSED_HEADERS
+    value: ""
+  - name: PCEPAR_COMMTRACE_ENCRYPT_INVALID_MSG
+    value: "false"
+  - name: PCECTR_OCM_DEVELOPMENT_MODE
+    value: "false"
+  - name: PCEPAR_HSM_ADDRESS
+    value: "172.18.152.251"
+  - name: PCEPAR_HSM_PORT
+    value: "0"
+  - name: PCEPAR_HSM_TYPE
+    value: "ThalesEmu"
+  - name: PCEPAR_HSM_TLS_ENABLED
+    value: "false"
+  - name: PCEPAR_HSM_MUTUAL_TLS_ENABLED
+    value: "false"
+  - name: PCEPAR_HSM2_ADDRESS
+    value: "172.18.152.251"
+  - name: PCEPAR_HSM2_PORT
+    value: "0"
+  - name: PCEPAR_HSM2_TLS_ENABLED
+    value: "false"
+  - name: PCEPAR_HSM2_MUTUAL_TLS_ENABLED
+    value: "false"
+  - name: PCEPAR_HSM_HEALTHCHECK_ENABLED
+    value: "false"
+  - name: PCEPAR_HSM_CERTIFICATE_PROVIDER
+    value: "HSM_tls"
+  - name: DS_OVERRIDE_CONSUMER_TEMPLATE_DB
+    value: "PCE_JDBC_TX_DATASOURCE"
+  - name: DS_OVERRIDE_INSTITUTE_TEMPLATE_DB
+    value: "PCE_JDBC_TX_DATASOURCE"
+  - name: PCEPAR_MASTERCARDSMS2_ENDPOINTS
+    value: "127.0.0.1:5014"
+  - name: PCEPAR_TEST_ENDPOINTS
+    value: "127.0.0.1:15607,127.0.0.1:15608"
+  - name: PCEPAR_VISADPS2_ENDPOINTS
+    value: "127.0.0.1:15627,127.0.0.1:15628"
+  - name: PCEPAR_HISO_DEVICE_HANDLING_POS_ENDPOINTS
+    value: "127.0.0.1:15630"
+  - name: PCEPAR_BICISO_DEVICE_HANDLING_POS_ENDPOINTS
+    value: "127.0.0.1:15730"
+  - name: PCEPAR_HISO_ECOMMERCE_ENDPOINTS
+    value: "127.0.0.1:15640"
+  - name: PCEPAR_BICISO_ECOMMERCE_ENDPOINTS
+    value: "127.0.0.1:15740"
+  - name: PCEPAR_OBAPI_ADDRESS
+    value: "http://localhost:1235/obapirest"
+  - name: PCEPAR_OBAPI_PROXY_HOST
+    value: "NULL"
+  - name: PCEPAR_OBAPI_PROXY_PORT
+    value: "NULL"
+  - name: PCEPAR_NDC_ENDPOINTS
+    value: "127.0.0.1:9001"
+  - name: PCEPAR_NDC_THREADPOOL_CORESIZE
+    value: "70"
+  - name: PCEPAR_NDC_THREADPOOL_MAXQUEUESIZE
+    value: "1000"
+  - name: PCEPAR_NDC_THREADPOOL_QUEUESIZE_REJECTION_THRESHOLD
+    value: "1000"
+  - name: PCEPAR_NDC_PREFERRED_ADAPTER
+    value: ""
+  - name: PCEPAR_NDC_MAX_CONNECTIONS_PER_EIS_PH
+    value: "20000"
+  - name: PCEPAR_NDC_MAX_CONNECTION_PER_SERVER
+    value: "1000"
+  - name: PCEPAR_HISO_DEVICE_HANDLING_SELFSERVICE_ENDPOINTS
+    value: "127.0.0.1:15631"
+  - name: PCEPAR_BICISO_DEVICE_HANDLING_SELFSERVICE_ENDPOINTS
+    value: "127.0.0.1:15731"
+  - name: PCEPAR_CHAMELEON_PORT
+    value: "1231"
+  - name: PCEPAR_CHAMELEON_MULTIPLEX_PORT
+    value: "1232"
+  - name: PCEPAR_CHAMELEON_HTTP_PORT
+    value: "1235"
+  - name: PCEPAR_CHAMELEON_HOST
+    value: "localhost"
+
+  # Non-secret per-environment overrides, applied by name on top of
+  # nonSecret above - see values-dev/uat/prod.yaml.
+  envOverrides: {}
+# Secrets are expected to already exist in the target namespace, created out
+# of band by an External Secrets Operator / Vault / cluster admin - NOT by
+# Helm, and NEVER checked into this repo. See deploy/README.md "Secrets".
+secrets:
+  existingSecretName: "txm-secrets"   # must contain DB_PASSWORD, and the
+                                       # mounted keystore(s) referenced below
+
+probes:
+  # Confirmed against a real running instance (local: successfully reached
+  # http://localhost:8080/pages/Login.jsf?jfwid=...). The jfwid query
+  # param is a per-request JSF window id, not needed for a bare liveness/
+  # readiness GET - the bare path returns the login page (200) once TM is
+  # actually up. Still worth re-confirming this doesn't require session
+  # state once the DB is wired in (task 1) - some JSF apps redirect an
+  # unauthenticated GET, which would show up as the probe getting a
+  # 3xx instead of 200 and needs httpGet path/expected code adjusted.
+  #
+  # startupProbe gates when liveness/readiness even start being evaluated -
+  # added after `oc describe pod` showed the real failure mode: TM's cold
+  # boot (entrypoint.sh copy+template + JVM start + full CDI/component
+  # init) legitimately runs past 2 minutes, and the old liveness budget
+  # (60s + 15s*6 = 150s) was killing the container mid-boot -
+  # "Liveness probe failed ... Killing" while Jetty had already started
+  # and TM was still working through startup nodes, not stuck. Without a
+  # startupProbe, liveness/readiness start counting immediately on
+  # container start and have no way to distinguish "still legitimately
+  # booting" from "actually hung".
+  startup:
+    httpGet:
+      path: /pages/Login.jsf
+      port: http
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    failureThreshold: 90   # up to ~15 min to come up once, cold
+  liveness:
+    httpGet:
+      path: /pages/Login.jsf
+      port: http
+    periodSeconds: 15
+    failureThreshold: 6
+  readiness:
+    httpGet:
+      path: /pages/Login.jsf
+      port: http
+    periodSeconds: 10
+    failureThreshold: 3
+
+# TM terminals hold long-lived connections; give in-flight sessions and open
+# JTA transactions time to drain before SIGKILL.
+terminationGracePeriodSeconds: 90
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

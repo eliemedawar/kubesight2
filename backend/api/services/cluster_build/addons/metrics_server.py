@@ -13,19 +13,27 @@ METRICS_SERVER = AddonDescriptor(
         "Horizontal Pod Autoscaling."
     ),
     support_tier="supported",
-    # 0.7.x covers Kubernetes 1.27+ and so every minor the builder offers.
-    # Kubernetes 1.34 and newer need Metrics Server 0.9.x — pin that release
-    # before listing those minors here.
-    versions=("0.7.2",),
-    supported_k8s_minors=("1.29", "1.30", "1.31", "1.32"),
+    versions=("0.9.0", "0.7.2"),
     manifest_files=("components.yaml",),
     manifest_urls=(
         "https://github.com/kubernetes-sigs/metrics-server/releases/download/"
         "v{version}/components.yaml",
     ),
-    manifest_sha256=(
-        "f103539a54ed72efe66616afc74a8bfaed651703cb3918797599046af5617441",
-    ),
+    manifest_sha256={
+        "0.9.0": (
+            "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b",
+        ),
+        "0.7.2": (
+            "f103539a54ed72efe66616afc74a8bfaed651703cb3918797599046af5617441",
+        ),
+    },
+    # Upstream's compatibility matrix: 0.9.x is the release documented for
+    # Kubernetes 1.34+, while 0.7.x covers 1.27+ and is what the older minors
+    # in this catalog were validated on.
+    k8s_minors_by_version={
+        "0.9.0": ("1.34", "1.35", "1.36"),
+        "0.7.2": ("1.29", "1.30", "1.31", "1.32"),
+    },
     readiness_commands=(
         "-n kube-system rollout status deployment/metrics-server --timeout=600s",
         "wait --for=condition=Available "

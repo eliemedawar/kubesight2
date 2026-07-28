@@ -222,7 +222,9 @@ class TestAddonApi:
         ).get_json()["data"]
         catalog = {item["id"]: item for item in options["addons"]}
         assert set(catalog) == {"metrics-server", "nginx-ingress", "metallb"}
-        assert catalog["metrics-server"]["defaultVersion"] == "0.7.2"
+        # Newest first: 0.9.0 serves Kubernetes 1.34+, 0.7.2 the older minors.
+        assert catalog["metrics-server"]["defaultVersion"] == "0.9.0"
+        assert catalog["metrics-server"]["versions"] == ["0.9.0", "0.7.2"]
         assert catalog["nginx-ingress"]["defaultVersion"] == "5.5.4"
         assert catalog["metallb"]["defaultVersion"] == "0.16.1"
         assert catalog["metallb"]["supportTier"] == "best-effort"
@@ -278,17 +280,35 @@ class TestAddonApi:
 
         for addon in addon_registry.available():
             entry = catalog[addon.id]
+            # The flat list mirrors the default (newest) version...
             assert entry["manifestDigests"] == [
                 {"file": filename, "sha256": digest}
                 for filename, digest in zip(
-                    addon.manifest_files, addon.manifest_sha256
+                    addon.manifest_files, addon.digests_for(addon.versions[0])
                 )
             ]
+            # ...and every version carries its own pinned set, because the same
+            # filename holds different bytes at a different version.
+            assert entry["manifestDigestsByVersion"] == {
+                version: [
+                    {"file": filename, "sha256": digest}
+                    for filename, digest in zip(
+                        addon.manifest_files, addon.digests_for(version)
+                    )
+                ]
+                for version in addon.versions
+            }
             # Every digest is a full SHA-256 — the UI shortens it for display.
             assert all(
                 re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
-                for item in entry["manifestDigests"]
+                for digests in entry["manifestDigestsByVersion"].values()
+                for item in digests
             )
+            # No version may ship without its digests.
+            for version in addon.versions:
+                assert len(addon.digests_for(version)) == len(addon.manifest_files), (
+                    f"{addon.id} {version} is missing pinned digests"
+                )
             # Bundled versions are the ones actually vendored on this host.
             assert entry["bundledVersions"] == [
                 version
@@ -306,7 +326,12 @@ class TestAddonApi:
             "https://raw.githubusercontent.com/metallb/metallb/"
             "v{version}/config/manifests/metallb-native.yaml",
         )
-        assert METALLB.manifest_sha256 == (
+        assert METALLB.manifest_sha256 == {
+            "0.16.1": (
+                "bf25feebb7582ca7df845efd52ffbc2960d6cbf4cfc972f47fded9f788b67f0b",
+            ),
+        }
+        assert METALLB.digests_for("0.16.1") == (
             "bf25feebb7582ca7df845efd52ffbc2960d6cbf4cfc972f47fded9f788b67f0b",
         )
         assert any(
@@ -582,7 +607,7 @@ class TestAddonApi:
             versions=("1.0.0",),
             manifest_files=("manifest.yaml",),
             manifest_urls=("https://example.invalid/{version}.yaml",),
-            manifest_sha256=(digest,),
+            manifest_sha256={"1.0.0": (digest,)},
             readiness_commands=(),
         )
         monkeypatch.setattr(
@@ -595,9 +620,15 @@ class TestAddonApi:
             descriptor, "1.0.0", mirror
         ) == [content.decode()]
 
-        bad = replace(descriptor, manifest_sha256=("0" * 64,))
+        bad = replace(descriptor, manifest_sha256={"1.0.0": ("0" * 64,)})
         with pytest.raises(Exception, match="integrity"):
             _REAL_ADDON_LOAD_MANIFESTS(bad, "1.0.0", mirror)
+
+        # A version with no digests recorded must be refused outright rather
+        # than installed unverified.
+        unpinned = replace(descriptor, versions=("1.0.0", "2.0.0"))
+        with pytest.raises(Exception, match="digest"):
+            _REAL_ADDON_LOAD_MANIFESTS(unpinned, "2.0.0", mirror)
 
         offline = replace(default_profile(), repo_mode="offline")
         with pytest.raises(Exception, match="offline"):

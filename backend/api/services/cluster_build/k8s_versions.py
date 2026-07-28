@@ -78,60 +78,49 @@ class MinorSupport:
     # Served when discovery fails and nothing was ever cached. Keeping one per
     # minor means an upstream outage still yields a working, tested version.
     fallback_patch: str
-    # CNI plugin / add-on ids whose pinned manifests are validated on this minor.
-    cni_plugins: Tuple[str, ...] = ()
-    addons: Tuple[str, ...] = ()
     enabled: bool = False
     blockers: Tuple[str, ...] = field(default_factory=tuple)
 
 
-# Every CNI plugin and add-on currently pinned in this repository has been
-# validated by KubeSight across the enabled range, so the enabled minors share
-# one compatibility set. Named here rather than repeated per record.
-_VALIDATED_CNI = ("calico", "flannel", "cilium")
-_VALIDATED_ADDONS = ("metrics-server", "nginx-ingress", "metallb")
+# Which CNI plugins and add-ons cover which minor is declared on the
+# descriptors themselves, per version, and enforced by preflight — this table
+# deliberately does not restate it, so there is one source of truth.
 
-# Blockers shared by every minor newer than the validated set: the pinned CNI
-# and Metrics Server manifests predate them. Clearing these means vendoring the
-# newer artifacts *with their SHA-256 digests* via
-# backend/tools/fetch_cluster_build_bundles.py, declaring the new versions on
-# the descriptors, and then flipping ``enabled`` here.
-_UNPINNED_ARTIFACTS = (
-    "Calico 3.32 is the release upstream tests against Kubernetes 1.34-1.36; "
-    "this build pins Calico 3.28.2/3.27.4, so the default CNI has no "
-    "digest-pinned manifest for this minor.",
-    "Metrics Server 0.9.x is required from Kubernetes 1.34; this build pins "
-    "0.7.2.",
-    "NGINX Ingress 5.5.4 and MetalLB 0.16.1 are not validated on this minor.",
+# 1.33 is the one gap in the enabled range: no vendored CNI release covers it.
+# Calico 3.32 starts at 1.34 and 3.28.2 stops at 1.32, so closing this means
+# vendoring a Calico 3.30/3.31 build with its SHA-256 digest.
+_NO_CNI_FOR_MINOR = (
+    "No vendored CNI release covers Kubernetes 1.33: Calico 3.32.1 is "
+    "validated from 1.34 and Calico 3.28.2 only to 1.32. Vendor a Calico "
+    "3.30/3.31 manifest with its digest to close the gap.",
 )
 
 # Ordered newest first. Records exist for known-but-disabled minors on purpose:
 # the pause tag and kubeadm API for those are already resolved, so enabling one
 # later is a reviewed flag change rather than fresh research.
 SUPPORTED_MINORS: Tuple[MinorSupport, ...] = (
+    # Upstream-maintained minors. Calico 3.32.1, Metrics Server 0.9.0, NGINX
+    # Ingress 5.5.4 and MetalLB 0.16.1 are vendored and digest-pinned for these.
     MinorSupport(
         minor="1.36",
         pause_image_tag="3.10.2",
         kubeadm_config_api=KUBEADM_API_V1BETA4,
         fallback_patch="1.36.0",
-        enabled=False,
-        blockers=_UNPINNED_ARTIFACTS,
+        enabled=True,
     ),
     MinorSupport(
         minor="1.35",
         pause_image_tag="3.10.1",
         kubeadm_config_api=KUBEADM_API_V1BETA4,
         fallback_patch="1.35.0",
-        enabled=False,
-        blockers=_UNPINNED_ARTIFACTS,
+        enabled=True,
     ),
     MinorSupport(
         minor="1.34",
         pause_image_tag="3.10.1",
         kubeadm_config_api=KUBEADM_API_V1BETA4,
         fallback_patch="1.34.0",
-        enabled=False,
-        blockers=_UNPINNED_ARTIFACTS,
+        enabled=True,
     ),
     MinorSupport(
         minor="1.33",
@@ -139,15 +128,14 @@ SUPPORTED_MINORS: Tuple[MinorSupport, ...] = (
         kubeadm_config_api=KUBEADM_API_V1BETA4,
         fallback_patch="1.33.0",
         enabled=False,
-        blockers=_UNPINNED_ARTIFACTS,
+        blockers=_NO_CNI_FOR_MINOR,
     ),
+    # Upstream-EOL, retained so existing builds and drafts stay buildable.
     MinorSupport(
         minor="1.32",
         pause_image_tag="3.10",
         kubeadm_config_api=KUBEADM_API_V1BETA4,
         fallback_patch="1.32.4",
-        cni_plugins=_VALIDATED_CNI,
-        addons=_VALIDATED_ADDONS,
         enabled=True,
     ),
     MinorSupport(
@@ -155,8 +143,6 @@ SUPPORTED_MINORS: Tuple[MinorSupport, ...] = (
         pause_image_tag="3.10",
         kubeadm_config_api=KUBEADM_API_V1BETA4,
         fallback_patch="1.31.8",
-        cni_plugins=_VALIDATED_CNI,
-        addons=_VALIDATED_ADDONS,
         enabled=True,
     ),
     MinorSupport(
@@ -165,8 +151,6 @@ SUPPORTED_MINORS: Tuple[MinorSupport, ...] = (
         # v1beta4 only exists from kubeadm 1.31 — these two must stay v1beta3.
         kubeadm_config_api=KUBEADM_API_V1BETA3,
         fallback_patch="1.30.12",
-        cni_plugins=_VALIDATED_CNI,
-        addons=_VALIDATED_ADDONS,
         enabled=True,
     ),
     MinorSupport(
@@ -174,8 +158,6 @@ SUPPORTED_MINORS: Tuple[MinorSupport, ...] = (
         pause_image_tag="3.9",
         kubeadm_config_api=KUBEADM_API_V1BETA3,
         fallback_patch="1.29.15",
-        cni_plugins=_VALIDATED_CNI,
-        addons=_VALIDATED_ADDONS,
         enabled=True,
     ),
 )

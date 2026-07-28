@@ -1,0 +1,20 @@
+{{- if and .Values.openshift.enabled .Values.openshift.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "txm.fullname" . }}
+  labels:
+    {{- include "txm.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.openshift.route.host }}
+  host: {{ .Values.openshift.route.host }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "txm.fullname" . }}
+  port:
+    targetPort: http
+  tls:
+    termination: {{ .Values.openshift.route.tls.termination }}
+    insecureEdgeTerminationPolicy: Redirect
+{{- end }}
