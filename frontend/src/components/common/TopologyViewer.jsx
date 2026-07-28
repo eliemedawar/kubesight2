@@ -505,6 +505,30 @@ export default function TopologyViewer({
 
   const [fullscreen, setFullscreen] = useState(false);
 
+  // ── Click-to-focus ─────────────────────────────────────────────────────
+  // Clicking a node isolates it: the node, its direct neighbours and the edges
+  // between them keep their full weight while everything else fades back, so a
+  // single component's connections are readable inside a busy graph. Clicking
+  // the same node again (or the empty canvas) clears it.
+  const [focusId, setFocusId] = useState(null);
+
+  const focusSet = useMemo(() => {
+    if (!focusId) return null;
+    const set = new Set([focusId]);
+    (edges || []).forEach((e) => {
+      const s = String(e.sourceNodeId), t = String(e.targetNodeId);
+      if (s === focusId) set.add(t);
+      else if (t === focusId) set.add(s);
+    });
+    return set;
+  }, [focusId, edges]);
+
+  // An edge survives the fade only when the focused node is one of its ends.
+  const edgeInFocus = (edge) =>
+    !focusId ||
+    String(edge.sourceNodeId) === focusId ||
+    String(edge.targetNodeId) === focusId;
+
   // Exit fullscreen on Escape. Capture phase + stopPropagation so the parent
   // modal's own Escape-to-close handler (service/client detail) doesn't also
   // fire — one Escape closes only the fullscreen layer.
@@ -515,6 +539,12 @@ export default function TopologyViewer({
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();
+        // Escape unwinds one layer at a time: drop the focus highlight first,
+        // and only leave fullscreen once nothing is highlighted.
+        if (focusId) {
+          setFocusId(null);
+          return;
+        }
         setView({ k: 1, x: 0, y: 0 });
         setFullscreen(false);
       }
@@ -524,7 +554,7 @@ export default function TopologyViewer({
       window.removeEventListener("keydown", onKey, true);
       document.body.style.overflow = previousOverflow;
     };
-  }, [fullscreen]);
+  }, [fullscreen, focusId]);
 
   // ── Pan & zoom (opt-in via `zoomable`) ─────────────────────────────────
   const svgRef = useRef(null);
@@ -533,9 +563,11 @@ export default function TopologyViewer({
   const [view, setView] = useState({ k: 1, x: 0, y: 0 });
   const [panning, setPanning] = useState(false);
 
-  // A new graph re-fits via the viewBox; drop any prior pan/zoom so it starts centered.
+  // A new graph re-fits via the viewBox; drop any prior pan/zoom so it starts
+  // centered, and clear the highlight (its node id belongs to the old graph).
   useEffect(() => {
     setView({ k: 1, x: 0, y: 0 });
+    setFocusId(null);
   }, [nodes, edges]);
 
   // Wheel-to-zoom toward the cursor. A native, non-passive listener so the page
@@ -708,14 +740,25 @@ export default function TopologyViewer({
 
   const isClickable = (node) =>
     onNodeClick ? (nodeClickable ? nodeClickable(node) : true) : false;
-  const handleNodeClick = (node) => {
+  const handleNodeClick = (node, event) => {
+    // Keep the click inside the node: the canvas click handler below clears
+    // the highlight, and it must not undo the one we are about to set.
+    event?.stopPropagation();
     if (draggedRef.current) return;
+    const id = String(node.id);
+    setFocusId((current) => (current === id ? null : id));
     if (isClickable(node)) onNodeClick(node);
+  };
+  // Clicking bare canvas clears the highlight — but a pan gesture ends with a
+  // click too, so ignore the one that follows a drag.
+  const handleCanvasClick = () => {
+    if (draggedRef.current) return;
+    setFocusId(null);
   };
 
   const viewer = (
     <div
-      className={`topo-viewer${compact ? " topo-viewer--compact" : ""}${fullscreen ? " topo-viewer--fs" : ""}`}
+      className={`topo-viewer${compact ? " topo-viewer--compact" : ""}${fullscreen ? " topo-viewer--fs" : ""}${focusId ? " topo-viewer--focused" : ""}`}
       role={fullscreen ? "dialog" : undefined}
       aria-modal={fullscreen ? "true" : undefined}
       aria-label={fullscreen ? "Topology fullscreen view" : undefined}
@@ -773,6 +816,7 @@ export default function TopologyViewer({
       <svg ref={svgRef}
         viewBox={`${-zoomMx} ${-zoomMy} ${svgW + zoomMx * 2} ${svgH + zoomMy * 2}`}
         preserveAspectRatio="xMidYMid meet"
+        onClick={handleCanvasClick}
         onPointerDown={startPan}
         onPointerMove={movePan}
         onPointerUp={endPan}
@@ -924,7 +968,8 @@ export default function TopologyViewer({
                 .filter(Boolean).join(" · ");
               const halo = { paintOrder: "stroke" };
               return (
-                <g key={edge.id ?? `e${idx}`} className="topo-tunnel">
+                <g key={edge.id ?? `e${idx}`}
+                  className={`topo-tunnel${edgeInFocus(edge) ? "" : " is-dim"}`}>
                   <title>{tip}</title>
                   <path d={d} fill="none" stroke="var(--accent-border)" strokeWidth={15} />
                   <path d={d} fill="none" stroke="var(--bg-inset)" strokeWidth={12} />
@@ -983,7 +1028,8 @@ export default function TopologyViewer({
               .filter(Boolean).join(" · ");
 
             return (
-              <g key={edge.id ?? `e${idx}`}>
+              <g key={edge.id ?? `e${idx}`}
+                className={`topo-edge${edgeInFocus(edge) ? "" : " is-dim"}`}>
                 {edgeTip ? <title>{edgeTip}</title> : null}
                 <path d={d}
                   className={
@@ -1034,22 +1080,31 @@ export default function TopologyViewer({
             const textX = pos.x + 46;
             const nameY = hasSub ? pos.y + 19 : pos.y + NODE_H / 2 + 1;
             const clickableNode = isClickable(node);
+            const nodeId = String(node.id);
+            const isFocusNode = focusId === nodeId;
+            const dimmed = Boolean(focusSet) && !focusSet.has(nodeId);
 
             return (
               <g
                 key={node.id}
-                className={`topo-node${clickableNode ? " topo-node--click" : ""}`}
-                onClick={clickableNode ? () => handleNodeClick(node) : undefined}
-                onKeyDown={clickableNode ? (event) => {
+                className={`topo-node${clickableNode ? " topo-node--click" : ""}${
+                  isFocusNode ? " is-focus" : ""}${dimmed ? " is-dim" : ""}`}
+                onClick={(event) => handleNodeClick(node, event)}
+                onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    handleNodeClick(node);
+                    handleNodeClick(node, event);
                   }
-                } : undefined}
-                role={clickableNode ? "button" : undefined}
-                tabIndex={clickableNode ? 0 : undefined}
-                aria-label={clickableNode ? `Open ${node.name} namespace` : undefined}
-                style={clickableNode ? { cursor: "pointer" } : undefined}
+                }}
+                role="button"
+                tabIndex={0}
+                aria-pressed={isFocusNode}
+                aria-label={
+                  clickableNode
+                    ? `Open ${node.name} namespace`
+                    : `${node.name} — highlight its connections`
+                }
+                style={{ cursor: "pointer" }}
                 title={node.description || node.name}
               >
                 {node.description ? <title>{node.description}</title> : null}

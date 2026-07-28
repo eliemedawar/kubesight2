@@ -160,6 +160,45 @@
   opacity: 0.75;
 }
 
+/* ── Click-to-focus ────────────────────────────────────────────────────────
+   Every node is clickable: clicking one isolates it. The node, its direct
+   neighbours and the edges touching it keep their full weight; everything
+   else fades back so the selected component's connections read clearly.
+   Dimmed items stay hit-testable so a click moves the focus straight to
+   another node. Clicking the same node again, or the bare canvas, clears it
+   (as does Escape while fullscreen). */
+.topo-viewer .topo-node,
+.topo-viewer .topo-edge,
+.topo-viewer .topo-tunnel {
+  transition: opacity var(--dur-fast, 120ms) var(--ease, ease);
+}
+.topo-viewer .topo-node:focus {
+  outline: none;
+}
+.topo-viewer .topo-node:focus-visible .topo-node-card {
+  stroke: var(--accent-strong);
+  stroke-width: 2;
+}
+.topo-viewer--focused .topo-node.is-dim,
+.topo-viewer--focused .topo-edge.is-dim,
+.topo-viewer--focused .topo-tunnel.is-dim {
+  opacity: 0.16;
+}
+/* The selected node keeps an accent ring so it stays identifiable once the
+   surrounding graph has faded. */
+.topo-viewer--focused .topo-node.is-focus .topo-node-card {
+  stroke: var(--accent-strong);
+  stroke-width: 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topo-viewer .topo-node,
+  .topo-viewer .topo-edge,
+  .topo-viewer .topo-tunnel {
+    transition: none;
+  }
+}
+
 /* ── Topology page chrome (standalone drill-down view) ─────────────────── */
 .topology-page .topo-breadcrumb {
   display: flex;
