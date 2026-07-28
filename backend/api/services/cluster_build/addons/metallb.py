@@ -167,6 +167,7 @@ METALLB = _MetalLb(
     # compatibility policy classifies these combinations as best effort.
     support_tier="best-effort",
     versions=("0.16.1",),
+    supported_k8s_minors=("1.29", "1.30", "1.31", "1.32"),
     manifest_files=("metallb-native.yaml",),
     manifest_urls=(
         "https://raw.githubusercontent.com/metallb/metallb/"

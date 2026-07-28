@@ -51,4 +51,5 @@ NGINX_INGRESS = AddonDescriptor(
     readiness_commands=(
         "-n nginx-ingress rollout status deployment/nginx-ingress --timeout=900s",
     ),
+    supported_k8s_minors=("1.29", "1.30", "1.31", "1.32"),
 )

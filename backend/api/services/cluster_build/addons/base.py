@@ -53,6 +53,9 @@ class AddonDescriptor:
     # Declarative description of ``config`` for the wizard. Add-ons that need
     # no configuration leave this empty and reject any config sent to them.
     config_fields: Tuple[Dict[str, Any], ...] = ()
+    # Kubernetes minors ("1.32") this add-on's pinned manifests are validated
+    # against; preflight fails the build before provisioning otherwise.
+    supported_k8s_minors: Tuple[str, ...] = ()
 
     def bundled_path(self, version: str, filename: str) -> Path:
         return _data_dir() / self.id / version / filename

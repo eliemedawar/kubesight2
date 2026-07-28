@@ -36,4 +36,5 @@ FLANNEL = _Flannel(
         ),
     },
     readiness_daemonset=("kube-flannel", "kube-flannel-ds"),
+    supported_k8s_minors=("1.29", "1.30", "1.31", "1.32"),
 )

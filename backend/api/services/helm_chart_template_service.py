@@ -21,9 +21,11 @@ from urllib.parse import urlparse
 
 import yaml
 
+from sqlalchemy import func
+
 from ..audit import log_audit
 from ..db import db
-from ..models import HelmChartTemplate
+from ..models import HelmChartTemplate, HelmChartTemplateVersion
 
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_FILES = 500
@@ -76,7 +78,90 @@ def _clean_text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
 
-def _summary(row: HelmChartTemplate) -> Dict[str, Any]:
+def _definition_counts(definition: Dict[str, Any]) -> Dict[str, Any]:
+    chart = definition.get("chart") or {}
+    variables = definition.get("variables") or []
+    return {
+        "templateCount": len(chart.get("templates") or []),
+        "valuesFileCount": len(chart.get("valuesFiles") or []),
+        "variableCount": len(variables),
+        "requiredVariableCount": sum(1 for item in variables if item.get("required")),
+        "resourceCount": int(definition.get("resourceCount") or 0),
+    }
+
+
+def _version_entry(
+    *,
+    version: str,
+    app_version: str,
+    description: str,
+    source_type: str,
+    source_ref: str,
+    created_at: Any,
+    created_by: Optional[int],
+    definition: Dict[str, Any],
+    is_current: bool,
+) -> Dict[str, Any]:
+    """A version list entry. Deliberately free of the heavy per-version chart
+    inspection so the catalog listing stays small; fetch the version's detail
+    for its files, values and inputs."""
+    return {
+        "version": version or "0.1.0",
+        "appVersion": app_version or "",
+        "description": description or "",
+        "sourceType": source_type,
+        "sourceRef": source_ref or "",
+        "createdAt": created_at.isoformat() if created_at else None,
+        "createdBy": created_by,
+        "isCurrent": bool(is_current),
+        **_definition_counts(definition or {}),
+    }
+
+
+def _version_entries(row: HelmChartTemplate) -> List[Dict[str, Any]]:
+    """Version list for a chart. Charts imported before versioning existed have
+    no version rows yet, so the parent row itself stands in as their only
+    version until something writes (see ``_backfill_versions``)."""
+    rows = sorted(
+        row.versions or [],
+        key=lambda item: (item.created_at is None, item.created_at, item.id),
+    )
+    if not rows:
+        return [
+            _version_entry(
+                version=row.version,
+                app_version=row.app_version,
+                description=row.description,
+                source_type=row.source_type,
+                source_ref=row.source_ref,
+                created_at=row.created_at,
+                created_by=row.created_by,
+                definition=row.definition or {},
+                is_current=True,
+            )
+        ]
+    return [
+        _version_entry(
+            version=item.version,
+            app_version=item.app_version,
+            description=item.description,
+            source_type=item.source_type,
+            source_ref=item.source_ref,
+            created_at=item.created_at,
+            created_by=item.created_by,
+            definition=item.definition or {},
+            is_current=item.version == row.version,
+        )
+        for item in rows
+    ]
+
+
+def _summary(
+    row: HelmChartTemplate,
+    *,
+    version_count: Optional[int] = None,
+    versions: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     definition = row.definition or {}
     chart = definition.get("chart") or {}
     return {
@@ -88,13 +173,9 @@ def _summary(row: HelmChartTemplate) -> Dict[str, Any]:
         "sourceType": row.source_type,
         "sourceRef": row.source_ref or "",
         "chart": chart,
-        "templateCount": len(chart.get("templates") or []),
-        "valuesFileCount": len(chart.get("valuesFiles") or []),
-        "variableCount": len(definition.get("variables") or []),
-        "requiredVariableCount": sum(
-            1 for item in definition.get("variables") or [] if item.get("required")
-        ),
-        "resourceCount": int(definition.get("resourceCount") or 0),
+        "versionCount": version_count if version_count is not None else len(versions or [1]),
+        "versions": versions or [],
+        **_definition_counts(definition),
         "warnings": definition.get("warnings") or [],
         "createdBy": row.created_by,
         "createdAt": row.created_at.isoformat() if row.created_at else None,
@@ -102,10 +183,23 @@ def _summary(row: HelmChartTemplate) -> Dict[str, Any]:
     }
 
 
-def _detail(row: HelmChartTemplate) -> Dict[str, Any]:
-    definition = row.definition or {}
+def _detail(row: HelmChartTemplate, version: str = "") -> Dict[str, Any]:
+    """Chart detail. ``version`` scopes the inputs and defaults to one revision;
+    without it the currently selected version is described."""
+    versions = _version_entries(row)
+    definition = _definition_for(row, version)
+    selected = _clean_text(version, 64) or (row.version or "0.1.0")
+    entry = next((item for item in versions if item["version"] == selected), None)
+    chart = definition.get("chart") or {}
     return {
-        **_summary(row),
+        **_summary(row, versions=versions),
+        "version": selected,
+        "appVersion": (entry or {}).get("appVersion") or row.app_version or "",
+        "sourceType": (entry or {}).get("sourceType") or row.source_type,
+        "sourceRef": (entry or {}).get("sourceRef") or row.source_ref or "",
+        "chart": chart,
+        **_definition_counts(definition),
+        "warnings": definition.get("warnings") or [],
         "variables": definition.get("variables") or [],
         "defaultValues": definition.get("values") or {},
     }
@@ -115,12 +209,22 @@ def list_chart_templates() -> List[Dict[str, Any]]:
     rows = HelmChartTemplate.query.order_by(
         HelmChartTemplate.name.asc(), HelmChartTemplate.id.asc()
     ).all()
-    return [_summary(row) for row in rows]
+    counts = dict(
+        db.session.query(
+            HelmChartTemplateVersion.template_id, func.count(HelmChartTemplateVersion.id)
+        )
+        .group_by(HelmChartTemplateVersion.template_id)
+        .all()
+    )
+    return [
+        _summary(row, version_count=counts.get(row.id) or 1, versions=_version_entries(row))
+        for row in rows
+    ]
 
 
-def get_chart_template(slug: str) -> Optional[Dict[str, Any]]:
+def get_chart_template(slug: str, version: str = "") -> Optional[Dict[str, Any]]:
     row = HelmChartTemplate.query.filter_by(slug=slug).first()
-    return _detail(row) if row else None
+    return _detail(row, version) if row else None
 
 
 def _get_row(slug: str) -> HelmChartTemplate:
@@ -128,6 +232,26 @@ def _get_row(slug: str) -> HelmChartTemplate:
     if not row:
         raise ChartTemplateError("Helm chart template not found.")
     return row
+
+
+def _version_row(row: HelmChartTemplate, version: str) -> Optional[HelmChartTemplateVersion]:
+    wanted = _clean_text(version, 64)
+    if not wanted:
+        return None
+    return HelmChartTemplateVersion.query.filter_by(
+        template_id=row.id, version=wanted
+    ).first()
+
+
+def _definition_for(row: HelmChartTemplate, version: str = "") -> Dict[str, Any]:
+    """The stored definition of one version, defaulting to the current one."""
+    wanted = _clean_text(version, 64)
+    if not wanted or wanted == (row.version or ""):
+        return row.definition or {}
+    found = _version_row(row, wanted)
+    if not found:
+        raise ChartTemplateError(f"Version {wanted} was not found for {row.name}.")
+    return found.definition or {}
 
 
 def _safe_chart_path(path: str) -> str:
@@ -217,6 +341,23 @@ def _encode_files(files: Dict[str, bytes]) -> Dict[str, str]:
     return encoded
 
 
+def _definition_blob(
+    files: Dict[str, bytes],
+    values: Dict[str, Any],
+    variables: List[Dict[str, Any]],
+    warnings: List[str],
+    resource_count: int,
+) -> Dict[str, Any]:
+    return {
+        "files": _encode_files(files),
+        "values": values,
+        "variables": variables[:MAX_VARIABLES],
+        "warnings": warnings,
+        "resourceCount": resource_count,
+        "chart": _chart_inspection(files),
+    }
+
+
 def _decode_files(definition: Dict[str, Any]) -> Dict[str, bytes]:
     decoded: Dict[str, bytes] = {}
     for raw_path, content in (definition.get("files") or {}).items():
@@ -246,23 +387,29 @@ def _persist(
     clean_name = _clean_text(name, 120)
     if not clean_name:
         raise ChartTemplateError("Chart name is required.")
+    clean_version = _clean_text(version, 64) or "0.1.0"
+    definition = _definition_blob(files, values, variables, warnings, resource_count)
     row = HelmChartTemplate(
         slug=_unique_slug(clean_name),
         name=clean_name,
         description=_clean_text(description, 500) or None,
-        version=_clean_text(version, 64) or "0.1.0",
+        version=clean_version,
         app_version=_clean_text(app_version, 64) or None,
         source_type=source_type,
         source_ref=_clean_text(source_ref, 1000) or None,
-        definition={
-            "files": _encode_files(files),
-            "values": values,
-            "variables": variables[:MAX_VARIABLES],
-            "warnings": warnings,
-            "resourceCount": resource_count,
-            "chart": _chart_inspection(files),
-        },
+        definition=definition,
         created_by=actor_user_id,
+    )
+    row.versions.append(
+        HelmChartTemplateVersion(
+            version=clean_version,
+            app_version=_clean_text(app_version, 64) or None,
+            description=_clean_text(description, 500) or None,
+            source_type=source_type,
+            source_ref=_clean_text(source_ref, 1000) or None,
+            definition=definition,
+            created_by=actor_user_id,
+        )
     )
     db.session.add(row)
     db.session.commit()
@@ -274,11 +421,187 @@ def _persist(
         details={
             "name": row.name,
             "sourceType": source_type,
+            "version": clean_version,
             "variableCount": len(variables),
             "resourceCount": resource_count,
         },
     )
     return _detail(row)
+
+
+def _backfill_versions(row: HelmChartTemplate) -> None:
+    """Give a pre-versioning chart its first version row from the parent state."""
+    if row.versions:
+        return
+    row.versions.append(
+        HelmChartTemplateVersion(
+            version=row.version or "0.1.0",
+            app_version=row.app_version,
+            description=row.description,
+            source_type=row.source_type,
+            source_ref=row.source_ref,
+            definition=row.definition or {},
+            created_by=row.created_by,
+            created_at=row.created_at,
+        )
+    )
+    db.session.flush()
+
+
+def _persist_version(
+    row: HelmChartTemplate,
+    prepared: Dict[str, Any],
+    *,
+    make_current: bool,
+    actor_user_id: Optional[int],
+) -> Dict[str, Any]:
+    version = _clean_text(prepared.get("version"), 64) or "0.1.0"
+    _backfill_versions(row)
+    if any(item.version == version for item in row.versions):
+        raise ChartTemplateError(
+            f"Version {version} already exists for {row.name}. "
+            "Bump the version in Chart.yaml or delete the stored version first."
+        )
+    app_version = _clean_text(prepared.get("app_version"), 64) or None
+    description = _clean_text(prepared.get("description"), 500) or None
+    source_ref = _clean_text(prepared.get("source_ref"), 1000) or None
+    definition = _definition_blob(
+        prepared["files"],
+        prepared["values"],
+        prepared["variables"],
+        prepared["warnings"],
+        prepared["resource_count"],
+    )
+    row.versions.append(
+        HelmChartTemplateVersion(
+            version=version,
+            app_version=app_version,
+            description=description,
+            source_type=prepared["source_type"],
+            source_ref=source_ref,
+            definition=definition,
+            created_by=actor_user_id,
+        )
+    )
+    if make_current:
+        row.version = version
+        row.app_version = app_version
+        row.source_type = prepared["source_type"]
+        row.source_ref = source_ref
+        row.definition = definition
+        # The catalog description belongs to the chart, not the upload: only fill
+        # it in when it is still empty so a curated description is never lost.
+        if description and not row.description:
+            row.description = description
+    db.session.commit()
+    log_audit(
+        "helm_chart_template_version_added",
+        actor_user_id=actor_user_id,
+        target_type="helm_chart_template",
+        target_id=row.slug,
+        details={
+            "name": row.name,
+            "version": version,
+            "sourceType": prepared["source_type"],
+            "isCurrent": bool(make_current),
+        },
+    )
+    return _detail(row, version)
+
+
+def add_chart_version(
+    slug: str, payload: Dict[str, Any], actor_user_id: Optional[int] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Add another archive as a new version of an existing chart."""
+    row = HelmChartTemplate.query.filter_by(slug=slug).first()
+    if not row:
+        return None, "Helm chart template not found.", 404
+    try:
+        prepared = _prepare_archive_import(payload)
+        make_current = payload.get("makeCurrent")
+        data = _persist_version(
+            row,
+            prepared,
+            make_current=True if make_current is None else bool(make_current),
+            actor_user_id=actor_user_id,
+        )
+        return data, None, 201
+    except ChartTemplateError as exc:
+        db.session.rollback()
+        return None, str(exc), 400
+    except (OSError, UnicodeError) as exc:
+        db.session.rollback()
+        return None, f"Unable to read the archive: {exc}", 400
+
+
+def set_current_chart_version(
+    slug: str, version: str, actor_user_id: Optional[int] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    row = HelmChartTemplate.query.filter_by(slug=slug).first()
+    if not row:
+        return None, "Helm chart template not found.", 404
+    _backfill_versions(row)
+    wanted = _clean_text(version, 64)
+    found = next((item for item in row.versions if item.version == wanted), None)
+    if not found:
+        db.session.rollback()
+        return None, f"Version {wanted} was not found for {row.name}.", 404
+    row.version = found.version
+    row.app_version = found.app_version
+    row.source_type = found.source_type
+    row.source_ref = found.source_ref
+    row.definition = found.definition or {}
+    db.session.commit()
+    log_audit(
+        "helm_chart_template_version_selected",
+        actor_user_id=actor_user_id,
+        target_type="helm_chart_template",
+        target_id=row.slug,
+        details={"name": row.name, "version": found.version},
+    )
+    return _detail(row), None, 200
+
+
+def delete_chart_version(
+    slug: str, version: str, actor_user_id: Optional[int] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    row = HelmChartTemplate.query.filter_by(slug=slug).first()
+    if not row:
+        return None, "Helm chart template not found.", 404
+    _backfill_versions(row)
+    wanted = _clean_text(version, 64)
+    found = next((item for item in row.versions if item.version == wanted), None)
+    if not found:
+        db.session.rollback()
+        return None, f"Version {wanted} was not found for {row.name}.", 404
+    if len(row.versions) == 1:
+        db.session.rollback()
+        return (
+            None,
+            "This is the only version of the chart. Delete the chart itself instead.",
+            400,
+        )
+    was_current = found.version == row.version
+    row.versions.remove(found)
+    db.session.flush()
+    if was_current:
+        newest = sorted(
+            row.versions, key=lambda item: (item.created_at is None, item.created_at, item.id)
+        )[-1]
+        row.version = newest.version
+        row.app_version = newest.app_version
+        row.source_type = newest.source_type
+        row.source_ref = newest.source_ref
+        row.definition = newest.definition or {}
+    db.session.commit()
+    log_audit(
+        "helm_chart_template_version_deleted",
+        actor_user_id=actor_user_id,
+        target_type="helm_chart_template",
+        target_id=row.slug,
+        details={"name": row.name, "version": wanted, "wasCurrent": was_current},
+    )
+    return _detail(row), None, 200
 
 
 def delete_chart_template(
@@ -288,6 +611,7 @@ def delete_chart_template(
     if not row:
         return None, "Helm chart template not found.", 404
     name = row.name
+    version_count = len(row.versions)
     db.session.delete(row)
     db.session.commit()
     log_audit(
@@ -295,7 +619,7 @@ def delete_chart_template(
         actor_user_id=actor_user_id,
         target_type="helm_chart_template",
         target_id=slug,
-        details={"name": name},
+        details={"name": name, "versionCount": version_count},
     )
     return {"id": slug, "deleted": True}, None, 200
 
@@ -1032,14 +1356,14 @@ def _scrub_environment_values_files(files: Dict[str, bytes]) -> List[str]:
     return warnings
 
 
-def _import_existing_chart(
+def _prepare_existing_chart(
     chart_root: Path,
     *,
     payload: Dict[str, Any],
     source_type: str,
     source_ref: str,
-    actor_user_id: Optional[int],
 ) -> Dict[str, Any]:
+    """Read a packaged chart into the keyword arguments ``_persist`` expects."""
     try:
         metadata = yaml.safe_load((chart_root / "Chart.yaml").read_text(encoding="utf-8")) or {}
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
@@ -1076,21 +1400,20 @@ def _import_existing_chart(
     name = _clean_text(payload.get("name"), 120) or _clean_text(metadata.get("name"), 120)
     if not name:
         raise ChartTemplateError("Chart.yaml does not contain a chart name.")
-    return _persist(
-        name=name,
-        description=_clean_text(payload.get("description"), 500)
+    return {
+        "name": name,
+        "description": _clean_text(payload.get("description"), 500)
         or _clean_text(metadata.get("description"), 500),
-        version=_clean_text(metadata.get("version"), 64) or "0.1.0",
-        app_version=_clean_text(metadata.get("appVersion"), 64),
-        source_type=source_type,
-        source_ref=source_ref,
-        files=files,
-        values=scrubbed,
-        variables=variables,
-        warnings=warnings,
-        resource_count=len([path for path in files if path.startswith("templates/")]),
-        actor_user_id=actor_user_id,
-    )
+        "version": _clean_text(metadata.get("version"), 64) or "0.1.0",
+        "app_version": _clean_text(metadata.get("appVersion"), 64),
+        "source_type": source_type,
+        "source_ref": source_ref,
+        "files": files,
+        "values": scrubbed,
+        "variables": variables,
+        "warnings": warnings,
+        "resource_count": len([path for path in files if path.startswith("templates/")]),
+    }
 
 
 def _validate_git_url(raw_url: str) -> str:
@@ -1274,13 +1597,13 @@ def import_git_chart(
             repo_path = _clean_text(payload.get("path"), 500)
             source_ref = f"{url}{f'#{ref}' if ref else ''}{f':{repo_path}' if repo_path else ''}"
             if chart_root and import_type != "yaml":
-                return _import_existing_chart(
+                prepared = _prepare_existing_chart(
                     chart_root,
                     payload=payload,
                     source_type="git-chart",
                     source_ref=source_ref,
-                    actor_user_id=actor_user_id,
-                ), None, 201
+                )
+                return _persist(**prepared, actor_user_id=actor_user_id), None, 201
 
             source_files = _collect_yaml_source_files(selected)
             name, files, values, variables, warnings, count = _convert_manifest_files(
@@ -1444,68 +1767,70 @@ def _extract_archive(data: bytes, filename: str, destination: Path) -> None:
         raise ChartTemplateError("The archive does not contain any importable files.")
 
 
+def _prepare_archive_import(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract an uploaded archive into the keyword arguments ``_persist`` expects."""
+    filename = _clean_text(payload.get("filename") or payload.get("fileName"), 255)
+    if filename and not filename.lower().endswith(ARCHIVE_SUFFIXES):
+        raise ChartTemplateError(f"Only {ARCHIVE_SUFFIX_LABEL} archives are supported.")
+    data = _decode_archive(payload)
+    with _private_import_directory() as temp_dir:
+        archive_root = Path(temp_dir) / "archive"
+        archive_root.mkdir(parents=True, exist_ok=True)
+        _extract_archive(data, filename, archive_root)
+        selected = _resolve_subpath(archive_root, payload.get("path") or "", label="archive")
+        import_type = _clean_text(payload.get("importType"), 20).lower() or "auto"
+        chart_root = _discover_chart_root(
+            selected, import_type, path_hint="Path inside archive"
+        )
+        archive_path = _clean_text(payload.get("path"), 500)
+        source_ref = (
+            f"{filename or 'uploaded-archive'}"
+            f"{f':{archive_path}' if archive_path else ''}"
+        )
+        if chart_root and import_type != "yaml":
+            return _prepare_existing_chart(
+                chart_root,
+                payload=payload,
+                source_type="archive-chart",
+                source_ref=source_ref,
+            )
+
+        source_files = _collect_yaml_source_files(selected)
+        name, files, values, variables, warnings, count = _convert_manifest_files(
+            source_files, requested_name=_clean_text(payload.get("name"), 120)
+        )
+        return {
+            "name": name,
+            "description": _clean_text(payload.get("description"), 500)
+            or "Converted from Kubernetes YAML in an uploaded archive",
+            "version": "0.1.0",
+            "app_version": "1.0.0",
+            "source_type": "archive-yaml",
+            "source_ref": source_ref,
+            "files": files,
+            "values": values,
+            "variables": variables,
+            "warnings": warnings,
+            "resource_count": count,
+        }
+
+
 def import_archive_chart(
     payload: Dict[str, Any], actor_user_id: Optional[int] = None
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     """Import a chart or raw Kubernetes manifests from an uploaded archive."""
     try:
-        filename = _clean_text(payload.get("filename") or payload.get("fileName"), 255)
-        if filename and not filename.lower().endswith(ARCHIVE_SUFFIXES):
-            raise ChartTemplateError(f"Only {ARCHIVE_SUFFIX_LABEL} archives are supported.")
-        data = _decode_archive(payload)
-        with _private_import_directory() as temp_dir:
-            archive_root = Path(temp_dir) / "archive"
-            archive_root.mkdir(parents=True, exist_ok=True)
-            _extract_archive(data, filename, archive_root)
-            selected = _resolve_subpath(
-                archive_root, payload.get("path") or "", label="archive"
-            )
-            import_type = _clean_text(payload.get("importType"), 20).lower() or "auto"
-            chart_root = _discover_chart_root(
-                selected, import_type, path_hint="Path inside archive"
-            )
-            archive_path = _clean_text(payload.get("path"), 500)
-            source_ref = (
-                f"{filename or 'uploaded-archive'}"
-                f"{f':{archive_path}' if archive_path else ''}"
-            )
-            if chart_root and import_type != "yaml":
-                return _import_existing_chart(
-                    chart_root,
-                    payload=payload,
-                    source_type="archive-chart",
-                    source_ref=source_ref,
-                    actor_user_id=actor_user_id,
-                ), None, 201
-
-            source_files = _collect_yaml_source_files(selected)
-            name, files, values, variables, warnings, count = _convert_manifest_files(
-                source_files, requested_name=_clean_text(payload.get("name"), 120)
-            )
-            return _persist(
-                name=name,
-                description=_clean_text(payload.get("description"), 500)
-                or "Converted from Kubernetes YAML in an uploaded archive",
-                version="0.1.0",
-                app_version="1.0.0",
-                source_type="archive-yaml",
-                source_ref=source_ref,
-                files=files,
-                values=values,
-                variables=variables,
-                warnings=warnings,
-                resource_count=count,
-                actor_user_id=actor_user_id,
-            ), None, 201
+        prepared = _prepare_archive_import(payload)
+        return _persist(**prepared, actor_user_id=actor_user_id), None, 201
     except ChartTemplateError as exc:
         return None, str(exc), 400
     except (OSError, UnicodeError) as exc:
         return None, f"Unable to read the archive: {exc}", 400
 
 
-def chart_archive_base64(slug: str) -> str:
+def chart_archive_base64(slug: str, version: str = "") -> str:
     row = _get_row(slug)
-    files = _decode_files(row.definition or {})
+    files = _decode_files(_definition_for(row, version))
     root = _slugify(row.name)
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as archive:
@@ -1542,9 +1867,9 @@ def _coerce_value(value: Any, variable: Dict[str, Any]) -> Any:
     return "" if value is None else str(value)
 
 
-def build_values_yaml(slug: str, answers: Dict[str, Any]) -> str:
+def build_values_yaml(slug: str, answers: Dict[str, Any], version: str = "") -> str:
     row = _get_row(slug)
-    definition = row.definition or {}
+    definition = _definition_for(row, version)
     values = deepcopy(definition.get("values") or {})
     variables = definition.get("variables") or []
     answer_map = answers if isinstance(answers, dict) else {}
@@ -1584,14 +1909,20 @@ def prepare_chart_template_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not slug:
         raise ChartTemplateError("chartTemplateId is required.")
     row = _get_row(slug)
+    # A chart can hold several uploaded versions; deploy the requested one and
+    # fall back to whichever version is currently selected.
+    version = _clean_text(
+        payload.get("chartVersion") or payload.get("chart_version"), 64
+    ) or (row.version or "")
+    _definition_for(row, version)
     prepared = dict(payload)
     prepared.update(
         {
             "chartSource": "local",
-            "chartArchiveBase64": chart_archive_base64(slug),
-            "valuesYaml": build_values_yaml(slug, payload.get("values") or {}),
+            "chartArchiveBase64": chart_archive_base64(slug, version),
+            "valuesYaml": build_values_yaml(slug, payload.get("values") or {}, version),
             "chartName": row.name,
-            "chartVersion": row.version,
+            "chartVersion": version or row.version,
         }
     )
     return prepared

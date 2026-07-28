@@ -22,12 +22,16 @@ from ..services.helm_service import (
     _resolve_access,
 )
 from ..services.helm_chart_template_service import (
+    ChartTemplateError,
+    add_chart_version,
     delete_chart_template,
+    delete_chart_version,
     get_chart_template,
     import_archive_chart,
     import_git_chart,
     import_yaml_chart,
     list_chart_templates,
+    set_current_chart_version,
 )
 
 helm_bp = Blueprint("helm", __name__, url_prefix="/api/helm")
@@ -145,10 +149,50 @@ def helm_chart_templates():
 @helm_bp.route("/chart-templates/<slug>", methods=["GET"])
 @require_permission("helm:view")
 def helm_chart_template_detail(slug: str):
-    template = get_chart_template(slug)
+    version = request.args.get("version") or ""
+    try:
+        template = get_chart_template(slug, version)
+    except ChartTemplateError as exc:
+        return error_response(str(exc), 404)
     if not template:
         return error_response("Helm chart template not found.", 404)
     return success_response(template)
+
+
+@helm_bp.route("/chart-templates/<slug>/versions", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_add_version(slug: str):
+    user = get_current_user()
+    data, err, status = add_chart_version(
+        slug, _body(), actor_user_id=user.id if user else None
+    )
+    if err:
+        return error_response(err, status)
+    return success_response(data, status_code=status)
+
+
+@helm_bp.route("/chart-templates/<slug>/versions/<version>/current", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_select_version(slug: str, version: str):
+    user = get_current_user()
+    data, err, status = set_current_chart_version(
+        slug, version, actor_user_id=user.id if user else None
+    )
+    if err:
+        return error_response(err, status)
+    return success_response(data)
+
+
+@helm_bp.route("/chart-templates/<slug>/versions/<version>", methods=["DELETE"])
+@require_permission("inventory:update")
+def helm_chart_template_delete_version(slug: str, version: str):
+    user = get_current_user()
+    data, err, status = delete_chart_version(
+        slug, version, actor_user_id=user.id if user else None
+    )
+    if err:
+        return error_response(err, status)
+    return success_response(data)
 
 
 @helm_bp.route("/chart-templates/import/yaml", methods=["POST"])

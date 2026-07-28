@@ -13,20 +13,47 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from . import k8s_versions
 from .profiles import DEFAULT_K8S_IMAGE_REGISTRY, ResolvedProfile
 
 CRI_SOCKET = "unix:///run/containerd/containerd.sock"
 
-# Pause (sandbox) image tag kubeadm pins per minor — the containerd
-# sandbox_image and the verify smoke pod must match it, or mirror/offline
-# registries that only carry the kubeadm image list break.
-_PAUSE_TAGS = {"1.29": "3.9", "1.30": "3.9", "1.31": "3.10", "1.32": "3.10"}
-
 
 def pause_image_tag(k8s_version: str) -> str:
-    parts = k8s_version.lstrip("v").split(".")
-    minor = ".".join(parts[:2]) if len(parts) >= 2 else k8s_version
-    return _PAUSE_TAGS.get(minor, "3.10")
+    """The pause (sandbox) tag kubeadm pins for this version's minor.
+
+    Read from the per-minor support table, which records kubeadm's
+    ``PauseVersion`` constant per release branch. There is deliberately **no**
+    generic fallback: guessing here would point containerd's ``sandbox_image``
+    and the verify smoke pod at a tag kubeadm never asks for, which a mirror or
+    offline registry carrying only kubeadm's image list cannot serve — and the
+    failure would surface as an unexplained sandbox pull error mid-build rather
+    than as a rejected version.
+    """
+    record = k8s_versions.record_for(k8s_version)
+    if record is None:
+        raise ValueError(
+            f"No pause image tag is recorded for Kubernetes '{k8s_version}'. "
+            "Add a support record for its minor before building with it."
+        )
+    return record.pause_image_tag
+
+
+def config_api_version(k8s_version: str) -> str:
+    """The kubeadm configuration API this version's minor must be given.
+
+    ``kubeadm.k8s.io/v1beta4`` exists from kubeadm 1.31 and is the only version
+    current kubeadm documents as supported; v1beta3 is deprecated upstream and
+    is emitted only for the pre-1.31 minors that cannot read v1beta4. Builds
+    pinned to those older minors keep working unchanged.
+    """
+    record = k8s_versions.record_for(k8s_version)
+    if record is None:
+        raise ValueError(
+            f"No kubeadm configuration API is recorded for Kubernetes "
+            f"'{k8s_version}'."
+        )
+    return record.kubeadm_config_api
 
 
 def render_init_config(
@@ -41,22 +68,34 @@ def render_init_config(
 ) -> str:
     """InitConfiguration + ClusterConfiguration + KubeletConfiguration YAML.
 
-    v1beta3 is accepted across the supported 1.29–1.33 range (deprecated from
-    1.31 but functional; revisit at 1.34 when it is removed).
+    The kubeadm API version comes from the minor's support record. Every field
+    emitted below carries the same name and nesting in v1beta3 and v1beta4 —
+    ``nodeRegistration.{name,criSocket}``, ``kubernetesVersion``,
+    ``controlPlaneEndpoint``, ``imageRepository``,
+    ``networking.{podSubnet,serviceSubnet}`` and ``apiServer.certSANs`` — so the
+    document is schema-valid under both. The v1beta4 changes that would matter
+    (structured ``extraArgs`` lists, the removal of
+    ``apiServer.timeoutForControlPlane`` in favour of ``timeouts``) touch fields
+    this renderer does not set; ``preflight`` re-parses the rendered document
+    per build rather than trusting that by inspection.
+
+    KubeletConfiguration keeps its own group: ``kubelet.config.k8s.io/v1beta1``
+    is unrelated to the kubeadm API version and is current across this range.
     """
     version = k8s_version.lstrip("v")
+    api_version = config_api_version(version)
     image_repo_block = ""
     if profile.k8s_image_registry and profile.k8s_image_registry != DEFAULT_K8S_IMAGE_REGISTRY:
         image_repo_block = f"imageRepository: {profile.k8s_image_registry}\n"
     endpoint_host = control_plane_endpoint.rsplit(":", 1)[0]
     server_tls_line = "serverTLSBootstrap: true\n" if server_tls_bootstrap else ""
-    return f"""apiVersion: kubeadm.k8s.io/v1beta3
+    return f"""apiVersion: {api_version}
 kind: InitConfiguration
 nodeRegistration:
   name: {json.dumps(node_name)}
   criSocket: {CRI_SOCKET}
 ---
-apiVersion: kubeadm.k8s.io/v1beta3
+apiVersion: {api_version}
 kind: ClusterConfiguration
 kubernetesVersion: v{version}
 controlPlaneEndpoint: "{control_plane_endpoint}"

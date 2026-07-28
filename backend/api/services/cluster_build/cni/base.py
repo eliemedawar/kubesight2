@@ -75,6 +75,10 @@ class CniDescriptor:
     manifest_files: Tuple[str, ...]      # filenames under data/cni/<id>/<ver>/
     manifest_urls: Tuple[str, ...]       # pinned upstream, {version} templated
     manifest_sha256: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    # Kubernetes minors ("1.32") this plugin's pinned manifests are validated
+    # against. Preflight fails a build whose minor is absent, so a newly enabled
+    # Kubernetes minor cannot quietly reuse a CNI manifest nobody tested on it.
+    supported_k8s_minors: Tuple[str, ...] = ()
     # DaemonSet the readiness gate waits on: (namespace, name).
     readiness_daemonset: Tuple[str, str] = ("kube-system", "")
     # Appended to "manifest not bundled" errors: the command that fixes it.

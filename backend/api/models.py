@@ -1042,6 +1042,50 @@ class HelmChartTemplate(db.Model):
     )
 
     creator = db.relationship("User", foreign_keys=[created_by])
+    versions = db.relationship(
+        "HelmChartTemplateVersion",
+        back_populates="template",
+        cascade="all, delete-orphan",
+        order_by="HelmChartTemplateVersion.created_at",
+    )
+
+
+class HelmChartTemplateVersion(db.Model):
+    """One uploaded revision of a reusable Helm chart.
+
+    Every version carries its own complete ``definition`` (files, values,
+    generated inputs, warnings, inspection) so an older revision stays
+    deployable unchanged. The parent row mirrors whichever version is current,
+    which keeps every single-version code path behaving exactly as before.
+    """
+
+    __tablename__ = "helm_chart_template_versions"
+    __table_args__ = (
+        db.UniqueConstraint("template_id", "version", name="uq_helm_chart_template_version"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    template_id = db.Column(
+        db.Integer,
+        db.ForeignKey("helm_chart_templates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version = db.Column(db.String(64), nullable=False)
+    app_version = db.Column(db.String(64), nullable=True)
+    description = db.Column(db.String(500), nullable=True)
+    source_type = db.Column(db.String(32), nullable=False)
+    source_ref = db.Column(db.String(1000), nullable=True)
+    definition = db.Column(db.JSON, nullable=False, default=dict)
+    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    template = db.relationship("HelmChartTemplate", back_populates="versions")
+    creator = db.relationship("User", foreign_keys=[created_by])
 
 
 class DeploymentRequest(db.Model):

@@ -13,8 +13,11 @@ METRICS_SERVER = AddonDescriptor(
         "Horizontal Pod Autoscaling."
     ),
     support_tier="supported",
-    # 0.7.x supports every Kubernetes version offered by the builder (1.29–1.32).
+    # 0.7.x covers Kubernetes 1.27+ and so every minor the builder offers.
+    # Kubernetes 1.34 and newer need Metrics Server 0.9.x — pin that release
+    # before listing those minors here.
     versions=("0.7.2",),
+    supported_k8s_minors=("1.29", "1.30", "1.31", "1.32"),
     manifest_files=("components.yaml",),
     manifest_urls=(
         "https://github.com/kubernetes-sigs/metrics-server/releases/download/"

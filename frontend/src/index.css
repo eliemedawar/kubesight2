@@ -7328,6 +7328,74 @@ kbd {
   font-size: var(--font-size-xs);
 }
 
+.helm-chart-card__version-count {
+  margin-left: var(--space-2);
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill, 999px);
+  background: var(--bg-interactive);
+  color: var(--text-subtle);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.helm-chart-version-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.helm-chart-version-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel-strong);
+}
+
+.helm-chart-version-list li.is-current {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.helm-chart-version-list__info {
+  display: grid;
+  gap: 0.1rem;
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.helm-chart-version-list__badge {
+  margin-left: var(--space-2);
+  color: var(--accent);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.helm-chart-version-list__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.helm-chart-version-list__actions .btn-text {
+  padding: 0.15rem 0.4rem;
+  font-size: var(--font-size-xs);
+}
+
+.helm-version-picker {
+  max-width: 22rem;
+}
+
 .helm-chart-card__contents .helm-chart-contents {
   margin-top: var(--space-3);
 }
@@ -7442,6 +7510,28 @@ kbd {
   width: min(58rem, calc(100vw - 2rem));
   max-height: min(88vh, 58rem);
   overflow-y: auto;
+}
+
+/* Field label above its control, so tall inputs (YAML textareas) do not sit
+   baseline-aligned beside their label. */
+.helm-chart-import-modal label,
+.helm-chart-deploy-modal label {
+  display: grid;
+  gap: var(--space-1);
+  align-content: start;
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.helm-chart-import-modal label > .muted,
+.helm-chart-deploy-modal label > span .muted {
+  font-weight: 400;
+}
+
+.helm-chart-import-modal label input[type="file"] {
+  font-weight: 400;
 }
 
 .helm-import-source-tabs {

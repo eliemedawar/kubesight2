@@ -13,10 +13,15 @@ import NamespaceSelect from "./NamespaceSelect.jsx";
 
 function initialFieldValue(variable) {
   const value = variable?.default;
-  if (variable?.type === "array" || variable?.type === "object") {
-    return value == null ? "" : JSON.stringify(value, null, 2);
+  if (value == null || value === "") {
+    // A blanked default (e.g. a scrubbed secret) stays an empty field rather
+    // than rendering as a literal `""` for the operator to delete.
+    return "";
   }
-  return value ?? "";
+  if (variable?.type === "array" || variable?.type === "object") {
+    return JSON.stringify(value, null, 2);
+  }
+  return value;
 }
 
 function VariableField({ variable, value, onChange }) {
@@ -39,7 +44,13 @@ function VariableField({ variable, value, onChange }) {
           <option value="false">False</option>
         </SearchableSelect>
       ) : variable.type === "array" || variable.type === "object" ? (
-        <textarea {...common} rows={4} className="yaml-editor" />
+        <textarea
+          {...common}
+          rows={4}
+          className="yaml-editor"
+          placeholder={variable.type === "array" ? "- first-item" : "key: value"}
+          spellCheck={false}
+        />
       ) : (
         <input
           {...common}
@@ -73,6 +84,7 @@ export default function HelmChartDeployModal({
       ? defaultClusterId
       : options[0]?.id || "";
   const [detail, setDetail] = useState(null);
+  const [version, setVersion] = useState("");
   const [clusterId, setClusterId] = useState(resolvedCluster);
   const [namespace, setNamespace] = useState("");
   const [releaseName, setReleaseName] = useState("");
@@ -89,11 +101,13 @@ export default function HelmChartDeployModal({
     let cancelled = false;
     setBusy(true);
     setError("");
-    getHelmChartTemplate(template.id)
+    // An empty version asks the backend for whichever version is current.
+    getHelmChartTemplate(template.id, version)
       .then((result) => {
         if (cancelled) return;
         setDetail(result);
-        setReleaseName(
+        setReleaseName((previous) =>
+          previous ||
           String(result.id || "release")
             .toLowerCase()
             .replace(/[^a-z0-9-]+/g, "-")
@@ -118,11 +132,12 @@ export default function HelmChartDeployModal({
     return () => {
       cancelled = true;
     };
-  }, [open, template?.id]);
+  }, [open, template?.id, version]);
 
   useEffect(() => {
     if (!open) {
       setDetail(null);
+      setVersion("");
       setClusterId(resolvedCluster);
       setNamespace("");
       setReleaseName("");
@@ -147,9 +162,11 @@ export default function HelmChartDeployModal({
 
   if (!open) return null;
 
+  const versions = detail?.versions || [];
   const payload = {
     chartSource: "template",
     chartTemplateId: detail?.id || template?.id,
+    chartVersion: version || detail?.version || "",
     clusterId,
     namespace,
     releaseName,
@@ -215,6 +232,26 @@ export default function HelmChartDeployModal({
 
         {step === "configure" ? (
           <form className="add-app-form" onSubmit={previewChart}>
+            {versions.length > 1 ? (
+              <label className="helm-version-picker">
+                <span>
+                  Chart version <span className="muted">({versions.length} stored)</span>
+                </span>
+                <SearchableSelect
+                  value={version || detail?.version || ""}
+                  onChange={(event) => setVersion(event.target.value)}
+                >
+                  {versions.map((item) => (
+                    <option key={item.version} value={item.version}>
+                      v{item.version}
+                      {item.isCurrent ? " (current)" : ""}
+                      {item.appVersion ? ` · app ${item.appVersion}` : ""}
+                    </option>
+                  ))}
+                </SearchableSelect>
+              </label>
+            ) : null}
+
             <div className="helm-target-grid">
               <label>
                 Cluster
@@ -334,7 +371,9 @@ export default function HelmChartDeployModal({
               </div>
             ) : null}
             <label>
-              Type <strong>{confirmationPhrase}</strong> to confirm
+              <span>
+                Type <strong>{confirmationPhrase}</strong> to confirm
+              </span>
               <input
                 value={confirmation}
                 onChange={(event) => setConfirmation(event.target.value)}

@@ -57,4 +57,7 @@ CALICO = _Calico(
         ),
     },
     readiness_daemonset=("kube-system", "calico-node"),
+    # Enabling a newer Kubernetes minor means pinning the Calico release
+    # upstream tests against it (3.32 for 1.34-1.36) and listing it here.
+    supported_k8s_minors=("1.29", "1.30", "1.31", "1.32"),
 )

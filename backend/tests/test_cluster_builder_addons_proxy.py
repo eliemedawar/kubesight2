@@ -806,7 +806,19 @@ class TestImageAndForwardProxy:
 
         assert "https://proxy.local:5000/v2/" in script
         assert "proxy.local:5000/kubernetes/v2" not in script
-        assert script.count("https://proxy.local:5000/v2/") == 1
+        # The reachability probe hits the registry ROOT once, deduplicated
+        # across the k8s/CNI/add-on prefixes that share this authority. Match
+        # only the bare root so the image-manifest probe below — which
+        # legitimately continues with a repository path — is not counted here.
+        assert len(re.findall(
+            r"https://proxy\.local:5000/v2/(?![A-Za-z0-9])", script
+        )) == 1
+        # The pause tag kubeadm pins for this minor is probed under the
+        # prefix's repository path, not at the authority root.
+        assert (
+            "https://proxy.local:5000/v2/kubernetes/pause/manifests/3.10"
+            in script
+        )
         assert "HTTP_PROXY" in script
         assert "mktemp /run/.kubesight-preflight-ca.XXXXXX" in script
         assert "mktemp /var/tmp/.kubesight-fsync.XXXXXX" in script

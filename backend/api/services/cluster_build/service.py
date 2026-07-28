@@ -27,7 +27,7 @@ from ..vsphere_client import VSphereError
 from . import addons as addon_registry
 from . import cni as cni_registry
 from .addons import metallb as metallb_addon
-from . import executor, os_adapters, preflight
+from . import executor, k8s_versions, os_adapters, preflight
 from .profiles import resolve as resolve_profile
 from .scrub import scrub
 
@@ -36,7 +36,10 @@ _TOPOLOGIES = {"single_cp", "stacked_ha"}
 _ROLES = {"control_plane", "worker", "loadbalancer"}
 _EDITABLE_STATUSES = {"draft", "preflight_passed", "preflight_failed"}
 
-SUPPORTED_K8S_VERSIONS = ("1.32.4", "1.31.8", "1.30.12", "1.29.15")
+# The versions KubeSight ships when upstream release discovery is unreachable.
+# The live list served to the wizard is discovered per supported minor — see
+# ``k8s_versions`` — but this stays the documented, tested floor.
+SUPPORTED_K8S_VERSIONS = k8s_versions.STATIC_FALLBACK_VERSIONS
 
 _ENDPOINT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.\-]*(:\d{1,5})?$")
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
@@ -383,12 +386,13 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         raise ValueError("name is required.")
     build.name = name
 
-    k8s_version = str(payload.get("k8sVersion", build.k8s_version or "")).strip().lstrip("v")
-    if k8s_version not in SUPPORTED_K8S_VERSIONS:
-        raise ValueError(
-            f"k8sVersion must be one of: {', '.join(SUPPORTED_K8S_VERSIONS)}."
-        )
-    build.k8s_version = k8s_version
+    # Same policy the options endpoint publishes, so every version the wizard
+    # offers is accepted here. Minor-scoped rather than list-scoped on purpose:
+    # a draft pinned to 1.32.4 must stay editable once 1.32.5 is discovered,
+    # and the build keeps its own exact patch either way.
+    build.k8s_version = k8s_versions.validate_version(
+        payload.get("k8sVersion", build.k8s_version or "")
+    )
 
     topology = str(payload.get("topologyType", build.topology_type or "single_cp")).strip()
     if topology not in _TOPOLOGIES:
@@ -700,12 +704,20 @@ def run_preflight(build_id: int) -> Dict[str, Any]:
                 resolved,
             )
 
+        # The exact pinned version is judged before any node is touched: an
+        # unsupported version/CNI/add-on combination must fail here rather than
+        # part-way through cluster creation.
+        build_checks = preflight.version_checks(build, resolved)
+
         vsphere_results = preflight.vsphere_checks(build)
         node_results = preflight.run_node_preflight(
             build, resolved, lambda node: executor._target_for(build, node)
         )
-        merged = preflight.merge_preflight(build, vsphere_results, node_results)
+        merged = preflight.merge_preflight(
+            build, vsphere_results, node_results, build_checks=build_checks
+        )
         merged["topologyWarnings"] = warnings
+        merged["buildChecks"] = build_checks
     except Exception as exc:
         # Never strand the build in 'preflighting' — that status blocks both
         # editing and re-running from the wizard.
@@ -873,13 +885,17 @@ def preflight_growth(build_id: int) -> Dict[str, Any]:
     )
     resolved = resolve_profile(profile_row)
     try:
+        # A machine joining a live cluster must satisfy the same version policy
+        # the cluster was built under — its pinned version, unchanged.
+        build_checks = preflight.version_checks(build, resolved)
         vsphere_results = preflight.vsphere_checks(build, nodes=pending)
         node_results = preflight.run_node_preflight(
             build, resolved, lambda node: executor._target_for(build, node),
             nodes=pending,
         )
         merged = preflight.merge_preflight(
-            build, vsphere_results, node_results, nodes=pending
+            build, vsphere_results, node_results, nodes=pending,
+            build_checks=build_checks,
         )
     except Exception as exc:
         db.session.rollback()
@@ -887,6 +903,7 @@ def preflight_growth(build_id: int) -> Dict[str, Any]:
         raise ValueError(f"Preflight failed to run: {safe_error}") from exc
 
     merged["topologyWarnings"] = []
+    merged["buildChecks"] = build_checks
     db.session.commit()
     return merged
 
@@ -1034,8 +1051,13 @@ def build_logs(build_id: int, *, node_id: Optional[int] = None) -> List[Dict[str
 
 
 def wizard_options() -> Dict[str, Any]:
+    # One discovery pass feeds both the list and its provenance.
+    releases = k8s_versions.releases()
     return {
-        "k8sVersions": list(SUPPORTED_K8S_VERSIONS),
+        # Contract: a plain string[] of exact patch versions, newest first.
+        # Additive metadata lives alongside it in k8sVersionInfo.
+        "k8sVersions": k8s_versions.supported_versions(releases),
+        "k8sVersionInfo": k8s_versions.version_metadata(releases),
         "cniPlugins": cni_registry.catalog(),
         "addons": addon_registry.catalog(),
         "osMatrix": os_adapters.supported_matrix(),

@@ -207,18 +207,25 @@ function ShapeStep({ options, basics, setBasic }) {
       </Field>
 
       <Field label="Kubernetes version" hint="Newest first. Preflight confirms your sources carry it.">
-        <div className="sg-cb-seg" role="group" aria-label="Kubernetes version">
-          {options.k8sVersions.map((version) => (
-            <button
-              key={version}
-              type="button"
-              aria-pressed={basics.k8sVersion === version}
-              onClick={() => setBasic("k8sVersion", version)}
-            >
-              v{version}
-            </button>
-          ))}
-        </div>
+        {(options.k8sVersions || []).length ? (
+          <div className="sg-cb-seg" role="group" aria-label="Kubernetes version">
+            {options.k8sVersions.map((version) => (
+              <button
+                key={version}
+                type="button"
+                aria-pressed={basics.k8sVersion === version}
+                onClick={() => setBasic("k8sVersion", version)}
+              >
+                v{version}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">
+            No Kubernetes versions are available. KubeSight could not resolve a
+            supported release; check the backend logs and retry.
+          </p>
+        )}
       </Field>
 
       <Field label="Topology">

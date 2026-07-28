@@ -30,8 +30,35 @@ export function listHelmChartTemplates() {
   return request("/api/helm/chart-templates");
 }
 
-export function getHelmChartTemplate(templateId) {
-  return request(`/api/helm/chart-templates/${encodeURIComponent(templateId)}`);
+export function getHelmChartTemplate(templateId, version = "") {
+  return request(`/api/helm/chart-templates/${encodeURIComponent(templateId)}`, {
+    query: { version },
+  });
+}
+
+export function addHelmChartVersion(templateId, payload) {
+  return request(`/api/helm/chart-templates/${encodeURIComponent(templateId)}/versions`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function setHelmChartVersionCurrent(templateId, version) {
+  return request(
+    `/api/helm/chart-templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(
+      version,
+    )}/current`,
+    { method: "POST" },
+  );
+}
+
+export function deleteHelmChartVersion(templateId, version) {
+  return request(
+    `/api/helm/chart-templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(
+      version,
+    )}`,
+    { method: "DELETE" },
+  );
 }
 
 export function importHelmChartFromYaml(payload) {

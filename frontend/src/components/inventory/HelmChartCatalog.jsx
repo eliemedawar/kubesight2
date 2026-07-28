@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 
 import {
   deleteHelmChartTemplate,
+  deleteHelmChartVersion,
   listHelmChartTemplates,
+  setHelmChartVersionCurrent,
 } from "../../api/helmApi.js";
 import HelmChartContents, { helmSourceLabel } from "./HelmChartContents.jsx";
 import HelmChartDeployModal from "./HelmChartDeployModal.jsx";
@@ -19,6 +21,7 @@ export default function HelmChartCatalog({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [importOpen, setImportOpen] = useState(false);
+  const [versionTarget, setVersionTarget] = useState(null);
   const [selectedTemplate, setSelectedTemplate] = useState(null);
 
   const load = useCallback(async () => {
@@ -53,6 +56,33 @@ export default function HelmChartCatalog({
       await load();
     } catch (err) {
       setError(err.message || "Failed to delete the Helm chart.");
+    }
+  };
+
+  const useVersion = async (template, version) => {
+    setError("");
+    try {
+      await setHelmChartVersionCurrent(template.id, version.version);
+      await load();
+    } catch (err) {
+      setError(err.message || "Failed to switch the chart version.");
+    }
+  };
+
+  const removeVersion = async (template, version) => {
+    if (
+      !window.confirm(
+        `Delete version ${version.version} of “${template.name}”? Releases already deployed from it are not affected.`,
+      )
+    ) {
+      return;
+    }
+    setError("");
+    try {
+      await deleteHelmChartVersion(template.id, version.version);
+      await load();
+    } catch (err) {
+      setError(err.message || "Failed to delete the chart version.");
     }
   };
 
@@ -98,7 +128,14 @@ export default function HelmChartCatalog({
               <div className="helm-chart-card__icon" aria-hidden="true">H</div>
               <div>
                 <h3>{template.name}</h3>
-                <p className="helm-chart-card__version">v{template.version}</p>
+                <p className="helm-chart-card__version">
+                  v{template.version}
+                  {template.versionCount > 1 ? (
+                    <span className="helm-chart-card__version-count">
+                      {template.versionCount} versions
+                    </span>
+                  ) : null}
+                </p>
               </div>
               {canManage ? (
                 <button
@@ -140,6 +177,63 @@ export default function HelmChartCatalog({
               </summary>
               <HelmChartContents template={template} compact />
             </details>
+            {(template.versions || []).length > 1 ? (
+              <details className="helm-chart-card__contents">
+                <summary>Versions · {template.versions.length} stored</summary>
+                <ul className="helm-chart-version-list">
+                  {[...template.versions].reverse().map((version) => (
+                    <li
+                      key={version.version}
+                      className={version.isCurrent ? "is-current" : undefined}
+                    >
+                      <div className="helm-chart-version-list__info">
+                        <span>
+                          <code>v{version.version}</code>
+                          {version.isCurrent ? (
+                            <span className="helm-chart-version-list__badge">current</span>
+                          ) : null}
+                        </span>
+                        <span className="muted">
+                          {version.templateCount} template
+                          {version.templateCount === 1 ? "" : "s"} ·{" "}
+                          {version.valuesFileCount} env file
+                          {version.valuesFileCount === 1 ? "" : "s"} ·{" "}
+                          {version.requiredVariableCount} required
+                        </span>
+                        <span className="muted">
+                          {version.sourceRef || helmSourceLabel(version)}
+                          {version.createdAt
+                            ? ` · ${new Date(version.createdAt).toLocaleString()}`
+                            : ""}
+                        </span>
+                      </div>
+                      {canManage ? (
+                        <div className="helm-chart-version-list__actions">
+                          {version.isCurrent ? null : (
+                            <button
+                              type="button"
+                              className="btn-text"
+                              onClick={() => useVersion(template, version)}
+                            >
+                              Make current
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="helm-chart-card__delete"
+                            onClick={() => removeVersion(template, version)}
+                            aria-label={`Delete version ${version.version}`}
+                            title="Delete version"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
             {(template.warnings || []).length ? (
               <details className="helm-chart-card__warnings">
                 <summary>{template.warnings.length} import warning{template.warnings.length === 1 ? "" : "s"}</summary>
@@ -151,6 +245,16 @@ export default function HelmChartCatalog({
               </details>
             ) : null}
             <div className="helm-chart-card__actions">
+              {canManage ? (
+                <button
+                  type="button"
+                  className="btn-text"
+                  onClick={() => setVersionTarget(template)}
+                  title="Upload another packaged chart as a new version"
+                >
+                  Add Version
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="btn-primary"
@@ -168,6 +272,12 @@ export default function HelmChartCatalog({
       <HelmChartImportModal
         open={importOpen}
         onClose={() => setImportOpen(false)}
+        onImported={load}
+      />
+      <HelmChartImportModal
+        open={Boolean(versionTarget)}
+        targetTemplate={versionTarget}
+        onClose={() => setVersionTarget(null)}
         onImported={load}
       />
       <HelmChartDeployModal

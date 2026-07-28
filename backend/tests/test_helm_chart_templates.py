@@ -515,6 +515,204 @@ def test_tgz_archive_rejects_symlinked_members(client, admin_token):
     assert "link" in response.get_json()["error"]
 
 
+def _chart_entries(version: str, *, replicas: int = 2, extra: dict | None = None) -> dict:
+    entries = {
+        "areeba-txm/Chart.yaml": (
+            f"apiVersion: v2\nname: areeba-txm\nversion: {version}\n"
+            f"appVersion: '{version}'\ndescription: Transaction manager {version}\n"
+        ),
+        "areeba-txm/values.yaml": f"replicaCount: {replicas}\n",
+        "areeba-txm/templates/deployment.yaml": (
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: txm\n"
+            "spec:\n  replicas: {{ .Values.replicaCount }}\n"
+        ),
+    }
+    entries.update(extra or {})
+    return entries
+
+
+def test_chart_versions_accumulate_and_track_the_current_one(client, admin_token, app):
+    first = _import_archive(
+        client, admin_token, _chart_entries("0.1.0"), filename="areeba-txm-0.1.0.tgz"
+    )
+    assert first.status_code == 201, first.get_json()
+    slug = first.get_json()["data"]["id"]
+    assert first.get_json()["data"]["versionCount"] == 1
+
+    second = client.post(
+        f"/api/helm/chart-templates/{slug}/versions",
+        headers=auth_headers(admin_token),
+        json={
+            "filename": "areeba-txm-0.2.0.tgz",
+            "archiveBase64": _tgz_base64(
+                _chart_entries(
+                    "0.2.0",
+                    replicas=5,
+                    extra={
+                        "areeba-txm/templates/service.yaml": (
+                            "apiVersion: v1\nkind: Service\nmetadata:\n  name: txm\n"
+                        ),
+                        "areeba-txm/values-prod.yaml": "replicaCount: 9\n",
+                    },
+                )
+            ),
+        },
+    )
+    assert second.status_code == 201, second.get_json()
+    data = second.get_json()["data"]
+    assert data["versionCount"] == 2
+    assert data["version"] == "0.2.0", "the newest upload becomes current"
+    assert data["templateCount"] == 2
+    assert data["valuesFileCount"] == 1
+    versions = {item["version"]: item for item in data["versions"]}
+    assert set(versions) == {"0.1.0", "0.2.0"}
+    assert versions["0.2.0"]["isCurrent"] is True
+    assert versions["0.1.0"]["isCurrent"] is False
+    assert versions["0.1.0"]["templateCount"] == 1
+    assert versions["0.1.0"]["sourceRef"] == "areeba-txm-0.1.0.tgz"
+
+    # Re-uploading the same chart version is refused rather than silently kept.
+    duplicate = client.post(
+        f"/api/helm/chart-templates/{slug}/versions",
+        headers=auth_headers(admin_token),
+        json={
+            "filename": "areeba-txm-0.2.0.tgz",
+            "archiveBase64": _tgz_base64(_chart_entries("0.2.0")),
+        },
+    )
+    assert duplicate.status_code == 400
+    assert "already exists" in duplicate.get_json()["error"]
+
+    # The listing keeps one card per chart, with the version history attached.
+    listing = client.get(
+        "/api/helm/chart-templates", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    entry = next(item for item in listing if item["id"] == slug)
+    assert entry["versionCount"] == 2
+    assert entry["version"] == "0.2.0"
+
+    # Older versions stay deployable exactly as they were uploaded.
+    older = client.get(
+        f"/api/helm/chart-templates/{slug}?version=0.1.0",
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]
+    assert older["version"] == "0.1.0"
+    assert older["templateCount"] == 1
+    with app.app_context():
+        packaged = base64.b64decode(chart_archive_base64(slug, "0.1.0"))
+        current = base64.b64decode(chart_archive_base64(slug))
+        assert "replicaCount: 2" in build_values_yaml(slug, {}, "0.1.0")
+        assert "replicaCount: 5" in build_values_yaml(slug, {})
+    with tarfile.open(fileobj=io.BytesIO(packaged), mode="r:gz") as archive:
+        assert not any(name.endswith("service.yaml") for name in archive.getnames())
+    with tarfile.open(fileobj=io.BytesIO(current), mode="r:gz") as archive:
+        assert any(name.endswith("service.yaml") for name in archive.getnames())
+
+    missing = client.get(
+        f"/api/helm/chart-templates/{slug}?version=9.9.9",
+        headers=auth_headers(admin_token),
+    )
+    assert missing.status_code == 404
+
+
+def test_chart_version_can_be_reselected_and_deleted(client, admin_token):
+    slug = _import_archive(
+        client, admin_token, _chart_entries("1.0.0"), filename="txm-1.0.0.tgz"
+    ).get_json()["data"]["id"]
+    client.post(
+        f"/api/helm/chart-templates/{slug}/versions",
+        headers=auth_headers(admin_token),
+        json={
+            "filename": "txm-1.1.0.tgz",
+            "archiveBase64": _tgz_base64(_chart_entries("1.1.0", replicas=4)),
+        },
+    )
+
+    rolled_back = client.post(
+        f"/api/helm/chart-templates/{slug}/versions/1.0.0/current",
+        headers=auth_headers(admin_token),
+    )
+    assert rolled_back.status_code == 200
+    assert rolled_back.get_json()["data"]["version"] == "1.0.0"
+
+    removed = client.delete(
+        f"/api/helm/chart-templates/{slug}/versions/1.1.0",
+        headers=auth_headers(admin_token),
+    )
+    assert removed.status_code == 200
+    assert removed.get_json()["data"]["versionCount"] == 1
+
+    last = client.delete(
+        f"/api/helm/chart-templates/{slug}/versions/1.0.0",
+        headers=auth_headers(admin_token),
+    )
+    assert last.status_code == 400
+    assert "only version" in last.get_json()["error"]
+
+
+def test_chart_version_endpoints_require_permission(client, admin_token, viewer_token):
+    slug = _import_archive(
+        client, admin_token, _chart_entries("1.0.0"), filename="txm-1.0.0.tgz"
+    ).get_json()["data"]["id"]
+    denied = client.post(
+        f"/api/helm/chart-templates/{slug}/versions",
+        headers=auth_headers(viewer_token),
+        json={
+            "filename": "txm-2.0.0.tgz",
+            "archiveBase64": _tgz_base64(_chart_entries("2.0.0")),
+        },
+    )
+    assert denied.status_code == 403
+    assert (
+        client.delete(
+            f"/api/helm/chart-templates/{slug}/versions/1.0.0",
+            headers=auth_headers(viewer_token),
+        ).status_code
+        == 403
+    )
+
+
+def test_deploy_pipeline_uses_the_requested_chart_version(client, admin_token):
+    slug = _import_archive(
+        client, admin_token, _chart_entries("0.1.0"), filename="txm-0.1.0.tgz"
+    ).get_json()["data"]["id"]
+    client.post(
+        f"/api/helm/chart-templates/{slug}/versions",
+        headers=auth_headers(admin_token),
+        json={
+            "filename": "txm-0.3.0.tgz",
+            "archiveBase64": _tgz_base64(_chart_entries("0.3.0", replicas=7)),
+        },
+    )
+    rendered = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: preview\n"
+    captured = {}
+
+    def fake_run_helm(access, args, **kwargs):
+        values_path = args[args.index("-f") + 1] if "-f" in args else ""
+        captured["values"] = Path(values_path).read_text(encoding="utf-8") if values_path else ""
+        captured["args"] = list(args)
+        return rendered
+
+    with patch("api.services.helm_service.is_helm_installed", return_value=True):
+        with patch("api.services.helm_service.run_helm", side_effect=fake_run_helm):
+            response = client.post(
+                "/api/helm/template",
+                headers=auth_headers(admin_token),
+                json={
+                    "chartSource": "template",
+                    "chartTemplateId": slug,
+                    "chartVersion": "0.1.0",
+                    "clusterId": "prod-us-east",
+                    "namespace": "default",
+                    "releaseName": "txm",
+                    "values": {},
+                },
+            )
+    assert response.status_code == 200, response.get_json()
+    assert "replicaCount: 2" in captured["values"], captured
+    assert "replicaCount: 7" not in captured["values"]
+
+
 def test_saved_chart_uses_existing_helm_preview_pipeline(client, admin_token):
     imported = _import_yaml(client, admin_token).get_json()["data"]
     detail = client.get(

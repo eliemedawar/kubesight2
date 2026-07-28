@@ -14,13 +14,18 @@ import shlex
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import yaml
 
 from ...models import ClusterBuild, ClusterBuildNode
 from ..ssh import SshTarget, get_transport
-from . import os_adapters
+from . import addons as addon_registry
+from . import cni as cni_registry
+from . import k8s_versions, kubeadm, os_adapters
 from .os_adapters import OsFacts
-from .profiles import ResolvedProfile
+from .profiles import ResolvedProfile, registry_authority
 from .scrub import scrub
 
 _ROLE_MINIMUMS = {
@@ -205,19 +210,266 @@ def vsphere_checks(
 
 
 # ---------------------------------------------------------------------------
+# Build-scoped checks for the exact selected Kubernetes version
+#
+# These need no SSH: they answer "can this build's pinned patch version be
+# assembled at all from the selected CNI, add-ons and repo mode" before a single
+# node is touched. An unsupported combination must fail here, not half-way
+# through cluster creation.
+# ---------------------------------------------------------------------------
+
+def _kubeadm_config_check(build: ClusterBuild, profile: ResolvedProfile) -> Dict[str, Any]:
+    """Render this build's kubeadm config and prove it parses for its version.
+
+    Migrating a minor to a newer kubeadm API is never just an ``apiVersion``
+    edit, so the generated document is parsed back and its required fields are
+    asserted rather than assumed.
+    """
+    try:
+        expected_api = kubeadm.config_api_version(build.k8s_version)
+        rendered = kubeadm.render_init_config(
+            k8s_version=build.k8s_version,
+            control_plane_endpoint=build.control_plane_endpoint or "127.0.0.1:6443",
+            pod_cidr=build.pod_cidr,
+            service_cidr=build.service_cidr,
+            profile=profile,
+            node_name="preflight-render",
+            server_tls_bootstrap=any(
+                (item or {}).get("id") == "metrics-server"
+                for item in (build.addons_json or [])
+            ),
+        )
+        documents = [doc for doc in yaml.safe_load_all(rendered) if doc]
+    except (ValueError, yaml.YAMLError) as exc:
+        return _check(
+            "k8s_kubeadm_config", "kubeadm configuration valid", "fail",
+            scrub(str(exc)),
+            "The generated kubeadm configuration could not be produced for "
+            f"Kubernetes {build.k8s_version}.",
+        )
+
+    by_kind = {str(doc.get("kind") or ""): doc for doc in documents}
+    missing = [
+        kind for kind in ("InitConfiguration", "ClusterConfiguration",
+                          "KubeletConfiguration")
+        if kind not in by_kind
+    ]
+    if missing:
+        return _check(
+            "k8s_kubeadm_config", "kubeadm configuration valid", "fail",
+            f"The rendered configuration is missing: {', '.join(missing)}.",
+        )
+
+    problems: List[str] = []
+    for kind in ("InitConfiguration", "ClusterConfiguration"):
+        actual = str(by_kind[kind].get("apiVersion") or "")
+        if actual != expected_api:
+            problems.append(
+                f"{kind} uses {actual or 'no apiVersion'}, expected {expected_api}"
+            )
+    init_registration = by_kind["InitConfiguration"].get("nodeRegistration") or {}
+    if not init_registration.get("criSocket"):
+        problems.append("InitConfiguration.nodeRegistration.criSocket is unset")
+    cluster = by_kind["ClusterConfiguration"]
+    networking = cluster.get("networking") or {}
+    for path, value in (
+        ("kubernetesVersion", cluster.get("kubernetesVersion")),
+        ("controlPlaneEndpoint", cluster.get("controlPlaneEndpoint")),
+        ("networking.podSubnet", networking.get("podSubnet")),
+        ("networking.serviceSubnet", networking.get("serviceSubnet")),
+        ("apiServer.certSANs", (cluster.get("apiServer") or {}).get("certSANs")),
+    ):
+        if not value:
+            problems.append(f"ClusterConfiguration.{path} is unset")
+    pinned = str(cluster.get("kubernetesVersion") or "").lstrip("v")
+    if pinned and pinned != build.k8s_version:
+        problems.append(
+            f"ClusterConfiguration.kubernetesVersion is v{pinned}, but this "
+            f"build is pinned to {build.k8s_version}"
+        )
+    if problems:
+        return _check(
+            "k8s_kubeadm_config", "kubeadm configuration valid", "fail",
+            "; ".join(problems) + ".",
+            "kubeadm would reject or misread this configuration.",
+        )
+    return _check(
+        "k8s_kubeadm_config", "kubeadm configuration valid", "pass",
+        f"{expected_api} rendered and parsed for v{build.k8s_version}.",
+    )
+
+
+def _offline_artifact_check(
+    build: ClusterBuild, profile: ResolvedProfile
+) -> Optional[Dict[str, Any]]:
+    """Offline mode: every manifest this build needs must already be vendored."""
+    if profile.repo_mode != "offline":
+        return None
+    missing: List[str] = []
+    descriptor = cni_registry.get(build.cni_plugin)
+    if descriptor is not None:
+        version = build.cni_version or descriptor.versions[0]
+        missing.extend(
+            f"{descriptor.display_name} {version}: {filename}"
+            for filename in descriptor.manifest_files
+            if not descriptor.bundled_path(version, filename).is_file()
+        )
+    for selection in build.addons_json or []:
+        addon = addon_registry.get(str((selection or {}).get("id") or ""))
+        if addon is None:
+            continue
+        version = str(selection.get("version") or addon.versions[0])
+        missing.extend(
+            f"{addon.display_name} {version}: {filename}"
+            for filename in addon.manifest_files
+            if not addon.bundled_path(version, filename).is_file()
+        )
+    if profile.offline_bundle_path and not Path(profile.offline_bundle_path).exists():
+        missing.append(f"offline bundle path {profile.offline_bundle_path}")
+    if missing:
+        return _check(
+            "k8s_offline_bundle", "Offline artifacts vendored", "fail",
+            "Not present on the KubeSight host: " + "; ".join(missing) + ".",
+            "Run `python backend/tools/fetch_cluster_build_bundles.py` on the "
+            "KubeSight host, or pick a repo mode that allows an internet "
+            "fallback.",
+        )
+    return _check(
+        "k8s_offline_bundle", "Offline artifacts vendored", "pass",
+        "Every pinned manifest this build needs is vendored locally.",
+    )
+
+
+def version_checks(
+    build: ClusterBuild, profile: ResolvedProfile
+) -> List[Dict[str, Any]]:
+    """Checks that depend only on the build's pinned Kubernetes version."""
+    record = k8s_versions.record_for(build.k8s_version)
+    if record is None or not record.enabled:
+        reason = (
+            "; ".join(record.blockers) if record is not None and record.blockers
+            else "no support record is declared for this minor"
+        )
+        return [_check(
+            "k8s_version", "Kubernetes version supported", "fail",
+            f"Kubernetes {build.k8s_version} is not supported by the Cluster "
+            f"Builder — {reason}.",
+            "Supported minors: "
+            f"{', '.join(k8s_versions.enabled_minors()) or 'none'}.",
+        )]
+
+    checks = [_check(
+        "k8s_version", "Kubernetes version supported", "pass",
+        f"v{build.k8s_version} (minor {record.minor}; pause image "
+        f"{record.pause_image_tag}; {record.kubeadm_config_api}).",
+    )]
+    checks.append(_kubeadm_config_check(build, profile))
+
+    descriptor = cni_registry.get(build.cni_plugin)
+    if descriptor is None:
+        checks.append(_check(
+            "k8s_cni_support", "CNI supports this Kubernetes minor", "fail",
+            f"CNI plugin '{build.cni_plugin}' is unavailable.",
+        ))
+    elif record.minor not in descriptor.supported_k8s_minors:
+        checks.append(_check(
+            "k8s_cni_support", "CNI supports this Kubernetes minor", "fail",
+            f"{descriptor.display_name} "
+            f"{build.cni_version or descriptor.versions[0]} is not validated on "
+            f"Kubernetes {record.minor} (validated: "
+            f"{', '.join(descriptor.supported_k8s_minors) or 'none'}).",
+            "Pick a Kubernetes version this CNI supports, or pin a CNI release "
+            "that upstream tests against this minor.",
+        ))
+    else:
+        checks.append(_check(
+            "k8s_cni_support", "CNI supports this Kubernetes minor", "pass",
+            f"{descriptor.display_name} "
+            f"{build.cni_version or descriptor.versions[0]} on Kubernetes "
+            f"{record.minor}.",
+        ))
+
+    unsupported = []
+    for selection in build.addons_json or []:
+        addon = addon_registry.get(str((selection or {}).get("id") or ""))
+        if addon is None:
+            unsupported.append(f"'{(selection or {}).get('id')}' is unavailable")
+        elif record.minor not in addon.supported_k8s_minors:
+            unsupported.append(
+                f"{addon.display_name} "
+                f"{selection.get('version') or addon.versions[0]} is not "
+                f"validated on Kubernetes {record.minor}"
+            )
+    if build.addons_json:
+        checks.append(_check(
+            "k8s_addon_support", "Add-ons support this Kubernetes minor",
+            "fail" if unsupported else "pass",
+            "; ".join(unsupported) + "." if unsupported
+            else f"All selected add-ons are validated on Kubernetes {record.minor}.",
+            "Deselect the add-on or choose a Kubernetes version it supports."
+            if unsupported else "",
+        ))
+
+    offline = _offline_artifact_check(build, profile)
+    if offline is not None:
+        checks.append(offline)
+    return checks
+
+
+# ---------------------------------------------------------------------------
 # Node-side probe (one escalated POSIX script; output parsed as KS_KEY=value)
 # ---------------------------------------------------------------------------
 
+def image_manifest_url(image_prefix: str, repository: str, tag: str) -> str:
+    """Registry v2 manifest URL for ``<prefix>/<repository>:<tag>``.
+
+    ``registry.k8s.io`` → ``https://registry.k8s.io/v2/pause/manifests/3.10``;
+    ``nexus:5000/kubernetes`` →
+    ``https://nexus:5000/v2/kubernetes/pause/manifests/3.10``.
+    """
+    prefix = str(image_prefix or "").strip().strip("/")
+    authority = registry_authority(prefix)
+    path = prefix[len(authority):].strip("/")
+    repo_path = f"{path}/{repository}" if path else repository
+    return f"https://{authority}/v2/{repo_path}/manifests/{tag}"
+
+
 def _probe_script(build: ClusterBuild, node: ClusterBuildNode, profile: ResolvedProfile) -> str:
     ports = " ".join(str(p) for p in _required_ports(build, node))
+    version = build.k8s_version.lstrip("v")
+    minor_placeholder = ".".join(version.split(".")[:2])
+    deb_repo = profile.k8s_pkg_repo("debian", minor_placeholder)
+    rpm_repo = profile.k8s_pkg_repo("rhel", minor_placeholder)
     repo_urls = []
+    image_urls = []
     if profile.repo_mode != "offline":
-        minor_placeholder = ".".join(build.k8s_version.lstrip("v").split(".")[:2])
-        repo_urls.append(profile.k8s_pkg_repo("debian", minor_placeholder))
+        repo_urls.append(deb_repo)
         if node.role != "loadbalancer":
             for host in profile.registry_hosts():
                 repo_urls.append(f"https://{host}/v2/")
+            # The pause tag is the one image kubeadm pins per minor rather than
+            # per patch, so a mirror stocked for an older minor fails here
+            # instead of at pod-sandbox creation time on every node. An
+            # unrecorded minor is reported by ``version_checks`` instead.
+            record = k8s_versions.record_for(version)
+            if record is not None:
+                image_urls.append(image_manifest_url(
+                    profile.k8s_image_registry, "pause", record.pause_image_tag
+                ))
     probe_urls = " ".join(shlex.quote(u) for u in repo_urls)
+    image_probe_urls = " ".join(shlex.quote(u) for u in image_urls)
+    # Load balancers never install kubelet/kubeadm/kubectl, and an offline
+    # build must not carry an outbound URL into the script at all.
+    probe_packages = (
+        node.role != "loadbalancer" and profile.repo_mode != "offline"
+    )
+    pkg_probe = "1" if probe_packages else "0"
+    deb_packages_url = shlex.quote(
+        deb_repo.rstrip("/") + "/Packages" if probe_packages else ""
+    )
+    rpm_repomd_url = shlex.quote(
+        rpm_repo.rstrip("/") + "/repodata/repomd.xml" if probe_packages else ""
+    )
     proxy_env = profile.proxy_env()
     ca_b64 = base64.b64encode(
         profile.extra_ca_certs_pem.encode("ascii")
@@ -285,6 +537,40 @@ if command -v curl >/dev/null 2>&1; then
       echo "KS_REPO_FAIL=$url"
     fi
   done
+  # Registry v2 manifest probe. The Accept header matters: without it a
+  # registry serving an OCI index answers 404 for an image that is present.
+  for url in {image_probe_urls}; do
+    KS_IMG_CODE=$(ks_curl -m 8 -s -o /dev/null -w '%{{http_code}}' \
+      -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
+      "$url" 2>/dev/null)
+    # 401/403: the mirror wants credentials, which the image pre-pull phase
+    # proves. Only 404/000 means the tag is genuinely unavailable here.
+    if echo "$KS_IMG_CODE" | grep -qE '^(2|3|401|403)'; then
+      echo "KS_IMG_OK=$url"
+    else
+      echo "KS_IMG_FAIL=$url"
+    fi
+  done
+  if [ "{pkg_probe}" = "1" ]; then
+    # The exact kubeadm/kubelet/kubectl build must be obtainable, not merely
+    # the repository. Debian repos publish a flat Packages index readable
+    # before the repo is configured on the node.
+    if command -v apt-get >/dev/null 2>&1; then
+      if ks_curl -m 15 -sf {deb_packages_url} 2>/dev/null | grep -q '^Version: {version}-'; then
+        echo "KS_PKG_EXACT=ok"
+      else
+        echo "KS_PKG_EXACT=missing"
+      fi
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+      # RPM metadata is compressed and indexed; confirm this minor's repository
+      # publishes metadata and let the pinned dnf install assert the patch.
+      if ks_curl -m 15 -sf -o /dev/null {rpm_repomd_url} 2>/dev/null; then
+        echo "KS_PKG_EXACT=repo_only"
+      else
+        echo "KS_PKG_EXACT=missing"
+      fi
+    fi
+  fi
   [ -z "$KS_CA_FILE" ] || rm -f -- "$KS_CA_FILE"
   KS_CA_FILE=""
 else
@@ -310,16 +596,23 @@ exit 0
 
 
 def _parse_probe(output: str) -> Dict[str, Any]:
-    facts: Dict[str, Any] = {"repo_ok": [], "repo_fail": []}
+    facts: Dict[str, Any] = {
+        "repo_ok": [], "repo_fail": [], "image_ok": [], "image_fail": [],
+    }
+    collected = {
+        "KS_REPO_OK": "repo_ok",
+        "KS_REPO_FAIL": "repo_fail",
+        "KS_IMG_OK": "image_ok",
+        "KS_IMG_FAIL": "image_fail",
+    }
     for raw_line in output.splitlines():
         line = raw_line.strip()
         if not line.startswith("KS_") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        if key == "KS_REPO_OK":
-            facts["repo_ok"].append(value)
-        elif key == "KS_REPO_FAIL":
-            facts["repo_fail"].append(value)
+        bucket = collected.get(key)
+        if bucket is not None:
+            facts[bucket].append(value)
         else:
             facts[key] = value
     return facts
@@ -481,6 +774,45 @@ def _node_checks(
                 "curl is not installed; reachability could not be probed.",
             ))
 
+        for url in facts.get("image_fail", []):
+            checks.append(_check(
+                "k8s_images", "Kubernetes images available", "fail",
+                f"The configured registry does not serve {url}.",
+                "kubeadm pins this pause tag for the selected Kubernetes "
+                "minor; mirror it before building, or the pod sandbox cannot "
+                "start on any node.",
+            ))
+        if facts.get("image_ok") and not facts.get("image_fail"):
+            checks.append(_check(
+                "k8s_images", "Kubernetes images available", "pass",
+                f"pause:{kubeadm.pause_image_tag(build.k8s_version)} is served "
+                "by the configured registry.",
+            ))
+
+        package_state = facts.get("KS_PKG_EXACT")
+        if package_state == "ok":
+            checks.append(_check(
+                "k8s_packages", "Exact Kubernetes packages available", "pass",
+                f"kubelet/kubeadm/kubectl {build.k8s_version} are published by "
+                "the configured repository.",
+            ))
+        elif package_state == "repo_only":
+            checks.append(_check(
+                "k8s_packages", "Exact Kubernetes packages available", "warn",
+                f"The Kubernetes {'.'.join(build.k8s_version.split('.')[:2])} "
+                "RPM repository publishes metadata, but RPM indexes are "
+                "compressed so the exact patch is asserted by the pinned "
+                "install itself.",
+            ))
+        elif package_state == "missing":
+            checks.append(_check(
+                "k8s_packages", "Exact Kubernetes packages available", "fail",
+                f"kubelet/kubeadm/kubectl {build.k8s_version} are not published "
+                "by the configured package repository.",
+                "Pick a version the repository carries, or mirror this patch "
+                "release before building.",
+            ))
+
     fsync = facts.get("KS_FSYNC_MS_PER_OP")
     if fsync is not None and node.role == "control_plane":
         try:
@@ -610,16 +942,25 @@ def merge_preflight(
     vsphere_results: Dict[int, List[Dict[str, Any]]],
     node_results: Dict[int, Dict[str, Any]],
     nodes: Optional[List[ClusterBuildNode]] = None,
+    build_checks: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Combine both halves, stamp per-node results, and compute the verdict.
 
     Only the nodes under examination are stamped. Growing a cluster must not
     rewrite a joined machine's status back to 'preflight_passed'.
+
+    ``build_checks`` are whole-build verdicts (the selected Kubernetes version
+    and what it implies). They are attached to the first subject node so they
+    are visible once in the per-node UI and count toward the overall status —
+    an unsupported version has to block the build, not just annotate it.
     """
     overall = "pass"
     per_node = []
+    pending_build_checks = list(build_checks or [])
     for node in (build.nodes if nodes is None else nodes):
-        checks = list(vsphere_results.get(node.id, []))
+        checks = list(pending_build_checks)
+        pending_build_checks = []
+        checks.extend(vsphere_results.get(node.id, []))
         node_result = node_results.get(node.id, {"status": "pass", "checks": []})
         checks.extend(node_result["checks"])
         status = _worst(checks)

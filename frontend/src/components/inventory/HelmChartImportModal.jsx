@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import {
+  addHelmChartVersion,
   importHelmChartFromArchive,
   importHelmChartFromGit,
   importHelmChartFromYaml,
@@ -30,7 +31,14 @@ function formatSize(bytes) {
     : `${Math.max(1, Math.round(bytes / 1024))} KiB`;
 }
 
-export default function HelmChartImportModal({ open, onClose, onImported }) {
+export default function HelmChartImportModal({
+  open,
+  onClose,
+  onImported,
+  // When set, the upload becomes a new version of that existing chart instead
+  // of a new catalog entry.
+  targetTemplate = null,
+}) {
   const [mode, setMode] = useState("yaml");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -61,13 +69,16 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
 
   if (!open) return null;
 
+  const versionMode = Boolean(targetTemplate?.id);
+  const activeMode = versionMode ? "archive" : mode;
+
   const submit = async (event) => {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
       let result;
-      if (mode === "yaml") {
+      if (activeMode === "yaml") {
         const files = await Promise.all(
           yamlFiles.map(async (file) => ({ name: file.name, content: await file.text() })),
         );
@@ -78,7 +89,7 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
           throw new Error("Choose at least one YAML file or paste Kubernetes YAML.");
         }
         result = await importHelmChartFromYaml({ name, description, files });
-      } else if (mode === "archive") {
+      } else if (activeMode === "archive") {
         if (!archiveFile) {
           throw new Error("Choose a .zip, .tgz, or .tar.gz archive to import.");
         }
@@ -88,13 +99,14 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
         if (archiveFile.size > MAX_ARCHIVE_BYTES) {
           throw new Error("The archive exceeds the 10 MiB import limit.");
         }
-        result = await importHelmChartFromArchive({
-          name,
-          description,
+        const archivePayload = {
           filename: archiveFile.name,
           archiveBase64: await readChartArchiveAsBase64(archiveFile),
           ...archive,
-        });
+        };
+        result = versionMode
+          ? await addHelmChartVersion(targetTemplate.id, archivePayload)
+          : await importHelmChartFromArchive({ name, description, ...archivePayload });
       } else {
         result = await importHelmChartFromGit({
           name,
@@ -125,11 +137,21 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
       >
         <header className="modal-header">
           <div>
-            <h3 id="helm-import-title">{imported ? "Chart Imported" : "Import Helm Chart"}</h3>
+            <h3 id="helm-import-title">
+              {imported
+                ? versionMode
+                  ? `Version ${imported.version} Added`
+                  : "Chart Imported"
+                : versionMode
+                  ? `Add Version to ${targetTemplate.name}`
+                  : "Import Helm Chart"}
+            </h3>
             <p className="muted">
               {imported
                 ? "KubeSight read the chart and stored it for reuse."
-                : "Save a reusable chart from Kubernetes manifests, a chart archive, or Git."}
+                : versionMode
+                  ? `Upload another packaged chart. Its Chart.yaml version becomes the new version — ${targetTemplate.name} is currently v${targetTemplate.version}.`
+                  : "Save a reusable chart from Kubernetes manifests, a chart archive, or Git."}
             </p>
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
@@ -140,8 +162,9 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
         {imported ? (
           <div className="helm-import-result">
             <p className="banner-message">
-              Imported <strong>{imported.name}</strong> v{imported.version} ·{" "}
-              {helmSourceLabel(imported)}
+              {versionMode ? "Added" : "Imported"} <strong>{imported.name}</strong> v
+              {imported.version} · {helmSourceLabel(imported)}
+              {versionMode ? ` · ${imported.versionCount} versions stored` : ""}
             </p>
             <HelmChartContents template={imported} />
             {(imported.warnings || []).length ? (
@@ -166,7 +189,7 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
                   setArchiveFile(null);
                 }}
               >
-                Import another
+                {versionMode ? "Add another version" : "Import another"}
               </button>
               <button type="button" className="btn-primary" onClick={onClose}>
                 Done
@@ -175,63 +198,67 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
           </div>
         ) : (
           <>
-            <div className="helm-import-source-tabs" role="tablist" aria-label="Import source">
-              <button
-                type="button"
-                className={mode === "yaml" ? "active" : ""}
-                onClick={() => {
-                  setMode("yaml");
-                  setError("");
-                }}
-              >
-                Deployment YAMLs
-              </button>
-              <button
-                type="button"
-                className={mode === "archive" ? "active" : ""}
-                onClick={() => {
-                  setMode("archive");
-                  setError("");
-                }}
-              >
-                Chart Archive
-              </button>
-              <button
-                type="button"
-                className={mode === "git" ? "active" : ""}
-                onClick={() => {
-                  setMode("git");
-                  setError("");
-                }}
-              >
-                Git Repository
-              </button>
-            </div>
+            {versionMode ? null : (
+              <div className="helm-import-source-tabs" role="tablist" aria-label="Import source">
+                <button
+                  type="button"
+                  className={mode === "yaml" ? "active" : ""}
+                  onClick={() => {
+                    setMode("yaml");
+                    setError("");
+                  }}
+                >
+                  Deployment YAMLs
+                </button>
+                <button
+                  type="button"
+                  className={mode === "archive" ? "active" : ""}
+                  onClick={() => {
+                    setMode("archive");
+                    setError("");
+                  }}
+                >
+                  Chart Archive
+                </button>
+                <button
+                  type="button"
+                  className={mode === "git" ? "active" : ""}
+                  onClick={() => {
+                    setMode("git");
+                    setError("");
+                  }}
+                >
+                  Git Repository
+                </button>
+              </div>
+            )}
 
             <form className="add-app-form" onSubmit={submit}>
               {error ? <p className="banner-message error">{error}</p> : null}
 
-              <div className="helm-form-grid">
-                <label>
-                  Chart name <span className="muted">(optional)</span>
-                  <input
-                    value={name}
-                    maxLength={120}
-                    onChange={(event) => setName(event.target.value)}
-                    placeholder="Derived from Chart.yaml or the first workload"
-                  />
-                </label>
-                <label>
-                  Description <span className="muted">(optional)</span>
-                  <input
-                    value={description}
-                    maxLength={500}
-                    onChange={(event) => setDescription(event.target.value)}
-                  />
-                </label>
-              </div>
+              {versionMode ? null : (
+                <div className="helm-form-grid">
+                  <label>
+                    Chart name <span className="muted">(optional)</span>
+                    <input
+                      value={name}
+                      maxLength={120}
+                      onChange={(event) => setName(event.target.value)}
+                      placeholder="Derived from Chart.yaml or the first workload"
+                    />
+                  </label>
+                  <label>
+                    Description <span className="muted">(optional)</span>
+                    <input
+                      value={description}
+                      maxLength={500}
+                      onChange={(event) => setDescription(event.target.value)}
+                    />
+                  </label>
+                </div>
+              )}
 
-              {mode === "yaml" ? (
+              {activeMode === "yaml" ? (
                 <>
                   <label>
                     Kubernetes YAML files
@@ -263,7 +290,7 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
                     environment variants: their differing values become configurable fields.
                   </p>
                 </>
-              ) : mode === "archive" ? (
+              ) : activeMode === "archive" ? (
                 <>
                   <label>
                     Chart or manifests archive{" "}
@@ -315,6 +342,9 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
                     “helm package” tarball or a “Download ZIP” export works as-is. Templates
                     and values-&lt;environment&gt;.yaml files are read and listed after import,
                     and sensitive values are always stripped.
+                    {versionMode
+                      ? " The new version becomes the one deployed by default; earlier versions stay available."
+                      : ""}
                   </p>
                 </>
               ) : (
@@ -402,7 +432,13 @@ export default function HelmChartImportModal({ open, onClose, onImported }) {
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary" disabled={busy}>
-                  {busy ? "Importing…" : "Import & Save Chart"}
+                  {busy
+                    ? versionMode
+                      ? "Adding…"
+                      : "Importing…"
+                    : versionMode
+                      ? "Add Version"
+                      : "Import & Save Chart"}
                 </button>
               </div>
             </form>
