@@ -7611,10 +7611,29 @@ kbd {
   color: var(--text-subtle);
 }
 
+.helm-namespace-filter {
+  flex: 1 1 12rem;
+  min-width: 0;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+}
+
+.helm-namespace-empty {
+  margin: 0;
+  padding: var(--space-3);
+  font-size: var(--font-size-xs);
+}
+
 .helm-namespace-groups {
   display: grid;
   gap: var(--space-3);
-  max-height: 16rem;
+  max-height: 20rem;
   margin: 0;
   padding: var(--space-3);
   overflow-y: auto;
@@ -7630,12 +7649,34 @@ kbd {
 }
 
 .helm-namespace-kind {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   margin: 0 0 var(--space-1);
   font-size: var(--font-size-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-subtle);
+}
+
+/* Quiet inline affordance, not another pill: every `button` picks up the
+   pill chrome from the base rule, so it has to be stripped explicitly. */
+.helm-namespace-kind .btn-text {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: var(--accent-strong);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.helm-namespace-kind .btn-text:hover {
+  background: none;
+  text-decoration: underline;
 }
 
 /* Scoped to the modal so it outweighs `.helm-chart-import-modal label`, which

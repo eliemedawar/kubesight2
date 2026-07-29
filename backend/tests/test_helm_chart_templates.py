@@ -179,6 +179,56 @@ def test_yaml_import_creates_reusable_chart_and_scrubs_secrets(client, admin_tok
     assert "database-password-must-not-persist" not in contents
 
 
+def test_secrets_claim_the_value_budget_ahead_of_everything_else(client, admin_token, app):
+    """A namespace-sized import must not run out of budget before its Secrets.
+
+    Secret values can only be stored by becoming required fields, so if the
+    budget is spent first the import used to abort outright.
+    """
+    bulky = "\n---\n".join(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bulk-{index}\ndata:\n".format(
+            index=index
+        )
+        + "".join(f"  key{key}: value-{index}-{key}\n" for key in range(10))
+        for index in range(40)
+    )
+
+    response = client.post(
+        "/api/helm/chart-templates/import/yaml",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "Oversized Namespace",
+            "files": [
+                {"name": "bulk.yaml", "content": bulky},
+                {"name": "secret.yaml", "content": SECRET},
+            ],
+        },
+    )
+    assert response.status_code == 201, response.get_json()
+    imported = response.get_json()["data"]
+    assert any("value limit" in warning for warning in imported["warnings"])
+
+    detail = client.get(
+        f"/api/helm/chart-templates/{imported['id']}",
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]
+    sensitive = [item for item in detail["variables"] if item["sensitive"]]
+    assert [item["label"] for item in sensitive] == ["secret_payments_credentials password"]
+
+    with app.app_context():
+        archive = base64.b64decode(chart_archive_base64(imported["id"]))
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        chart = "\n".join(
+            tar.extractfile(member).read().decode("utf-8", errors="ignore")
+            for member in tar.getmembers()
+            if member.isfile()
+        )
+    assert "database-password-must-not-persist" not in chart
+    # The values that lost the budget race keep their literals, so the chart
+    # still renders — they are simply not configurable.
+    assert "value-39-9" in chart
+
+
 def test_template_catalog_permissions(client, admin_token, viewer_token):
     denied = client.post(
         "/api/helm/chart-templates/import/yaml",

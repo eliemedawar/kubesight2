@@ -74,6 +74,7 @@ export default function HelmChartImportModal({
   const [selectedResources, setSelectedResources] = useState(() => new Set());
   const [scanBusy, setScanBusy] = useState("");
   const [scanError, setScanError] = useState("");
+  const [resourceFilter, setResourceFilter] = useState("");
 
   useEffect(() => {
     if (!open) {
@@ -99,6 +100,7 @@ export default function HelmChartImportModal({
       setSelectedResources(new Set());
       setScanBusy("");
       setScanError("");
+      setResourceFilter("");
     }
   }, [open]);
 
@@ -237,18 +239,32 @@ export default function HelmChartImportModal({
 
   const importableResources = (scan?.resources || []).filter((resource) => !resource.skipped);
   const skippedResources = (scan?.resources || []).filter((resource) => resource.skipped);
-  const allSelected =
-    importableResources.length > 0 && selectedResources.size === importableResources.length;
+  // A busy namespace is imported one application at a time, so every bulk
+  // action works on what the filter currently shows, not on all 128 objects.
+  const filterTerm = resourceFilter.trim().toLowerCase();
+  const visibleResources = filterTerm
+    ? importableResources.filter((resource) =>
+        `${resource.kind}/${resource.name}`.toLowerCase().includes(filterTerm),
+      )
+    : importableResources;
+  const allVisibleSelected =
+    visibleResources.length > 0 &&
+    visibleResources.every((resource) => selectedResources.has(resourceKey(resource)));
 
-  const toggleAllResources = () => {
-    setSelectedResources(
-      allSelected ? new Set() : new Set(importableResources.map((item) => resourceKey(item))),
-    );
+  const setSelection = (resources, selected) => {
+    setSelectedResources((previous) => {
+      const next = new Set(previous);
+      resources.forEach((resource) => {
+        if (selected) next.add(resourceKey(resource));
+        else next.delete(resourceKey(resource));
+      });
+      return next;
+    });
   };
 
   // The backend already orders resources workloads-first; grouping keeps that
-  // order while making a 40-object namespace readable.
-  const groupedResources = importableResources.reduce((groups, resource) => {
+  // order while making a 128-object namespace readable.
+  const groupedResources = visibleResources.reduce((groups, resource) => {
     const bucket = groups.get(resource.kind) || [];
     bucket.push(resource);
     groups.set(resource.kind, bucket);
@@ -634,15 +650,49 @@ export default function HelmChartImportModal({
                         <span>
                           {selectedResources.size} of {importableResources.length} selected
                         </span>
-                        <button type="button" className="btn-text" onClick={toggleAllResources}>
-                          {allSelected ? "Clear all" : "Select all"}
+                        <input
+                          className="helm-namespace-filter"
+                          type="search"
+                          value={resourceFilter}
+                          placeholder="Filter by name or kind…"
+                          onChange={(event) => setResourceFilter(event.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="btn-text"
+                          disabled={!visibleResources.length}
+                          onClick={() => setSelection(visibleResources, !allVisibleSelected)}
+                        >
+                          {allVisibleSelected ? "Clear" : "Select"}
+                          {filterTerm ? " shown" : " all"}
                         </button>
                       </header>
+                      {filterTerm && !visibleResources.length ? (
+                        <p className="helm-namespace-empty muted">
+                          No importable object matches “{resourceFilter}”.
+                        </p>
+                      ) : null}
                       <ul className="helm-namespace-groups">
                         {Array.from(groupedResources.entries()).map(([kind, items]) => (
                           <li key={kind}>
                             <p className="helm-namespace-kind">
                               {kind} <span className="muted">({items.length})</span>
+                              <button
+                                type="button"
+                                className="btn-text"
+                                onClick={() =>
+                                  setSelection(
+                                    items,
+                                    !items.every((item) =>
+                                      selectedResources.has(resourceKey(item)),
+                                    ),
+                                  )
+                                }
+                              >
+                                {items.every((item) => selectedResources.has(resourceKey(item)))
+                                  ? "none"
+                                  : "all"}
+                              </button>
                             </p>
                             <ul>
                               {items.map((resource) => (

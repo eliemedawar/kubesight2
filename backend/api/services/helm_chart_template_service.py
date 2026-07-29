@@ -777,8 +777,9 @@ class _VariableBuilder:
             if sensitive:
                 parent[field] = ""
                 raise ChartTemplateError(
-                    f"Chart exceeds the {MAX_VARIABLES}-value limit before all secrets "
-                    "could be exposed safely."
+                    f"These resources hold more than {MAX_VARIABLES} secret keys, which is "
+                    "past the chart value limit — the remaining ones could not be exposed as "
+                    "fields, and their values are never stored. Import fewer resources at a time."
                 )
             return
         base = _safe_key(key)
@@ -1084,7 +1085,14 @@ def _convert_manifest_files(
     builder = _VariableBuilder()
     template_files: Dict[str, bytes] = {}
 
-    for index, (resource_key, entries) in enumerate(grouped.items(), start=1):
+    # Secrets get first claim on the value budget. A live Secret value can only
+    # be stored safely by becoming a required field, so a chart that runs out of
+    # budget before reaching one has to abort (see _VariableBuilder.add) — while
+    # every other resource simply stops being parameterised and keeps its
+    # literal value. Sorting is stable, so nothing else changes order.
+    ordered = sorted(grouped.items(), key=lambda item: 0 if item[0][1] == "Secret" else 1)
+
+    for index, (resource_key, entries) in enumerate(ordered, start=1):
         _, kind, resource_name = resource_key
         base = deepcopy(entries[0][1])
         identity = _safe_key(f"{kind}_{resource_name}")
@@ -1125,7 +1133,11 @@ def _convert_manifest_files(
 
     public_variables = _public_variables(builder.variables)
     if len(builder.variables) >= MAX_VARIABLES:
-        warnings.append(f"Only the first {MAX_VARIABLES} generated variables were retained.")
+        warnings.append(
+            f"This chart hit the {MAX_VARIABLES}-value limit. Every secret was still exposed "
+            "as a required field; the remaining fields kept the literal values they had. "
+            "Import fewer resources at a time for a fully configurable chart."
+        )
     chart_yaml = {
         "apiVersion": "v2",
         "name": slug,

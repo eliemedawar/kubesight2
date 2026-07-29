@@ -265,6 +265,48 @@ def test_live_cluster_read_strips_owned_and_helm_managed_objects(client, admin_t
     assert "{{ .Values.variables." in chart
 
 
+def test_cluster_managed_objects_do_not_consume_the_import_cap(client, admin_token):
+    """A namespace full of junk must still offer a full 250 importable objects."""
+    items = [
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": f"app-{index:03d}", "namespace": "live"},
+            "spec": {"replicas": 1, "template": {"spec": {"containers": []}}},
+        }
+        for index in range(260)
+    ]
+    items += [
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": f"app-{index:03d}-pod",
+                "namespace": "live",
+                "ownerReferences": [{"kind": "ReplicaSet", "name": f"app-{index:03d}"}],
+            },
+        }
+        for index in range(200)
+    ]
+
+    patches = [
+        patch("api.k8s_provider.should_use_real_k8s", return_value=True),
+        patch("api.k8s_provider.resolve_cluster_access", return_value=object()),
+        patch("api.k8s_provider._run_for_access", return_value=json.dumps({"items": items})),
+    ]
+    for item in patches:
+        item.start()
+    try:
+        data = _discover(client, admin_token, namespace="live").get_json()["data"]
+    finally:
+        for item in patches:
+            item.stop()
+
+    assert data["importableCount"] == 250
+    assert data["skippedCount"] == 200
+    assert any("importable objects" in warning for warning in data["warnings"])
+
+
 def test_missing_kind_on_older_clusters_falls_back_to_per_kind_reads(client, admin_token):
     from api.k8s_provider import K8sCommandError
 

@@ -406,9 +406,11 @@ def _fetch_namespace_objects(access, namespace: str) -> Tuple[List[Dict[str, Any
         )
         return list(json.loads(output or "{}").get("items") or []), warnings
     except (K8sCommandError, json.JSONDecodeError):
-        # An older API server without one of these kinds fails the whole batch,
-        # so fall back to reading each kind on its own and note what was missing.
+        # One unreadable kind — absent from an older API server, or not granted
+        # to KubeSight's kubeconfig — fails the whole batch, so fall back to
+        # reading each kind on its own and report the ones that stayed closed.
         items: List[Dict[str, Any]] = []
+        missing: List[str] = []
         for resource in NAMESPACE_IMPORT_RESOURCES:
             try:
                 output = _run_for_access(
@@ -417,7 +419,13 @@ def _fetch_namespace_objects(access, namespace: str) -> Tuple[List[Dict[str, Any
                 )
                 items.extend(json.loads(output or "{}").get("items") or [])
             except (K8sCommandError, json.JSONDecodeError):
-                warnings.append(f"{resource} could not be read from this cluster and were skipped.")
+                missing.append(resource)
+        if missing:
+            warnings.append(
+                f"Could not read {', '.join(missing)} from this cluster — the kind is missing "
+                "or KubeSight's kubeconfig has no permission for it. Those objects are not "
+                "part of the chart."
+            )
         return items, warnings
 
 
@@ -463,13 +471,27 @@ def _snapshot(
         )
 
     entries.sort(key=lambda item: (_KIND_ORDER.get(item["kind"], 99), item["name"]))
-    if len(entries) > MAX_NAMESPACE_RESOURCES:
+
+    # The cap applies to what is actually importable — cluster-managed objects
+    # are discarded a moment later and must not eat the budget. Their listing is
+    # capped separately, since it is only ever shown as an explanation.
+    kept: List[Dict[str, Any]] = []
+    importable = skipped = 0
+    for entry in entries:
+        if entry["skipped"]:
+            skipped += 1
+            if skipped <= MAX_NAMESPACE_RESOURCES:
+                kept.append(entry)
+            continue
+        importable += 1
+        if importable <= MAX_NAMESPACE_RESOURCES:
+            kept.append(entry)
+    if importable > MAX_NAMESPACE_RESOURCES:
         warnings.append(
-            f"The namespace holds more than {MAX_NAMESPACE_RESOURCES} objects; only the "
-            f"first {MAX_NAMESPACE_RESOURCES} are offered for import."
+            f"The namespace holds {importable} importable objects; only the first "
+            f"{MAX_NAMESPACE_RESOURCES} are offered. Import it in slices."
         )
-        entries = entries[:MAX_NAMESPACE_RESOURCES]
-    return entries, warnings
+    return kept, warnings
 
 
 def _public_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
