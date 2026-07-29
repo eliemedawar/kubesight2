@@ -809,6 +809,73 @@ class _VariableBuilder:
             }
         )
 
+    def add_secret_object(self, doc: Dict[str, Any], identity: str) -> set[Tuple[Any, ...]]:
+        """Expose one safe object field for every key carried by a large Secret.
+
+        The object stored in values.yaml contains only the Secret's field/key
+        names and blank strings.  Each template leaf still has its own Helm
+        ``required`` check, so grouping the form input does not weaken deploy
+        validation or retain any live credential material.
+        """
+        blank_sections: Dict[str, Dict[str, str]] = {}
+        for section in ("data", "stringData"):
+            mapping = doc.get(section)
+            if isinstance(mapping, dict) and mapping:
+                blank_sections[section] = {str(key): "" for key in mapping}
+        if not blank_sections:
+            return set()
+        if len(self.variables) >= MAX_VARIABLES:
+            raise ChartTemplateError(
+                f"Chart contains more than {MAX_VARIABLES} Secrets and cannot expose "
+                "all of them safely. Import fewer resources at a time."
+            )
+
+        base = _safe_key(f"{identity}_values")
+        unique = base
+        suffix = 2
+        while unique in self._keys:
+            unique = f"{base[:72]}_{suffix}"
+            suffix += 1
+        self._keys.add(unique)
+
+        replacements: List[Dict[str, Any]] = []
+        added: set[Tuple[Any, ...]] = set()
+        for section, keys in blank_sections.items():
+            mapping = doc[section]
+            for secret_key in keys:
+                self._sentinel_index += 1
+                sentinel = f"__KUBESIGHT_HELM_VARIABLE_{self._sentinel_index}__"
+                mapping[secret_key] = sentinel
+                replacements.append(
+                    {
+                        "sentinel": sentinel,
+                        "keys": [section, secret_key],
+                        "transform": "b64enc" if section == "data" else "",
+                    }
+                )
+                added.add((section, secret_key))
+
+        safe_default = deepcopy(blank_sections)
+        self.values["variables"][unique] = safe_default
+        self.variables.append(
+            {
+                "key": unique,
+                "path": f"variables.{unique}",
+                "label": f"{identity} values",
+                "type": "object",
+                "default": deepcopy(safe_default),
+                "required": True,
+                "sensitive": True,
+                "category": "Secrets",
+                "description": (
+                    "Enter a YAML or JSON mapping with a non-empty value for every listed "
+                    "Secret key."
+                ),
+                "_secret_replacements": replacements,
+            }
+        )
+        return added
+
 
 def _pod_spec(doc: Dict[str, Any]) -> Dict[str, Any]:
     spec = doc.get("spec") or {}
@@ -850,7 +917,13 @@ def _path_parent(value: Any, path: Sequence[Any]) -> Tuple[Any, Any]:
     return cursor, path[-1]
 
 
-def _known_variables(doc: Dict[str, Any], identity: str, builder: _VariableBuilder) -> set[Tuple[Any, ...]]:
+def _known_variables(
+    doc: Dict[str, Any],
+    identity: str,
+    builder: _VariableBuilder,
+    *,
+    compact_secrets: bool = False,
+) -> set[Tuple[Any, ...]]:
     added: set[Tuple[Any, ...]] = set()
     kind = str(doc.get("kind") or "")
     spec = doc.get("spec") or {}
@@ -976,6 +1049,8 @@ def _known_variables(doc: Dict[str, Any], identity: str, builder: _VariableBuild
                 added.add((field, key))
 
     if kind == "Secret":
+        if compact_secrets:
+            return added | builder.add_secret_object(doc, identity)
         for field in ("data", "stringData"):
             data = doc.get(field) or {}
             for key in list(data):
@@ -1005,6 +1080,23 @@ def _different_scalar_paths(base: Any, variants: Sequence[Any]) -> List[Tuple[An
 def _render_manifest_template(doc: Dict[str, Any], variables: Sequence[Dict[str, Any]]) -> str:
     dumped = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
     for item in variables:
+        secret_replacements = item.get("_secret_replacements") or []
+        if secret_replacements:
+            for replacement in secret_replacements:
+                sentinel = replacement.get("sentinel")
+                if not sentinel or sentinel not in dumped:
+                    continue
+                indexes = " ".join(
+                    json.dumps(str(key)) for key in replacement.get("keys") or []
+                )
+                value_ref = f'(index .Values.{item["path"]} {indexes})'
+                key_label = "/".join(str(key) for key in replacement.get("keys") or [])
+                label = f'{item["label"]} {key_label}'
+                expression = f'required "{label} is required" {value_ref}'
+                if replacement.get("transform") == "b64enc":
+                    expression = f"{expression} | b64enc"
+                dumped = dumped.replace(sentinel, "{{ " + expression + " | quote }}")
+            continue
         sentinel = item.get("_sentinel")
         if not sentinel or sentinel not in dumped:
             continue
@@ -1084,6 +1176,21 @@ def _convert_manifest_files(
     slug = _slugify(name)
     builder = _VariableBuilder()
     template_files: Dict[str, bytes] = {}
+    secret_key_count = sum(
+        len(mapping)
+        for (_, kind, _), entries in grouped.items()
+        if kind == "Secret"
+        for section in ("data", "stringData")
+        for mapping in [entries[0][1].get(section)]
+        if isinstance(mapping, dict)
+    )
+    compact_secrets = secret_key_count > MAX_VARIABLES
+    if compact_secrets:
+        warnings.append(
+            f"This chart contains {secret_key_count} Secret keys. They were compacted into "
+            "one required YAML/JSON object per Secret so the chart remains deployable without "
+            "storing any live Secret values."
+        )
 
     # Secrets get first claim on the value budget. A live Secret value can only
     # be stored safely by becoming a required field, so a chart that runs out of
@@ -1096,7 +1203,9 @@ def _convert_manifest_files(
         _, kind, resource_name = resource_key
         base = deepcopy(entries[0][1])
         identity = _safe_key(f"{kind}_{resource_name}")
-        known_paths = _known_variables(base, identity, builder)
+        known_paths = _known_variables(
+            base, identity, builder, compact_secrets=compact_secrets
+        )
         if len(entries) > 1:
             variant_names = ", ".join(entry[0] for entry in entries[1:])
             warnings.append(

@@ -229,6 +229,69 @@ def test_secrets_claim_the_value_budget_ahead_of_everything_else(client, admin_t
     assert "value-39-9" in chart
 
 
+def test_oversized_secret_is_compacted_without_storing_live_values(
+    client, admin_token, app
+):
+    secret_data = "\n".join(
+        f"  key-{index:03d}: live-secret-{index:03d}" for index in range(251)
+    )
+    manifest = (
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        "  name: oversized-secret\n"
+        "type: Opaque\n"
+        "stringData:\n"
+        f"{secret_data}\n"
+    )
+
+    response = client.post(
+        "/api/helm/chart-templates/import/yaml",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "Oversized Secret",
+            "files": [{"name": "secret.yaml", "content": manifest}],
+        },
+    )
+    assert response.status_code == 201, response.get_json()
+    imported = response.get_json()["data"]
+    assert any("compacted" in warning for warning in imported["warnings"])
+
+    detail = client.get(
+        f"/api/helm/chart-templates/{imported['id']}",
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]
+    sensitive = [item for item in detail["variables"] if item["sensitive"]]
+    assert len(sensitive) == 1
+    variable = sensitive[0]
+    assert variable["type"] == "object"
+    assert set(variable["default"]["stringData"]) == {
+        f"key-{index:03d}" for index in range(251)
+    }
+    assert set(variable["default"]["stringData"].values()) == {""}
+    assert "live-secret-" not in json.dumps(detail)
+
+    replacements = {
+        "stringData": {
+            f"key-{index:03d}": f"replacement-{index:03d}" for index in range(251)
+        }
+    }
+    with app.app_context():
+        values_yaml = build_values_yaml(
+            imported["id"], {variable["path"]: yaml.safe_dump(replacements)}
+        )
+        archive = base64.b64decode(chart_archive_base64(imported["id"]))
+    assert "replacement-250" in values_yaml
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        chart = "\n".join(
+            tar.extractfile(member).read().decode("utf-8", errors="ignore")
+            for member in tar.getmembers()
+            if member.isfile()
+        )
+    assert "live-secret-" not in chart
+    assert 'index .Values.variables.secret_oversized_secret_values "stringData" "key-250"' in chart
+
+
 def test_template_catalog_permissions(client, admin_token, viewer_token):
     denied = client.post(
         "/api/helm/chart-templates/import/yaml",
