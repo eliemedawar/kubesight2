@@ -213,6 +213,14 @@ class ClusterBuild(db.Model):
     # Optional, version-pinned cluster add-ons selected in the builder:
     # [{"id": "metrics-server", "version": "0.7.2"}, ...].
     addons_json = db.Column(db.JSON, nullable=True)
+    # Optional workloads copied out of an existing cluster once this one is up:
+    # {"sourceClusterId": "custom-3", "registryConnectionId": 2,
+    #  "items": [{"namespace": "core", "kind": "Deployment", "name": "api"},
+    #            {"namespace": "payments", "kind": "Namespace", "name": ""}],
+    #  "imageAck": {...}, "result": {...}}
+    # Only the *selection* is stored — manifests are re-read from the source at
+    # apply time, so a build never applies a stale copy of a live object.
+    workloads_json = db.Column(db.JSON, nullable=True)
 
     vsphere_connection_id = db.Column(
         db.Integer, db.ForeignKey("vsphere_connections.id"), nullable=True

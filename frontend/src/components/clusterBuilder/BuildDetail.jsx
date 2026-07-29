@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Blueprint from "./Blueprint.jsx";
 import GrowPanel from "./GrowPanel.jsx";
+import WorkloadsPanel from "./WorkloadsPanel.jsx";
 import PhaseRail from "./PhaseRail.jsx";
 import { AddonChips, LiveBadge, StatusPill } from "./common.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
@@ -25,6 +26,7 @@ import {
   isGrowing,
   runStartedAt,
   addonDisplayName,
+  workloadReceipt,
 } from "../../utils/clusterBuilder.js";
 import {
   cancelClusterBuild,
@@ -85,7 +87,8 @@ function FailureHero({ point, build, log, canExecute, onRetry, busy }) {
 }
 
 function DayTwo({
-  build, canCreate, canDownloadKubeconfig, onOpenCluster, onGrow, notify, busy, setBusy,
+  build, canCreate, canDownloadKubeconfig, onOpenCluster, onGrow, onBringWorkloads,
+  notify, busy, setBusy,
 }) {
   const download = async () => {
     setBusy(true);
@@ -119,6 +122,11 @@ function DayTwo({
           Add worker machines
         </button>
       ) : null}
+      {canCreate ? (
+        <button className="btn-outline btn-sm" type="button" onClick={onBringWorkloads}>
+          Bring workloads over
+        </button>
+      ) : null}
       {canDownloadKubeconfig ? (
         <button className="btn-outline btn-sm" type="button" disabled={busy} onClick={download}>
           Download kubeconfig
@@ -144,9 +152,11 @@ function DayTwo({
 }
 
 function Receipt({
-  build, catalog, duration, addonStep, onOpenAddonLog, dayTwo,
+  build, catalog, duration, addonStep, onOpenAddonLog, workloadStep,
+  onOpenWorkloadLog, dayTwo,
 }) {
   const machineCount = (build.nodes || []).length;
+  const copied = workloadReceipt(build);
   return (
     <>
       <div className="card sg-cb-receipt">
@@ -217,6 +227,76 @@ function Receipt({
           </p>
         </div>
       ) : null}
+
+      {copied ? (
+        <div className="card sg-cb-card">
+          <div className="sg-cb-sect">
+            <h2>Workloads brought over</h2>
+            <span className="sg-cb-sect-right">
+              from <b>{copied.source}</b>
+              {workloadStep ? <StatusPill status={workloadStep.status} /> : null}
+            </span>
+          </div>
+          <ul className="sg-cb-proofs">
+            {copied.workloads.map((workload) => {
+              const label = `${workload.namespace}/${workload.name}`;
+              const waiting = copied.notReady.includes(label);
+              return (
+                <li
+                  className={`sg-cb-proof ${waiting ? "is-todo" : ""}`}
+                  key={`${workload.namespace}-${workload.kind}-${workload.name}`}
+                >
+                  <span className="tick" aria-hidden="true">{waiting ? "…" : "✓"}</span>
+                  <span className="what sg-cb-mono">{label}</span>
+                  <span className="how">
+                    {workload.kind}
+                    {waiting
+                      ? " · applied, not ready yet — most often an image that is not in the registry"
+                      : " · rolled out"}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          {copied.volumes.length ? (
+            <ul className="sg-cb-proofs">
+              {copied.volumes.map((volume) => (
+                <li className="sg-cb-proof" key={volume.claim}>
+                  <span className="tick" aria-hidden="true">
+                    {volume.source === "none" ? "…" : "✓"}
+                  </span>
+                  <span className="what sg-cb-mono">{volume.claim}</span>
+                  <span className="how">
+                    {volume.source === "reuse"
+                      ? `reusing ${volume.target}${volume.readOnly ? " (read-only)" : ""}`
+                      : volume.source === "fresh"
+                        ? `new volume at ${volume.target}`
+                        : volume.source === "class"
+                          ? "bound through a StorageClass"
+                          : "left pending — nothing to bind to"}
+                    {volume.capacity ? ` · ${volume.capacity}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p className="muted sg-cb-proof-note">
+            {copied.namespaces.length} namespace{copied.namespaces.length === 1 ? "" : "s"}
+            {" "}({copied.namespaces.join(", ")}) and {copied.supportCount} configuration
+            object{copied.supportCount === 1 ? "" : "s"} came with them.
+            {copied.skipped.length
+              ? ` Skipped, because the source no longer has them: ${copied.skipped.join(", ")}.`
+              : ""}
+            {copied.runs > 1 ? ` Copied over ${copied.runs} runs.` : ""}
+            {" "}
+            {workloadStep ? (
+              <button className="sg-cb-linkbtn" type="button" onClick={onOpenWorkloadLog}>
+                Open the copy log
+              </button>
+            ) : null}
+          </p>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -234,6 +314,7 @@ export default function BuildDetail({
   buildProfiles = [],
 }) {
   const [growing, setGrowing] = useState(false);
+  const [bringing, setBringing] = useState(false);
   const [build, setBuild] = useState(null);
   const [logs, setLogs] = useState(null);
   // The step being viewed: {id, nodeId, phase}.
@@ -381,6 +462,7 @@ export default function BuildDetail({
     ? progress.timeline.filter((cell) => cell.state === "todo")
     : [];
   const addonStep = steps.find((step) => step.phase === "addons");
+  const workloadStep = steps.find((step) => step.phase === "workloads");
 
   const act = async (fn, after) => {
     setBusy(true);
@@ -401,7 +483,9 @@ export default function BuildDetail({
         <button className="btn-ghost" type="button" onClick={onBack}>← All builds</button>
         <h3>{build.name}</h3>
         {build.status === "building"
-          ? <LiveBadge label={isGrowthRun ? "Adding machines" : "Building"} />
+          ? <LiveBadge label={build.currentPhase === "workloads" && isGrowthRun
+            ? "Copying workloads"
+            : isGrowthRun ? "Adding machines" : "Building"} />
           : <StatusPill status={build.status} />}
         <span className="muted sg-cb-mono sg-cb-detail-meta">
           v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}
@@ -492,13 +576,16 @@ export default function BuildDetail({
           duration={duration}
           addonStep={addonStep}
           onOpenAddonLog={() => addonStep && openLogs(addonStep)}
+          workloadStep={workloadStep}
+          onOpenWorkloadLog={() => workloadStep && openLogs(workloadStep)}
           dayTwo={(
             <DayTwo
               build={build}
               canCreate={canCreate}
               canDownloadKubeconfig={canDownloadKubeconfig}
               onOpenCluster={onOpenCluster}
-              onGrow={() => setGrowing(true)}
+              onGrow={() => { setBringing(false); setGrowing(true); }}
+              onBringWorkloads={() => { setGrowing(false); setBringing(true); }}
               notify={notify}
               busy={busy}
               setBusy={setBusy}
@@ -514,6 +601,16 @@ export default function BuildDetail({
           notify={notify}
           onChanged={load}
           onClose={() => setGrowing(false)}
+        />
+      ) : null}
+
+      {isDone && bringing ? (
+        <WorkloadsPanel
+          build={build}
+          canExecute={canExecute}
+          notify={notify}
+          onChanged={load}
+          onClose={() => setBringing(false)}
         />
       ) : null}
 
@@ -632,6 +729,12 @@ export default function BuildDetail({
                 : "none",
             },
             { label: "Sources", value: buildProfile?.name || "Internet defaults" },
+            ...((build.workloads?.itemCount || 0) ? [{
+              label: "Workloads",
+              value: `${build.workloads.workloadCount || 0} + `
+                + `${(build.workloads.wholeNamespaces || []).length} whole ns from `
+                + `${build.workloads.sourceClusterName || build.workloads.sourceClusterId}`,
+            }] : []),
             {
               label: "Images",
               value: buildProfile?.k8sImageRegistry || "upstream registries",

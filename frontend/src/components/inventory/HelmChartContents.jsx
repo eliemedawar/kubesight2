@@ -4,6 +4,7 @@ export const HELM_SOURCE_LABELS = {
   "git-chart": "Git · Helm chart",
   "archive-yaml": "Archive · Kubernetes YAML",
   "archive-chart": "Archive · Helm chart",
+  namespace: "Cluster namespace",
 };
 
 export function helmSourceLabel(template) {

@@ -3,7 +3,7 @@
 Phases (single-CP builds skip loadbalancer/join_cp as configured):
 
     base_prep → loadbalancer → pull_images → init → cni → join_cp (serial!)
-    → join_workers → verify → onboard
+    → join_workers → verify → onboard → addons → workloads
 
 Every phase writes ClusterBuildStep rows; completed steps are skipped on
 resume, so a backend restart RESUMES a build instead of restarting it
@@ -39,6 +39,8 @@ from .. import ssh_profile_service
 from . import addons as addon_registry
 from . import cni as cni_registry
 from . import kubeadm, lb, onboard, os_adapters
+from . import storage as workload_storage
+from . import workloads as workload_copy
 from .addons import metallb as metallb_addon
 from .cni.base import extract_images, rewrite_manifest_images
 from .profiles import resolve as resolve_profile
@@ -54,6 +56,13 @@ _CNI_ROLLOUT_TIMEOUT_S = 1200
 _NODE_READY_TIMEOUT_S = 1200
 _COREDNS_ROLLOUT_TIMEOUT_S = 600
 _SMOKE_POD_TIMEOUT_S = 600
+_WORKLOAD_APPLY_TIMEOUT_S = 600
+_WORKLOAD_ROLLOUT_TIMEOUT_S = 120
+# An unreachable NFS export hangs `mount` for a long time by default; bound so
+# the phase reports a failure instead of sitting there.
+_WORKLOAD_MOUNT_TIMEOUT_S = 180
+# Kinds with a rollout to wait on. A CronJob has nothing to become ready.
+_ROLLOUT_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
 _KUBELET_CSR_APPROVER_IMAGE = (
     "docker.io/postfinance/kubelet-csr-approver:v1.2.14@"
     "sha256:c0f6aa1abdc225a32f9a29992fd97f711e78e2df21434f9ce7bc60981f96a5f8"
@@ -320,6 +329,17 @@ def _nodes_by_role(build: ClusterBuild) -> Tuple[List[ClusterBuildNode], List[Cl
     return cps, workers, lbs
 
 
+def _needs_nfs_client(build: ClusterBuild) -> bool:
+    """Will any copied claim be backed by NFS?
+
+    Read from the *stored decisions* rather than from the source cluster: this
+    runs at the very start of a build, and it must not depend on another
+    cluster being reachable.
+    """
+    selection = workload_copy.selection_of(build)
+    return workload_storage.needs_nfs((selection or {}).get("storage"))
+
+
 def _phase_base_prep(build: ClusterBuild, resolved) -> None:
     """Parallel node preparation. Scripts per role:
     CP/worker → CA, kernel prep, containerd, kube packages;
@@ -341,6 +361,14 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
             scripts.append(("Kernel modules + sysctl + swap off", adapter.script_kernel_prep(ctx)))
             scripts.append(("containerd install + config", adapter.script_install_containerd(ctx)))
             scripts.append(("Kubernetes packages (kubeadm, kubelet, kubectl)", adapter.script_install_kube_packages(ctx)))
+            # Only when this build will actually mount one: the kubelet needs
+            # /sbin/mount.nfs, and without it an NFS volume fails at pod start
+            # with an opaque "wrong fs type" long after the build succeeded.
+            if _needs_nfs_client(build):
+                scripts.append((
+                    "NFS client (for copied volume claims)",
+                    adapter.script_install_nfs_client(ctx),
+                ))
         jobs.append((
             node, step, scripts, _target_for(build, node),
             node.id, step.id,
@@ -1511,6 +1539,254 @@ def _phase_addons(
         raise _PhaseFailed(f"add-ons failed: {exc}") from exc
 
 
+def _prepare_workload_storage(
+    build: ClusterBuild,
+    selection: Dict,
+    export,
+    target: SshTarget,
+    stream: _StreamTail,
+) -> List:
+    """Resolve where each copied claim lands, and make the fresh directories.
+
+    Runs before any manifest is applied. A claim whose decision cannot be
+    honoured fails the phase here rather than producing a Pending claim nobody
+    asked for — the decision was explicit, so silently downgrading it would be
+    worse than stopping.
+    """
+    claim_plans = workload_copy.resolve_storage(selection, export)
+    if not claim_plans:
+        return []
+    problems = workload_storage.errors(claim_plans)
+    if problems:
+        raise _PhaseFailed(
+            "the storage plan for the copied volume claims is not valid: "
+            + "; ".join(problems[:3])
+        )
+
+    summary = workload_storage.summarize(claim_plans)
+    stream.header(
+        f"volumes — {summary['volumesToCreate']} to create, "
+        f"{summary['reusingData']} reusing the source's data, "
+        f"{summary['pending']} left pending"
+    )
+    for plan in claim_plans:
+        stream.write(
+            f"{plan.key}: {plan.source}"
+            + (f" → {plan.server}:{plan.path}" if plan.server else "")
+            + (f" ({plan.capacity})" if plan.capacity else "")
+            + (" read-only" if plan.read_only else "")
+            + "\n"
+        )
+
+    script = workload_storage.prepare_script(
+        claim_plans, selection.get("storage") or {}
+    )
+    if script:
+        # Mounted, used and unmounted in one command: the export is not left
+        # attached to a control-plane node after the build.
+        _run_traced(
+            target,
+            script,
+            timeout_s=_WORKLOAD_MOUNT_TIMEOUT_S,
+            stream=stream,
+            display_command="create the NFS directories for copied claims",
+            input_summary="export root mounted, one directory per claim, unmounted",
+        )
+    return claim_plans
+
+
+def _verify_claims_bound(
+    build: ClusterBuild,
+    target: SshTarget,
+    claim_plans: List,
+    stream: _StreamTail,
+) -> List[str]:
+    """Report which copied claims did not bind. Never fails the phase."""
+    unbound = []
+    for plan in claim_plans:
+        if plan.source == workload_storage.NONE:
+            continue
+        _check_cancelled(build)
+        try:
+            phase = _kubectl(
+                target,
+                f"-n {shlex.quote(plan.namespace)} get pvc "
+                f"{shlex.quote(plan.name)} -o jsonpath='{{.status.phase}}'",
+                timeout_s=60,
+                stream=stream,
+            ).strip()
+        except (SshCommandError, SshConnectionError):
+            unbound.append(f"{plan.key} (could not be read)")
+            continue
+        if phase != "Bound":
+            unbound.append(f"{plan.key} ({phase or 'unknown'})")
+    if unbound:
+        stream.write(
+            f"\n{len(unbound)} volume claim(s) did not bind: {', '.join(unbound)}\n"
+        )
+    return unbound
+
+
+def _phase_workloads(build: ClusterBuild, primary: ClusterBuildNode) -> None:
+    """Copy the selected namespaces/workloads out of an existing cluster.
+
+    The manifests are read *now*, not when they were picked: a selection saved
+    an hour ago must not apply an hour-old copy of a live Deployment.
+
+    Two deliberate asymmetries with the add-ons phase:
+      * a workload whose pods never become ready does NOT fail the build —
+        a missing image was warned about at preflight and acknowledged, and
+        failing here would strand a perfectly good cluster;
+      * the uploaded manifest is deleted from the node afterwards, because it
+        can contain Secret data.
+    """
+    selection = workload_copy.selection_of(build)
+    if selection is None:
+        return
+    step = _get_step(build, "workloads")
+    if step.status == "completed":
+        return
+    _step_start(step)
+    stream = _StreamTail(step.id)
+    target = _target_for(build, primary)
+    source = selection.get("sourceClusterName") or selection.get("sourceClusterId")
+
+    try:
+        stream.header(f"Reading {len(selection['items'])} selection(s) from {source}")
+        try:
+            export = workload_copy.export_selection(selection)
+        except (workload_copy.WorkloadSourceError, PermissionError) as exc:
+            raise _PhaseFailed(
+                f"The source cluster '{source}' could not be read: {exc}"
+            ) from exc
+        if not export.documents:
+            raise _PhaseFailed(
+                f"Nothing to copy: none of the selected workloads exist in "
+                f"'{source}' any more."
+            )
+        stream.write(
+            f"{len(export.workloads)} workload(s), "
+            f"{sum(export.support.values())} configuration object(s), "
+            f"{len(export.documents)} manifest(s) across "
+            f"{len(export.namespaces)} namespace(s)\n"
+        )
+        for missing in export.missing:
+            stream.write(f"skipped (gone from the source): {missing}\n")
+        for warning in export.warnings:
+            stream.write(f"note: {warning}\n")
+
+        # Informational only — the operator already acknowledged this at
+        # preflight, and a registry that has gone dark must not fail the phase.
+        try:
+            checks, _ = workload_copy.check_images(
+                selection.get("registryConnectionId"), export.images
+            )
+            absent = [c["image"] for c in checks if c["status"] == workload_copy.NOT_FOUND]
+            if absent:
+                stream.write(
+                    f"{len(absent)} image(s) are not in the selected registry and "
+                    f"will not pull: {', '.join(absent[:10])}\n"
+                )
+        except Exception as exc:  # noqa: BLE001 — a check, not a gate
+            stream.write(f"image availability could not be re-checked: {exc}\n")
+
+        # Storage before anything that mounts it: the directories have to exist
+        # and the PersistentVolumes have to be there for the claims to bind to.
+        claim_plans = _prepare_workload_storage(
+            build, selection, export, target, stream
+        )
+        apply_docs = workload_copy.apply_documents(export, claim_plans)
+
+        applied_namespaces = []
+        for namespace, documents in workload_copy.group_by_namespace(apply_docs):
+            _check_cancelled(build)
+            label = namespace or "cluster-scoped volumes"
+            stream.header(f"{label} — {len(documents)} object(s)")
+            remote_path = f"/etc/kubernetes/kubesight-workloads-{namespace or 'cluster'}.yaml"
+            _upload_and_run_traced(
+                target,
+                remote_path,
+                workload_copy.to_yaml(documents),
+                # 'set +e' so the manifest is deleted even when apply fails:
+                # the uploaded file can carry Secret data, and the enclosing
+                # script's 'set -e' would otherwise exit before the rm.
+                "set +e; kubectl --kubeconfig /etc/kubernetes/admin.conf "
+                f"apply -f {remote_path}; rc=$?; rm -f {remote_path}; exit $rc",
+                timeout_s=_WORKLOAD_APPLY_TIMEOUT_S,
+                stream=stream,
+            )
+            if namespace:
+                applied_namespaces.append(namespace)
+
+        unbound = _verify_claims_bound(build, target, claim_plans, stream)
+
+        # Best-effort readiness: reported, never enforced.
+        not_ready = []
+        for workload in export.workloads:
+            kind = workload.get("kind") or ""
+            if kind not in _ROLLOUT_KINDS:
+                continue
+            _check_cancelled(build)
+            reference = f"{kind.lower()}/{workload['name']}"
+            try:
+                _kubectl(
+                    target,
+                    f"-n {shlex.quote(workload['namespace'])} rollout status "
+                    f"{shlex.quote(reference)} --timeout={_WORKLOAD_ROLLOUT_TIMEOUT_S}s",
+                    timeout_s=_WORKLOAD_ROLLOUT_TIMEOUT_S + 30,
+                    stream=stream,
+                )
+            except (SshCommandError, SshConnectionError):
+                not_ready.append(f"{workload['namespace']}/{workload['name']}")
+        if not_ready:
+            stream.write(
+                f"\n{len(not_ready)} workload(s) are not ready yet: "
+                f"{', '.join(not_ready)}\n"
+                "The cluster is built and the objects are applied — a workload "
+                "whose image is missing stays in ImagePullBackOff until it is "
+                "pushed. Nothing else is affected.\n"
+            )
+
+        record = {
+            "at": _utcnow().isoformat(),
+            "sourceClusterId": selection.get("sourceClusterId"),
+            "sourceClusterName": selection.get("sourceClusterName") or "",
+            "namespaces": applied_namespaces,
+            "workloads": [
+                {"namespace": w["namespace"], "kind": w["kind"], "name": w["name"]}
+                for w in export.workloads
+            ],
+            "support": export.support,
+            "skipped": export.missing,
+            "notReady": not_ready,
+            "volumes": [
+                {"claim": plan.key, "source": plan.source, "pv": plan.pv_name,
+                 "target": f"{plan.server}:{plan.path}" if plan.server else "",
+                 "capacity": plan.capacity, "readOnly": plan.read_only}
+                for plan in claim_plans
+            ],
+            "unboundClaims": unbound,
+        }
+        # A fresh dict: a JSON column is not mutation-tracked, so an in-place
+        # append would never be written back.
+        data = dict(build.workloads_json or {})
+        data["applied"] = [*list(data.get("applied") or []), record]
+        data["result"] = record
+        build.workloads_json = data
+        db.session.commit()
+
+        _check_cancelled(build)
+        _step_done(step, stream.text())
+    except _Cancelled:
+        raise
+    except (SshCommandError, SshConnectionError, _PhaseFailed) as exc:
+        extra = getattr(exc, "output", "")
+        if extra and extra not in stream.text():
+            stream.write(extra)
+        _step_fail(step, str(exc), stream.text())
+        raise _PhaseFailed(f"workload copy failed: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # The worker
 # ---------------------------------------------------------------------------
@@ -1551,6 +1827,8 @@ def _run_build(app, build_id: int) -> None:
             _phase_onboard(build, primary)
             _check_cancelled(build)
             _phase_addons(build, resolved, primary)
+            _check_cancelled(build)
+            _phase_workloads(build, primary)
             _check_cancelled(build)
 
             # Bank the original build's duration the first time it completes.

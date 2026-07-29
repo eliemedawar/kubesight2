@@ -1,4 +1,4 @@
-/** The new-build wizard: Shape → Machines → Add-ons → Verify & build.
+/** The new-build wizard: Shape → Machines → Add-ons → Workloads → Verify.
  *
  *  The old step 1 held eleven fields plus the whole add-on catalog in one grid,
  *  mixing what the cluster *is* with the infrastructure plumbing a build
@@ -9,6 +9,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Blueprint from "./Blueprint.jsx";
+import WorkloadsPicker from "./WorkloadsPicker.jsx";
 import { Field, StatusPill } from "./common.jsx";
 import { addonSelectionError, ipRangeListError } from "../../utils/addonConfig.js";
 import {
@@ -22,6 +23,11 @@ import {
   preferredSources,
   preflightBlueprint,
   versionsForK8s,
+  emptyStorage,
+  storageErrors,
+  storageRows,
+  storageSummary,
+  workloadSelectionSummary,
 } from "../../utils/clusterBuilder.js";
 import {
   createClusterBuild,
@@ -31,7 +37,23 @@ import {
   updateClusterBuild,
 } from "../../api/clusterBuildsApi.js";
 
-const STEPS = ["Shape", "Machines", "Add-ons", "Verify & build"];
+const STEPS = ["Shape", "Machines", "Add-ons", "Workloads", "Verify & build"];
+
+// Named because the rail, the right-hand footer and the preflight hand-off
+// all reference them, and off-by-one there is a silent wrong-panel bug.
+const STEP_SHAPE = 0;
+const STEP_MACHINES = 1;
+const STEP_ADDONS = 2;
+const STEP_WORKLOADS = 3;
+const STEP_VERIFY = 4;
+
+const EMPTY_WORKLOADS = {
+  sourceClusterId: "",
+  sourceClusterName: "",
+  registryConnectionId: null,
+  storage: emptyStorage(),
+  items: [],
+};
 
 const EMPTY_BASICS = {
   name: "",
@@ -44,6 +66,7 @@ const EMPTY_BASICS = {
   podCidr: "10.244.0.0/16",
   serviceCidr: "10.96.0.0/12",
   addons: [],
+  workloads: { ...EMPTY_WORKLOADS },
   vsphereConnectionId: "",
   buildProfileId: "",
   connectionProfileId: "",
@@ -857,6 +880,9 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
   const [busy, setBusy] = useState(false);
   const [acked, setAcked] = useState(false);
   const [editingSource, setEditingSource] = useState(null);
+  // The last image check from the Workloads step, so the Blueprint can report
+  // it while the user is still standing on that step.
+  const [workloadPlan, setWorkloadPlan] = useState(null);
   const seeded = useRef(false);
 
   const setBasic = (key, value) => setBasics((previous) => ({ ...previous, [key]: value }));
@@ -970,6 +996,9 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
         vsphereConnectionId: basics.vsphereConnectionId || undefined,
         buildProfileId: basics.buildProfileId || undefined,
         connectionProfileId: basics.connectionProfileId || undefined,
+        // null clears a selection that was made and then emptied — the
+        // wizard is the only place that can say "bring nothing after all".
+        workloads: basics.workloads.items.length ? basics.workloads : null,
         nodes: nodesPayload,
       };
       if (id) await updateClusterBuild(id, payload);
@@ -979,7 +1008,7 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
         setBuildId(id);
       }
       setPreflightResult(await preflightClusterBuild(id));
-      setStep(3);
+      setStep(STEP_VERIFY);
     } catch (error) {
       notify(error.message || String(error), true);
     } finally {
@@ -1023,6 +1052,64 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
     };
   });
 
+  // Recomputed here as well as in the picker: the Blueprint reports the
+  // volume plan, and the step's own gate is "every claim has a destination".
+  const workloadStorageRows = workloadPlan
+    ? storageRows(workloadPlan, basics.workloads.storage)
+    : [];
+  const workloadStorageErrors = storageErrors(workloadStorageRows);
+
+  const workloadFacts = basics.workloads.items.length
+    ? [
+      {
+        label: "From",
+        value: basics.workloads.sourceClusterName || basics.workloads.sourceClusterId,
+      },
+      { label: "Selected", value: workloadSelectionSummary(basics.workloads.items) },
+      ...(workloadStorageRows.length
+        ? [{ label: "Volumes", value: storageSummary(workloadStorageRows) }]
+        : []),
+      ...(workloadPlan ? [{
+        label: "Images",
+        value: workloadPlan.counts?.missingImages
+          ? `${workloadPlan.counts.missingImages} missing from the registry`
+          : workloadPlan.registryConnectionId
+            ? `all ${workloadPlan.counts?.images || 0} in the registry`
+            : `${workloadPlan.counts?.images || 0}, not checked`,
+      }] : []),
+    ]
+    : [];
+
+  const workloadNote = !basics.workloads.items.length
+    ? {
+      tone: "plain",
+      text: "Optional. A new cluster is usually empty — pick namespaces or "
+        + "workloads here only when this cluster is replacing or mirroring "
+        + "another one.",
+    }
+    : workloadStorageErrors.length
+      ? {
+        tone: "warn",
+        text: `${workloadStorageErrors.length} volume claim`
+          + `${workloadStorageErrors.length === 1 ? " has" : "s have"} no valid `
+          + 'destination yet. Every claim needs somewhere to land, even if that '
+          + 'is "leave pending".',
+      }
+      : workloadPlan?.counts?.missingImages
+        ? {
+          tone: "warn",
+          text: `${workloadPlan.counts.missingImages} image`
+            + `${workloadPlan.counts.missingImages === 1 ? " is" : "s are"} not in `
+            + "the chosen registry. Those workloads are still created — their pods "
+            + "wait in ImagePullBackOff until the image is pushed. Remove them if "
+            + "that is not what you want.",
+        }
+        : {
+          tone: "good",
+          text: "Copied after the cluster registers, as the last phase. The source "
+            + "cluster is only read — nothing there moves.",
+        };
+
   const affinityNote = plan.conflictHosts.length
     ? {
       tone: "warn",
@@ -1035,7 +1122,7 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
       : { tone: "plain", text: "Assign a machine to every slot. Nothing is reserved until preflight runs." };
 
   const rightRail = (() => {
-    if (step === 3 && stampedPlan && grouped) {
+    if (step === STEP_VERIFY && stampedPlan && grouped) {
       return (
         <Blueprint
           plan={stampedPlan}
@@ -1045,31 +1132,46 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
         />
       );
     }
-    const footer = step === 0 ? (
+    const footer = step === STEP_SHAPE ? (
       <button
         className="primary sg-cb-bp-cta"
         type="button"
         disabled={!shapeReady}
-        onClick={() => setStep(1)}
+        onClick={() => setStep(STEP_MACHINES)}
       >
         Next — pick machines
       </button>
-    ) : step === 1 ? (
+    ) : step === STEP_MACHINES ? (
       <button
         className="primary sg-cb-bp-cta"
         type="button"
         disabled={!countsOk || Boolean(plan.conflictHosts.length)}
-        onClick={() => setStep(2)}
+        onClick={() => setStep(STEP_ADDONS)}
       >
         Next — add-ons
       </button>
-    ) : (
+    ) : step === STEP_ADDONS ? (
       <>
         {addonError ? <span className="sg-cb-field-error">{addonError}</span> : null}
         <button
           className="primary sg-cb-bp-cta"
           type="button"
-          disabled={busy || !countsOk || Boolean(addonError) || !nodesPayload.length}
+          disabled={Boolean(addonError)}
+          onClick={() => setStep(STEP_WORKLOADS)}
+        >
+          Next — workloads
+        </button>
+      </>
+    ) : (
+      <>
+        {workloadStorageErrors.length ? (
+          <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
+        ) : null}
+        <button
+          className="primary sg-cb-bp-cta"
+          type="button"
+          disabled={busy || !countsOk || Boolean(addonError) || !nodesPayload.length
+            || workloadStorageErrors.length > 0}
           onClick={runPreflight}
         >
           {busy ? "Running preflight…" : "Run preflight"}
@@ -1079,15 +1181,18 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
     return (
       <Blueprint
         plan={plan}
-        note={step === 0
-          ? {
-            tone: "plain",
-            text: basics.topologyType === "stacked_ha"
-              ? "Nine machines is the usual production shape. The drawing fills in as you assign roles."
-              : "A lab cluster. The drawing fills in as you assign roles.",
-          }
+        note={step === STEP_WORKLOADS
+          ? workloadNote
+          : step === STEP_SHAPE
+            ? {
+              tone: "plain",
+              text: basics.topologyType === "stacked_ha"
+                ? "Nine machines is the usual production shape. The drawing fills in as you assign roles."
+                : "A lab cluster. The drawing fills in as you assign roles.",
+            }
           : affinityNote}
-        facts={step === 2 ? addonFacts : []}
+        facts={step === STEP_ADDONS ? addonFacts
+          : step === STEP_WORKLOADS ? workloadFacts : []}
         footer={footer}
       />
     );
@@ -1112,11 +1217,11 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
 
       <div className="sg-cb-split">
         <div className="sg-cb-vstack">
-          {step === 0 ? (
+          {step === STEP_SHAPE ? (
             <ShapeStep options={options} basics={basics} setBasic={setBasic} />
           ) : null}
 
-          {step === 1 ? (
+          {step === STEP_MACHINES ? (
             <MachinesStep
               basics={basics}
               infra={infra}
@@ -1134,7 +1239,7 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
             />
           ) : null}
 
-          {step === 2 ? (
+          {step === STEP_ADDONS ? (
             <div className="card sg-cb-card">
               <div className="sg-cb-sect">
                 <h2>Installed after the cluster registers</h2>
@@ -1153,7 +1258,33 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
             </div>
           ) : null}
 
-          {step === 3 && preflightResult && grouped ? (
+          {step === STEP_WORKLOADS ? (
+            <div className="card sg-cb-card">
+              <div className="sg-cb-sect">
+                <h2>Bring workloads from an existing cluster</h2>
+                <span className="sg-cb-sect-right">
+                  {basics.workloads.items.length
+                    ? `${workloadSelectionSummary(basics.workloads.items)} · copied as the last phase`
+                    : "Optional — skip to build an empty cluster"}
+                </span>
+              </div>
+              <p className="muted sg-cb-wl-lede">
+                A copy, not a move: the source cluster is only read. Each workload
+                travels with the ConfigMaps, Secrets, volume claims, Services and
+                Ingresses it references, so it starts on its own — cluster IPs,
+                node ports and bound volumes are left behind for the new cluster
+                to allocate its own.
+              </p>
+              <WorkloadsPicker
+                value={basics.workloads}
+                onChange={(next) => setBasic("workloads", next)}
+                onPlanChange={setWorkloadPlan}
+                notify={notify}
+              />
+            </div>
+          ) : null}
+
+          {step === STEP_VERIFY && preflightResult && grouped ? (
             <>
               <VerifyStep
                 grouped={grouped}
@@ -1183,7 +1314,11 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
                 </div>
               ) : (
                 <div className="sg-cb-actions">
-                  <button className="btn-outline" type="button" onClick={() => setStep(1)}>
+                  <button
+                    className="btn-outline"
+                    type="button"
+                    onClick={() => setStep(STEP_MACHINES)}
+                  >
                     Back to machines
                   </button>
                   <button

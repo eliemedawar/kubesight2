@@ -9,7 +9,7 @@ import { parseApiTime } from "../lib/apiTime";
 
 export const PHASE_ORDER = [
   "base_prep", "loadbalancer", "pull_images", "init", "cni",
-  "join_cp", "join_workers", "verify", "onboard", "addons",
+  "join_cp", "join_workers", "verify", "onboard", "addons", "workloads",
 ];
 
 export const PHASE_LABELS = {
@@ -23,6 +23,7 @@ export const PHASE_LABELS = {
   verify: "Cluster verification",
   onboard: "Register in KubeSight",
   addons: "Install add-ons",
+  workloads: "Bring workloads over",
 };
 
 /** Short form for the horizontal rail, where a cell is ~80px wide. */
@@ -37,6 +38,7 @@ export const PHASE_SHORT = {
   verify: "Verify",
   onboard: "Register",
   addons: "Add-ons",
+  workloads: "Workloads",
 };
 
 export const PHASE_NOTES = {
@@ -50,6 +52,7 @@ export const PHASE_NOTES = {
   verify: "nodes Ready · CoreDNS · etcd · smoke pod",
   onboard: "admin.conf → Clusters page, no manual step",
   addons: "selected add-ons, pinned and verified",
+  workloads: "namespaces and workloads copied from an existing cluster",
 };
 
 export const ROLE_LABELS = {
@@ -174,6 +177,7 @@ export function expectedPhases(build) {
     if (phase === "join_cp") return (build?.nodeCounts?.controlPlane || 0) > 1;
     if (phase === "join_workers") return (build?.nodeCounts?.worker || 0) > 0;
     if (phase === "addons") return (build?.addons || []).length > 0;
+    if (phase === "workloads") return (build?.workloads?.itemCount || 0) > 0;
     return true;
   });
 }
@@ -947,4 +951,330 @@ export function defaultVersionForK8s(catalogEntry, k8sVersion) {
 /** CNI plugins with at least one version usable on this Kubernetes version. */
 export function cniPluginsForK8s(catalog = [], k8sVersion) {
   return catalog.filter((plugin) => versionsForK8s(plugin, k8sVersion).length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Bringing workloads from an existing cluster
+//
+// The selection is a flat list of {namespace, kind, name} where kind
+// "Namespace" means the whole namespace. Flat rather than nested because the
+// backend stores it flat and every operation here — toggle, count, remove —
+// is a filter over one list.
+// ---------------------------------------------------------------------------
+
+export const WHOLE_NAMESPACE = "Namespace";
+
+/** The kinds a build can copy, in the order the picker lists them. */
+export const WORKLOAD_KINDS = ["Deployment", "StatefulSet", "DaemonSet", "CronJob"];
+
+export function workloadKey(item) {
+  return `${item?.namespace || ""}/${item?.kind || ""}/${item?.name || ""}`;
+}
+
+export function isWholeNamespaceSelected(items = [], namespace) {
+  return items.some(
+    (item) => item.namespace === namespace && item.kind === WHOLE_NAMESPACE
+  );
+}
+
+/** Selections inside one namespace, ignoring the whole-namespace marker. */
+export function selectedInNamespace(items = [], namespace) {
+  return items.filter(
+    (item) => item.namespace === namespace && item.kind !== WHOLE_NAMESPACE
+  );
+}
+
+/** Add or remove one workload.
+ *
+ *  Picking an individual workload in a namespace that is selected whole is a
+ *  narrowing, not a contradiction: the whole-namespace marker is dropped so the
+ *  user ends up with what they clicked rather than silently keeping everything.
+ */
+export function toggleWorkload(items = [], entry) {
+  const target = {
+    namespace: entry.namespace,
+    kind: entry.kind,
+    name: entry.name || "",
+  };
+  const key = workloadKey(target);
+  if (items.some((item) => workloadKey(item) === key)) {
+    return items.filter((item) => workloadKey(item) !== key);
+  }
+  const kept = items.filter(
+    (item) => !(item.namespace === target.namespace && item.kind === WHOLE_NAMESPACE)
+  );
+  return [...kept, target];
+}
+
+/** Select or clear a whole namespace, replacing any individual picks in it. */
+export function toggleWholeNamespace(items = [], namespace) {
+  if (isWholeNamespaceSelected(items, namespace)) {
+    return items.filter((item) => item.namespace !== namespace);
+  }
+  return [
+    ...items.filter((item) => item.namespace !== namespace),
+    { namespace, kind: WHOLE_NAMESPACE, name: "" },
+  ];
+}
+
+/** Turn a whole-namespace selection into its explicit members.
+ *
+ *  Needed the moment someone unticks one row of a namespace they selected
+ *  whole: without this, the only thing the click could do is *narrow to* that
+ *  one workload, so unticking a box would leave it ticked and clear its
+ *  neighbours — the opposite of what the gesture means. Namespaces that are not
+ *  selected whole are returned untouched.
+ */
+export function expandNamespaceSelection(items = [], namespace, workloads = []) {
+  if (!isWholeNamespaceSelected(items, namespace)) return items;
+  return [
+    ...items.filter((item) => item.namespace !== namespace),
+    ...workloads.map((workload) => ({
+      namespace,
+      kind: workload.kind,
+      name: workload.name,
+    })),
+  ];
+}
+
+export function removeWorkload(items = [], entry) {
+  const key = workloadKey(entry);
+  return items.filter((item) => workloadKey(item) !== key);
+}
+
+/** One line for the wizard footer, the Blueprint facts, and the receipt.
+ *
+ *  `short` drops the "across N namespaces" clause — it reads as nonsense inside
+ *  a button ("Copy 1 whole namespace across 1 namespace into prod").
+ */
+export function workloadSelectionSummary(items = [], { short = false } = {}) {
+  if (!items.length) return "Nothing selected";
+  const whole = items.filter((item) => item.kind === WHOLE_NAMESPACE);
+  const picked = items.filter((item) => item.kind !== WHOLE_NAMESPACE);
+  const parts = [];
+  if (whole.length) {
+    parts.push(`${whole.length} whole namespace${whole.length === 1 ? "" : "s"}`);
+  }
+  if (picked.length) {
+    parts.push(`${picked.length} workload${picked.length === 1 ? "" : "s"}`);
+  }
+  const namespaces = new Set(items.map((item) => item.namespace));
+  if (short || (whole.length && namespaces.size === whole.length && !picked.length)) {
+    return parts.join(" · ");
+  }
+  return `${parts.join(" · ")} across ${namespaces.size} namespace${
+    namespaces.size === 1 ? "" : "s"}`;
+}
+
+const IMAGE_STATUS_TEXT = {
+  ok: "in the registry",
+  missing: "no image in the registry",
+  unreachable: "registry unreachable",
+  not_checked: "not checked",
+  no_images: "no images",
+};
+
+export function imageStatusText(status) {
+  return IMAGE_STATUS_TEXT[status] || String(status || "");
+}
+
+/** What the Workloads step has to say about a plan, ready to render.
+ *
+ *  `blocking` is deliberately absent: a workload with no image in the registry
+ *  is a warning the operator either fixes by removing it or accepts on the
+ *  record. The copy is of something that already runs somewhere.
+ */
+export function workloadPlanVerdict(plan) {
+  const workloads = plan?.workloads || [];
+  const missing = plan?.missingWorkloads || [];
+  const counts = plan?.counts || {};
+  const unreachable = workloads.filter((item) => item.imageStatus === "unreachable");
+  const checked = Boolean(plan?.registryConnectionId);
+  let tone = "good";
+  if (missing.length) tone = "warn";
+  else if (unreachable.length) tone = "warn";
+  else if (!checked && counts.images) tone = "plain";
+  return {
+    tone,
+    checked,
+    total: workloads.length,
+    missing,
+    unreachable,
+    okCount: workloads.filter((item) => item.imageStatus === "ok").length,
+    imageCount: counts.images || 0,
+    missingImageCount: counts.missingImages || 0,
+    supportCount: Object.values(plan?.support || {}).reduce((sum, n) => sum + n, 0),
+    warnings: plan?.warnings || [],
+    skipped: plan?.missing || [],
+    headline: missing.length
+      ? `${missing.length} workload${missing.length === 1 ? "" : "s"} would start `
+        + `without an image${plan?.imageChecks?.[0]?.registry
+          ? ` in ${plan.imageChecks[0].registry}` : ""}`
+      : !checked
+        ? `${workloads.length} workload${workloads.length === 1 ? "" : "s"} ready to copy `
+          + "— pick a registry to check their images"
+        : `Every image of all ${workloads.length} workload${
+          workloads.length === 1 ? "" : "s"} is in the registry`,
+  };
+}
+
+/** What actually landed, for the finished-build receipt. */
+export function workloadReceipt(build) {
+  const summary = build?.workloads || {};
+  const runs = build?.workloadSelection?.applied || [];
+  const last = runs[runs.length - 1] || summary.lastApplied || null;
+  if (!last) return null;
+  const namespaces = new Set();
+  const workloads = [];
+  for (const run of runs.length ? runs : [last]) {
+    for (const namespace of run.namespaces || []) namespaces.add(namespace);
+    for (const workload of run.workloads || []) workloads.push(workload);
+  }
+  const notReady = last.notReady || [];
+  return {
+    source: last.sourceClusterName || last.sourceClusterId || "another cluster",
+    namespaces: [...namespaces],
+    workloads,
+    // Volumes are the last run's, not every run's: a claim can only be backed
+    // by one thing at a time, so an older answer for it is history, not fact.
+    volumes: last.volumes || [],
+    unbound: last.unboundClaims || [],
+    notReady,
+    runs: runs.length || 1,
+    supportCount: Object.values(last.support || {}).reduce((sum, n) => sum + n, 0),
+    skipped: last.skipped || [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Where copied volume claims land
+//
+// One decision per claim with a copy-wide default, mirroring `storage.py`.
+// The preview is computed here rather than round-tripped, so changing a
+// destination is instant; the backend validates the same rules again at
+// preflight, which is what actually gates the build.
+// ---------------------------------------------------------------------------
+
+export const STORAGE_SOURCES = [
+  {
+    value: "fresh",
+    label: "New NFS directory",
+    hint: "A volume of its own under the export root. Starts empty.",
+  },
+  {
+    value: "reuse",
+    label: "Reuse the source's export",
+    hint: "Points at the same NFS path the source cluster uses — the existing data.",
+  },
+  {
+    value: "class",
+    label: "StorageClass in the new cluster",
+    hint: "Binds dynamically against a StorageClass you already have there.",
+  },
+  {
+    value: "none",
+    label: "Leave pending",
+    hint: "Copied as-is with nothing to bind to. The pod waits.",
+  },
+];
+
+export const emptyStorage = () => ({
+  default: "none",
+  nfsServer: "",
+  nfsExportRoot: "",
+  nfsMountOptions: "",
+  storageClassName: "",
+  claims: {},
+});
+
+export function storageDecision(storage, key) {
+  const entry = (storage?.claims || {})[key] || {};
+  return {
+    source: entry.source || storage?.default || "none",
+    readOnly: Boolean(entry.readOnly),
+  };
+}
+
+export function setStorageDecision(storage, key, patch) {
+  const claims = { ...(storage?.claims || {}) };
+  const next = { ...storageDecision(storage, key), ...patch };
+  // Read-only is a property of reusing somebody's data; it means nothing on a
+  // directory we just created for this cluster.
+  if (next.source !== "reuse") next.readOnly = false;
+  claims[key] = next;
+  return { ...storage, claims };
+}
+
+/** Apply one destination to every claim, clearing the per-claim overrides that
+ *  would otherwise silently win over what the user just chose. */
+export function setAllStorageDecisions(storage, keys, source) {
+  const claims = { ...(storage?.claims || {}) };
+  for (const key of keys) delete claims[key];
+  return { ...storage, default: source, claims };
+}
+
+/** Where a claim would actually land, recomputed from what is on screen. */
+export function storageTarget(row, decision, storage) {
+  if (decision.source === "fresh") {
+    const server = (storage?.nfsServer || "").trim();
+    const root = (storage?.nfsExportRoot || "").trim().replace(/\/+$/, "");
+    if (!server || !root) return "";
+    return `${server}:${root}/${row.namespace}/${row.name}`;
+  }
+  if (decision.source === "reuse") return row.sourceTarget || "";
+  if (decision.source === "class") {
+    return (storage?.storageClassName || row.storageClassName || "").trim();
+  }
+  return "";
+}
+
+/** One row per copied claim: the server's facts plus the local decision. */
+export function storageRows(plan, storage) {
+  return (plan?.storage?.claims || []).map((row) => {
+    const decision = storageDecision(storage, row.key);
+    let error = "";
+    if (decision.source === "reuse" && !row.reusable) {
+      error = `Cannot reuse — ${row.reuseBlocked || "no NFS volume in the source"}.`;
+    } else if (decision.source === "fresh"
+      && !((storage?.nfsServer || "").trim() && (storage?.nfsExportRoot || "").trim())) {
+      error = "Fill in the NFS server and export root.";
+    } else if (decision.source === "class"
+      && !((storage?.storageClassName || "").trim() || row.storageClassName)) {
+      error = "Name a StorageClass.";
+    }
+    return {
+      ...row,
+      source: decision.source,
+      readOnly: decision.readOnly,
+      target: storageTarget(row, decision, storage),
+      error,
+    };
+  });
+}
+
+export function storageErrors(rows = []) {
+  return rows.filter((row) => row.error).map((row) => `${row.key}: ${row.error}`);
+}
+
+/** Which inputs the form actually needs, given what is chosen. */
+export function storageNeeds(rows = []) {
+  return {
+    nfs: rows.some((row) => row.source === "fresh"),
+    storageClass: rows.some((row) => row.source === "class"),
+    reuse: rows.some((row) => row.source === "reuse"),
+  };
+}
+
+export function storageSummary(rows = []) {
+  if (!rows.length) return "";
+  const counts = rows.reduce((acc, row) => {
+    acc[row.source] = (acc[row.source] || 0) + 1;
+    return acc;
+  }, {});
+  const parts = [];
+  if (counts.fresh) parts.push(`${counts.fresh} new volume${counts.fresh === 1 ? "" : "s"}`);
+  if (counts.reuse) parts.push(`${counts.reuse} reusing existing data`);
+  if (counts.class) parts.push(`${counts.class} via StorageClass`);
+  if (counts.none) parts.push(`${counts.none} left pending`);
+  return parts.join(" · ");
 }

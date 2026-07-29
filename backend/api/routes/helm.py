@@ -35,6 +35,10 @@ from ..services.helm_chart_template_service import (
     list_chart_templates,
     set_current_chart_version,
 )
+from ..services.helm_namespace_import import (
+    discover_namespace_resources,
+    import_namespace_chart,
+)
 
 helm_bp = Blueprint("helm", __name__, url_prefix="/api/helm")
 
@@ -245,6 +249,27 @@ def helm_chart_template_import_archive():
     user = get_current_user()
     data, err, status = import_archive_chart(
         _body(), actor_user_id=user.id if user else None
+    )
+    if err:
+        return error_response(err, status)
+    return success_response(data, status_code=status)
+
+
+@helm_bp.route("/chart-templates/namespace/resources", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_namespace_resources():
+    data, err, status = discover_namespace_resources(_body(), user=get_current_user())
+    if err:
+        return error_response(err, status)
+    return success_response(data)
+
+
+@helm_bp.route("/chart-templates/import/namespace", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_import_namespace():
+    user = get_current_user()
+    data, err, status = import_namespace_chart(
+        _body(), actor_user_id=user.id if user else None, user=user
     )
     if err:
         return error_response(err, status)

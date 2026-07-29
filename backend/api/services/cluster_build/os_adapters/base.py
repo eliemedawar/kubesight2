@@ -208,6 +208,12 @@ class OsAdapter:
     def script_install_haproxy_keepalived(self, ctx: ScriptContext) -> str:
         raise NotImplementedError
 
+    def script_install_nfs_client(self, ctx: ScriptContext) -> str:
+        """Userspace NFS mount helper, needed on every node that will run a pod
+        with an NFS-backed volume. Only generated when a build actually has
+        one — see the Cluster Builder's workload copy."""
+        raise NotImplementedError
+
     # Shared fragments (distro-independent).
     def script_kernel_prep(self, ctx: ScriptContext) -> str:
         return shell_preamble(ctx) + kernel_prep_script(ctx)

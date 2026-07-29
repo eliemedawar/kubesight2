@@ -81,6 +81,16 @@ _apt update -qq
 _apt install -y -qq haproxy keepalived psmisc
 """
 
+    def script_install_nfs_client(self, ctx: ScriptContext) -> str:
+        # The kubelet shells out to /sbin/mount.nfs; without nfs-common an
+        # NFS-backed volume fails at pod start with an opaque "wrong fs type".
+        return f"""{shell_preamble(ctx)}
+{_APT_SHELL_PREAMBLE}
+_apt update -qq
+_apt install -y -qq nfs-common
+command -v mount.nfs
+"""
+
 
 # Documented default the resolver falls back to; referenced here so a grep for
 # the constant finds both producer and consumer.

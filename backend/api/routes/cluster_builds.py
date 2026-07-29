@@ -280,6 +280,140 @@ def grow_build(build_id: int):
     return success_response(data)
 
 
+# ---------------------------------------------------------------------------
+# Bringing workloads from an existing cluster
+#
+# Reads of the *source* cluster are gated twice: the builder permission below,
+# and the caller's own cluster/namespace access rules inside the service (a
+# builder is not automatically entitled to read every cluster's workloads).
+# ---------------------------------------------------------------------------
+
+@cluster_builds_bp.route("/workload-sources", methods=["GET"])
+@require_permission("cluster_builds:view")
+def workload_sources():
+    return success_response({
+        **svc.workload_copy.list_sources(get_current_user()),
+        "registries": svc.workload_copy.registry_options(),
+    })
+
+
+@cluster_builds_bp.route("/workload-sources/<cluster_id>/namespaces", methods=["GET"])
+@require_permission("cluster_builds:view")
+def workload_source_namespaces(cluster_id: str):
+    try:
+        data = svc.workload_copy.list_namespaces(cluster_id, get_current_user())
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
+    except svc.workload_copy.WorkloadSourceError as exc:
+        return error_response(str(exc), 502)
+    return success_response(data)
+
+
+@cluster_builds_bp.route(
+    "/workload-sources/<cluster_id>/namespaces/<namespace>/workloads", methods=["GET"]
+)
+@require_permission("cluster_builds:view")
+def workload_source_workloads(cluster_id: str, namespace: str):
+    try:
+        data = svc.workload_copy.list_workloads(cluster_id, namespace, get_current_user())
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
+    except svc.workload_copy.WorkloadSourceError as exc:
+        return error_response(str(exc), 502)
+    return success_response(data)
+
+
+@cluster_builds_bp.route("/workload-plan", methods=["POST"])
+@require_permission("cluster_builds:view")
+def workload_plan():
+    """What a selection would copy, and which images are missing.
+
+    Available before a build row exists, because the wizard checks images while
+    the build is still being composed.
+    """
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = svc.workload_copy.plan(payload, user=get_current_user())
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    except svc.workload_copy.WorkloadSourceError as exc:
+        return error_response(str(exc), 502)
+    return success_response(data)
+
+
+@cluster_builds_bp.route("/<int:build_id>/workloads", methods=["PUT"])
+@require_permission("cluster_builds:create")
+def set_build_workloads(build_id: int):
+    """Choose workloads to copy into a cluster this build already produced."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = svc.set_build_workloads(build_id, payload.get("workloads") or payload)
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_workloads_selected",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={
+            "name": data.get("name"),
+            "source": (data.get("workloads") or {}).get("sourceClusterId"),
+            "items": (data.get("workloads") or {}).get("itemCount"),
+        },
+    )
+    return success_response(data)
+
+
+@cluster_builds_bp.route("/<int:build_id>/workload-plan", methods=["GET"])
+@require_permission("cluster_builds:view")
+def build_workload_plan(build_id: int):
+    try:
+        data = svc.workload_plan_for_build(build_id, user=get_current_user())
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
+
+
+@cluster_builds_bp.route("/<int:build_id>/bring-workloads", methods=["POST"])
+@require_permission("cluster_builds:execute")
+def bring_workloads(build_id: int):
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = svc.bring_workloads(
+            build_id,
+            ack_missing_images=bool(payload.get("ackMissingImages")),
+            actor=_actor_name(),
+            user=get_current_user(),
+        )
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_workloads_applied",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={
+            "name": data.get("name"),
+            "clusterId": data.get("resultClusterId"),
+            "source": (data.get("workloads") or {}).get("sourceClusterId"),
+            "missingImagesAcked": bool(payload.get("ackMissingImages")),
+        },
+    )
+    return success_response(data)
+
+
 @cluster_builds_bp.route("/<int:build_id>/kubeconfig", methods=["GET"])
 @require_permission("cluster_builds:kubeconfig")
 def build_kubeconfig(build_id: int):

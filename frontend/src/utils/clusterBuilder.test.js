@@ -27,6 +27,24 @@ import {
   sourceProfileSummary,
   sshPosture,
   timeAgo,
+  imageStatusText,
+  isWholeNamespaceSelected,
+  removeWorkload,
+  selectedInNamespace,
+  toggleWholeNamespace,
+  toggleWorkload,
+  expandNamespaceSelection,
+  workloadPlanVerdict,
+  workloadReceipt,
+  workloadSelectionSummary,
+  emptyStorage,
+  setAllStorageDecisions,
+  setStorageDecision,
+  storageDecision,
+  storageErrors,
+  storageNeeds,
+  storageRows,
+  storageSummary,
 } from "./clusterBuilder.js";
 
 const NOW = Date.parse("2026-07-27T12:00:00Z");
@@ -752,5 +770,305 @@ describe("Kubernetes-version compatibility", () => {
     };
     expect(addonProvenance(entry, "0.9.0").digest).toBe("sha256:1cec…c79b");
     expect(addonProvenance(entry, "0.7.2").digest).toBe("sha256:f103…7441");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bringing workloads from an existing cluster
+// ---------------------------------------------------------------------------
+
+describe("workload selection", () => {
+  const api = { namespace: "core", kind: "Deployment", name: "api" };
+  const ui = { namespace: "web", kind: "StatefulSet", name: "ui" };
+
+  it("toggles one workload on and off", () => {
+    const once = toggleWorkload([], api);
+    expect(once).toEqual([api]);
+    expect(toggleWorkload(once, api)).toEqual([]);
+  });
+
+  it("narrowing a whole namespace to one workload drops the whole marker", () => {
+    // Otherwise the user clicks one deployment and still gets all twenty.
+    const whole = toggleWholeNamespace([], "core");
+    expect(isWholeNamespaceSelected(whole, "core")).toBe(true);
+    const narrowed = toggleWorkload(whole, api);
+    expect(isWholeNamespaceSelected(narrowed, "core")).toBe(false);
+    expect(narrowed).toEqual([api]);
+  });
+
+  it("unticking one row of a whole namespace leaves the rest, named", () => {
+    // The gesture means "not that one" — narrowing to only the clicked row
+    // would be the opposite of what the click says.
+    const all = [
+      { kind: "Deployment", name: "api" },
+      { kind: "Deployment", name: "web" },
+      { kind: "CronJob", name: "nightly" },
+    ];
+    const whole = toggleWholeNamespace([], "core");
+    const expanded = expandNamespaceSelection(whole, "core", all);
+    expect(expanded).toHaveLength(3);
+    const remaining = toggleWorkload(expanded, { namespace: "core", ...all[1] });
+    expect(remaining.map((item) => item.name)).toEqual(["api", "nightly"]);
+    expect(isWholeNamespaceSelected(remaining, "core")).toBe(false);
+  });
+
+  it("expanding leaves namespaces that were not selected whole alone", () => {
+    expect(expandNamespaceSelection([api], "core", [{ kind: "Deployment", name: "x" }]))
+      .toEqual([api]);
+  });
+
+  it("selecting a whole namespace replaces the individual picks in it", () => {
+    const items = toggleWholeNamespace([api, ui], "core");
+    expect(items).toEqual([ui, { namespace: "core", kind: "Namespace", name: "" }]);
+    // Other namespaces are untouched.
+    expect(selectedInNamespace(items, "web")).toEqual([ui]);
+  });
+
+  it("clearing a whole namespace clears everything in it", () => {
+    const whole = toggleWholeNamespace([ui], "core");
+    expect(toggleWholeNamespace(whole, "core")).toEqual([ui]);
+  });
+
+  it("removes a workload by identity, not by position", () => {
+    expect(removeWorkload([api, ui], { ...api })).toEqual([ui]);
+    expect(removeWorkload([api, ui], { ...api, name: "other" })).toEqual([api, ui]);
+  });
+
+  it("summarizes what will be copied", () => {
+    expect(workloadSelectionSummary([])).toBe("Nothing selected");
+    expect(workloadSelectionSummary([api])).toBe("1 workload across 1 namespace");
+    expect(workloadSelectionSummary([
+      api, ui, { namespace: "pay", kind: "Namespace", name: "" },
+    ])).toBe("1 whole namespace · 2 workloads across 3 namespaces");
+  });
+
+  it("drops the namespace clause where it would read as nonsense", () => {
+    // Inside a button: "Copy 1 whole namespace across 1 namespace into prod".
+    const whole = [{ namespace: "pay", kind: "Namespace", name: "" }];
+    expect(workloadSelectionSummary(whole)).toBe("1 whole namespace");
+    expect(workloadSelectionSummary([api, ui], { short: true }))
+      .toBe("2 workloads");
+  });
+});
+
+describe("workloadPlanVerdict", () => {
+  const plan = (extra = {}) => ({
+    registryConnectionId: 2,
+    workloads: [
+      { namespace: "core", kind: "Deployment", name: "api", imageStatus: "ok" },
+      { namespace: "core", kind: "Deployment", name: "web", imageStatus: "missing" },
+    ],
+    missingWorkloads: [{
+      namespace: "core", kind: "Deployment", name: "web",
+      missingImages: ["registry.local/web:2"],
+    }],
+    imageChecks: [{ image: "registry.local/api:1", status: "found", registry: "nexus" }],
+    support: { ConfigMap: 2, Secret: 1 },
+    counts: { workloads: 2, images: 3, missingImages: 1 },
+    warnings: ["node ports are not copied"],
+    missing: [],
+    ...extra,
+  });
+
+  it("warns about missing images without ever blocking", () => {
+    const verdict = workloadPlanVerdict(plan());
+    expect(verdict.tone).toBe("warn");
+    expect(verdict.missing).toHaveLength(1);
+    expect(verdict.okCount).toBe(1);
+    expect(verdict.supportCount).toBe(3);
+    expect(verdict.headline).toBe("1 workload would start without an image in nexus");
+    expect(verdict).not.toHaveProperty("blocking");
+  });
+
+  it("says so plainly when no registry was chosen", () => {
+    const verdict = workloadPlanVerdict(plan({
+      registryConnectionId: null,
+      missingWorkloads: [],
+      counts: { workloads: 2, images: 3, missingImages: 0 },
+    }));
+    expect(verdict.checked).toBe(false);
+    expect(verdict.tone).toBe("plain");
+    expect(verdict.headline).toContain("pick a registry");
+  });
+
+  it("is good when everything is present", () => {
+    const verdict = workloadPlanVerdict(plan({
+      workloads: [{ namespace: "core", kind: "Deployment", name: "api", imageStatus: "ok" }],
+      missingWorkloads: [],
+      counts: { workloads: 1, images: 1, missingImages: 0 },
+    }));
+    expect(verdict.tone).toBe("good");
+    expect(verdict.headline).toBe("Every image of all 1 workload is in the registry");
+  });
+
+  it("survives an empty plan", () => {
+    const verdict = workloadPlanVerdict(null);
+    expect(verdict.total).toBe(0);
+    expect(verdict.missing).toEqual([]);
+  });
+
+  it("names each image status in words", () => {
+    expect(imageStatusText("missing")).toBe("no image in the registry");
+    expect(imageStatusText("ok")).toBe("in the registry");
+    expect(imageStatusText("weird")).toBe("weird");
+  });
+});
+
+describe("workloadReceipt", () => {
+  it("is null until something has actually landed", () => {
+    expect(workloadReceipt({ workloads: { itemCount: 2 } })).toBeNull();
+  });
+
+  it("accumulates every run, and reports what is not ready", () => {
+    const receipt = workloadReceipt({
+      workloads: { appliedRuns: 2 },
+      workloadSelection: {
+        applied: [
+          {
+            sourceClusterName: "areeba-prod-01", namespaces: ["core"],
+            workloads: [{ namespace: "core", kind: "Deployment", name: "api" }],
+            support: { ConfigMap: 1 }, notReady: [], skipped: [],
+          },
+          {
+            sourceClusterName: "areeba-prod-01", namespaces: ["pay"],
+            workloads: [{ namespace: "pay", kind: "CronJob", name: "nightly" }],
+            support: { Secret: 2 }, notReady: ["pay/nightly"], skipped: ["pay/Deployment gone"],
+            volumes: [{ claim: "pay/data", source: "reuse", pv: "kubesight-pay-data",
+                        target: "10.9.9.9:/vol/pay", capacity: "20Gi", readOnly: false }],
+            unboundClaims: [],
+          },
+        ],
+      },
+    });
+    expect(receipt.source).toBe("areeba-prod-01");
+    expect(receipt.namespaces).toEqual(["core", "pay"]);
+    expect(receipt.workloads).toHaveLength(2);
+    expect(receipt.runs).toBe(2);
+    expect(receipt.notReady).toEqual(["pay/nightly"]);
+    expect(receipt.supportCount).toBe(2);
+    expect(receipt.skipped).toEqual(["pay/Deployment gone"]);
+    // Volumes are the latest run's only: a claim has one backing at a time.
+    expect(receipt.volumes).toEqual([{
+      claim: "pay/data", source: "reuse", pv: "kubesight-pay-data",
+      target: "10.9.9.9:/vol/pay", capacity: "20Gi", readOnly: false,
+    }]);
+  });
+});
+
+describe("expectedPhases with a workload copy", () => {
+  it("plans the workloads phase only when something is selected", () => {
+    const base = {
+      endpointMode: "manual_endpoint", nodeCounts: { controlPlane: 1, worker: 1 },
+      addons: [],
+    };
+    expect(expectedPhases(base)).not.toContain("workloads");
+    expect(expectedPhases({ ...base, workloads: { itemCount: 3 } }))
+      .toContain("workloads");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Where copied volume claims land
+// ---------------------------------------------------------------------------
+
+describe("storage decisions", () => {
+  const claim = (key, extra = {}) => ({
+    key,
+    namespace: key.split("/")[0],
+    name: key.split("/")[1],
+    capacity: "5Gi",
+    accessModes: ["ReadWriteOnce"],
+    storageClassName: "",
+    reusable: false,
+    reuseBlocked: "it is not bound to a volume in the source cluster",
+    sourceTarget: "",
+    ...extra,
+  });
+  const plan = (...claims) => ({ storage: { claims } });
+  const nfs = {
+    ...emptyStorage(), default: "fresh",
+    nfsServer: "10.4.1.20", nfsExportRoot: "/exports/ks",
+  };
+
+  it("falls back to the copy-wide default", () => {
+    expect(storageDecision(nfs, "core/api-data").source).toBe("fresh");
+    const narrowed = setStorageDecision(nfs, "core/api-data", { source: "none" });
+    expect(storageDecision(narrowed, "core/api-data").source).toBe("none");
+    expect(storageDecision(narrowed, "core/other").source).toBe("fresh");
+  });
+
+  it("read-only only survives on a reused export", () => {
+    // It means "do not write to somebody else's data"; on a directory we just
+    // created for this cluster it is nonsense.
+    const reused = setStorageDecision(nfs, "core/db", { source: "reuse", readOnly: true });
+    expect(storageDecision(reused, "core/db").readOnly).toBe(true);
+    const fresh = setStorageDecision(reused, "core/db", { source: "fresh" });
+    expect(storageDecision(fresh, "core/db").readOnly).toBe(false);
+  });
+
+  it("setting all clears the per-claim overrides that would win", () => {
+    const mixed = setStorageDecision(nfs, "core/api-data", { source: "none" });
+    const all = setAllStorageDecisions(mixed, ["core/api-data", "core/db"], "class");
+    expect(all.default).toBe("class");
+    expect(storageDecision(all, "core/api-data").source).toBe("class");
+  });
+
+  it("previews the target without asking the server", () => {
+    const rows = storageRows(plan(claim("core/api-data")), nfs);
+    expect(rows[0].target).toBe("10.4.1.20:/exports/ks/core/api-data");
+    expect(rows[0].error).toBe("");
+  });
+
+  it("a reuse row shows the source's own path", () => {
+    const row = claim("core/db", { reusable: true, sourceTarget: "10.9.9.9:/vol/db" });
+    const rows = storageRows(plan(row), { ...nfs, default: "reuse" });
+    expect(rows[0].target).toBe("10.9.9.9:/vol/db");
+  });
+
+  it("refuses reuse where the source volume is not NFS", () => {
+    const row = claim("core/db", {
+      reusable: false, reuseBlocked: "its volume in the source cluster is backed by the CSI driver x, not NFS",
+    });
+    const rows = storageRows(plan(row), { ...nfs, default: "reuse" });
+    expect(rows[0].error).toContain("Cannot reuse");
+    expect(storageErrors(rows)).toHaveLength(1);
+  });
+
+  it("asks for the fields each decision actually needs", () => {
+    const rows = storageRows(plan(claim("core/api-data")), { ...nfs, nfsServer: "" });
+    expect(rows[0].error).toContain("NFS server");
+    expect(storageNeeds(rows)).toEqual({ nfs: true, storageClass: false, reuse: false });
+
+    const classy = storageRows(plan(claim("core/api-data")), {
+      ...emptyStorage(), default: "class",
+    });
+    expect(classy[0].error).toBe("Name a StorageClass.");
+    expect(storageNeeds(classy).storageClass).toBe(true);
+  });
+
+  it("a claim that names its own StorageClass needs no answer", () => {
+    const rows = storageRows(
+      plan(claim("core/api-data", { storageClassName: "fast" })),
+      { ...emptyStorage(), default: "class" }
+    );
+    expect(rows[0].error).toBe("");
+    expect(rows[0].target).toBe("fast");
+  });
+
+  it("summarises a mixed plan", () => {
+    const storage = setAllStorageDecisions(
+      setStorageDecision(nfs, "core/cache", { source: "none" }),
+      [], "fresh"
+    );
+    const rows = storageRows(
+      plan(claim("core/api-data"), claim("core/cache")), storage
+    );
+    expect(storageSummary(rows)).toBe("1 new volume · 1 left pending");
+    expect(storageSummary([])).toBe("");
+  });
+
+  it("has no rows when nothing has volume claims", () => {
+    expect(storageRows({ storage: { claims: [] } }, nfs)).toEqual([]);
+    expect(storageRows(null, nfs)).toEqual([]);
   });
 });

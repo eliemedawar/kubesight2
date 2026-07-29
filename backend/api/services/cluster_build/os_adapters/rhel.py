@@ -79,6 +79,14 @@ systemctl enable kubelet
 kubeadm version -o short
 """
 
+    def script_install_nfs_client(self, ctx: ScriptContext) -> str:
+        # The kubelet shells out to /sbin/mount.nfs; without nfs-utils an
+        # NFS-backed volume fails at pod start with an opaque "wrong fs type".
+        return f"""{shell_preamble(ctx)}
+dnf install -y nfs-utils
+command -v mount.nfs
+"""
+
     def script_install_haproxy_keepalived(self, ctx: ScriptContext) -> str:
         return f"""{shell_preamble(ctx)}
 dnf install -y haproxy keepalived psmisc

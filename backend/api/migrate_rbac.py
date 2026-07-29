@@ -72,6 +72,7 @@ def _migrate_cluster_build_columns() -> None:
     existing one, so deployed databases need this small idempotent migration.
     """
     _add_column_if_missing("cluster_builds", "addons_json", "JSON")
+    _add_column_if_missing("cluster_builds", "workloads_json", "JSON")
     _add_column_if_missing("cluster_builds", "growth_started_at", "DATETIME")
     _add_column_if_missing("cluster_builds", "build_seconds", "INTEGER")
     for col, sql_type in [

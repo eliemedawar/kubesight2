@@ -77,6 +77,20 @@ export function discoverHelmGitPaths(payload) {
   return request("/api/helm/chart-templates/git/paths", { method: "POST", body: payload });
 }
 
+export function discoverNamespaceResources(payload) {
+  return request("/api/helm/chart-templates/namespace/resources", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function importHelmChartFromNamespace(payload) {
+  return request("/api/helm/chart-templates/import/namespace", {
+    method: "POST",
+    body: payload,
+  });
+}
+
 export function importHelmChartFromArchive(payload) {
   return request("/api/helm/chart-templates/import/archive", {
     method: "POST",

@@ -4,11 +4,14 @@ import {
   addHelmChartVersion,
   discoverHelmGitPaths,
   discoverHelmGitRefs,
+  discoverNamespaceResources,
   importHelmChartFromArchive,
   importHelmChartFromGit,
+  importHelmChartFromNamespace,
   importHelmChartFromYaml,
   readChartArchiveAsBase64,
 } from "../../api/helmApi.js";
+import { listClusters, listNamespacesByCluster } from "../../api/clustersApi.js";
 import HelmChartContents, { helmSourceLabel } from "./HelmChartContents.jsx";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 
@@ -22,6 +25,13 @@ const EMPTY_GIT = {
 };
 
 const EMPTY_ARCHIVE = { path: "", importType: "auto" };
+
+const EMPTY_NAMESPACE = { clusterId: "", namespace: "" };
+
+// Identity of a live object inside the scan result; also the checkbox key.
+function resourceKey(resource) {
+  return `${resource.kind}/${resource.name}`;
+}
 
 // Mirrors MAX_IMPORT_BYTES on the backend so oversized uploads fail instantly.
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024;
@@ -57,6 +67,13 @@ export default function HelmChartImportModal({
   const [gitDiscoveryBusy, setGitDiscoveryBusy] = useState("");
   const [gitDiscoveryError, setGitDiscoveryError] = useState("");
   const [gitPathsTruncated, setGitPathsTruncated] = useState(false);
+  const [source, setSource] = useState(EMPTY_NAMESPACE);
+  const [clusters, setClusters] = useState([]);
+  const [namespaces, setNamespaces] = useState([]);
+  const [scan, setScan] = useState(null);
+  const [selectedResources, setSelectedResources] = useState(() => new Set());
+  const [scanBusy, setScanBusy] = useState("");
+  const [scanError, setScanError] = useState("");
 
   useEffect(() => {
     if (!open) {
@@ -76,8 +93,30 @@ export default function HelmChartImportModal({
       setGitDiscoveryBusy("");
       setGitDiscoveryError("");
       setGitPathsTruncated(false);
+      setSource(EMPTY_NAMESPACE);
+      setNamespaces([]);
+      setScan(null);
+      setSelectedResources(new Set());
+      setScanBusy("");
+      setScanError("");
     }
   }, [open]);
+
+  // Clusters are loaded once the namespace tab is opened, not on every mount.
+  useEffect(() => {
+    if (!open || mode !== "namespace" || clusters.length) return;
+    let cancelled = false;
+    listClusters()
+      .then((result) => {
+        if (!cancelled) setClusters(result?.items || []);
+      })
+      .catch((err) => {
+        if (!cancelled) setScanError(err.message || "Unable to load clusters.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, mode, clusters.length]);
 
   if (!open) return null;
 
@@ -141,6 +180,81 @@ export default function HelmChartImportModal({
     }
   };
 
+  const selectSourceCluster = async (clusterId) => {
+    setSource({ clusterId, namespace: "" });
+    setNamespaces([]);
+    setScan(null);
+    setSelectedResources(new Set());
+    setScanError("");
+    if (!clusterId) return;
+    setScanBusy("namespaces");
+    try {
+      const result = await listNamespacesByCluster(clusterId, { lite: true });
+      setNamespaces((result?.items || []).map((item) => item.name || item).filter(Boolean));
+    } catch (err) {
+      setScanError(err.message || "Unable to load namespaces for this cluster.");
+    } finally {
+      setScanBusy("");
+    }
+  };
+
+  const scanNamespace = async () => {
+    if (!source.clusterId || !source.namespace) {
+      setScanError("Choose a cluster and a namespace first.");
+      return;
+    }
+    setScanBusy("scan");
+    setScanError("");
+    setScan(null);
+    try {
+      const result = await discoverNamespaceResources(source);
+      setScan(result);
+      // Everything importable starts ticked; the operator unticks what should
+      // stay out of the chart.
+      setSelectedResources(
+        new Set(
+          (result?.resources || [])
+            .filter((resource) => !resource.skipped)
+            .map((resource) => resourceKey(resource)),
+        ),
+      );
+    } catch (err) {
+      setScanError(err.message || "Unable to read this namespace.");
+    } finally {
+      setScanBusy("");
+    }
+  };
+
+  const toggleResource = (resource) => {
+    setSelectedResources((previous) => {
+      const next = new Set(previous);
+      const key = resourceKey(resource);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const importableResources = (scan?.resources || []).filter((resource) => !resource.skipped);
+  const skippedResources = (scan?.resources || []).filter((resource) => resource.skipped);
+  const allSelected =
+    importableResources.length > 0 && selectedResources.size === importableResources.length;
+
+  const toggleAllResources = () => {
+    setSelectedResources(
+      allSelected ? new Set() : new Set(importableResources.map((item) => resourceKey(item))),
+    );
+  };
+
+  // The backend already orders resources workloads-first; grouping keeps that
+  // order while making a 40-object namespace readable.
+  const groupedResources = importableResources.reduce((groups, resource) => {
+    const bucket = groups.get(resource.kind) || [];
+    bucket.push(resource);
+    groups.set(resource.kind, bucket);
+    return groups;
+  }, new Map());
+
   const submit = async (event) => {
     event.preventDefault();
     setBusy(true);
@@ -176,6 +290,25 @@ export default function HelmChartImportModal({
         result = versionMode
           ? await addHelmChartVersion(targetTemplate.id, archivePayload)
           : await importHelmChartFromArchive({ name, description, ...archivePayload });
+      } else if (activeMode === "namespace") {
+        if (!scan) {
+          throw new Error("Scan the namespace first, then choose what to import.");
+        }
+        const chosen = importableResources.filter((resource) =>
+          selectedResources.has(resourceKey(resource)),
+        );
+        if (!chosen.length) {
+          throw new Error("Select at least one resource to import.");
+        }
+        result = await importHelmChartFromNamespace({
+          name,
+          description,
+          ...source,
+          resources: chosen.map((resource) => ({
+            kind: resource.kind,
+            name: resource.name,
+          })),
+        });
       } else {
         result = await importHelmChartFromGit({
           name,
@@ -220,7 +353,7 @@ export default function HelmChartImportModal({
                 ? "KubeSight read the chart and stored it for reuse."
                 : versionMode
                   ? `Upload another packaged chart. Its Chart.yaml version becomes the new version — ${targetTemplate.name} is currently v${targetTemplate.version}.`
-                  : "Save a reusable chart from Kubernetes manifests, a chart archive, or Git."}
+                  : "Save a reusable chart from Kubernetes manifests, a chart archive, Git, or a live namespace."}
             </p>
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
@@ -298,6 +431,16 @@ export default function HelmChartImportModal({
                   }}
                 >
                   Git Repository
+                </button>
+                <button
+                  type="button"
+                  className={mode === "namespace" ? "active" : ""}
+                  onClick={() => {
+                    setMode("namespace");
+                    setError("");
+                  }}
+                >
+                  Cluster Namespace
                 </button>
               </div>
             )}
@@ -414,6 +557,139 @@ export default function HelmChartImportModal({
                     {versionMode
                       ? " The new version becomes the one deployed by default; earlier versions stay available."
                       : ""}
+                  </p>
+                </>
+              ) : activeMode === "namespace" ? (
+                <>
+                  <div className="helm-form-grid">
+                    <label>
+                      Cluster
+                      <SearchableSelect
+                        value={source.clusterId}
+                        placeholder="Select a cluster"
+                        searchPlaceholder="Search clusters…"
+                        onChange={(event) => selectSourceCluster(event.target.value)}
+                        options={clusters.map((item) => ({
+                          value: item.id,
+                          label: item.name || item.id,
+                        }))}
+                      />
+                    </label>
+                    <label>
+                      Namespace
+                      <SearchableSelect
+                        value={source.namespace}
+                        disabled={!namespaces.length || scanBusy === "namespaces"}
+                        placeholder={
+                          scanBusy === "namespaces"
+                            ? "Loading namespaces…"
+                            : source.clusterId
+                              ? "Select a namespace"
+                              : "Select a cluster first"
+                        }
+                        searchPlaceholder="Search namespaces…"
+                        onChange={(event) => {
+                          const namespace = event.target.value;
+                          setSource((previous) => ({ ...previous, namespace }));
+                          setScan(null);
+                          setSelectedResources(new Set());
+                        }}
+                        options={namespaces.map((item) => ({ value: item, label: item }))}
+                      />
+                    </label>
+                  </div>
+                  <div className="helm-git-discovery">
+                    <button
+                      type="button"
+                      className="btn-outline"
+                      disabled={Boolean(scanBusy) || !source.clusterId || !source.namespace}
+                      onClick={scanNamespace}
+                    >
+                      {scanBusy === "scan"
+                        ? "Reading namespace…"
+                        : scan
+                          ? "Rescan namespace"
+                          : "Scan namespace"}
+                    </button>
+                    {scan ? (
+                      <span className="muted">
+                        {importableResources.length} importable object
+                        {importableResources.length === 1 ? "" : "s"}
+                        {skippedResources.length
+                          ? ` · ${skippedResources.length} cluster-managed skipped`
+                          : ""}
+                      </span>
+                    ) : null}
+                  </div>
+                  {scanError ? <p className="banner-message error">{scanError}</p> : null}
+                  {(scan?.warnings || []).map((warning, index) => (
+                    <p className="form-help" key={`scan-warning-${index}`}>
+                      {warning}
+                    </p>
+                  ))}
+
+                  {scan && importableResources.length ? (
+                    <div className="helm-namespace-results">
+                      <header>
+                        <span>
+                          {selectedResources.size} of {importableResources.length} selected
+                        </span>
+                        <button type="button" className="btn-text" onClick={toggleAllResources}>
+                          {allSelected ? "Clear all" : "Select all"}
+                        </button>
+                      </header>
+                      <ul className="helm-namespace-groups">
+                        {Array.from(groupedResources.entries()).map(([kind, items]) => (
+                          <li key={kind}>
+                            <p className="helm-namespace-kind">
+                              {kind} <span className="muted">({items.length})</span>
+                            </p>
+                            <ul>
+                              {items.map((resource) => (
+                                <li key={resourceKey(resource)}>
+                                  <label className="helm-namespace-item">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedResources.has(resourceKey(resource))}
+                                      onChange={() => toggleResource(resource)}
+                                    />
+                                    <span>{resource.name}</span>
+                                  </label>
+                                </li>
+                              ))}
+                            </ul>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+
+                  {skippedResources.length ? (
+                    <details className="helm-namespace-skipped">
+                      <summary>
+                        {skippedResources.length} object
+                        {skippedResources.length === 1 ? "" : "s"} left out
+                      </summary>
+                      <ul>
+                        {skippedResources.map((resource) => (
+                          <li key={resourceKey(resource)}>
+                            <code>
+                              {resource.kind}/{resource.name}
+                            </code>{" "}
+                            <span className="muted">· {resource.skipped}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  ) : null}
+
+                  <p className="form-help">
+                    Live objects are stripped of everything the cluster generated — status,
+                    UIDs, revisions, cluster IPs and node ports — before becoming templates.
+                    Images, replicas, env values, ports, hosts and storage sizes turn into
+                    configurable chart values. Secret keys are kept but their values are never
+                    read into the chart: each one becomes a required field to fill at deploy
+                    time.
                   </p>
                 </>
               ) : (

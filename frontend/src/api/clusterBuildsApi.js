@@ -46,6 +46,37 @@ export const preflightClusterGrowth = (id) =>
 export const growClusterBuild = (id, payload = {}) =>
   request(`/api/cluster-builds/${id}/grow`, { method: "POST", body: payload });
 
+// --- Bringing workloads from an existing cluster ----------------------------
+
+/** Clusters that can act as a source, plus the registries to check against. */
+export const listWorkloadSources = () =>
+  request("/api/cluster-builds/workload-sources");
+
+export const listWorkloadNamespaces = (clusterId) =>
+  request(
+    `/api/cluster-builds/workload-sources/${encodeURIComponent(clusterId)}/namespaces`
+  );
+
+export const listWorkloadsInNamespace = (clusterId, namespace) =>
+  request(
+    `/api/cluster-builds/workload-sources/${encodeURIComponent(clusterId)}`
+    + `/namespaces/${encodeURIComponent(namespace)}/workloads`
+  );
+
+/** What a selection would copy, and which images are missing from the registry.
+ *  Answers before a build row exists, which is what the wizard needs. */
+export const planWorkloadCopy = (selection) =>
+  request("/api/cluster-builds/workload-plan", { method: "POST", body: selection });
+
+export const setBuildWorkloads = (id, workloads) =>
+  request(`/api/cluster-builds/${id}/workloads`, { method: "PUT", body: { workloads } });
+
+export const getBuildWorkloadPlan = (id) =>
+  request(`/api/cluster-builds/${id}/workload-plan`);
+
+export const bringClusterWorkloads = (id, payload = {}) =>
+  request(`/api/cluster-builds/${id}/bring-workloads`, { method: "POST", body: payload });
+
 /** The cluster-admin kubeconfig. Every retrieval is audited server-side. */
 export const getClusterBuildKubeconfig = (id) =>
   request(`/api/cluster-builds/${id}/kubeconfig`);

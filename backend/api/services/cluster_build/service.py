@@ -28,6 +28,8 @@ from . import addons as addon_registry
 from . import cni as cni_registry
 from .addons import metallb as metallb_addon
 from . import executor, k8s_versions, os_adapters, preflight
+from . import storage as storage_copy
+from . import workloads as workload_copy
 from .profiles import resolve as resolve_profile
 from .scrub import scrub
 
@@ -97,7 +99,7 @@ def serialize_step(step: ClusterBuildStep) -> Dict[str, Any]:
 
 _PHASE_ORDER = (
     "base_prep", "loadbalancer", "pull_images", "init", "cni",
-    "join_cp", "join_workers", "verify", "onboard", "addons",
+    "join_cp", "join_workers", "verify", "onboard", "addons", "workloads",
 )
 
 
@@ -132,6 +134,7 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
         "podCidr": build.pod_cidr,
         "serviceCidr": build.service_cidr,
         "addons": list(build.addons_json or []),
+        "workloads": workload_copy.summarize(workload_copy.selection_of(build)),
         "vsphereConnectionId": build.vsphere_connection_id,
         "buildProfileId": build.build_profile_id,
         "connectionProfileId": build.connection_profile_id,
@@ -173,6 +176,10 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
         data["nodes"] = [serialize_node(n) for n in build.nodes]
         data["steps"] = [serialize_step(s) for s in build.steps]
         data["warningsAck"] = build.warnings_ack_json
+        # The full selection (and, once the phase has run, its outcome) so the
+        # detail page can show what was brought over without re-reading the
+        # source cluster.
+        data["workloadSelection"] = build.workloads_json or None
     return data
 
 
@@ -191,6 +198,29 @@ def get_build(build_id: int) -> ClusterBuild:
 # ---------------------------------------------------------------------------
 # Validation + CRUD
 # ---------------------------------------------------------------------------
+
+def _mount_probe_targets(
+    build: ClusterBuild, nodes: Optional[List[ClusterBuildNode]] = None
+) -> List[tuple]:
+    """The machines that will actually mount a copied volume.
+
+    Workers where there are any, otherwise the control planes (a single-CP lab
+    runs its pods there). Load balancers never do, so they are never probed.
+    """
+    candidates = list(build.nodes if nodes is None else nodes)
+    workers = [n for n in candidates if n.role == "worker"]
+    chosen = workers or [n for n in candidates if n.role == "control_plane"]
+    return [
+        (node.hostname or node.address, executor._target_for(build, node))
+        for node in chosen
+    ]
+
+
+def _ssh_probe(target, script: str) -> str:
+    from ..ssh import get_transport
+
+    return get_transport().run(target, script, timeout_s=30).output
+
 
 def _validate_cidr(value: str, field: str) -> str:
     value = str(value or "").strip()
@@ -377,6 +407,14 @@ def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List
 
     if worker_count == 0:
         warnings.append("No worker nodes: workloads will need control-plane tolerations.")
+        if workload_copy.selection_of(build):
+            # A warning rather than a hard stop: the cluster is still built and
+            # the copy still applied — the pods just have nowhere untainted to
+            # land until a worker joins.
+            warnings.append(
+                "Copied workloads have no worker to run on; their pods stay "
+                "Pending until a worker joins (Day two → Add worker machines)."
+            )
     return warnings
 
 
@@ -512,6 +550,12 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         # Friendly alias for callers using the UI's "Plugins & add-ons" label.
         build.addons_json = addon_registry.normalize_selection(
             payload.get("plugins"), k8s_minor
+        )
+    if "workloads" in payload:
+        # Only the selection is validated here; whether the source cluster can
+        # still serve it is a preflight question, not an edit-time one.
+        build.workloads_json = workload_copy.replace_selection(
+            build.workloads_json, payload.get("workloads")
         )
 
     for key, attr in (
@@ -751,6 +795,15 @@ def run_preflight(build_id: int) -> Dict[str, Any]:
         # unsupported version/CNI/add-on combination must fail here rather than
         # part-way through cluster creation.
         build_checks = preflight.version_checks(build, resolved)
+        # Whether the workloads to copy can still be read, whether their images
+        # are in the chosen registry, and where their volume claims will land.
+        # Warnings only, except an unreachable NFS export — see
+        # ``workloads.preflight_checks`` and ``storage``'s module docstring.
+        build_checks += workload_copy.preflight_checks(
+            build,
+            probe=_ssh_probe,
+            probe_targets=_mount_probe_targets(build),
+        )
 
         vsphere_results = preflight.vsphere_checks(build)
         node_results = preflight.run_node_preflight(
@@ -931,6 +984,15 @@ def preflight_growth(build_id: int) -> Dict[str, Any]:
         # A machine joining a live cluster must satisfy the same version policy
         # the cluster was built under — its pinned version, unchanged.
         build_checks = preflight.version_checks(build, resolved)
+        # A new worker also has to reach the NFS export the copied claims live
+        # on; finding that out when a pod lands on it is too late. The rest of
+        # the workload checks are deliberately skipped — growth copies nothing.
+        selection = workload_copy.selection_of(build)
+        build_checks += storage_copy.reachability_checks(
+            (selection or {}).get("storage"),
+            probe=_ssh_probe,
+            probe_targets=_mount_probe_targets(build, nodes=pending),
+        )
         vsphere_results = preflight.vsphere_checks(build, nodes=pending)
         node_results = preflight.run_node_preflight(
             build, resolved, lambda node: executor._target_for(build, node),
@@ -993,6 +1055,98 @@ def grow_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
         synchronize_session=False,
     )
 
+    build.status = "building"
+    build.error = None
+    build.growth_started_at = datetime.now(timezone.utc)
+    build.finished_at = None
+    db.session.commit()
+    executor.start_build_worker(build.id)
+    db.session.refresh(build)
+    return serialize_build(build, include_detail=True)
+
+
+# ---------------------------------------------------------------------------
+# Day two: bringing workloads into a cluster that is already running
+#
+# The same phase the wizard runs, reopened. The phase machine skips every
+# completed step, so a workloads run touches nothing else: no machine is
+# prepared again, no join is re-attempted, and 'verify' stays completed
+# (unlike growth, which deliberately re-verifies with the new machine in).
+# ---------------------------------------------------------------------------
+
+def set_build_workloads(build_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Choose what to copy into a cluster this build already produced."""
+    build = get_build(build_id)
+    _require_growable(build)
+    build.workloads_json = workload_copy.replace_selection(
+        build.workloads_json, payload
+    )
+    db.session.commit()
+    return serialize_build(build, include_detail=True)
+
+
+def workload_plan_for_build(build_id: int, user=None) -> Dict[str, Any]:
+    """The copy plan for a build's current selection (day-two preview)."""
+    build = get_build(build_id)
+    selection = workload_copy.selection_of(build)
+    if selection is None:
+        raise ValueError("No workloads are selected for this build.")
+    try:
+        return workload_copy.plan(selection, user=user)
+    except workload_copy.WorkloadSourceError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def bring_workloads(build_id: int, *, ack_missing_images: bool = False,
+                    actor: str = "", user=None) -> Dict[str, Any]:
+    """Run the workloads phase against a finished cluster."""
+    build = get_build(build_id)
+    _require_growable(build)
+    selection = workload_copy.selection_of(build)
+    if selection is None:
+        raise ValueError("Select at least one namespace or workload to copy.")
+    if growth_nodes(build):
+        raise ValueError(
+            "Machines are queued to join. Finish (or remove) those first — "
+            "one run of the phase machine does one job."
+        )
+
+    try:
+        plan = workload_copy.plan(selection, user=user)
+    except workload_copy.WorkloadSourceError as exc:
+        raise ValueError(f"The source cluster could not be read: {exc}") from exc
+    if plan["missingWorkloads"] and not ack_missing_images:
+        names = ", ".join(
+            f"{item['namespace']}/{item['name']}" for item in plan["missingWorkloads"]
+        )
+        raise ValueError(
+            f"{len(plan['missingWorkloads'])} workload(s) have images that are "
+            f"not in the selected registry ({names}). Remove them, or pass "
+            "ackMissingImages to bring them anyway."
+        )
+    if plan["missingWorkloads"]:
+        selection = {
+            **selection,
+            "imageAck": {
+                "acknowledgedBy": actor,
+                "acknowledgedAt": datetime.now(timezone.utc).isoformat(),
+                "workloads": [
+                    f"{item['namespace']}/{item['kind']}/{item['name']}"
+                    for item in plan["missingWorkloads"]
+                ],
+            },
+        }
+        build.workloads_json = selection
+
+    # Reopen only this phase. A completed 'workloads' step from an earlier copy
+    # would otherwise be skipped and the run would be a no-op.
+    ClusterBuildStep.query.filter(
+        ClusterBuildStep.build_id == build.id,
+        ClusterBuildStep.phase == "workloads",
+    ).update(
+        {"status": "pending", "error": None, "started_at": None, "finished_at": None},
+        synchronize_session=False,
+    )
     build.status = "building"
     build.error = None
     build.growth_started_at = datetime.now(timezone.utc)
