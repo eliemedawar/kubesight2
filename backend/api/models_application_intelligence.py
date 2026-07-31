@@ -105,6 +105,9 @@ class ApplicationAnalysis(db.Model):
     topology_confidence = db.Column(db.String(32), nullable=True)
     scanner_versions = db.Column(db.JSON, nullable=False, default=dict)
     scanner_runs = db.Column(db.JSON, nullable=False, default=list)
+    # How much of the repository the model was actually shown. Its findings can
+    # only ever describe the slice it received.
+    source_coverage = db.Column(db.JSON, nullable=True)
     hermes_model = db.Column(db.String(120), nullable=True)
     hermes_prompt_version = db.Column(db.String(64), nullable=True)
     result_summary = db.Column(db.JSON, nullable=True)

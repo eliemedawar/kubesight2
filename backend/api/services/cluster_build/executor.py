@@ -1065,10 +1065,22 @@ def _phase_onboard(build: ClusterBuild, primary: ClusterBuildNode) -> None:
         # existing sudo/wheel users. Those accounts already have root-equivalent
         # access to admin.conf; this adds convenience without widening the
         # machine's privilege boundary. Never log or echo admin.conf itself.
-        username = target.username
-        quoted_user = shlex.quote(username)
-        configure = f"""set -e
+        #
+        # Every control plane, not only the primary: kubeadm writes admin.conf
+        # on a joining control plane too, and an operator who SSHes into CP 2 to
+        # look at the cluster gets "localhost:8080 connection refused" if only
+        # CP 1 was configured.
+        cps, _, _ = _nodes_by_role(build)
+        for cp_node in cps:
+            cp_target = _target_for(build, cp_node)
+            username = cp_target.username
+            quoted_user = shlex.quote(username)
+            configure = f"""set -e
 BUILDER_USER={quoted_user}
+if [ ! -f /etc/kubernetes/admin.conf ]; then
+  echo "no /etc/kubernetes/admin.conf on this node; skipping kubectl setup"
+  exit 0
+fi
 for KUBECTL_USER in $(getent passwd | cut -d: -f1); do
   if [ "$KUBECTL_USER" != "$BUILDER_USER" ] && \
      ! id -nG "$KUBECTL_USER" | tr ' ' '\\n' | grep -Eq '^(sudo|wheel)$'; then
@@ -1083,17 +1095,29 @@ for KUBECTL_USER in $(getent passwd | cut -d: -f1); do
   echo "kubectl configured for $KUBECTL_USER"
 done
 """
-        _run_traced(
-            target,
-            configure,
-            timeout_s=60,
-            stream=stream,
-            display_command=(
-                f"install admin kubeconfig (mode 600) for SSH user {username} "
-                "and existing sudo/wheel users, then verify kubectl"
-            ),
-            input_summary="admin.conf content hidden",
-        )
+            host_label = cp_node.hostname or cp_node.address
+            try:
+                _run_traced(
+                    cp_target,
+                    configure,
+                    timeout_s=60,
+                    stream=stream,
+                    display_command=(
+                        f"[{host_label}] install admin kubeconfig (mode 600) for "
+                        f"SSH user {username} and existing sudo/wheel users, "
+                        "then verify kubectl"
+                    ),
+                    input_summary="admin.conf content hidden",
+                )
+            except (SshCommandError, SshConnectionError) as exc:
+                # The cluster is already alive and registered by this point;
+                # kubectl convenience on a secondary control plane is not worth
+                # failing a finished build over. The primary still is.
+                if cp_node.id == primary.id:
+                    raise
+                stream.write(
+                    f"kubectl setup skipped on {host_label}: {exc}\n"
+                )
         public_id = onboard.register_cluster(build, admin_conf)
         stream.write(f"Registered as cluster {public_id}.\n")
         _step_done(step, stream.text())

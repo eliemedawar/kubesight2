@@ -292,6 +292,7 @@ def main() -> int:
                 },
             )
 
+        selected_files, evidence_coverage = _selected_file_evidence(root, discovery)
         evidence = {
             "repository": {
                 "analysis_mode": analysis_mode,
@@ -402,6 +403,7 @@ def main() -> int:
                     item for item in normalized_findings if item.get("type") == "dependency"
                 ],
                 "buildVerification": build_verification,
+                "evidenceCoverage": evidence_coverage,
                 "warnings": warnings,
                 "hermesModel": model,
                 "hermesPromptVersion": prompt_version,

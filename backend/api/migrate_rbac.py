@@ -668,6 +668,7 @@ def _migrate_application_intelligence_columns() -> None:
         ("worker_callback_token_hash", "VARCHAR(64)"),
         ("scanner_runs", "JSON"),
         ("warnings", "JSON"),
+        ("source_coverage", "JSON"),
     ]:
         _add_column_if_missing("application_analyses", col, sql_type)
     # Per-finding source evidence. Earlier builds discarded the observation

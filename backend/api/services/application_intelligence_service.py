@@ -409,6 +409,29 @@ def _evidence_coverage(row: ApplicationAnalysis) -> dict:
     return {"label": label, "available": available, "unavailable": unavailable}
 
 
+def _source_coverage(payload: Any) -> dict | None:
+    """Validate the worker's account of how much source the model was shown."""
+    if not isinstance(payload, dict):
+        return None
+    coverage = {}
+    for key in (
+        "selectedFiles",
+        "eligibleFiles",
+        "repositoryFiles",
+        "truncatedFiles",
+        "fileLimit",
+        "bytesSent",
+    ):
+        value = payload.get(key)
+        coverage[key] = value if isinstance(value, int) and 0 <= value < 10_000_000 else None
+    if coverage["selectedFiles"] is None or not coverage["eligibleFiles"]:
+        return None
+    coverage["reviewedPercent"] = round(
+        100 * coverage["selectedFiles"] / coverage["eligibleFiles"]
+    )
+    return coverage
+
+
 def _build_verification_status(row: ApplicationAnalysis) -> str | None:
     """Status of KubeSight's own build stage, not the model's account of it."""
     profile = (row.result_summary or {}).get("application_profile")
@@ -488,6 +511,7 @@ def analysis_to_dict(row: ApplicationAnalysis | None, *, compact=False) -> dict 
         "safeErrorMessage": row.safe_error_message,
         "posture": _finding_posture(row.id),
         "evidenceCoverage": _evidence_coverage(row),
+        "sourceCoverage": row.source_coverage,
         "buildVerificationStatus": _build_verification_status(row),
         "topologyConfidence": row.topology_confidence,
         "scannerVersions": row.scanner_versions or {},
@@ -1727,6 +1751,7 @@ def record_worker_result(row: ApplicationAnalysis, payload: dict) -> dict:
         str(payload.get("hermesPromptVersion") or "")[:64] or None
     )
     row.warnings = redact_structure(payload.get("warnings") or [])
+    row.source_coverage = _source_coverage(payload.get("evidenceCoverage"))
     row.topology_confidence = str(
         (result.get("architecture_summary") or {}).get("topology_confidence") or ""
     )[:32] or None

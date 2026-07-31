@@ -965,6 +965,13 @@ class TestHaBuild:
         # etcd quorum gate ran between serial CP joins
         etcd_checks = [s for _, s in fake.calls if "readyz/etcd" in s]
         assert len(etcd_checks) >= 2
+        # Every control plane gets a kubeconfig installed, not only the primary:
+        # SSHing into cp-2 and running `kubectl` must not hit localhost:8080.
+        kubeconfig_hosts = {
+            h for h, s in fake.calls if "$KUBECTL_HOME/.kube/config" in s
+        }
+        assert kubeconfig_hosts == {"10.0.0.11", "10.0.0.12", "10.0.0.13"}
+        assert not kubeconfig_hosts & {"10.0.0.5", "10.0.0.6", "10.0.0.21"}
 
     def test_failed_worker_join_fails_build_then_retry(
         self, client, admin_token, ssh_profile, fake_ssh, app

@@ -106,6 +106,17 @@ class HermesError(RuntimeError):
     pass
 
 
+class HermesTransientError(HermesError):
+    """A failure that says nothing about the evidence and may not recur.
+
+    Upstream model providers intermittently stall or drop a long request, and
+    Hermes surfaces that as an incomplete run. Discarding several minutes of
+    checkout and scanning over one such stall is wasteful, so these are retried.
+    Schema violations are deliberately *not* transient: a response that does not
+    match the contract must fail rather than be retried into acceptance.
+    """
+
+
 def _enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -185,7 +196,10 @@ def _candidate_from_response(payload: object) -> object:
         or hermes_status.get("partial") is True
         or hermes_status.get("completed") is False
     ):
-        raise HermesError("Hermes did not complete the source analysis.")
+        raise HermesTransientError(
+            "Hermes did not complete the source analysis. Its model provider "
+            "returned no usable response."
+        )
     if "result" in payload:
         return payload["result"]
     choices = payload.get("choices")
@@ -326,6 +340,22 @@ def analyze(evidence: dict) -> tuple[dict, str, str]:
             "User-Agent": "KubeSight/hermes-agent",
         },
     )
+    # One retry by default. A stalled provider is the common failure here and it
+    # usually clears; a genuinely broken configuration fails just as fast twice.
+    attempts = max(1, min(3, int(os.getenv("APPLICATION_ANALYSIS_HERMES_ATTEMPTS", "2"))))
+    last_error: HermesTransientError | None = None
+    for attempt in range(attempts):
+        try:
+            return _attempt_analysis(request, model)
+        except HermesTransientError as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                continue
+            raise
+    raise last_error or HermesError("Hermes source analysis failed.")
+
+
+def _attempt_analysis(request: Request, model: str) -> tuple[dict, str, str]:
     try:
         with urlopen(
             request,
@@ -339,21 +369,29 @@ def analyze(evidence: dict) -> tuple[dict, str, str]:
                 raise HermesError("Hermes response exceeds the configured limit.")
             payload = json.loads(raw_response.decode("utf-8"))
     except HTTPError as exc:
+        # 429 and 5xx are the upstream's problem, not the evidence's.
+        if exc.code == 429 or 500 <= exc.code < 600:
+            raise HermesTransientError(
+                f"Hermes rejected the analysis request ({exc.code})."
+            ) from exc
         raise HermesError(f"Hermes rejected the analysis request ({exc.code}).") from exc
     except (URLError, TimeoutError) as exc:
-        raise HermesError("Hermes source analysis timed out or is unavailable.") from exc
+        raise HermesTransientError(
+            "Hermes source analysis timed out or is unavailable."
+        ) from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HermesError("Hermes returned malformed JSON.") from exc
+        raise HermesTransientError("Hermes returned malformed JSON.") from exc
 
     candidate = _candidate_from_response(payload)
     if isinstance(candidate, str):
         try:
             candidate = _decode_json_candidate(candidate)
         except json.JSONDecodeError as exc:
-            raise HermesError("Hermes returned malformed JSON.") from exc
+            raise HermesTransientError("Hermes returned malformed JSON.") from exc
     candidate = _normalize_omitted_metadata(candidate)
     try:
         result = validate_hermes_output(candidate)
     except ValueError as exc:
+        # A contract violation is deterministic evidence of a bad response.
         raise HermesError(str(exc)) from exc
     return redact_structure(result), model, PROMPT_VERSION

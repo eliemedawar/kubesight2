@@ -1392,6 +1392,7 @@ function Overview({ analysis, application, artifacts }) {
   const { build_verified: _ignoredBuildClaim, ...operational } = result.operational_readiness || {};
   const posture = analysis?.posture;
   const coverage = analysis?.evidenceCoverage;
+  const sourceCoverage = analysis?.sourceCoverage;
   const limitations = result.limitations || [];
   const warnings = analysis?.warnings || [];
   const assessed = producedResult(analysis?.status);
@@ -1419,7 +1420,7 @@ function Overview({ analysis, application, artifacts }) {
           <small>{assessed ? `${posture?.total || 0} recorded in total` : "Analysis stopped before findings were recorded."}</small>
         </article>
         <article className="ai-verdict__card">
-          <span>Evidence coverage</span>
+          <span>Scanner coverage</span>
           {assessed
             ? (
               <span className={`status-badge status-badge--${coverageTone(coverage?.label)}`}>
@@ -1436,6 +1437,25 @@ function Overview({ analysis, application, artifacts }) {
           </small>
         </article>
         <article className="ai-verdict__card">
+          <span>Source reviewed</span>
+          {assessed && sourceCoverage
+            ? (
+              <span className={`status-badge status-badge--${
+                sourceCoverage.reviewedPercent >= 80
+                  ? "pass"
+                  : sourceCoverage.reviewedPercent >= 40 ? "warning" : "fail"
+              }`}>
+                {sourceCoverage.reviewedPercent}% of files
+              </span>
+            )
+            : <span className="muted">—</span>}
+          <small>
+            {assessed && sourceCoverage
+              ? `Hermes read ${sourceCoverage.selectedFiles} of ${sourceCoverage.eligibleFiles} analyzable files (${analysis?.analysisMode} caps the slice at ${sourceCoverage.fileLimit}).`
+              : "Not recorded for this run."}
+          </small>
+        </article>
+        <article className="ai-verdict__card">
           <span>Build verification</span>
           {analysis?.buildVerificationStatus
             ? <Status status={analysis.buildVerificationStatus} />
@@ -1448,6 +1468,17 @@ function Overview({ analysis, application, artifacts }) {
         </article>
       </div>
 
+      {assessed && sourceCoverage && sourceCoverage.reviewedPercent < 100 ? (
+        <p className="ai-caveat">
+          <strong>Hermes read part of the repository, not all of it.</strong> {analysis.analysisMode} mode
+          sends at most {sourceCoverage.fileLimit} files, so {sourceCoverage.selectedFiles} of{" "}
+          {sourceCoverage.eligibleFiles} analyzable files were reviewed
+          {sourceCoverage.truncatedFiles ? `, ${sourceCoverage.truncatedFiles} of them truncated` : ""}.
+          Configuration, manifests, entrypoints, clients, and controllers are prioritized, but anything
+          outside that slice is unexamined — its absence from the findings means nothing.
+          {analysis.analysisMode === "Quick" ? " Deep mode triples the slice." : ""}
+        </p>
+      ) : null}
       {assessed && coverage?.unavailable?.length ? (
         <p className="ai-caveat">
           <strong>Read this result as incomplete.</strong> {coverage.unavailable.join(", ")} did not run in

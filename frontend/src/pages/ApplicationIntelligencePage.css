@@ -37,7 +37,7 @@
 .ai-provenance { margin: .5rem 0 0; color: var(--text-muted); font-size: var(--font-size-xs); line-height: 1.7; }
 
 /* ------------------------------------------------------------------ verdict */
-.ai-verdict { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; }
+.ai-verdict { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .75rem; }
 .ai-verdict__card {
   padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-md);
   background: var(--bg-panel); box-shadow: var(--shadow-sm);
@@ -180,7 +180,18 @@
 
 /* --------------------------------------------------------------- topology */
 .ai-graph { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; gap: 1rem; align-items: start; }
-.ai-graph__canvas { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-panel-strong); overflow: hidden; }
+/* A zoomable viewer sizes its SVG to the container. Without an explicit height
+   the container has none, so the SVG stretches to the full panel width and its
+   height follows the aspect ratio — a tall hub-and-spoke graph then renders at
+   roughly 2x and pushes the rest of the tab off-screen. Bounding the box lets
+   the viewBox letterbox instead, and zoom/pan remain available for detail. */
+.ai-graph__canvas {
+  min-width: 0;
+  height: clamp(20rem, 44vh, 32rem);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.ai-graph__canvas .topo-viewer { height: 100%; }
 .ai-evidence { padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-panel); display: grid; gap: .55rem; align-content: start; }
 .ai-evidence h4 { margin: 0; font-size: var(--font-size-sm); text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
 .ai-evidence p { margin: 0; font-size: var(--font-size-sm); color: var(--text-subtle); }
@@ -215,6 +226,9 @@
 .ai-comparison-controls .ss-wrap { min-width: 20rem; flex: 1; }
 .ai-comparison { display: grid; gap: 1rem; }
 
+@media (max-width: 1400px) {
+  .ai-verdict { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 @media (max-width: 1100px) {
   .ai-verdict { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ai-graph { grid-template-columns: 1fr; }
