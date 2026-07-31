@@ -730,6 +730,45 @@ def test_auto_run_is_idempotent_per_ticket(client, admin_token, app, monkeypatch
     assert DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).count() == 1
 
 
+def test_the_webhook_path_defers_outbound_calls_to_the_scheduler(
+    client, admin_token, app, monkeypatch
+):
+    """An auto (webhook) run is persisted and returned WITHOUT advancing.
+
+    The inline advance would run inside the ticketing system's HTTP request, where
+    the first stages are a kubectl read (30s timeout), a registry probe (10s) and a
+    Jenkins trigger (15s) — long enough for a reverse proxy to hand the sender a
+    504 for work that actually happened, which it then retries. So the webhook
+    returns a queued run and the scheduler tick does the talking.
+    """
+    from api.models import JenkinsConnection
+    from api.services.deploy_automation_service import advance_runs, maybe_auto_run
+
+    probed = []
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: (probed.append(image), {"status": "found", "image": image})[1],
+    )
+    _set_cluster_approvals(0)  # direct path, no bundle needed
+    db.session.add(
+        JenkinsConnection(id=1, auto_run_tickets=True, image_tag_template="{tag}")
+    )
+    db.session.commit()
+    ticket = _make_ticket(tag="1.0.0")
+
+    started = maybe_auto_run(ticket.id)
+
+    assert started is not None
+    assert started["status"] == "queued", "the webhook request advanced the run inline"
+    assert probed == [], "the webhook request called out to the registry"
+
+    # The tick picks it up and takes it the whole way, same as before.
+    advance_runs()
+    row = db.session.get(DeployAutomationRun, started["id"])
+    assert row.status == "deployed", row.error
+    assert probed, "the deferred run was never advanced by the scheduler"
+
+
 def test_manager_reject_is_authoritative(client, admin_token, app, monkeypatch):
     """One manager reject finalizes the bundle even when the recipient pool is
     larger than the required-approval count (the old quorum needed 2 declines)."""
@@ -1067,11 +1106,11 @@ def test_cascade_resync_rebuilds_chain_parent_first(app, monkeypatch):
     # The namespace has to be a PUBLISHED Environment value: a mapping naming a
     # parent value Zoho never saw on the picklist is rejected, so it is skipped.
     db.session.add(row)
-    # The deploy surface is shared across ticketing providers, so the namespace
-    # selection lives on its own row.
+    # Each provider owns its deploy surface, so the namespace selection lives on
+    # its own row.
     from api.services import ticketing_targets
 
-    source = ticketing_targets.get_or_create_config()
+    source = ticketing_targets.get_or_create_config("zoho")
     source.selected_namespaces = json.dumps(["verto-sit"])
     db.session.add(source)
     db.session.commit()
@@ -1126,7 +1165,7 @@ def test_cascade_resync_rebuilds_chain_parent_first(app, monkeypatch):
     # synthesized from the config row above.
     from api.services import zoho_option_sources as sources
 
-    ctx = sources.SourceContext(row, entries)
+    ctx = sources.SourceContext(row, entries, "zoho")
     monkeypatch.setattr(svc, "_variables_for_entries", lambda *a, **k: vars_by_ns)
     bindings = sources.all_bindings(row)
     resolved = {b.field_id: sources.resolve(b, ctx) for b in bindings}
@@ -1861,6 +1900,7 @@ def test_auto_run_queues_behind_active(client, admin_token, app, monkeypatch):
     """The webhook auto-start no longer skips a busy target — the second ticket's
     run is created waiting."""
     from api.models import ZohoIntegration
+    from api.services.deploy_automation_service import advance_runs
     from api.services.zoho_sync_service import _source_entries, resolve_inbound
 
     state = {"result": None}
@@ -1885,6 +1925,13 @@ def test_auto_run_queues_behind_active(client, admin_token, app, monkeypatch):
         )
         assert result["resolved"] is True and result["error"] is None
 
+    # The webhook itself only persists the runs — it must not talk to Jenkins on
+    # the sender's request thread. The queue order is already decided here.
+    runs = DeployAutomationRun.query.order_by(DeployAutomationRun.id.asc()).all()
+    assert [r.status for r in runs] == ["queued", "waiting"]
+
+    # The tick is what triggers the build; the second run stays in line.
+    advance_runs()
     runs = DeployAutomationRun.query.order_by(DeployAutomationRun.id.asc()).all()
     assert [r.status for r in runs] == ["building", "waiting"]
     assert all(r.auto for r in runs)

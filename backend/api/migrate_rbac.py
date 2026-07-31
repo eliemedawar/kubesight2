@@ -733,14 +733,19 @@ def _migrate_zoho_integration_columns() -> None:
 def _migrate_ticketing_tables() -> None:
     """Make the Zoho-only integration multi-provider (Zoho + Jira).
 
-    Two idempotent steps:
+    Idempotent steps:
 
     1. Stamp ``provider`` on the tables Zoho used to own outright. Existing rows
        predate Jira, so the backfill is unconditionally ``'zoho'``.
-    2. Seed :class:`~api.models.TicketingDeployConfig` — the now-shared deploy
-       surface — from the live Zoho row, ONCE. The columns moved verbatim (same
-       names, same JSON encodings), so this is a copy. Guarded on the shared row
-       not existing yet, so a later Zoho edit never overwrites shared state.
+    2. Seed :class:`~api.models.TicketingDeployConfig` — the deploy surface —
+       from the live Zoho row, ONCE. The columns moved verbatim (same names, same
+       JSON encodings), so this is a copy.
+    3. Key that table by provider and give every provider its own row. The deploy
+       source was briefly one shared record; splitting it means the pre-existing
+       row becomes Zoho's and is CLONED to the other providers, so both tabs keep
+       publishing exactly what they published before the split. Only the split
+       needs the clone — a provider added later has no history to inherit and
+       starts with an empty selection.
 
     Nothing is dropped from ``zoho_integration``: the old columns stay as a
     readable record of where the values came from, and as the fallback the
@@ -759,38 +764,87 @@ def _migrate_ticketing_tables() -> None:
             with db.engine.begin() as conn:
                 conn.execute(text(f"UPDATE {table} SET provider = 'zoho' WHERE provider IS NULL"))
 
-    if "ticketing_deploy_config" not in tables or "zoho_integration" not in tables:
+    if "ticketing_deploy_config" not in tables:
         return
+
+    # --- The source becomes per-provider -----------------------------------
+    fresh_provider = "provider" not in _table_columns("ticketing_deploy_config")
+    _add_column_if_missing("ticketing_deploy_config", "provider", "VARCHAR(16) DEFAULT 'zoho'")
     with db.engine.begin() as conn:
-        existing = conn.execute(
-            text("SELECT COUNT(*) FROM ticketing_deploy_config WHERE id = 1")
-        ).scalar()
-        if existing:
-            return
-        legacy = conn.execute(
-            text(
-                "SELECT source_cluster_id, selected_namespaces, selected_deployments, "
-                "custom_environments, job_overrides FROM zoho_integration WHERE id = 1"
+        if fresh_provider:
+            conn.execute(
+                text(
+                    "UPDATE ticketing_deploy_config SET provider = 'zoho' "
+                    "WHERE provider IS NULL OR provider = ''"
+                )
             )
-        ).first()
+        # Enforced as an index rather than a constraint: SQLite cannot ALTER one
+        # in, and on PostgreSQL the UNIQUE constraint create_all makes on a fresh
+        # database IS an index of this name, so IF NOT EXISTS covers both.
         conn.execute(
             text(
-                "INSERT INTO ticketing_deploy_config "
-                "(id, source_cluster_id, selected_namespaces, selected_deployments, "
-                " custom_environments, job_overrides, created_at, updated_at) "
-                "VALUES (1, :cluster, :namespaces, :deployments, :custom, :overrides, "
-                " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-            ),
-            {
-                "cluster": legacy[0] if legacy else None,
-                "namespaces": legacy[1] if legacy else None,
-                "deployments": legacy[2] if legacy else None,
-                "custom": legacy[3] if legacy else None,
-                "overrides": legacy[4] if legacy else None,
-            },
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_ticketing_deploy_provider "
+                "ON ticketing_deploy_config (provider)"
+            )
         )
+
+    legacy = None
+    if "zoho_integration" in tables:
+        with db.engine.begin() as conn:
+            seeded = conn.execute(
+                text("SELECT COUNT(*) FROM ticketing_deploy_config WHERE provider = 'zoho'")
+            ).scalar()
+            if not seeded:
+                legacy = conn.execute(
+                    text(
+                        "SELECT source_cluster_id, selected_namespaces, selected_deployments, "
+                        "custom_environments, job_overrides FROM zoho_integration WHERE id = 1"
+                    )
+                ).first()
+                conn.execute(
+                    text(
+                        "INSERT INTO ticketing_deploy_config "
+                        "(provider, source_cluster_id, selected_namespaces, selected_deployments, "
+                        " custom_environments, job_overrides, created_at, updated_at) "
+                        "VALUES ('zoho', :cluster, :namespaces, :deployments, :custom, :overrides, "
+                        " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {
+                        "cluster": legacy[0] if legacy else None,
+                        "namespaces": legacy[1] if legacy else None,
+                        "deployments": legacy[2] if legacy else None,
+                        "custom": legacy[3] if legacy else None,
+                        "overrides": legacy[4] if legacy else None,
+                    },
+                )
     if legacy and any(legacy):
-        logger.info("Seeded the shared ticketing deploy config from the Zoho integration row.")
+        logger.info("Seeded the Zoho ticketing deploy source from the Zoho integration row.")
+
+    # Clone the (formerly shared) selection to any provider still missing a row.
+    for other in ("jira",):
+        with db.engine.begin() as conn:
+            if conn.execute(
+                text("SELECT COUNT(*) FROM ticketing_deploy_config WHERE provider = :p"),
+                {"p": other},
+            ).scalar():
+                continue
+            copied = conn.execute(
+                text(
+                    "INSERT INTO ticketing_deploy_config "
+                    "(provider, source_cluster_id, selected_namespaces, selected_deployments, "
+                    " custom_environments, job_overrides, created_at, updated_at) "
+                    "SELECT :p, source_cluster_id, selected_namespaces, selected_deployments, "
+                    " custom_environments, job_overrides, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
+                    "FROM ticketing_deploy_config WHERE provider = 'zoho'"
+                ),
+                {"p": other},
+            ).rowcount
+            # Zero means there was no Zoho row to inherit from (a fresh install);
+            # the provider's row is then created empty on first read.
+            if copied:
+                logger.info(
+                    "Split the ticketing deploy source: cloned the shared selection to %s.", other
+                )
 
 
 def _migrate_deploy_automation_columns() -> None:

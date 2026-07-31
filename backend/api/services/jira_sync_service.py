@@ -127,8 +127,8 @@ def serialize(row: JiraIntegration) -> Dict[str, Any]:
         "syncEnvironment": bool(row.sync_environment),
         "syncVariables": bool(row.sync_variables),
         "syncIntervalMinutes": int(row.sync_interval_minutes or 30),
-        # Live-cluster dropdown source — shared with every other provider.
-        **targets.serialize(),
+        # Live-cluster dropdown source — this provider's own selection.
+        **targets.serialize(PROVIDER),
         "cascadeEnabled": bool(row.cascade_enabled),
         "cascadeFieldId": row.cascade_field_id or "",
         "cascadeFieldApiName": row.cascade_field_api_name or row.cascade_field_id or "",
@@ -242,9 +242,9 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             errors.append("Sync interval must be a whole number of minutes.")
 
-    # The dropdown source is shared with every other provider; staged, not
-    # committed, so the rollback below undoes it too if validation fails.
-    errors.extend(targets.apply_config_payload(payload))
+    # The dropdown source is this provider's own row; staged, not committed, so
+    # the rollback below undoes it too if validation fails.
+    errors.extend(targets.apply_config_payload(PROVIDER, payload))
 
     _apply_secret(payload, "apiToken", "clearApiToken", row, "api_token_encrypted")
     _apply_secret(payload, "inboundSecret", "clearInboundSecret", row, "inbound_secret_encrypted")
@@ -304,8 +304,10 @@ def set_source(
     custom_environments: Optional[List[Dict[str, Any]]] = None,
     job_overrides: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Persist the shared dropdown source, then return this provider's config view."""
-    targets.set_source(cluster_id, namespaces, deployments, custom_environments, job_overrides)
+    """Persist this provider's dropdown source, then return its config view."""
+    targets.set_source(
+        PROVIDER, cluster_id, namespaces, deployments, custom_environments, job_overrides
+    )
     return serialize(get_or_create_config())
 
 
@@ -316,12 +318,12 @@ def set_source(
 def build_preview(fresh: bool = False) -> Dict[str, Any]:
     """The same live-source preview Zoho shows, read through the shared builders.
 
-    The values are identical between providers by construction (they come from
-    the cluster, not the ticketing system), so this simply re-labels the shared
-    preview with Jira's field ids.
+    The *builders* are shared — they read Kubernetes, not the ticketing system —
+    but the source they read is this provider's own row, so both the config row
+    and the provider key are handed over rather than defaulted to Zoho's.
     """
-    preview = shared.build_preview(fresh=fresh)
     row = get_or_create_config()
+    preview = shared.build_preview(fresh=fresh, row=row, provider=PROVIDER)
     preview["provider"] = PROVIDER
     preview["appFieldId"] = row.app_field_id or ""
     preview["environmentFieldId"] = row.environment_field_id or ""
@@ -447,12 +449,12 @@ def sync_now() -> Dict[str, Any]:
             raise ValueError("The Jira integration is disabled. Enable it before syncing.")
         cfg = _to_client_config(row)
         try:
-            entries = shared._source_entries(row)
+            entries = shared._source_entries(row, provider=PROVIDER)
         except ValueError as exc:
             _record_sync(row, "error", str(exc), None)
             return {"status": "error", "message": str(exc), **serialize(row)}
 
-        ctx = sources.SourceContext(row, entries)
+        ctx = sources.SourceContext(row, entries, PROVIDER)
         bindings = sources.all_bindings(row, PROVIDER)
         publishing = [b for b in bindings if b.enabled]
         resolved: Dict[str, Any] = {}
@@ -671,7 +673,7 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     variable_field = row.variable_field_api_name or row.variable_field_id or ""
     value_field = row.value_field_api_name or ""
     cascade_field = row.cascade_field_api_name or row.cascade_field_id or ""
-    source_cluster = targets.source_cluster_id() or ""
+    source_cluster = targets.source_cluster_id(PROVIDER) or ""
 
     issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else {}
     ticket_id = _extract(payload, "key", "issueKey", "id", "issue_id") or issue.get("key")

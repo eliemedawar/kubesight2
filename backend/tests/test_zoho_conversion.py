@@ -69,7 +69,7 @@ def zoho(app, monkeypatch):
     row.environment_field_id = ENV_FIELD
     row.tag_field_api_name = "cf_tag"
     db.session.add(row)
-    source = targets.get_or_create_config()
+    source = targets.get_or_create_config("zoho")
     source.custom_environments = json.dumps(
         [{"name": "POS-UAT", "applications": ["pos"], "jenkinsJobPath": "pos-deploy",
           "jenkinsParams": {"repotag": "{cf_tag}", "msName": "{app}"}}]
@@ -235,7 +235,7 @@ def test_jenkins_param_tokens_are_reported_but_never_rewritten(zoho, client, adm
 
     assert _warning_with(data, "custom environment “POS-UAT”")
     assert _warning_with(data, "job override “common-dev/persona-ms”")
-    source = targets.get_or_create_config()
+    source = targets.get_or_create_config("zoho")
     assert json.loads(source.custom_environments)[0]["jenkinsParams"]["repotag"] == "{cf_tag}"
     assert json.loads(source.job_overrides)[0]["jenkinsParams"]["TAG"] == "{cf_tag}"
 

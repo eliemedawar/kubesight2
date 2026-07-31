@@ -22,6 +22,7 @@ from . import zoho_option_sources as sources
 from .zoho_client import ZohoError
 from .zoho_sync_service import (
     NONE_VALUE,
+    PROVIDER,
     _sanitize_value,
     _source_entries as svc_source_entries,
     _to_client_config,
@@ -854,7 +855,7 @@ def preview_field_binding(field_id: str, payload: Dict[str, Any]) -> Dict[str, A
         # No source configured yet is a normal state, not an error page.
         return {"values": [], "count": 0, "byParent": {}, "error": str(exc)}
 
-    ctx = sources.SourceContext(row, entries, fresh=bool(payload.get("fresh")))
+    ctx = sources.SourceContext(row, entries, PROVIDER, fresh=bool(payload.get("fresh")))
     options = sources.resolve(binding, ctx)
     by_parent = options.by_parent
     if binding.parent_field_id:

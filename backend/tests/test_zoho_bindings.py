@@ -69,7 +69,7 @@ def zoho(app, monkeypatch):
     row.sync_variables = False
     row.cascade_enabled = True
     db.session.add(row)
-    source = targets.get_or_create_config()
+    source = targets.get_or_create_config("zoho")
     source.source_cluster_id = CLUSTER
     source.selected_namespaces = json.dumps(["payments", "checkout"])
     db.session.add(source)
@@ -156,7 +156,7 @@ def test_align_by_parent_drops_unpublished_children():
 
 def test_every_source_kind_resolves(zoho):
     row = svc.get_or_create_config()
-    ctx = sources.SourceContext(row, svc._source_entries(row))
+    ctx = sources.SourceContext(row, svc._source_entries(row), "zoho")
     for key in sources.SOURCE_KINDS:
         options = sources.resolve(sources.Binding(REGION_FIELD, "Region", key), ctx)
         assert options.values[0] == svc.NONE_VALUE
@@ -166,14 +166,14 @@ def test_deployments_source_matches_the_legacy_application_list(zoho):
     """A binding on the Application field would publish byte-identical values."""
     row = svc.get_or_create_config()
     entries = svc._source_entries(row)
-    ctx = sources.SourceContext(row, entries)
+    ctx = sources.SourceContext(row, entries, "zoho")
     options = sources.resolve(sources.Binding(REGION_FIELD, "Region", "deployments"), ctx)
     assert options.values == svc._application_values(entries)
 
 
 def test_env_vars_source_is_not_read_unless_asked(zoho):
     row = svc.get_or_create_config()
-    ctx = sources.SourceContext(row, svc._source_entries(row))
+    ctx = sources.SourceContext(row, svc._source_entries(row), "zoho")
     sources.resolve(sources.Binding(REGION_FIELD, "Region", "namespaces"), ctx)
     assert ctx.variables_read is False
     sources.resolve(sources.Binding(REGION_FIELD, "Region", "env_vars"), ctx)
@@ -354,7 +354,7 @@ def test_preview_resolves_without_publishing(zoho, client, admin_token):
 
 
 def test_preview_reports_a_missing_source_instead_of_failing(zoho, client, admin_token):
-    source = targets.get_or_create_config()
+    source = targets.get_or_create_config("zoho")
     source.source_cluster_id = ""
     source.selected_namespaces = json.dumps([])
     db.session.commit()

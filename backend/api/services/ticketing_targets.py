@@ -1,23 +1,33 @@
-"""The deploy surface every ticketing provider shares.
+"""The deploy surface — one selection per ticketing provider.
 
 A ticket only ever says *what* to deploy; *where it can go* is KubeSight's own
 answer — a source cluster, the namespaces picked out of it, which deployments in
 those namespaces to publish, the custom non-cluster environments, and the Jenkins
-job overrides that route a build. None of that is Zoho- or Jira-shaped, so it
-lives on the single :class:`~api.models.TicketingDeployConfig` row rather than
-being configured once per provider.
+job overrides that route a build.
 
-These columns used to sit on :class:`~api.models.ZohoIntegration`. They moved
-verbatim (same names, same JSON encodings) and
-``migrate_rbac._migrate_ticketing_tables`` seeds the shared row from the Zoho one
-on first start, so an existing deployment keeps its exact source selection.
+That answer used to be a single shared row on the theory that "a cluster is a
+cluster whichever system raised the ticket". In practice it made the two tabs
+fight: choosing namespaces on the Jira tab silently rewrote what Zoho published,
+and because :func:`set_source` prunes ``selected_deployments`` and
+``job_overrides`` down to the namespaces still chosen, each save also dropped the
+other provider's per-deployment selection and routing rules. Every provider now
+owns its own :class:`~api.models.TicketingDeployConfig` row, keyed by
+``provider``.
+
+The split is all-or-nothing on purpose. Keeping the namespaces per-provider but
+the Jenkins routing shared would reintroduce exactly that pruning bug, since a
+rule for a namespace only Jira selected would vanish the next time Zoho saved.
+
+Two consumers are provider-agnostic — deploy automation resolving a run whose
+originating ticket is gone, and Mobile Applications listing environment names.
+They pass ``provider=None`` and read across every provider's row; each such
+function documents how it breaks a tie.
 
 Value sanitization stays in :mod:`zoho_sync_service`: custom environment names
 and applications are stored already reduced to picklist-safe characters, because
 what is stored is exactly what gets published *and* matched against on inbound.
 That rule is Zoho's, but it is the stricter of the two — a value Zoho accepts is
-always valid in Jira — so applying it to the shared store keeps one spelling for
-both providers.
+always valid in Jira — so applying it to every provider's row keeps one spelling.
 """
 
 from __future__ import annotations
@@ -29,17 +39,31 @@ from ..db import db
 from ..models import TicketingDeployConfig
 
 
-def get_or_create_config() -> TicketingDeployConfig:
-    row = TicketingDeployConfig.query.get(1)
+def _key(provider: Any) -> str:
+    """Normalize a provider key. Raises ValueError on a blank one.
+
+    Deliberately strict rather than defaulting to Zoho: a silent default is how a
+    caller ends up reading — or worse, writing — the wrong provider's estate.
+    """
+    key = str(provider or "").strip().lower()
+    if not key:
+        raise ValueError("A ticketing provider key is required to read the deploy source.")
+    return key[:16]
+
+
+def get_or_create_config(provider: str) -> TicketingDeployConfig:
+    """This provider's source row, created empty on first use."""
+    key = _key(provider)
+    row = TicketingDeployConfig.query.filter_by(provider=key).first()
     if row is None:
-        row = TicketingDeployConfig(id=1)
+        row = TicketingDeployConfig(provider=key)
         db.session.add(row)
         db.session.commit()
     return row
 
 
-def _staged_config() -> TicketingDeployConfig:
-    """The shared row for a caller that owns the transaction.
+def _staged_config(provider: str) -> TicketingDeployConfig:
+    """This provider's row for a caller that owns the transaction.
 
     :func:`get_or_create_config` COMMITS when it has to create the row, which is
     fine on a read path but wrong inside a provider's ``update_config``: that
@@ -47,24 +71,43 @@ def _staged_config() -> TicketingDeployConfig:
     before the validation below could roll them back. Here the new row is only
     staged, so it lives or dies with the caller's transaction.
     """
-    row = TicketingDeployConfig.query.get(1)
+    key = _key(provider)
+    row = TicketingDeployConfig.query.filter_by(provider=key).first()
     if row is None:
-        row = TicketingDeployConfig(id=1)
+        row = TicketingDeployConfig(provider=key)
         db.session.add(row)
     return row
+
+
+def all_configs() -> List[TicketingDeployConfig]:
+    """Every provider's row, in a stable order — for the cross-provider readers."""
+    return TicketingDeployConfig.query.order_by(TicketingDeployConfig.provider).all()
+
+
+def _resolve(provider: Optional[str], row: Optional[TicketingDeployConfig]):
+    """The row to read: an explicit one wins, else the provider's own.
+
+    A row already in hand is provider-scoped by construction, so a caller that
+    has one does not need to name the provider again.
+    """
+    if row is not None:
+        return row
+    return get_or_create_config(provider)
 
 
 # ---------------------------------------------------------------------------
 # Readers — each tolerates a legacy/garbled encoding by falling back to empty
 # ---------------------------------------------------------------------------
 
-def source_cluster_id() -> Optional[str]:
-    return get_or_create_config().source_cluster_id or None
+def source_cluster_id(provider: Optional[str] = None, row: Optional[TicketingDeployConfig] = None) -> Optional[str]:
+    return _resolve(provider, row).source_cluster_id or None
 
 
-def namespace_list(row: Optional[TicketingDeployConfig] = None) -> List[str]:
+def namespace_list(
+    provider: Optional[str] = None, row: Optional[TicketingDeployConfig] = None
+) -> List[str]:
     """The operator's chosen namespaces (stored JSON-encoded, order-stable)."""
-    raw = (row or get_or_create_config()).selected_namespaces
+    raw = _resolve(provider, row).selected_namespaces
     if not raw:
         return []
     try:
@@ -75,13 +118,15 @@ def namespace_list(row: Optional[TicketingDeployConfig] = None) -> List[str]:
     return [str(n).strip() for n in parsed if str(n).strip()] if isinstance(parsed, list) else []
 
 
-def deployment_selection(row: Optional[TicketingDeployConfig] = None) -> Dict[str, Any]:
+def deployment_selection(
+    provider: Optional[str] = None, row: Optional[TicketingDeployConfig] = None
+) -> Dict[str, Any]:
     """Per-namespace deployment selection: ``{namespace: {"all": bool, "names": [str]}}``.
 
     A namespace absent from the map publishes ALL its live deployments — the
     dynamic default, so a newly created deployment shows up without a config edit.
     """
-    raw = (row or get_or_create_config()).selected_deployments
+    raw = _resolve(provider, row).selected_deployments
     if not raw:
         return {}
     try:
@@ -91,9 +136,11 @@ def deployment_selection(row: Optional[TicketingDeployConfig] = None) -> Dict[st
     return parsed if isinstance(parsed, dict) else {}
 
 
-def custom_environment_list(row: Optional[TicketingDeployConfig] = None) -> List[Dict[str, Any]]:
+def custom_environment_list(
+    provider: Optional[str] = None, row: Optional[TicketingDeployConfig] = None
+) -> List[Dict[str, Any]]:
     """Custom (non-cluster) environments: ``[{name, applications, jenkinsJobPath, jenkinsParams}]``."""
-    raw = (row or get_or_create_config()).custom_environments
+    raw = _resolve(provider, row).custom_environments
     if not raw:
         return []
     try:
@@ -103,41 +150,64 @@ def custom_environment_list(row: Optional[TicketingDeployConfig] = None) -> List
     return parsed if isinstance(parsed, list) else []
 
 
-def custom_environment_names() -> List[str]:
+def custom_environment_names(provider: Optional[str] = None) -> List[str]:
     """Names of the custom environments, in stored order.
 
-    Used by Mobile Applications to offer the environment binding as a dropdown
-    instead of free text.
+    ``provider=None`` returns the union across every provider, de-duped
+    casefolded (the comparison both providers' dropdowns use). Mobile
+    Applications reads it that way: it offers environment names as a dropdown
+    instead of free text and has no ticketing provider of its own.
     """
-    return [
-        str(entry.get("name", "")).strip()
-        for entry in custom_environment_list()
-        if str(entry.get("name", "")).strip()
-    ]
+    if provider is not None:
+        entries = custom_environment_list(provider)
+    else:
+        entries = [e for row in all_configs() for e in custom_environment_list(row=row)]
+    out: List[str] = []
+    seen = set()
+    for entry in entries:
+        name = str(entry.get("name", "")).strip()
+        if name and name.casefold() not in seen:
+            seen.add(name.casefold())
+            out.append(name)
+    return out
 
 
-def custom_environment_by_name(name: str) -> Optional[Dict[str, Any]]:
+def custom_environment_by_name(
+    name: str, provider: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """The custom-environment entry matching ``name``, casefolded.
 
     Both providers compare dropdown values case-insensitively, so the lookup does
     too. Used by deploy automation to find a run's Jenkins routing.
+
+    ``provider=None`` searches every provider's list and returns the first match
+    in provider order — the fallback for a run whose originating ticket row is
+    gone (the FK is ``ON DELETE SET NULL``). Two providers defining the same
+    custom environment name is an operator choice, not a conflict this can
+    resolve; naming the provider avoids the guess.
     """
     target = str(name or "").strip().casefold()
     if not target:
         return None
-    for entry in custom_environment_list():
+    if provider is not None:
+        candidates = custom_environment_list(provider)
+    else:
+        candidates = [e for row in all_configs() for e in custom_environment_list(row=row)]
+    for entry in candidates:
         if str(entry.get("name", "")).casefold() == target:
             return entry
     return None
 
 
-def job_override_list(row: Optional[TicketingDeployConfig] = None) -> List[Dict[str, Any]]:
+def job_override_list(
+    provider: Optional[str] = None, row: Optional[TicketingDeployConfig] = None
+) -> List[Dict[str, Any]]:
     """Jenkins job overrides for cluster targets.
 
     ``[{"namespace", "deployments", "jenkinsJobPath", "jenkinsParams"}]`` — an
     empty ``deployments`` list means the whole namespace.
     """
-    raw = (row or get_or_create_config()).job_overrides
+    raw = _resolve(provider, row).job_overrides
     if not raw:
         return []
     try:
@@ -147,20 +217,30 @@ def job_override_list(row: Optional[TicketingDeployConfig] = None) -> List[Dict[
     return parsed if isinstance(parsed, list) else []
 
 
-def job_override_for(namespace: str, deployment: str) -> Optional[Dict[str, Any]]:
+def job_override_for(
+    namespace: str, deployment: str, provider: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """The override rule for a cluster target, or None (= the global router job).
 
     A rule naming the deployment beats a whole-namespace rule. Matched casefolded
     — the values round-trip through a ticket dropdown, which compares values
     case-insensitively. Consulted by deploy automation only when a run actually
     needs a build (the ticket's image tag is not already in the registry).
+
+    ``provider=None`` scans every provider's rules, keeping that same specificity
+    order globally: a deployment-specific rule from any provider wins over a
+    namespace-wide one from any provider.
     """
     ns = str(namespace or "").strip().casefold()
     dep = str(deployment or "").strip().casefold()
     if not ns:
         return None
+    if provider is not None:
+        rules = job_override_list(provider)
+    else:
+        rules = [r for row in all_configs() for r in job_override_list(row=row)]
     ns_wide: Optional[Dict[str, Any]] = None
-    for entry in job_override_list():
+    for entry in rules:
         if not isinstance(entry, dict):
             continue
         if str(entry.get("namespace", "")).strip().casefold() != ns:
@@ -174,19 +254,22 @@ def job_override_for(namespace: str, deployment: str) -> Optional[Dict[str, Any]
     return ns_wide
 
 
-def serialize(row: Optional[TicketingDeployConfig] = None) -> Dict[str, Any]:
-    """The shared deploy surface as the config API exposes it.
+def serialize(
+    provider: Optional[str] = None, row: Optional[TicketingDeployConfig] = None
+) -> Dict[str, Any]:
+    """One provider's deploy surface as the config API exposes it.
 
-    Merged into every provider's config payload under the same keys the Zoho tab
-    already used, so the settings form is unchanged on the wire.
+    Merged into that provider's config payload under the same keys the Zoho tab
+    already used, so the settings form is unchanged on the wire — each tab simply
+    now round-trips its own selection.
     """
-    row = row or get_or_create_config()
+    row = _resolve(provider, row)
     return {
         "sourceClusterId": row.source_cluster_id or "",
-        "selectedNamespaces": namespace_list(row),
-        "selectedDeployments": deployment_selection(row),
-        "customEnvironments": custom_environment_list(row),
-        "jobOverrides": job_override_list(row),
+        "selectedNamespaces": namespace_list(row=row),
+        "selectedDeployments": deployment_selection(row=row),
+        "customEnvironments": custom_environment_list(row=row),
+        "jobOverrides": job_override_list(row=row),
     }
 
 
@@ -202,24 +285,26 @@ def _normalizers():
 
 
 def set_source(
+    provider: str,
     cluster_id: Optional[str],
     namespaces: Optional[List[str]],
     deployments: Optional[Dict[str, Any]] = None,
     custom_environments: Optional[List[Dict[str, Any]]] = None,
     job_overrides: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Persist the dropdown source shared by every provider.
+    """Persist one provider's dropdown source.
 
-    The Environment dropdown becomes exactly these namespaces plus the custom
-    environment names; the Application dropdown becomes the live deployments
-    running in them (resolved at sync time) plus the custom applications — a
-    namespace left unspecified publishes all of its deployments dynamically.
+    That provider's Environment dropdown becomes exactly these namespaces plus
+    its custom environment names; its Application dropdown becomes the live
+    deployments running in them (resolved at sync time) plus the custom
+    applications — a namespace left unspecified publishes all of its deployments
+    dynamically. The other provider's selection is untouched.
 
     Raises ValueError on a custom name colliding with a namespace, or on two
     job overrides targeting the same thing.
     """
     svc = _normalizers()
-    row = get_or_create_config()
+    row = get_or_create_config(provider)
     row.source_cluster_id = (str(cluster_id).strip() if cluster_id else None) or None
     clean: List[str] = []
     seen = set()
@@ -247,21 +332,21 @@ def set_source(
         row.selected_deployments = json.dumps(normalized)
     db.session.add(row)
     db.session.commit()
-    return serialize(row)
+    return serialize(row=row)
 
 
-def apply_config_payload(payload: Dict[str, Any]) -> List[str]:
-    """Apply the shared source keys out of a provider's config payload.
+def apply_config_payload(provider: str, payload: Dict[str, Any]) -> List[str]:
+    """Apply the source keys out of one provider's config payload.
 
     The settings form posts the whole config in one PUT, so each provider's
-    ``update_config`` hands the payload here for the shared half. Stages changes
+    ``update_config`` hands the payload here for the source half. Stages changes
     on the session WITHOUT committing — the caller owns the transaction, so a
-    validation failure further down rolls the shared edit back too. Returns the
+    validation failure further down rolls this edit back too. Returns the
     validation errors it collected.
     """
     svc = _normalizers()
     errors: List[str] = []
-    row = _staged_config()
+    row = _staged_config(provider)
 
     if "sourceClusterId" in payload:
         value = payload.get("sourceClusterId")
@@ -281,7 +366,7 @@ def apply_config_payload(payload: Dict[str, Any]) -> List[str]:
         try:
             row.custom_environments = json.dumps(
                 svc._normalize_custom_environments(
-                    payload.get("customEnvironments"), reserved=set(namespace_list(row))
+                    payload.get("customEnvironments"), reserved=set(namespace_list(row=row))
                 )
             )
         except ValueError as exc:

@@ -499,7 +499,7 @@ const PAGE_TOURS = {
     {
       target: ".sg-tk-note",
       title: "One deploy surface",
-      body: "The source cluster, its namespaces, the custom environments and the Jenkins router are configured once and shared by both providers.",
+      body: "The source cluster, its namespaces and the custom environments belong to this provider — each tab publishes its own selection. The Jenkins router itself is one shared connection.",
     },
     {
       target: ".sg-zh-cmdbar",

@@ -130,7 +130,7 @@ class FakeJira:
 
 @pytest.fixture()
 def jira(app, monkeypatch):
-    """A configured Jira integration over a shared, populated deploy surface."""
+    """A configured Jira integration over its OWN populated deploy surface."""
     row = JiraIntegration.query.get(1) or JiraIntegration(id=1)
     row.enabled = True
     row.base_url = "https://example.atlassian.net"
@@ -151,7 +151,7 @@ def jira(app, monkeypatch):
     row.cascade_enabled = True
     db.session.add(row)
 
-    source = targets.get_or_create_config()
+    source = targets.get_or_create_config("jira")
     source.source_cluster_id = CLUSTER
     source.selected_namespaces = json.dumps(["payments", "checkout"])
     source.selected_deployments = None
@@ -253,7 +253,11 @@ def test_a_failed_cluster_read_does_not_touch_jira(jira, monkeypatch):
     fake = FakeJira()
     monkeypatch.setattr(jira_client, "_request", fake)
     monkeypatch.setattr(
-        zoho_svc, "_source_entries", lambda row, fresh=False: (_ for _ in ()).throw(ValueError("cluster unreachable"))
+        zoho_svc,
+        "_source_entries",
+        lambda row, provider=None, fresh=False: (_ for _ in ()).throw(
+            ValueError("cluster unreachable")
+        ),
     )
 
     result = svc.sync_now()
@@ -453,23 +457,78 @@ def test_an_unavailable_transition_is_skipped_not_raised(jira, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The shared seam
+# The per-provider seam
 # ---------------------------------------------------------------------------
 
-def test_both_providers_read_one_deploy_surface(jira):
-    """Configuring the source from either tab configures it for both — a cluster
-    is a cluster whichever system raised the ticket."""
-    zoho_cfg = zoho_svc.get_config_dict()
-    jira_cfg = svc.get_config_dict()
+def test_each_provider_owns_its_deploy_surface(jira):
+    """Choosing namespaces on one tab must not move the other's.
 
-    assert zoho_cfg["sourceClusterId"] == jira_cfg["sourceClusterId"] == CLUSTER
-    assert zoho_cfg["selectedNamespaces"] == jira_cfg["selectedNamespaces"] == [
-        "payments",
-        "checkout",
-    ]
-
+    The source used to be a single shared row, which meant narrowing Jira also
+    narrowed what Zoho published — silently, on a screen that never mentioned the
+    other provider.
+    """
+    zoho_svc.set_source(CLUSTER, ["payments", "checkout"], None, None, None)
     svc.set_source(CLUSTER, ["payments"], None, None, None)
-    assert zoho_svc.get_config_dict()["selectedNamespaces"] == ["payments"]
+
+    assert svc.get_config_dict()["selectedNamespaces"] == ["payments"]
+    assert zoho_svc.get_config_dict()["selectedNamespaces"] == ["payments", "checkout"]
+
+    # ...and the other direction, since the two rows are written by one module.
+    zoho_svc.set_source(CLUSTER, ["checkout"], None, None, None)
+    assert svc.get_config_dict()["selectedNamespaces"] == ["payments"]
+
+
+def test_custom_environments_are_unioned_for_a_caller_with_no_provider(jira):
+    """Mobile Applications has no ticketing provider of its own, so its
+    environment dropdown is the union — not, silently, whichever provider the
+    reader happened to default to."""
+    zoho_svc.set_source(
+        CLUSTER, ["payments"], None, [{"name": "POS-UAT", "applications": ["pos"]}], None
+    )
+    svc.set_source(
+        CLUSTER, ["payments"], None, [{"name": "ATM-UAT", "applications": ["atm"]}], None
+    )
+
+    assert targets.custom_environment_names("zoho") == ["POS-UAT"]
+    assert targets.custom_environment_names("jira") == ["ATM-UAT"]
+    assert sorted(targets.custom_environment_names(provider=None)) == ["ATM-UAT", "POS-UAT"]
+
+
+def test_a_job_override_routes_only_its_own_providers_builds(jira):
+    """Jenkins routing follows the provider that raised the ticket: a Zoho rule
+    must not hijack a Jira build, even for the same namespace."""
+    zoho_svc.set_source(
+        CLUSTER, ["payments"], None, None,
+        [{"namespace": "payments", "deployments": [], "jenkinsJobPath": "zoho/build"}],
+    )
+    svc.set_source(
+        CLUSTER, ["payments"], None, None,
+        [{"namespace": "payments", "deployments": [], "jenkinsJobPath": "jira/build"}],
+    )
+
+    zoho_rule = targets.job_override_for("payments", "payments-api", "zoho")
+    jira_rule = targets.job_override_for("payments", "payments-api", "jira")
+    assert zoho_rule["jenkinsJobPath"] == "zoho/build"
+    assert jira_rule["jenkinsJobPath"] == "jira/build"
+
+
+def test_a_providers_sync_publishes_only_its_own_namespaces(jira, monkeypatch):
+    """The publish path reads the source through builders that live in the Zoho
+    module — the regression this guards is those defaulting to Zoho's row."""
+    zoho_svc.set_source(CLUSTER, ["checkout"], None, None, None)
+    svc.set_source(CLUSTER, ["payments"], None, None, None)
+
+    fake = FakeJira()
+    monkeypatch.setattr(jira_client, "_request", fake)
+    result = svc.sync_now()
+
+    assert result["status"] == "ok", result
+    assert {o["value"] for o in fake.options[ENV_FIELD]} == {"payments"}, (
+        "Jira published the namespaces Zoho selected"
+    )
+    assert {o["value"] for o in fake.options[APP_FIELD]} == {"payments-api"}, (
+        "Jira published deployments out of Zoho's namespace"
+    )
 
 
 def test_enabling_jira_requires_the_essentials(app):

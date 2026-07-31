@@ -165,11 +165,11 @@ def preview(provider_key: str):
 
 
 # ---------------------------------------------------------------------------
-# Dropdown source picker — the deploy surface every provider shares.
+# Dropdown source picker — one deploy surface per provider.
 #
-# Writes land on the one shared row (ticketing_targets), so editing it from
-# either provider's tab is the same edit. That is intentional: a cluster is a
-# cluster whichever system raised the ticket.
+# Writes land on the addressed provider's ticketing_targets row, so each tab
+# publishes its own slice of the estate: narrowing namespaces on the Jira tab
+# leaves what Zoho publishes untouched.
 # ---------------------------------------------------------------------------
 
 @ticketing_bp.route("/<provider_key>/source", methods=["GET"])
@@ -185,9 +185,10 @@ def get_source(provider_key: str):
             "customEnvironments": cfg.get("customEnvironments") or [],
             "jobOverrides": cfg.get("jobOverrides") or [],
             "cascadeEnabled": cfg.get("cascadeEnabled"),
-            # The source is one shared record — say so, so the UI can tell the
-            # operator their edit applies to the other provider too.
-            "shared": True,
+            # Each provider owns its selection; kept in the payload (rather than
+            # dropped) so a client written against the shared-source API sees the
+            # change instead of reading a missing key as "shared".
+            "shared": False,
         }
     )
 
@@ -222,7 +223,8 @@ def update_source(provider_key: str):
         "source_updated",
         provider,
         "ticketing_deploy_config",
-        "1",
+        # The row is keyed by provider now, so that is the readable target id.
+        provider.key,
         {
             "clusterId": data.get("sourceClusterId"),
             "namespaces": data.get("selectedNamespaces"),

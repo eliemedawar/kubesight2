@@ -2638,23 +2638,36 @@ class MobileAppPublish(db.Model):
 
 
 class TicketingDeployConfig(db.Model):
-    """What KubeSight can deploy — shared by every ticketing provider.
+    """What KubeSight can deploy — **one row per ticketing provider**.
 
     The dropdown *source* (a cluster, its namespaces, which deployments to
     publish), the custom non-cluster environments and the Jenkins job overrides
-    describe KubeSight's own deploy surface, not Zoho's or Jira's. They lived on
-    :class:`ZohoIntegration` while Zoho was the only provider; a second provider
-    would otherwise mean configuring the same clusters twice and two sources of
-    truth for deploy routing.
+    describe KubeSight's own deploy surface. They lived on
+    :class:`ZohoIntegration` while Zoho was the only provider, then briefly on a
+    single shared row — which meant narrowing the namespaces for one provider
+    silently narrowed them for the other. Each provider now owns its selection,
+    so a Jira project can publish a different slice of the estate than a Zoho
+    department without the two fighting over one record.
 
-    Single row (id is always 1), seeded once from the existing Zoho row by
-    ``migrate_rbac._migrate_ticketing_tables``. The columns keep their original
-    names and JSON encodings so the migration is a copy, not a transform.
+    The whole object is per-provider, not just the namespace list: ``set_source``
+    prunes ``selected_deployments`` and ``job_overrides`` down to the namespaces
+    still chosen, so a half-shared row would drop the other provider's routing
+    rules on every save.
+
+    Keyed by ``provider`` (unique). ``migrate_rbac._migrate_ticketing_tables``
+    stamps the pre-existing single row as Zoho and clones it to Jira, so an
+    upgrade keeps both tabs publishing exactly what they published before.
     """
 
     __tablename__ = "ticketing_deploy_config"
+    __table_args__ = (
+        db.UniqueConstraint("provider", name="uq_ticketing_deploy_provider"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
+    # "zoho" | "jira" — which provider's tab owns this selection. The pre-split
+    # row was Zoho's (it was seeded from zoho_integration), hence the default.
+    provider = db.Column(db.String(16), nullable=False, default="zoho", index=True)
 
     # The cluster whose live deployments feed the Application dropdown, and the
     # namespaces the operator picked out of it (JSON-encoded list of names).
@@ -2706,8 +2719,8 @@ class JiraIntegration(db.Model):
     ==================  ==========================  =============================
 
     The deploy surface itself (source cluster/namespaces/deployments, custom
-    environments, Jenkins job overrides) is NOT here — it is shared, on
-    :class:`TicketingDeployConfig`.
+    environments, Jenkins job overrides) is NOT here — it is this provider's own
+    :class:`TicketingDeployConfig` row, keyed by ``provider``.
     """
 
     __tablename__ = "jira_integration"

@@ -44,6 +44,8 @@ from . import ticketing_targets as targets
 from . import zoho_client
 from .zoho_client import ZohoConfig, ZohoError
 
+# This module's provider key — which deploy-source row it reads and writes.
+PROVIDER = "zoho"
 # The placeholder Zoho keeps as the default/blank picklist entry — always first.
 NONE_VALUE = "-None-"
 # Sentinel cluster id for snapshots of CUSTOM (non-cluster) environment entries —
@@ -113,9 +115,9 @@ def serialize(row: ZohoIntegration) -> Dict[str, Any]:
         "syncVariables": bool(row.sync_variables),
         "statusFilter": _status_list(row),
         "syncIntervalMinutes": int(row.sync_interval_minutes or 30),
-        # Live-cluster dropdown source — shared with every other ticketing
-        # provider, so it comes from ticketing_targets rather than this row.
-        **targets.serialize(),
+        # Live-cluster dropdown source — this provider's own selection, kept on
+        # its ticketing_targets row rather than on this one.
+        **targets.serialize(PROVIDER),
         "cascadeEnabled": bool(row.cascade_enabled),
         "dependencyMappingId": row.dependency_mapping_id or "",
         "lastDependencyStatus": row.last_dependency_status,
@@ -146,46 +148,51 @@ def _status_list(row: ZohoIntegration) -> List[str]:
     return [s.strip() for s in (row.status_filter or "").split(",") if s.strip()]
 
 
-# --- The shared deploy surface ---------------------------------------------
+# --- This provider's deploy surface ----------------------------------------
 # Source cluster, namespaces, deployments, custom environments and Jenkins job
 # overrides describe what KUBESIGHT can deploy, not what Zoho looks like, so they
-# live on the shared ticketing_targets row (Jira reads the identical selection).
-# These wrappers keep the call sites — and the exported names other modules and
-# the tests import — unchanged; the ``row`` argument is accepted and ignored so
-# the sync loop can keep passing the config it already has in hand.
+# live on a ticketing_targets row — one per provider, so choosing namespaces here
+# leaves Jira's selection alone. These wrappers keep the call sites (and the
+# exported names other modules and the tests import) unchanged; the ``row``
+# argument is accepted and ignored — it is the ZohoIntegration config, not the
+# source row, and the provider key is what selects the latter.
 
-def _namespace_list(row: Optional[ZohoIntegration] = None) -> List[str]:
-    """The operator's chosen namespaces (shared across providers)."""
-    return targets.namespace_list()
+def _namespace_list(row: Optional[ZohoIntegration] = None, provider: str = PROVIDER) -> List[str]:
+    """The operator's chosen namespaces for ``provider``."""
+    return targets.namespace_list(provider)
 
 
-def _deployment_selection(row: Optional[ZohoIntegration] = None) -> Dict[str, Any]:
+def _deployment_selection(
+    row: Optional[ZohoIntegration] = None, provider: str = PROVIDER
+) -> Dict[str, Any]:
     """Per-namespace deployment selection: ``{namespace: {"all", "names"}}``."""
-    return targets.deployment_selection()
+    return targets.deployment_selection(provider)
 
 
-def _custom_environment_list(row: Optional[ZohoIntegration] = None) -> List[Dict[str, Any]]:
+def _custom_environment_list(
+    row: Optional[ZohoIntegration] = None, provider: str = PROVIDER
+) -> List[Dict[str, Any]]:
     """Custom (non-cluster) environments: ``[{name, applications, jenkins*}]``."""
-    return targets.custom_environment_list()
+    return targets.custom_environment_list(provider)
 
 
-def _source_cluster_id(row: Optional[ZohoIntegration] = None) -> str:
-    """The cluster the dropdowns are read from (shared across providers)."""
-    return (targets.source_cluster_id() or "").strip()
+def _source_cluster_id(row: Optional[ZohoIntegration] = None, provider: str = PROVIDER) -> str:
+    """The cluster ``provider``'s dropdowns are read from."""
+    return (targets.source_cluster_id(provider) or "").strip()
 
 
 def custom_environment_names() -> List[str]:
     """Names of the operator's custom (non-cluster) environments, in stored
-    order. Used by Mobile Applications to offer the environment binding as a
-    dropdown instead of free text."""
-    return targets.custom_environment_names()
+    order. Scoped to this provider — Mobile Applications wants the union and
+    calls :func:`ticketing_targets.custom_environment_names` directly."""
+    return targets.custom_environment_names(PROVIDER)
 
 
 def custom_environment_by_name(name: str) -> Optional[Dict[str, Any]]:
     """The custom-environment entry whose name matches ``name`` (dropdown values
     compare case-insensitively, so match casefolded). Used by deploy automation
     to find a run's Jenkins routing."""
-    return targets.custom_environment_by_name(name)
+    return targets.custom_environment_by_name(name, PROVIDER)
 
 
 # Every config column that stores a Zoho FIELD API NAME, with the label the
@@ -264,15 +271,15 @@ def repoint_api_name(old_api_name: str, new_api_name: str) -> List[str]:
 
 
 def _job_override_list(row: Optional[ZohoIntegration] = None) -> List[Dict[str, Any]]:
-    """Jenkins job overrides for cluster targets (shared across providers)."""
-    return targets.job_override_list()
+    """Jenkins job overrides for this provider's cluster targets."""
+    return targets.job_override_list(PROVIDER)
 
 
 def job_override_for(namespace: str, deployment: str) -> Optional[Dict[str, Any]]:
     """The Jenkins job-override rule for a cluster target, or None (= the
     global router). Used by deploy automation when a run actually needs a build
     (the image tag is not in the registry)."""
-    return targets.job_override_for(namespace, deployment)
+    return targets.job_override_for(namespace, deployment, PROVIDER)
 
 
 def _normalize_job_overrides(value: Any) -> List[Dict[str, Any]]:
@@ -420,11 +427,13 @@ def set_source(
     Raises ValueError on a custom name colliding with a namespace or on
     ambiguous job overrides.
 
-    The source itself is shared with every other ticketing provider, so the write
-    goes to ``ticketing_targets``; the response is still this provider's full
-    config view (the settings form round-trips the whole thing).
+    The source lives on this provider's ``ticketing_targets`` row, so the write
+    leaves the other providers' selections alone; the response is still this
+    provider's full config view (the settings form round-trips the whole thing).
     """
-    targets.set_source(cluster_id, namespaces, deployments, custom_environments, job_overrides)
+    targets.set_source(
+        PROVIDER, cluster_id, namespaces, deployments, custom_environments, job_overrides
+    )
     return serialize(get_or_create_config())
 
 
@@ -488,10 +497,10 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "cascadeEnabled" in payload:
         row.cascade_enabled = bool(payload.get("cascadeEnabled"))
 
-    # Dropdown source may also be edited from the main config form. It is shared
-    # with every other provider, so it is staged onto the shared row — uncommitted,
-    # so the rollback below still undoes it if anything here fails to validate.
-    errors.extend(targets.apply_config_payload(payload))
+    # Dropdown source may also be edited from the main config form. It is staged
+    # onto this provider's source row — uncommitted, so the rollback below still
+    # undoes it if anything here fails to validate.
+    errors.extend(targets.apply_config_payload(PROVIDER, payload))
 
     # Secrets: set only when a non-empty value is supplied; explicit clear flags wipe.
     _apply_secret(payload, "clientSecret", "clearClientSecret", row, "client_secret_encrypted")
@@ -764,7 +773,9 @@ def _get_or_create_snapshot(cluster_id: str, namespace: str, name: str) -> ZohoD
     return snap
 
 
-def _source_entries(row: ZohoIntegration, fresh: bool = False) -> List[Dict[str, Any]]:
+def _source_entries(
+    row: ZohoIntegration, *, provider: str = PROVIDER, fresh: bool = False
+) -> List[Dict[str, Any]]:
     """The deployments to publish: [{id, namespace, name, label, custom}], snapshotted.
 
     Live cluster entries first, then the custom (non-cluster) environments' free-
@@ -772,15 +783,19 @@ def _source_entries(row: ZohoIntegration, fresh: bool = False) -> List[Dict[str,
     resolve them the same way. Raises ValueError when no source at all is
     configured or a cluster read fails, so the caller (sync/preview) can surface
     a clear message instead of publishing nothing.
+
+    ``provider`` selects whose source row to read. Jira reuses this builder
+    verbatim (the entries are Kubernetes, not Zoho), so it MUST name itself —
+    otherwise Jira would publish the namespaces Zoho selected.
     """
-    cluster_id = _source_cluster_id()
-    customs = _custom_environment_list(row)
+    cluster_id = _source_cluster_id(provider=provider)
+    customs = _custom_environment_list(row, provider)
     if not cluster_id and not customs:
         raise ValueError("No source selected. Pick a cluster and namespaces (or add custom environments) first.")
     entries: List[Dict[str, Any]] = []
     if cluster_id:
-        selection = _deployment_selection(row)
-        namespaces = _namespace_list(row)
+        selection = _deployment_selection(row, provider)
+        namespaces = _namespace_list(row, provider)
         # All cluster reads fan out up front; the DB snapshot work below stays on
         # the request thread (it needs the app-context session).
         per_ns = _list_deployments_by_namespace(cluster_id, namespaces, fresh=fresh)
@@ -812,13 +827,18 @@ def _source_entries(row: ZohoIntegration, fresh: bool = False) -> List[Dict[str,
     return entries
 
 
-def build_environment_values(row: ZohoIntegration) -> List[str]:
+def build_environment_values(row: ZohoIntegration, provider: str = PROVIDER) -> List[str]:
     """Environment dropdown: ``-None-`` + the operator's selected namespaces +
     the custom environment names. De-duped casefolded — Zoho compares picklist
-    values case-insensitively and rejects the whole PATCH on a duplicate."""
+    values case-insensitively and rejects the whole PATCH on a duplicate.
+
+    ``provider`` selects whose namespaces those are; the binding engine passes
+    the one on its :class:`~api.services.zoho_option_sources.SourceContext`."""
     values = [NONE_VALUE]
     seen = {NONE_VALUE.casefold()}
-    for ns in _namespace_list(row) + [c.get("name", "") for c in _custom_environment_list(row)]:
+    for ns in _namespace_list(row, provider) + [
+        c.get("name", "") for c in _custom_environment_list(row, provider)
+    ]:
         s = _sanitize_value(ns)
         if s and s.casefold() not in seen:
             seen.add(s.casefold())
@@ -837,9 +857,9 @@ def _application_values(entries: List[Dict[str, Any]]) -> List[str]:
     return values
 
 
-def build_application_values(row: ZohoIntegration) -> List[str]:
+def build_application_values(row: ZohoIntegration, provider: str = PROVIDER) -> List[str]:
     """Application dropdown: ``-None-`` + unique deployment names."""
-    return _application_values(_source_entries(row))
+    return _application_values(_source_entries(row, provider=provider))
 
 
 def _namespace_to_labels(entries: List[Dict[str, Any]]) -> Dict[str, List[str]]:
@@ -859,15 +879,20 @@ def _namespace_to_labels(entries: List[Dict[str, Any]]) -> Dict[str, List[str]]:
 
 
 def _variables_for_entries(
-    row: ZohoIntegration, entries: List[Dict[str, Any]], fresh: bool = False
+    row: ZohoIntegration,
+    entries: List[Dict[str, Any]],
+    fresh: bool = False,
+    provider: str = PROVIDER,
 ) -> Dict[str, Dict[str, List[str]]]:
     """``{namespace: {deployment: [env-var names]}}`` for the published entries.
 
     Only literal-valued env vars are listed (``valueFrom`` refs are not offered
     for change). Best-effort: read failures degrade to an empty map per
     namespace — variables are additive on top of an otherwise-good sync.
+
+    ``provider`` names whose source cluster the specs are read from.
     """
-    cluster_id = _source_cluster_id()
+    cluster_id = _source_cluster_id(provider=provider)
     # Custom (non-cluster) entries have no live spec to read env vars from.
     namespaces = sorted({e["namespace"] for e in entries if not e.get("custom")})
     if not cluster_id or not namespaces:
@@ -969,25 +994,38 @@ def _app_to_variables(
     return {label: sorted(vars_, key=str.casefold) for label, vars_ in grouped.items()}
 
 
-def build_preview(fresh: bool = False) -> Dict[str, Any]:
-    """What the next sync would publish (both dropdowns) — for the UI, no Zoho write."""
-    row = get_or_create_config()
-    env_values = build_environment_values(row)
+def build_preview(
+    fresh: bool = False, row: Optional[ZohoIntegration] = None, provider: str = PROVIDER
+) -> Dict[str, Any]:
+    """What the next sync would publish (both dropdowns) — for the UI, no Zoho write.
+
+    ``row``/``provider`` let Jira reuse this verbatim: the values come from the
+    cluster rather than the ticketing system, but *which* namespaces and which
+    per-field toggles apply are that provider's own, so both have to be named.
+    Passing neither previews Zoho.
+    """
+    row = row if row is not None else get_or_create_config()
+    env_values = build_environment_values(row, provider)
     error: Optional[str] = None
     entries: List[Dict[str, Any]] = []
     try:
-        entries = _source_entries(row, fresh=fresh)
+        entries = _source_entries(row, provider=provider, fresh=fresh)
     except ValueError as exc:
         error = str(exc)
     manage_variables = bool(row.sync_variables and row.variable_field_id)
-    vars_by_ns = _variables_for_entries(row, entries, fresh=fresh) if manage_variables else {}
+    vars_by_ns = (
+        _variables_for_entries(row, entries, fresh=fresh, provider=provider)
+        if manage_variables
+        else {}
+    )
+    cluster_id = _source_cluster_id(provider=provider)
     items = [
         {
             "id": e["id"],
             "label": e["label"],
             "deploymentName": e["name"],
             "namespace": e["namespace"],
-            "clusterId": CUSTOM_SOURCE_CLUSTER if e.get("custom") else _source_cluster_id(),
+            "clusterId": CUSTOM_SOURCE_CLUSTER if e.get("custom") else cluster_id,
             "custom": bool(e.get("custom")),
             "variables": _entry_variables(e, vars_by_ns) if manage_variables else [],
         }
@@ -996,10 +1034,10 @@ def build_preview(fresh: bool = False) -> Dict[str, Any]:
     app_values = _application_values(entries)
     variable_values = build_variable_values(entries, vars_by_ns) if manage_variables else [NONE_VALUE]
     return {
-        "sourceClusterId": _source_cluster_id(),
-        "selectedNamespaces": _namespace_list(row),
-        "selectedDeployments": _deployment_selection(row),
-        "customEnvironments": _custom_environment_list(row),
+        "sourceClusterId": cluster_id,
+        "selectedNamespaces": _namespace_list(row, provider),
+        "selectedDeployments": _deployment_selection(row, provider),
+        "customEnvironments": _custom_environment_list(row, provider),
         "count": max(0, len(app_values) - 1),
         "manageApplication": bool(row.sync_application and row.app_field_id),
         "manageEnvironment": bool(row.sync_environment and row.environment_field_id),
@@ -1238,8 +1276,8 @@ def sync_now() -> Dict[str, Any]:
             _record_sync(row, "error", str(exc), None)
             return {"status": "error", "message": str(exc), **serialize(row)}
 
-        ctx = sources.SourceContext(row, entries)
-        bindings = sources.all_bindings(row)
+        ctx = sources.SourceContext(row, entries, PROVIDER)
+        bindings = sources.all_bindings(row, PROVIDER)
         publishing = [b for b in bindings if b.enabled]
         resolved: Dict[str, sources.ResolvedOptions] = {}
         warnings: List[str] = []

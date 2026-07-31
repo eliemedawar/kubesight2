@@ -62,9 +62,9 @@ def zoho(app, monkeypatch):
     row.sync_variables = True
     row.cascade_enabled = True
     db.session.add(row)
-    # The deploy surface is shared across ticketing providers, so it lives on
-    # its own row rather than on the Zoho config.
-    source = targets.get_or_create_config()
+    # Each provider owns its deploy surface, so it lives on its own row rather
+    # than on the Zoho config.
+    source = targets.get_or_create_config("zoho")
     source.source_cluster_id = CLUSTER
     source.selected_namespaces = json.dumps(["payments", "checkout"])
     source.selected_deployments = None
@@ -77,7 +77,7 @@ def zoho(app, monkeypatch):
     def _deployments(cluster_id, namespaces, fresh=False):
         return {ns: list(DEPLOYMENTS.get(ns) or []) for ns in namespaces}
 
-    def _variables(row_, entries, fresh=False):
+    def _variables(row_, entries, fresh=False, provider="zoho"):
         return {ns: dict(vars_) for ns, vars_ in ENV_VARS.items()}
 
     monkeypatch.setattr(svc, "_list_deployments_by_namespace", _deployments)

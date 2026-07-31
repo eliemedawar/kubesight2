@@ -572,12 +572,14 @@ def preview_field_binding(field_id: str, payload: Dict[str, Any]) -> Dict[str, A
         parent_field_id=str(payload.get("parentFieldId") or "") or None,
     )
     try:
-        entries = svc_source_entries(row, fresh=bool(payload.get("fresh")))
+        entries = svc_source_entries(
+            row, provider=PROVIDER, fresh=bool(payload.get("fresh"))
+        )
     except ValueError as exc:
         # No source configured yet is a normal state, not an error page.
         return {"values": [], "count": 0, "byParent": {}, "error": str(exc)}
 
-    ctx = sources.SourceContext(row, entries, fresh=bool(payload.get("fresh")))
+    ctx = sources.SourceContext(row, entries, PROVIDER, fresh=bool(payload.get("fresh")))
     options = sources.resolve(binding, ctx)
     by_parent = options.by_parent
     if binding.parent_field_id:

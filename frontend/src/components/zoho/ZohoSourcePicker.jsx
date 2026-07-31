@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import ErrorBanner from "../common/ErrorBanner.jsx";
-import { useTicketingApi } from "../ticketing/TicketingContext.jsx";
+import { useTicketing, useTicketingApi } from "../ticketing/TicketingContext.jsx";
 
 /**
  * Modal to choose the dropdown source: a cluster + which of its namespaces feed
- * the Zoho Environment field, and — per namespace — exactly which live deployments
+ * the Environment field, and — per namespace — exactly which live deployments
  * feed the Application field. Each namespace is either "All deployments" (dynamic:
  * future deployments auto-included) or an explicit subset. Cluster targets can
  * carry Jenkins job overrides (a namespace — or specific deployments — builds via
@@ -12,6 +12,9 @@ import { useTicketingApi } from "../ticketing/TicketingContext.jsx";
  * environments can be added too: a free-text Environment name (e.g. POS-UAT) with
  * free-text applications, plus the Jenkins job + parameter map its tickets should
  * trigger. Saving persists the source; the operator publishes it with "Sync now".
+ *
+ * Scoped to the provider whose tab opened it — `useTicketingApi` addresses that
+ * provider's own source row, so a selection made here does not move the other's.
  */
 export default function ZohoSourcePicker({
   initialClusterId = "",
@@ -23,6 +26,7 @@ export default function ZohoSourcePicker({
   onSaved,
 }) {
   const api = useTicketingApi();
+  const { name: providerName } = useTicketing();
   const [clusters, setClusters] = useState([]);
   const [clusterId, setClusterId] = useState(initialClusterId);
   const [namespaces, setNamespaces] = useState([]);
@@ -385,7 +389,7 @@ export default function ZohoSourcePicker({
       >
         <header className="modal-header">
           <div>
-            <h3>Choose namespaces &amp; deployments</h3>
+            <h3>Choose namespaces &amp; deployments{providerName ? ` for ${providerName}` : ""}</h3>
             <p className="muted">
               Pick a cluster and the namespaces to publish as the <code>Environment</code> options. For
               each namespace, publish <strong>all</strong> live deployments (auto-includes future ones)
@@ -393,6 +397,12 @@ export default function ZohoSourcePicker({
               are <strong>not</strong> in the cluster (e.g. <code>POS-UAT</code>) go under Custom
               environments below.
             </p>
+            {providerName ? (
+              <p className="muted">
+                This selection belongs to <strong>{providerName}</strong> only — every other ticketing
+                provider keeps its own.
+              </p>
+            ) : null}
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
             ✕

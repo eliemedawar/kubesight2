@@ -108,11 +108,16 @@ class SourceContext:
     Zoho write, because a failed cluster read must abort the sync rather than
     publish an empty list. Env-var names are read lazily: it is a full spec read
     per deployment and only the ``env_vars`` kind wants it.
+
+    ``provider`` is required: the deploy source is per-provider, so a resolver
+    that reads it (``namespaces``, and the cluster the env-var specs come from)
+    has to know whose sync it is running inside.
     """
 
-    def __init__(self, row, entries: List[Dict[str, Any]], fresh: bool = False):
+    def __init__(self, row, entries: List[Dict[str, Any]], provider: str, fresh: bool = False):
         self.row = row
         self.entries = entries
+        self.provider = provider
         self.fresh = fresh
         self._vars_by_ns: Optional[Dict[str, Dict[str, List[str]]]] = None
 
@@ -120,7 +125,7 @@ class SourceContext:
     def vars_by_ns(self) -> Dict[str, Dict[str, List[str]]]:
         if self._vars_by_ns is None:
             self._vars_by_ns = sync_svc._variables_for_entries(
-                self.row, self.entries, fresh=self.fresh
+                self.row, self.entries, fresh=self.fresh, provider=self.provider
             )
         return self._vars_by_ns
 
@@ -149,7 +154,9 @@ class ResolvedOptions:
 # ---------------------------------------------------------------------------
 
 def _namespaces(ctx: SourceContext, params: Dict[str, Any]) -> ResolvedOptions:
-    values, canon = canonical_values(sync_svc.build_environment_values(ctx.row))
+    values, canon = canonical_values(
+        sync_svc.build_environment_values(ctx.row, ctx.provider)
+    )
     return ResolvedOptions(values, canon)
 
 

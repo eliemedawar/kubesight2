@@ -134,8 +134,9 @@ export function makeTicketingApi(providerKey) {
       request(`${base}/fields/${fieldId}/binding/preview`, { method: "POST", body: payload }),
 
     // --- Dropdown source picker (cluster + namespaces -> live deployments) ---
-    // One shared record across providers: it describes what KubeSight can deploy,
-    // not what the ticketing system looks like.
+    // One record PER PROVIDER: it describes what KubeSight can deploy, and each
+    // ticketing system is allowed to publish a different slice of the estate.
+    // These paths are provider-scoped, so a save here never moves the other's.
     getSource: () => request(`${base}/source`),
 
     updateSource: (payload) => request(`${base}/source`, { method: "PUT", body: payload }),

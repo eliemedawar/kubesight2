@@ -76,9 +76,9 @@ WAITING_STATUS = "waiting"
 OPEN_STATUSES = (WAITING_STATUS,) + ACTIVE_STATUSES
 TERMINAL_STATUSES = ("deployed", "failed", "cancelled")
 
-# Serializes run advancement. The inline advance in start_run (web/webhook
-# thread) and the scheduler tick (its own thread) must never advance the same
-# run concurrently — otherwise both could pass the trigger step and fire the
+# Serializes run advancement. The inline advance in start_run (a manual Run, on
+# the web thread) and the scheduler tick (its own thread) must never advance the
+# same run concurrently — otherwise both could pass the trigger step and fire the
 # Jenkins build twice for one run. Whoever holds the lock advances to completion
 # and commits; the other re-reads the committed status before proceeding.
 _advance_lock = threading.RLock()
@@ -403,6 +403,11 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
 
     A ticket carries exactly ONE change: an image tag (deploy flow) or a
     variable + value (env-var change flow) — the run's ``change_type`` follows.
+
+    ``auto`` marks the webhook path (see :func:`maybe_auto_run`) and makes this
+    return as soon as the run is persisted — every outbound call is left to the
+    scheduler tick, because this one runs inside the ticketing system's HTTP
+    request. A manual Run advances inline so the operator sees movement at once.
     """
     ticket = ZohoInboundTicket.query.get(int(ticket_record_id))
     if ticket is None:
@@ -505,14 +510,25 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
     # stages are seconds); errors are recorded on the run, never raised. Under
     # the advance lock + a refresh so a concurrent scheduler tick can't have
     # already moved this run past the trigger (which would double-fire the build).
-    try:
-        with _advance_lock:
-            db.session.refresh(run)
-            if run.status in ACTIVE_STATUSES:
-                _advance(run, jrow)
-                db.session.commit()
-    except Exception:  # pragma: no cover — advance already isolates per-step errors
-        db.session.rollback()
+    #
+    # NOT on the auto path. That call sits inside the inbound webhook's request,
+    # and the first stages are outbound calls to other systems: a kubectl read
+    # (30s timeout), a registry probe (10s) and a Jenkins trigger (15s), chained
+    # up to _MAX_CHAIN_PER_TICK times. A reverse proxy in front of KubeSight gives
+    # up long before that and answers the ticketing system with its own 504, so
+    # the sender records a failure for work that actually happened — and retries
+    # it. The run is a DB state machine either way: the scheduler picks it up on
+    # the next tick (15s default), which is nothing next to a build, and the run
+    # is already visible as queued the moment this returns.
+    if not auto:
+        try:
+            with _advance_lock:
+                db.session.refresh(run)
+                if run.status in ACTIVE_STATUSES:
+                    _advance(run, jrow)
+                    db.session.commit()
+        except Exception:  # pragma: no cover — advance already isolates per-step errors
+            db.session.rollback()
     return serialize_run(run)
 
 
@@ -1209,6 +1225,22 @@ def _custom_params(
     return {name: _render_param(template, run, payload) for name, template in templates.items()}
 
 
+def _run_provider(run: DeployAutomationRun) -> Optional[str]:
+    """Which ticketing provider raised this run, or None if that is unknowable.
+
+    The deploy source (custom environments, Jenkins job overrides) is per
+    provider, so routing a run means reading the row belonging to the system that
+    asked for it. The originating ticket carries that; the FK is ``ON DELETE SET
+    NULL`` and the intake table is pruned, so an old run can outlive it — None
+    then tells :mod:`ticketing_targets` to search every provider rather than
+    guessing one.
+    """
+    if not run.ticket_record_id:
+        return None
+    record = ZohoInboundTicket.query.get(run.ticket_record_id)
+    return (record.provider or None) if record is not None else None
+
+
 def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     """queued → building for a custom (non-cluster) environment run.
 
@@ -1222,7 +1254,7 @@ def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> Non
 
     _set_step(run, "image_check", "skip", "custom environment — no live cluster image to gate on")
 
-    env_cfg = custom_environment_by_name(run.namespace) or {}
+    env_cfg = custom_environment_by_name(run.namespace, _run_provider(run)) or {}
     job_path = str(env_cfg.get("jenkinsJobPath") or "").strip()
     path = job_path or (jrow.router_job_path or "")
     if not (jrow.enabled and jrow.base_url and path and jrow.api_token_encrypted):
@@ -1308,9 +1340,10 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     # router call: its own job path (blank = the router job) and parameter map
     # (empty = the standard contract). Only the BUILD trigger changes — the
     # registry gate above and the deploy/rollout stages after stay the same.
+    # Rules belong to the provider that raised the ticket.
     from .ticketing_targets import job_override_for
 
-    override = job_override_for(run.namespace, run.deployment_name) or {}
+    override = job_override_for(run.namespace, run.deployment_name, _run_provider(run)) or {}
     override_path = str(override.get("jenkinsJobPath") or "").strip()
     path = override_path or (jrow.router_job_path or "")
     if not (jrow.enabled and jrow.base_url and path and jrow.api_token_encrypted):
