@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-fixture
+spec:
+  template:
+    spec:
+      containers:
+        - name: application
+          image: payment-fixture:test
+          ports:
+            - containerPort: 8080

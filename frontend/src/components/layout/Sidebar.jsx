@@ -97,6 +97,13 @@ const NAV_ICONS = {
       <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm3.293 1.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L7.586 10 5.293 7.707a1 1 0 010-1.414zM11 12a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
     </svg>
   ),
+  applicationIntelligence: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 2v2M4.3 4.3l1.4 1.4M2 10h2m.3 5.7 1.4-1.4M10 16v2m5.7-2.3-1.4-1.4M16 10h2m-2.3-5.7-1.4 1.4" />
+      <circle cx="10" cy="10" r="4" />
+      <path d="M8.4 10.2l1.1 1.1 2.3-2.6" />
+    </svg>
+  ),
   clients: (
     <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-6-3a2 2 0 11-4 0 2 2 0 014 0zm-2 4a5 5 0 00-4.546 2.916A5.986 5.986 0 0010 16a5.986 5.986 0 004.546-2.084A5 5 0 0010 11z" clipRule="evenodd" />

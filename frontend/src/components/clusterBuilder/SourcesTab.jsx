@@ -398,7 +398,15 @@ function SourceProfileForm({ onSave, onClose, busy }) {
   );
 }
 
-export default function SourcesTab({ infra, reloadInfra, notify, addonCatalog = [] }) {
+export default function SourcesTab({
+  infra,
+  reloadInfra,
+  notify,
+  addonCatalog = [],
+  canManageVSphere = false,
+  canManageSSH = false,
+  canManageBuildProfiles = false,
+}) {
   const { vsphere, credentials, profiles, buildProfiles } = infra;
   const [open, setOpen] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -424,6 +432,7 @@ export default function SourcesTab({ infra, reloadInfra, notify, addonCatalog = 
 
   return (
     <div className="sg-cb-sources">
+      {canManageVSphere ? (
       <Group
         title="vCenter"
         description="A read-only link that powers the machine picker and the placement checks. The account needs nothing beyond the Read-Only role."
@@ -503,7 +512,9 @@ export default function SourcesTab({ infra, reloadInfra, notify, addonCatalog = 
           />
         )) : <p className="muted">Nothing configured yet — machines can still be entered by hand.</p>}
       </Group>
+      ) : null}
 
+      {canManageSSH ? (
       <Group
         title="SSH reach"
         description="Who KubeSight logs in as, and the route it takes. Secrets are encrypted at rest and never shown again. A route that has never been proved is the usual cause of a build dying in node preparation."
@@ -720,7 +731,9 @@ export default function SourcesTab({ infra, reloadInfra, notify, addonCatalog = 
           </details>
         ) : null}
       </Group>
+      ) : null}
 
+      {canManageBuildProfiles ? (
       <Group
         title="Packages & images"
         description="Three questions decide a source profile: where packages come from, where images come from, and what stands in the way."
@@ -802,6 +815,7 @@ export default function SourcesTab({ infra, reloadInfra, notify, addonCatalog = 
           </p>
         ) : null}
       </Group>
+      ) : null}
     </div>
   );
 }

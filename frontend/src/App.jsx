@@ -89,6 +89,7 @@ const TicketingPage = lazy(() => import("./pages/TicketingPage.jsx"));
 const MobileAppsPage = lazy(() => import("./pages/MobileAppsPage.jsx"));
 const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
+const ApplicationIntelligencePage = lazy(() => import("./pages/ApplicationIntelligencePage.jsx"));
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
 const ServiceCatalogPage = lazy(() => import("./pages/ServiceCatalogPage.jsx"));
 const ComponentsPage = lazy(() => import("./pages/ComponentsPage.jsx"));
@@ -1642,9 +1643,9 @@ export default function App() {
             canCreate={hasPermission("cluster_builds:create")}
             canExecute={hasPermission("cluster_builds:execute")}
             canDownloadKubeconfig={hasPermission("cluster_builds:kubeconfig")}
-            canManageInfra={
-              hasPermission("ssh_credentials:manage") || hasPermission("vsphere:manage")
-            }
+            canManageVSphere={hasPermission("vsphere:manage")}
+            canManageSSH={hasPermission("ssh_credentials:manage")}
+            canManageBuildProfiles={hasPermission("cluster_builds:create")}
             // A finished build can hand off to the cluster it produced: select
             // it so the Clusters page opens already scoped to it.
             onOpenCluster={
@@ -1680,6 +1681,14 @@ export default function App() {
         return <ServiceCatalogPage clusters={allowedClusters} />;
       case "applicationServices":
         return <ApplicationServicesPage clusters={allowedClusters} />;
+      case "applicationIntelligence":
+        return (
+          <ApplicationIntelligencePage
+            clusters={allowedClusters}
+            canManage={hasPermission("applications:manage")}
+            canAnalyze={hasPermission("applications:analyze")}
+          />
+        );
       case "components":
         return <ComponentsPage />;
       case "clients":

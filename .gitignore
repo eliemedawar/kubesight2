@@ -1,0 +1,4 @@
+# Local Hermes installation/runtime snapshot. It contains credentials, auth
+# state, histories, sessions, databases, caches, and generated dependencies.
+hermes/
+hermes-local.runtime.env

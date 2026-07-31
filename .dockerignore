@@ -1,0 +1,4 @@
+# Never send a local Hermes home/install snapshot to a Docker build context.
+# It may contain credentials, auth state, SSH material, histories, and databases.
+hermes/
+hermes-local.runtime.env

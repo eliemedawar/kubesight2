@@ -182,6 +182,10 @@ class ClusterBuild(db.Model):
     status = db.Column(db.String(24), nullable=False, default="draft", index=True)
     k8s_version = db.Column(db.String(32), nullable=False, default="")
     cri = db.Column(db.String(24), nullable=False, default="containerd")
+    # Filesystem path preflight measures free space on. Null means /var, where
+    # kubeadm, containerd and pulled images land by default; a node that backs
+    # those directories with another mount must be measured there instead.
+    disk_check_path = db.Column(db.String(255), nullable=True)
 
     # single_cp | stacked_ha
     topology_type = db.Column(db.String(16), nullable=False, default="single_cp")
@@ -237,6 +241,12 @@ class ClusterBuild(db.Model):
     error = db.Column(db.Text, nullable=True)
     # Recorded acknowledgement when a user overrides preflight warnings.
     warnings_ack_json = db.Column(db.JSON, nullable=True)
+    # The user whose current cluster/namespace access authorizes background
+    # workload reads. Persisted because the phase may run after a process
+    # restart, when the original HTTP request context no longer exists.
+    execution_user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id"), nullable=True
+    )
     created_by = db.Column(db.String(120), nullable=True)
     created_at = db.Column(
         db.DateTime(timezone=True), nullable=False, default=_utcnow, index=True

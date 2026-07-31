@@ -147,9 +147,11 @@ def _load_user_from_api_token(raw_token: str) -> Optional[User]:
 def get_current_user() -> Optional[User]:
     token = get_bearer_token()
     if not token:
-        if hasattr(g, "current_user"):
-            return g.current_user
+        # Never reuse a user cached by an earlier request. This matters when an
+        # outer application context spans requests (tests, CLI orchestration)
+        # and is safer than assuming Flask's ``g`` always has request lifetime.
         g.current_user = None
+        g.auth_token = None
         return None
 
     cached_token = getattr(g, "auth_token", None)

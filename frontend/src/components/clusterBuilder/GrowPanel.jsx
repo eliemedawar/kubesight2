@@ -158,7 +158,7 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
                     () => { setPreflight(null); setAcked(false); onChanged(); }
                   )}
                 >
-                  Remove
+                  Remove from queue
                 </button>
               </span>
             </div>

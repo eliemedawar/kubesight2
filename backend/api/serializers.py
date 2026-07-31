@@ -65,6 +65,10 @@ def user_to_dict(user: User, include_access: bool = False) -> Dict[str, Any]:
         "role": role_name,
         "roleId": user.role_id,
         "isActive": user.is_active,
+        "isServiceAccount": bool(getattr(user, "is_service_account", False)),
+        "interactiveLoginEnabled": bool(
+            getattr(user, "interactive_login_enabled", True)
+        ),
         "isAdmin": is_admin(user),
         "hasFullAccess": is_admin(user),
         "permissions": permissions,

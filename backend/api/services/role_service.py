@@ -190,6 +190,15 @@ def update_role(
         if perm_error:
             return None, perm_error, 400
         new_keys = {perm.key for perm in permissions}
+        if role.name == "hermes-agent":
+            from ..rbac_data import HERMES_AGENT_PERMISSIONS
+
+            if new_keys != set(HERMES_AGENT_PERMISSIONS):
+                return (
+                    None,
+                    "The hermes-agent role is fixed to its source-analysis execution permission.",
+                    400,
+                )
         lockout_error = _actor_retains_management(actor, role, new_keys)
         if lockout_error:
             return None, lockout_error, 400

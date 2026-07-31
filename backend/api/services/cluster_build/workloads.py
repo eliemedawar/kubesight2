@@ -346,6 +346,27 @@ def normalize_selection(payload: Any) -> Optional[Dict[str, Any]]:
     return selection
 
 
+def authorize_selection(selection: Any, user) -> None:
+    """Require the caller to retain access to every selected source namespace.
+
+    The picker endpoints already filter their responses, but API payloads are
+    untrusted and can name a cluster or namespace the picker never returned.
+    This small, read-free gate is therefore repeated when saving, preflighting,
+    launching, and finally exporting a selection.
+    """
+    normalized = normalize_selection(selection)
+    if normalized is None:
+        return
+    if user is None:
+        raise PermissionError(
+            "A signed-in user is required to authorize workload copying."
+        )
+    source = normalized["sourceClusterId"]
+    _check_access(user, source)
+    for namespace in sorted({item["namespace"] for item in normalized["items"]}):
+        _check_access(user, source, namespace)
+
+
 def replace_selection(existing: Any, payload: Any) -> Optional[Dict[str, Any]]:
     """A new selection, carrying forward what has already been applied.
 
@@ -1076,7 +1097,9 @@ def resolve_storage(
 # Preflight
 # ---------------------------------------------------------------------------
 
-def preflight_checks(build: ClusterBuild, *, probe=None, probe_targets=None) -> List[Dict[str, Any]]:
+def preflight_checks(
+    build: ClusterBuild, *, user=None, probe=None, probe_targets=None
+) -> List[Dict[str, Any]]:
     """Workload-copy checks, all acknowledgeable.
 
     Nothing here fails a build. Copying workloads is an add-on to building a
@@ -1094,7 +1117,7 @@ def preflight_checks(build: ClusterBuild, *, probe=None, probe_targets=None) -> 
     source = selection.get("sourceClusterName") or selection["sourceClusterId"]
     claim_plans: List[storage.ClaimPlan] = []
     try:
-        result, claim_plans = _plan(selection)
+        result, claim_plans = _plan(selection, user=user)
     except PermissionError as exc:
         return [check(
             "workload_source", "Workload source readable", "warn", str(exc),

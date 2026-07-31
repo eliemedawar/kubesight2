@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .db import db
 from .mock_data import SETTINGS
-from .models import AccessRule, AppSettings, Permission, Role, User, UserClusterAccess, role_permissions as rp_table
+from .models import AccessRule, AppSettings, Permission, Role, User, UserClusterAccess
 from .passwords import hash_password
 from .rbac_data import (
     DEFAULT_USERS,
@@ -53,19 +53,16 @@ def _seed_roles(permissions_by_key: dict) -> dict:
             db.session.add(role)
             role.permissions = default_permissions
         elif definition.get("is_system_role", False):
-            # For system roles, add any missing permissions directly via the table
-            rows = db.session.execute(
-                db.text("SELECT permission_id FROM role_permissions WHERE role_id = :rid"),
-                {"rid": role.id},
-            ).fetchall()
-            existing_perm_ids = {r[0] for r in rows}
-            for key in definition["permissions"]:
-                perm = permissions_by_key.get(key)
-                if perm and perm.id not in existing_perm_ids:
-                    db.session.execute(
-                        rp_table.insert().values(role_id=role.id, permission_id=perm.id)
-                    )
-                    existing_perm_ids.add(perm.id)
+            # Keep the ORM relationship and the join table in one source of
+            # truth. A direct join-table insert leaves an already-loaded
+            # collection stale; the later exact Hermes-role reconciliation can
+            # then enqueue the same pair again and violate the composite unique
+            # constraint on an existing installation.
+            existing_perm_ids = {permission.id for permission in role.permissions}
+            for permission in default_permissions:
+                if permission.id not in existing_perm_ids:
+                    role.permissions.append(permission)
+                    existing_perm_ids.add(permission.id)
         elif not role.permissions:
             role.permissions = default_permissions
         roles_by_name[name] = role
@@ -85,6 +82,8 @@ def _seed_users(roles_by_name: dict) -> None:
                 full_name=spec["full_name"],
                 role=role,
                 is_active=True,
+                is_service_account=spec["username"] == "hermes-agent",
+                interactive_login_enabled=spec["username"] != "hermes-agent",
             )
             db.session.add(user)
             continue
@@ -93,6 +92,10 @@ def _seed_users(roles_by_name: dict) -> None:
             user.role = role
         if not user.password_hash:
             user.password_hash = hash_password(spec["password"])
+        if spec["username"] == "hermes-agent":
+            user.role = role
+            user.is_service_account = True
+            user.interactive_login_enabled = False
 
 
 def _seed_role_cluster_access(username: str, cluster_ids: tuple[str, ...]) -> None:
@@ -431,7 +434,16 @@ def seed_defaults() -> None:
     cluster_ids = ("prod-us-east", "staging-eu-west")
     _seed_role_cluster_access("viewer", cluster_ids)
     _seed_role_cluster_access("operator", cluster_ids)
-    _seed_role_cluster_access("hermes-agent", cluster_ids)
+    # Hermes is source-analysis-only. It deliberately receives neither runtime
+    # cluster grants nor any interactive session capability.
+    hermes = User.query.filter_by(username="hermes-agent").first()
+    if hermes and hermes.role:
+        allowed = set(HERMES_AGENT_PERMISSIONS)
+        hermes.role.permissions = [
+            permission for permission in permissions_by_key.values() if permission.key in allowed
+        ]
+        AccessRule.query.filter_by(user_id=hermes.id).delete()
+        UserClusterAccess.query.filter_by(user_id=hermes.id).delete()
 
     import threading
     from flask import current_app as _cur_app

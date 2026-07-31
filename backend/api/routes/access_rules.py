@@ -12,6 +12,14 @@ from ..response import error_response, success_response
 access_rules_bp = Blueprint("access_rules", __name__, url_prefix="/api/users")
 
 
+def _protected_service_account(user: User | None) -> bool:
+    return bool(
+        user
+        and getattr(user, "is_service_account", False)
+        and user.username == "hermes-agent"
+    )
+
+
 @access_rules_bp.route("/<int:user_id>/access-rules", methods=["GET"])
 @require_permission("users:view")
 def list_user_access_rules(user_id: int):
@@ -28,6 +36,8 @@ def replace_user_access_rules(user_id: int):
     user = User.query.get(user_id)
     if not user:
         return error_response("User not found", 404)
+    if _protected_service_account(user):
+        return error_response("hermes-agent cannot receive cluster access rules.", 400)
 
     payload = request.get_json(silent=True) or {}
     rules = payload.get("accessRules") or payload.get("rules") or []
@@ -58,6 +68,8 @@ def create_user_access_rule(user_id: int):
     user = User.query.get(user_id)
     if not user:
         return error_response("User not found", 404)
+    if _protected_service_account(user):
+        return error_response("hermes-agent cannot receive cluster access rules.", 400)
     payload = request.get_json(silent=True) or {}
     try:
         data = parse_access_rule_payload(payload)
@@ -80,6 +92,9 @@ def create_user_access_rule(user_id: int):
 @access_rules_bp.route("/<int:user_id>/access-rules/<int:rule_id>", methods=["PUT"])
 @require_permission("users:update")
 def update_user_access_rule(user_id: int, rule_id: int):
+    user = User.query.get(user_id)
+    if _protected_service_account(user):
+        return error_response("hermes-agent cannot receive cluster access rules.", 400)
     rule = AccessRule.query.filter_by(user_id=user_id, id=rule_id).first()
     if not rule:
         return error_response("Access rule not found", 404)

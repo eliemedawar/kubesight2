@@ -83,6 +83,10 @@ class User(db.Model):
     lock_count_24h = db.Column(db.Integer, nullable=False, default=0)
     requires_admin_unlock = db.Column(db.Boolean, nullable=False, default=False)
     created_by_admin_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    # Service identities exist for audit attribution and machine-to-machine
+    # authorization only. They are categorically excluded from interactive login.
+    is_service_account = db.Column(db.Boolean, nullable=False, default=False)
+    interactive_login_enabled = db.Column(db.Boolean, nullable=False, default=True)
 
     role = db.relationship("Role", back_populates="users")
     cluster_access_entries = db.relationship(
@@ -2811,4 +2815,19 @@ from .models_cluster_build import (  # noqa: E402,F401
     SshCredential,
     SshHostKey,
     VSphereConnection,
+)
+
+# Application Intelligence has its own bounded domain model but remains part of
+# the canonical ORM import surface used by migrations and services.
+from .models_application_intelligence import (  # noqa: E402,F401
+    ApplicationAnalysis,
+    ApplicationArtifact,
+    ApplicationCommunication,
+    ApplicationDependency,
+    ApplicationFinding,
+    ApplicationFindingStatusEvent,
+    ApplicationPullRequest,
+    ApplicationRuntimeSnapshot,
+    BitbucketCredentialProfile,
+    IntelligenceApplication,
 )

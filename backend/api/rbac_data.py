@@ -89,6 +89,13 @@ PERMISSIONS = [
     ),
     ("ssh_credentials:manage", "Manage SSH credentials and connection profiles"),
     ("vsphere:manage", "Manage vSphere connections and browse VM inventory"),
+    ("applications:view", "View Application Intelligence applications and analyses"),
+    ("applications:manage", "Create and update Application Intelligence applications"),
+    ("applications:analyze", "Request source-code analysis through Hermes"),
+    (
+        "applications:execute",
+        "Execute the bounded Application Intelligence analysis pipeline as a service account",
+    ),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -155,6 +162,16 @@ PERMISSION_GROUPS = [
         "keys": ["app_services:view", "app_services:create", "app_services:update", "app_services:delete"],
     },
     {
+        "id": "applicationIntelligence",
+        "label": "Application Intelligence",
+        "keys": [
+            "applications:view",
+            "applications:manage",
+            "applications:analyze",
+            "applications:execute",
+        ],
+    },
+    {
         "id": "clients",
         "label": "Clients",
         "keys": ["clients:view", "clients:create", "clients:update", "clients:delete"],
@@ -205,6 +222,7 @@ DANGEROUS_PERMISSION_KEYS = {
     "service_blueprints:delete", "service_blueprints:deploy",
     "components:delete", "registries:manage", "mobile_apps:manage",
     "cluster_builds:create", "cluster_builds:execute",
+    "applications:manage", "applications:analyze", "applications:execute",
     # Handing out a cluster-admin kubeconfig is the most privileged thing this
     # feature can do — it is full control of the cluster, outside KubeSight's
     # own RBAC, for as long as the certificate lives.
@@ -268,6 +286,7 @@ VIEWER_PERMISSIONS = [
     "change_bundles:create",
     "change_bundles:view",
     "components:view",
+    "applications:view",
 ]
 
 OPERATOR_PERMISSIONS = [
@@ -308,6 +327,9 @@ OPERATOR_PERMISSIONS = [
     "components:update",
     "components:check",
     "mobile_apps:view",
+    "applications:view",
+    "applications:manage",
+    "applications:analyze",
 ]
 
 CLUSTER_ADMIN_PERMISSIONS = [
@@ -360,20 +382,13 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "components:delete",
     "components:check",
     "mobile_apps:view",
+    "applications:view",
+    "applications:manage",
+    "applications:analyze",
 ]
 
 HERMES_AGENT_PERMISSIONS = [
-    "clusters:view",
-    "overview:view",
-    "namespaces:view",
-    "pods:view",
-    "deployments:view",
-    "services:view",
-    "alerts:view",
-    "app_services:view",
-    "clients:view",
-    "service_blueprints:view",
-    "components:view",
+    "applications:execute",
 ]
 
 ROLE_DEFINITIONS = {
@@ -398,7 +413,7 @@ ROLE_DEFINITIONS = {
         "permissions": VIEWER_PERMISSIONS,
     },
     "hermes-agent": {
-        "description": "Read-only service account for the Hermes AI Operations Agent",
+        "description": "Non-interactive, source-analysis-only Hermes service account",
         "is_system_role": True,
         "permissions": HERMES_AGENT_PERMISSIONS,
     },

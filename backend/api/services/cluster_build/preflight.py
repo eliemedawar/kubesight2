@@ -29,13 +29,17 @@ from .profiles import ResolvedProfile, registry_authority
 from .scrub import scrub
 
 _ROLE_MINIMUMS = {
-    # role: (cpus, memory MiB, disk GiB on /var)
+    # role: (cpus, memory MiB, disk GiB on the checked path)
     "control_plane": (2, 2048, 20),
     "worker": (2, 2048, 20),
     "loadbalancer": (1, 512, 5),
 }
 
-# Free /var disk, tiered: below fail_floor => fail; below pass_floor => warn
+# Where the free-space check looks unless the build names another path. It is
+# /var because kubeadm, containerd and every pulled image land under /var/lib.
+DEFAULT_DISK_PATH = "/var"
+
+# Free disk, tiered: below fail_floor => fail; below pass_floor => warn
 # (enough to build, tight for image churn over time); at/above => pass. A
 # control plane/worker wants 20 GiB long-term but can smoke-test on 8.
 _DISK_THRESHOLDS = {
@@ -74,6 +78,16 @@ def _required_ports(
     if metal_lb_selected and node.role in ("control_plane", "worker"):
         ports.append(7946)
     return tuple(ports)
+
+
+def disk_path_of(build: ClusterBuild) -> str:
+    """The filesystem path this build measures free space on.
+
+    A build that never set one is measured on /var. Stored per build rather
+    than per node: a cluster whose machines disagree about where container
+    data lives is a cluster nobody can reason about.
+    """
+    return str(getattr(build, "disk_check_path", "") or "").strip() or DEFAULT_DISK_PATH
 
 
 def _check(check_id: str, label: str, status: str, detail: str = "", hint: str = "") -> Dict[str, Any]:
@@ -481,7 +495,10 @@ def _probe_script(build: ClusterBuild, node: ClusterBuildNode, profile: Resolved
         profile.extra_ca_certs_pem.encode("ascii")
     ).decode("ascii")
     fsync_test = "1" if node.role == "control_plane" else "0"
+    disk_path_arg = shlex.quote(disk_path_of(build))
     vip = build.vip_address or ""
+    vip_arg = shlex.quote(vip)
+    vip_interface_arg = shlex.quote(build.vip_interface or "")
     vip_test = "1" if (node.role == "loadbalancer" and vip) else "0"
     return f"""#!/bin/sh
 {proxy_env}
@@ -506,7 +523,12 @@ echo "KS_HOSTNAME=$(hostname)"
 echo "KS_CPUS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)"
 echo "KS_MEM_MIB=$(( $(grep MemTotal /proc/meminfo | tr -s ' ' | cut -d' ' -f2) / 1024 ))"
 echo "KS_SWAP_KB=$(grep SwapTotal /proc/meminfo | tr -s ' ' | cut -d' ' -f2)"
-echo "KS_DISK_VAR_GB=$(df -P /var 2>/dev/null | tail -1 | tr -s ' ' | cut -d' ' -f4 | awk '{{print int($1/1048576)}}')"
+KS_DISK_PATH={disk_path_arg}
+if [ -d "$KS_DISK_PATH" ]; then
+  echo "KS_DISK_FREE_GB=$(df -P "$KS_DISK_PATH" 2>/dev/null | tail -1 | tr -s ' ' | cut -d' ' -f4 | awk '{{print int($1/1048576)}}')"
+else
+  echo "KS_DISK_PATH_MISSING=1"
+fi
 echo "KS_EPOCH=$(date +%s)"
 for mod in overlay br_netfilter; do
   if modprobe -n $mod >/dev/null 2>&1 || grep -q "^$mod" /proc/modules; then
@@ -594,7 +616,22 @@ if [ "{fsync_test}" = "1" ] && command -v dd >/dev/null 2>&1; then
   fi
 fi
 if [ "{vip_test}" = "1" ]; then
-  if ping -c 1 -W 1 {vip} >/dev/null 2>&1; then echo "KS_VIP_STATE=in_use"; else echo "KS_VIP_STATE=free"; fi
+  KS_VIP={vip_arg}
+  KS_VIP_IF={vip_interface_arg}
+  if [ -z "$KS_VIP_IF" ] && command -v ip >/dev/null 2>&1; then
+    KS_VIP_IF=$(ip route get "$KS_VIP" 2>/dev/null | awk '{{for (i=1;i<=NF;i++) if ($i=="dev") {{print $(i+1); exit}}}}')
+  fi
+  if command -v arping >/dev/null 2>&1 && [ -n "$KS_VIP_IF" ]; then
+    if arping -D -c 2 -w 3 -I "$KS_VIP_IF" "$KS_VIP" >/dev/null 2>&1; then
+      echo "KS_VIP_STATE=free"
+    else
+      echo "KS_VIP_STATE=in_use"
+    fi
+  elif ping -c 1 -W 1 "$KS_VIP" >/dev/null 2>&1; then
+    echo "KS_VIP_STATE=in_use"
+  else
+    echo "KS_VIP_STATE=free"
+  fi
 fi
 if sudo -n true 2>/dev/null || [ "$(id -u)" = "0" ]; then echo "KS_ESCALATION=ok"; fi
 exit 0
@@ -693,24 +730,41 @@ def _node_checks(
         "memory", "Memory", "pass" if mem >= mem_req * 0.95 else "fail",
         f"{mem} MiB (minimum {mem_req} MiB for {node.role}).",
     ))
-    try:
-        disk = int(facts.get("KS_DISK_VAR_GB", 0))
-    except (TypeError, ValueError):
-        disk = 0
+    disk_path = disk_path_of(build)
     disk_fail_floor, disk_pass_floor = _DISK_THRESHOLDS.get(node.role, (8, 20))
-    if disk < disk_fail_floor:
-        disk_status = "fail"
-    elif disk < disk_pass_floor:
-        disk_status = "warn"
+    if facts.get("KS_DISK_PATH_MISSING") == "1":
+        # An unmeasurable path is reported as itself rather than as 0 GiB free:
+        # "the directory is not there" and "the disk is full" want different fixes.
+        checks.append(_check(
+            "disk", f"Free disk on {disk_path}", "fail",
+            f"{disk_path} does not exist on this node.",
+            "Create the directory on every machine, or point the build's disk "
+            "check path at one that exists.",
+        ))
     else:
-        disk_status = "pass"
-    checks.append(_check(
-        "disk", "Free disk on /var", disk_status,
-        f"{disk} GiB free on /var "
-        f"(need ≥ {disk_fail_floor} GiB; ≥ {disk_pass_floor} GiB recommended).",
-        "Free space or grow the disk — kubeadm, containerd, and pulled images "
-        f"land on /var." if disk_status != "pass" else "",
-    ))
+        try:
+            disk = int(facts.get("KS_DISK_FREE_GB", 0))
+        except (TypeError, ValueError):
+            disk = 0
+        if disk < disk_fail_floor:
+            disk_status = "fail"
+        elif disk < disk_pass_floor:
+            disk_status = "warn"
+        else:
+            disk_status = "pass"
+        if disk_status == "pass":
+            hint = ""
+        elif disk_path == DEFAULT_DISK_PATH:
+            hint = ("Free space or grow the disk — kubeadm, containerd, and "
+                    "pulled images land on /var.")
+        else:
+            hint = f"Free space or grow the filesystem backing {disk_path}."
+        checks.append(_check(
+            "disk", f"Free disk on {disk_path}", disk_status,
+            f"{disk} GiB free on {disk_path} "
+            f"(need ≥ {disk_fail_floor} GiB; ≥ {disk_pass_floor} GiB recommended).",
+            hint,
+        ))
 
     try:
         swap_kb = int(facts.get("KS_SWAP_KB", 0))

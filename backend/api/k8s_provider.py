@@ -1163,6 +1163,42 @@ def _get_namespace_items(access: ClusterAccess, resource_kind: str, namespace: s
         return []
 
 
+def read_namespaced_resource_json(
+    access: ClusterAccess,
+    resource_kind: str,
+    namespace: str,
+    resource_name: str,
+) -> Dict[str, Any]:
+    """Read one Kubernetes resource without exposing connection material.
+
+    Callers must perform KubeSight user authorization before invoking this
+    transport helper. kubectl receives the resolved server credential only in
+    its isolated subprocess; the returned object contains Kubernetes data only.
+    """
+    output = _run_for_access(
+        access,
+        ["get", resource_kind, resource_name, "-n", namespace, "-o", "json"],
+    )
+    value = json.loads(output)
+    if not isinstance(value, dict):
+        raise K8sCommandError("Kubernetes returned an invalid resource document.")
+    return value
+
+
+def list_namespaced_resources_json(
+    access: ClusterAccess,
+    resource_kind: str,
+    namespace: str,
+) -> List[Dict[str, Any]]:
+    """List raw resource documents for a permission-checked namespace."""
+    output = _run_for_access(
+        access, ["get", resource_kind, "-n", namespace, "-o", "json"]
+    )
+    value = json.loads(output)
+    items = value.get("items", []) if isinstance(value, dict) else []
+    return [item for item in items if isinstance(item, dict)]
+
+
 def _workload_container_image(spec: Dict[str, Any]) -> str:
     containers = (spec.get("template") or {}).get("spec", {}).get("containers") or []
     if not containers:
@@ -2392,4 +2428,3 @@ def list_alerts_from_k8s(cluster_id: Optional[str] = None) -> Dict[str, Any]:
         metadata["detail"] = "Install metrics-server or ensure kubectl top pods works."
 
     return {"items": items, "count": len(items), "metadata": metadata}
-

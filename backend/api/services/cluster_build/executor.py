@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 from flask import current_app
 
 from ...db import db
-from ...models import BuildProfile, ClusterBuild, ClusterBuildNode, ClusterBuildStep
+from ...models import BuildProfile, ClusterBuild, ClusterBuildNode, ClusterBuildStep, User
 from ...secret_encryption import decrypt_secret, encrypt_secret
 from ..ssh import SshCommandError, SshConnectionError, SshTarget, get_transport
 from .. import ssh_profile_service
@@ -1650,11 +1650,16 @@ def _phase_workloads(build: ClusterBuild, primary: ClusterBuildNode) -> None:
     stream = _StreamTail(step.id)
     target = _target_for(build, primary)
     source = selection.get("sourceClusterName") or selection.get("sourceClusterId")
+    execution_user = (
+        db.session.get(User, build.execution_user_id)
+        if build.execution_user_id else None
+    )
 
     try:
         stream.header(f"Reading {len(selection['items'])} selection(s) from {source}")
         try:
-            export = workload_copy.export_selection(selection)
+            workload_copy.authorize_selection(selection, execution_user)
+            export = workload_copy.export_selection(selection, user=execution_user)
         except (workload_copy.WorkloadSourceError, PermissionError) as exc:
             raise _PhaseFailed(
                 f"The source cluster '{source}' could not be read: {exc}"

@@ -28,6 +28,7 @@ from . import addons as addon_registry
 from . import cni as cni_registry
 from .addons import metallb as metallb_addon
 from . import executor, k8s_versions, os_adapters, preflight
+from . import profiles as build_profile_service
 from . import storage as storage_copy
 from . import workloads as workload_copy
 from .profiles import resolve as resolve_profile
@@ -46,6 +47,7 @@ SUPPORTED_K8S_VERSIONS = k8s_versions.STATIC_FALLBACK_VERSIONS
 _ENDPOINT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.\-]*(:\d{1,5})?$")
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _IFNAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
+_DISK_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{0,254}$")
 
 
 def _iso(dt) -> Optional[str]:
@@ -129,6 +131,9 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
         "endpointMode": build.endpoint_mode,
         "vipAddress": build.vip_address,
         "vipInterface": build.vip_interface,
+        # Always the effective path, so the wizard shows what preflight will
+        # actually measure rather than an empty box meaning "/var".
+        "diskCheckPath": preflight.disk_path_of(build),
         "cniPlugin": build.cni_plugin,
         "cniVersion": build.cni_version,
         "podCidr": build.pod_cidr,
@@ -225,9 +230,11 @@ def _ssh_probe(target, script: str) -> str:
 def _validate_cidr(value: str, field: str) -> str:
     value = str(value or "").strip()
     try:
-        ipaddress.ip_network(value)
+        network = ipaddress.ip_network(value)
     except ValueError as exc:
         raise ValueError(f"{field} must be a valid CIDR (e.g. 10.244.0.0/16).") from exc
+    if network.version != 4:
+        raise ValueError(f"{field} currently requires an IPv4 CIDR.")
     return value
 
 
@@ -268,6 +275,25 @@ def _validate_interface(value: str) -> str:
     return value
 
 
+def _validate_disk_check_path(value: str) -> str:
+    """An absolute POSIX directory the preflight probe can measure.
+
+    The path is interpolated into the (shell-quoted) probe script, so the
+    charset is deliberately narrow: anything a df target legitimately needs
+    and nothing that could be read as shell.
+    """
+    value = str(value or "").strip().rstrip("/") or "/"
+    if not _DISK_PATH_RE.fullmatch(value):
+        raise ValueError(
+            "diskCheckPath must be an absolute POSIX path (for example "
+            "'/var' or '/data/containerd') using only letters, digits, "
+            "'_', '.', '-' and '/' — maximum 255 characters."
+        )
+    if any(part == ".." for part in value.split("/")):
+        raise ValueError("diskCheckPath must not contain '..' segments.")
+    return value
+
+
 def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List[str]:
     """Returns warnings; raises on hard violations."""
     warnings: List[str] = []
@@ -277,9 +303,28 @@ def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List
 
     if build.vip_interface:
         _validate_interface(build.vip_interface)
+    pod_network = ipaddress.ip_network(build.pod_cidr)
+    service_network = ipaddress.ip_network(build.service_cidr)
+    if pod_network.overlaps(service_network):
+        raise ValueError("podCidr and serviceCidr must not overlap.")
     effective_node_names = []
+    node_ips = []
     for node in nodes:
         address = _validate_node_address(str(node.get("address") or ""))
+        try:
+            node_ip = ipaddress.ip_address(address)
+        except ValueError:
+            node_ip = None
+        if node_ip is not None:
+            node_ips.append(node_ip)
+            for network, field in (
+                (pod_network, "podCidr"),
+                (service_network, "serviceCidr"),
+            ):
+                if node_ip.version == network.version and node_ip in network:
+                    raise ValueError(
+                        f"Node address {node_ip} overlaps {field} ({network})."
+                    )
         hostname = str(node.get("hostname") or "").strip()
         if hostname:
             _validate_dns_subdomain(hostname, "node hostname")
@@ -327,6 +372,15 @@ def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List
             )
         if not build.vip_address:
             raise ValueError("managed_haproxy endpoint mode requires vipAddress.")
+        vip = ipaddress.ip_address(build.vip_address)
+        if vip in node_ips:
+            raise ValueError("The API VIP must not match a node address.")
+        for network, field in (
+            (pod_network, "podCidr"),
+            (service_network, "serviceCidr"),
+        ):
+            if vip.version == network.version and vip in network:
+                raise ValueError(f"The API VIP overlaps {field} ({network}).")
     elif lb_count:
         raise ValueError(
             f"{build.endpoint_mode} endpoint mode does not use load-balancer nodes."
@@ -422,6 +476,8 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
     name = str(payload.get("name", build.name or "")).strip()
     if not name:
         raise ValueError("name is required.")
+    if len(name) > 120 or any(ord(char) < 32 for char in name):
+        raise ValueError("name must be at most 120 printable characters.")
     build.name = name
 
     # Same policy the options endpoint publishes, so every version the wizard
@@ -449,12 +505,23 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         if not vip:
             raise ValueError("vipAddress is required for managed_haproxy.")
         try:
-            ipaddress.ip_address(vip)
+            vip_ip = ipaddress.ip_address(vip)
         except ValueError as exc:
             raise ValueError("vipAddress must be a valid IP address.") from exc
+        if vip_ip.version != 4:
+            raise ValueError(
+                "managed_haproxy currently requires an IPv4 VIP."
+            )
         build.vip_address = vip
         build.control_plane_endpoint = f"{vip}:6443"
     else:
+        if vip:
+            try:
+                vip_ip = ipaddress.ip_address(vip)
+            except ValueError as exc:
+                raise ValueError("vipAddress must be a valid IP address.") from exc
+            if vip_ip.version != 4:
+                raise ValueError("vipAddress currently requires IPv4.")
         build.vip_address = vip or None
         endpoint = str(
             payload.get("controlPlaneEndpoint", build.control_plane_endpoint or "")
@@ -468,11 +535,25 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
             raise ValueError("controlPlaneEndpoint must be host[:port].")
         if ":" not in endpoint:
             endpoint = f"{endpoint}:6443"
+        else:
+            port = int(endpoint.rsplit(":", 1)[1])
+            if port < 1 or port > 65535:
+                raise ValueError(
+                    "controlPlaneEndpoint port must be between 1 and 65535."
+                )
         build.control_plane_endpoint = endpoint
 
     if "vipInterface" in payload:
         value = str(payload.get("vipInterface") or "").strip()
         build.vip_interface = _validate_interface(value) if value else None
+    if "diskCheckPath" in payload:
+        value = str(payload.get("diskCheckPath") or "").strip()
+        # Cleared or left at the default: stored as null so the build follows
+        # DEFAULT_DISK_PATH rather than pinning a copy of today's default.
+        path = _validate_disk_check_path(value) if value else ""
+        build.disk_check_path = (
+            path if path and path != preflight.DEFAULT_DISK_PATH else None
+        )
     if "vrrpRouterId" in payload and payload.get("vrrpRouterId"):
         router_id = int(payload["vrrpRouterId"])
         if router_id < 1 or router_id > 255:
@@ -540,6 +621,10 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
     build.service_cidr = _validate_cidr(
         payload.get("serviceCidr", build.service_cidr or "10.96.0.0/12"), "serviceCidr"
     )
+    pod_network = ipaddress.ip_network(build.pod_cidr)
+    service_network = ipaddress.ip_network(build.service_cidr)
+    if pod_network.overlaps(service_network):
+        raise ValueError("podCidr and serviceCidr must not overlap.")
     if "addons" in payload and "plugins" in payload:
         raise ValueError("Use either addons or plugins, not both.")
     if "addons" in payload:
@@ -689,9 +774,13 @@ def _apply_nodes_payload(build: ClusterBuild, nodes_payload: List[Dict[str, Any]
     build.nodes = new_nodes
 
 
-def create_build(payload: Dict[str, Any], created_by: str = "") -> Dict[str, Any]:
+def create_build(
+    payload: Dict[str, Any], created_by: str = "", user=None
+) -> Dict[str, Any]:
     build = ClusterBuild(created_by=created_by or None)
     _apply_build_payload(build, payload)
+    if workload_copy.selection_of(build):
+        workload_copy.authorize_selection(build.workloads_json, user)
     nodes_payload = payload.get("nodes") or []
     if nodes_payload:
         _apply_nodes_payload(build, nodes_payload)
@@ -707,11 +796,14 @@ def create_build(payload: Dict[str, Any], created_by: str = "") -> Dict[str, Any
     return serialize_build(build, include_detail=True)
 
 
-def update_build(build_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+def update_build(build_id: int, payload: Dict[str, Any], user=None) -> Dict[str, Any]:
     build = get_build(build_id)
     if build.status not in _EDITABLE_STATUSES:
         raise ValueError(f"Build cannot be edited in status '{build.status}'.")
     _apply_build_payload(build, payload)
+    if "workloads" in payload and workload_copy.selection_of(build):
+        workload_copy.authorize_selection(build.workloads_json, user)
+        build.execution_user_id = None
     if "nodes" in payload:
         _apply_nodes_payload(build, payload.get("nodes") or [])
     if build.nodes:
@@ -730,8 +822,12 @@ def update_build(build_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def delete_build(build_id: int) -> None:
     build = get_build(build_id)
-    if build.status == "building":
+    if build.status in ("building", "preflighting"):
         raise ValueError("Cancel the build before deleting it.")
+    if build.status == "completed" or build.result_cluster_id:
+        raise ValueError(
+            "Completed build history is retained for audit and cannot be deleted."
+        )
     db.session.delete(build)
     db.session.commit()
 
@@ -740,12 +836,14 @@ def delete_build(build_id: int) -> None:
 # Lifecycle
 # ---------------------------------------------------------------------------
 
-def run_preflight(build_id: int) -> Dict[str, Any]:
+def run_preflight(build_id: int, user=None) -> Dict[str, Any]:
     build = get_build(build_id)
     if build.status in ("building", "preflighting"):
         raise ValueError("Build is already running.")
     if not build.nodes:
         raise ValueError("Add nodes before running preflight.")
+    if workload_copy.selection_of(build):
+        workload_copy.authorize_selection(build.workloads_json, user)
     warnings = _validate_topology(
         build,
         [
@@ -801,6 +899,7 @@ def run_preflight(build_id: int) -> Dict[str, Any]:
         # ``workloads.preflight_checks`` and ``storage``'s module docstring.
         build_checks += workload_copy.preflight_checks(
             build,
+            user=user,
             probe=_ssh_probe,
             probe_targets=_mount_probe_targets(build),
         )
@@ -831,7 +930,7 @@ def run_preflight(build_id: int) -> Dict[str, Any]:
 
 
 def start_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
-                actor: str = "") -> Dict[str, Any]:
+                actor: str = "", user=None) -> Dict[str, Any]:
     build = get_build(build_id)
     if build.status == "building":
         raise ValueError("Build is already running.")
@@ -840,6 +939,9 @@ def start_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
             "Preflight must pass before starting (current status: "
             f"'{build.status}'). Warnings can be acknowledged; failures cannot."
         )
+    if workload_copy.selection_of(build):
+        workload_copy.authorize_selection(build.workloads_json, user)
+        build.execution_user_id = getattr(user, "id", None)
     has_warnings = any(
         (n.preflight_json or {}).get("status") == "warn" for n in build.nodes
     )
@@ -1074,13 +1176,19 @@ def grow_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
 # (unlike growth, which deliberately re-verifies with the new machine in).
 # ---------------------------------------------------------------------------
 
-def set_build_workloads(build_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+def set_build_workloads(
+    build_id: int, payload: Dict[str, Any], user=None
+) -> Dict[str, Any]:
     """Choose what to copy into a cluster this build already produced."""
     build = get_build(build_id)
     _require_growable(build)
-    build.workloads_json = workload_copy.replace_selection(
+    selection = workload_copy.replace_selection(
         build.workloads_json, payload
     )
+    if isinstance(selection, dict) and selection.get("items"):
+        workload_copy.authorize_selection(selection, user)
+    build.workloads_json = selection
+    build.execution_user_id = None
     db.session.commit()
     return serialize_build(build, include_detail=True)
 
@@ -1105,6 +1213,7 @@ def bring_workloads(build_id: int, *, ack_missing_images: bool = False,
     selection = workload_copy.selection_of(build)
     if selection is None:
         raise ValueError("Select at least one namespace or workload to copy.")
+    workload_copy.authorize_selection(selection, user)
     if growth_nodes(build):
         raise ValueError(
             "Machines are queued to join. Finish (or remove) those first — "
@@ -1148,6 +1257,7 @@ def bring_workloads(build_id: int, *, ack_missing_images: bool = False,
         synchronize_session=False,
     )
     build.status = "building"
+    build.execution_user_id = getattr(user, "id", None)
     build.error = None
     build.growth_started_at = datetime.now(timezone.utc)
     build.finished_at = None
@@ -1197,13 +1307,16 @@ def build_kubeconfig(build_id: int) -> Dict[str, Any]:
     }
 
 
-def retry_build(build_id: int) -> Dict[str, Any]:
+def retry_build(build_id: int, user=None) -> Dict[str, Any]:
     build = get_build(build_id)
     # Cancelled is resumable too: cancelling stops the phase machine but leaves
     # completed phases intact, and without this a cancelled build is a dead end
     # that can only be deleted.
     if build.status not in ("failed", "cancelled"):
         raise ValueError("Only failed or cancelled builds can be retried.")
+    if workload_copy.selection_of(build):
+        workload_copy.authorize_selection(build.workloads_json, user)
+        build.execution_user_id = getattr(user, "id", None)
     reset_labels = executor.reset_failed_nodes(build)
     # Reset both failed steps and any left stuck in 'running' (a phase that
     # crashed on an unexpected error, e.g. a mid-command connection drop, never
@@ -1279,4 +1392,29 @@ def wizard_options() -> Dict[str, Any]:
              "shape": "1 control plane · 1 managed LB when selected · N workers"},
         ],
         "defaults": {"podCidr": "10.244.0.0/16", "serviceCidr": "10.96.0.0/12"},
+        # Builders need to select these records but must not need permission to
+        # manage or inspect connection details. Mutation and full records remain
+        # on the dedicated manage endpoints.
+        "sources": {
+            "vsphere": [
+                {
+                    key: row.get(key)
+                    for key in (
+                        "id", "name", "lastConnectionStatus", "lastTestedAt",
+                    )
+                }
+                for row in vsphere_service.list_connections()
+            ],
+            "profiles": [
+                {
+                    key: row.get(key)
+                    for key in (
+                        "id", "name", "hostKeyPolicy", "lastTestStatus",
+                        "lastTestAt",
+                    )
+                }
+                for row in ssh_profile_service.list_profiles()
+            ],
+            "buildProfiles": build_profile_service.list_profiles(),
+        },
     }

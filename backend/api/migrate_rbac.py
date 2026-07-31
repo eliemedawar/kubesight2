@@ -75,6 +75,8 @@ def _migrate_cluster_build_columns() -> None:
     _add_column_if_missing("cluster_builds", "workloads_json", "JSON")
     _add_column_if_missing("cluster_builds", "growth_started_at", "DATETIME")
     _add_column_if_missing("cluster_builds", "build_seconds", "INTEGER")
+    _add_column_if_missing("cluster_builds", "execution_user_id", "INTEGER")
+    _add_column_if_missing("cluster_builds", "disk_check_path", "VARCHAR(255)")
     for col, sql_type in [
         ("last_test_at", "DATETIME"),
         ("last_test_status", "VARCHAR(16)"),
@@ -644,8 +646,36 @@ def _migrate_user_onboarding_columns() -> None:
         ("lock_count_24h", "INTEGER DEFAULT 0"),
         ("requires_admin_unlock", "BOOLEAN DEFAULT false"),
         ("created_by_admin_id", "INTEGER"),
+        ("is_service_account", "BOOLEAN DEFAULT false"),
+        ("interactive_login_enabled", "BOOLEAN DEFAULT true"),
     ]:
         _add_column_if_missing("users", col, sql_type)
+
+
+def _migrate_application_intelligence_columns() -> None:
+    """Forward-compatible Phase 1 Application Intelligence columns.
+
+    New installations receive all tables through ``db.create_all``. These
+    idempotent additions protect deployments that started an earlier build of
+    Phase 1 before progress, worker authentication, or warning fields existed.
+    """
+    if "application_analyses" not in inspect(db.engine).get_table_names():
+        return
+    for col, sql_type in [
+        ("progress_percent", "INTEGER DEFAULT 0"),
+        ("current_stage", "VARCHAR(64)"),
+        ("worker_job_name", "VARCHAR(253)"),
+        ("worker_callback_token_hash", "VARCHAR(64)"),
+        ("scanner_runs", "JSON"),
+        ("warnings", "JSON"),
+    ]:
+        _add_column_if_missing("application_analyses", col, sql_type)
+    # Per-finding source evidence. Earlier builds discarded the observation
+    # Hermes cited, which left findings unverifiable in the UI. Legacy score
+    # columns on application_analyses are intentionally left in place and
+    # unmapped: they held model-invented numbers that are no longer published.
+    if "application_findings" in inspect(db.engine).get_table_names():
+        _add_column_if_missing("application_findings", "evidence", "TEXT")
 
 
 def _migrate_zoho_integration_columns() -> None:
@@ -881,6 +911,7 @@ def run_migrations() -> None:
     _migrate_mobile_app_columns()
     _backfill_build_signature_state()
     _migrate_user_onboarding_columns()
+    _migrate_application_intelligence_columns()
     _migrate_deployment_request_columns()
     _migrate_change_bundle_columns()
     _migrate_alert_routing_user_receivers()

@@ -83,7 +83,7 @@ def probe_output(hostname: str, uuid_suffix: str, role: str = "worker") -> str:
         "KS_CPUS=4",
         "KS_MEM_MIB=8192",
         "KS_SWAP_KB=0",
-        "KS_DISK_VAR_GB=50",
+        "KS_DISK_FREE_GB=50",
         "KS_EPOCH={}".format(__import__("time").time().__int__()),
         "KS_MOD_overlay=ok",
         "KS_MOD_br_netfilter=ok",
@@ -481,6 +481,58 @@ class TestSshCredentials:
 # ---------------------------------------------------------------------------
 
 class TestBuildValidation:
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"controlPlaneEndpoint": "10.0.0.100:70000"}, "port"),
+            ({"podCidr": "10.96.0.0/16"}, "must not overlap"),
+            ({"podCidr": "10.0.0.0/24"}, "Node address"),
+        ],
+    )
+    def test_rejects_unsafe_network_layouts(
+        self, client, admin_token, ssh_profile, overrides, message
+    ):
+        payload = make_build_payload(nodes=SINGLE_CP_NODES, **overrides)
+        payload["connectionProfileId"] = ssh_profile["id"]
+        response = client.post(
+            "/api/cluster-builds", json=payload, headers=auth_headers(admin_token)
+        )
+        assert response.status_code == 400
+        assert message.lower() in response.get_json()["error"].lower()
+
+    def test_rejects_ipv6_managed_vip(
+        self, client, admin_token, ssh_profile
+    ):
+        payload = make_build_payload(
+            endpoint_mode="managed_haproxy",
+            nodes=SINGLE_CP_MANAGED_LB_NODES,
+            vipAddress="2001:db8::10",
+        )
+        payload["connectionProfileId"] = ssh_profile["id"]
+        response = client.post(
+            "/api/cluster-builds", json=payload, headers=auth_headers(admin_token)
+        )
+        assert response.status_code == 400
+        assert "ipv4" in response.get_json()["error"].lower()
+
+    def test_completed_build_history_cannot_be_deleted(
+        self, client, admin_token, ssh_profile
+    ):
+        build = create_build(
+            client, admin_token, ssh_profile,
+            make_build_payload(nodes=SINGLE_CP_NODES),
+        )
+        row = db.session.get(ClusterBuild, build["id"])
+        row.status = "completed"
+        db.session.commit()
+        response = client.delete(
+            f"/api/cluster-builds/{build['id']}",
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 400
+        assert "retained for audit" in response.get_json()["error"]
+        assert db.session.get(ClusterBuild, build["id"]) is not None
+
     def test_two_control_planes_rejected(self, client, admin_token, ssh_profile):
         nodes = [
             {"role": "control_plane", "hostname": "cp-1", "address": "10.0.0.11"},
@@ -622,6 +674,68 @@ class TestPreflight:
         assert data["status"] == "fail"
         dup = [c for n in data["nodes"] for c in n["checks"] if c["id"] == "hostname_unique"]
         assert dup and all(c["status"] == "fail" for c in dup)
+
+    def test_disk_check_follows_configured_path(
+        self, client, admin_token, ssh_profile, fake_ssh
+    ):
+        """A build that names another mount is measured there, not on /var."""
+        probe = probe_output("cp-1", "aaaa").replace(
+            "KS_DISK_FREE_GB=50", "KS_DISK_FREE_GB=120"
+        )
+        fake_ssh.add(lambda h, s: "preflight probe" in s, probe)
+        build = create_build(
+            client, admin_token, ssh_profile,
+            make_build_payload(nodes=SINGLE_CP_NODES, diskCheckPath="/data/containerd"),
+        )
+        assert build["diskCheckPath"] == "/data/containerd"
+        response = client.post(
+            f"/api/cluster-builds/{build['id']}/preflight",
+            headers=auth_headers(admin_token),
+        )
+        data = response.get_json()["data"]
+        disk = [c for n in data["nodes"] for c in n["checks"] if c["id"] == "disk"]
+        assert disk and all(c["status"] == "pass" for c in disk)
+        assert all(c["label"] == "Free disk on /data/containerd" for c in disk)
+        # The probe itself must measure that path — not /var with a new label.
+        scripts = [s for _, s in fake_ssh.calls if "preflight probe" in s]
+        assert scripts and all("KS_DISK_PATH=/data/containerd\n" in s for s in scripts)
+
+    def test_missing_disk_path_fails_as_missing(
+        self, client, admin_token, ssh_profile, fake_ssh
+    ):
+        """A path that isn't on the node reads as absent, not as 0 GiB free."""
+        probe = probe_output("cp-1", "bbbb").replace(
+            "KS_DISK_FREE_GB=50", "KS_DISK_PATH_MISSING=1"
+        )
+        fake_ssh.add(lambda h, s: "preflight probe" in s, probe)
+        build = create_build(
+            client, admin_token, ssh_profile,
+            make_build_payload(nodes=SINGLE_CP_NODES, diskCheckPath="/mnt/k8s"),
+        )
+        response = client.post(
+            f"/api/cluster-builds/{build['id']}/preflight",
+            headers=auth_headers(admin_token),
+        )
+        data = response.get_json()["data"]
+        disk = [c for n in data["nodes"] for c in n["checks"] if c["id"] == "disk"]
+        assert disk and all(c["status"] == "fail" for c in disk)
+        assert "does not exist" in disk[0]["detail"]
+
+    def test_disk_check_path_defaults_to_var(self, client, admin_token, ssh_profile):
+        build = create_build(client, admin_token, ssh_profile,
+                             make_build_payload(nodes=SINGLE_CP_NODES))
+        assert build["diskCheckPath"] == "/var"
+
+    @pytest.mark.parametrize("bad", ["var", "/var; rm -rf /", "/var/../../etc", "~/data"])
+    def test_invalid_disk_check_path_rejected(
+        self, client, admin_token, ssh_profile, bad
+    ):
+        payload = make_build_payload(nodes=SINGLE_CP_NODES, diskCheckPath=bad)
+        payload["connectionProfileId"] = ssh_profile["id"]
+        response = client.post("/api/cluster-builds", json=payload,
+                               headers=auth_headers(admin_token))
+        assert response.status_code == 400
+        assert "diskCheckPath" in response.get_json()["error"]
 
     def test_start_blocked_without_preflight(self, client, admin_token, ssh_profile):
         build = create_build(client, admin_token, ssh_profile,

@@ -41,7 +41,8 @@ New Cluster Build
 - Ubuntu 22.04/24.04 (primary) and Rocky/RHEL 9 (validated secondary), via OS adapters.
 - Repository modes: internet, internal mirror, fully offline bundle.
 - Calico as the production CNI; Flannel as a lab option; Cilium behind a flag.
-- Day-2: add / remove a worker node.
+- Day-2: add workers; queued workers can be removed before they join. Removing
+  a live worker (drain, delete, and infrastructure cleanup) is deferred.
 - Auto-onboarding: the finished cluster appears in KubeSight with no manual kubeconfig step.
 
 ### Explicit non-goals (v1)

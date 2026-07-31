@@ -1,0 +1,29 @@
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HERMES_HOME=/opt/data \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+WORKDIR /opt/hermes
+
+COPY . .
+
+RUN --mount=type=secret,id=trend_micro_cloud_ca,required=true \
+    --mount=type=secret,id=trend_micro_onprem_ca,required=true \
+    --mount=type=cache,target=/root/.cache/pip \
+    cp /run/secrets/trend_micro_cloud_ca \
+        /usr/local/share/ca-certificates/trend-micro-cloud.crt && \
+    cp /run/secrets/trend_micro_onprem_ca \
+        /usr/local/share/ca-certificates/trend-micro-onprem.crt && \
+    update-ca-certificates && \
+    sed -i '\|^"optional-mcps/|d' pyproject.toml && \
+    pip install . aiohttp==3.13.4 && \
+    useradd --uid 10000 --create-home --home-dir /opt/data hermes && \
+    chown -R hermes:hermes /opt/data
+
+USER hermes
+
+ENTRYPOINT ["hermes"]
+CMD ["gateway", "run", "--replace"]

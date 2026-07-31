@@ -28,6 +28,7 @@ backend/tests/         pytest suite
 - **Upgrade Safe Mode** — precheck + controlled workflow
 - **User management** — roles, permissions, fine-grained access rules
 - **Audit logs** — security-relevant actions
+- **Application Intelligence** — bounded Bitbucket source analysis with deterministic scanners and Hermes AI
 
 ## Quick start
 
@@ -90,6 +91,9 @@ Copy templates: [backend/.env.example](backend/.env.example), [frontend/.env.exa
 - Frontend hides unauthorized UI; backend always enforces.
 
 Details: [backend/README.md](backend/README.md)
+
+Application Intelligence architecture, permissions, scanner configuration, and
+worker requirements: [APPLICATION-INTELLIGENCE.md](APPLICATION-INTELLIGENCE.md)
 
 ## Testing
 

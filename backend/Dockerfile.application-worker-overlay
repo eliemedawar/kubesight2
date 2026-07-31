@@ -1,0 +1,9 @@
+# Offline local-development overlay. Build the full worker image for production.
+FROM kubesight-application-worker:local
+
+WORKDIR /app
+COPY . .
+USER 65532:65532
+
+ENTRYPOINT ["python"]
+CMD ["-m", "api.application_worker"]

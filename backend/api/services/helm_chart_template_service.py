@@ -29,7 +29,12 @@ from ..models import HelmChartTemplate, HelmChartTemplateVersion
 
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_FILES = 500
+# Optional values are capped to keep the deploy form finite. Sensitive values are
+# not optional: a credential that gets no field is a credential that would have
+# to be stored in the chart, so they are always exposed and only a pathological
+# count (a namespace of nothing but Secrets) is refused.
 MAX_VARIABLES = 250
+MAX_SENSITIVE_VARIABLES = 1000
 MAX_GIT_PATHS = 2000
 # Archiver leftovers that would otherwise be stored inside the chart.
 ARCHIVE_JUNK_FILES = {".DS_Store", "Thumbs.db"}
@@ -377,6 +382,25 @@ def _encode_files(files: Dict[str, bytes]) -> Dict[str, str]:
     return encoded
 
 
+def _capped_variables(variables: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Trim optional values to the cap, never the sensitive ones.
+
+    Every sensitive value is referenced by name from a rendered template
+    (``{{ required ... .Values.x }}``), so dropping one here would leave a chart
+    that can never be deployed.
+    """
+    kept: List[Dict[str, Any]] = []
+    optional = 0
+    for item in variables:
+        if item.get("sensitive"):
+            kept.append(item)
+            continue
+        optional += 1
+        if optional <= MAX_VARIABLES:
+            kept.append(item)
+    return kept
+
+
 def _definition_blob(
     files: Dict[str, bytes],
     values: Dict[str, Any],
@@ -387,7 +411,7 @@ def _definition_blob(
     return {
         "files": _encode_files(files),
         "values": values,
-        "variables": variables[:MAX_VARIABLES],
+        "variables": _capped_variables(variables),
         "warnings": warnings,
         "resourceCount": resource_count,
         "chart": _chart_inspection(files),
@@ -759,6 +783,22 @@ class _VariableBuilder:
         self.variables: List[Dict[str, Any]] = []
         self._keys: set[str] = set()
         self._sentinel_index = 0
+        self.optional_count = 0
+        self.sensitive_count = 0
+
+    def _require_sensitive_budget(
+        self, parent: Dict[str, Any] | List[Any] | None = None, field: Any = None
+    ) -> None:
+        """Sensitive fields ignore the optional cap; only the ceiling stops them."""
+        if self.sensitive_count < MAX_SENSITIVE_VARIABLES:
+            return
+        if parent is not None and field is not None:
+            parent[field] = ""
+        raise ChartTemplateError(
+            f"These resources carry more than {MAX_SENSITIVE_VARIABLES} secret values, which is "
+            "more than one chart can expose as fields. Their values are never stored. Untick some "
+            "Secrets, or import the namespace one application at a time."
+        )
 
     def add(
         self,
@@ -773,15 +813,12 @@ class _VariableBuilder:
         sensitive: bool = False,
         transform: str = "",
     ) -> None:
-        if len(self.variables) >= MAX_VARIABLES:
-            if sensitive:
-                parent[field] = ""
-                raise ChartTemplateError(
-                    f"These resources hold more than {MAX_VARIABLES} secret keys, which is "
-                    "past the chart value limit — the remaining ones could not be exposed as "
-                    "fields, and their values are never stored. Import fewer resources at a time."
-                )
-            return
+        if sensitive:
+            self._require_sensitive_budget(parent, field)
+        else:
+            if self.optional_count >= MAX_VARIABLES:
+                return
+            self.optional_count += 1
         base = _safe_key(key)
         unique = base
         suffix = 2
@@ -808,6 +845,8 @@ class _VariableBuilder:
                 "_transform": transform,
             }
         )
+        if sensitive:
+            self.sensitive_count += 1
 
     def add_secret_object(self, doc: Dict[str, Any], identity: str) -> set[Tuple[Any, ...]]:
         """Expose one safe object field for every key carried by a large Secret.
@@ -824,11 +863,7 @@ class _VariableBuilder:
                 blank_sections[section] = {str(key): "" for key in mapping}
         if not blank_sections:
             return set()
-        if len(self.variables) >= MAX_VARIABLES:
-            raise ChartTemplateError(
-                f"Chart contains more than {MAX_VARIABLES} Secrets and cannot expose "
-                "all of them safely. Import fewer resources at a time."
-            )
+        self._require_sensitive_budget()
 
         base = _safe_key(f"{identity}_values")
         unique = base
@@ -874,6 +909,7 @@ class _VariableBuilder:
                 "_secret_replacements": replacements,
             }
         )
+        self.sensitive_count += 1
         return added
 
 
@@ -1241,11 +1277,11 @@ def _convert_manifest_files(
         template_files[relative] = _render_manifest_template(base, builder.variables).encode("utf-8")
 
     public_variables = _public_variables(builder.variables)
-    if len(builder.variables) >= MAX_VARIABLES:
+    if builder.optional_count >= MAX_VARIABLES:
         warnings.append(
-            f"This chart hit the {MAX_VARIABLES}-value limit. Every secret was still exposed "
-            "as a required field; the remaining fields kept the literal values they had. "
-            "Import fewer resources at a time for a fully configurable chart."
+            f"This chart hit the {MAX_VARIABLES}-value limit for optional fields. Every secret "
+            "is still exposed as a required field; the values past the limit kept the literals "
+            "they had. Import fewer resources at a time for a fully configurable chart."
         )
     chart_yaml = {
         "apiVersion": "v2",
@@ -1342,17 +1378,21 @@ def _scrub_chart_values(
     flattened.sort(
         key=lambda item: not _is_sensitive_value(schema, item[0])
     )
+    optional_count = 0
     for path, default in flattened:
         if not path:
             continue
         sensitive = _is_sensitive_value(schema, path)
-        if len(variables) >= MAX_VARIABLES:
-            if sensitive:
+        if sensitive:
+            if sum(1 for item in variables if item.get("sensitive")) >= MAX_SENSITIVE_VARIABLES:
                 raise ChartTemplateError(
-                    f"Chart contains more than {MAX_VARIABLES} values and cannot "
-                    "expose all sensitive values safely."
+                    f"This chart carries more than {MAX_SENSITIVE_VARIABLES} sensitive values, "
+                    "which is more than one chart can expose as fields. None of them are stored."
                 )
-            continue
+        else:
+            if optional_count >= MAX_VARIABLES:
+                continue
+            optional_count += 1
         schema_node = _schema_for_path(schema, path)
         required = sensitive or _path_required(schema, path)
         safe_default = "" if sensitive else default
@@ -1457,10 +1497,10 @@ def _scrub_static_secret_templates(
                 literal = entry_match.group(3).strip()
                 if not literal or "{{" in literal:
                     continue
-                if len(variables) >= MAX_VARIABLES:
+                if sum(1 for item in variables if item.get("sensitive")) >= MAX_SENSITIVE_VARIABLES:
                     raise ChartTemplateError(
-                        f"Chart exceeds the {MAX_VARIABLES}-value limit before all "
-                        "literal Secret values could be exposed safely."
+                        f"This chart holds more than {MAX_SENSITIVE_VARIABLES} literal Secret "
+                        "values, which is more than one chart can expose as fields."
                     )
                 counter += 1
                 variable_key = _safe_key(

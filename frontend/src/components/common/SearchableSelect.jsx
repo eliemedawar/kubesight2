@@ -83,6 +83,8 @@ export default function SearchableSelect({
   placeholder = "Select…",
   searchThreshold = 6,
   searchPlaceholder = "Search…",
+  allowCustom = false,
+  customOptionLabel = (customValue) => `Use "${customValue}"`,
   "aria-label": ariaLabel,
 }) {
   const [open, setOpen] = useState(false);
@@ -92,7 +94,7 @@ export default function SearchableSelect({
   const dropRef = useRef(null);
 
   const items = useMemo(() => buildOptions(options, children), [options, children]);
-  const showSearch = items.length > searchThreshold;
+  const showSearch = allowCustom || items.length > searchThreshold;
 
   useLayoutEffect(() => {
     if (!open) {
@@ -159,7 +161,17 @@ export default function SearchableSelect({
     };
   }, [open]);
 
-  const selected = items.find((o) => sameValue(o.value, value));
+  const selected = items.find((o) => sameValue(o.value, value))
+    || (
+      allowCustom && value != null && !sameValue(value, "")
+        ? {
+            value,
+            label: value,
+            text: String(value),
+            disabled: false,
+          }
+        : undefined
+    );
   const hasValue = selected && !sameValue(selected.value, "");
   const triggerLabel = selected ? selected.label : placeholder;
 
@@ -167,6 +179,20 @@ export default function SearchableSelect({
   const filtered = needle
     ? items.filter((o) => o.text.toLowerCase().includes(needle))
     : items;
+  const customItem = allowCustom && search.trim() && !items.some(
+    (item) => sameValue(item.value, search.trim()),
+  )
+    ? {
+        value: search.trim(),
+        label: typeof customOptionLabel === "function"
+          ? customOptionLabel(search.trim())
+          : customOptionLabel,
+        text: search.trim(),
+        disabled: false,
+        custom: true,
+      }
+    : null;
+  const visibleItems = customItem ? [...filtered, customItem] : filtered;
 
   const choose = (opt) => {
     if (opt.disabled) return;
@@ -226,12 +252,12 @@ export default function SearchableSelect({
             </div>
           )}
           <div className="ss-list">
-            {filtered.length === 0 ? (
+            {visibleItems.length === 0 ? (
               <div className="ss-empty">No results</div>
             ) : (
-              filtered.map((opt, i) => (
+              visibleItems.map((opt, i) => (
                 <div
-                  key={`${String(opt.value)}-${i}`}
+                  key={`${opt.custom ? "custom-" : ""}${String(opt.value)}-${i}`}
                   role="option"
                   aria-selected={sameValue(opt.value, value)}
                   className={`ss-option${sameValue(opt.value, value) ? " ss-option--selected" : ""}${opt.disabled ? " ss-option--disabled" : ""}`}

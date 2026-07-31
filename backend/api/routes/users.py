@@ -54,6 +54,20 @@ def update_user(user_id: int):
         return error_response("User not found", 404)
 
     payload = request.get_json(silent=True) or {}
+    if getattr(user, "is_service_account", False) and user.username == "hermes-agent":
+        protected_fields = {
+            "roleId",
+            "isActive",
+            "password",
+            "accessRules",
+            "clusterAccess",
+            "namespaceAccess",
+        }
+        if protected_fields & set(payload):
+            return error_response(
+                "The hermes-agent identity boundary cannot be changed through user management.",
+                400,
+            )
     if "fullName" in payload:
         user.full_name = (payload.get("fullName") or "").strip() or user.full_name
     if "email" in payload:
@@ -180,6 +194,9 @@ def lock_account(user_id: int):
 @users_bp.route("/<int:user_id>/enable", methods=["POST"])
 @require_any_permission("users:update", "users:manage", "users:disable")
 def enable_user(user_id: int):
+    target = User.query.get(user_id)
+    if target and getattr(target, "is_service_account", False):
+        return error_response("Service-account activation is managed by KubeSight.", 400)
     data, error, status = user_service.enable_user(user_id)
     if error:
         return error_response(error, status)
@@ -192,6 +209,9 @@ def disable_user(user_id: int):
     actor = get_current_user()
     if actor and actor.id == user_id:
         return error_response("You cannot disable your own account", 400)
+    target = User.query.get(user_id)
+    if target and getattr(target, "is_service_account", False):
+        return error_response("Service accounts cannot be disabled through user management.", 400)
     data, error, status = user_service.disable_user(user_id)
     if error:
         return error_response(error, status)

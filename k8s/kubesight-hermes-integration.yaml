@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubesight-hermes-integration
+  namespace: kubesight
+data:
+  HERMES_API_URL: http://hermes-application-intelligence.kubesight-hermes.svc.cluster.local:8642/v1/chat/completions
+  HERMES_APPLICATION_MODEL: hermes-agent
+  HERMES_SERVICE_NAMESPACE: kubesight-hermes
+  HERMES_SERVICE_PORT: "8642"
+  APPLICATION_ANALYSIS_EXECUTION_MODE: kubernetes
+  APPLICATION_ANALYSIS_NAMESPACE: kubesight-analysis
+  APPLICATION_ANALYSIS_SERVICE_ACCOUNT: kubesight-analysis-worker
+  APPLICATION_ANALYSIS_WORKER_IMAGE: registry.example.com/kubesight/application-worker:replace-me
+  APPLICATION_ANALYSIS_IMAGE_PULL_POLICY: IfNotPresent
+  APPLICATION_ANALYSIS_CALLBACK_URL: http://kubesight-backend.kubesight.svc.cluster.local:5000/api/application-analysis-worker
+  APPLICATION_PULL_REQUEST_CALLBACK_URL: http://kubesight-backend.kubesight.svc.cluster.local:5000/api/application-pull-request-worker
+  APPLICATION_ANALYSIS_ARTIFACT_ROOT: /var/lib/kubesight/application-analysis-artifacts
+  APPLICATION_ANALYSIS_CPU_LIMIT: "2"
+  APPLICATION_ANALYSIS_MEMORY_LIMIT: 4Gi
+  APPLICATION_BUILD_CPU_LIMIT: "2"
+  APPLICATION_BUILD_MEMORY_LIMIT: 4Gi
+  APPLICATION_ANALYSIS_EPHEMERAL_LIMIT: 2Gi
+  APPLICATION_ANALYSIS_DEADLINE_SECONDS: "1800"
+  APPLICATION_ANALYSIS_JOB_TTL_SECONDS: "900"
+  APPLICATION_ANALYSIS_BACKOFF_LIMIT: "1"
+  APPLICATION_BUILD_COMMAND_TIMEOUT_SECONDS: "600"
+  APPLICATION_ANALYSIS_HERMES_TIMEOUT_SECONDS: "180"
+  APPLICATION_ANALYSIS_HERMES_MAX_BYTES: "4000000"
+  APPLICATION_ANALYSIS_HERMES_RESPONSE_MAX_BYTES: "4000000"

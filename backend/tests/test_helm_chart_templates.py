@@ -292,6 +292,73 @@ def test_oversized_secret_is_compacted_without_storing_live_values(
     assert 'index .Values.variables.secret_oversized_secret_values "stringData" "key-250"' in chart
 
 
+SENSITIVE_ENV_WORKLOAD = """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: late-workload
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: api
+          image: registry.example/late:1.0.0
+          env:
+            - name: DB_PASSWORD
+              value: late-secret-must-not-persist
+"""
+
+
+def test_sensitive_values_are_never_dropped_by_the_optional_value_cap(client, admin_token, app):
+    """The optional cap must not refuse a credential found late in a big import.
+
+    Reproduces the real failure: a namespace whose ConfigMaps and Services spend
+    the value budget long before the converter reaches a workload carrying a
+    password env var.
+    """
+    bulky = "\n---\n".join(
+        f"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bulk-{index}\ndata:\n"
+        + "".join(f"  key{key}: value-{index}-{key}\n" for key in range(10))
+        for index in range(40)
+    )
+
+    response = client.post(
+        "/api/helm/chart-templates/import/yaml",
+        headers=auth_headers(admin_token),
+        json={
+            "name": "Late Secret Namespace",
+            "files": [
+                {"name": "bulk.yaml", "content": bulky},
+                {"name": "workload.yaml", "content": SENSITIVE_ENV_WORKLOAD},
+            ],
+        },
+    )
+    assert response.status_code == 201, response.get_json()
+    imported = response.get_json()["data"]
+
+    detail = client.get(
+        f"/api/helm/chart-templates/{imported['id']}",
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]
+    sensitive = [item for item in detail["variables"] if item["sensitive"]]
+    assert [item["label"] for item in sensitive] == ["DB_PASSWORD"]
+    assert sensitive[0]["required"] and sensitive[0]["default"] == ""
+
+    with app.app_context():
+        archive = base64.b64decode(chart_archive_base64(imported["id"]))
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        chart = "\n".join(
+            tar.extractfile(member).read().decode("utf-8", errors="ignore")
+            for member in tar.getmembers()
+            if member.isfile()
+        )
+    assert "late-secret-must-not-persist" not in chart
+    # The credential is templated, and its variable survived into the stored
+    # definition — a required reference with no variable is an undeployable chart.
+    assert f"required \"DB_PASSWORD is required\" .Values.{sensitive[0]['path']}" in chart
+
+
 def test_template_catalog_permissions(client, admin_token, viewer_token):
     denied = client.post(
         "/api/helm/chart-templates/import/yaml",

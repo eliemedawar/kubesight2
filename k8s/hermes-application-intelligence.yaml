@@ -1,0 +1,224 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubesight-hermes
+  labels:
+    kubesight.io/purpose: application-intelligence
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-application-intelligence
+  namespace: kubesight-hermes
+data:
+  config.yaml: |
+    model:
+      # Select a low-latency model that supports reliable JSON output.
+      default: gpt-5.5
+      provider: openai-api
+      base_url: https://api.openai.com/v1
+      max_tokens: 8192
+    providers: {}
+    fallback_providers: []
+    toolsets: []
+    agent:
+      max_turns: 2
+      gateway_timeout: 180
+      api_max_retries: 1
+      task_completion_guidance: false
+      environment_probe: false
+      coding_context: "off"
+      reasoning_effort: low
+      verbose: false
+    platform_toolsets:
+      api_server:
+        - no_mcp
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hermes-application-intelligence
+  namespace: kubesight-hermes
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hermes-application-intelligence
+  namespace: kubesight-hermes
+  labels:
+    app.kubernetes.io/name: hermes-application-intelligence
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: hermes-application-intelligence
+  ports:
+    - name: http
+      port: 8642
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hermes-application-intelligence
+  namespace: kubesight-hermes
+  labels:
+    app.kubernetes.io/name: hermes-application-intelligence
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hermes-application-intelligence
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hermes-application-intelligence
+    spec:
+      serviceAccountName: hermes-application-intelligence
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hermes
+          # Build Dockerfile.hermes-production and replace this with an
+          # immutable image digest before applying in production.
+          image: registry.example.com/kubesight/hermes-application-intelligence:replace-me
+          imagePullPolicy: IfNotPresent
+          args: ["gateway", "run", "--replace"]
+          ports:
+            - name: http
+              containerPort: 8642
+              protocol: TCP
+          env:
+            - name: HERMES_HOME
+              value: /opt/data
+            - name: HOME
+              value: /opt/data
+            - name: API_SERVER_ENABLED
+              value: "true"
+            - name: API_SERVER_HOST
+              value: 0.0.0.0
+            - name: API_SERVER_PORT
+              value: "8642"
+            - name: API_SERVER_MODEL_NAME
+              value: hermes-agent
+            - name: HERMES_MAX_ITERATIONS
+              value: "2"
+            - name: API_SERVER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-application-intelligence
+                  key: API_SERVER_KEY
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-application-intelligence
+                  key: OPENAI_API_KEY
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+              ephemeral-storage: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 4
+          volumeMounts:
+            - name: data
+              mountPath: /opt/data
+            - name: config
+              mountPath: /opt/data/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: config
+          configMap:
+            name: hermes-application-intelligence
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hermes-application-intelligence
+  namespace: kubesight-hermes
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hermes-application-intelligence
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - kubesight
+                  - kubesight-analysis
+      ports:
+        - port: 8642
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Standard NetworkPolicy cannot select api.openai.com by DNS name.
+    # Replace this rule with a Cilium/Calico FQDN policy where available.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP

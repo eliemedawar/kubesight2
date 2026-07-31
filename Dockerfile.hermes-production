@@ -1,0 +1,42 @@
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HERMES_HOME=/opt/data \
+    HOME=/opt/data \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+WORKDIR /opt/hermes
+
+COPY . .
+
+# Optional public corporate root CAs keep the same Dockerfile usable behind a
+# TLS-inspecting proxy. BuildKit keeps their source paths out of the build
+# context; when supplied, the public certificates are copied into the image
+# trust store.
+RUN --mount=type=secret,id=corporate_ca_1,required=false \
+    --mount=type=secret,id=corporate_ca_2,required=false \
+    if [ -f /run/secrets/corporate_ca_1 ]; then \
+      cp /run/secrets/corporate_ca_1 /usr/local/share/ca-certificates/corporate-1.crt; \
+    fi && \
+    if [ -f /run/secrets/corporate_ca_2 ]; then \
+      cp /run/secrets/corporate_ca_2 /usr/local/share/ca-certificates/corporate-2.crt; \
+    fi && \
+    update-ca-certificates
+
+# This source snapshot does not include the optional editable MCP packages
+# referenced by pyproject.toml. Application Intelligence disables all tools and
+# MCP servers, so omit those development-only package entries from this image.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    sed -i '\|^"optional-mcps/|d' pyproject.toml && \
+    pip install --no-compile . aiohttp==3.13.4 && \
+    useradd --uid 10000 --create-home --home-dir /opt/data hermes && \
+    chown -R hermes:hermes /opt/data
+
+USER 10000:10000
+
+EXPOSE 8642
+
+ENTRYPOINT ["hermes"]
+CMD ["gateway", "run", "--replace"]

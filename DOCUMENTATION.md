@@ -30,7 +30,7 @@ KubeSight from local development to a production Kubernetes deployment.
 
 **Runtime command (production):**
 ```sh
-gunicorn -w 1 --threads 8 -b 0.0.0.0:5000 --timeout 120 "api:create_app()"
+gunicorn -w 1 --threads 8 -b 0.0.0.0:5000 --timeout 300 "api:create_app()"
 ```
 Single worker keeps the in-process alert scheduler and caches singular; 8 threads provide
 concurrency for blocking `kubectl`/`helm`/log-stream calls.
@@ -399,6 +399,11 @@ kubectl rollout undo deploy/kubesight-backend -n kubesight
 ---
 
 ## 9. Operations Notes
+
+Application Intelligence has a separate untrusted-source worker and service
+identity boundary. See [APPLICATION-INTELLIGENCE.md](APPLICATION-INTELLIGENCE.md)
+for setup, permissions, Bitbucket credentials, scanner/Hermes configuration,
+retention, AI limitations, security controls, and troubleshooting.
 
 - **Alerts:** fire when `(cpu_usage / cpu_limit) * 100 > ALERT_CPU_THRESHOLD_PERCENT` (default 80).
   Requires metrics-server. Email is sent once per firing alert on each `GET /api/alerts` poll until

@@ -121,6 +121,14 @@
   border-radius: var(--radius-md);
 }
 
+.sidebar-flyout .nav-link-label {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 1023px) {
   .sidebar {
     overflow-x: hidden;

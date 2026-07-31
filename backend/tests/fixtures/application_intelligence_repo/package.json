@@ -1,0 +1,9 @@
+{
+  "name": "payment-fixture",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "4.17.1",
+    "kafkajs": "2.2.4",
+    "pg": "8.11.0"
+  }
+}

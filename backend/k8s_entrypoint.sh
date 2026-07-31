@@ -38,4 +38,5 @@ fi
 
 # Single worker keeps the in-process alert scheduler and caches singular;
 # threads provide concurrency for blocking kubectl/helm/log-stream calls.
-exec gunicorn -w 1 --threads 8 -b 0.0.0.0:5000 --timeout 120 "api:create_app()"
+exec gunicorn -w 1 --threads 8 -b 0.0.0.0:5000 \
+  --timeout "${GUNICORN_TIMEOUT:-300}" "api:create_app()"

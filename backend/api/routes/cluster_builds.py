@@ -40,7 +40,11 @@ def list_builds():
 def create_build():
     payload = request.get_json(silent=True) or {}
     try:
-        data = svc.create_build(payload, created_by=_actor_name())
+        data = svc.create_build(
+            payload, created_by=_actor_name(), user=get_current_user()
+        )
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
     except LookupError as exc:
         return error_response(str(exc), 400)
     except ValueError as exc:
@@ -75,11 +79,13 @@ def get_build(build_id: int):
 def update_build(build_id: int):
     payload = request.get_json(silent=True) or {}
     try:
-        data = svc.update_build(build_id, payload)
+        data = svc.update_build(build_id, payload, user=get_current_user())
     except LookupError:
         return error_response("Cluster build not found.", 404)
     except ValueError as exc:
         return error_response(str(exc), 400)
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
     log_audit(
         "cluster_build_updated",
         actor=get_current_user(),
@@ -112,11 +118,13 @@ def delete_build(build_id: int):
 @require_permission("cluster_builds:execute")
 def preflight_build(build_id: int):
     try:
-        result = svc.run_preflight(build_id)
+        result = svc.run_preflight(build_id, user=get_current_user())
     except LookupError:
         return error_response("Cluster build not found.", 404)
     except ValueError as exc:
         return error_response(str(exc), 400)
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
     log_audit(
         "cluster_build_preflight",
         actor=get_current_user(),
@@ -136,11 +144,14 @@ def start_build(build_id: int):
             build_id,
             ack_warnings=payload.get("ackWarnings"),
             actor=_actor_name(),
+            user=get_current_user(),
         )
     except LookupError:
         return error_response("Cluster build not found.", 404)
     except ValueError as exc:
         return error_response(str(exc), 400)
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
     log_audit(
         "cluster_build_started",
         actor=get_current_user(),
@@ -155,9 +166,11 @@ def start_build(build_id: int):
 @require_permission("cluster_builds:execute")
 def retry_build(build_id: int):
     try:
-        data = svc.retry_build(build_id)
+        data = svc.retry_build(build_id, user=get_current_user())
     except LookupError:
         return error_response("Cluster build not found.", 404)
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
     except ValueError as exc:
         return error_response(str(exc), 400)
     log_audit(
@@ -349,11 +362,17 @@ def set_build_workloads(build_id: int):
     """Choose workloads to copy into a cluster this build already produced."""
     payload = request.get_json(silent=True) or {}
     try:
-        data = svc.set_build_workloads(build_id, payload.get("workloads") or payload)
+        data = svc.set_build_workloads(
+            build_id,
+            payload.get("workloads") or payload,
+            user=get_current_user(),
+        )
     except LookupError:
         return error_response("Cluster build not found.", 404)
     except ValueError as exc:
         return error_response(str(exc), 400)
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
     log_audit(
         "cluster_build_workloads_selected",
         actor=get_current_user(),

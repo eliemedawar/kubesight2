@@ -55,6 +55,10 @@ const EMPTY_WORKLOADS = {
   items: [],
 };
 
+// Where preflight measures free space when the build says nothing else. Mirrors
+// preflight.DEFAULT_DISK_PATH on the backend, which stays the authority.
+const DEFAULT_DISK_CHECK_PATH = "/var";
+
 const EMPTY_BASICS = {
   name: "",
   k8sVersion: "",
@@ -65,12 +69,61 @@ const EMPTY_BASICS = {
   cniPlugin: "calico",
   podCidr: "10.244.0.0/16",
   serviceCidr: "10.96.0.0/12",
+  diskCheckPath: DEFAULT_DISK_CHECK_PATH,
   addons: [],
   workloads: { ...EMPTY_WORKLOADS },
   vsphereConnectionId: "",
   buildProfileId: "",
   connectionProfileId: "",
 };
+
+function basicsFromBuild(build) {
+  if (!build) return { ...EMPTY_BASICS, workloads: { ...EMPTY_WORKLOADS } };
+  return {
+    ...EMPTY_BASICS,
+    name: build.name || "",
+    k8sVersion: build.k8sVersion || "",
+    topologyType: build.topologyType || "stacked_ha",
+    endpointMode: build.endpointMode || "managed_haproxy",
+    vipAddress: build.vipAddress || "",
+    controlPlaneEndpoint: build.controlPlaneEndpoint || "",
+    cniPlugin: build.cniPlugin || "calico",
+    podCidr: build.podCidr || "10.244.0.0/16",
+    serviceCidr: build.serviceCidr || "10.96.0.0/12",
+    diskCheckPath: build.diskCheckPath || DEFAULT_DISK_CHECK_PATH,
+    addons: build.addons || [],
+    workloads: build.workloadSelection?.items?.length
+      ? { ...EMPTY_WORKLOADS, ...build.workloadSelection }
+      : { ...EMPTY_WORKLOADS },
+    vsphereConnectionId: build.vsphereConnectionId
+      ? String(build.vsphereConnectionId) : "",
+    buildProfileId: build.buildProfileId ? String(build.buildProfileId) : "",
+    connectionProfileId: build.connectionProfileId
+      ? String(build.connectionProfileId) : "",
+  };
+}
+
+function pickedFromBuild(build) {
+  return Object.fromEntries(
+    (build?.nodes || [])
+      .filter((node) => node.vsphereVmMoid)
+      .map((node) => [node.vsphereVmMoid, {
+        role: node.role,
+        address: node.address || "",
+        hostname: node.hostname || "",
+      }])
+  );
+}
+
+function manualFromBuild(build) {
+  return (build?.nodes || [])
+    .filter((node) => !node.vsphereVmMoid)
+    .map((node) => ({
+      role: node.role,
+      address: node.address || "",
+      hostname: node.hostname || "",
+    }));
+}
 
 const ROLE_KEYS = [
   ["loadbalancer", "LB"],
@@ -368,6 +421,29 @@ function ShapeStep({ options, basics, setBasic }) {
               className="sg-cb-input sg-cb-mono"
               value={basics.serviceCidr}
               onChange={(event) => setBasic("serviceCidr", event.target.value)}
+            />
+          </Field>
+        </div>
+      </details>
+
+      <details className="sg-cb-adv">
+        <summary>
+          Machine disk
+          <span className="sv sg-cb-mono">free space checked on {basics.diskCheckPath || DEFAULT_DISK_CHECK_PATH}</span>
+          <span className="cv">change it if container data lives on another mount</span>
+        </summary>
+        <div className="sg-cb-adv-body">
+          <Field
+            label="Disk check path"
+            htmlFor="cb-diskpath"
+            hint="Preflight measures free space on the filesystem behind this path, on every machine. /var is the default because kubeadm, containerd and pulled images land under /var/lib — point it at the mount that actually backs them if you moved them elsewhere."
+          >
+            <input
+              id="cb-diskpath"
+              className="sg-cb-input sg-cb-mono"
+              value={basics.diskCheckPath}
+              onChange={(event) => setBasic("diskCheckPath", event.target.value)}
+              placeholder={DEFAULT_DISK_CHECK_PATH}
             />
           </Field>
         </div>
@@ -866,16 +942,25 @@ function VerifyStep({ grouped, preflightResult, busy, onRerun }) {
 // Wizard
 // ---------------------------------------------------------------------------
 
-export default function Wizard({ options, infra, notify, onBuildLaunched, onCancel }) {
+export default function Wizard({
+  options,
+  infra,
+  canExecute = false,
+  initialBuild = null,
+  notify,
+  onBuildSaved,
+  onBuildLaunched,
+  onCancel,
+}) {
   const [step, setStep] = useState(0);
-  const [basics, setBasics] = useState({ ...EMPTY_BASICS });
+  const [basics, setBasics] = useState(() => basicsFromBuild(initialBuild));
   const [vms, setVms] = useState([]);
   const [vmsLoading, setVmsLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState({ poweredOn: true, tools: false, big: false });
-  const [picked, setPicked] = useState({});
-  const [manualNodes, setManualNodes] = useState([]);
-  const [buildId, setBuildId] = useState(null);
+  const [picked, setPicked] = useState(() => pickedFromBuild(initialBuild));
+  const [manualNodes, setManualNodes] = useState(() => manualFromBuild(initialBuild));
+  const [buildId, setBuildId] = useState(initialBuild?.id || null);
   const [preflightResult, setPreflightResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [acked, setAcked] = useState(false);
@@ -883,7 +968,7 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
   // The last image check from the Workloads step, so the Blueprint can report
   // it while the user is still standing on that step.
   const [workloadPlan, setWorkloadPlan] = useState(null);
-  const seeded = useRef(false);
+  const seeded = useRef(Boolean(initialBuild));
 
   const setBasic = (key, value) => setBasics((previous) => ({ ...previous, [key]: value }));
 
@@ -986,21 +1071,43 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
     && (basics.endpointMode === "managed_haproxy" ? basics.vipAddress.trim() : basics.controlPlaneEndpoint.trim())
   );
 
+  const buildPayload = () => ({
+    ...basics,
+    vsphereConnectionId: basics.vsphereConnectionId || undefined,
+    buildProfileId: basics.buildProfileId || undefined,
+    connectionProfileId: basics.connectionProfileId || undefined,
+    workloads: basics.workloads.items.length ? basics.workloads : null,
+    nodes: nodesPayload,
+  });
+
+  const saveDraft = async () => {
+    setBusy(true);
+    try {
+      let id = buildId;
+      const payload = buildPayload();
+      if (id) await updateClusterBuild(id, payload);
+      else {
+        const created = await createClusterBuild(payload);
+        id = created.id;
+        setBuildId(id);
+      }
+      notify(`Draft ${basics.name} saved.`);
+      if (onBuildSaved) onBuildSaved(id);
+      return id;
+    } catch (error) {
+      notify(error.message || String(error), true);
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const runPreflight = async () => {
     setBusy(true);
     setAcked(false);
     try {
       let id = buildId;
-      const payload = {
-        ...basics,
-        vsphereConnectionId: basics.vsphereConnectionId || undefined,
-        buildProfileId: basics.buildProfileId || undefined,
-        connectionProfileId: basics.connectionProfileId || undefined,
-        // null clears a selection that was made and then emptied — the
-        // wizard is the only place that can say "bring nothing after all".
-        workloads: basics.workloads.items.length ? basics.workloads : null,
-        nodes: nodesPayload,
-      };
+      const payload = buildPayload();
       if (id) await updateClusterBuild(id, payload);
       else {
         const created = await createClusterBuild(payload);
@@ -1162,7 +1269,7 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
           Next — workloads
         </button>
       </>
-    ) : (
+    ) : canExecute ? (
       <>
         {workloadStorageErrors.length ? (
           <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
@@ -1175,6 +1282,25 @@ export default function Wizard({ options, infra, notify, onBuildLaunched, onCanc
           onClick={runPreflight}
         >
           {busy ? "Running preflight…" : "Run preflight"}
+        </button>
+      </>
+    ) : (
+      <>
+        {workloadStorageErrors.length ? (
+          <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
+        ) : (
+          <span className="muted">
+            Save this draft for a reviewer with execute permission to run preflight and launch it.
+          </span>
+        )}
+        <button
+          className="primary sg-cb-bp-cta"
+          type="button"
+          disabled={busy || !countsOk || Boolean(addonError) || !nodesPayload.length
+            || workloadStorageErrors.length > 0}
+          onClick={saveDraft}
+        >
+          Save draft for review
         </button>
       </>
     );

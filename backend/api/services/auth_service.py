@@ -534,6 +534,22 @@ def login_user(
             return _locked_response(user)
         return None, "Invalid credentials", 401
 
+    if getattr(user, "is_service_account", False) or not getattr(
+        user, "interactive_login_enabled", True
+    ):
+        log_audit(
+            "login_failed",
+            actor_user_id=user.id,
+            target_type="service_account",
+            target_id=str(user.id),
+            details={
+                "reason": "interactive_login_disabled",
+                "username": user.username,
+                "ip": _client_ip(),
+            },
+        )
+        return None, "Interactive login is disabled for this service account.", 403
+
     # Password is correct — clear failure counters (but keep an admin lock).
     _reset_counters(user)
 

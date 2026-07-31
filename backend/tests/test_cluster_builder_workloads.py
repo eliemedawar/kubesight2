@@ -311,6 +311,77 @@ class TestNormalizeSelection:
         assert cleared["items"] == [] and cleared["applied"]
 
 
+class TestWorkloadSelectionAuthorization:
+    def test_crafted_build_payload_cannot_bypass_source_access(
+        self, client, admin_token, ssh_profile, source_cluster, monkeypatch
+    ):
+        monkeypatch.setattr(
+            wl,
+            "_check_access",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                PermissionError("Source cluster access denied.")
+            ),
+        )
+        payload = make_build_payload(
+            nodes=SINGLE_CP_NODES,
+            workloads=selection(),
+            connectionProfileId=ssh_profile["id"],
+        )
+        response = client.post(
+            "/api/cluster-builds",
+            json=payload,
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 403
+        assert "access denied" in response.get_json()["error"].lower()
+        assert source_cluster["calls"] == []
+
+    def test_access_is_revalidated_before_background_export(
+        self, client, admin_token, ssh_profile, fake_ssh, app,
+        source_cluster, monkeypatch
+    ):
+        fake = build_default_fake({
+            "10.0.0.11": ("cp-1", "control_plane"),
+            "10.0.0.21": ("w-1", "worker"),
+        })
+        set_transport_factory(lambda: fake)
+        original = wl.authorize_selection
+        calls = {"count": 0}
+
+        def revoke_before_export(selected, user):
+            calls["count"] += 1
+            if calls["count"] >= 4:
+                raise PermissionError("Source access was revoked.")
+            return original(selected, user)
+
+        monkeypatch.setattr(wl, "authorize_selection", revoke_before_export)
+        build = create_build(
+            client, admin_token, ssh_profile,
+            make_build_payload(nodes=SINGLE_CP_NODES, workloads=selection()),
+        )
+        preflight_response = client.post(
+            f"/api/cluster-builds/{build['id']}/preflight",
+            headers=auth_headers(admin_token),
+        )
+        assert preflight_response.status_code == 200
+        reads_before_start = len(source_cluster["calls"])
+
+        start_response = client.post(
+            f"/api/cluster-builds/{build['id']}/start",
+            json={"ackWarnings": ["ack"]},
+            headers=auth_headers(admin_token),
+        )
+        assert start_response.status_code == 200
+        data = client.get(
+            f"/api/cluster-builds/{build['id']}",
+            headers=auth_headers(admin_token),
+        ).get_json()["data"]
+        assert data["status"] == "failed"
+        assert "access was revoked" in data["error"].lower()
+        assert len(source_cluster["calls"]) == reads_before_start
+        assert db.session.get(ClusterBuild, build["id"]).execution_user_id is not None
+
+
 # ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------

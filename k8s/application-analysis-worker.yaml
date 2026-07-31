@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubesight-analysis
+  labels:
+    kubesight.io/purpose: untrusted-source-analysis
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesight-analysis-worker
+  namespace: kubesight-analysis
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: analysis-quota
+  namespace: kubesight-analysis
+spec:
+  hard:
+    count/jobs.batch: "20"
+    count/secrets: "30"
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.cpu: "16"
+    limits.memory: 32Gi
+    requests.ephemeral-storage: 20Gi
+    limits.ephemeral-storage: 40Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: analysis-defaults
+  namespace: kubesight-analysis
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+        ephemeral-storage: 256Mi
+      default:
+        cpu: "2"
+        memory: 4Gi
+        ephemeral-storage: 2Gi
+---
+# Bind this Role to the KubeSight backend ServiceAccount in the backend's
+# deployment namespace. The launcher may create/delete analysis Jobs and their
+# short-lived Secrets/NetworkPolicies; it cannot read application workloads.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesight-analysis-launcher
+  namespace: kubesight-analysis
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "delete", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "delete", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubesight-analysis-launcher
+  namespace: kubesight-analysis
+subjects:
+  - kind: ServiceAccount
+    name: kubesight-backend
+    namespace: kubesight
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubesight-analysis-launcher

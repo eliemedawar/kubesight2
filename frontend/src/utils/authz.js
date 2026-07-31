@@ -108,6 +108,12 @@ export const NAV_PAGES = [
     section: "Services",
   },
   {
+    key: "applicationIntelligence",
+    label: "Application Intelligence",
+    permission: "applications:view",
+    section: "Services",
+  },
+  {
     key: "components",
     label: "Components",
     permission: "components:view",

@@ -34,7 +34,9 @@ import {
   getClusterBuild,
   getClusterBuildKubeconfig,
   getClusterBuildLogs,
+  preflightClusterBuild,
   retryClusterBuild,
+  startClusterBuild,
 } from "../../api/clusterBuildsApi.js";
 
 const DETAIL_POLL_INTERVAL_MS = 2500;
@@ -310,6 +312,7 @@ export default function BuildDetail({
   notify,
   onBack,
   onDeleted,
+  onEdit = null,
   addonCatalog = [],
   buildProfiles = [],
 }) {
@@ -320,7 +323,6 @@ export default function BuildDetail({
   // The step being viewed: {id, nodeId, phase}.
   const [logStep, setLogStep] = useState(null);
   const [busy, setBusy] = useState(false);
-  const timer = useRef(null);
   // While the build runs, the log panel tracks the first running step until
   // someone chooses a lane. A manual click pins that exact step, which matters
   // in parallel phases where the generic follower would otherwise jump back.
@@ -342,20 +344,15 @@ export default function BuildDetail({
     }
   }, [buildId, notify]);
 
-  useEffect(() => {
-    let stopped = false;
-    const tick = async () => {
-      const data = await load();
-      if (stopped) return;
-      if (data && (data.status === "building" || data.status === "preflighting")) {
-        timer.current = setTimeout(tick, DETAIL_POLL_INTERVAL_MS);
-      }
-    };
-    tick();
-    return () => { stopped = true; clearTimeout(timer.current); };
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
   const isRunning = build?.status === "building" || build?.status === "preflighting";
+
+  useEffect(() => {
+    if (!isRunning) return undefined;
+    const id = setInterval(load, DETAIL_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [isRunning, load]);
 
   useEffect(() => {
     if (!isRunning) return undefined;
@@ -477,6 +474,31 @@ export default function BuildDetail({
     }
   };
 
+  const warningCount = (build.nodes || []).reduce(
+    (count, node) => count + (node.preflight?.checks || [])
+      .filter((check) => check.status === "warn").length,
+    0
+  );
+
+  const startReviewedBuild = () => {
+    if (
+      warningCount
+      && !window.confirm(
+        `Preflight has ${warningCount} warning${warningCount === 1 ? "" : "s"}. `
+        + "Acknowledge them and start this build?"
+      )
+    ) return;
+    act(() => startClusterBuild(
+      build.id,
+      warningCount ? { ackWarnings: ["Acknowledged from build review"] } : {}
+    ));
+  };
+
+  const deleteDraft = () => {
+    if (!window.confirm(`Delete build "${build.name}"? This cannot be undone.`)) return;
+    act(() => deleteClusterBuild(build.id), onDeleted);
+  };
+
   return (
     <div className="sg-cb-detail">
       <div className="sg-cb-detail-head">
@@ -508,12 +530,42 @@ export default function BuildDetail({
               Cancel build
             </button>
           ) : null}
-          {build.status !== "building" ? (
+          {canCreate && onEdit && ["draft", "preflight_failed", "preflight_passed"].includes(build.status) ? (
+            <button
+              className="btn-outline"
+              type="button"
+              disabled={busy}
+              onClick={() => onEdit(build)}
+            >
+              Edit draft
+            </button>
+          ) : null}
+          {canExecute && ["draft", "preflight_failed"].includes(build.status) ? (
+            <button
+              className="primary"
+              type="button"
+              disabled={busy}
+              onClick={() => act(() => preflightClusterBuild(build.id))}
+            >
+              Run preflight
+            </button>
+          ) : null}
+          {canExecute && build.status === "preflight_passed" ? (
+            <button
+              className="primary"
+              type="button"
+              disabled={busy}
+              onClick={startReviewedBuild}
+            >
+              Start build
+            </button>
+          ) : null}
+          {canCreate && !["building", "preflighting", "completed"].includes(build.status) ? (
             <button
               className="btn-danger"
               type="button"
               disabled={busy}
-              onClick={() => act(() => deleteClusterBuild(build.id), onDeleted)}
+              onClick={deleteDraft}
             >
               Delete
             </button>

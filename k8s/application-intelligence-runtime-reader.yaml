@@ -1,0 +1,22 @@
+# Optional role for an in-cluster KubeSight connection.
+#
+# Deliberately no binding is included: bind this role to the KubeSight backend
+# service account separately in each namespace that Application Intelligence is
+# allowed to observe. Never bind it cluster-wide unless that scope is intended.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesight-application-runtime-reader
+  labels:
+    app.kubernetes.io/name: kubesight
+    app.kubernetes.io/component: application-intelligence
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list"]

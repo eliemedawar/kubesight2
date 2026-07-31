@@ -5,7 +5,7 @@
  *  Sources (everything a build consumes).
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PageTitle from "../components/common/PageTitle.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import BuildDetail from "../components/clusterBuilder/BuildDetail.jsx";
@@ -28,7 +28,9 @@ const EMPTY_INFRA = { vsphere: [], credentials: [], profiles: [], buildProfiles:
 export default function ClusterBuilderPage({
   canCreate = false,
   canExecute = false,
-  canManageInfra = false,
+  canManageVSphere = false,
+  canManageSSH = false,
+  canManageBuildProfiles = false,
   canDownloadKubeconfig = false,
   onOpenCluster = null,
 }) {
@@ -39,7 +41,9 @@ export default function ClusterBuilderPage({
   const [notice, setNotice] = useState("");
   const [options, setOptions] = useState(null);
   const [selectedBuildId, setSelectedBuildId] = useState(null);
+  const [editingBuild, setEditingBuild] = useState(null);
   const [infra, setInfra] = useState(EMPTY_INFRA);
+  const previousStatuses = useRef(null);
   // Ticks so elapsed clocks advance between polls.
   const [now, setNow] = useState(() => Date.now());
 
@@ -51,7 +55,23 @@ export default function ClusterBuilderPage({
   const reloadBuilds = useCallback(async () => {
     try {
       const data = await listClusterBuilds();
-      setBuilds(data.items || []);
+      const items = data.items || [];
+      if (previousStatuses.current) {
+        const newlyFailed = items.filter(
+          (build) => build.status === "failed"
+            && ["building", "preflighting"].includes(
+              previousStatuses.current.get(build.id)
+            )
+        );
+        if (newlyFailed.length) {
+          const names = newlyFailed.map((build) => build.name).join(", ");
+          setError(`Cluster build failed: ${names}. Open the build to see the failed phase and retry.`);
+        }
+      }
+      previousStatuses.current = new Map(
+        items.map((build) => [build.id, build.status])
+      );
+      setBuilds(items);
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -59,26 +79,38 @@ export default function ClusterBuilderPage({
     }
   }, []);
 
-  const reloadInfra = useCallback(async () => {
+  const reloadInfra = useCallback(async (fallback = null) => {
     const [vsphere, credentials, profiles, buildProfiles] = await Promise.all([
-      canManageInfra ? listVSphereConnections().catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
-      canManageInfra ? listSshCredentials().catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
-      canManageInfra ? listSshProfiles().catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
-      listBuildProfiles().catch(() => ({ items: [] })),
+      canManageVSphere
+        ? listVSphereConnections().catch(() => ({ items: fallback?.vsphere }))
+        : Promise.resolve({ items: fallback?.vsphere }),
+      canManageSSH
+        ? listSshCredentials().catch(() => ({ items: [] }))
+        : Promise.resolve({ items: [] }),
+      canManageSSH
+        ? listSshProfiles().catch(() => ({ items: fallback?.profiles }))
+        : Promise.resolve({ items: fallback?.profiles }),
+      listBuildProfiles().catch(() => ({ items: fallback?.buildProfiles })),
     ]);
-    setInfra({
-      vsphere: vsphere.items || [],
+    setInfra((previous) => ({
+      vsphere: vsphere.items ?? previous.vsphere,
       credentials: credentials.items || [],
-      profiles: profiles.items || [],
-      buildProfiles: buildProfiles.items || [],
-    });
-  }, [canManageInfra]);
+      profiles: profiles.items ?? previous.profiles,
+      buildProfiles: buildProfiles.items ?? previous.buildProfiles,
+    }));
+  }, [canManageSSH, canManageVSphere]);
 
   useEffect(() => {
     reloadBuilds();
-    reloadInfra();
-    getBuilderOptions().then(setOptions).catch((err) => setError(err.message));
+    getBuilderOptions()
+      .then((data) => {
+        setOptions(data);
+        reloadInfra(data.sources || {});
+      })
+      .catch((err) => setError(err.message));
   }, [reloadBuilds, reloadInfra]);
+
+  const canManageInfra = canManageVSphere || canManageSSH || canManageBuildProfiles;
 
   const active = builds.some(
     (build) => build.status === "building" || build.status === "preflighting"
@@ -110,7 +142,11 @@ export default function ClusterBuilderPage({
     ...(canManageInfra ? [{ id: "sources", label: "Sources" }] : []),
   ];
 
-  const openBuild = (id) => { setTab("floor"); setSelectedBuildId(id); };
+  const openBuild = (id) => {
+    setEditingBuild(null);
+    setTab("floor");
+    setSelectedBuildId(id);
+  };
 
   return (
     <div className="sg-cb-page">
@@ -144,6 +180,11 @@ export default function ClusterBuilderPage({
           notify={notify}
           onBack={() => { setSelectedBuildId(null); reloadBuilds(); }}
           onDeleted={() => { setSelectedBuildId(null); reloadBuilds(); }}
+          onEdit={(build) => {
+            setEditingBuild(build);
+            setSelectedBuildId(null);
+            setTab("new");
+          }}
           addonCatalog={options?.addons || []}
           buildProfiles={infra.buildProfiles}
         />
@@ -168,8 +209,18 @@ export default function ClusterBuilderPage({
         <Wizard
           options={options}
           infra={infra}
+          canExecute={canExecute}
+          initialBuild={editingBuild}
           notify={notify}
-          onCancel={() => setTab("floor")}
+          onCancel={() => {
+            setEditingBuild(null);
+            setTab("floor");
+          }}
+          onBuildSaved={(id) => {
+            setEditingBuild(null);
+            reloadBuilds();
+            openBuild(id);
+          }}
           onBuildLaunched={(id) => { reloadBuilds(); openBuild(id); }}
         />
       ) : null}
@@ -180,6 +231,9 @@ export default function ClusterBuilderPage({
           reloadInfra={reloadInfra}
           notify={notify}
           addonCatalog={options?.addons || []}
+          canManageVSphere={canManageVSphere}
+          canManageSSH={canManageSSH}
+          canManageBuildProfiles={canManageBuildProfiles}
         />
       ) : null}
     </div>
