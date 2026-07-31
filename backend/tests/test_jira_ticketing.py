@@ -586,6 +586,29 @@ def test_jira_field_details_load_options_only_when_requested(jira, monkeypatch):
     assert result["isPicklist"] is True
 
 
+def test_a_fields_type_is_shown_as_a_short_label_not_a_plugin_key(jira, monkeypatch):
+    """Jira types are plugin keys ~55 unbreakable characters long. Rendered raw in
+    the editor's type chip they told the operator nothing and collapsed the card's
+    name column, so the chip gets the editor's own word and keeps the key for the
+    tooltip."""
+    field = {"id": TAG_KEY, "name": "Release tag", "custom": True, "type": jira_client.SELECT_TYPE}
+    monkeypatch.setattr(jira_client, "field_on_screen", lambda _cfg, _id: field)
+    monkeypatch.setattr(jira_client, "get_options", lambda _cfg, _id: [])
+
+    result = fields.get_field(TAG_KEY)
+
+    assert result["type"] == "Select"
+    assert result["typeKey"] == jira_client.SELECT_TYPE
+
+    # A type the create-form doesn't offer keeps its last segment; a system
+    # field's schema type has no separator and passes through; empty stays empty.
+    assert fields._type_label("com.atlassian.jira.plugin.system.customfieldtypes:multiselect") == (
+        "multiselect"
+    )
+    assert fields._type_label("string") == "string"
+    assert fields._type_label(None) == ""
+
+
 def test_jira_layout_routes_create_tabs_and_distinguish_remove_from_trash(
     app, client, admin_token, monkeypatch
 ):

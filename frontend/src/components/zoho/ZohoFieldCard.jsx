@@ -47,7 +47,14 @@ export default function ZohoFieldCard({
           <span className="sg-zh-fapi">{field.apiName}</span>
         </div>
         <div className="sg-zh-fbadges">
-          <span className="sg-tag">{field.type}</span>
+          {/* An empty type (the field catalogue had no schema for it) would
+              otherwise render as a blank pill. `title` keeps the provider's own
+              name for the type — Jira's is a long plugin key the chip shortens. */}
+          {field.type ? (
+            <span className="sg-tag" title={field.typeKey || field.type}>
+              {field.type}
+            </span>
+          ) : null}
           {field.autoManaged ? (
             <span
               className="status-pill ok"

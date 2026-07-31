@@ -42,6 +42,25 @@ CREATABLE_TYPES = {
 # Which Jira type strings count as a single-value dropdown for option editing.
 _OPTION_TYPES = {SELECT_TYPE, CASCADING_TYPE}
 
+# Jira names a custom field's type with a plugin key
+# ("com.atlassian.jira.plugin.system.customfieldtypes:select"). Rendered raw in
+# the editor's type chip that is both meaningless to an operator and ~55
+# unbreakable characters wide. Prefer the editor's own vocabulary — the same words
+# the create-field form offers — and fall back to the key's last segment.
+_TYPE_LABELS = {jira_type: label for label, jira_type in CREATABLE_TYPES.items()}
+
+
+def _type_label(raw: Any) -> str:
+    """A short, human type name for one field. ``""`` stays empty."""
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    if value in _TYPE_LABELS:
+        return _TYPE_LABELS[value]
+    # "…customfieldtypes:multiselect" -> "multiselect". A system field's schema
+    # type ("string", "user", "array") has no separator and passes through.
+    return value.rsplit(":", 1)[-1].rsplit(".", 1)[-1] or value
+
 
 def _config_and_cfg():
     row = get_or_create_config()
@@ -100,7 +119,10 @@ def _field_dict(
         # A Jira custom field's id IS its webhook key, so they are the same thing.
         "apiName": fid,
         "label": field.get("name") or fid,
-        "type": field.get("type") or "",
+        # Short label for display; the plugin key stays available for the tooltip
+        # and for anyone who needs to match Jira's own vocabulary.
+        "type": _type_label(field.get("type")),
+        "typeKey": str(field.get("type") or ""),
         # Jira's per-tab field rows do not carry "required" — that lives on the
         # issue-type field configuration, a different object this editor does not
         # own. Reported as False rather than guessed at.

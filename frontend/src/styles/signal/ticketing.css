@@ -910,7 +910,7 @@
   align-items: flex-start;
   gap: 0.6rem;
 }
-.sg-zh-fname { min-width: 0; }
+.sg-zh-fname { min-width: 0; flex: 1 1 auto; }
 .sg-zh-fname b {
   display: block;
   font-size: 0.8125rem;
@@ -933,7 +933,21 @@
   flex-direction: column;
   align-items: flex-end;
   gap: 0.3rem;
-  flex: none;
+  /* Shrinkable, and never more than half the header. `flex: none` + the
+     `white-space: nowrap` on .sg-tag meant one long unbreakable badge (a Jira
+     plugin type key, a binding's source label) held this column at its full
+     content width and squeezed the field name to one character per line. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+}
+/* inline-block, not the tag's own inline-flex: text-overflow only applies to a
+   block container, so an over-long badge ellipsises instead of overflowing. */
+.sg-zh-fbadges > .sg-tag {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sg-zh-fvals { margin-top: 0.65rem; }
