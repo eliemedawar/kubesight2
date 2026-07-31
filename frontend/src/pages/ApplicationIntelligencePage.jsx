@@ -1200,8 +1200,27 @@ function toRuntimeGraph(topology) {
   return { nodes, edges };
 }
 
+/**
+ * Why a wire fact is absent matters as much as the fact itself. An address
+ * supplied by a property at deploy time is a different situation from one that
+ * was never found, so name the property when we know it.
+ */
+function AbsentValue({ configurationKey }) {
+  if (configurationKey) {
+    // The property name is already spelled out in the endpoint column, so keep
+    // the cell scannable and put the full key in the tooltip.
+    return (
+      <span className="ai-externalized" title={`Supplied at runtime by ${configurationKey}`}>
+        externalized
+      </span>
+    );
+  }
+  return <span className="muted">not stated</span>;
+}
+
 function CommunicationsTable({ edges, onSelect, selectedId }) {
-  const missingPorts = edges.filter((edge) => !edge.port).length;
+  const missingPorts = edges.filter((edge) => !edge.port);
+  const externalized = missingPorts.filter((edge) => edge.configurationKey).length;
   return (
     <>
       <div className="ai-table-wrap">
@@ -1222,22 +1241,32 @@ function CommunicationsTable({ edges, onSelect, selectedId }) {
               >
                 <td><strong>{edge.destination}</strong></td>
                 <td>{edge.destinationType || "—"}</td>
-                <td>{edge.protocol ? edge.protocol.toUpperCase() : <span className="muted">not stated</span>}</td>
-                <td>{edge.port ? <code>{edge.port}</code> : <span className="muted">not stated</span>}</td>
-                <td>{edge.direction || "Outbound"}</td>
-                <td className="ai-cell-path">
-                  {edge.endpoint ? <code>{edge.endpoint}</code> : edge.configurationKey ? <code>{edge.configurationKey}</code> : "—"}
+                <td>
+                  {edge.protocol
+                    ? edge.protocol.toUpperCase()
+                    : <AbsentValue configurationKey={edge.configurationKey} />}
                 </td>
+                <td>
+                  {edge.port
+                    ? <code>{edge.port}</code>
+                    : <AbsentValue configurationKey={edge.configurationKey} />}
+                </td>
+                <td>{edge.direction || "Outbound"}</td>
+                <td className="ai-cell-path">{edge.endpoint ? <code>{edge.endpoint}</code> : "—"}</td>
                 <td>{edge.confidence}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {missingPorts ? (
+      {missingPorts.length ? (
         <p className="ai-trust-note">
-          {missingPorts} of {edges.length} dependencies record no port. Ports appear only where a literal
-          value was found in source — a protocol's default port is never assumed.
+          {missingPorts.length} of {edges.length} dependencies record no port.
+          {externalized
+            ? ` ${externalized} resolve their address from a property at deploy time — the value lives in the config server or environment, not the repository.`
+            : ""}
+          {" "}Ports appear only where a literal value was found in the repository; a protocol's default
+          port is never assumed.
         </p>
       ) : null}
     </>
@@ -1275,6 +1304,11 @@ function Architecture({ summary, topology, runtime }) {
                   edges={sourceGraph.edges}
                   fillWidth
                   zoomable
+                  // One service fanning out to N dependencies: a column per
+                  // rank keeps every edge in the gutter. The default vertical
+                  // layout wraps past five peers, dropping the sixth under a
+                  // sibling and routing its edge through the row above.
+                  layoutDirection="horizontal"
                   onNodeClick={selectByNode}
                   nodeClickable={(node) => node.kind !== "application"}
                   emptyMessage="No communications were inferred from source."
@@ -1288,8 +1322,20 @@ function Architecture({ summary, topology, runtime }) {
                     <p>{selected.evidence || "No source snippet was stored for this edge."}</p>
                     <dl className="ai-detail-grid ai-detail-grid--compact">
                       <div><dt>Type</dt><dd>{selected.destinationType || "Unknown"}</dd></div>
-                      <div><dt>Protocol</dt><dd>{selected.protocol || "Not stated in source"}</dd></div>
-                      <div><dt>Port</dt><dd>{selected.port || "Not stated in source"}</dd></div>
+                      <div>
+                        <dt>Protocol</dt>
+                        <dd>{selected.protocol || <AbsentValue configurationKey={selected.configurationKey} />}</dd>
+                      </div>
+                      <div>
+                        <dt>Port</dt>
+                        <dd>{selected.port || <AbsentValue configurationKey={selected.configurationKey} />}</dd>
+                      </div>
+                      {selected.configurationKey ? (
+                        <div>
+                          <dt>Address from</dt>
+                          <dd><code>{selected.configurationKey}</code></dd>
+                        </div>
+                      ) : null}
                       <div><dt>Confidence</dt><dd>{selected.confidence}</dd></div>
                       <div><dt>Evidence state</dt><dd>{selected.evidenceState}</dd></div>
                       <div><dt>Required</dt><dd>{selected.required ? "Yes" : "No"}</dd></div>
@@ -1318,6 +1364,7 @@ function Architecture({ summary, topology, runtime }) {
               edges={runtimeGraph.edges}
               fillWidth
               zoomable
+              layoutDirection="horizontal"
               emptyMessage="The runtime snapshot recorded no topology."
             />
           </div>

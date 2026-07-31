@@ -721,6 +721,52 @@ class TestPreflight:
         assert disk and all(c["status"] == "fail" for c in disk)
         assert "does not exist" in disk[0]["detail"]
 
+    def test_crictl_already_installed_passes(
+        self, client, admin_token, ssh_profile, fake_ssh
+    ):
+        fake_ssh.add(lambda h, s: "preflight probe" in s,
+                     probe_output("cp-1", "cccc") + "\nKS_CRICTL=present")
+        build = create_build(client, admin_token, ssh_profile,
+                             make_build_payload(nodes=SINGLE_CP_NODES))
+        response = client.post(
+            f"/api/cluster-builds/{build['id']}/preflight",
+            headers=auth_headers(admin_token),
+        )
+        data = response.get_json()["data"]
+        cri = [c for n in data["nodes"] for c in n["checks"] if c["id"] == "cri_tools"]
+        assert cri and all(c["status"] == "pass" for c in cri)
+
+    def test_missing_crictl_and_cri_tools_fails(
+        self, client, admin_token, ssh_profile, fake_ssh
+    ):
+        """crictl absent and unobtainable blocks the build at preflight rather
+        than at the image pre-pull phase, where it reads as 'command not found'."""
+        fake_ssh.add(lambda h, s: "preflight probe" in s,
+                     probe_output("cp-1", "dddd") + "\nKS_PKG_CRI_TOOLS=missing")
+        build = create_build(client, admin_token, ssh_profile,
+                             make_build_payload(nodes=SINGLE_CP_NODES))
+        response = client.post(
+            f"/api/cluster-builds/{build['id']}/preflight",
+            headers=auth_headers(admin_token),
+        )
+        data = response.get_json()["data"]
+        assert data["status"] == "fail"
+        cri = [c for n in data["nodes"] for c in n["checks"] if c["id"] == "cri_tools"]
+        assert cri and all(c["status"] == "fail" for c in cri)
+        assert "cri-tools" in cri[0]["hint"]
+
+    def test_probe_reports_crictl_and_cri_tools(
+        self, client, admin_token, ssh_profile, fake_ssh
+    ):
+        fake_ssh.add(lambda h, s: "preflight probe" in s, probe_output("cp-1", "eeee"))
+        build = create_build(client, admin_token, ssh_profile,
+                             make_build_payload(nodes=SINGLE_CP_NODES))
+        client.post(f"/api/cluster-builds/{build['id']}/preflight",
+                    headers=auth_headers(admin_token))
+        script = next(s for _, s in fake_ssh.calls if "preflight probe" in s)
+        assert "command -v crictl" in script
+        assert "'^Package: cri-tools'" in script
+
     def test_disk_check_path_defaults_to_var(self, client, admin_token, ssh_profile):
         build = create_build(client, admin_token, ssh_profile,
                              make_build_payload(nodes=SINGLE_CP_NODES))

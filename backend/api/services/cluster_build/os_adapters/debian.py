@@ -70,6 +70,13 @@ apt-mark unhold kubelet kubeadm kubectl 2>/dev/null || true
 _apt update -qq
 _apt install -y -qq kubelet="${{K8S_VER}}-*" kubeadm="${{K8S_VER}}-*" kubectl="${{K8S_VER}}-*"
 apt-mark hold kubelet kubeadm kubectl
+# crictl is installed explicitly rather than inherited: it is a kubeadm package
+# dependency on some minors and not on others, and the image pre-pull phase
+# drives it directly for every CNI and add-on image. Its version floats — only
+# the Kubernetes packages are pinned. The distro's own cri-tools is an accepted
+# fallback when the Kubernetes repo does not publish one.
+_apt install -y -qq cri-tools || _apt install -y -qq crictl
+command -v crictl
 systemctl enable kubelet
 kubeadm version -o short
 """

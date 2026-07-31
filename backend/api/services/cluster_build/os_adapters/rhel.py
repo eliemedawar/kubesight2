@@ -75,6 +75,13 @@ setenforce 0 2>/dev/null || true
 sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
 dnf install -y "kubelet-${{K8S_VER}}" "kubeadm-${{K8S_VER}}" "kubectl-${{K8S_VER}}" \\
   --disableexcludes=kubesight-kubernetes
+# crictl is installed explicitly rather than inherited: it is a kubeadm package
+# dependency on some minors and not on others, and the image pre-pull phase
+# drives it directly for every CNI and add-on image. Its version floats — only
+# the Kubernetes packages are pinned, and cri-tools is in this repo's exclude
+# list, so the install must opt out of it by name.
+dnf install -y cri-tools --disableexcludes=kubesight-kubernetes
+command -v crictl
 systemctl enable kubelet
 kubeadm version -o short
 """

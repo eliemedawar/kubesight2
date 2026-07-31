@@ -70,6 +70,8 @@
 .ai-sev--medium { color: var(--warn); background: var(--warn-soft); border-color: var(--warn-border); }
 .ai-sev--low { color: var(--info); background: var(--info-soft); border-color: var(--info-border); }
 .ai-sev--informational { color: var(--text-muted); background: var(--bg-inset); border-color: var(--border); }
+.ai-externalized { color: var(--info); font-size: var(--font-size-xs); }
+.ai-externalized code { font-size: inherit; }
 .ai-delta--worse { color: var(--danger); font-weight: 700; }
 .ai-delta--better { color: var(--ok); font-weight: 700; }
 

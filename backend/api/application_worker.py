@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -78,7 +79,37 @@ def _post(kind: str, payload: dict) -> None:
         pass
 
 
-def _selected_file_evidence(root: Path, discovery: dict) -> list[dict]:
+# Path signals that make a source file worth spending the evidence budget on.
+# Hermes only ever sees a slice of a real repository, so the slice must be the
+# part that carries architecture, integration, and security meaning rather than
+# whichever files happen to sort first.
+SOURCE_RELEVANCE_RANK = (
+    (re.compile(r"(application|main|program|startup|bootstrap)\.[a-z]+$", re.I), 0),
+    (re.compile(r"(config|configuration|properties)", re.I), 1),
+    (re.compile(r"(security|auth|oauth|jwt|credential)", re.I), 1),
+    (re.compile(r"(client|apiclient|feign|gateway|producer|consumer|listener)", re.I), 2),
+    (re.compile(r"(controller|resource|handler|route|endpoint)", re.I), 3),
+    (re.compile(r"(service|usecase|manager)", re.I), 4),
+    (re.compile(r"(repository|dao|entity|model|dto|domain)", re.I), 6),
+    (re.compile(r"(test|spec|mock|fixture)", re.I), 9),
+)
+
+
+def _source_rank(relative: str) -> int:
+    name = relative.rsplit("/", 1)[-1]
+    for pattern, rank in SOURCE_RELEVANCE_RANK:
+        if pattern.search(name):
+            return rank
+    return 5
+
+
+def _selected_file_evidence(root: Path, discovery: dict) -> tuple[list[dict], dict]:
+    """Choose the file slice sent to Hermes, and report how much it covers.
+
+    Returns the selection plus a coverage summary. A model reading 120 of 900
+    files cannot see what it was not given, so the size of that gap is part of
+    the result rather than a silent implementation detail.
+    """
     mode = os.getenv("ANALYSIS_MODE", "Quick")
     default_file_limit = "40" if mode == "Quick" else "120"
     max_files = int(
@@ -90,16 +121,35 @@ def _selected_file_evidence(root: Path, discovery: dict) -> list[dict]:
     )
     total_bytes = 0
     selected = []
+    truncated = 0
+    # Configuration files carry the connection evidence (broker addresses,
+    # datasource URLs, ports). They sort after source directories, so without an
+    # explicit priority they lose the file budget to source files and the model
+    # is left reporting "not stated" for values the repository does contain.
     priority = set(
-        discovery.get("dependency_manifests", [])
+        discovery.get("configuration_files", [])
+        + discovery.get("dependency_manifests", [])
         + discovery.get("dockerfiles", [])
+        + discovery.get("compose_files", [])
         + discovery.get("kubernetes_manifests", [])
         + discovery.get("api_specs", [])
         + discovery.get("ci_files", [])
     )
+    eligible = [
+        item
+        for item in discovery.get("file_tree", [])
+        if (
+            Path(item.get("path", "")).name in RELEVANT_NAMES
+            or Path(item.get("path", "")).suffix.lower() in RELEVANT_SUFFIXES
+        )
+    ]
     candidates = sorted(
-        discovery.get("file_tree", []),
-        key=lambda item: (item.get("path") not in priority, item.get("path", "")),
+        eligible,
+        key=lambda item: (
+            item.get("path") not in priority,
+            _source_rank(item.get("path", "")),
+            item.get("path", ""),
+        ),
     )
     for item in candidates:
         relative = item.get("path", "")
@@ -107,8 +157,6 @@ def _selected_file_evidence(root: Path, discovery: dict) -> list[dict]:
         if len(selected) >= max_files:
             break
         if item.get("size", 0) > max_file_bytes:
-            continue
-        if path.name not in RELEVANT_NAMES and path.suffix.lower() not in RELEVANT_SUFFIXES:
             continue
         try:
             raw = path.read_bytes()
@@ -119,9 +167,20 @@ def _selected_file_evidence(root: Path, discovery: dict) -> list[dict]:
             continue
         if total_bytes + len(raw) > max_total_bytes:
             continue
+        if len(content) > max_file_bytes:
+            truncated += 1
         selected.append({"path": relative, "content": redact_text(content, max_chars=max_file_bytes)})
         total_bytes += len(raw)
-    return selected
+    coverage = {
+        "selectedFiles": len(selected),
+        "eligibleFiles": len(eligible),
+        "repositoryFiles": len(discovery.get("file_tree", [])),
+        "truncatedFiles": truncated,
+        "fileLimit": max_files,
+        "bytesSent": total_bytes,
+        "analysisMode": mode,
+    }
+    return selected, coverage
 
 
 def _build_verification() -> tuple[dict | None, str | None]:
@@ -243,7 +302,7 @@ def main() -> int:
                 )
             },
             "discovery": discovery,
-            "selected_files": _selected_file_evidence(root, discovery),
+            "selected_files": selected_files,
             "scanner_findings": normalized_findings,
             "scanner_runs": scanner_runs,
         }
@@ -272,6 +331,62 @@ def main() -> int:
             elif item.get("direction"):
                 # Direction is decided by a file-level marker, not by the model.
                 existing["direction"] = item["direction"]
+
+        # Deterministic connections outrank the model on wire facts: they are
+        # read straight from configuration. Backfill protocol/port/endpoint onto
+        # a dependency the model already named, and add the ones it missed.
+        result.setdefault("communications", [])
+        # Keep one consistent name for the analyzed service within a run. The
+        # trusted side resolves whatever this is onto the application node.
+        application_name = next(
+            (
+                str(entry["source"]).strip()
+                for entry in result["communications"]
+                if isinstance(entry, dict) and str(entry.get("source") or "").strip()
+            ),
+            "this service",
+        )
+        for item in discovery.get("connections") or []:
+            destination = str(item.get("destination") or "").strip()
+            if not destination:
+                continue
+            existing = next(
+                (
+                    entry
+                    for entry in result["communications"]
+                    if isinstance(entry, dict)
+                    and destination.lower() in str(entry.get("destination") or "").lower()
+                ),
+                None,
+            )
+            if existing is None:
+                result["communications"].append(
+                    {
+                        "source": application_name,
+                        "destination": destination,
+                        "destination_type": item.get("destination_type") or "External service",
+                        "protocol": item.get("protocol"),
+                        "port": item.get("port"),
+                        "endpoint": item.get("endpoint"),
+                        "configuration_key": item.get("configuration_key"),
+                        "direction": "Outbound",
+                        "required": True,
+                        "confidence": "Confirmed",
+                        "evidence_state": "Configuration Declared",
+                        "evidence": item.get("evidence"),
+                        "file": item.get("file"),
+                        "line": item.get("line"),
+                    }
+                )
+                continue
+            for field in ("protocol", "port", "endpoint", "configuration_key"):
+                if item.get(field) and not existing.get(field):
+                    existing[field] = item[field]
+            if item.get("evidence") and not existing.get("evidence"):
+                existing["evidence"] = item["evidence"]
+            # Configuration is stronger evidence than source inference.
+            existing["confidence"] = "Confirmed"
+            existing["evidence_state"] = "Configuration Declared"
         if build_verification:
             result.setdefault("application_profile", {})[
                 "build_verification"

@@ -598,6 +598,18 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
                     "kubeadm config images pull "
                     f"--kubernetes-version v{build.k8s_version.lstrip('v')}{repo_flag}"
                 )
+            if images:
+                # Base prep installs cri-tools, but a build resumed from a
+                # node prepared by an older KubeSight can reach this phase
+                # without it. Say so, rather than leave the log holding a bare
+                # "crictl: command not found".
+                pull_commands.append(
+                    'command -v crictl >/dev/null 2>&1 || { '
+                    'echo "crictl is not installed on this node; the CNI and '
+                    'add-on images are pulled with it. Install the cri-tools '
+                    'package (base prep installs it on a fresh build) and '
+                    'retry."; exit 1; }'
+                )
             pull_commands.extend(
                 f"crictl pull {shlex.quote(image)}" for image in images
             )

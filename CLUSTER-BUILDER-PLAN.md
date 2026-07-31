@@ -367,10 +367,10 @@ restart resumes rather than restarts.
 | # | Phase | Target | Notes |
 |---|---|---|---|
 | 1 | `vsphere_preflight` | vCenter | power, Tools, sizing, guest OS, **anti-affinity**, snapshots |
-| 2 | `node_preflight` | all, parallel | OS detect, swap, modules, ports, unique hostname + `product_uuid`, sudo, clock skew, repo reachability, **etcd disk fsync latency on CPs** |
-| 3 | `base_prep` | all, parallel | proxy + CA, swap off (+`fstab`), `br_netfilter`/`overlay`, sysctl, containerd `SystemdCgroup=true`, kube packages pinned + held |
+| 2 | `node_preflight` | all, parallel | OS detect, swap, modules, ports, unique hostname + `product_uuid`, sudo, clock skew, repo reachability, free disk on the build's checked path (default `/var`), `crictl` present or `cri-tools` obtainable, **etcd disk fsync latency on CPs** |
+| 3 | `base_prep` | all, parallel | proxy + CA, swap off (+`fstab`), `br_netfilter`/`overlay`, sysctl, containerd `SystemdCgroup=true`, kube packages pinned + held, `cri-tools` for `crictl` (unpinned) |
 | 4 | `loadbalancer` | LB VMs | haproxy + keepalived, then **verify the VIP answers and fails over** |
-| 5 | `pull_images` | all | `kubeadm config images pull` — fails early and visibly on registry problems |
+| 5 | `pull_images` | all | `kubeadm config images pull` on CPs, `crictl pull` for CNI/add-on images — fails early and visibly on registry problems |
 | 6 | `init` | primary CP | `kubeadm init` from a rendered `ClusterConfiguration` file (not flags), `--upload-certs`; capture join command + cert key |
 | 7 | `cni` | primary CP | render bundled manifests with pod CIDR + registry overrides, apply, wait for readiness |
 | 8 | `join_cp` | CPs 2 and 3, **serial** | `kubeadm join --control-plane`; **wait for etcd quorum health between each** |

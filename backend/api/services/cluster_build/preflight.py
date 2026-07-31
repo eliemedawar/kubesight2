@@ -530,6 +530,7 @@ else
   echo "KS_DISK_PATH_MISSING=1"
 fi
 echo "KS_EPOCH=$(date +%s)"
+command -v crictl >/dev/null 2>&1 && echo "KS_CRICTL=present"
 for mod in overlay br_netfilter; do
   if modprobe -n $mod >/dev/null 2>&1 || grep -q "^$mod" /proc/modules; then
     echo "KS_MOD_$mod=ok"
@@ -584,18 +585,29 @@ if command -v curl >/dev/null 2>&1; then
     # the repository. Debian repos publish a flat Packages index readable
     # before the repo is configured on the node.
     if command -v apt-get >/dev/null 2>&1; then
-      if ks_curl -m 15 -sf {deb_packages_url} 2>/dev/null | grep -q '^Version: {version}-'; then
+      # Fetched once and read twice: the same index answers whether cri-tools
+      # (crictl) is published, which the image pre-pull phase depends on.
+      KS_PKG_INDEX=$(ks_curl -m 15 -sf {deb_packages_url} 2>/dev/null)
+      if echo "$KS_PKG_INDEX" | grep -q '^Version: {version}-'; then
         echo "KS_PKG_EXACT=ok"
       else
         echo "KS_PKG_EXACT=missing"
       fi
+      if echo "$KS_PKG_INDEX" | grep -q '^Package: cri-tools'; then
+        echo "KS_PKG_CRI_TOOLS=ok"
+      else
+        echo "KS_PKG_CRI_TOOLS=missing"
+      fi
+      KS_PKG_INDEX=""
     elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
       # RPM metadata is compressed and indexed; confirm this minor's repository
       # publishes metadata and let the pinned dnf install assert the patch.
       if ks_curl -m 15 -sf -o /dev/null {rpm_repomd_url} 2>/dev/null; then
         echo "KS_PKG_EXACT=repo_only"
+        echo "KS_PKG_CRI_TOOLS=repo_only"
       else
         echo "KS_PKG_EXACT=missing"
+        echo "KS_PKG_CRI_TOOLS=missing"
       fi
     fi
   fi
@@ -871,6 +883,39 @@ def _node_checks(
                 "by the configured package repository.",
                 "Pick a version the repository carries, or mirror this patch "
                 "release before building.",
+            ))
+
+    # The image pre-pull phase drives ``crictl pull`` for every CNI and add-on
+    # image, so a node that ends base prep without crictl fails phase 3 with a
+    # bare "command not found". Asked here, before anything is installed:
+    # already present, or obtainable as cri-tools. Load balancers pull nothing.
+    if node.role != "loadbalancer":
+        cri_tools_state = facts.get("KS_PKG_CRI_TOOLS")
+        if facts.get("KS_CRICTL") == "present":
+            checks.append(_check(
+                "cri_tools", "crictl available", "pass",
+                "Already installed on this node.",
+            ))
+        elif profile.repo_mode == "offline":
+            checks.append(_check(
+                "cri_tools", "crictl available", "warn",
+                "crictl is not installed yet; base prep installs cri-tools "
+                "from the offline bundle, which must therefore carry it.",
+            ))
+        elif cri_tools_state in ("ok", "repo_only"):
+            checks.append(_check(
+                "cri_tools", "crictl available", "pass",
+                "cri-tools is published by the configured repository; base "
+                "prep installs it.",
+            ))
+        elif cri_tools_state == "missing":
+            checks.append(_check(
+                "cri_tools", "crictl available", "fail",
+                "crictl is not installed and the configured repository does "
+                "not publish cri-tools.",
+                "Image pre-pull runs 'crictl pull' for every CNI and add-on "
+                "image. Mirror cri-tools alongside the Kubernetes packages, or "
+                "install crictl on every machine before building.",
             ))
 
     fsync = facts.get("KS_FSYNC_MS_PER_OP")
