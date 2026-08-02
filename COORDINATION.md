@@ -61,10 +61,6 @@ Where: inside `create_app`, immediately after `db.init_app(app)` and before CORS
 Add:
     from .production_guards import run_startup_guards
     run_startup_guards(app)
-Related A1-owned change: in `backend/api/seed.py:seed_defaults`, call `_seed_users`
-only when `default_user_seeding_enabled()` from `production_guards.py` is true.
-This preserves permission, role, access, and settings seeding while making
-`KUBESIGHT_SEED_DEFAULT_USERS=false` effective.
 Status: pending
 
 ---

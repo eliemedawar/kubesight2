@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING
 
 from .auth_utils import auth_required_enabled
 from .migrations import is_at_head
+from .models import User
+from .passwords import verify_password
+from .rbac_data import DEFAULT_USERS
 from .secret_encryption import secret_encryption_key_configured
 
 if TYPE_CHECKING:
@@ -14,7 +17,6 @@ if TYPE_CHECKING:
 
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 _INSECURE_SECRET_VALUES = frozenset(
     {
         "change-me",
@@ -55,22 +57,22 @@ def production_environment_enabled() -> bool:
     return _environment_value("KUBESIGHT_ENV").lower() == "production"
 
 
-def default_user_seeding_enabled() -> bool:
-    """Whether the built-in demo accounts may be created at startup.
-
-    This remains enabled by default for development compatibility. Production
-    startup requires the operator to disable it explicitly.
-    """
-    raw = _environment_value("KUBESIGHT_SEED_DEFAULT_USERS")
-    return raw.lower() not in _FALSE_VALUES
-
-
 def _cors_is_unsafe() -> bool:
     raw = _environment_value("CORS_ORIGINS")
     if not raw:
         return True
     origins = {item.strip().lower() for item in raw.split(",") if item.strip()}
     return not origins or "*" in origins or "null" in origins
+
+
+def _default_seeded_usernames() -> list[str]:
+    """Return built-in accounts that still accept their shipped password."""
+    unsafe: list[str] = []
+    for spec in DEFAULT_USERS:
+        user = User.query.filter_by(username=spec["username"]).first()
+        if user and verify_password(spec["password"], user.password_hash):
+            unsafe.append(spec["username"])
+    return unsafe
 
 
 def _collect_violations(app: Flask) -> list[str]:
@@ -88,9 +90,6 @@ def _collect_violations(app: Flask) -> list[str]:
 
     if not auth_required_enabled():
         violations.append("AUTH_REQUIRED must be enabled")
-
-    if default_user_seeding_enabled():
-        violations.append("KUBESIGHT_SEED_DEFAULT_USERS must be set to false")
 
     encryption_key = _environment_value("ALERT_ROUTING_SECRET_KEY")
     if (
@@ -116,13 +115,26 @@ def _collect_violations(app: Flask) -> list[str]:
             "K8S_REAL_MODE must be explicitly enabled so demo-mode fallback is off"
         )
 
+    migrations_at_head = False
+    default_seeded_users: list[str] | None = None
     try:
         with app.app_context():
             migrations_at_head = is_at_head()
+            if migrations_at_head:
+                default_seeded_users = _default_seeded_usernames()
     except Exception:
-        migrations_at_head = False
+        if migrations_at_head:
+            default_seeded_users = None
     if not migrations_at_head:
         violations.append("DATABASE_MIGRATIONS must be at the Alembic head revision")
+    elif default_seeded_users is None:
+        violations.append("DEFAULT_SEEDED_USERS could not be verified safely")
+    elif default_seeded_users:
+        usernames = ", ".join(default_seeded_users)
+        violations.append(
+            "DEFAULT_SEEDED_USERS must not retain shipped passwords "
+            f"(found: {usernames})"
+        )
 
     return violations
 

@@ -5,7 +5,7 @@ from flask import Flask
 
 from api.production_guards import (
     ProductionGuardError,
-    default_user_seeding_enabled,
+    _default_seeded_usernames,
     run_startup_guards,
 )
 from api.secret_encryption import (
@@ -20,7 +20,6 @@ SAFE_ENVIRONMENT = {
     "JWT_SECRET_KEY": "jwt-signing-key-that-is-at-least-32-characters",
     "FLASK_DEBUG": "false",
     "AUTH_REQUIRED": "true",
-    "KUBESIGHT_SEED_DEFAULT_USERS": "false",
     "ALERT_ROUTING_SECRET_KEY": "credential-key-that-is-at-least-32-characters",
     "CORS_ORIGINS": "https://kubesight.example.com",
     "K8S_REAL_MODE": "true",
@@ -32,6 +31,9 @@ def production_app(monkeypatch):
     for name, value in SAFE_ENVIRONMENT.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr("api.production_guards.is_at_head", lambda: True)
+    monkeypatch.setattr(
+        "api.production_guards._default_seeded_usernames", lambda: []
+    )
     app = Flask(__name__)
     app.config["DEBUG"] = False
     return app
@@ -52,7 +54,6 @@ def test_safe_production_configuration_passes(production_app):
         ("JWT_SECRET_KEY", "change-me-generate-with-openssl-rand-hex-32"),
         ("FLASK_DEBUG", "true"),
         ("AUTH_REQUIRED", "false"),
-        ("KUBESIGHT_SEED_DEFAULT_USERS", "true"),
         ("ALERT_ROUTING_SECRET_KEY", ""),
         ("ALERT_ROUTING_SECRET_KEY", "change-me-credential-encryption-key"),
         ("CORS_ORIGINS", "*"),
@@ -119,6 +120,47 @@ def test_database_migration_check_fails_closed(production_app, monkeypatch):
     assert "database details must not escape" not in message
 
 
+def test_default_seeded_credentials_are_rejected(production_app, monkeypatch):
+    monkeypatch.setattr(
+        "api.production_guards._default_seeded_usernames",
+        lambda: ["admin", "viewer"],
+    )
+
+    with pytest.raises(ProductionGuardError) as exc_info:
+        run_startup_guards(production_app)
+
+    message = str(exc_info.value)
+    assert "DEFAULT_SEEDED_USERS" in message
+    assert "admin, viewer" in message
+
+
+def test_default_seeded_credential_check_fails_closed(
+    production_app, monkeypatch
+):
+    def unavailable():
+        raise RuntimeError("user query details must not escape")
+
+    monkeypatch.setattr(
+        "api.production_guards._default_seeded_usernames", unavailable
+    )
+
+    with pytest.raises(ProductionGuardError) as exc_info:
+        run_startup_guards(production_app)
+
+    message = str(exc_info.value)
+    assert "DEFAULT_SEEDED_USERS" in message
+    assert "user query details must not escape" not in message
+
+
+def test_shipped_seeded_credentials_are_detected(app):
+    assert set(_default_seeded_usernames()) == {
+        "admin",
+        "viewer",
+        "operator",
+        "hermes-agent",
+    }
+
+
 def test_all_violations_are_reported_together(production_app, monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "change-me")
     monkeypatch.setenv("AUTH_REQUIRED", "off")
@@ -131,17 +173,6 @@ def test_all_violations_are_reported_together(production_app, monkeypatch):
     assert "JWT_SECRET_KEY" in message
     assert "AUTH_REQUIRED" in message
     assert "CORS_ORIGINS" in message
-
-
-@pytest.mark.parametrize("value", ["false", "0", "no", "off", "FALSE"])
-def test_default_user_seeding_can_be_disabled(monkeypatch, value):
-    monkeypatch.setenv("KUBESIGHT_SEED_DEFAULT_USERS", value)
-    assert default_user_seeding_enabled() is False
-
-
-def test_default_user_seeding_is_fail_safe(monkeypatch):
-    monkeypatch.delenv("KUBESIGHT_SEED_DEFAULT_USERS", raising=False)
-    assert default_user_seeding_enabled() is True
 
 
 def test_credential_encryption_does_not_fall_back_to_jwt(monkeypatch):
