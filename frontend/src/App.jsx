@@ -688,6 +688,11 @@ export default function App() {
   const activeClusterLabel =
     allowedClusters.find((cluster) => cluster.id === selectedClusterId)?.name || selectedClusterId || "";
 
+  // Resource lists belong to the route that shows them; ResourcesRoute owns the
+  // namespace cache now. The key stays so `scopedData` keeps its shape for the
+  // pages that spread it, but nothing in the shell can populate it.
+  const allowedResources = emptyNamespaceResources();
+
   const scopedData = {
     ...data,
     clusters: allowedClusters,
@@ -836,7 +841,6 @@ export default function App() {
             selectedClusterId={selectedClusterId}
             allowedClusters={allowedClusters}
             allowedNamespaces={allowedNamespaces}
-            allowedResources={allowedResources}
             selectedNamespace={selectedNamespace}
             canManageAlerts={hasPermission("alerts:manage")}
             hasClusters={hasClusters}

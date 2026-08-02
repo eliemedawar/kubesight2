@@ -59,6 +59,11 @@
   gap: 0.6rem;
   width: 100%;
   text-align: left;
+  /* This became an <a> when cards gained real hrefs. Anchor defaults cascade
+     to every child, so without these the name, the status pill, the message
+     and the timestamp all render as underlined link text. */
+  color: inherit;
+  text-decoration: none;
   padding: var(--space-4);
   background: var(--bg-panel);
   border: 1px solid var(--border);

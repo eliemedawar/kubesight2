@@ -142,7 +142,10 @@ export default function AlertsPage({
   selectedClusterId,
   allowedClusters,
   allowedNamespaces,
-  allowedResources,
+  // Deliberately not a prop any more: the namespace resource cache belongs to
+  // the workloads route, so the shell could only ever pass an empty object.
+  // The remaining scope checks (namespaces, admin, cluster access) are what
+  // actually decide this.
   selectedNamespace = "",
   canManageAlerts = false,
   hasClusters,
@@ -183,7 +186,6 @@ export default function AlertsPage({
   const hasScope = hasAlertMonitoringScope({
     hasClusters,
     namespaces: allowedNamespaces,
-    resources: allowedResources,
     user: authUser,
   });
 
@@ -193,9 +195,8 @@ export default function AlertsPage({
         clusterId: selectedClusterId,
         clusters: allowedClusters,
         namespaces: allowedNamespaces,
-        resources: allowedResources,
-      }),
-    [selectedClusterId, allowedClusters, allowedNamespaces, allowedResources]
+          }),
+    [selectedClusterId, allowedClusters, allowedNamespaces]
   );
 
   /* ── history feed (activity strip, sparklines, resolved stats, History tab) ── */
