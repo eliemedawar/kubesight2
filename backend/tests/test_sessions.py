@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pyotp
 
 from api.auth_utils import decode_access_token
+from api.models import AuditLog
 from api.models_auth import AuthRefreshToken, AuthSession
 from api.session_auth import (
     ACCESS_COOKIE,
@@ -75,6 +77,21 @@ def test_cookie_mutation_requires_matching_signed_csrf(client):
     assert invalid.status_code == 403
     assert CSRF_HEADER in missing.get_json()["error"]
     assert client.get("/api/auth/me").status_code == 200
+
+
+def test_csrf_protects_cookie_mutations_outside_the_auth_blueprint(client):
+    _login(client)
+
+    missing = client.post("/api/auth/tokens", json={"name": "browser-token"})
+    csrf = _csrf(client)
+    accepted = client.post(
+        "/api/auth/tokens",
+        headers={CSRF_HEADER: csrf},
+        json={"name": "browser-token"},
+    )
+
+    assert missing.status_code == 403
+    assert accepted.status_code == 201
 
 
 def test_bearer_mutation_remains_compatible_without_csrf(client):
@@ -146,6 +163,50 @@ def test_consumed_refresh_token_reuse_revokes_entire_family(client, app):
         assert all(
             token.revoked_at is not None for token in AuthRefreshToken.query.all()
         )
+
+
+def test_session_lifecycle_is_audited_without_token_material(client, app):
+    _login(client)
+    csrf = _csrf(client)
+    consumed_refresh = _refresh_cookie(client).value
+    assert client.post(
+        "/api/auth/refresh", headers={CSRF_HEADER: csrf}
+    ).status_code == 200
+    current_csrf = client.get_cookie(CSRF_COOKIE).value
+    client.set_cookie(
+        REFRESH_COOKIE, consumed_refresh, path="/api/auth", secure=True
+    )
+    assert client.post(
+        "/api/auth/refresh", headers={CSRF_HEADER: current_csrf}
+    ).status_code == 401
+
+    with app.app_context():
+        entries = AuditLog.query.filter(
+            AuditLog.action.in_(
+                {
+                    "session_created",
+                    "session_refreshed",
+                    "refresh_token_reuse_detected",
+                }
+            )
+        ).all()
+        assert {entry.action for entry in entries} == {
+            "session_created",
+            "session_refreshed",
+            "refresh_token_reuse_detected",
+        }
+        serialized = json.dumps(
+            [
+                {
+                    "action": entry.action,
+                    "target": entry.target_id,
+                    "details": entry.details,
+                }
+                for entry in entries
+            ]
+        )
+        assert consumed_refresh not in serialized
+        assert hashlib.sha256(consumed_refresh.encode("utf-8")).hexdigest() not in serialized
 
 
 def test_unknown_refresh_token_does_not_revoke_an_unrelated_session(app):
