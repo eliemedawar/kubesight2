@@ -269,3 +269,20 @@ export function routeLoadingLabel(pageKey) {
 export function routeHidesBundleFab(pageKey) {
   return Boolean(routeForPageKey(pageKey)?.hideBundleFab);
 }
+
+/**
+ * Which scope values this route names in its path, derived from the path itself
+ * so the two can never disagree.
+ *
+ * A route that names a cluster in its path carries the scope *as identity* —
+ * /fleet/clusters/prod-eu is a page about that cluster. Routes that merely
+ * filter by one carry it in the query string instead, so the address still
+ * round-trips but the path stays stable.
+ */
+export function routePathParams(pageKey) {
+  const path = routeForPageKey(pageKey)?.path || "";
+  return {
+    clusterId: path.includes(":clusterId"),
+    namespace: path.includes(":namespace"),
+  };
+}

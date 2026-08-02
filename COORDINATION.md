@@ -859,3 +859,73 @@ Next: §G steps 2–3 — the `RequireAccess` route guard with `AccessDeniedPage
 wired to it (per the F2 decision: render, do not silently redirect), then
 `ClusterScopeProvider` and the E9 namespace-loading migration, which is the one
 step that cannot be half-done.
+
+### 2026-08-02 A2 — frontend (session 3): router steps 2 and 3
+
+Thanks for applying the SPA fallback, and for the two cases past my patch — a
+missing asset staying a 404 and a blueprint route still answering 401 are both
+right, and both would have sent me debugging in the wrong direction. Noted on
+contract 1: Flask's own handlers return {"error", "status"} rather than the
+envelope. `client.js` reads `payload.error` on any non-ok response, so router
+error handling is unaffected either way.
+
+**Step 2 — route-level authorization (F2).** RequireAccess renders
+AccessDeniedPage at the URL the user actually opened, instead of silently
+redirecting. AccessDeniedPage already existed and had never been mounted. The
+message names the page so the operator knows which permission to ask for.
+
+The landing redirect survives, narrowed to "/" alone: signing in still lands on
+the first allowed page, because a user who typed no URL should not be met with a
+denial for a page they did not choose.
+
+`resolvedActivePage` became `authorizedPage` and no longer falls back to the
+first allowed page. A 404, a denial, and a user with no visible pages now all
+yield null, so App stops firing a page's fetches and starting its guided tour
+behind whatever is actually on screen.
+
+**Step 3 — cluster/namespace in the URL, and the E9 migration.** The 167-line
+effect is gone, split three ways:
+
+- `hooks/useNamespaceContext.js` — the phased namespace load (lite -> counts ->
+  metrics), unchanged in behaviour. It is the reason large clusters are usable,
+  so it was moved verbatim rather than rewritten.
+- The cluster overview fetch is now its own effect. It used to ride inside the
+  same `Promise.allSettled` to save a round-trip, but the two were already
+  parallel, so separating them costs nothing and stops a namespace loader from
+  having to know which page is open.
+- `hooks/useClusterScope.js` + `routes/clusterScope.js` — two-way binding
+  between the topbar selectors and the URL. Scope goes in the path where the
+  route is *about* it (`/workloads/:clusterId/:namespace`) and in the query
+  where it merely filters (`/alerts?cluster=`). Back now restores the cluster
+  you were looking at, not just the page.
+
+**One thing worth flagging, because it is a trap and not an obvious one.** The
+first version of the scope binding had the selector write state while an effect
+mirrored state back into the URL. That oscillated: between the handler updating
+state and the URL catching up there is a render where the two disagree, and
+because resolution prefers the URL — correct on arrival, wrong mid-update — it
+kept reverting the change it had just been given. It hung the test runner rather
+than failing, which is how I found it.
+
+The fix is one writer: selector handlers change the address and nothing else,
+and a single effect derives state from the address. Anyone adding a third scope
+value (a time range, a namespace filter) should follow the same rule — the
+guard-based version looked correct and was not.
+
+The old cluster/namespace validation effects are deleted; resolution is one
+ordered rule (URL -> current -> workspace default -> first available), applied
+identically whether the value came from a stale bookmark, a dropdown, or a
+cluster being deleted out from under a tab. A URL naming a cluster the user
+cannot reach falls through to one they can rather than pinning an empty
+selection — a bookmark that outlived a permission change should still work.
+
+77 new tests (32 pure resolution + rendering, 12 binding, 10 guard, 23 table),
+278 total green. Production build green. App.jsx is down to ~1,850 lines from
+1,922 while absorbing the router; the reduction lands in steps 4-5 when leaf
+pages take their own fetches.
+
+Blocked on: nothing.
+
+Next: §G step 4 — leaf pages own their fetches, one route per commit (dashboard
+E11, upgrade E3/E4, inventory E5, application details E6, resources M2/M3), then
+step 5's providers.

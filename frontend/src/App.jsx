@@ -10,8 +10,6 @@ import {
   listMyDeploymentRequests,
   listClusters,
   testAlertEmail,
-  listNamespacesByCluster,
-  listNamespaceMetricsByCluster,
   getUpgradeInfo,
   getUpgradeJob,
   runUpgradePrecheck,
@@ -25,12 +23,9 @@ import AppShell from "./components/layout/AppShell.jsx";
 import RouteLoadingFallback from "./components/common/RouteLoadingFallback.jsx";
 import { emptyNamespaceResources, listKeyForTab } from "./lib/resourceTypes.js";
 import { useNamespaceResourceCache } from "./hooks/useNamespaceResourceCache.js";
-import { resourceCache } from "./services/resourceCacheService.js";
 import {
   EMPTY_MESSAGES,
   formatAccessError,
-  pageNeedsClusterContext,
-  pageNeedsNamespaceContext,
 } from "./utils/authz.js";
 import {
   getScopeLoadingLabel,
@@ -54,6 +49,8 @@ import {
 import { applyTheme, readThemePreference, storeThemePreference } from "./utils/theme.js";
 import { matchPath, pathForPageKey } from "./routes/paths.js";
 import RequireAccess from "./routes/RequireAccess.jsx";
+import { useClusterScope } from "./hooks/useClusterScope.js";
+import { useNamespaceContext } from "./hooks/useNamespaceContext.js";
 import {
   ROUTES,
   navPageKeyFor,
@@ -163,7 +160,6 @@ export default function App() {
   const [selectedNamespace, setSelectedNamespace] = useState("");
   const [loadingState, setLoadingState] = useState({
     core: false,
-    namespaces: false,
     resources: false,
     page: false,
   });
@@ -219,26 +215,26 @@ export default function App() {
 
   const applicationDetailRequestRef = useRef(0);
   const alertsLoadRef = useRef({ key: "", at: 0 });
-  const clusterContextClusterRef = useRef("");
   const upgradeLoadClusterRef = useRef("");
   const dashboardLoadClusterRef = useRef("");
   const dashboardRequestSeqRef = useRef(0);
   const dashboardSummaryClusterRef = useRef("");
   const [dashboardRefreshing, setDashboardRefreshing] = useState(false);
 
+  const applyPageError = useCallback((message, { expectedDenied = false } = {}) => {
+    if (!shouldShowAccessError(message, { expectedDenied })) {
+      setErrorState((prev) => ({ ...prev, page: "" }));
+      return;
+    }
+    setErrorState((prev) => ({ ...prev, page: formatAccessError(message) }));
+  }, [shouldShowAccessError]);
+
   const allowedClusters = useMemo(
     () => data.clusters,
     [data.clusters]
   );
-  const allowedNamespaces = useMemo(
-    () => data.namespaces,
-    [data.namespaces]
-  );
   const selectedCluster = allowedClusters.find((cluster) => cluster.id === selectedClusterId);
   const hasClusters = allowedClusters.length > 0;
-  const hasNamespaces = allowedNamespaces.length > 0;
-
-  const namespacesLoading = loadingState.namespaces;
 
   const displayUser = resolveDisplayUser(authUser);
 
@@ -258,7 +254,7 @@ export default function App() {
   /**
    * The page whose data App should fetch, or null.
    *
-   * Renamed from `authorizedPage`, and the semantics changed with it: it no
+   * Renamed from `resolvedActivePage`, and the semantics changed with it: it no
    * longer falls back to "the first page you are allowed to see". A page that
    * is not open is not a page to fetch for.
    *
@@ -279,6 +275,41 @@ export default function App() {
     // Drill-down routes (e.g. applicationDetails) are valid but not sidebar entries.
     return isPageAllowed(activePage) ? activePage : null;
   }, [visiblePages, activePage, isPageAllowed]);
+
+  // Namespaces come from the loader hook rather than the shared `data` blob:
+  // they are cluster scope, not page data, and every cluster-scoped screen
+  // needs them regardless of which one is open.
+  const handleNamespaceError = useCallback(
+    (error) => {
+      applyPageError(error?.message, {
+        expectedDenied: !canAccessCluster(selectedClusterId),
+      });
+    },
+    [applyPageError, canAccessCluster, selectedClusterId]
+  );
+
+  const { namespaces: allowedNamespaces, loading: namespacesLoading } = useNamespaceContext({
+    clusterId: selectedClusterId,
+    enabled: Boolean(isAuthenticated) && routeNeedsClusterContext(authorizedPage),
+    onError: handleNamespaceError,
+  });
+
+  const hasNamespaces = allowedNamespaces.length > 0;
+
+  // Two-way binding between the topbar selectors and the URL, so a shared link
+  // opens on the scope the sender was looking at and back restores it.
+  const { setCluster: handleClusterChange, setNamespace: handleNamespaceChange } =
+    useClusterScope({
+      pageKey: activePage,
+      routeParams,
+      clusters: allowedClusters,
+      namespaces: allowedNamespaces,
+      defaultClusterId: settingsDraft?.defaultCluster,
+      selectedClusterId,
+      selectedNamespace,
+      onClusterChange: setSelectedClusterId,
+      onNamespaceChange: setSelectedNamespace,
+    });
 
   const resourceCacheEnabled =
     pageNeedsResourceData(authorizedPage) &&
@@ -324,14 +355,6 @@ export default function App() {
   const scopeDataLoading = namespacesLoading || resourcesLoading;
 
   const isDashboardPage = authorizedPage === "dashboard";
-
-  const applyPageError = (message, { expectedDenied = false } = {}) => {
-    if (!shouldShowAccessError(message, { expectedDenied })) {
-      setErrorState((prev) => ({ ...prev, page: "" }));
-      return;
-    }
-    setErrorState((prev) => ({ ...prev, page: formatAccessError(message) }));
-  };
 
   const applyCoreError = (message, { expectedDenied = false } = {}) => {
     if (!shouldShowAccessError(message, { expectedDenied })) {
@@ -480,58 +503,16 @@ export default function App() {
     }
   }, [isAuthenticated, authLoading, activePage, getFirstAllowedPage, isPageAllowed, navigate]);
 
-  // Bridge: routes that name a cluster/namespace in the path drive the topbar
-  // scope, so /workloads/prod-eu/kube-system opens on that namespace instead of
-  // wherever the selector happened to be.
-  //
-  // This is a step-1 shim. The ClusterScopeProvider takes ownership of the
-  // cluster/namespace pair and makes the binding two-way (selector writes the
-  // URL as well as reading it); until then the flow is URL -> state only, and
-  // the validation effects below still get the final say on whether the value
-  // is one the user may actually see.
+  // The cluster/namespace validation effects that used to live here are gone.
+  // useClusterScope resolves both against the lists the user can actually
+  // reach, in one place, with the URL as an input — so an invalid selection is
+  // corrected by the same rule whether it came from a stale bookmark, a
+  // dropdown, or a cluster being deleted out from under a tab.
   useEffect(() => {
-    const paramCluster = routeParams?.clusterId;
-    if (paramCluster && paramCluster !== selectedClusterId) {
-      setSelectedClusterId(paramCluster);
+    if (isAuthenticated && !allowedClusters.length && selectedClusterId) {
+      setSelectedClusterId("");
     }
-  }, [routeParams?.clusterId, selectedClusterId]);
-
-  useEffect(() => {
-    const paramNamespace = routeParams?.namespace;
-    if (paramNamespace && paramNamespace !== selectedNamespace) {
-      setSelectedNamespace(paramNamespace);
-    }
-  }, [routeParams?.namespace, selectedNamespace]);
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      return;
-    }
-    if (!allowedClusters.length) {
-      if (selectedClusterId) {
-        setSelectedClusterId("");
-      }
-      return;
-    }
-    if (!allowedClusters.some((cluster) => cluster.id === selectedClusterId)) {
-      setSelectedClusterId(allowedClusters[0].id);
-    }
-  }, [isAuthenticated, allowedClusters, selectedClusterId]);
-
-  useEffect(() => {
-    if (!selectedClusterId) {
-      return;
-    }
-    if (!allowedNamespaces.length) {
-      if (selectedNamespace) {
-        setSelectedNamespace("");
-      }
-      return;
-    }
-    if (!allowedNamespaces.some((ns) => ns.name === selectedNamespace)) {
-      setSelectedNamespace(allowedNamespaces[0]?.name || "");
-    }
-  }, [selectedClusterId, allowedNamespaces, selectedNamespace]);
+  }, [isAuthenticated, allowedClusters.length, selectedClusterId]);
 
   const applyClusterList = (clusters, preferredId) => {
     const filtered = clusters;
@@ -555,11 +536,17 @@ export default function App() {
 
   // Pick initial cluster only from clusters the user can actually reach (API list ∩ RBAC).
   // Do not restore legacy profile IDs like prod-us-east when the live cluster is docker-desktop.
+  //
+  // Only for routes that take no cluster. On a cluster-scoped route
+  // useClusterScope resolves the selection from the URL and owns it outright;
+  // seeding a different cluster here first would fire one wasted namespace load
+  // for it before the URL's cluster won. Unscoped routes still need a selection
+  // so the topbar alert badge has something to count on a cold load.
   useEffect(() => {
     if (!isAuthenticated || !authUser || selectedClusterId || loadingState.core) {
       return;
     }
-    if (!allowedClusters.length) {
+    if (!allowedClusters.length || routeNeedsClusterContext(activePage)) {
       return;
     }
     const preferred = settingsDraft?.defaultCluster;
@@ -567,6 +554,7 @@ export default function App() {
   }, [
     isAuthenticated,
     authUser,
+    activePage,
     selectedClusterId,
     allowedClusters,
     settingsDraft.defaultCluster,
@@ -622,173 +610,33 @@ export default function App() {
     };
   }, [isAuthenticated, authUser?.id]);
 
+  // The cluster overview is its own fetch now. It used to ride along inside the
+  // namespace loader's Promise.allSettled to save a round-trip, but the two
+  // already ran in parallel, so separating them costs nothing and stops a
+  // namespace loader from having to know which page is open.
   useEffect(() => {
-    if (!isAuthenticated || !selectedClusterId) {
-      clusterContextClusterRef.current = "";
+    if (!isAuthenticated || !selectedClusterId || authorizedPage !== "clusterOverview") {
       return undefined;
     }
-
-    if (authorizedPage === "dashboard") {
-      return undefined;
-    }
-
-    if (!pageNeedsClusterContext(authorizedPage)) {
-      return undefined;
-    }
-
-    const contextReady = clusterContextClusterRef.current === selectedClusterId;
-
-    if (contextReady) {
-      if (authorizedPage === "clusterOverview") {
-        let cancelled = false;
-        const loadOverview = async () => {
-          try {
-            const overview = await getClusterOverview(selectedClusterId);
-            if (!cancelled) {
-              setClusterOverview(overview);
-            }
-          } catch (loadError) {
-            if (!cancelled) {
-              applyPageError(loadError.message, {
-                expectedDenied: !canAccessCluster(selectedClusterId),
-              });
-            }
-          }
-        };
-        loadOverview();
-        return () => {
-          cancelled = true;
-        };
-      }
-      return undefined;
-    }
-
     let cancelled = false;
-    const loadClusterContext = async () => {
-      const clusterChanged = clusterContextClusterRef.current !== selectedClusterId;
-      if (clusterChanged) {
-        resourceCache.clearAll();
-        setData((prev) => ({
-          ...prev,
-          namespaces: [],
-          resources: emptyNamespaceResources(),
-        }));
-      }
-
-      setLoadingState((prev) => ({ ...prev, namespaces: true, resources: false }));
-      setErrorState((prev) => ({ ...prev, page: "" }));
-
-      let defaultNamespace = "";
-      let namespaces = [];
+    (async () => {
       try {
-        const needsOverview = authorizedPage === "clusterOverview";
-        // Namespaces load in phases so slow/failing metrics can never blank the
-        // counts. Lite (one kubectl call) paints the page and namespace selector
-        // immediately; counts (pods/deployments/services, no metrics-server) is
-        // merged in next; metrics (CPU/memory) is merged in silently whenever it
-        // arrives — a slow or missing metrics-server no longer holds up numbers.
-        const countsPromise = listNamespacesByCluster(selectedClusterId, { counts: true });
-        const [namespacesResult, overviewResult] = await Promise.allSettled([
-          listNamespacesByCluster(selectedClusterId, { lite: true }),
-          needsOverview ? getClusterOverview(selectedClusterId) : Promise.resolve(null),
-        ]);
-
-        if (cancelled) {
-          return;
+        const overview = await getClusterOverview(selectedClusterId);
+        if (!cancelled) {
+          setClusterOverview(overview);
         }
-
-        const liteSucceeded = namespacesResult.status === "fulfilled";
-        if (!liteSucceeded) {
-          // Lite path failed — fall back to the counts request before erroring.
-          try {
-            namespacesResult.value = await countsPromise;
-            namespacesResult.status = "fulfilled";
-          } catch {
-            throw namespacesResult.reason;
-          }
-          if (cancelled) {
-            return;
-          }
-        }
-
-        if (overviewResult.status === "fulfilled" && overviewResult.value) {
-          setClusterOverview(overviewResult.value);
-        } else if (overviewResult.status === "rejected" && needsOverview) {
-          applyPageError(
-            overviewResult.reason?.message || "Failed to load cluster overview.",
-            { expectedDenied: !canAccessCluster(selectedClusterId) }
-          );
-        }
-
-        namespaces = namespacesResult.value.items || [];
-        defaultNamespace = namespaces[0]?.name || "";
-        setData((prev) => ({ ...prev, namespaces }));
-        clusterContextClusterRef.current = selectedClusterId;
-
-        // Merge later phases in without blocking first paint. Counts and metrics
-        // carry disjoint fields, so merging by name is order-independent —
-        // whichever resolves first is never clobbered by the other.
-        const stillCurrent = () =>
-          !cancelled && clusterContextClusterRef.current === selectedClusterId;
-        const mergeNamespaces = (incoming) => {
-          if (!incoming?.length || !stillCurrent()) {
-            return;
-          }
-          setData((prev) => {
-            const byName = new Map(incoming.map((ns) => [ns.name, ns]));
-            const merged = prev.namespaces.map((ns) =>
-              byName.has(ns.name) ? { ...ns, ...byName.get(ns.name) } : ns
-            );
-            return { ...prev, namespaces: merged };
-          });
-        };
-
-        if (liteSucceeded) {
-          // Only needed when lite names were painted; the fallback above has
-          // already applied the counts payload.
-          countsPromise.then((res) => mergeNamespaces(res.items)).catch(() => {});
-        }
-        listNamespaceMetricsByCluster(selectedClusterId)
-          .then((res) => mergeNamespaces(res.items))
-          .catch(() => {});
       } catch (loadError) {
         if (!cancelled) {
-          clusterContextClusterRef.current = "";
           applyPageError(loadError.message, {
             expectedDenied: !canAccessCluster(selectedClusterId),
           });
-          setData((prev) => ({
-            ...prev,
-            namespaces: [],
-            resources: emptyNamespaceResources(),
-          }));
-        }
-        return;
-      } finally {
-        if (!cancelled) {
-          setLoadingState((prev) => ({ ...prev, namespaces: false, resources: false }));
         }
       }
-
-      if (cancelled) {
-        return;
-      }
-
-      const namespaceStillValid =
-        selectedNamespace && namespaces.some((ns) => ns.name === selectedNamespace);
-      const activeNamespace = namespaceStillValid ? selectedNamespace : defaultNamespace;
-
-      if (!namespaceStillValid) {
-        setSelectedNamespace(activeNamespace);
-      }
-    };
-
-    loadClusterContext();
+    })();
     return () => {
       cancelled = true;
-      setLoadingState((prev) => ({ ...prev, namespaces: false, resources: false }));
     };
-  }, [selectedClusterId, authorizedPage, isAuthenticated]);
+  }, [isAuthenticated, selectedClusterId, authorizedPage]);
 
   useEffect(() => {
     if (!selectedClusterId) {
@@ -1694,8 +1542,8 @@ export default function App() {
             selectedNamespace={selectedNamespace}
             preferredPod={preferredLogPod}
             onPreferredPodApplied={() => setPreferredLogPod("")}
-            onClusterChange={setSelectedClusterId}
-            onNamespaceChange={setSelectedNamespace}
+            onClusterChange={handleClusterChange}
+            onNamespaceChange={handleNamespaceChange}
             hasClusters={hasClusters}
             hasNamespaces={hasNamespaces}
             coreLoading={loadingState.core}
@@ -1923,8 +1771,8 @@ export default function App() {
       allowedNamespaces={allowedNamespaces}
       selectedClusterId={selectedClusterId}
       selectedNamespace={selectedNamespace}
-      onClusterChange={setSelectedClusterId}
-      onNamespaceChange={setSelectedNamespace}
+      onClusterChange={handleClusterChange}
+      onNamespaceChange={handleNamespaceChange}
       loadingCore={loadingState.core}
       loadingNamespaces={namespacesLoading}
       loadingResources={resourcesLoading}
