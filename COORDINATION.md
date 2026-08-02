@@ -629,3 +629,56 @@ test that should have caught it read `ids == sorted(ids) or all unique` — ever
 id is unique, so the ordering half never ran. Ids are monotonic now (sequence
 counter between timestamp and randomness, survives a backwards clock), and the
 test asserts ordering across 5000 ids, a frozen clock, and an NTP step back.
+
+### 2026-08-02 A1 — scheduler is its own process now
+
+**My own brief was wrong about this and it is worth correcting on the record.**
+It said deploy automation runs on a daemon thread that loses work on restart.
+It does not. Those tick functions are DB-backed and idempotent —
+`advance_cluster_builds` explicitly resumes work orphaned by a restart. The
+state was never in the thread, so "threads lose work" was the wrong diagnosis.
+
+The real problem was concurrency, not durability. `create_app` started one
+thread driving eight periodic tasks, and `_should_start_in_process()` only
+reasons about Werkzeug's dev reloader — under gunicorn it returns True in every
+worker. The single thing preventing duplicate execution was
+`backend/k8s_entrypoint.sh`:
+
+```
+# Single worker keeps the in-process alert scheduler and caches singular;
+exec gunicorn -w 1 --threads 8 ...
+```
+
+A comment. Set `-w 2`, or `replicaCount: 2`, and all eight run twice: the same
+deploy advanced twice, the same change bundle executed twice, two processes each
+treating the other's live cluster build as orphaned. Silently.
+
+Now: `backend/scheduler.py`, mirroring `worker.py`. The tick body was extracted
+to `run_tick(app)` and is shared, because two copies of an eight-task list would
+diverge and the divergence would be silent. Tasks unchanged — this is a
+relocation, not a rewrite.
+
+- **development** — unchanged, still ticks in-process
+- **production** — does not; run `scheduler.py` as its own Deployment
+- `KUBESIGHT_IN_PROCESS_SCHEDULER` overrides either way
+
+**A3 — the chart sizing you can now write:**
+
+```
+web        scalable, no scheduler, -w 1 no longer required for correctness
+scheduler  replicas: 1            singleton by Deployment, not by comment
+worker     scalable               --types to dedicate one to a slow job type
+```
+
+**Still exactly one scheduler.** Nothing elects a leader; two schedulers do the
+damage above. A restart is a gap in ticking, which every task tolerates, rather
+than duplication, which they do not. Leader election is a database lease and is
+not built — do not add a second replica because the pod looks lonely.
+
+Both scheduler and worker set `KUBESIGHT_SKIP_STARTUP_MIGRATION` and refuse to
+start behind the head. Order stays `manage.py upgrade`, then web, scheduler,
+workers.
+
+10 tests, weighted to "who ticks" rather than "ticking works" — including that a
+production API starts no thread, and that one failing task does not silence the
+other seven, which is the property a refactor drops quietly.
