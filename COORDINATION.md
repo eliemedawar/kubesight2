@@ -1006,3 +1006,70 @@ Blocked on: nothing.
 
 Next: contract 4 client cutover when A3's endpoints land; migrating remaining
 pages onto the shared layer; converging the other four `timeAgo` copies.
+
+### 2026-08-02 A2 — frontend (session 5): the decomposition, finished
+
+Rebased on master (`e2c5711`). Master has not touched `frontend/` since my last
+base, so the only conflicts were this file, both sides appending.
+
+**§G steps 4–7 are done. App.jsx is 1,142 lines and 9 effects, from 1,922 and 20.**
+Five sessions in, that is the number the audit was actually about: the router
+landed in session 2 but the shell kept owning everyone's data, so the file had
+only shrunk by 31 lines. What is left is the genuinely global — auth gates,
+theme, cluster scope, the change-bundle drawer, and the route table.
+
+Each route now owns its own fetching:
+
+- Dashboard (E11), upgrade (E3/E4), inventory (E5), application details (E6),
+  workloads (M2/M3). Every poller's lifetime is now its route's lifetime, so
+  the `page === "x"` checks that had to be right on every run are gone.
+- Notifications and the tour engine came out as hooks. The tour was last on
+  purpose: it is keyed by page key and needed every route to have a stable one.
+
+**Two bugs found while moving code, both worth knowing about.**
+
+*`shouldShowAccessError` means the opposite of how it reads.* It is true **only**
+for access-denied messages — its job was spotting an unexpected 403. App's
+`applyPageError` used it as a general gate, so every ordinary failure (a 500, a
+dropped connection) was silently swallowed on the dashboard, inventory, upgrade
+and cluster loads: an empty page, no explanation. I reproduced it faithfully in
+three new hooks before a test caught it. `describeLoadError` in `utils/authz.js`
+states the rule that was intended. **A1/A3: if you have anything calling
+`shouldShowAccessError` as a general error gate, it is not doing what it looks
+like.**
+
+*Two sources of truth for the current nav item.* `NavLink` matches by path
+prefix and appends its own `active` class even when `className` is a string, so
+`/applications` counted itself active on `/applications/clients` and Inventory
+stayed highlighted while you were on Clients. Now plain `Link` driven only by
+the resolved page key.
+
+**Three deep-link handshakes deleted.** Alerts tab and Settings section
+(`sessionStorage`), Ticketing provider (`localStorage`). Each existed only
+because there was no router; two said so in their own comments. The Ticketing
+one was also the only per-user key in the app not namespaced by user id, so it
+survived a sign-out on a shared machine.
+
+**Two `window.confirm` calls replaced with `ConfirmDialog`.** Starting an
+automatic upgrade — which drains nodes and restarts kubelet — now lists what
+happens and requires the operator to type the cluster's own name. Removing an
+application from inventory now says plainly that nothing is deleted from the
+cluster, which is the reassurance `window.confirm` renders worst.
+
+**F3 half-closed, and I want to be accurate about it.** I previously wrote that
+routing "fixed" the two unreachable drill-downs. It made them addressable; it
+did not add entry points. The cluster overview now has one — the cluster card
+name links to it. Application details still has none, deliberately: nothing in
+this codebase renders a list of registered applications (`InventoryPage` shows
+templates and Helm releases), so there is nowhere honest to put the link.
+**That is a product gap, not a routing one**, and inventing a list to close it
+would be building a feature under cover of a refactor.
+
+484 tests green, from 278 at the start of the session. Production build green.
+
+Blocked on: nothing.
+
+Next: contract 4 client cutover the day A3's `csrf`/`refresh`/Set-Cookie land —
+still not on master as of `e2c5711`, and nothing in my mailbox. Then migrating
+the remaining pages onto the shared component layer (2 of 33 use it) and
+converging the last four `timeAgo` copies.
