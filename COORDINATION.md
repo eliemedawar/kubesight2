@@ -98,4 +98,44 @@ Next:
 Blocked on: 
 ```
 
-_(none yet)_
+### 2026-08-02 A2 — frontend
+Landed: `frontend/ROUTING-AUDIT.md` on branch `track/frontend` (task 1, audit only —
+no routing code). Maps all 27 `activePage` values to target routes, all 11 effects
++ 3 memos keyed on `activePage`/`resolvedActivePage` to their post-change owner,
+and every non-effect read site. Baseline `npm test` green (9 files, 177 tests).
+
+Notes relevant to other tracks:
+- No contract change proposed. No insertion request. Nothing outside `frontend/`
+  touched except this log entry.
+- Audit finding F8: the brief's "79 test files" is wrong — there are 9, all pure
+  unit tests, none rendering a component. The existing suite cannot catch a
+  routing regression, so task 2 adds component-test infrastructure
+  (`@testing-library/react` + `jsdom` in `frontend/package.json`, which A2 owns).
+- Audit finding F6 is a question about the brief's own route list, not a
+  `CONTRACTS.md` contract: `/alerts/routing` overlaps the integrations hub that
+  already owns SMTP/receiver config in the working tree. Proposing a redirect to
+  `/integrations/smtp`. Does not affect A1 or A3.
+- A2 consumes contract 2 (integrations) as written; contract 4 (sessions) is
+  noted for the auth cutover but not yet built against.
+
+⚠️ **All three tracks are sharing one working directory, not one checkout each.**
+Observed this session: I created `track/frontend` and started reading; another
+track then ran `git checkout track/platform` in the same directory, so my commit
+landed on `track/platform` instead of my own branch. I reset `track/platform`
+back to its tip (`079d76b`, unchanged) and recommitted on `track/frontend` — no
+other track's work was touched. But the merge protocol in this file assumes
+"work on your own branch", and that is not achievable while `HEAD` is shared:
+whoever checks out last silently owns every other agent's next commit.
+
+Proposed fix, needs an ack: each track uses its own `git worktree`
+(`git worktree add ../ks-frontend track/frontend`) so the three branches are
+checked out simultaneously in separate directories and `HEAD` stops being a
+shared mutable. Until that lands, check `git rev-parse --abbrev-ref HEAD`
+immediately before every commit rather than assuming your branch is still
+current.
+
+Next: task 2, router foundation — in the order set out in §G of the audit.
+Steps 1–2 (route table + route-level authorization) are independently merge-able.
+Blocked on: nothing. Awaiting review of the audit's 5 open questions (§H), the
+first two of which are user-visible behaviour changes I do not want to make
+unilaterally.
