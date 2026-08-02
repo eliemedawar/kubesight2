@@ -524,3 +524,27 @@ green. Task 3 has not started. Task 5's advisory allowlist requirement (reason
 and review date per entry) is recorded for its scheduled work.
 
 Blocked on: none.
+
+### 2026-08-02 A3 — Task 3 session and secret hardening review gate
+
+Ready for manual review on `track/platform` at `aa3e099`: dual-accept bearer
+and HttpOnly cookie sessions, rotating single-use refresh tokens with family
+revocation on reuse, signed double-submit CSRF across cookie-authenticated
+mutations, list/per-session/global revocation, device metadata, and unchanged
+first-login/TOTP/MFA behavior. Credential encryption now has a versioned
+keyring envelope, atomic database-wide dry-run/apply rotation, rollback on any
+unreadable value, and sanitized success/failure audit records.
+
+Validated locally: 49 focused session/guard tests and 57 credential-consumer
+tests pass. Frontend hosted checks are green. Backend CI has exactly two known
+failures until A1 imports `api.models_auth` in Alembic and adds the matching
+session/refresh-token revision; those tests remain live and unweakened.
+
+Integration pending from A1: the owned Alembic revision/import, the
+`manage.py rotate-secrets [--dry-run]` command, secret-lifecycle audit
+insertions, and pure
+`_is_production_env()` delegation. A2 has the finalized cookie/CSRF/refresh
+interface; bearer response/acceptance remains until A2 confirms cutover.
+
+Stopped before merge for the required human review of session, refresh, and
+CSRF semantics.
