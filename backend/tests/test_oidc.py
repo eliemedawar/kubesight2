@@ -12,6 +12,12 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from api.mfa_recovery import (
+    consume_admin_recovery_grant,
+    consume_recovery_code,
+    mint_admin_recovery_grant,
+    regenerate_recovery_codes,
+)
 from api.oidc import (
     OidcConfig,
     OidcConfigurationError,
@@ -72,6 +78,88 @@ def test_oidc_and_recovery_records_are_hash_only_and_one_time(app):
     grant.used_at = now
     assert request.is_active(now) is False
     assert grant.is_active(now) is False
+
+
+def test_mfa_recovery_codes_are_hash_only_rotating_and_single_use(app):
+    from api.models import AuditLog, User
+    from api.models_auth import MfaRecoveryCode
+
+    user = User.query.filter_by(username="admin").one()
+    first_set = regenerate_recovery_codes(user, count=3)
+    assert len(first_set) == 3
+    assert all(len(code) == 19 and code.count("-") == 3 for code in first_set)
+    stored_hashes = {row.code_hash for row in MfaRecoveryCode.query.all()}
+    assert all(code.replace("-", "") not in stored_hashes for code in first_set)
+
+    second_set = regenerate_recovery_codes(user, count=2)
+    assert consume_recovery_code(user, first_set[0]) is False
+    assert consume_recovery_code(user, f"{second_set[0]}!") is False
+    assert consume_recovery_code(user, second_set[0].lower()) is True
+    assert consume_recovery_code(user, second_set[0]) is False
+
+    serialized_audit = json.dumps(
+        [entry.details for entry in AuditLog.query.order_by(AuditLog.id).all()]
+    )
+    for code in first_set + second_set:
+        assert code not in serialized_audit
+        assert code.replace("-", "") not in serialized_audit
+
+
+def test_admin_break_glass_is_short_lived_hash_only_and_revokes_sessions(
+    app, client
+):
+    from api.db import db
+    from api.models import AuditLog, User
+    from api.models_auth import AdminRecoveryGrant, AuthSession
+
+    login = client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin123"}
+    )
+    assert login.status_code == 200
+    user = User.query.filter_by(username="admin").one()
+    user.mfa_enabled = True
+    user.totp_secret = "JBSWY3DPEHPK3PXP"
+    user.requires_admin_unlock = True
+    user.lock_reason = "mfa"
+    db.session.commit()
+
+    _user, raw_token, expires_at = mint_admin_recovery_grant(
+        "admin", duration_minutes=5
+    )
+    stored = AdminRecoveryGrant.query.one()
+    assert stored.token_hash != raw_token
+    assert stored.expires_at.replace(tzinfo=timezone.utc) == expires_at
+
+    recovered = consume_admin_recovery_grant("admin", raw_token)
+    assert recovered is not None
+    assert recovered.mfa_enabled is False
+    assert recovered.totp_secret is None
+    assert recovered.first_login_completed is False
+    assert recovered.requires_admin_unlock is False
+    assert AuthSession.query.one().revoked_at is not None
+    assert consume_admin_recovery_grant("admin", raw_token) is None
+
+    serialized_audit = json.dumps(
+        [entry.details for entry in AuditLog.query.order_by(AuditLog.id).all()]
+    )
+    assert raw_token not in serialized_audit
+
+
+def test_admin_break_glass_rejects_non_admin_and_expired_grants(app):
+    from api.db import db
+    from api.models import User
+    from api.models_auth import AdminRecoveryGrant
+
+    with pytest.raises(ValueError, match="administrator"):
+        mint_admin_recovery_grant("viewer")
+
+    user, raw_token, _expires = mint_admin_recovery_grant("admin")
+    grant = AdminRecoveryGrant.query.one()
+    grant.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.session.commit()
+
+    assert consume_admin_recovery_grant(user.username, raw_token) is None
+    assert user.first_login_completed is True
 
 
 def _environment(**overrides) -> dict[str, str]:
