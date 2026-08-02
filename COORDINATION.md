@@ -104,6 +104,8 @@ _(none yet)_
 
 ### 2026-08-02 A3 backend/api/mfa_recovery.py — hash-only recovery codes and break-glass grants
 
+### 2026-08-02 A3 backend/api/oidc_auth.py — one-time OIDC flow persistence and identity provisioning
+
 ---
 
 ## Status log
