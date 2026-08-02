@@ -28,6 +28,7 @@ SAFE_ENVIRONMENT = {
     "ALERT_ROUTING_SECRET_KEY": "credential-key-that-is-at-least-32-characters",
     "CORS_ORIGINS": "https://kubesight.example.com",
     "K8S_REAL_MODE": "true",
+    "OIDC_ENABLED": "false",
 }
 
 
@@ -161,6 +162,33 @@ def test_signing_and_encryption_keys_must_be_different(
         ProductionGuardError,
         match="ALERT_ROUTING_SECRET_KEY must be different from JWT_SECRET_KEY",
     ):
+        run_startup_guards(production_app)
+
+
+def test_enabled_oidc_must_be_complete_and_secure(production_app, monkeypatch):
+    monkeypatch.setenv("OIDC_ENABLED", "true")
+    monkeypatch.delenv("OIDC_ISSUER_URL", raising=False)
+
+    with pytest.raises(
+        ProductionGuardError, match="OIDC_CONFIGURATION.*OIDC_ISSUER_URL"
+    ):
+        run_startup_guards(production_app)
+
+
+def test_oidc_client_secret_must_be_independent(production_app, monkeypatch):
+    values = {
+        "OIDC_ENABLED": "true",
+        "OIDC_ISSUER_URL": "https://idp.example.test/tenant",
+        "OIDC_CLIENT_ID": "kubesight",
+        "OIDC_CLIENT_SECRET": SAFE_ENVIRONMENT["JWT_SECRET_KEY"],
+        "OIDC_REDIRECT_URI": "https://kubesight.example.com/api/auth/oidc/callback",
+        "OIDC_ALLOWED_DOMAINS": "example.test",
+        "OIDC_DEFAULT_ROLE": "viewer",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(ProductionGuardError, match="OIDC_CLIENT_SECRET"):
         run_startup_guards(production_app)
 
 
