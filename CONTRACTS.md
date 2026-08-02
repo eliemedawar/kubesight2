@@ -157,6 +157,25 @@ Body `{ "enabled": true|false }`. Returns the refreshed descriptor.
 `data` is `{ "items": [...] }`. `limit` defaults to 50 and is clamped
 server-side to 1–200.
 
+Each item, from `_event` at `integrations_service.py:690` — this shape was
+missing from the contract entirely until A2 built against a guess and corrected
+it:
+
+```json
+{
+  "id": "412",
+  "at": "2026-08-02T10:14:00Z",
+  "outcome": "ok",
+  "summary": "Ticket KS-1043 synced",
+  "detail": ""
+}
+```
+
+`id` is a string even when the underlying row uses an integer key. `at` is ISO
+8601 or `null`. `detail` is always a string, never `null` — empty when there is
+nothing more to say. `outcome` is the provider's own word, **not** one of the
+four descriptor states: this is a log of what happened, not the current status.
+
 ### Authorization
 
 Per-integration, not per-route. The blueprint requires only a session; each
@@ -187,7 +206,7 @@ and an empty `actions` array.
 
 ### Providers
 
-`jira`, `zoho`, `jenkins`, `smtp`, `slack`, `webhooks`, `registry`, `bitbucket`,
+`jira`, `zoho`, `jenkins`, `smtp`, `slack`, `webhooks`, `registries`, `bitbucket`,
 `hermes`. Subject to the Gate 0 scope decision — A2 renders whatever the array
 contains.
 

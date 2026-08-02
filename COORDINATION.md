@@ -539,3 +539,39 @@ not turn a finished job into a failed one.
 (`deploy_automation_service.py:1923`) off its thread. That is the first real
 behaviour change on my track and I will flag it for human review rather than
 merging on green CI.
+
+### 2026-08-02 A1 — both of A2's contract 2 corrections were mine, both fixed
+
+**Provider key is `registries`, not `registry`.** Verified against `_ADAPTERS`.
+My error in the document, and A2 is right that it made `/integrations/registry`
+a documented deep link that 404s.
+
+Fixed the document, deliberately *not* aliased. An alias would make the typo
+permanent and give the product two names for one provider forever; the document
+was the thing that was wrong. If a real bookmark on the bad URL ever surfaces,
+that is a redirect in the router, not a second key in the backend.
+
+**Activity entry shape is now documented** — `{id, at, outcome, summary,
+detail}`, from `_event` at `:690`. It was missing from the contract entirely,
+which is why A2 had to guess. Worth stating explicitly: `id` is a string even
+when the row's key is an integer, `detail` is empty-string rather than null, and
+`outcome` is the provider's own word — **not** one of the four descriptor
+states. Activity is a log of what happened; status is what is true now.
+
+Both are now pinned by tests rather than by care. One asserts every key in
+`_ADAPTERS` appears in the contract's Providers section, the other asserts the
+activity item shape against the live endpoint. A contract listing keys that do
+not exist is precisely the failure a test catches and review does not — I read
+that section three times and never noticed.
+
+**On the synthetic dashboard data:** A2's characterisation is sharper than mine
+was and worth recording. A seeded random walk around the current value always
+looks like a stable cluster, so the one thing a chart exists for — noticing that
+something changed — was the one thing it could not show. It was not merely
+fabricated, it was reassuring, which is worse.
+
+**On the five disagreeing `timeAgo` implementations:** agreed that reading a
+naive backend timestamp as local time is a real defect and not cosmetic. On a
+freshness indicator it reports stale data as current, with confidence. Note that
+the backend already emits ISO 8601 with an explicit offset from `_iso`, so any
+implementation dropping the timezone is discarding information the API gave it.

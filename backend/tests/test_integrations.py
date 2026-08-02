@@ -280,3 +280,41 @@ def test_activity_clamps_a_hostile_limit(client, admin_token, monkeypatch):
 
     client.get("/api/integrations/jira/activity?limit=abc", headers=auth_headers(admin_token))
     assert seen["limit"] == 50
+
+
+# ─── the contract document itself ───
+
+
+def test_contract_lists_the_provider_keys_the_service_actually_emits():
+    """CONTRACTS.md is what A2 builds deep links from.
+
+    It said `registry`; the service emits `registries`. Harmless for a frontend
+    that hardcodes nothing, but it made /integrations/registry a documented URL
+    that 404s. Pinned here rather than aliased -- an alias would make the typo
+    permanent, and the document is the thing that was wrong.
+    """
+    import pathlib
+    import re
+
+    contracts = pathlib.Path(__file__).resolve().parents[2] / "CONTRACTS.md"
+    text = contracts.read_text(encoding="utf-8")
+
+    section = text.split("### Providers", 1)
+    assert len(section) == 2, "CONTRACTS.md lost its Providers section"
+    documented = set(re.findall(r"`([a-z]+)`", section[1].split("---", 1)[0]))
+
+    actual = {entry["key"] for entry in svc._ADAPTERS}
+    assert actual <= documented, (
+        f"providers the service emits but the contract omits: {sorted(actual - documented)}"
+    )
+
+
+def test_activity_entries_match_the_documented_shape(client, admin_token):
+    """The activity shape was undocumented; A2 guessed and had to correct."""
+    response = client.get("/api/integrations/jira/activity", headers=auth_headers(admin_token))
+    assert response.status_code == 200
+
+    for item in response.get_json()["data"]["items"]:
+        assert set(item) == {"id", "at", "outcome", "summary", "detail"}
+        assert isinstance(item["id"], str)
+        assert isinstance(item["detail"], str), "detail is empty-string, never null"
