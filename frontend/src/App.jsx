@@ -53,6 +53,7 @@ import {
 } from "./utils/formatters.js";
 import { applyTheme, readThemePreference, storeThemePreference } from "./utils/theme.js";
 import { matchPath, pathForPageKey } from "./routes/paths.js";
+import RequireAccess from "./routes/RequireAccess.jsx";
 import {
   ROUTES,
   navPageKeyFor,
@@ -254,42 +255,47 @@ export default function App() {
     }
   }, [visibleResourceTabs, resourceActiveTab]);
 
-  const resolvedActivePage = useMemo(() => {
-    if (!visiblePages.length) {
-      return null;
-    }
-    // No route matched. Resolving that to "the first page you are allowed to
-    // see" would run the dashboard's fetches and start its guided tour behind
-    // the not-found page, so a 404 resolves to nothing at all.
-    if (!activePage) {
+  /**
+   * The page whose data App should fetch, or null.
+   *
+   * Renamed from `authorizedPage`, and the semantics changed with it: it no
+   * longer falls back to "the first page you are allowed to see". A page that
+   * is not open is not a page to fetch for.
+   *
+   * Three cases now yield null, and each used to yield the dashboard:
+   *   - no route matched (404)
+   *   - the route exists but this user may not see it (RequireAccess renders
+   *     the denial; fetching its data anyway would be a needless 403 in the
+   *     network log and, on cluster-scoped pages, a wasted round-trip)
+   *   - the user has no visible pages at all
+   *
+   * Effects and the tour engine below key on this, so null means "do nothing",
+   * which is the honest answer in all three.
+   */
+  const authorizedPage = useMemo(() => {
+    if (!visiblePages.length || !activePage) {
       return null;
     }
     // Drill-down routes (e.g. applicationDetails) are valid but not sidebar entries.
-    if (isPageAllowed(activePage)) {
-      return activePage;
-    }
-    if (visiblePages.some((page) => page.key === activePage)) {
-      return activePage;
-    }
-    return getFirstAllowedPage() || visiblePages[0]?.key || null;
-  }, [visiblePages, activePage, isPageAllowed, getFirstAllowedPage]);
+    return isPageAllowed(activePage) ? activePage : null;
+  }, [visiblePages, activePage, isPageAllowed]);
 
   const resourceCacheEnabled =
-    pageNeedsResourceData(resolvedActivePage) &&
+    pageNeedsResourceData(authorizedPage) &&
     Boolean(selectedClusterId && selectedNamespace);
 
   const activeResourceListKey = useMemo(() => {
     if (!resourceCacheEnabled) {
       return "";
     }
-    if (pageNeedsPodsData(resolvedActivePage)) {
+    if (pageNeedsPodsData(authorizedPage)) {
       return "pods";
     }
-    if (pageNeedsResourceTabs(resolvedActivePage)) {
+    if (pageNeedsResourceTabs(authorizedPage)) {
       return listKeyForTab(resourceActiveTab);
     }
     return "";
-  }, [resourceCacheEnabled, resolvedActivePage, resourceActiveTab]);
+  }, [resourceCacheEnabled, authorizedPage, resourceActiveTab]);
 
   const {
     resources: cachedResources,
@@ -317,7 +323,7 @@ export default function App() {
   const resourcesLoading = resourceCacheEnabled && activeTabLoading;
   const scopeDataLoading = namespacesLoading || resourcesLoading;
 
-  const isDashboardPage = resolvedActivePage === "dashboard";
+  const isDashboardPage = authorizedPage === "dashboard";
 
   const applyPageError = (message, { expectedDenied = false } = {}) => {
     if (!shouldShowAccessError(message, { expectedDenied })) {
@@ -394,12 +400,12 @@ export default function App() {
   };
 
   const startPageTour = () => {
-    if (!resolvedActivePage) {
+    if (!authorizedPage) {
       return;
     }
-    const { steps, includesWelcome } = buildTourSteps(resolvedActivePage);
+    const { steps, includesWelcome } = buildTourSteps(authorizedPage);
     if (steps.length) {
-      setActiveTour({ pageKey: resolvedActivePage, steps, auto: false, includesWelcome });
+      setActiveTour({ pageKey: authorizedPage, steps, auto: false, includesWelcome });
     }
   };
 
@@ -414,71 +420,65 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!isAuthenticated || authLoading || needsOnboarding || !resolvedActivePage || activeTour) {
+    if (!isAuthenticated || authLoading || needsOnboarding || !authorizedPage || activeTour) {
       return undefined;
     }
     const state = readTourState(authUser?.id);
-    if (state.muted || state.seen[resolvedActivePage]) {
+    if (state.muted || state.seen[authorizedPage]) {
       return undefined;
     }
-    const { steps, includesWelcome } = buildTourSteps(resolvedActivePage);
+    const { steps, includesWelcome } = buildTourSteps(authorizedPage);
     if (!steps.length) {
       return undefined;
     }
     // Small delay so the page renders its chrome before the spotlight looks
     // for targets; slow data is handled by the engine's per-step polling.
     const timer = setTimeout(
-      () => setActiveTour({ pageKey: resolvedActivePage, steps, auto: true, includesWelcome }),
+      () => setActiveTour({ pageKey: authorizedPage, steps, auto: true, includesWelcome }),
       800
     );
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated, authLoading, needsOnboarding, resolvedActivePage, activeTour, authUser?.id]);
+  }, [isAuthenticated, authLoading, needsOnboarding, authorizedPage, activeTour, authUser?.id]);
 
   // Navigating away mid-tour ends it (and counts it as seen, so it doesn't
   // nag again); logging out clears it so the next user starts fresh.
   useEffect(() => {
-    if (activeTour && (!isAuthenticated || activeTour.pageKey !== resolvedActivePage)) {
+    if (activeTour && (!isAuthenticated || activeTour.pageKey !== authorizedPage)) {
       if (isAuthenticated) {
         markActiveTourSeen(activeTour);
       }
       setActiveTour(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTour, resolvedActivePage, isAuthenticated]);
+  }, [activeTour, authorizedPage, isAuthenticated]);
 
+  // Landing only. "/" is the dashboard, which not every role may open, and a
+  // user who typed no URL at all should not be met with a denial for a page
+  // they did not ask for — so signing in still lands on the first page they can
+  // see, exactly as before.
+  //
+  // Every other address is left alone. A URL the user deliberately opened and
+  // may not see is answered by RequireAccess at that URL, not by a redirect
+  // that makes a correct link look broken.
   useEffect(() => {
     if (!isAuthenticated || authLoading) {
       return;
     }
-    const allowedKeys = visiblePages.map((page) => page.key);
-    if (!allowedKeys.length) {
+    if (activePage !== "dashboard" || isPageAllowed("dashboard")) {
       return;
     }
-    // No route matched: that is a 404, not an authorization failure. Leave it
-    // alone so NotFoundPage renders instead of bouncing the user somewhere
-    // that looks like the link worked.
-    if (!activePage) {
+    const target = getFirstAllowedPage();
+    if (!target || target === "dashboard") {
       return;
     }
-    if (!allowedKeys.includes(activePage) && !isPageAllowed(activePage)) {
-      const target = getFirstAllowedPage() || allowedKeys[0];
-      const path = pathForPageKey(target);
-      if (path) {
-        // replace: the page they could not open should not sit in history as a
-        // back-button trap that re-redirects on every press.
-        navigate(path, { replace: true });
-      }
+    const path = pathForPageKey(target);
+    if (path) {
+      // replace: the landing page should not sit in history as a back-button
+      // trap that re-redirects on every press.
+      navigate(path, { replace: true });
     }
-  }, [
-    isAuthenticated,
-    authLoading,
-    visiblePages,
-    activePage,
-    getFirstAllowedPage,
-    isPageAllowed,
-    navigate,
-  ]);
+  }, [isAuthenticated, authLoading, activePage, getFirstAllowedPage, isPageAllowed, navigate]);
 
   // Bridge: routes that name a cluster/namespace in the path drive the topbar
   // scope, so /workloads/prod-eu/kube-system opens on that namespace instead of
@@ -628,18 +628,18 @@ export default function App() {
       return undefined;
     }
 
-    if (resolvedActivePage === "dashboard") {
+    if (authorizedPage === "dashboard") {
       return undefined;
     }
 
-    if (!pageNeedsClusterContext(resolvedActivePage)) {
+    if (!pageNeedsClusterContext(authorizedPage)) {
       return undefined;
     }
 
     const contextReady = clusterContextClusterRef.current === selectedClusterId;
 
     if (contextReady) {
-      if (resolvedActivePage === "clusterOverview") {
+      if (authorizedPage === "clusterOverview") {
         let cancelled = false;
         const loadOverview = async () => {
           try {
@@ -681,7 +681,7 @@ export default function App() {
       let defaultNamespace = "";
       let namespaces = [];
       try {
-        const needsOverview = resolvedActivePage === "clusterOverview";
+        const needsOverview = authorizedPage === "clusterOverview";
         // Namespaces load in phases so slow/failing metrics can never blank the
         // counts. Lite (one kubectl call) paints the page and namespace selector
         // immediately; counts (pods/deployments/services, no metrics-server) is
@@ -788,7 +788,7 @@ export default function App() {
       cancelled = true;
       setLoadingState((prev) => ({ ...prev, namespaces: false, resources: false }));
     };
-  }, [selectedClusterId, resolvedActivePage, isAuthenticated]);
+  }, [selectedClusterId, authorizedPage, isAuthenticated]);
 
   useEffect(() => {
     if (!selectedClusterId) {
@@ -796,7 +796,7 @@ export default function App() {
       return;
     }
 
-    if (resolvedActivePage === "dashboard") {
+    if (authorizedPage === "dashboard") {
       return;
     }
 
@@ -854,7 +854,7 @@ export default function App() {
     hasPermission,
     canAccessCluster,
     filterAlertsForUser,
-    resolvedActivePage,
+    authorizedPage,
   ]);
 
   const requestSignature = (req) => `${req.id}:${req.decidedAt || ""}`;
@@ -1157,7 +1157,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (resolvedActivePage !== "dashboard" || !selectedClusterIsAllowed) {
+    if (authorizedPage !== "dashboard" || !selectedClusterIsAllowed) {
       return undefined;
     }
     const clusterChanged =
@@ -1177,7 +1177,7 @@ export default function App() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [resolvedActivePage, selectedClusterId, selectedClusterIsAllowed, settingsDraft.refreshIntervalSeconds]);
+  }, [authorizedPage, selectedClusterId, selectedClusterIsAllowed, settingsDraft.refreshIntervalSeconds]);
 
   const loadInventory = async () => {
     if (!hasPermission("inventory:view") && !hasPermission("resources:view")) {
@@ -1832,7 +1832,11 @@ export default function App() {
             <Route
               key={route.pageKey}
               path={route.path}
-              element={<RoutePage pageKey={route.pageKey} render={renderPage} />}
+              element={
+                <RequireAccess pageKey={route.pageKey} isPageAllowed={isPageAllowed}>
+                  <RoutePage pageKey={route.pageKey} render={renderPage} />
+                </RequireAccess>
+              }
             />
           ))}
           <Route path="*" element={<NotFoundPage />} />
