@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { NavLink, useParams } from "react-router-dom";
 import PageHeader from "../../components/common/PageHeader.jsx";
-import AsyncState from "../../components/common/AsyncState.jsx";
+import AccessScopeView from "../../components/common/AccessScopeView.jsx";
 import LoadingState from "../../components/common/LoadingState.jsx";
 import StatusPill from "../../components/common/StatusPill.jsx";
 import FreshnessIndicator from "../../components/common/FreshnessIndicator.jsx";
@@ -176,12 +176,12 @@ function ActivityTab({ providerKey }) {
 
   return (
     <section className="card">
-      <AsyncState loading={loading} error={error} loadingLabel="Loading activity...">
+      <AccessScopeView pageLoading={loading} accessError={error} loadingLabel="Loading activity...">
         <ActivityTimeline
           entries={entries}
           emptyMessage="No activity recorded for this integration yet."
         />
-      </AsyncState>
+      </AccessScopeView>
     </section>
   );
 }
@@ -286,9 +286,9 @@ export default function IntegrationDetailPage({ tab = "overview" }) {
         ))}
       </nav>
 
-      <AsyncState loading={loading} error={error} loadingLabel="Loading integration...">
+      <AccessScopeView pageLoading={loading} accessError={error} loadingLabel="Loading integration...">
         {integration ? renderTab() : null}
-      </AsyncState>
+      </AccessScopeView>
     </>
   );
 }

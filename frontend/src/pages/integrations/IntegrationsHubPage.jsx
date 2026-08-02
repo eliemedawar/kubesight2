@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import PageHeader from "../../components/common/PageHeader.jsx";
-import AsyncState from "../../components/common/AsyncState.jsx";
+import AccessScopeView from "../../components/common/AccessScopeView.jsx";
 import StatusPill from "../../components/common/StatusPill.jsx";
 import FreshnessIndicator from "../../components/common/FreshnessIndicator.jsx";
 import { groupByCategory } from "../../lib/integrations.js";
@@ -95,9 +95,9 @@ export default function IntegrationsHubPage() {
         meta={items.length ? <HealthSummary items={items} /> : null}
       />
 
-      <AsyncState
-        loading={loading}
-        error={error}
+      <AccessScopeView
+        pageLoading={loading}
+        accessError={error}
         empty={!items.length}
         loadingLabel="Loading integrations..."
         emptyMessage="No integrations are available to your account."
@@ -115,7 +115,7 @@ export default function IntegrationsHubPage() {
             </section>
           ))}
         </div>
-      </AsyncState>
+      </AccessScopeView>
     </>
   );
 }
