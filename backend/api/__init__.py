@@ -251,15 +251,18 @@ def create_app(config_object=None) -> Flask:
                         "`alembic upgrade head` before starting KubeSight in "
                         "production."
                     )
+                # Reconciliation and seeding are operator commands in
+                # production, not boot behaviour. reconcile_data() rewrites
+                # permissions -- a release granting system roles a new
+                # capability -- and seed_defaults() creates demo users. Neither
+                # belongs in the blast radius of a pod restart in a product
+                # whose premise is that changes are reviewed. Both are
+                # `python manage.py upgrade`, run deliberately.
             else:
                 upgrade_to_head(app.config["SQLALCHEMY_DATABASE_URI"])
                 apply_legacy_schema()
-
-            # Data reconciliation is not schema mutation and runs everywhere:
-            # it is how a release grants newly introduced permissions to system
-            # roles and converts legacy access rules. See reconcile_data.
-            reconcile_data()
-            seed_defaults()
+                reconcile_data()
+                seed_defaults()
 
     @app.route("/health", methods=["GET"])
     def health():
