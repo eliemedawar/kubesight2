@@ -30,6 +30,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
 
+from ..audit import log_audit
 from ..db import db
 from ..models_jobs import (
     CANCELLED,
@@ -217,11 +218,44 @@ def heartbeat(job: Job, *, step: Optional[str] = None, percent: Optional[int] = 
     db.session.commit()
 
 
+def _audit(job: Job, action: str, **extra: Any) -> None:
+    """Record a terminal outcome against the person who asked for it.
+
+    Only terminal states. A retry is visible in the job row and auditing each
+    attempt would bury the outcome that matters in noise.
+
+    `actor_user_id` is what makes this an audit trail rather than a log:
+    scheduled work has none and reads as system, but an operator-triggered
+    deploy names the operator, months later, without the job row still existing.
+    """
+    try:
+        log_audit(
+            action,
+            actor_user_id=job.actor_user_id,
+            target_type="job",
+            target_id=job.id,
+            details={
+                "jobType": job.job_type,
+                "attempt": job.attempt,
+                "maxAttempts": job.max_attempts,
+                "idempotencyKey": job.idempotency_key,
+                "error": job.error,
+                **extra,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        # A failure to audit must not turn a finished job into a failed one, but
+        # it must not pass silently either -- an audit trail with unexplained
+        # gaps is worse than one known to be incomplete.
+        logger.exception("failed to write audit record for job %s (%s)", job.id, action)
+
+
 def succeed(job: Job) -> None:
     job.state = SUCCEEDED
     job.finished_at = _utcnow()
     job.error = None
     db.session.commit()
+    _audit(job, "job_succeeded")
 
 
 def fail(job: Job, error: str) -> None:
@@ -232,7 +266,8 @@ def fail(job: Job, error: str) -> None:
     loses the only signal that says whether retrying by hand is sensible.
     """
     job.error = (error or "")[:4000]
-    if job.attempt >= job.max_attempts:
+    exhausted = job.attempt >= job.max_attempts
+    if exhausted:
         job.state = FAILED
         job.finished_at = _utcnow()
     else:
@@ -241,6 +276,8 @@ def fail(job: Job, error: str) -> None:
         job.heartbeat_at = None
         job.claimed_by = None
     db.session.commit()
+    if exhausted:
+        _audit(job, "job_failed")
 
 
 def dead_letter(job: Job, error: str) -> None:
@@ -248,15 +285,22 @@ def dead_letter(job: Job, error: str) -> None:
     job.error = (error or "")[:4000]
     job.finished_at = _utcnow()
     db.session.commit()
+    _audit(job, "job_dead_lettered")
 
 
-def cancel(job: Job) -> bool:
-    """Cancel a job that has not finished. Returns False if it already had."""
+def cancel(job: Job, *, actor_user_id: Optional[int] = None) -> bool:
+    """Cancel a job that has not finished. Returns False if it already had.
+
+    `actor_user_id` is whoever pressed cancel, which is not necessarily whoever
+    enqueued it -- "who stopped this deploy" is a different question from "who
+    started it", and an audit trail that cannot tell them apart answers neither.
+    """
     if job.state in TERMINAL_STATES:
         return False
     job.state = CANCELLED
     job.finished_at = _utcnow()
     db.session.commit()
+    _audit(job, "job_cancelled", cancelledBy=actor_user_id)
     return True
 
 
@@ -269,6 +313,7 @@ def reap_stale(*, now: Optional[datetime] = None) -> int:
     """
     now = now or _utcnow()
     reaped = 0
+    abandoned: list[Job] = []
     for job in Job.query.filter(Job.state == RUNNING).all():
         last_seen = _aware(job.heartbeat_at) or _aware(job.started_at)
         if last_seen is None:
@@ -281,6 +326,7 @@ def reap_stale(*, now: Optional[datetime] = None) -> int:
             job.state = FAILED
             job.finished_at = now
             job.error = message
+            abandoned.append(job)
         else:
             job.state = QUEUED
             job.started_at = None
@@ -290,6 +336,10 @@ def reap_stale(*, now: Optional[datetime] = None) -> int:
         reaped += 1
     if reaped:
         db.session.commit()
+    # Audited after the commit: a job abandoned by a dead worker is exactly the
+    # outcome nobody watched happen, so it is the one that most needs a record.
+    for job in abandoned:
+        _audit(job, "job_failed", reason="worker_abandoned")
     return reaped
 
 

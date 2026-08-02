@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from api.db import db
+from api.models import AuditLog
 from api.models_jobs import (
     CANCELLED,
     DEAD_LETTER,
@@ -303,3 +304,83 @@ def test_job_record_never_carries_the_payload(ctx):
         "jobId", "jobType", "state", "attempt", "maxAttempts", "progress",
         "createdAt", "startedAt", "finishedAt", "error", "actorUserId",
     }
+
+
+# ─── audit attribution ───
+#
+# The reason actor_user_id exists. A job row can be pruned; the audit record is
+# what still answers "who asked for this deploy" months later.
+
+
+def _audits(action: str):
+    return AuditLog.query.filter_by(action=action, target_type="job").all()
+
+
+def test_success_is_audited_against_the_person_who_asked(ctx):
+    @job_queue.handler("deploy.execute")
+    def _run(job):
+        return None
+
+    job_queue.enqueue("deploy.execute", idempotency_key="k", actor_user_id=7)
+    job_queue.run_once()
+
+    entries = _audits("job_succeeded")
+    assert len(entries) == 1
+    assert entries[0].actor_user_id == 7
+    assert entries[0].details["jobType"] == "deploy.execute"
+
+
+def test_a_retry_is_not_audited_but_the_final_failure_is(ctx):
+    """Auditing every attempt buries the outcome that matters in noise."""
+    job_queue.enqueue("deploy.execute", idempotency_key="k", max_attempts=2)
+
+    job = job_queue.claim_next()
+    job_queue.fail(job, "first")
+    assert _audits("job_failed") == [], "a retry is visible in the job row"
+
+    job = job_queue.claim_next()
+    job_queue.fail(job, "second")
+    assert len(_audits("job_failed")) == 1
+
+
+def test_dead_letter_is_audited(ctx):
+    job_queue.enqueue("deploy.execute", idempotency_key="k")
+    job_queue.dead_letter(job_queue.claim_next(), "malformed")
+    assert len(_audits("job_dead_lettered")) == 1
+
+
+def test_cancellation_records_who_cancelled_not_only_who_asked(ctx):
+    """Who stopped this deploy is a different question from who started it."""
+    job_queue.enqueue("deploy.execute", idempotency_key="k", actor_user_id=7)
+    job_queue.cancel(job_queue.claim_next(), actor_user_id=99)
+
+    entry = _audits("job_cancelled")[0]
+    assert entry.actor_user_id == 7, "the job still belongs to whoever asked"
+    assert entry.details["cancelledBy"] == 99
+
+
+def test_a_job_abandoned_by_a_dead_worker_is_audited(ctx):
+    """The outcome nobody watched happen is the one that most needs a record."""
+    job_queue.enqueue(
+        "deploy.execute", idempotency_key="k", max_attempts=1, timeout_seconds=1
+    )
+    job_queue.claim_next()
+    job_queue.reap_stale(now=datetime.now(timezone.utc) + timedelta(seconds=120))
+
+    entry = _audits("job_failed")[0]
+    assert entry.details["reason"] == "worker_abandoned"
+
+
+def test_a_failing_audit_does_not_fail_the_job(ctx, monkeypatch):
+    """An audit outage must not turn a finished deploy into a failed one."""
+    monkeypatch.setattr(
+        job_queue, "log_audit", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("audit down"))
+    )
+
+    @job_queue.handler("deploy.execute")
+    def _run(job):
+        return None
+
+    job_queue.enqueue("deploy.execute", idempotency_key="k")
+    job = job_queue.run_once()
+    assert job.state == SUCCEEDED

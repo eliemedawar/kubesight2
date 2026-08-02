@@ -52,6 +52,21 @@ def _is_production_env() -> bool:
     return False
 
 
+def _skip_startup_migration() -> bool:
+    """Whether this process must not bring the database to head itself.
+
+    Set by the job worker. Development startup normally migrates, which is fine
+    for one process and a race for several starting together -- and scaling
+    workers out is the ordinary reason to have more than one.
+    """
+    return os.getenv("KUBESIGHT_SKIP_STARTUP_MIGRATION", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _is_logs_fetch_path(path: str) -> bool:
     normalized = (path or "").rstrip("/")
     if normalized == "/api/logs":
@@ -293,7 +308,12 @@ def create_app(config_object=None) -> Flask:
             #
             # Development keeps doing all of it, because the cost of a wrong
             # guess there is a restart.
-            if not _is_production_env():
+            if _skip_startup_migration():
+                # Set by processes that must never be the migrator -- the job
+                # worker, which is scaled out, so several would race on the same
+                # upgrade. They verify the head themselves and refuse.
+                pass
+            elif not _is_production_env():
                 upgrade_to_head(app.config["SQLALCHEMY_DATABASE_URI"])
                 apply_legacy_schema()
                 reconcile_data()
