@@ -36,6 +36,7 @@ def production_app(monkeypatch):
     )
     app = Flask(__name__)
     app.config["DEBUG"] = False
+    app.config["JWT_SECRET_KEY"] = SAFE_ENVIRONMENT["JWT_SECRET_KEY"]
     return app
 
 
@@ -51,7 +52,6 @@ def test_safe_production_configuration_passes(production_app):
 @pytest.mark.parametrize(
     ("setting", "unsafe_value"),
     [
-        ("JWT_SECRET_KEY", "change-me-generate-with-openssl-rand-hex-32"),
         ("FLASK_DEBUG", "true"),
         ("AUTH_REQUIRED", "false"),
         ("ALERT_ROUTING_SECRET_KEY", ""),
@@ -71,8 +71,19 @@ def test_each_unsafe_setting_names_itself(
         run_startup_guards(production_app)
 
 
+def test_default_jwt_secret_config_is_rejected(production_app, monkeypatch):
+    monkeypatch.setenv("JWT_SECRET_KEY", SAFE_ENVIRONMENT["JWT_SECRET_KEY"])
+    production_app.config["JWT_SECRET_KEY"] = (
+        "change-me-generate-with-openssl-rand-hex-32"
+    )
+
+    with pytest.raises(ProductionGuardError, match="JWT_SECRET_KEY"):
+        run_startup_guards(production_app)
+
+
 def test_missing_jwt_secret_is_rejected(production_app, monkeypatch):
-    monkeypatch.delenv("JWT_SECRET_KEY")
+    monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
+    production_app.config.pop("JWT_SECRET_KEY", None)
 
     with pytest.raises(ProductionGuardError, match="JWT_SECRET_KEY"):
         run_startup_guards(production_app)
@@ -162,7 +173,7 @@ def test_shipped_seeded_credentials_are_detected(app):
 
 
 def test_all_violations_are_reported_together(production_app, monkeypatch):
-    monkeypatch.setenv("JWT_SECRET_KEY", "change-me")
+    production_app.config["JWT_SECRET_KEY"] = "change-me"
     monkeypatch.setenv("AUTH_REQUIRED", "off")
     monkeypatch.setenv("CORS_ORIGINS", "*")
 

@@ -78,7 +78,7 @@ def _default_seeded_usernames() -> list[str]:
 def _collect_violations(app: Flask) -> list[str]:
     violations: list[str] = []
 
-    jwt_secret = _environment_value("JWT_SECRET_KEY")
+    jwt_secret = str(app.config.get("JWT_SECRET_KEY") or "").strip()
     if _is_insecure_secret(jwt_secret):
         violations.append(
             "JWT_SECRET_KEY must be explicitly set to a non-placeholder value "
