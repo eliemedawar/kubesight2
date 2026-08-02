@@ -36,6 +36,7 @@ from api.db import db  # noqa: E402
 import api.models  # noqa: E402,F401
 import api.models_application_intelligence  # noqa: E402,F401
 import api.models_cluster_build  # noqa: E402,F401
+import api.models_jobs  # noqa: E402,F401
 
 config = context.config
 if config.config_file_name is not None:
