@@ -53,7 +53,11 @@ def _is_insecure_secret(value: str) -> bool:
 
 
 def production_environment_enabled() -> bool:
-    """Whether strict startup validation applies to this process."""
+    """Whether strict startup validation applies to this process.
+
+    ``KUBESIGHT_ENV`` is the single authoritative environment-mode setting.
+    Legacy Flask environment signals deliberately do not participate here.
+    """
     return _environment_value("KUBESIGHT_ENV").lower() == "production"
 
 

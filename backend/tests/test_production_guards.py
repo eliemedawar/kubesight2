@@ -6,6 +6,7 @@ from flask import Flask
 from api.production_guards import (
     ProductionGuardError,
     _default_seeded_usernames,
+    production_environment_enabled,
     run_startup_guards,
 )
 from api.secret_encryption import (
@@ -43,6 +44,27 @@ def production_app(monkeypatch):
 def test_non_production_environment_is_not_guarded(monkeypatch):
     monkeypatch.delenv("KUBESIGHT_ENV", raising=False)
     run_startup_guards(Flask(__name__))
+
+
+@pytest.mark.parametrize("legacy_setting", ["FLASK_ENV", "APP_ENV"])
+def test_legacy_environment_signals_do_not_enable_production_guards(
+    monkeypatch, legacy_setting
+):
+    monkeypatch.delenv("KUBESIGHT_ENV", raising=False)
+    monkeypatch.setenv("FLASK_DEBUG", "false")
+    monkeypatch.setenv(legacy_setting, "production")
+
+    assert production_environment_enabled() is False
+
+
+def test_kubesight_environment_is_the_authoritative_production_signal(
+    monkeypatch,
+):
+    monkeypatch.setenv("KUBESIGHT_ENV", "  ProDucTion  ")
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.setenv("APP_ENV", "development")
+
+    assert production_environment_enabled() is True
 
 
 def test_safe_production_configuration_passes(production_app):
