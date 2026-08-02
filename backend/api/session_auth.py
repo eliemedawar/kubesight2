@@ -313,7 +313,7 @@ def csrf_token_valid(token: str) -> bool:
 def csrf_violation() -> str | None:
     if request.method in _SAFE_METHODS:
         return None
-    if request.path == "/api/auth/login":
+    if request.path in {"/api/auth/login", "/api/auth/admin-recovery"}:
         return None
     authorization = request.headers.get("Authorization", "")
     if authorization.startswith("Bearer "):

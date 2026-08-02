@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 import jwt
+import pyotp
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -18,7 +19,13 @@ from api.mfa_recovery import (
     mint_admin_recovery_grant,
     regenerate_recovery_codes,
 )
-from api.oidc_auth import complete_oidc_login, start_oidc_login
+from api.oidc_auth import (
+    OIDC_FLOW_COOKIE,
+    OIDC_FLOW_COOKIE_PATH,
+    complete_oidc_login,
+    start_oidc_login,
+)
+from api.session_auth import ACCESS_COOKIE, CSRF_HEADER
 from api.oidc import (
     OidcConfig,
     OidcConfigurationError,
@@ -670,3 +677,149 @@ def test_oidc_does_not_silently_link_an_existing_email(app, monkeypatch):
             browser_binding=started.browser_binding,
         )
     assert User.query.filter_by(email="collision@example.test").count() == 1
+
+
+def test_oidc_http_start_uses_hardened_binding_cookie_and_safe_redirect(
+    client, monkeypatch
+):
+    from api.oidc_auth import StartedOidcLogin
+
+    monkeypatch.setattr(
+        "api.routes.auth.start_oidc_login",
+        lambda return_to: StartedOidcLogin(
+            authorization_url="https://idp.example.test/authorize?safe=1",
+            browser_binding="browser-binding-secret",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        ),
+    )
+
+    response = client.get("/api/auth/oidc/login?returnTo=/clusters")
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "https://idp.example.test/authorize?safe=1"
+    assert response.headers["Cache-Control"] == "no-store"
+    cookie = client.get_cookie(OIDC_FLOW_COOKIE, path=OIDC_FLOW_COOKIE_PATH)
+    assert cookie and cookie.http_only and cookie.secure
+    assert cookie.same_site == "Lax"
+    blocked = client.get(
+        "/api/auth/oidc/login?returnTo=https://evil.example/phish"
+    )
+    assert blocked.status_code == 400
+
+
+def test_oidc_http_callback_sets_session_without_exposing_tokens(
+    app, client, monkeypatch
+):
+    from api.models import User
+    from api.oidc_auth import CompletedOidcLogin
+    from api.session_auth import issue_browser_session
+
+    def fake_complete(*, state, code, browser_binding):
+        assert (state, code, browser_binding) == (
+            "one-time-state",
+            "authorization-code",
+            "browser-binding",
+        )
+        user = User.query.filter_by(username="admin").one()
+        return CompletedOidcLogin(
+            user=user,
+            issued_session=issue_browser_session(user),
+            return_to="/clusters",
+            provisioned=False,
+        )
+
+    monkeypatch.setattr("api.routes.auth.complete_oidc_login", fake_complete)
+    client.set_cookie(
+        OIDC_FLOW_COOKIE,
+        "browser-binding",
+        path=OIDC_FLOW_COOKIE_PATH,
+        secure=True,
+    )
+
+    response = client.get(
+        "/api/auth/oidc/callback?state=one-time-state&code=authorization-code"
+    )
+
+    assert response.status_code == 303
+    assert response.headers["Location"] == "/clusters"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert client.get_cookie(ACCESS_COOKIE).http_only
+    assert client.get_cookie(OIDC_FLOW_COOKIE, path=OIDC_FLOW_COOKIE_PATH) is None
+    serialized = response.get_data(as_text=True) + str(response.headers)
+    assert "authorization-code" not in serialized
+    assert "browser-binding" not in serialized
+
+
+def test_recovery_code_completes_mfa_and_can_be_regenerated(
+    app, client
+):
+    from api.models import User
+    from api.models_auth import MfaRecoveryCode
+
+    user = User.query.filter_by(username="admin").one()
+    user.mfa_enabled = True
+    user.totp_secret = "JBSWY3DPEHPK3PXP"
+    codes = regenerate_recovery_codes(user, count=2)
+    login = client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin123"}
+    )
+    assert login.get_json()["data"]["stage"] == "mfa_challenge"
+    csrf = client.get("/api/auth/csrf").get_json()["data"]["csrfToken"]
+
+    recovered = client.post(
+        "/api/auth/mfa/recover",
+        headers={CSRF_HEADER: csrf},
+        json={"recoveryCode": codes[0]},
+    )
+
+    assert recovered.status_code == 200
+    assert recovered.get_json()["data"]["stage"] == "authenticated"
+    assert client.get_cookie(ACCESS_COOKIE).http_only
+    assert client.get("/api/auth/mfa/recovery-codes").get_json()["data"] == {
+        "remaining": 1
+    }
+    refreshed_csrf = client.get("/api/auth/csrf").get_json()["data"]["csrfToken"]
+    regenerated = client.post(
+        "/api/auth/mfa/recovery-codes",
+        headers={CSRF_HEADER: refreshed_csrf},
+        json={"code": pyotp.TOTP(user.totp_secret).now()},
+    )
+    new_codes = regenerated.get_json()["data"]["recoveryCodes"]
+    assert regenerated.status_code == 200
+    assert len(new_codes) == 10
+    stored = {row.code_hash for row in MfaRecoveryCode.query.all()}
+    assert all(code.replace("-", "") not in stored for code in new_codes)
+
+
+def test_cli_admin_recovery_grant_reenters_mfa_setup_without_password(
+    app, client
+):
+    from api.db import db
+    from api.models import User
+
+    user = User.query.filter_by(username="admin").one()
+    user.mfa_enabled = True
+    user.totp_secret = "JBSWY3DPEHPK3PXP"
+    db.session.commit()
+    _user, raw_token, _expires_at = mint_admin_recovery_grant("admin")
+
+    recovered = client.post(
+        "/api/auth/admin-recovery",
+        json={"username": "admin", "recoveryToken": raw_token},
+    )
+    assert recovered.status_code == 200
+    assert recovered.get_json()["data"]["stage"] == "mfa_setup"
+    csrf = client.get("/api/auth/csrf").get_json()["data"]["csrfToken"]
+    setup = client.post(
+        "/api/auth/first-login/totp/setup", headers={CSRF_HEADER: csrf}
+    )
+    secret = setup.get_json()["data"]["secret"]
+    verified = client.post(
+        "/api/auth/first-login/totp/verify",
+        headers={CSRF_HEADER: csrf},
+        json={"code": pyotp.TOTP(secret).now()},
+    )
+
+    assert verified.status_code == 200
+    assert len(verified.get_json()["data"]["recoveryCodes"]) == 10
+    assert client.get_cookie(ACCESS_COOKIE).http_only

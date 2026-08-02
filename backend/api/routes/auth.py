@@ -1,13 +1,30 @@
-from flask import Blueprint, request
+from flask import Blueprint, redirect, request
 
+from ..audit import log_audit
 from ..auth_utils import (
     PURPOSE_MFA,
     PURPOSE_ONBOARDING,
+    create_interim_token,
     get_current_user,
     get_interim_token,
     load_user_for_purpose,
 )
 from ..decorators import require_auth
+from ..mfa_recovery import (
+    complete_login_with_recovery_code,
+    consume_admin_recovery_grant,
+    recovery_code_count,
+    regenerate_recovery_codes,
+)
+from ..oidc import OidcConfigurationError, OidcProtocolError, safe_return_to
+from ..oidc_auth import (
+    OIDC_FLOW_COOKIE,
+    clear_oidc_flow_cookie,
+    complete_oidc_login,
+    oidc_status,
+    set_oidc_flow_cookie,
+    start_oidc_login,
+)
 from ..response import error_response, success_response
 from ..session_auth import (
     REFRESH_COOKIE,
@@ -33,6 +50,7 @@ from ..services.auth_service import (
     verify_first_login_totp,
     verify_login_mfa,
 )
+from ..services.totp_service import verify_totp
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
@@ -104,9 +122,12 @@ def first_login_totp_verify():
         return error_response("Onboarding session is invalid or expired.", 401)
     payload = request.get_json(silent=True) or {}
     code = payload.get("code") or ""
+    was_mfa_enabled = bool(user.mfa_enabled)
     data, error, status = verify_first_login_totp(user, code)
     if error:
         return error_response(error, status, data=data)
+    if not was_mfa_enabled and data and data.get("stage") == "authenticated":
+        data["recoveryCodes"] = regenerate_recovery_codes(user)
     return _success_with_login_cookies(data)
 
 
@@ -121,6 +142,136 @@ def mfa_verify():
     if error:
         return error_response(error, status, data=data)
     return _success_with_login_cookies(data)
+
+
+@auth_bp.route("/mfa/recover", methods=["POST"])
+def mfa_recover():
+    user = _user_for_purpose(PURPOSE_MFA)
+    if not user:
+        return error_response("MFA session is invalid or expired.", 401)
+    payload = request.get_json(silent=True) or {}
+    data, error, status = complete_login_with_recovery_code(
+        user, payload.get("recoveryCode") or ""
+    )
+    if error:
+        return error_response(error, status)
+    return _success_with_login_cookies(data)
+
+
+@auth_bp.route("/mfa/recovery-codes", methods=["GET"])
+@require_auth
+def mfa_recovery_status():
+    user = get_current_user()
+    return success_response({"remaining": recovery_code_count(user)})
+
+
+@auth_bp.route("/mfa/recovery-codes", methods=["POST"])
+@require_auth
+def mfa_recovery_regenerate():
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    if not user.mfa_enabled or not user.totp_secret:
+        return error_response("MFA is not configured for this account.", 400)
+    if not verify_totp(user.totp_secret, payload.get("code") or ""):
+        log_audit(
+            "mfa_recovery_codes_regeneration_rejected",
+            actor=user,
+            target_type="user",
+            target_id=user.id,
+            details={"outcome": "rejected"},
+        )
+        return error_response("Invalid or expired authentication code.", 400)
+    codes = regenerate_recovery_codes(user)
+    return success_response({"recoveryCodes": codes, "remaining": len(codes)})
+
+
+@auth_bp.route("/admin-recovery", methods=["POST"])
+def admin_recovery():
+    payload = request.get_json(silent=True) or {}
+    user = consume_admin_recovery_grant(
+        payload.get("username") or "", payload.get("recoveryToken") or ""
+    )
+    if not user:
+        return error_response("Admin recovery credentials are invalid or expired.", 401)
+    token = create_interim_token(user, PURPOSE_ONBOARDING)
+    return _success_with_login_cookies(
+        {
+            "stage": "mfa_setup",
+            "onboardingToken": token,
+            "mustChangePassword": False,
+            "mfaEnabled": False,
+            "username": user.username,
+        }
+    )
+
+
+def _no_store(response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+@auth_bp.route("/oidc/status", methods=["GET"])
+def oidc_provider_status():
+    response, status = success_response(oidc_status())
+    return _no_store(response), status
+
+
+@auth_bp.route("/oidc/login", methods=["GET"])
+def oidc_login():
+    try:
+        return_to = safe_return_to(request.args.get("returnTo"))
+    except OidcProtocolError:
+        return error_response("OIDC returnTo must be a local path.", 400)
+    try:
+        started = start_oidc_login(return_to=return_to)
+    except OidcConfigurationError as exc:
+        log_audit(
+            "oidc_login_failed",
+            target_type="oidc",
+            details={"stage": "start", "errorType": type(exc).__name__},
+        )
+        return error_response("OIDC is not configured.", 503)
+    except OidcProtocolError as exc:
+        log_audit(
+            "oidc_login_failed",
+            target_type="oidc",
+            details={"stage": "start", "errorType": type(exc).__name__},
+        )
+        return error_response("OIDC provider is unavailable.", 502)
+    response = redirect(started.authorization_url, code=302)
+    set_oidc_flow_cookie(response, started.browser_binding)
+    return _no_store(response)
+
+
+@auth_bp.route("/oidc/callback", methods=["GET"])
+def oidc_callback():
+    provider_error = request.args.get("error")
+    state = request.args.get("state") or ""
+    code = request.args.get("code") or ""
+    browser_binding = request.cookies.get(OIDC_FLOW_COOKIE, "")
+    if provider_error or not state or not code or not browser_binding:
+        log_audit(
+            "oidc_login_failed",
+            target_type="oidc",
+            details={"stage": "callback", "errorType": "ProviderResponse"},
+        )
+        response = redirect("/login?oidc=failed", code=303)
+        clear_oidc_flow_cookie(response)
+        return _no_store(response)
+    try:
+        completed = complete_oidc_login(
+            state=state, code=code, browser_binding=browser_binding
+        )
+    except (OidcConfigurationError, OidcProtocolError):
+        response = redirect("/login?oidc=failed", code=303)
+        clear_oidc_flow_cookie(response)
+        return _no_store(response)
+    response = redirect(completed.return_to, code=303)
+    set_session_cookies(response, completed.issued_session)
+    clear_oidc_flow_cookie(response)
+    return _no_store(response)
 
 
 @auth_bp.route("/csrf", methods=["GET"])

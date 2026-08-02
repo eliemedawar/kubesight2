@@ -112,6 +112,24 @@ def consume_recovery_code(user: User, code: str) -> bool:
     return consumed == 1
 
 
+def recovery_code_count(user: User) -> int:
+    return MfaRecoveryCode.query.filter_by(user_id=user.id, used_at=None).count()
+
+
+def complete_login_with_recovery_code(user: User, code: str):
+    """Use one recovery code and rejoin the canonical login completion path."""
+    if not user.mfa_enabled or not user.totp_secret:
+        return None, "MFA is not configured for this account.", 400
+    if not consume_recovery_code(user, code):
+        return None, "Invalid or already-used recovery code.", 400
+
+    # A1 owns auth_service. Reusing its completion path preserves lock-counter
+    # resets, login audits, timestamps, and security notifications exactly.
+    from .services.auth_service import _complete_login
+
+    return _complete_login(user)
+
+
 def mint_admin_recovery_grant(
     username: str, *, duration_minutes: int = 10
 ) -> tuple[User, str, datetime]:

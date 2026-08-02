@@ -260,6 +260,12 @@ def complete_oidc_login(
         or row.issuer != config.issuer
         or row.redirect_uri != config.redirect_uri
     ):
+        log_audit(
+            "oidc_login_failed",
+            target_type="oidc_authorization_request",
+            target_id=row.id if row else None,
+            details={"stage": "binding", "errorType": "InvalidTransaction"},
+        )
         raise OidcProtocolError("OIDC authorization request is invalid or expired.")
 
     consumed = OidcAuthorizationRequest.query.filter(
@@ -270,6 +276,12 @@ def complete_oidc_login(
     ).update({OidcAuthorizationRequest.consumed_at: now}, synchronize_session=False)
     if consumed != 1:
         db.session.rollback()
+        log_audit(
+            "oidc_login_failed",
+            target_type="oidc_authorization_request",
+            target_id=row.id,
+            details={"stage": "consume", "errorType": "ReplayedTransaction"},
+        )
         raise OidcProtocolError("OIDC authorization request was already consumed.")
     db.session.commit()
 
