@@ -134,8 +134,12 @@ function ConfigForms({ showJenkinsOnly, canManage, onChanged }) {
     return <LoadingState label="Loading configuration..." />;
   }
 
+  // `.zoho-page` is not decoration: eighteen rules in ticketing.css are scoped
+  // to it, including the min-width:0 guards that stop inputs from overflowing
+  // their grid cell and overlapping the next column. The forms have always
+  // rendered inside it, so this wrapper comes with them.
   return (
-    <>
+    <div className="zoho-page">
       {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
       {notice ? <p className="settings-panel-notice">{notice}</p> : null}
 
@@ -173,7 +177,7 @@ function ConfigForms({ showJenkinsOnly, canManage, onChanged }) {
           Ticketing page. This tab is the connection only.
         </p>
       )}
-    </>
+    </div>
   );
 }
 

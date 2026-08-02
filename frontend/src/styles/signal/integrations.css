@@ -39,9 +39,11 @@
   color: var(--sidebar-section-label);
 }
 
+/* auto-fill, not auto-fit: a category with one integration should show one
+   card-sized card, not one card stretched across the whole column. */
 .sg-int-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
   gap: var(--space-4);
 }
 
@@ -49,6 +51,11 @@
 .sg-int-card {
   display: flex;
   flex-direction: column;
+  /* The global `button` rule centres its content both ways. A card is a block
+     of left-aligned text that happens to be clickable, so both axes are reset
+     here — without this the name, status and detail cluster in the middle. */
+  align-items: stretch;
+  justify-content: flex-start;
   gap: 0.6rem;
   width: 100%;
   text-align: left;
@@ -91,6 +98,12 @@
 .sg-int-card-name .muted {
   font-size: var(--font-size-xs);
   color: var(--text-muted);
+}
+
+.sg-int-card-head,
+.sg-int-card-detail,
+.sg-int-card-caps {
+  width: 100%;
 }
 
 .sg-int-card-detail {
