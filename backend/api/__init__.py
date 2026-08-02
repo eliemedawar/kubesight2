@@ -18,7 +18,8 @@ from .models import AppSettings, User
 from .routes import register_blueprints
 from .frontend_static import frontend_dist_available, register_frontend_static
 from .response import success_response
-from .migrate_rbac import run_migrations
+from .migrate_rbac import apply_legacy_schema, reconcile_data
+from .migrations import current_revision, head_revision, is_at_head, upgrade_to_head
 from .seed import seed_defaults
 from .services.alert_policy_scheduler import start_alert_policy_scheduler
 
@@ -233,7 +234,31 @@ def create_app(config_object=None) -> Flask:
 
     with app.app_context():
         if not is_testing:
-            run_migrations()
+            if _is_production_env():
+                # Production never reshapes its own schema at boot. Bringing a
+                # database to head is a deliberate, reversible step an operator
+                # takes with a backup in hand -- not a side effect of a pod
+                # restarting at 3am.
+                #
+                # Refusing here rather than letting reconcile_data() fail on a
+                # missing table: "not at revision X, run alembic upgrade head"
+                # is actionable at 3am; "no such column" is a debugging session.
+                if not is_at_head():
+                    raise RuntimeError(
+                        "Database is not at the expected migration revision "
+                        f"(current={current_revision()!r}, "
+                        f"expected={head_revision()!r}). Run "
+                        "`alembic upgrade head` before starting KubeSight in "
+                        "production."
+                    )
+            else:
+                upgrade_to_head(app.config["SQLALCHEMY_DATABASE_URI"])
+                apply_legacy_schema()
+
+            # Data reconciliation is not schema mutation and runs everywhere:
+            # it is how a release grants newly introduced permissions to system
+            # roles and converts legacy access rules. See reconcile_data.
+            reconcile_data()
             seed_defaults()
 
     @app.route("/health", methods=["GET"])

@@ -328,3 +328,54 @@ committed; they need a one-time normalise. New contributors are unaffected.
 Next: remove schema mutation from startup. `create_app` still calls
 `run_migrations()` at `__init__.py:236`.
 Blocked on: nothing.
+
+### 2026-08-02 A1 — schema mutation removed from startup
+
+`create_app` no longer calls `db.create_all()` or the hand-written column
+migrators in production.
+
+**What the split is, and why it is not a deletion.** `run_migrations()` looked
+like one thing and was two. Classifying all 30 entries: 20 pure DDL, 5 pure
+data, 4 both. The data half is not migration at all -- it runs every boot by
+design. `_sync_role_permissions` is how a release grants a newly introduced
+permission to existing system roles; `migrate_all_users_legacy_rules` converts
+access rules written in an older shape. Deleting the call to "stop mutating
+schema at startup" would have silently stopped RBAC reconciliation, with no
+error and no symptom until somebody's permissions were wrong.
+
+So:
+- `apply_legacy_schema()` — the 20 DDL migrators. Development only.
+- `reconcile_data()` — data repair. Every environment, every boot.
+- `run_migrations()` — both, minus `create_all`, for the test fixtures.
+
+Startup is now: production checks and refuses; everything else runs
+`upgrade_to_head()` then `apply_legacy_schema()`; both then reconcile and seed.
+
+**A3 — I have put a revision check in `create_app` and it overlaps your guard 7.**
+Deliberate, and it should not block you. With schema creation gone, a production
+boot against an un-migrated database would otherwise have died inside
+`reconcile_data()` with "no such column", which is a debugging session at 3am
+rather than an instruction. It now raises:
+
+```
+Database is not at the expected migration revision (current=None,
+expected='7def82636ab5'). Run `alembic upgrade head` before starting KubeSight
+in production.
+```
+
+Fold it into your guard set if you want one consistent report — `is_at_head()`,
+`current_revision()` and `head_revision()` are all in `api/migrations.py`. If
+your guard runs first it will report before this ever fires, which is the better
+outcome. I am not attached to my message winning; I am attached to production
+never reshaping its own schema at boot.
+
+**Verified, not assumed** — four boot paths:
+- fresh database → 85 tables, stamped at baseline, `is_at_head()` true, seeded
+- legacy database (built the old way, no `alembic_version`) → stamped, not
+  rebuilt, at head
+- production + un-migrated → refuses with the message above
+- production + migrated → starts, mutates nothing
+
+Next: durable job platform (contract 3), starting with `models_jobs.py`. It goes
+in a new module, and it goes in `alembic/env.py` at the same time -- the test
+that catches me if I forget is already there.
