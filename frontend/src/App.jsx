@@ -2,7 +2,6 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   getClusterOverview,
-  getDashboardSummary,
   getInventoryDetail,
   listInventory,
   getSettings,
@@ -10,10 +9,6 @@ import {
   listMyDeploymentRequests,
   listClusters,
   testAlertEmail,
-  getUpgradeInfo,
-  getUpgradeJob,
-  runUpgradePrecheck,
-  startUpgrade,
   updateSettings,
 } from "./api";
 import { useAuth } from "./context/AuthContext";
@@ -39,7 +34,6 @@ import { removeFromInventory, updateCatalogEntry } from "./api/inventoryApi.js";
 import {
   buildNotificationChannels,
   emptyAppData,
-  mapPrecheckState,
   normalizeAlertRouting,
   normalizeSettings,
   resolveDefaultClusterId,
@@ -172,9 +166,6 @@ export default function App() {
   const [errorState, setErrorState] = useState({ core: "", page: "" });
   const [data, setData] = useState(emptyAppData);
   const [clusterOverview, setClusterOverview] = useState(null);
-  const [upgradeResult, setUpgradeResult] = useState(null);
-  const [targetVersion, setTargetVersion] = useState("v1.31.0");
-  const [confirmationText, setConfirmationText] = useState("");
   const [inventoryItems, setInventoryItems] = useState([]);
   // Identity comes from the URL, so an application detail page is now
   // shareable and survives a refresh. This was previously state that only
@@ -219,7 +210,6 @@ export default function App() {
 
   const applicationDetailRequestRef = useRef(0);
   const alertsLoadRef = useRef({ key: "", at: 0 });
-  const upgradeLoadClusterRef = useRef("");
 
   const applyPageError = useCallback((message, { expectedDenied = false } = {}) => {
     if (!shouldShowAccessError(message, { expectedDenied })) {
@@ -852,112 +842,6 @@ export default function App() {
     });
   };
 
-  const normalizeUpgradePayload = (payload) => ({
-    clusterInfo: payload.clusterInfo,
-    provider: payload.provider,
-    versionInfo: payload.versionInfo,
-    versionSkew: payload.versionSkew,
-    upgradePlan: payload.upgradePlan,
-    instructions: payload.instructions || payload.provider?.instructions,
-    currentVersion: payload.currentVersion || payload.clusterInfo?.controlPlaneVersion,
-    canUpgrade: payload.canUpgrade,
-    status: payload.status,
-    message: payload.message,
-    upgradeId: payload.upgradeId,
-    executionSupported: payload.executionSupported,
-    requiredConfirmation: payload.requiredConfirmation,
-    upgradeChecks: (payload.checks || []).map((check) => ({
-      item: check.name,
-      state: mapPrecheckState(check.status),
-      rawStatus: check.status,
-      message: check.details || check.message,
-    })),
-    upgradeSteps: payload.steps || payload.upgradePlan?.steps || [],
-    activeStep: payload.activeStep ?? -1,
-  });
-
-  const loadUpgradeInfo = async (clusterId, version = targetVersion, { resetTarget = false } = {}) => {
-    if (!clusterId || !canAccessCluster(clusterId)) {
-      return;
-    }
-    upgradeLoadClusterRef.current = clusterId;
-    const requestClusterId = clusterId;
-    setLoadingState((prev) => ({ ...prev, page: true }));
-    setErrorState((prev) => ({ ...prev, page: "" }));
-    try {
-      const result = await getUpgradeInfo(clusterId, version);
-      if (upgradeLoadClusterRef.current !== requestClusterId) {
-        return;
-      }
-      setUpgradeResult({
-        ...normalizeUpgradePayload(result),
-        clusterId: requestClusterId,
-      });
-      if (resetTarget) {
-        const recommended = result.versionInfo?.recommendedTarget;
-        const latest = result.versionInfo?.latestAvailable;
-        if (recommended) {
-          setTargetVersion(recommended);
-        } else if (latest && latest !== "unknown") {
-          setTargetVersion(latest);
-        } else {
-          setTargetVersion(version);
-        }
-      }
-    } catch (infoError) {
-      if (upgradeLoadClusterRef.current === requestClusterId) {
-        applyPageError(infoError.message);
-      }
-    } finally {
-      if (upgradeLoadClusterRef.current === requestClusterId) {
-        setLoadingState((prev) => ({ ...prev, page: false }));
-      }
-    }
-  };
-
-  useEffect(() => {
-    if (activePage !== "upgrade" || !selectedClusterId) {
-      return;
-    }
-    setUpgradeResult(null);
-    setTargetVersion("v1.31.0");
-    loadUpgradeInfo(selectedClusterId, "v1.31.0", { resetTarget: true });
-  }, [activePage, selectedClusterId]);
-
-  useEffect(() => {
-    const jobId = upgradeResult?.upgradeId || upgradeResult?.jobId;
-    if (activePage !== "upgrade" || upgradeResult?.status !== "running" || !jobId) {
-      return undefined;
-    }
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const job = await getUpgradeJob(jobId);
-        if (cancelled) {
-          return;
-        }
-        setUpgradeResult((prev) => ({
-          ...prev,
-          status: job.status,
-          message: job.message,
-          error: job.error,
-          upgradeId: job.jobId || prev?.upgradeId,
-          upgradeSteps: job.steps || prev?.upgradeSteps,
-          activeStep: job.activeStep ?? prev?.activeStep ?? -1,
-          executionSupported: job.executionSupported ?? prev?.executionSupported,
-        }));
-      } catch {
-        // Keep polling until the job completes or the user leaves the page.
-      }
-    };
-    poll();
-    const timer = setInterval(poll, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [activePage, upgradeResult?.status, upgradeResult?.upgradeId, upgradeResult?.jobId]);
-
   const loadInventory = async () => {
     if (!hasPermission("inventory:view") && !hasPermission("resources:view")) {
       setInventoryItems([]);
@@ -1083,112 +967,6 @@ export default function App() {
     }
   };
 
-  const runPrecheck = async () => {
-    if (!selectedClusterId || !canAccessCluster(selectedClusterId)) {
-      return;
-    }
-    setLoadingState((prev) => ({ ...prev, page: true }));
-    setErrorState((prev) => ({ ...prev, page: "" }));
-    try {
-      const result = await runUpgradePrecheck({
-        clusterId: selectedClusterId,
-        targetVersion,
-      });
-      setUpgradeResult({
-        ...normalizeUpgradePayload(result),
-        clusterId: selectedClusterId,
-        canUpgrade: Boolean(result.canUpgrade),
-        status: result.canUpgrade ? null : "blocked",
-        message: result.canUpgrade
-          ? `Precheck passed. Current version: ${result.currentVersion || "unknown"}`
-          : "Precheck failed. Fix failed checks before upgrading.",
-      });
-    } catch (precheckError) {
-      applyPageError(precheckError.message);
-    } finally {
-      setLoadingState((prev) => ({ ...prev, page: false }));
-    }
-  };
-
-  const runUpgradeStart = async () => {
-    if (!selectedClusterId || !canAccessCluster(selectedClusterId)) {
-      return;
-    }
-    const showsInstructionsOnly =
-      upgradeResult?.provider?.executionMode === "instructions" ||
-      (!upgradeResult?.provider?.upgradeSupported &&
-        upgradeResult?.provider?.executionMode !== "plan-only" &&
-        upgradeResult?.provider?.executionMode !== "execute-with-cli");
-
-    if (showsInstructionsOnly) {
-      document.querySelector(".upgrade-instructions")?.scrollIntoView({ behavior: "smooth" });
-      return;
-    }
-
-    if (upgradeResult && upgradeResult.canUpgrade === false) {
-      setErrorState((prev) => ({ ...prev, page: "Run a successful precheck before starting upgrade." }));
-      return;
-    }
-
-    const willRunAutomatically = upgradeResult?.provider?.executionMode === "execute-with-cli";
-    if (willRunAutomatically) {
-      const clusterLabel = allowedClusters.find((c) => c.id === selectedClusterId)?.name || selectedClusterId;
-      const confirmed = window.confirm(
-        `Start automatic upgrade of cluster "${clusterLabel}" to ${targetVersion}?\n\nKubeSight will drain nodes, run kubeadm upgrade steps, and restart kubelet on each node.\n\nThis operation modifies your cluster. Continue?`
-      );
-      if (!confirmed) return;
-    }
-
-    setLoadingState((prev) => ({ ...prev, page: true }));
-    setErrorState((prev) => ({ ...prev, page: "" }));
-    try {
-      const result = await startUpgrade({
-        clusterId: selectedClusterId,
-        targetVersion,
-      });
-      const normalized = normalizeUpgradePayload(result);
-      const completedIndex = (normalized.upgradeSteps || []).reduce(
-        (last, step, index) => (step.status === "completed" ? index : last),
-        -1
-      );
-      setUpgradeResult({
-        ...normalized,
-        clusterId: selectedClusterId,
-        canUpgrade: upgradeResult?.canUpgrade ?? true,
-        status: result.status,
-        message: result.message,
-        activeStep: result.activeStep ?? completedIndex,
-        upgradeSteps: result.steps || normalized.upgradeSteps,
-        executionSupported: result.executionSupported ?? normalized.executionSupported,
-        jobId: result.jobId || result.upgradeId,
-      });
-      requestAnimationFrame(() => {
-        if (result.status === "manual_required") {
-          document.querySelector(".upgrade-result-banner")?.scrollIntoView({
-            behavior: "smooth",
-            block: "start",
-          });
-          return;
-        }
-        document.querySelector(".upgrade-plan-result")?.scrollIntoView({
-          behavior: "smooth",
-          block: "start",
-        });
-      });
-    } catch (startError) {
-      applyPageError(startError.message);
-    } finally {
-      setLoadingState((prev) => ({ ...prev, page: false }));
-    }
-  };
-
-  const handleTargetVersionChange = (version) => {
-    setTargetVersion(version);
-    if (selectedClusterId && activePage === "upgrade") {
-      loadUpgradeInfo(selectedClusterId, version);
-    }
-  };
-
   const testAlertEmailDelivery = async (routing) => {
     setTestingEmail(true);
     setTestEmailMessage("");
@@ -1284,6 +1062,9 @@ export default function App() {
       return { ...prev, [key]: value };
     });
   };
+
+  const activeClusterLabel =
+    allowedClusters.find((cluster) => cluster.id === selectedClusterId)?.name || selectedClusterId || "";
 
   const scopedData = {
     ...data,
@@ -1526,18 +1307,14 @@ export default function App() {
       case "upgrade":
         return (
           <UpgradeSafeModePage
-            upgradeData={upgradeResult}
-            targetVersion={targetVersion}
-            onTargetVersionChange={handleTargetVersionChange}
-            onRunPrecheck={runPrecheck}
-            onStartUpgrade={runUpgradeStart}
+            clusterId={selectedClusterId}
+            clusterLabel={activeClusterLabel}
             onViewInstructions={() =>
               document.querySelector(".upgrade-instructions")?.scrollIntoView({ behavior: "smooth" })
             }
-            loading={loadingState.page}
             coreLoading={loadingState.core}
             hasClusters={hasClusters}
-            accessError={pageAccessError}
+            accessError={errorState.core}
             canPrecheck={hasPermission("upgrades:precheck") && canAccessCluster(selectedClusterId)}
             canStart={hasPermission("upgrades:start") && canAccessCluster(selectedClusterId)}
           />
@@ -1639,8 +1416,6 @@ export default function App() {
   // The filtered list is the honest one — it counts what this user may actually
   // open — and it is now used everywhere.
   const alertBadgeCount = Array.isArray(data.alerts) ? data.alerts.length : 0;
-  const activeClusterLabel =
-    allowedClusters.find((cluster) => cluster.id === selectedClusterId)?.name || selectedClusterId || "";
 
   if (authLoading) {
     return (
