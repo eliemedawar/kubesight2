@@ -326,5 +326,45 @@ warning, never a degraded start.
 The migrations guard depends on A1 landing Alembic. Ship the other six first and
 add it after.
 
+Add an eighth: **demo-mode fallback must be off in production.**
+`routes/clients.py:48` and `:72` and `routes/application_services.py:44` serve
+demo data when a table is empty or a lookup 404s, gated on `_use_mock()`. In a
+governed platform "does this resource exist" has to be answerable truthfully — a
+404 that returns a plausible fake is worse than an error.
+
 Implementation lives entirely in `backend/api/production_guards.py`, exposing
 `run_startup_guards(app)`. A1 inserts the single call site.
+
+---
+
+## 6. Destructive actions require explicit intent
+
+**Producer:** A1 · **Consumer:** A2 · **Status:** implemented for roles
+
+An endpoint whose success would cause a large, invisible change to someone
+else's access refuses by default and takes an explicit opt-in. The caller has to
+have seen the consequence before it happens.
+
+First instance, and the pattern for the rest:
+
+### `DELETE /api/roles/<id>`
+
+| Condition | Response |
+|---|---|
+| No users assigned | `200` |
+| Users assigned, no `force` | **`409`**, `error` names up to five affected users and the total |
+| `?force=true` | `200`, users unassigned, `users_unassigned` and `forced` on the audit entry |
+| System role | `400` — never deletable |
+
+Unassigned means `role_id = None`: the user holds no permissions until
+reassigned, so the failure mode is closed, not open.
+
+**A2:** `deleteRole(id, { force })` in `api/usersApi.js`. Pass `force: true`
+only where the UI has already shown who is affected and had it confirmed --
+`RolesPanel.jsx` does exactly that, and its confirm dialog is what makes the
+opt-in legitimate. Do not default it to `true` to make a 409 go away; the 409 is
+the feature.
+
+The guard exists for the API surface as much as for the UI. A token-authenticated
+script gets no confirm dialog, and that is the caller most likely to delete a
+role without realising who was using it.
