@@ -1,0 +1,341 @@
+/*
+ * Shared component layer.
+ *
+ * Styles for the pieces every screen needs — breadcrumbs, status vocabulary,
+ * freshness, copyable identifiers, activity timelines, table search and sort,
+ * confirmation dialogs. Built before the Integrations hub so the hub is the
+ * first consumer rather than a retrofit.
+ *
+ * Everything here uses existing tokens from index.css. No new colour values:
+ * the point of a shared layer is that a status pill means the same thing and
+ * looks the same wherever it appears.
+ */
+
+/* ── Breadcrumbs ─────────────────────────────────────────────────────── */
+
+.breadcrumbs {
+  margin-bottom: var(--space-2);
+}
+
+.breadcrumbs ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.breadcrumbs a {
+  color: var(--text-muted);
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+}
+
+.breadcrumbs a:hover {
+  color: var(--text-strong);
+  text-decoration: underline;
+}
+
+.breadcrumbs a:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.breadcrumb-sep {
+  opacity: 0.5;
+}
+
+.breadcrumb-group {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 0.68rem;
+}
+
+.page-title-text {
+  min-width: 0;
+}
+
+.page-title-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.page-title-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  margin-top: var(--space-2);
+}
+
+/* ── Status vocabulary ───────────────────────────────────────────────── */
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.55rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.status-pill::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-pill--ok {
+  color: var(--ok-strong, #15803d);
+  border-color: color-mix(in srgb, currentColor 30%, transparent);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.status-pill--warn {
+  color: var(--warn-strong, #b45309);
+  border-color: color-mix(in srgb, currentColor 30%, transparent);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.status-pill--muted {
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: transparent;
+}
+
+/* ── Freshness ───────────────────────────────────────────────────────── */
+
+.freshness {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.freshness--stale {
+  color: var(--warn-strong, #b45309);
+  font-weight: 600;
+}
+
+.freshness--unknown {
+  font-style: italic;
+}
+
+/* ── Copyable identifiers ────────────────────────────────────────────── */
+
+.copyable-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-xs);
+  word-break: break-all;
+}
+
+.copyable-id--button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.copyable-id--button:hover {
+  border-color: var(--border);
+  background: var(--bg-subtle, transparent);
+}
+
+.copyable-id--button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.copyable-id-state {
+  font-family: var(--font-sans);
+  color: var(--ok-strong, #15803d);
+}
+
+.copyable-id-state:empty {
+  display: none;
+}
+
+/* ── Activity timeline ───────────────────────────────────────────────── */
+
+.activity-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.activity-entry {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-3);
+  align-items: start;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.activity-entry:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.activity-marker {
+  width: 0.6rem;
+  height: 0.6rem;
+  margin-top: 0.35rem;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.activity-entry--ok .activity-marker {
+  background: var(--ok-strong, #15803d);
+}
+
+.activity-entry--warn .activity-marker {
+  background: var(--warn-strong, #b45309);
+}
+
+.activity-entry--error .activity-marker {
+  background: var(--danger-strong, #b91c1c);
+}
+
+.activity-body {
+  min-width: 0;
+}
+
+.activity-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.activity-title {
+  font-weight: 600;
+}
+
+.activity-detail,
+.activity-actor {
+  margin: 0.2rem 0 0;
+  font-size: var(--font-size-xs);
+}
+
+/* ── Table search and sort ───────────────────────────────────────────── */
+
+.data-table-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+.data-table-search {
+  flex: 1 1 16rem;
+  max-width: 24rem;
+  min-height: 2.25rem;
+}
+
+.data-table-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.data-table-sort:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--radius-sm);
+}
+
+.data-table-sort-marker {
+  opacity: 0.45;
+  font-size: 0.7em;
+}
+
+th.is-sortable[aria-sort="ascending"] .data-table-sort-marker,
+th.is-sortable[aria-sort="descending"] .data-table-sort-marker {
+  opacity: 1;
+}
+
+/* ── Confirmation dialog ─────────────────────────────────────────────── */
+
+.confirm-dialog {
+  max-width: 32rem;
+}
+
+.confirm-dialog-body {
+  margin: var(--space-2) 0 0;
+}
+
+.confirm-dialog-affected {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.confirm-dialog-affected p {
+  margin: 0 0 0.35rem;
+  font-size: var(--font-size-xs);
+}
+
+.confirm-dialog-affected ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: var(--font-size-sm);
+}
+
+.confirm-dialog-phrase {
+  display: block;
+  margin-top: var(--space-3);
+}
+
+.confirm-dialog-phrase span {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: var(--font-size-sm);
+}
+
+.confirm-dialog-phrase input {
+  width: 100%;
+}
+
+/* ── Degraded banner ─────────────────────────────────────────────────── */
+
+.banner-message--warn {
+  border-color: color-mix(in srgb, var(--warn-strong, #b45309) 35%, transparent);
+  background: color-mix(in srgb, var(--warn-strong, #b45309) 8%, transparent);
+  color: var(--warn-strong, #b45309);
+}
+
+.state-error {
+  border-color: color-mix(in srgb, var(--danger-strong, #b91c1c) 30%, transparent);
+}
