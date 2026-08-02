@@ -175,8 +175,6 @@ export default function App() {
   const [upgradeResult, setUpgradeResult] = useState(null);
   const [targetVersion, setTargetVersion] = useState("v1.31.0");
   const [confirmationText, setConfirmationText] = useState("");
-  const [dashboardSummary, setDashboardSummary] = useState(null);
-  const [dashboardRefreshedAt, setDashboardRefreshedAt] = useState(null);
   const [inventoryItems, setInventoryItems] = useState([]);
   // Identity comes from the URL, so an application detail page is now
   // shareable and survives a refresh. This was previously state that only
@@ -222,10 +220,6 @@ export default function App() {
   const applicationDetailRequestRef = useRef(0);
   const alertsLoadRef = useRef({ key: "", at: 0 });
   const upgradeLoadClusterRef = useRef("");
-  const dashboardLoadClusterRef = useRef("");
-  const dashboardRequestSeqRef = useRef(0);
-  const dashboardSummaryClusterRef = useRef("");
-  const [dashboardRefreshing, setDashboardRefreshing] = useState(false);
 
   const applyPageError = useCallback((message, { expectedDenied = false } = {}) => {
     if (!shouldShowAccessError(message, { expectedDenied })) {
@@ -372,7 +366,6 @@ export default function App() {
   const resourcesLoading = resourceCacheEnabled && activeTabLoading;
   const scopeDataLoading = namespacesLoading || resourcesLoading;
 
-  const isDashboardPage = authorizedPage === "dashboard";
 
   const applyCoreError = (message, { expectedDenied = false } = {}) => {
     if (!shouldShowAccessError(message, { expectedDenied })) {
@@ -662,10 +655,11 @@ export default function App() {
       return;
     }
 
-    if (authorizedPage === "dashboard") {
-      return;
-    }
-
+    // The dashboard used to be skipped here, because the summary carried its
+    // own server-side alert total for the badge. The badge reads one source
+    // now, so skipping would leave the bell empty on the one page people watch
+    // it from. The 30s dedupe below already stops this costing a request per
+    // navigation.
     if (!hasPermission("alerts:view") || !canAccessCluster(selectedClusterId)) {
       setData((prev) => ({ ...prev, alerts: [], alertsMeta: {} }));
       return;
@@ -963,87 +957,6 @@ export default function App() {
       clearInterval(timer);
     };
   }, [activePage, upgradeResult?.status, upgradeResult?.upgradeId, upgradeResult?.jobId]);
-
-  const loadDashboardSummary = async (clusterId, { background = false } = {}) => {
-    if (!clusterId || !hasPermission("overview:view") || !canAccessCluster(clusterId)) {
-      dashboardLoadClusterRef.current = "";
-      setDashboardSummary(null);
-      setDashboardRefreshedAt(null);
-      setDashboardRefreshing(false);
-      setLoadingState((prev) => ({ ...prev, page: false }));
-      return;
-    }
-    const requestSeq = ++dashboardRequestSeqRef.current;
-    const isLatestRequest = () => requestSeq === dashboardRequestSeqRef.current;
-    dashboardLoadClusterRef.current = clusterId;
-    if (background) {
-      setDashboardRefreshing(true);
-    } else {
-      setLoadingState((prev) => ({ ...prev, page: true }));
-    }
-    setErrorState((prev) => ({ ...prev, page: "" }));
-    try {
-      const summary = await getDashboardSummary(clusterId);
-      if (!isLatestRequest() || dashboardLoadClusterRef.current !== clusterId) {
-        return;
-      }
-      setDashboardSummary(summary);
-      setDashboardRefreshedAt(new Date().toISOString());
-    } catch (dashboardError) {
-      if (!isLatestRequest() || dashboardLoadClusterRef.current !== clusterId) {
-        return;
-      }
-      // The cluster no longer exists (e.g. deleted in another tab) — stop polling
-      // it by refreshing the list, which drops it and re-selects a valid cluster.
-      if (dashboardError.status === 404) {
-        dashboardLoadClusterRef.current = "";
-        setDashboardSummary(null);
-        setDashboardRefreshedAt(null);
-        reloadClusters().catch(() => {});
-        return;
-      }
-      applyPageError(dashboardError.message, {
-        expectedDenied: !canAccessCluster(clusterId),
-      });
-    } finally {
-      if (!isLatestRequest()) {
-        return;
-      }
-      if (background) {
-        setDashboardRefreshing(false);
-      } else {
-        setLoadingState((prev) => ({ ...prev, page: false }));
-      }
-    }
-  };
-
-  const selectedClusterIsAllowed = useMemo(
-    () => Boolean(selectedClusterId && allowedClusters.some((cluster) => cluster.id === selectedClusterId)),
-    [selectedClusterId, allowedClusters]
-  );
-
-  useEffect(() => {
-    if (authorizedPage !== "dashboard" || !selectedClusterIsAllowed) {
-      return undefined;
-    }
-    const clusterChanged =
-      Boolean(dashboardSummaryClusterRef.current) &&
-      dashboardSummaryClusterRef.current !== selectedClusterId;
-    if (clusterChanged || !dashboardSummaryClusterRef.current) {
-      setDashboardSummary(null);
-      setDashboardRefreshedAt(null);
-    }
-    dashboardSummaryClusterRef.current = selectedClusterId;
-    loadDashboardSummary(selectedClusterId);
-    const intervalSeconds = Number(settingsDraft.refreshIntervalSeconds) || 30;
-    const intervalMs = Math.min(Math.max(intervalSeconds, 30), 60) * 1000;
-    const timer = window.setInterval(() => {
-      loadDashboardSummary(selectedClusterId, { background: true });
-    }, intervalMs);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [authorizedPage, selectedClusterId, selectedClusterIsAllowed, settingsDraft.refreshIntervalSeconds]);
 
   const loadInventory = async () => {
     if (!hasPermission("inventory:view") && !hasPermission("resources:view")) {
@@ -1386,19 +1299,12 @@ export default function App() {
       case "dashboard":
         return (
           <DashboardPage
-            summary={dashboardSummary}
-            loading={loadingState.page}
-            refreshing={dashboardRefreshing}
             coreLoading={loadingState.core}
-            accessError={errorState.page}
+            accessError={errorState.core}
             hasClusters={hasClusters}
             selectedCluster={selectedCluster}
-            onRefresh={() =>
-              loadDashboardSummary(selectedClusterId, {
-                background: Boolean(dashboardSummary?.clusterId === selectedClusterId),
-              })
-            }
-            lastRefreshedAt={dashboardRefreshedAt}
+            refreshIntervalSeconds={settingsDraft.refreshIntervalSeconds}
+            onClusterMissing={() => reloadClusters().catch(() => {})}
             onNavigateToUpgrade={() => handleNavigate("upgrade")}
             onNavigateToInventory={() => handleNavigate("inventory")}
             canOpenUpgrade={isPageAllowed("upgrade")}
@@ -1727,11 +1633,12 @@ export default function App() {
     );
   }
 
-  const alertBadgeCount = isDashboardPage
-    ? dashboardSummary?.alerts?.total || 0
-    : Array.isArray(data.alerts)
-      ? data.alerts.length
-      : 0;
+  // One source. The badge used to read the dashboard summary's server-side
+  // total on the dashboard and the RBAC-filtered list everywhere else, so the
+  // same bell showed two different numbers depending on which page you were on.
+  // The filtered list is the honest one — it counts what this user may actually
+  // open — and it is now used everywhere.
+  const alertBadgeCount = Array.isArray(data.alerts) ? data.alerts.length : 0;
   const activeClusterLabel =
     allowedClusters.find((cluster) => cluster.id === selectedClusterId)?.name || selectedClusterId || "";
 
@@ -1790,7 +1697,7 @@ export default function App() {
     coreLoading: loadingState.core,
     namespacesLoading,
     resourcesLoading,
-    pageLoading: isDashboardPage ? loadingState.page : false,
+    pageLoading: false,
   });
   const loadingOverlayHint =
     namespacesLoading || resourcesLoading ? SCOPE_LOADING_HINT : undefined;
