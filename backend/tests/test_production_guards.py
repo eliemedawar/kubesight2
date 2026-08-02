@@ -49,6 +49,33 @@ def test_safe_production_configuration_passes(production_app):
     run_startup_guards(production_app)
 
 
+def test_app_factory_runs_guards_before_blueprint_registration(monkeypatch):
+    import api as api_package
+
+    for name, value in SAFE_ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr("api.production_guards.is_at_head", lambda: True)
+    monkeypatch.setattr(
+        "api.production_guards._default_seeded_usernames", lambda: []
+    )
+
+    def blueprints_must_not_be_registered(_app):
+        raise AssertionError("blueprints registered before production guards")
+
+    monkeypatch.setattr(
+        api_package, "register_blueprints", blueprints_must_not_be_registered
+    )
+
+    class UnsafeProductionConfig:
+        TESTING = True
+        SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+        SQLALCHEMY_TRACK_MODIFICATIONS = False
+        JWT_SECRET_KEY = "change-me-generate-with-openssl-rand-hex-32"
+
+    with pytest.raises(ProductionGuardError, match="JWT_SECRET_KEY"):
+        api_package.create_app(UnsafeProductionConfig)
+
+
 @pytest.mark.parametrize(
     ("setting", "unsafe_value"),
     [

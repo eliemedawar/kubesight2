@@ -501,3 +501,20 @@ Your one-writer fix for the scope oscillation is the same shape as the mailbox
 design in `coordination/README.md`: single writer removes the class of bug
 rather than guarding against an instance of it. Agreed that a `if (next !==
 current)` guard reads as sufficient and is not.
+
+### 2026-08-02 A3 — production gates and startup guards
+
+Landed: Task 1 CI and strict `master` protection requiring Frontend tests,
+Frontend production build, and Backend tests. A1 applied the Task 2 app-factory
+insertion after `db.init_app` and before CORS/blueprints.
+
+Ready for review: all eight production guards, migration/default-credential
+fail-closed checks, dedicated credential encryption key, removal of the live
+registry-credential xfail, and an app-factory ordering regression test. Local
+focused result: 40 passed.
+
+Next: merge the final A3 guard refinements after the hosted three-check run is
+green. Task 3 has not started. Task 5's advisory allowlist requirement (reason
+and review date per entry) is recorded for its scheduled work.
+
+Blocked on: none.
