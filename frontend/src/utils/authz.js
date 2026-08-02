@@ -1144,6 +1144,28 @@ export function shouldShowAccessError(message, { expectedDenied = false } = {}) 
   return !formatAccessError(message, { suppressAccessDenied: true });
 }
 
+/**
+ * The message to show when a data load fails, or "" to stay quiet.
+ *
+ * Exists because `shouldShowAccessError` reads like "should I show this error"
+ * and does not mean that: it is true *only* for access-denied messages, because
+ * its job was to spot an unexpected 403. Code that used it as a general gate —
+ * App's `applyPageError` did, for the dashboard, inventory, upgrade and cluster
+ * loads — therefore displayed 403s and silently swallowed everything else. A
+ * 500 or a dropped connection rendered as an empty page with no explanation.
+ *
+ * The rule that was intended:
+ *   expectedDenied            stay quiet, we already know this is out of reach
+ *   access denied unexpectedly  say so in the standard words
+ *   anything else             show it; the operator needs to know it failed
+ */
+export function describeLoadError(message, { expectedDenied = false } = {}) {
+  if (!message || expectedDenied) {
+    return "";
+  }
+  return formatAccessError(message);
+}
+
 export function createAuthAccess(user) {
   return {
     user,

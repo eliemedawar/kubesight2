@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getDashboardSummary } from "../api/dashboardApi.js";
-import { formatAccessError, shouldShowAccessError } from "../utils/authz.js";
+import { describeLoadError } from "../utils/authz.js";
 
 /**
  * The dashboard's own data.
@@ -90,11 +90,11 @@ export function useDashboardSummary({
           onClusterMissing?.();
           return;
         }
-        if (shouldShowAccessError(loadError.message, {
-          expectedDenied: !canAccessCluster?.(targetClusterId),
-        })) {
-          setError(formatAccessError(loadError.message));
-        }
+        setError(
+          describeLoadError(loadError.message, {
+            expectedDenied: !canAccessCluster?.(targetClusterId),
+          })
+        );
       } finally {
         if (isLatest()) {
           if (background) {

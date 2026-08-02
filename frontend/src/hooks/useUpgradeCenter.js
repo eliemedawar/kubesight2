@@ -6,7 +6,7 @@ import {
   startUpgrade,
 } from "../api/upgradesApi.js";
 import { mapPrecheckState } from "../utils/formatters.js";
-import { formatAccessError, shouldShowAccessError } from "../utils/authz.js";
+import { describeLoadError } from "../utils/authz.js";
 
 /** The version asked for before the backend tells us what it recommends. */
 const INITIAL_TARGET = "v1.31.0";
@@ -88,9 +88,7 @@ export function useUpgradeCenter({ clusterId, clusterLabel, canAccessCluster }) 
   const loadClusterRef = useRef("");
 
   const reportError = useCallback((message) => {
-    if (shouldShowAccessError(message)) {
-      setError(formatAccessError(message));
-    }
+    setError(describeLoadError(message));
   }, []);
 
   const load = useCallback(

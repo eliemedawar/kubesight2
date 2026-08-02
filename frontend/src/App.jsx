@@ -2,8 +2,6 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   getClusterOverview,
-  getInventoryDetail,
-  listInventory,
   getSettings,
   listAlerts,
   listMyDeploymentRequests,
@@ -30,7 +28,6 @@ import {
   shouldDeferAccessMessage,
   SCOPE_LOADING_HINT,
 } from "./utils/accessViewState.js";
-import { removeFromInventory, updateCatalogEntry } from "./api/inventoryApi.js";
 import {
   buildNotificationChannels,
   emptyAppData,
@@ -74,7 +71,7 @@ const ClustersPage = lazy(() => import("./pages/ClustersPage.jsx"));
 const ClusterManagementPage = lazy(() => import("./pages/ClusterManagementPage.jsx"));
 const ClusterOverviewPage = lazy(() => import("./pages/ClusterOverviewPage.jsx"));
 const InventoryPage = lazy(() => import("./pages/InventoryPage.jsx"));
-const ApplicationDetailsPage = lazy(() => import("./pages/ApplicationDetailsPage.jsx"));
+const ApplicationDetailsRoute = lazy(() => import("./pages/ApplicationDetailsRoute.jsx"));
 const NamespacesPage = lazy(() => import("./pages/NamespacesPage.jsx"));
 const ResourcesPage = lazy(() => import("./pages/ResourcesPage.jsx"));
 const TopologyPage = lazy(() => import("./pages/TopologyPage.jsx"));
@@ -91,7 +88,6 @@ const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
 const ImageRegistriesPage = lazy(() => import("./pages/ImageRegistriesPage.jsx"));
 const TicketingPage = lazy(() => import("./pages/TicketingPage.jsx"));
 const MobileAppsPage = lazy(() => import("./pages/MobileAppsPage.jsx"));
-const EditCatalogModal = lazy(() => import("./components/inventory/EditCatalogModal.jsx"));
 const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPage.jsx"));
 const ApplicationIntelligencePage = lazy(() => import("./pages/ApplicationIntelligencePage.jsx"));
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
@@ -166,16 +162,6 @@ export default function App() {
   const [errorState, setErrorState] = useState({ core: "", page: "" });
   const [data, setData] = useState(emptyAppData);
   const [clusterOverview, setClusterOverview] = useState(null);
-  const [inventoryItems, setInventoryItems] = useState([]);
-  // Identity comes from the URL, so an application detail page is now
-  // shareable and survives a refresh. This was previously state that only
-  // `handleSelectApplication` wrote — and nothing called it (F3).
-  const selectedApplicationId = routeParams?.applicationId || "";
-  const [applicationDetailsTab, setApplicationDetailsTab] = useState("overview");
-  const [applicationDetail, setApplicationDetail] = useState(null);
-  const [editCatalogOpen, setEditCatalogOpen] = useState(false);
-  const [editCatalogSaving, setEditCatalogSaving] = useState(false);
-  const [editCatalogError, setEditCatalogError] = useState("");
   // withLocalTheme here too — otherwise the theme effect below persists the
   // "system" default over the user's stored preference before settings load.
   const [settingsDraft, setSettingsDraft] = useState(() =>
@@ -208,7 +194,6 @@ export default function App() {
     return undefined;
   }, [settingsDraft.theme]);
 
-  const applicationDetailRequestRef = useRef(0);
   const alertsLoadRef = useRef({ key: "", at: 0 });
 
   const applyPageError = useCallback((message, { expectedDenied = false } = {}) => {
@@ -842,131 +827,6 @@ export default function App() {
     });
   };
 
-  const loadInventory = async () => {
-    if (!hasPermission("inventory:view") && !hasPermission("resources:view")) {
-      setInventoryItems([]);
-      return;
-    }
-    setLoadingState((prev) => ({ ...prev, page: true }));
-    setErrorState((prev) => ({ ...prev, page: "" }));
-    try {
-      const items = await listInventory(
-        selectedClusterId ? { cluster: selectedClusterId } : undefined
-      );
-      setInventoryItems(Array.isArray(items) ? items : []);
-    } catch (inventoryError) {
-      applyPageError(inventoryError.message);
-      setInventoryItems([]);
-    } finally {
-      setLoadingState((prev) => ({ ...prev, page: false }));
-    }
-  };
-
-  const loadApplicationDetail = async (inventoryId) => {
-    if (!inventoryId) {
-      setApplicationDetail(null);
-      return;
-    }
-    const requestId = ++applicationDetailRequestRef.current;
-    setApplicationDetail(null);
-    setLoadingState((prev) => ({ ...prev, page: true }));
-    setErrorState((prev) => ({ ...prev, page: "" }));
-    try {
-      const detail = await getInventoryDetail(inventoryId);
-      if (requestId !== applicationDetailRequestRef.current) {
-        return;
-      }
-      setApplicationDetail(detail);
-    } catch (detailError) {
-      if (requestId !== applicationDetailRequestRef.current) {
-        return;
-      }
-      applyPageError(detailError.message);
-      setApplicationDetail(null);
-    } finally {
-      if (requestId === applicationDetailRequestRef.current) {
-        setLoadingState((prev) => ({ ...prev, page: false }));
-      }
-    }
-  };
-
-  useEffect(() => {
-    if (activePage !== "inventory") {
-      return undefined;
-    }
-    loadInventory();
-    return undefined;
-  }, [activePage, selectedClusterId]);
-
-  useEffect(() => {
-    if (activePage !== "applicationDetails" || !selectedApplicationId) {
-      return;
-    }
-    loadApplicationDetail(selectedApplicationId);
-  }, [activePage, selectedApplicationId]);
-
-  const handleSelectApplication = (inventoryId, tab = "overview") => {
-    if (!inventoryId) {
-      return;
-    }
-    setApplicationDetailsTab(tab);
-    handleNavigate("applicationDetails", { applicationId: inventoryId });
-  };
-
-  const inventoryClusterOptions = useMemo(() => {
-    const byId = new Map();
-    allowedClusters.forEach((cluster) => {
-      byId.set(cluster.id, { id: cluster.id, name: cluster.name || cluster.id });
-    });
-    inventoryItems.forEach((item) => {
-      const id = item.cluster || item.clusterId;
-      if (id && !byId.has(id)) {
-        byId.set(id, { id, name: id });
-      }
-    });
-    return [...byId.values()].sort((a, b) =>
-      String(a.name).localeCompare(String(b.name))
-    );
-  }, [inventoryItems, allowedClusters]);
-
-  const inventoryNamespaceOptions = useMemo(() => {
-    const ns = new Set(inventoryItems.map((item) => item.namespace).filter(Boolean));
-    return [...ns].sort();
-  }, [inventoryItems]);
-
-  const handleRemoveFromInventory = async (detail) => {
-    const entryId = detail?.summary?.catalogEntryId || detail?.catalog?.id;
-    if (!entryId) return;
-    const confirmed = window.confirm(
-      "This removes the app from KubeSight inventory metadata only.\nIt will not delete anything from the Kubernetes cluster."
-    );
-    if (!confirmed) return;
-    try {
-      await removeFromInventory(entryId);
-      handleNavigate("inventory");
-      loadInventory();
-    } catch (err) {
-      applyPageError(err.message);
-    }
-  };
-
-  const handleSaveCatalogEdit = async (payload) => {
-    const entryId = applicationDetail?.summary?.catalogEntryId || applicationDetail?.catalog?.id;
-    if (!entryId) return;
-    setEditCatalogSaving(true);
-    setEditCatalogError("");
-    try {
-      await updateCatalogEntry(entryId, payload);
-      setEditCatalogOpen(false);
-      await loadApplicationDetail(selectedApplicationId);
-      loadInventory();
-    } catch (err) {
-      setEditCatalogError(err.message || "Update failed");
-    } finally {
-      setEditCatalogSaving(false);
-    }
-  };
-
   const testAlertEmailDelivery = async (routing) => {
     setTestingEmail(true);
     setTestEmailMessage("");
@@ -1133,7 +993,7 @@ export default function App() {
             coreLoading={loadingState.core}
             accessError={pageAccessError}
             hasClusters={hasClusters}
-            clusterOptions={inventoryClusterOptions}
+            allowedClusters={allowedClusters}
             defaultClusterId={selectedClusterId}
             canRegister={hasPermission("inventory:register")}
             canDeploy={hasPermission("apps:deploy")}
@@ -1141,53 +1001,10 @@ export default function App() {
             canHelmInstall={hasPermission("helm:install")}
             canManageTemplates={hasPermission("inventory:update")}
             isAdmin={isAdmin}
-            onRefresh={loadInventory}
           />
         );
       case "applicationDetails":
-        return (
-          <>
-            <ApplicationDetailsPage
-              detail={applicationDetail}
-              selectedApplicationId={selectedApplicationId}
-              loading={loadingState.page}
-              user={authUser}
-              activeTab={applicationDetailsTab}
-              onTabChange={setApplicationDetailsTab}
-              onBack={() => handleNavigate("inventory")}
-              onRefreshDetail={() => loadApplicationDetail(selectedApplicationId)}
-              canViewLogs={hasPermission("logs:view")}
-              canUpdateCatalog={hasPermission("inventory:update")}
-              canRemoveFromInventory={hasPermission("inventory:remove")}
-              canDeploy={hasPermission("apps:deploy")}
-              canViewHelm={hasPermission("helm:view")}
-              canUpgradeHelm={hasPermission("helm:upgrade")}
-              canRollbackHelm={hasPermission("helm:rollback")}
-              canUninstallHelm={hasPermission("helm:uninstall")}
-              onEditCatalog={() => setEditCatalogOpen(true)}
-              onRemoveFromInventory={handleRemoveFromInventory}
-              onDeployUpdate={() => {}}
-              clusterOptions={inventoryClusterOptions}
-              onHelmUpgrade={() => handleNavigate("inventory")}
-              onHelmActionComplete={() => {
-                loadApplicationDetail(selectedApplicationId);
-                loadInventory();
-              }}
-            />
-            {editCatalogOpen ? (
-              <Suspense fallback={null}>
-                <EditCatalogModal
-                  open={editCatalogOpen}
-                  catalog={applicationDetail?.catalog || {}}
-                  onClose={() => setEditCatalogOpen(false)}
-                  onSave={handleSaveCatalogEdit}
-                  saving={editCatalogSaving}
-                  error={editCatalogError}
-                />
-              </Suspense>
-            ) : null}
-          </>
-        );
+        return <ApplicationDetailsRoute allowedClusters={allowedClusters} />;
       case "namespaces":
         return (
           <NamespacesPage
