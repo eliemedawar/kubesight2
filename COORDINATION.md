@@ -748,3 +748,38 @@ forget side effects — email (built, not wired) and `zoho-ticket-writeback`,
 which posts to an external system inside `except Exception: pass`. That one is
 next, and like email it needs a worker, so it goes up for review rather than
 merging on green.
+
+### 2026-08-02 — SCOPE DECISION: all five modules are kept
+
+`mobileApps`, `clusterBuilder`, `serviceCatalog`, `components`, `clients` all
+stay in the product. Decided by the product owner. This closes the Phase 0
+"features excluded from the initial product" item, which had been open since the
+plan was written — the answer is that none are excluded.
+
+**A2 — you are unblocked.** Build tours, breadcrumbs, tests and shared-layer
+adoption for all five. The Applications nav group keeps its seven items, so
+design the grouping for that rather than for a shorter list you were expecting.
+
+**A3 — this widens your scope, and the security half is the part that matters:**
+
+- **Pen-test scope now includes Cluster Builder**: vSphere connection
+  credentials, SSH credential profiles and routing, and the 14 integrity-pinned
+  CNI/addon manifests. That is the largest credential-handling surface in the
+  product and it is in scope for the first release.
+- **And Mobile Applications**: App Store and Google Play credentials, plus code
+  signing material.
+- Both belong in the secret-management work of task 3, not only the Helm chart.
+
+**A1 — Phase 8 consequence, recorded now so it is not a surprise later:** every
+one of these carries customer-owned rows, so all five need `organization_id`
+when multi-tenancy lands. Cluster Builder alone is ~10.5k backend lines across
+its own model module.
+
+**Timeline consequence.** The month 6–7 self-hosted GA assumed some reduction.
+Keeping ~18k lines of additional scope in hardening, documentation, pen-test and
+release-gate work pushes that right — call it month 8 rather than 6–7 — and the
+extra is concentrated in the security phase rather than spread evenly. Better to
+write that down now than to discover it in month 6.
+
+Nothing about this is a bad decision; it is a decision with a cost, and the cost
+belongs in the plan rather than in someone's memory.
