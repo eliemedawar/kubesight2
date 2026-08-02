@@ -19,12 +19,30 @@ from .routes import register_blueprints
 from .frontend_static import frontend_dist_available, register_frontend_static
 from .response import success_response
 from .migrate_rbac import apply_legacy_schema, reconcile_data
-from .migrations import current_revision, head_revision, is_at_head, upgrade_to_head
+from .migrations import upgrade_to_head
+from .production_guards import production_environment_enabled, run_startup_guards
 from .seed import seed_defaults
 from .services.alert_policy_scheduler import start_alert_policy_scheduler
 
 
 def _is_production_env() -> bool:
+    """Is this a production process?
+
+    Two definitions existed and disagreed: this one (FLASK_ENV/APP_ENV with
+    FLASK_DEBUG off) and `production_guards.production_environment_enabled`
+    (KUBESIGHT_ENV). A deployment setting only FLASK_ENV=production landed in
+    the worst combination available -- this function said yes, so startup
+    skipped migration, reconciliation and seeding, while the guards said no and
+    checked nothing. Neither half ran.
+
+    Answered here by taking either signal, because the two error directions are
+    not symmetric: calling a dev box production costs a refused start and a
+    confused developer, while calling a production box dev ships an unguarded
+    one. `production_guards` keeps its own answer for its own checks; this is
+    the union, and the two should converge on one variable.
+    """
+    if production_environment_enabled():
+        return True
     debug = os.getenv("FLASK_DEBUG", "true").strip().lower()
     if debug in {"1", "true", "yes", "on"}:
         return False
@@ -222,6 +240,28 @@ def create_app(config_object=None) -> Flask:
     )
 
     db.init_app(app)
+
+    # Two definitions of "production" exist and they gate different things:
+    # this module's decides whether startup migrates, reconciles and seeds;
+    # production_guards' decides whether the safety checks run at all. A
+    # deployment setting only FLASK_ENV=production satisfied the first and not
+    # the second, so it skipped every setup step *and* ran no guards -- strictly
+    # worse than either alone, and silent.
+    #
+    # Refusing rather than guessing which one the operator meant. The two should
+    # converge on KUBESIGHT_ENV; until they do, an ambiguous production process
+    # does not start.
+    if not is_testing and _is_production_env() and not production_environment_enabled():
+        raise RuntimeError(
+            "Ambiguous production configuration: FLASK_ENV/APP_ENV say "
+            "production but KUBESIGHT_ENV does not, so the startup guards "
+            "would not run. Set KUBESIGHT_ENV=production."
+        )
+
+    # A3's insertion request. Placed here on purpose: after db.init_app so the
+    # migration-head check has an engine, and before CORS and blueprints so an
+    # unsafe production process refuses before it can register a single route.
+    run_startup_guards(app)
     _configure_cors(app)
     _configure_response_compression(app)
     _configure_access_log_filters()
@@ -234,31 +274,26 @@ def create_app(config_object=None) -> Flask:
 
     with app.app_context():
         if not is_testing:
-            if _is_production_env():
-                # Production never reshapes its own schema at boot. Bringing a
-                # database to head is a deliberate, reversible step an operator
-                # takes with a backup in hand -- not a side effect of a pod
-                # restarting at 3am.
-                #
-                # Refusing here rather than letting reconcile_data() fail on a
-                # missing table: "not at revision X, run alembic upgrade head"
-                # is actionable at 3am; "no such column" is a debugging session.
-                if not is_at_head():
-                    raise RuntimeError(
-                        "Database is not at the expected migration revision "
-                        f"(current={current_revision()!r}, "
-                        f"expected={head_revision()!r}). Run "
-                        "`alembic upgrade head` before starting KubeSight in "
-                        "production."
-                    )
-                # Reconciliation and seeding are operator commands in
-                # production, not boot behaviour. reconcile_data() rewrites
-                # permissions -- a release granting system roles a new
-                # capability -- and seed_defaults() creates demo users. Neither
-                # belongs in the blast radius of a pod restart in a product
-                # whose premise is that changes are reviewed. Both are
-                # `python manage.py upgrade`, run deliberately.
-            else:
+            # Production does none of this to itself on boot.
+            #
+            # It never reshapes its own schema: bringing a database to head is a
+            # deliberate, reversible step an operator takes with a backup in
+            # hand, not a side effect of a pod restarting at 3am. The
+            # migration-head check that used to live here is gone --
+            # run_startup_guards above owns it now, reports it alongside every
+            # other violation rather than only the first, and refuses before a
+            # single route is registered. Two checks would mean two different
+            # messages for one condition.
+            #
+            # It does not reconcile or seed either. reconcile_data() rewrites
+            # permissions -- it is how a release grants system roles a new
+            # capability -- and seed_defaults() creates demo users, the exact
+            # condition one of A3's guards exists to reject. Both are
+            # `python manage.py upgrade`, run deliberately.
+            #
+            # Development keeps doing all of it, because the cost of a wrong
+            # guess there is a restart.
+            if not _is_production_env():
                 upgrade_to_head(app.config["SQLALCHEMY_DATABASE_URI"])
                 apply_legacy_schema()
                 reconcile_data()
