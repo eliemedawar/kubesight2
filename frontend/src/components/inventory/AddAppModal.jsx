@@ -123,6 +123,14 @@ export default function AddAppModal({
   const [deployDiff, setDeployDiff] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Applying raw YAML writes straight to a live namespace, so the operator names
+  // the target back before it runs. The server enforces the same phrase
+  // (deployment_service.expected_apply_confirmation) -- this input is the
+  // prompt, not the check.
+  const [yamlConfirmation, setYamlConfirmation] = useState("");
+  const expectedYamlConfirmation = `APPLY ${yamlForm.namespace || ""}`.trim();
+  const [imageConfirmation, setImageConfirmation] = useState("");
+  const expectedImageConfirmation = `APPLY ${imageForm.namespace || ""}`.trim();
 
   useEffect(() => {
     if (!open) {
@@ -273,6 +281,7 @@ export default function AddAppModal({
         yaml: yamlForm.yaml,
         deploymentName: yamlForm.deploymentName,
         description: yamlForm.description,
+        confirmation: yamlConfirmation,
       });
       onSuccess?.();
       onClose();
@@ -312,6 +321,7 @@ export default function AddAppModal({
         ...imageForm,
         environmentVariables: parseEnvVars(imageForm.envVars),
         tags: [],
+        confirmation: imageConfirmation,
       });
       onSuccess?.();
       onClose();
@@ -677,12 +687,22 @@ export default function AddAppModal({
             {deployDiff?.hint ? (
               <p className="muted deploy-diff-hint">{deployDiff.hint}</p>
             ) : null}
+            <label>
+              <span>
+                Type <strong>{expectedYamlConfirmation}</strong> to confirm
+              </span>
+              <input
+                value={yamlConfirmation}
+                onChange={(event) => setYamlConfirmation(event.target.value)}
+                placeholder={expectedYamlConfirmation}
+              />
+            </label>
             <div className="modal-actions">
               <button type="button" className="btn-text" onClick={() => setStep("yaml-form")}>Back</button>
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy}
+                disabled={busy || yamlConfirmation.trim() !== expectedYamlConfirmation}
                 onClick={applyYaml}
               >
                 {busy ? "Applying..." : "Apply to Cluster"}
@@ -756,9 +776,24 @@ export default function AddAppModal({
                 <li key={`${res.kind}-${res.name}`}>{res.kind} {res.name}</li>
               ))}
             </ul>
+            <label>
+              <span>
+                Type <strong>{expectedImageConfirmation}</strong> to confirm
+              </span>
+              <input
+                value={imageConfirmation}
+                onChange={(event) => setImageConfirmation(event.target.value)}
+                placeholder={expectedImageConfirmation}
+              />
+            </label>
             <div className="modal-actions">
               <button type="button" className="btn-text" onClick={() => setStep("image-form")}>Back</button>
-              <button type="button" className="btn-primary" disabled={busy} onClick={applyImage}>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy || imageConfirmation.trim() !== expectedImageConfirmation}
+                onClick={applyImage}
+              >
                 {busy ? "Applying..." : "Apply to Cluster"}
               </button>
             </div>
