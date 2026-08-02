@@ -101,6 +101,7 @@ def rotate_database_secrets(*, dry_run: bool = False) -> dict[str, Any]:
     rotation back, so an operator never ends up needing two partially applied
     keyrings. No plaintext or ciphertext is returned in the report.
     """
+    from .audit import log_audit
     from .db import db
 
     suffixes = ("_encrypted", "_cipher")
@@ -147,9 +148,27 @@ def rotate_database_secrets(*, dry_run: bool = False) -> dict[str, Any]:
         if dry_run:
             db.session.rollback()
         else:
+            log_audit(
+                "credential_secrets_rotated",
+                target_type="credential_encryption",
+                details={
+                    "scanned": scanned,
+                    "rotated": rotated,
+                    "tables": per_table,
+                },
+                commit=False,
+            )
             db.session.commit()
-    except Exception:
+    except Exception as exc:
         db.session.rollback()
+        try:
+            log_audit(
+                "credential_secret_rotation_failed",
+                target_type="credential_encryption",
+                details={"errorType": type(exc).__name__},
+            )
+        except Exception:
+            db.session.rollback()
         raise
     return {
         "dryRun": dry_run,

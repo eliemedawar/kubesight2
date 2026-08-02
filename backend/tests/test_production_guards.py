@@ -306,6 +306,7 @@ def test_database_secret_rotation_is_atomic_and_supports_dry_run(
     app, monkeypatch
 ):
     from api.db import db
+    from api.models import AuditLog
     from api.models_cluster_build import SshCredential
 
     old_key = "old-database-key-that-is-at-least-32-characters"
@@ -334,12 +335,21 @@ def test_database_secret_rotation_is_atomic_and_supports_dry_run(
     assert result["rotated"] == 1
     assert row.secret_cipher != original
     assert decrypt_secret(row.secret_cipher) == "stored-password"
+    audit = AuditLog.query.filter_by(action="credential_secrets_rotated").one()
+    assert audit.details == {
+        "ip": None,
+        "scanned": 1,
+        "rotated": 1,
+        "tables": {"ssh_credentials": 1},
+    }
+    assert original not in str(audit.details)
 
 
 def test_database_secret_rotation_rolls_back_if_any_value_is_unreadable(
     app, monkeypatch
 ):
     from api.db import db
+    from api.models import AuditLog
     from api.models_cluster_build import SshCredential
 
     old_key = "old-rollback-key-that-is-at-least-32-characters"
@@ -368,3 +378,8 @@ def test_database_secret_rotation_rolls_back_if_any_value_is_unreadable(
 
     db.session.refresh(readable)
     assert readable.secret_cipher == original
+    audit = AuditLog.query.filter_by(
+        action="credential_secret_rotation_failed"
+    ).one()
+    assert audit.details == {"ip": None, "errorType": "ValueError"}
+    assert original not in str(audit.details)
