@@ -57,6 +57,7 @@ def test_safe_production_configuration_passes(production_app):
         ("ALERT_ROUTING_SECRET_KEY", ""),
         ("ALERT_ROUTING_SECRET_KEY", "change-me-credential-encryption-key"),
         ("CORS_ORIGINS", "*"),
+        ("CORS_ORIGINS", "https://*.example.com"),
         ("CORS_ORIGINS", "null"),
         ("K8S_REAL_MODE", "false"),
         ("K8S_REAL_MODE", "auto"),

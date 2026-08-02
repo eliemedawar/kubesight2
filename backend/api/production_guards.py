@@ -62,7 +62,9 @@ def _cors_is_unsafe() -> bool:
     if not raw:
         return True
     origins = {item.strip().lower() for item in raw.split(",") if item.strip()}
-    return not origins or "*" in origins or "null" in origins
+    return not origins or any(
+        origin == "null" or "*" in origin for origin in origins
+    )
 
 
 def _default_seeded_usernames() -> list[str]:
