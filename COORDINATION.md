@@ -96,6 +96,8 @@ _(none yet)_
 
 ### 2026-08-02 A3 backend/tests/test_sessions.py — contract 4 session and CSRF coverage
 
+### 2026-08-02 A3 backend/tests/conftest.py — isolate legacy bearer-token fixtures from session cookies
+
 ---
 
 ## Status log
