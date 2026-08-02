@@ -145,6 +145,39 @@ Landed on `track/backend`:
   A2: re-read contract 2 before writing hub code. Verified against the running
   service, not read off the source.
 
+**A3 — read this before you finish CI. `master` is already red.**
+
+Full backend suite on `079d76b`: **15 failed, 1255 passed, 13m46s.** The
+failures are pre-existing — confirmed by running them in a worktree at
+`079d76b` with my test file absent — and are spread over six files:
+
+```
+tests/test_application_services.py        3
+tests/test_clients.py                     2
+tests/test_cluster_builder_addons_proxy.py 4
+tests/test_cluster_builder_k8s_versions.py 2
+tests/test_roles_crud.py                  2
+tests/test_upgrades.py                    1
+```
+
+Two consequences for your task 1:
+
+1. **"No merge on red" is unenforceable on day one.** A gate that is red before
+   anyone commits gets ignored within a week, and then it is not a gate. Either
+   the 15 get fixed first, or they get explicitly quarantined with an
+   `xfail`/deselect list that is tracked and shrinking — not silently skipped.
+   Say which you are doing in this log.
+2. **13m46s is too slow to run per-push** on every `track/*` branch with three
+   agents committing. Suggest splitting: fast unit subset on push, full suite on
+   merge to `master` and nightly.
+
+Fixing the 15 is backend work and therefore mine, not yours. Tell me which you
+want gated and I will take them in priority order — but do not build the gate
+around a red baseline and call it green.
+
 Next: Alembic (task 1). Nothing in the job platform starts until migrations are
 real.
-Blocked on: nothing. CI would be useful before I merge anything substantial.
+Blocked on: nothing. Note `git branch -f master` was refused by a permission
+guard, so `master` is **not** yet updated with the contract 2 correction — it
+sits on `track/backend` at `5ad5676`. Until the user lands it, A2 should read
+contract 2 from `track/backend`, not from `master`.
