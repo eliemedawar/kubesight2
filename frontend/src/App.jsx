@@ -14,17 +14,13 @@ import { useChangeBundle } from "./context/ChangeBundleContext";
 import ChangeBundleDrawer from "./components/changes/ChangeBundleDrawer.jsx";
 import AppShell from "./components/layout/AppShell.jsx";
 import RouteLoadingFallback from "./components/common/RouteLoadingFallback.jsx";
-import { emptyNamespaceResources, listKeyForTab } from "./lib/resourceTypes.js";
-import { useNamespaceResourceCache } from "./hooks/useNamespaceResourceCache.js";
+import { emptyNamespaceResources } from "./lib/resourceTypes.js";
 import {
   EMPTY_MESSAGES,
   formatAccessError,
 } from "./utils/authz.js";
 import {
   getScopeLoadingLabel,
-  pageNeedsPodsData,
-  pageNeedsResourceData,
-  pageNeedsResourceTabs,
   shouldDeferAccessMessage,
   SCOPE_LOADING_HINT,
 } from "./utils/accessViewState.js";
@@ -73,7 +69,7 @@ const ClusterOverviewPage = lazy(() => import("./pages/ClusterOverviewPage.jsx")
 const InventoryPage = lazy(() => import("./pages/InventoryPage.jsx"));
 const ApplicationDetailsRoute = lazy(() => import("./pages/ApplicationDetailsRoute.jsx"));
 const NamespacesPage = lazy(() => import("./pages/NamespacesPage.jsx"));
-const ResourcesPage = lazy(() => import("./pages/ResourcesPage.jsx"));
+const ResourcesRoute = lazy(() => import("./pages/ResourcesRoute.jsx"));
 const TopologyPage = lazy(() => import("./pages/TopologyPage.jsx"));
 const LogsPage = lazy(() => import("./pages/LogsPage.jsx"));
 const AlertsPage = lazy(() => import("./pages/AlertsPage.jsx"));
@@ -122,8 +118,7 @@ export default function App() {
     getFirstAllowedPage,
     getAllowedResources,
     canAccessCluster,
-    getVisibleResourceTabs,
-    shouldShowAccessError,
+      shouldShowAccessError,
     filterAlertsForUser,
     isAdmin,
     needsOnboarding,
@@ -151,6 +146,12 @@ export default function App() {
   const routeMatch = useMemo(() => matchPath(location.pathname), [location.pathname]);
   const activePage = routeMatch?.pageKey || "";
   const routeParams = routeMatch?.params;
+  // Read-only view of the query string for the few shell-level props that take
+  // a value from it. Writing is done by useClusterScope and by the routes.
+  const locationSearch = useMemo(
+    () => new URLSearchParams(location.search),
+    [location.search]
+  );
 
   const [selectedClusterId, setSelectedClusterId] = useState("");
   const [selectedNamespace, setSelectedNamespace] = useState("");
@@ -171,8 +172,6 @@ export default function App() {
   const [routingError, setRoutingError] = useState("");
   const [testingEmail, setTestingEmail] = useState(false);
   const [testEmailMessage, setTestEmailMessage] = useState("");
-  const [preferredLogPod, setPreferredLogPod] = useState("");
-  const [resourceActiveTab, setResourceActiveTab] = useState("pods");
   // Decided (approved/declined) deployment requests for the current user, shown
   // in the notifications bell. "Seen" signatures are persisted per user so the
   // badge only counts decisions the user has not opened yet.
@@ -218,13 +217,6 @@ export default function App() {
     [getVisiblePages, authUser?.id, authUser?.permissions, authUser?.accessRules]
   );
 
-  const visibleResourceTabs = useMemo(() => getVisibleResourceTabs(), [getVisibleResourceTabs, authUser?.id]);
-
-  useEffect(() => {
-    if (visibleResourceTabs.length && !visibleResourceTabs.includes(resourceActiveTab)) {
-      setResourceActiveTab(visibleResourceTabs[0] || "pods");
-    }
-  }, [visibleResourceTabs, resourceActiveTab]);
 
   /**
    * The page whose data App should fetch, or null.
@@ -298,48 +290,10 @@ export default function App() {
     canViewApprovals: hasPermission("deployment_requests:view"),
   });
 
-  const resourceCacheEnabled =
-    pageNeedsResourceData(authorizedPage) &&
-    Boolean(selectedClusterId && selectedNamespace);
-
-  const activeResourceListKey = useMemo(() => {
-    if (!resourceCacheEnabled) {
-      return "";
-    }
-    if (pageNeedsPodsData(authorizedPage)) {
-      return "pods";
-    }
-    if (pageNeedsResourceTabs(authorizedPage)) {
-      return listKeyForTab(resourceActiveTab);
-    }
-    return "";
-  }, [resourceCacheEnabled, authorizedPage, resourceActiveTab]);
-
-  const {
-    resources: cachedResources,
-    rawResources: cachedRawResources,
-    refreshTab: refreshResourceTab,
-    isTabLoading,
-    isTabRefreshing,
-    isTabLoaded,
-    tabErrors: resourceTabErrors,
-    activeTabLoading,
-    activeTabRefreshing,
-  } = useNamespaceResourceCache({
-    clusterId: selectedClusterId,
-    namespace: selectedNamespace,
-    activeListKey: activeResourceListKey,
-    enabled: resourceCacheEnabled,
-    filterResources: getAllowedResources,
-  });
-
-  const allowedResources = useMemo(
-    () => (resourceCacheEnabled ? cachedResources : emptyNamespaceResources()),
-    [resourceCacheEnabled, cachedResources]
-  );
-
-  const resourcesLoading = resourceCacheEnabled && activeTabLoading;
-  const scopeDataLoading = namespacesLoading || resourcesLoading;
+  // Resource loading is the route's own business now; the shell's overlay
+  // tracks cluster and namespace scope only.
+  const resourcesLoading = false;
+  const scopeDataLoading = namespacesLoading;
 
 
   const applyCoreError = (message, { expectedDenied = false } = {}) => {
@@ -1018,35 +972,15 @@ export default function App() {
         );
       case "resources":
         return (
-          <ResourcesPage
-            data={scopedData}
-            rawResources={cachedRawResources}
+          <ResourcesRoute
             clusterId={selectedClusterId}
             namespace={selectedNamespace}
+            scopedData={scopedData}
             hasClusters={hasClusters}
             hasNamespaces={hasNamespaces}
             coreLoading={loadingState.core}
             namespacesLoading={namespacesLoading}
-            activeTab={resourceActiveTab}
-            onActiveTabChange={setResourceActiveTab}
-            onRefreshTab={() => refreshResourceTab(listKeyForTab(resourceActiveTab))}
-            tabLoading={isTabLoading(listKeyForTab(resourceActiveTab))}
-            tabRefreshing={isTabRefreshing(listKeyForTab(resourceActiveTab))}
-            isTabLoaded={isTabLoaded}
-            tabErrors={resourceTabErrors}
             accessError={pageAccessError}
-            visibleTabs={visibleResourceTabs}
-            isAdmin={isAdmin}
-            onNavigateToLogs={(prefill) => {
-              if (prefill?.clusterId) {
-                setSelectedClusterId(prefill.clusterId);
-              }
-              if (prefill?.namespace) {
-                setSelectedNamespace(prefill.namespace);
-              }
-              setPreferredLogPod(prefill?.pod || "");
-              handleNavigate("logs");
-            }}
           />
         );
       case "topology":
@@ -1066,8 +1000,18 @@ export default function App() {
             namespaces={allowedNamespaces}
             selectedClusterId={selectedClusterId}
             selectedNamespace={selectedNamespace}
-            preferredPod={preferredLogPod}
-            onPreferredPodApplied={() => setPreferredLogPod("")}
+            preferredPod={locationSearch.get("pod") || ""}
+            onPreferredPodApplied={() => {
+              // The prefill is a one-shot: once Logs has selected that pod, the
+              // param must go, or every later cluster/namespace change would
+              // snap the selection back to it.
+              if (!locationSearch.has("pod")) {
+                return;
+              }
+              const next = new URLSearchParams(locationSearch);
+              next.delete("pod");
+              navigate(`${location.pathname}?${next.toString()}`, { replace: true });
+            }}
             onClusterChange={handleClusterChange}
             onNamespaceChange={handleNamespaceChange}
             hasClusters={hasClusters}
