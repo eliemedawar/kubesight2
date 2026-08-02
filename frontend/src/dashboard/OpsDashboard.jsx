@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import ChartCanvas from "./charts/ChartCanvas.jsx";
 import Sparkline from "./charts/Sparkline.jsx";
-import { cssVar, drawArea, drawLines, drawStacked } from "./charts/chartDraw.js";
+import { cssVar, drawArea } from "./charts/chartDraw.js";
 import { TIME_RANGES } from "./useDashboardSeries.js";
 import { formatDashboardTime, formatLatestVersion } from "../utils/dashboardStatus.js";
 
@@ -28,12 +28,6 @@ function statusLabel(status) {
 }
 
 // Format a KB/s throughput figure the way the reference does.
-function fmtThroughput(value) {
-  const v = Number(value) || 0;
-  if (v >= 1000) return `${(v / 1000).toFixed(1)} MB/s`;
-  return `${Math.round(v)} KB/s`;
-}
-
 // Format a memory figure given in MiB as GiB (e.g. 31744 -> "31.0 GiB").
 function formatGiB(mib) {
   if (mib == null || Number.isNaN(Number(mib))) return "—";
@@ -184,6 +178,38 @@ function DeltaChip({ tone = "flat", children }) {
 // card headers on the chart panels, an sg-flist namespace card and an
 // sg-feed events card. Fed by the real dashboard summary + the rolling
 // series hook; the app's AppShell provides the surrounding chrome.
+/**
+ * What a chart shows when it has nothing honest to draw.
+ *
+ * Two different reasons, said differently: the metrics source did not answer,
+ * or it did and we have only just started watching. Collapsing them into one
+ * blank would leave an operator unable to tell a broken metrics-server from a
+ * page they opened four seconds ago.
+ */
+function MetricUnavailable({ available, observed }) {
+  if (!available) {
+    return (
+      <div className="ov-unavailable" role="status">
+        <p>Metrics unavailable.</p>
+        <p className="muted">
+          The cluster did not report this reading. A missing or unhealthy
+          metrics-server is the usual cause.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="ov-unavailable" role="status">
+      <p>Collecting readings…</p>
+      <p className="muted">
+        {observed
+          ? "One reading so far. The chart appears once there is something to compare it to."
+          : "Waiting for the first reading."}
+      </p>
+    </div>
+  );
+}
+
 export default function OpsDashboard({
   summary,
   series,
@@ -214,18 +240,19 @@ export default function OpsDashboard({
   // Canvas charts need resolved colors; these are read from design tokens at
   // render time (theme-aware) — never hardcoded.
   const accent = cssVar("--accent", "#3b82f6");
-  const TEAL = cssVar("--chart-8", "#2dd4bf");
   const PURPLE = cssVar("--chart-3", "#8b5cf6");
-  const bands = series?.cpuBands || [];
-  const bandColors = bands.map((_, i) => (i === 0 ? accent : i === 1 ? TEAL : PURPLE));
-  // Same palette as var() names for DOM legend dots (no resolved hex in JSX).
-  const bandTokens = ["--accent", "--chart-8", "--chart-3"];
-  const cpuPeak = series?.cpu?.length ? Math.round(Math.max(...series.cpu)) : null;
-  const netIn = series?.netIn || [];
-  const netOut = series?.netOut || [];
+  // Charts show only readings this session actually observed. There is no
+  // seeded history and no per-namespace split: the summary API reports one
+  // cluster-wide figure, and dividing it by pod count was an approximation
+  // drawn as though it were measurement.
+  const cpuSeries = series?.cpu || [];
+  const memSeries = series?.mem || [];
+  const observed = series?.observed || 0;
+  const cpuPeak = cpuSeries.length ? Math.round(Math.max(...cpuSeries)) : null;
+  const observedLabel = observed === 1 ? "1 reading this session" : `${observed} readings this session`;
 
-  const cpuTrend = trend(series?.cpu);
-  const memTrend = trend(series?.mem);
+  const cpuTrend = trend(cpuSeries);
+  const memTrend = trend(memSeries);
   const healthTone = pillTone(health);
   const notReady = Math.max((nodes.total ?? 0) - (nodes.ready ?? 0), 0);
 
@@ -399,33 +426,25 @@ export default function OpsDashboard({
           <div className="ov-card-h">
             <h3>CPU Utilization</h3>
             <span className="ov-card-sub">
-              By namespace · % of cluster
+              Cluster-wide · % of allocatable
               {cpuPeak != null ? ` · peak ${cpuPeak}%` : ""}
             </span>
             <div className="ov-card-r">
-              <div className="ov-legend">
-                {bands.map((band, i) => (
-                  <i key={band.label}>
-                    <span
-                      className="ov-sq"
-                      style={{ background: `var(${bandTokens[i] || "--chart-5"})` }}
-                    />
-                    {band.label}
-                  </i>
-                ))}
-              </div>
-              {!series?.cpuReal ? <span className="ov-sample">sample split</span> : null}
+              <span className="ov-card-note">{observedLabel}</span>
             </div>
           </div>
           <div className="ov-chart-wrap">
-            <ChartCanvas
-              className="ov-chart ov-chart--tall"
-              draw={(ctx, { width, height }) => {
-                if (!bands.length) return;
-                drawStacked(ctx, width, height, bands.map((b) => b.data), bandColors, 100, "%");
-              }}
-              deps={[bands, accent]}
-            />
+            {series?.cpuAvailable && cpuSeries.length > 1 ? (
+              <ChartCanvas
+                className="ov-chart ov-chart--tall"
+                draw={(ctx, { width, height }) => {
+                  drawArea(ctx, width, height, cpuSeries, accent, 100, null, "%");
+                }}
+                deps={[cpuSeries, accent]}
+              />
+            ) : (
+              <MetricUnavailable available={series?.cpuAvailable} observed={observed} />
+            )}
           </div>
         </section>
 
@@ -467,27 +486,26 @@ export default function OpsDashboard({
                 : ""}
             </span>
             <div className="ov-card-r">
-              <div className="ov-legend">
-                <i>
-                  <span className="ov-sq" style={{ background: "var(--chart-3)" }} />
-                  used
-                </i>
-                <i>
-                  <span className="ov-dashline" />
-                  limit {series?.memLimit || 85}%
-                </i>
-              </div>
+              {/*
+                The dashed "limit 85%" line is gone. It was a constant in the
+                frontend, not a threshold anyone configured, so it invited an
+                operator to read "under the line" as "within policy".
+              */}
+              <span className="ov-card-note">{observedLabel}</span>
             </div>
           </div>
           <div className="ov-chart-wrap">
-            <ChartCanvas
-              className="ov-chart"
-              draw={(ctx, { width, height }) => {
-                if (!series?.mem?.length) return;
-                drawArea(ctx, width, height, series.mem, PURPLE, 100, series.memLimit || 85, "%");
-              }}
-              deps={[series?.mem, series?.memLimit]}
-            />
+            {series?.memAvailable && memSeries.length > 1 ? (
+              <ChartCanvas
+                className="ov-chart"
+                draw={(ctx, { width, height }) => {
+                  drawArea(ctx, width, height, memSeries, PURPLE, 100, null, "%");
+                }}
+                deps={[memSeries]}
+              />
+            ) : (
+              <MetricUnavailable available={series?.memAvailable} observed={observed} />
+            )}
           </div>
         </section>
 
@@ -495,29 +513,23 @@ export default function OpsDashboard({
           <div className="ov-card-h">
             <h3>Network I/O</h3>
             <span className="ov-card-sub">Cluster-wide throughput</span>
-            <div className="ov-card-r">
-              <div className="ov-legend">
-                <i>
-                  <span className="ov-sq" style={{ background: "var(--accent)" }} />
-                  Ingress <b className="ov-mono">{fmtThroughput(netIn[netIn.length - 1])}</b>
-                </i>
-                <i>
-                  <span className="ov-sq" style={{ background: "var(--chart-8)" }} />
-                  Egress <b className="ov-mono">{fmtThroughput(netOut[netOut.length - 1])}</b>
-                </i>
-              </div>
-              {!series?.netReal ? <span className="ov-sample">sample</span> : null}
-            </div>
           </div>
+          {/*
+            This panel used to draw a random walk. There is no network metric in
+            the summary API at all -- the numbers were invented in the browser,
+            labelled "sample" in a corner, and drawn at the same fidelity as the
+            real CPU and memory charts. An operator reading throughput off it was
+            reading noise.
+          */}
           <div className="ov-chart-wrap">
-            <ChartCanvas
-              className="ov-chart"
-              draw={(ctx, { width, height }) => {
-                if (!netIn.length || !netOut.length) return;
-                drawLines(ctx, width, height, [netIn, netOut], [accent, TEAL], 1600, " KB");
-              }}
-              deps={[netIn, netOut, accent]}
-            />
+            <div className="ov-unavailable" role="status">
+              <p>Throughput is not collected yet.</p>
+              <p className="muted">
+                Network metrics need a Prometheus-backed source, which this
+                deployment does not have. Nothing is shown rather than an
+                estimate.
+              </p>
+            </div>
           </div>
         </section>
       </div>
