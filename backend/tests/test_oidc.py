@@ -27,6 +27,53 @@ from api.oidc import (
 )
 
 
+def test_oidc_and_recovery_records_are_hash_only_and_one_time(app):
+    from api.db import db
+    from api.models import User
+    from api.models_auth import (
+        AdminRecoveryGrant,
+        MfaRecoveryCode,
+        OidcAuthorizationRequest,
+        OidcIdentity,
+    )
+
+    now = datetime.now(timezone.utc)
+    user = User.query.filter_by(username="admin").one()
+    identity = OidcIdentity(
+        issuer="https://idp.example.test/tenant",
+        subject="provider-subject",
+        user_id=user.id,
+        email="admin@example.test",
+    )
+    request = OidcAuthorizationRequest(
+        state_hash="a" * 64,
+        nonce_hash="b" * 64,
+        browser_binding_hash="c" * 64,
+        code_verifier_cipher="ks1:key-id:encrypted-verifier",
+        issuer="https://idp.example.test/tenant",
+        redirect_uri="https://kubesight.example.test/api/auth/oidc/callback",
+        return_to="/clusters",
+        expires_at=now + timedelta(minutes=5),
+    )
+    recovery = MfaRecoveryCode(user_id=user.id, code_hash="d" * 64)
+    grant = AdminRecoveryGrant(
+        user_id=user.id,
+        token_hash="e" * 64,
+        expires_at=now + timedelta(minutes=10),
+    )
+    db.session.add_all([identity, request, recovery, grant])
+    db.session.commit()
+
+    assert request.is_active(now) is True
+    assert grant.is_active(now) is True
+    assert not hasattr(recovery, "code")
+    assert not hasattr(grant, "token")
+    request.consumed_at = now
+    grant.used_at = now
+    assert request.is_active(now) is False
+    assert grant.is_active(now) is False
+
+
 def _environment(**overrides) -> dict[str, str]:
     values = {
         "OIDC_ENABLED": "true",
