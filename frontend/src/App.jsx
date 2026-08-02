@@ -49,6 +49,8 @@ import {
 import { applyTheme, readThemePreference, storeThemePreference } from "./utils/theme.js";
 import { matchPath, pathForPageKey } from "./routes/paths.js";
 import RequireAccess from "./routes/RequireAccess.jsx";
+import CommandPalette from "./components/search/CommandPalette.jsx";
+import { useAttentionSources } from "./dashboard/useAttentionSources.js";
 import { useClusterScope } from "./hooks/useClusterScope.js";
 import { useNamespaceContext } from "./hooks/useNamespaceContext.js";
 import {
@@ -314,6 +316,18 @@ export default function App() {
       onClusterChange: setSelectedClusterId,
       onNamespaceChange: setSelectedNamespace,
     });
+
+  // Feed inputs for the dashboard's "needs attention" list. Fetched only there,
+  // and only for sources this user may see.
+  const {
+    integrations: attentionIntegrations,
+    approvals: attentionApprovals,
+    unavailable: attentionUnavailable,
+  } = useAttentionSources({
+    enabled: authorizedPage === "dashboard",
+    canViewIntegrations: isPageAllowed("integrations"),
+    canViewApprovals: hasPermission("deployment_requests:view"),
+  });
 
   const resourceCacheEnabled =
     pageNeedsResourceData(authorizedPage) &&
@@ -1389,6 +1403,10 @@ export default function App() {
             onNavigateToInventory={() => handleNavigate("inventory")}
             canOpenUpgrade={isPageAllowed("upgrade")}
             canOpenInventory={isPageAllowed("inventory")}
+            alerts={data.alerts}
+            integrations={attentionIntegrations}
+            approvals={attentionApprovals}
+            unavailableSources={attentionUnavailable}
           />
         );
       case "clusters":
@@ -1820,6 +1838,12 @@ export default function App() {
     >
       {pageNode}
     </AppShell>
+    <CommandPalette
+      visiblePages={visiblePages}
+      clusters={allowedClusters}
+      namespaces={allowedNamespaces}
+      clusterId={selectedClusterId}
+    />
     {activeTour ? (
       <CoachMarks
         steps={activeTour.steps}
