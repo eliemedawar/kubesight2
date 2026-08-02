@@ -38,6 +38,25 @@ Status codes in use: `400` validation, `401` unauthenticated, `403` authorized
 but forbidden, `404` not found, `409` conflict, `422` semantically invalid,
 `429` rate limited, `500` unexpected.
 
+### One exception, and it is real
+
+Framework-level errors do **not** use the envelope. Flask's own handlers at
+`__init__.py:101-118` -- an unrouted path, a wrong method, an unhandled
+exception -- return:
+
+```json
+{ "error": "Not found", "status": 404 }
+```
+
+No `success`, no `data`. Documented rather than fixed: `client.js` already reads
+`payload.error` on any non-ok response and only unwraps `data` when
+`payload.success` is a boolean, so both shapes work today. Changing the handlers
+would be churn on a path that behaves correctly.
+
+In practice: a handler you wrote answers in the envelope; a request that never
+reached a handler answers in this shape. Read `payload.error` on failures and
+you are right either way, which is what the client does.
+
 **A2:** the client is `frontend/src/api/client.js`. `frontend/src/api.js` is a
 deprecated re-export shim — do not add to it; import from `./api/*` modules.
 
