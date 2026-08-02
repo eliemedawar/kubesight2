@@ -682,3 +682,34 @@ workers.
 10 tests, weighted to "who ticks" rather than "ticking works" — including that a
 production API starts no thread, and that one failing task does not silence the
 other seven, which is the property a refactor drops quietly.
+
+### 2026-08-02 A1 — email as durable jobs (mechanism only, nothing wired)
+
+Every outbound email is sent from a `threading.Thread` whose body ends in
+`except Exception: pass`. A failed send is dropped with no retry and no record;
+a restart between spawning the thread and the SMTP handshake drops it with no
+trace it was attempted. These are password resets, MFA changes and
+deploy-failure notices — the product promises to send them, and the failure mode
+was that it silently did not.
+
+`services/notification_jobs.py` makes them jobs. Idempotency is content-derived,
+so a retried request does not send a second copy, with an explicit key available
+for a resend the operator actually asked for. Added
+`PermanentJobError` to the queue for this: unconfigured SMTP dead-letters
+immediately rather than burning four attempts on a certainty, while a refused
+connection retries. Those are different questions and `failed` vs `dead_letter`
+is where the answer lives.
+
+**Nothing calls it yet, deliberately** — same discipline as the queue itself.
+Wiring `auth_service` and `deploy_automation_service` over is a real behaviour
+change and goes up for review rather than merging on green.
+
+**The trade to be aware of before that lands: email will require a worker.**
+Today a send is attempted immediately and lost invisibly on failure. Queued, it
+is durable but delivered only when `worker.py` drains it — so a deployment
+without a worker collects mail instead of sending it. That is a backlog you can
+count, replacing a silence you cannot, which is the right direction. It does
+mean **A3: the worker Deployment is not optional once this is wired**, and a dev
+running only the API will need to start one.
+
+47 queue + notification tests green.

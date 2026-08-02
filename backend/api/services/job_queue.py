@@ -60,7 +60,21 @@ REDACTED = "[redacted]"
 
 
 class JobError(Exception):
-    """Raised by a handler to fail a job with a message an operator can read."""
+    """Raised by a handler to fail a job with a message an operator can read.
+
+    Retryable: the job goes back to the queue while attempts remain.
+    """
+
+
+class PermanentJobError(JobError):
+    """A failure another attempt cannot fix. Dead-letters immediately.
+
+    SMTP not configured, a malformed payload, a deleted target. Burning three
+    more attempts on a certainty delays the moment a human finds out, and fills
+    the retry budget with work that was never going to succeed. `dead_letter`
+    is also the state that means "somebody should look", which is exactly true
+    here and misleading for a refused connection.
+    """
 
 
 def redact(value: Any) -> Any:
@@ -363,6 +377,10 @@ def run_once(job_types: Optional[Iterable[str]] = None) -> Optional[Job]:
 
     try:
         fn(job)
+    except PermanentJobError as exc:
+        # Before JobError: PermanentJobError subclasses it, so the specific
+        # handler has to come first or it would never be reached.
+        dead_letter(job, str(exc))
     except JobError as exc:
         fail(job, str(exc))
     except Exception as exc:  # noqa: BLE001 -- a handler must not kill the worker
