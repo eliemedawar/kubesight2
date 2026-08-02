@@ -236,7 +236,20 @@ def delete_role(
     role_id: int,
     *,
     actor: Optional[User] = None,
+    force: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Delete a role, refusing by default while users are still assigned to it.
+
+    Deleting a role silently strips every assigned user's permissions, which is
+    a large, invisible authorization change triggered by what looks like a
+    tidy-up. In a platform whose point is that changes are reviewed, that should
+    not happen as a side effect: the caller has to see who is affected and say
+    so explicitly.
+
+    `force=True` keeps the capability -- the users are unassigned (`role_id`
+    None, so they hold no permissions until reassigned, failing closed) and the
+    count is recorded on the audit entry.
+    """
     role = Role.query.get(role_id)
     if not role:
         return None, "Role not found", 404
@@ -244,6 +257,19 @@ def delete_role(
         return None, "System roles cannot be deleted", 400
 
     affected_users = User.query.filter_by(role_id=role.id).all()
+    if affected_users and not force:
+        usernames = sorted(u.username for u in affected_users)
+        shown = ", ".join(usernames[:5])
+        if len(usernames) > 5:
+            shown += f", and {len(usernames) - 5} more"
+        return (
+            None,
+            f"{len(affected_users)} user(s) are still assigned to this role "
+            f"({shown}). Reassign them first, or repeat the request with "
+            f"force=true to unassign them.",
+            409,
+        )
+
     for u in affected_users:
         u.role_id = None
 
@@ -252,6 +278,7 @@ def delete_role(
         "description": role.description,
         "permissions": [perm.key for perm in role.permissions],
         "users_unassigned": len(affected_users),
+        "forced": bool(affected_users and force),
     }
     db.session.delete(role)
     db.session.commit()
