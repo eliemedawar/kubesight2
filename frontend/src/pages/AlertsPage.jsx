@@ -25,7 +25,6 @@ import {
 import { EMPTY_MESSAGES, isAccessDeniedError } from "../utils/authz.js";
 
 const AlertPoliciesPage = lazy(() => import("./AlertPoliciesPage.jsx"));
-const AlertRoutingPage = lazy(() => import("./AlertRoutingPage.jsx"));
 
 const HISTORY_LIMIT = 300;
 const HISTORY_REFRESH_MS = 60000;
@@ -133,9 +132,10 @@ function AllClear({ clusterLabel, lastResolved, nowTs, onOpenHistory }) {
 }
 
 /**
- * The Alerts section: Open (triage feed) · History · Policies · Routing.
- * Consolidates the former Alerts / Alert Policies / Alert Routing pages under
- * one address with the same RBAC gates each page had.
+ * The Alerts section: Open (triage feed) · History · Policies.
+ * Consolidates the former Alerts and Alert Policies pages under one address
+ * with the same RBAC gates each page had. Where the alerts are *delivered* —
+ * SMTP, receivers, delivery logs — is configured in Settings → Integrations.
  */
 export default function AlertsPage({
   data,
@@ -145,7 +145,6 @@ export default function AlertsPage({
   allowedResources,
   selectedNamespace = "",
   canManageAlerts = false,
-  canViewRouting = false,
   hasClusters,
   authUser,
   coreLoading = false,
@@ -156,9 +155,6 @@ export default function AlertsPage({
   const [tab, setTab] = useState(() => {
     const hint = consumeAlertsTabHint();
     if (hint === "history" || hint === "policies") {
-      return hint;
-    }
-    if (hint === "routing" && canViewRouting) {
       return hint;
     }
     return "open";
@@ -338,11 +334,14 @@ export default function AlertsPage({
     setQuery("");
   };
 
+  // Routing used to be a fourth tab here. SMTP, receivers, and delivery logs are
+  // integration configuration, so they live in Settings → Integrations → Email &
+  // delivery with everything else KubeSight connects to; this page stays about
+  // the alerts themselves.
   const tabs = [
     { key: "open", label: "Open", count: alerts.length },
     { key: "history", label: "History" },
     { key: "policies", label: "Policies" },
-    ...(canViewRouting ? [{ key: "routing", label: "Routing" }] : []),
   ];
 
   return (
@@ -479,12 +478,6 @@ export default function AlertsPage({
             coreLoading={coreLoading}
             accessError={accessError}
           />
-        </Suspense>
-      ) : null}
-
-      {tab === "routing" && canViewRouting ? (
-        <Suspense fallback={<LoadingState label="Loading alert routing..." />}>
-          <AlertRoutingPage embedded />
         </Suspense>
       ) : null}
 

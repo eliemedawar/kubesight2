@@ -1,14 +1,27 @@
 /* ═══ Settings page — Signal v3 ═══
-   Two-pane settings workspace: sticky in-page section rail (sidebar pill
-   language) + narrow content column of scoped cards. Personal vs Workspace
-   scope is explicit on every card; saving happens through a floating bar
-   that appears only when something changed. */
+   Two-pane settings workspace: sticky section rail (sidebar pill language) +
+   one panel beside it. The rail is grouped — Preferences / Integrations /
+   Administration — and is the only address for configuring anything, so it
+   carries link-out rows to the workspaces that own their own credentials.
+
+   Preference panels stay in a narrow measure of scoped cards, where Personal vs
+   Workspace scope is explicit on every card and saving happens through a
+   floating bar that appears only when something changed. Integration panels are
+   tables with toolbars, so they take the full width via `--wide`. */
 
 .settings-layout {
   display: grid;
-  grid-template-columns: 13rem minmax(0, 45rem);
+  grid-template-columns: 14rem minmax(0, 45rem);
   gap: 2rem;
   align-items: start;
+}
+/* Integration panels hold tables, not forms — give them the room. */
+.settings-layout--wide {
+  grid-template-columns: 14rem minmax(0, 1fr);
+}
+
+.settings-panel {
+  min-width: 0;
 }
 
 /* ─── Read-only banner ─── */
@@ -84,6 +97,11 @@
   flex: none;
   opacity: 0.85;
 }
+.settings-rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
 .settings-rail-divider {
   margin: 0.85rem 0.65rem 0.3rem;
   font-size: var(--font-size-xs);
@@ -116,6 +134,43 @@
   flex: none;
   margin-left: auto;
   opacity: 0.7;
+}
+
+/* ─── Panel header ───
+   Integration panels get a title and one line of orientation above whatever
+   component renders them, so a panel lifted out of its old standalone page
+   still says what it configures. */
+.settings-panel-head {
+  margin-bottom: var(--space-4);
+}
+.settings-panel-head h3 {
+  margin: 0 0 0.3rem;
+  font-size: var(--font-size-lg);
+  font-weight: 650;
+  color: var(--text-main);
+  letter-spacing: -0.01em;
+}
+.settings-panel-head p {
+  margin: 0;
+  max-width: 62ch;
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+/* An embedded panel's primary action, where its page header used to sit. */
+.settings-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--space-4);
+}
+.settings-panel-notice {
+  margin: 0 0 var(--space-4);
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--ok-border, var(--border));
+  border-radius: var(--radius-md);
+  background: var(--ok-soft, var(--bg-interactive));
+  font-size: var(--font-size-sm);
+  color: var(--text-subtle);
 }
 
 /* ─── Section cards ─── */
@@ -652,24 +707,18 @@
 
 /* ─── Responsive ─── */
 @media (max-width: 900px) {
-  .settings-layout {
+  .settings-layout,
+  .settings-layout--wide {
     grid-template-columns: 1fr;
     gap: var(--space-4);
   }
+  /* The rail stays a vertical list rather than becoming a horizontal scroller:
+     it now carries three labelled groups and every integration, and a sideways
+     strip would hide the group labels that make it navigable. */
   .settings-rail {
     position: static;
-    flex-direction: row;
-    overflow-x: auto;
-    padding-bottom: 0.25rem;
-  }
-  .settings-rail-link {
-    white-space: nowrap;
   }
   .settings-rail-link.active::before {
-    display: none;
-  }
-  .settings-rail-divider,
-  .settings-rail-ext {
     display: none;
   }
   .theme-tiles {

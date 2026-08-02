@@ -101,7 +101,9 @@ function TestResult({ status, message, at }) {
   );
 }
 
-function SmtpTab({ smtp, onSaved }) {
+/* Exported so the integrations hub can mount this same form as the SMTP
+   integration's Configuration tab — one form, two addresses. */
+export function SmtpTab({ smtp, onSaved }) {
   const [draft, setDraft] = useState(EMPTY_SMTP);
   const [testRecipient, setTestRecipient] = useState("");
   const [saving, setSaving] = useState(false);
@@ -272,7 +274,7 @@ function SmtpTab({ smtp, onSaved }) {
   );
 }
 
-function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, saving, error }) {
+function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, saving, error, lockType = "" }) {
   const [form, setForm] = useState(initial);
   const [headersText, setHeadersText] = useState("{}");
   const [localError, setLocalError] = useState("");
@@ -362,20 +364,25 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
               }}
             />
           </label>
-          <label>
-            Receiver type
-            <SearchableSelect
-              value={form.type}
-              onChange={(e) => setForm((p) => ({ ...p, type: e.target.value }))}
-              disabled={mode === "edit"}
-            >
-              <option value="user">User</option>
-              <option value="role">Role</option>
-              <option value="slack">Slack</option>
-              <option value="webhook">Webhook</option>
-              {showLegacyEmail ? <option value="email">Email (legacy)</option> : null}
-            </SearchableSelect>
-          </label>
+          {/* Opened from a single-provider screen (the Slack or Webhooks
+              integration), the type is already decided — offering the picker
+              would let someone create a Slack receiver from the Webhooks page. */}
+          {lockType ? null : (
+            <label>
+              Receiver type
+              <SearchableSelect
+                value={form.type}
+                onChange={(e) => setForm((p) => ({ ...p, type: e.target.value }))}
+                disabled={mode === "edit"}
+              >
+                <option value="user">User</option>
+                <option value="role">Role</option>
+                <option value="slack">Slack</option>
+                <option value="webhook">Webhook</option>
+                {showLegacyEmail ? <option value="email">Email (legacy)</option> : null}
+              </SearchableSelect>
+            </label>
+          )}
 
           {form.type === "user" ? (
             <label className="full-width">
@@ -600,7 +607,26 @@ function ReceiverDetailsModal({ open, receiver, onClose }) {
   );
 }
 
-function ReceiversTab({ receivers, groups, users, roles, onChanged }) {
+/**
+ * Exported for the integrations hub, which mounts it twice — once narrowed to
+ * `slack`, once to `webhook` — as those integrations' Configuration tabs.
+ *
+ * `typeFilter` does three things at once because they are the same decision:
+ * it narrows the list, drops the Receiver Groups sub-tab (a group spans types,
+ * so it does not belong on a single provider's screen), and locks the type in
+ * the create form.
+ */
+export function ReceiversTab({
+  receivers,
+  groups,
+  users,
+  roles,
+  onChanged,
+  typeFilter = "",
+  title = "Individual receivers",
+  description = "Email inboxes and webhook endpoints that can receive alerts.",
+  emptyMessage = "Add an email, Slack, or webhook receiver to get started.",
+}) {
   const [receiverView, setReceiverView] = useState("individual");
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState("create");
@@ -611,9 +637,13 @@ function ReceiversTab({ receivers, groups, users, roles, onChanged }) {
   const [testingId, setTestingId] = useState(null);
   const [testMessage, setTestMessage] = useState("");
 
+  const visibleReceivers = typeFilter
+    ? (receivers || []).filter((receiver) => receiver.type === typeFilter)
+    : receivers || [];
+
   const openCreate = () => {
     setModalMode("create");
-    setEditing(EMPTY_RECEIVER);
+    setEditing(typeFilter ? { ...EMPTY_RECEIVER, type: typeFilter } : EMPTY_RECEIVER);
     setError("");
     setModalOpen(true);
   };
@@ -695,7 +725,7 @@ function ReceiversTab({ receivers, groups, users, roles, onChanged }) {
     return names.length ? names.join(", ") : "—";
   };
 
-  const tableRows = receivers.map((receiver) => ({
+  const tableRows = visibleReceivers.map((receiver) => ({
     id: receiver.id,
     name: receiver.name,
     typeDisplay: <ReceiverTypeBadge type={receiver.type} />,
@@ -728,42 +758,47 @@ function ReceiversTab({ receivers, groups, users, roles, onChanged }) {
     ),
   }));
 
+  // On a single-provider screen the Type column would repeat the page title.
   const columns = [
     { key: "name", label: "Name" },
-    { key: "typeDisplay", label: "Type" },
+    ...(typeFilter ? [] : [{ key: "typeDisplay", label: "Type" }]),
     { key: "groups", label: "Groups" },
     { key: "statusDisplay", label: "Enabled" },
     { key: "lastTestDisplay", label: "Last test" },
     { key: "actionsDisplay", label: "" },
   ];
 
+  const showGroups = !typeFilter;
+
   return (
     <div className="receivers-tab-shell">
-      <nav className="tab-bar receiver-sub-tabs" aria-label="Receiver views">
-        <button
-          type="button"
-          className={receiverView === "individual" ? "active" : ""}
-          onClick={() => setReceiverView("individual")}
-        >
-          Individual Receivers
-        </button>
-        <button
-          type="button"
-          className={receiverView === "groups" ? "active" : ""}
-          onClick={() => setReceiverView("groups")}
-        >
-          Receiver Groups
-        </button>
-      </nav>
+      {showGroups ? (
+        <nav className="tab-bar receiver-sub-tabs" aria-label="Receiver views">
+          <button
+            type="button"
+            className={receiverView === "individual" ? "active" : ""}
+            onClick={() => setReceiverView("individual")}
+          >
+            Individual Receivers
+          </button>
+          <button
+            type="button"
+            className={receiverView === "groups" ? "active" : ""}
+            onClick={() => setReceiverView("groups")}
+          >
+            Receiver Groups
+          </button>
+        </nav>
+      ) : null}
 
-      {receiverView === "groups" ? (
+      {showGroups && receiverView === "groups" ? (
         <ReceiverGroupsPanel groups={groups} receivers={receivers} onChanged={onChanged} />
       ) : (
         <section className="card alert-routing-panel">
           <header className="alert-routing-panel-header">
             <div>
-              <h3>Individual receivers</h3>
-              <p className="muted">Email inboxes and webhook endpoints that can receive alerts.</p>
+              <h3>{title}</h3>
+              <p className="muted">{description}</p>
             </div>
             <button type="button" onClick={openCreate}>
               Add receiver
@@ -772,10 +807,10 @@ function ReceiversTab({ receivers, groups, users, roles, onChanged }) {
 
           {testMessage ? <p className="routing-test-message">{testMessage}</p> : null}
 
-          {receivers.length ? (
+          {visibleReceivers.length ? (
             <DataTable columns={columns} rows={tableRows} />
           ) : (
-            <EmptyState message="Add an email, Slack, or webhook receiver to get started." />
+            <EmptyState message={emptyMessage} />
           )}
 
           <ReceiverModal
@@ -784,6 +819,7 @@ function ReceiversTab({ receivers, groups, users, roles, onChanged }) {
             initial={editing || EMPTY_RECEIVER}
             users={users}
             roles={roles}
+            lockType={typeFilter}
             onClose={() => setModalOpen(false)}
             onSave={save}
             saving={saving}

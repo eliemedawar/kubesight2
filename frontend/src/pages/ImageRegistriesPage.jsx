@@ -38,7 +38,7 @@ const STATUS_BADGE = {
   no_connection: { label: "No linked registry", className: "status-muted" },
 };
 
-export default function ImageRegistriesPage({ canManage = false }) {
+export default function ImageRegistriesPage({ canManage = false, embedded = false }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -195,12 +195,24 @@ export default function ImageRegistriesPage({ canManage = false }) {
 
   return (
     <div className="registry-page">
-      <PageTitle
-        title="Image Registries"
-        subtitle="Link a container registry (e.g. Sonatype Nexus) so KubeSight verifies each image exists before deploying."
-        actionLabel={canManage ? "Add a registry" : undefined}
-        onAction={canManage ? openCreate : undefined}
-      />
+      {/* Embedded in Settings → Integrations the shell has already titled the
+          panel, so only the action survives. */}
+      {embedded ? (
+        canManage ? (
+          <div className="settings-panel-actions">
+            <button type="button" className="primary" onClick={openCreate}>
+              Add a registry
+            </button>
+          </div>
+        ) : null
+      ) : (
+        <PageTitle
+          title="Image Registries"
+          subtitle="Link a container registry (e.g. Sonatype Nexus) so KubeSight verifies each image exists before deploying."
+          actionLabel={canManage ? "Add a registry" : undefined}
+          onAction={canManage ? openCreate : undefined}
+        />
+      )}
 
       {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
       {notice ? (

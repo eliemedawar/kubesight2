@@ -58,6 +58,20 @@ const RESOURCE_SPECIFICITY = {
   service_port: 45,
 };
 
+/**
+ * Settings is the single address for preferences *and* every integration, so
+ * anyone who may configure one of those integrations can open it — the page
+ * itself then shows only the sections that person's permissions allow. Gating
+ * the whole page on `settings:view` would have locked a registry admin out of
+ * the only place registries are now configured.
+ */
+export const SETTINGS_ENTRY_PERMISSIONS = [
+  "settings:view",
+  "registries:view",
+  "ticketing:view",
+  "applications:view",
+];
+
 export const NAV_PAGES = [
   // Dashboard
   { key: "dashboard", label: "Dashboard", permission: "overview:view", section: "Dashboard" },
@@ -91,7 +105,7 @@ export const NAV_PAGES = [
 
   // Monitoring
   { key: "logs", label: "Logs", permission: "logs:view", section: "Monitoring" },
-  // One Alerts address: History / Policies / Routing live as RBAC-gated tabs inside.
+  // One Alerts address: History and Policies live as RBAC-gated tabs inside.
   { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Monitoring" },
 
   // Services
@@ -140,19 +154,27 @@ export const NAV_PAGES = [
     permission: "deployment_requests:view",
     section: "Administration",
   },
+  // A registry entry is nothing but a connection, so it is configured entirely
+  // in Settings → Integrations and no longer needs its own nav entry. `hidden`
+  // drops it from the sidebar without changing who may open it, so old deep
+  // links and its guided tour still resolve.
   {
     key: "imageRegistries",
     label: "Image Registries",
     permission: "registries:view",
     section: "Administration",
+    hidden: true,
   },
+  // Ticketing stays: browsing tickets, field sync, and deploy runs are work, not
+  // configuration. Connecting Jira or Zoho happens in the integrations hub; what
+  // you do once connected happens here.
   {
     key: "ticketing",
     label: "Ticketing",
     permission: "ticketing:view",
     section: "Administration",
   },
-  { key: "settings", label: "Settings", permission: "settings:view", section: "Administration" },
+  { key: "settings", label: "Settings", anyPermissions: SETTINGS_ENTRY_PERMISSIONS, section: "Administration" },
 
   // Operations
   {
@@ -1026,7 +1048,7 @@ export function pageAllowed(user, pageKey) {
           (pageGrantedByAdmin(user, "upgrade") && hasAnyClusterAccess(user)))
       );
     case "settings":
-      return hasPermission(user, "settings:view");
+      return hasAnyPermission(user, SETTINGS_ENTRY_PERMISSIONS);
     case "imageRegistries":
       return hasPermission(user, "registries:view");
     case "ticketing":
@@ -1052,7 +1074,7 @@ export function pageAllowed(user, pageKey) {
 }
 
 export function getVisiblePages(user) {
-  return NAV_PAGES.filter((page) => pageAllowed(user, page.key));
+  return NAV_PAGES.filter((page) => !page.hidden && pageAllowed(user, page.key));
 }
 
 export function getFirstAllowedPage(user) {

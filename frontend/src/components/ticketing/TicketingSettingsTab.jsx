@@ -162,10 +162,14 @@ export default function TicketingSettingsTab({
   savingJenkins,
   onTestJenkins,
   testingJenkins,
+  // In the integrations hub Jenkins is its own card with its own status, so the
+  // ticketing panels there hide it rather than showing the same connection
+  // twice under two different names.
+  showJenkins = true,
 }) {
   const { key: providerKey, name: providerName } = useTicketing();
   const sectionRefs = useRef({});
-  const rail = railFor(providerKey);
+  const rail = showJenkins ? railFor(providerKey) : sectionsFor(providerKey);
   const [active, setActive] = useState(rail[0]?.key || "connection");
   const ro = !canManage;
 
@@ -263,15 +267,17 @@ export default function TicketingSettingsTab({
           ) : null}
         </form>
 
-        <JenkinsSection
-          canManage={canManage}
-          jenkins={jenkins}
-          onSave={onSaveJenkins}
-          saving={savingJenkins}
-          onTest={onTestJenkins}
-          testing={testingJenkins}
-          refFn={(el) => (sectionRefs.current[JENKINS_SECTION.key] = el)}
-        />
+        {showJenkins ? (
+          <JenkinsSection
+            canManage={canManage}
+            jenkins={jenkins}
+            onSave={onSaveJenkins}
+            saving={savingJenkins}
+            onTest={onTestJenkins}
+            testing={testingJenkins}
+            refFn={(el) => (sectionRefs.current[JENKINS_SECTION.key] = el)}
+          />
+        ) : null}
       </div>
     </div>
   );
