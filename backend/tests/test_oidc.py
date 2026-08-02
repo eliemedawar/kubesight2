@@ -1,0 +1,374 @@
+"""Security-contract tests for the schema-independent OIDC core."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlparse
+
+import jwt
+import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+from api.oidc import (
+    OidcConfig,
+    OidcConfigurationError,
+    OidcDiscovery,
+    OidcProtocolError,
+    begin_authorization,
+    exchange_code,
+    fetch_discovery,
+    oidc_enabled,
+    principal_from_claims,
+    safe_return_to,
+    validate_id_token,
+)
+
+
+def _environment(**overrides) -> dict[str, str]:
+    values = {
+        "OIDC_ENABLED": "true",
+        "KUBESIGHT_ENV": "production",
+        "OIDC_ISSUER_URL": "https://idp.example.test/tenant",
+        "OIDC_CLIENT_ID": "kubesight-client",
+        "OIDC_CLIENT_SECRET": "provider-secret-must-never-leak",
+        "OIDC_REDIRECT_URI": "https://kubesight.example.test/api/auth/oidc/callback",
+        "OIDC_ALLOWED_DOMAINS": "example.test, xn--bcher-kva.example",
+        "OIDC_GROUP_ROLE_MAPPINGS": json.dumps(
+            {"platform-admins": "admin", "platform-viewers": "viewer"}
+        ),
+    }
+    values.update(overrides)
+    return values
+
+
+def _config(**overrides) -> OidcConfig:
+    return OidcConfig.from_environment(_environment(**overrides))
+
+
+def _discovery(config: OidcConfig | None = None) -> OidcDiscovery:
+    config = config or _config()
+    return OidcDiscovery.from_document(
+        config,
+        {
+            "issuer": config.issuer,
+            "authorization_endpoint": "https://idp.example.test/authorize",
+            "token_endpoint": "https://idp.example.test/token",
+            "jwks_uri": "https://idp.example.test/jwks",
+            "code_challenge_methods_supported": ["S256"],
+        },
+    )
+
+
+class _JsonResponse:
+    def __init__(self, document):
+        self._raw = json.dumps(document).encode("utf-8")
+
+    def read(self, _size):
+        return self._raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def test_oidc_enablement_is_explicit():
+    assert oidc_enabled({}) is False
+    assert oidc_enabled({"OIDC_ENABLED": "true"}) is True
+
+
+def test_config_requires_https_verified_domains_and_asymmetric_algorithms():
+    with pytest.raises(OidcConfigurationError, match="HTTPS"):
+        _config(OIDC_ISSUER_URL="http://idp.example.test")
+    with pytest.raises(OidcConfigurationError, match="verified domain"):
+        _config(OIDC_ALLOWED_DOMAINS="")
+    with pytest.raises(OidcConfigurationError, match="asymmetric"):
+        _config(OIDC_ALLOWED_ALGORITHMS="HS256")
+
+
+def test_insecure_http_is_only_available_for_local_development():
+    config = _config(
+        KUBESIGHT_ENV="development",
+        OIDC_ALLOW_INSECURE_HTTP="true",
+        OIDC_ISSUER_URL="http://localhost:8080/tenant",
+        OIDC_REDIRECT_URI="http://127.0.0.1:5000/api/auth/oidc/callback",
+    )
+    assert config.allow_insecure_localhost is True
+
+    with pytest.raises(OidcConfigurationError, match="HTTPS"):
+        _config(
+            OIDC_ALLOW_INSECURE_HTTP="true",
+            OIDC_ISSUER_URL="http://localhost:8080/tenant",
+        )
+
+
+def test_discovery_requires_exact_issuer_pkce_and_secure_endpoints():
+    config = _config()
+    base = {
+        "issuer": config.issuer,
+        "authorization_endpoint": "https://idp.example.test/authorize",
+        "token_endpoint": "https://idp.example.test/token",
+        "jwks_uri": "https://idp.example.test/jwks",
+        "code_challenge_methods_supported": ["S256"],
+    }
+    with pytest.raises(OidcProtocolError, match="exactly match"):
+        OidcDiscovery.from_document(config, {**base, "issuer": "https://evil.test"})
+    with pytest.raises(OidcProtocolError, match="PKCE S256"):
+        OidcDiscovery.from_document(
+            config, {**base, "code_challenge_methods_supported": ["plain"]}
+        )
+    with pytest.raises(OidcProtocolError, match="HTTPS"):
+        OidcDiscovery.from_document(
+            config, {**base, "token_endpoint": "http://idp.example.test/token"}
+        )
+
+
+def test_discovery_fetch_uses_well_known_document_and_timeout():
+    config = _config(OIDC_HTTP_TIMEOUT_SECONDS="7")
+    captured = {}
+
+    def opener(request, *, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        return _JsonResponse(
+            {
+                "issuer": config.issuer,
+                "authorization_endpoint": "https://idp.example.test/authorize",
+                "token_endpoint": "https://idp.example.test/token",
+                "jwks_uri": "https://idp.example.test/jwks",
+                "code_challenge_methods_supported": ["S256"],
+            }
+        )
+
+    discovered = fetch_discovery(config, opener=opener)
+
+    assert captured == {
+        "url": "https://idp.example.test/tenant/.well-known/openid-configuration",
+        "timeout": 7,
+    }
+    assert discovered.issuer == config.issuer
+
+
+def test_issuer_trailing_slash_is_preserved_for_exact_validation():
+    config = _config(OIDC_ISSUER_URL="https://idp.example.test/tenant/")
+    captured = {}
+
+    def opener(request, *, timeout):
+        captured["url"] = request.full_url
+        return _JsonResponse(
+            {
+                "issuer": config.issuer,
+                "authorization_endpoint": "https://idp.example.test/authorize",
+                "token_endpoint": "https://idp.example.test/token",
+                "jwks_uri": "https://idp.example.test/jwks",
+                "code_challenge_methods_supported": ["S256"],
+            }
+        )
+
+    assert fetch_discovery(config, opener=opener).issuer.endswith("/")
+    assert captured["url"] == (
+        "https://idp.example.test/tenant/.well-known/openid-configuration"
+    )
+
+
+def test_authorization_uses_code_pkce_nonce_state_and_no_secret():
+    config = _config()
+    transaction = begin_authorization(
+        config, _discovery(config), return_to="/clusters?scope=mine"
+    )
+    query = parse_qs(urlparse(transaction.authorization_url).query)
+
+    assert query["response_type"] == ["code"]
+    assert query["code_challenge_method"] == ["S256"]
+    assert query["state"] == [transaction.state]
+    assert query["nonce"] == [transaction.nonce]
+    assert query["redirect_uri"] == [config.redirect_uri]
+    assert 43 <= len(transaction.code_verifier) <= 128
+    assert transaction.return_to == "/clusters?scope=mine"
+    assert config.client_secret not in transaction.authorization_url
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["https://evil.test", "//evil.test", "/\\evil.test", "/ok\r\nLocation: bad"],
+)
+def test_return_to_rejects_open_redirect_shapes(value):
+    with pytest.raises(OidcProtocolError, match="local absolute path"):
+        safe_return_to(value)
+
+
+def test_token_exchange_uses_basic_auth_and_pkce_without_leaking_secret():
+    config = _config(
+        OIDC_CLIENT_ID="kubesight:client",
+        OIDC_CLIENT_SECRET="secret with spaces:and-colon",
+    )
+    captured = {}
+
+    def opener(request, *, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _JsonResponse({"id_token": "signed-id-token", "access_token": "opaque"})
+
+    tokens = exchange_code(
+        config,
+        _discovery(config),
+        code="one-time-code",
+        code_verifier="v" * 64,
+        opener=opener,
+    )
+
+    request = captured["request"]
+    form = parse_qs(request.data.decode("ascii"))
+    assert request.get_header("Authorization") == (
+        "Basic a3ViZXNpZ2h0JTNB" "Y2xpZW50OnNlY3JldCt3aXRoK3NwYWNlcyUzQWFuZC1jb2xvbg=="
+    )
+    assert form["code_verifier"] == ["v" * 64]
+    assert form["redirect_uri"] == [config.redirect_uri]
+    assert "client_secret" not in form
+    assert tokens["id_token"] == "signed-id-token"
+
+
+def test_token_exchange_error_is_sanitized():
+    config = _config()
+
+    def opener(request, *, timeout):
+        raise HTTPError(request.full_url, 401, "bad secret echoed", {}, None)
+
+    with pytest.raises(OidcProtocolError) as raised:
+        exchange_code(
+            config,
+            _discovery(config),
+            code="one-time-code",
+            code_verifier="v" * 64,
+            opener=opener,
+        )
+    assert config.client_secret not in str(raised.value)
+    assert "bad secret echoed" not in str(raised.value)
+
+
+def _signed_id_token(
+    private_key,
+    config: OidcConfig,
+    *,
+    nonce="expected-nonce",
+    audience=None,
+    **overrides,
+):
+    now = datetime.now(timezone.utc)
+    claims = {
+        "iss": config.issuer,
+        "aud": audience or config.client_id,
+        "sub": "provider-subject-123",
+        "nonce": nonce,
+        "iat": now,
+        "exp": now + timedelta(minutes=5),
+        "email": "operator@example.test",
+        "email_verified": True,
+        "groups": ["platform-admins"],
+    }
+    claims.update(overrides)
+    return jwt.encode(claims, private_key, algorithm="RS256", headers={"kid": "key-1"})
+
+
+def _jwk_factory(public_key):
+    class Client:
+        def __init__(self, uri, timeout):
+            self.uri = uri
+            self.timeout = timeout
+
+        def get_signing_key_from_jwt(self, _token):
+            return SimpleNamespace(key=public_key)
+
+    return Client
+
+
+def test_id_token_validation_checks_signature_issuer_audience_nonce_and_azp():
+    config = _config()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    factory = _jwk_factory(private_key.public_key())
+    valid = _signed_id_token(private_key, config)
+
+    claims = validate_id_token(
+        config,
+        _discovery(config),
+        id_token=valid,
+        expected_nonce="expected-nonce",
+        jwk_client_factory=factory,
+    )
+    assert claims["sub"] == "provider-subject-123"
+
+    with pytest.raises(OidcProtocolError, match="nonce"):
+        validate_id_token(
+            config,
+            _discovery(config),
+            id_token=valid,
+            expected_nonce="wrong-nonce",
+            jwk_client_factory=factory,
+        )
+
+    multiple_audiences = _signed_id_token(
+        private_key,
+        config,
+        audience=[config.client_id, "another-client"],
+    )
+    with pytest.raises(OidcProtocolError, match="authorized-party"):
+        validate_id_token(
+            config,
+            _discovery(config),
+            id_token=multiple_audiences,
+            expected_nonce="expected-nonce",
+            jwk_client_factory=factory,
+        )
+
+
+def test_claim_policy_requires_verified_allowed_email_and_one_role():
+    config = _config()
+    principal = principal_from_claims(
+        config,
+        {
+            "sub": "subject",
+            "email": "Operator@Example.Test",
+            "email_verified": True,
+            "preferred_username": "Platform Operator",
+            "name": "Platform Operator",
+            "groups": ["platform-admins"],
+        },
+    )
+    assert principal.email == "operator@example.test"
+    assert principal.username == "Platform-Operator"
+    assert principal.role_name == "admin"
+
+    with pytest.raises(OidcProtocolError, match="not verified"):
+        principal_from_claims(
+            config,
+            {
+                "sub": "subject",
+                "email": "operator@example.test",
+                "email_verified": False,
+                "groups": ["platform-admins"],
+            },
+        )
+    with pytest.raises(OidcProtocolError, match="not allowed"):
+        principal_from_claims(
+            config,
+            {
+                "sub": "subject",
+                "email": "operator@evil.test",
+                "email_verified": True,
+                "groups": ["platform-admins"],
+            },
+        )
+    with pytest.raises(OidcProtocolError, match="multiple roles"):
+        principal_from_claims(
+            config,
+            {
+                "sub": "subject",
+                "email": "operator@example.test",
+                "email_verified": True,
+                "groups": ["platform-admins", "platform-viewers"],
+            },
+        )
