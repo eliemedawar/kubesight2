@@ -52,10 +52,14 @@
   color: var(--sidebar-nav-hover-text);
 }
 
+/*
+ * The group heading carries weight rather than a tint: the selected *item*
+ * inside it already has the tint, and giving both the same treatment made the
+ * heading compete with the thing it contains.
+ */
 .sidebar-section.is-active .sidebar-section-trigger {
-  border-left-color: var(--sidebar-nav-active-border);
-  background: var(--sidebar-nav-active-bg);
-  color: var(--sidebar-nav-active-text);
+  color: var(--sidebar-nav-hover-text);
+  font-weight: 700;
 }
 
 .sidebar-section-trigger:focus-visible {

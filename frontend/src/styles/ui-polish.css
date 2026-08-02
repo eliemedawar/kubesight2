@@ -423,7 +423,7 @@ td:last-child button,
 .nav-link.active {
   background: var(--nav-active-bg);
   color: var(--sidebar-nav-active-text);
-  border-left-color: var(--accent);
+  border-left-color: transparent;
   font-weight: 600;
 }
 
@@ -1142,30 +1142,13 @@ kbd {
   font-size: var(--font-size-sm);
 }
 
-.nav-link-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 1rem;
-  height: 1rem;
-  flex-shrink: 0;
-  opacity: 0.65;
-  transition: opacity var(--dur-fast) var(--ease);
-}
-
-.nav-link-icon svg {
-  width: 1rem;
-  height: 1rem;
-}
-
-.nav-link:hover .nav-link-icon {
-  opacity: 0.9;
-}
-
-.nav-link.active .nav-link-icon {
-  opacity: 1;
-  color: var(--accent);
-}
+/*
+ * .nav-link-icon is gone with the per-item glyphs. The set covered 21 of ~28
+ * destinations and mixed filled with stroked styles; the rest fell back to a
+ * hollow circle, which reads as an unselected radio button. Its active rule
+ * also tinted the glyph with the brand red, which is the same colour the
+ * attention feed uses for "something is wrong".
+ */
 
 .nav-link-label {
   flex: 1;
@@ -1396,10 +1379,16 @@ body.has-bundle-fab .page-content.ops-layout {
 }
 
 /* ── Sidebar — smoother active item ─── */
+/*
+ * Selection is a neutral tint plus weight. These two rules used to re-apply
+ * `border-left-color: var(--accent)` and, being later in the cascade, won over
+ * index.css -- so the red marker survived being removed at the token level.
+ * Red is reserved for degraded, failed and firing; see styles/navStyling.test.js.
+ */
 .nav-link.active {
   background: var(--sidebar-nav-active-bg);
   color: var(--sidebar-nav-active-text);
-  border-left-color: var(--accent);
+  border-left-color: transparent;
   font-weight: 600;
 }
 

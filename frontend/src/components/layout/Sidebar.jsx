@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { NavLink } from "react-router-dom";
+import { Link } from "react-router-dom";
 import BrandMark from "../BrandMark.jsx";
 import { buildNavTree, groupIdForPageKey } from "../../routes/navigation.js";
-import { FALLBACK_ICON, NAV_ICONS } from "./navIcons.jsx";
 
 /**
  * Primary navigation.
@@ -19,52 +18,51 @@ import { FALLBACK_ICON, NAV_ICONS } from "./navIcons.jsx";
  * and did nothing at all on a trackpad where the pointer stops moving. Groups
  * now open only when you ask them to, and stay open until you say otherwise.
  *
- * The group containing the current page is always expanded — you can never end
- * up looking at a page whose place in the menu is hidden — and navigating into
- * a group expands it. Everything else is the user's to open and close, and the
- * choice survives navigation.
+ * **One group open at a time, and by default it is the active one.** An earlier
+ * version let groups accumulate, on the reasoning that closing something the
+ * user opened is its own kind of interference. That was wrong for a specific
+ * reason: with three groups open, "open" stops meaning "this is where you are"
+ * and degrades to "this is where you have been". Expansion is the only signal
+ * the sidebar has for current section, so it has to be spent on exactly one.
+ *
+ * Opening another group therefore closes the current one, and the group you are
+ * actually in is never left collapsed.
  *
  * **Entries are links, not buttons.** They have real hrefs, so middle-click,
  * ctrl-click, "open in new tab" and "copy link address" all work. On an app
  * whose whole point is now addressable URLs, a nav that could only be operated
  * by left-click was the wrong shape.
+ *
+ * **No per-item icons.** There was a partial set: 21 glyphs for ~28
+ * destinations, mixing filled and stroked styles, with the rest falling back to
+ * a hollow circle — which reads as an unselected radio button, "choose one"
+ * rather than "go here". (The upgrade page's glyph was keyed `upgradeSafeMode`
+ * against a `upgrade` page key, so it had silently never rendered at all.) A
+ * complete, consistent family would earn its place; a partial one costs more
+ * than it gives, and the labels here are short and unambiguous.
  */
 export default function Sidebar({ pages, activePage, onNavigated, open = false }) {
   const groups = useMemo(() => buildNavTree(pages), [pages]);
   const activeGroupId = groupIdForPageKey(activePage);
 
-  // Expanded groups. The active one is forced open by the effect below, so this
-  // only records what the user has chosen to open beyond that.
-  const [expanded, setExpanded] = useState(() =>
-    activeGroupId ? new Set([activeGroupId]) : new Set()
-  );
+  const [openGroup, setOpenGroup] = useState(activeGroupId);
 
-  // Navigating into a group opens it. Deliberately additive: it never closes a
-  // group the user opened, because a menu that tidies itself up while you are
-  // using it is the same complaint as the hover behaviour in a different form.
+  // Navigating moves the open group to wherever you landed.
   useEffect(() => {
-    if (!activeGroupId) {
-      return;
+    if (activeGroupId) {
+      setOpenGroup(activeGroupId);
     }
-    setExpanded((current) => {
-      if (current.has(activeGroupId)) {
-        return current;
-      }
-      const next = new Set(current);
-      next.add(activeGroupId);
-      return next;
-    });
   }, [activeGroupId]);
 
   const toggleGroup = (groupId) => {
-    setExpanded((current) => {
-      const next = new Set(current);
-      if (next.has(groupId)) {
-        next.delete(groupId);
-      } else {
-        next.add(groupId);
+    setOpenGroup((current) => {
+      if (current !== groupId) {
+        return groupId;
       }
-      return next;
+      // Collapsing the group you are browsing would leave nothing open and no
+      // indication of where you are, so it falls back to the active group
+      // rather than to nothing.
+      return groupId === activeGroupId ? groupId : activeGroupId;
     });
   };
 
@@ -86,8 +84,7 @@ export default function Sidebar({ pages, activePage, onNavigated, open = false }
       <nav aria-label="Main navigation" data-tour="sidebar-nav">
         {groups.map((group) => {
           const isActive = group.id === activeGroupId;
-          // The active group is always expanded, whatever the user last chose.
-          const isOpen = isActive || expanded.has(group.id);
+          const isOpen = group.id === openGroup;
           const panelId = `sidebar-${group.id}-pages`;
 
           return (
@@ -133,23 +130,30 @@ export default function Sidebar({ pages, activePage, onNavigated, open = false }
                 inert={!isOpen}
               >
                 <div className="sidebar-group-links">
+                  {/*
+                    Plain Link, not NavLink. NavLink brings its own matching --
+                    by path prefix, and it appends its own `active` class even
+                    when className is a string -- so `/applications` counted
+                    itself active on `/applications/clients` and Inventory
+                    stayed lit while you were on Clients.
+
+                    `activePage` is already resolved through the route table's
+                    parent chain, which is the one place that knows a drill-down
+                    belongs to its parent and a sibling does not. Two sources of
+                    truth for "current" is what caused the bug; suppressing the
+                    second would have left it there to be re-enabled.
+                  */}
                   {group.items.map((item) => (
-                    <NavLink
+                    <Link
                       key={item.pageKey}
                       to={item.href}
-                      end={item.href === "/"}
-                      className={({ isActive: linkActive }) =>
-                        `nav-link${linkActive || activePage === item.pageKey ? " active" : ""}`
-                      }
+                      className={`nav-link${activePage === item.pageKey ? " active" : ""}`}
                       // The link itself navigates; this only reports that it
                       // happened, so the mobile drawer can close behind it.
                       onClick={() => onNavigated?.(item.pageKey)}
                     >
-                      <span className="nav-link-icon">
-                        {NAV_ICONS[item.pageKey] || FALLBACK_ICON}
-                      </span>
                       <span className="nav-link-label">{item.label}</span>
-                    </NavLink>
+                    </Link>
                   ))}
                 </div>
               </div>

@@ -17,13 +17,19 @@ afterEach(cleanup);
 const ADMIN = { isAdmin: true, hasFullAccess: true, role: "admin", permissions: [], accessRules: [] };
 const PAGES = getVisiblePages(ADMIN);
 
-function renderSidebar({ activePage = "dashboard", onNavigated } = {}) {
+function renderSidebar({ activePage = "dashboard", onNavigated, path } = {}) {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={path ? [path] : undefined}>
       <Sidebar pages={PAGES} activePage={activePage} onNavigated={onNavigated} open />
     </MemoryRouter>
   );
 }
+
+const activeLinks = () =>
+  screen
+    .getAllByRole("link")
+    .filter((link) => link.className.includes("active"))
+    .map((link) => link.textContent.trim());
 
 const groupButton = (label) => screen.getByRole("button", { name: label });
 const groupPanel = (label) => screen.getByRole("group", { name: `${label} pages` });
@@ -70,14 +76,28 @@ describe("click controls expansion", () => {
     expect(isExpanded("Changes")).toBe(false);
   });
 
-  // Opening one group must not tidy away another the user opened on purpose.
-  it("lets several groups stay open at once", () => {
+  // Expansion is the only signal the sidebar has for "current section", so it
+  // has to be spent on exactly one group. With three open it degrades from
+  // "this is where you are" to "this is where you have been".
+  it("opens one group at a time", () => {
     renderSidebar();
     fireEvent.click(groupButton("Changes"));
-    fireEvent.click(groupButton("Applications"));
-
     expect(isExpanded("Changes")).toBe(true);
+
+    fireEvent.click(groupButton("Applications"));
     expect(isExpanded("Applications")).toBe(true);
+    expect(isExpanded("Changes")).toBe(false);
+  });
+
+  it("never leaves every group collapsed", () => {
+    renderSidebar({ activePage: "dashboard" });
+    fireEvent.click(groupButton("Changes"));
+    // Collapsing the group you were browsing falls back to the one you are in,
+    // rather than to nothing at all.
+    fireEvent.click(groupButton("Changes"));
+
+    expect(isExpanded("Changes")).toBe(false);
+    expect(isExpanded("Home")).toBe(true);
   });
 });
 
@@ -93,8 +113,9 @@ describe("the active group stays expanded", () => {
     expect(isExpanded("Changes")).toBe(true);
   });
 
-  it("expands the group you navigate into", () => {
+  it("expands the group you navigate into, and closes the one you left", () => {
     const { rerender } = renderSidebar({ activePage: "dashboard" });
+    expect(isExpanded("Home")).toBe(true);
     expect(isExpanded("Applications")).toBe(false);
 
     rerender(
@@ -103,6 +124,7 @@ describe("the active group stays expanded", () => {
       </MemoryRouter>
     );
     expect(isExpanded("Applications")).toBe(true);
+    expect(isExpanded("Home")).toBe(false);
   });
 
   // Drill-downs highlight through their parent, so opening an application
@@ -110,6 +132,31 @@ describe("the active group stays expanded", () => {
   it("keeps the parent group open on a drill-down", () => {
     renderSidebar({ activePage: "inventory" });
     expect(isExpanded("Applications")).toBe(true);
+  });
+});
+
+describe("exactly one entry is marked current", () => {
+  // The reported bug: on /applications/clients, both Inventory and Clients were
+  // highlighted. NavLink matches by path prefix, so /applications considered
+  // itself active on every /applications/* URL.
+  it("does not light a parent path when a sibling is open", () => {
+    renderSidebar({ activePage: "clients", path: "/applications/clients" });
+    expect(activeLinks()).toEqual(["Clients"]);
+  });
+
+  it("lights nothing spurious on a nested workloads URL", () => {
+    renderSidebar({ activePage: "namespaces", path: "/workloads/prod-eu/payments" });
+    expect(activeLinks()).toEqual(["Workloads"]);
+  });
+
+  it("lights the parent for a drill-down, since it has no entry of its own", () => {
+    renderSidebar({ activePage: "inventory", path: "/applications/42" });
+    expect(activeLinks()).toEqual(["Inventory"]);
+  });
+
+  it("lights the dashboard at the root without matching everything", () => {
+    renderSidebar({ activePage: "dashboard", path: "/" });
+    expect(activeLinks()).toEqual(["Dashboard"]);
   });
 });
 
@@ -130,6 +177,19 @@ describe("entries are real links", () => {
       "href",
       "/admin/audit"
     );
+  });
+
+  // A partial icon set fell back to a hollow circle, which reads as an
+  // unselected radio button — "choose one" rather than "go here".
+  it("renders no per-item glyphs", () => {
+    renderSidebar({ activePage: "dashboard" });
+    fireEvent.click(groupButton("Administration"));
+
+    within(groupPanel("Administration"))
+      .getAllByRole("link")
+      .forEach((link) => {
+        expect(link.querySelector("svg")).toBeNull();
+      });
   });
 
   it("reports navigation so the mobile drawer can close", () => {
