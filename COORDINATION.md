@@ -929,3 +929,80 @@ Blocked on: nothing.
 Next: §G step 4 — leaf pages own their fetches, one route per commit (dashboard
 E11, upgrade E3/E4, inventory E5, application details E6, resources M2/M3), then
 step 5's providers.
+
+### 2026-08-02 A2 — frontend (session 4): navigation, shared layer, hub, dashboard
+
+Rebased on master (26 commits). One conflict, in this file, both sides appends —
+kept both. My SPA fallback request is marked applied above.
+
+**Navigation (task 3).** Five groups — Home, Operate, Applications, Changes,
+Administration — replacing seven ad-hoc sections that split related work; the
+upgrade centre sat under "Operations" while the clusters it upgrades sat under
+"Infrastructure".
+
+Hover-driven expansion is gone, and with it three timers: a 160ms open delay, a
+140ms close delay, and a 420ms switch lock. Those are what a hover menu needs to
+stop flickering when the pointer crosses a group on the way elsewhere, and they
+are also why it felt like the menu had opinions — it opened what you passed
+over, closed what you were reading, and did nothing on a trackpad. Entries are
+links with real hrefs now, so middle-click and "open in new tab" work.
+
+Grouping moved out of `authz.js` into `routes/navigation.js`: those entries
+answer "who may see this", which changes for security reasons, and groups answer
+"where does an operator look for this", which changes for product reasons.
+
+**Shared component layer (task 4).** PageHeader/breadcrumbs derived from the
+route table's existing parent chain; AsyncState centralising the
+loading/denied/error/degraded/empty precedence; StatusPill making contract 2's
+four states the shared vocabulary; SaveBar with the unsaved-changes guard that
+routing made necessary; ConfirmDialog replacing `window.confirm` for destructive
+actions; DataTable gaining search and sort; CopyableId, ActivityTimeline,
+FreshnessIndicator.
+
+Also `lib/relativeTime.js`, replacing guesswork. **There are five hand-rolled
+`timeAgo` copies in this tree and they disagree on whether a naive backend
+timestamp is UTC.** Reading it as local shifts every duration by the viewer's
+offset — on a freshness indicator that means confidently reporting stale data as
+current. New code uses the shared one; `lib/integrations.js` is the first copy to
+converge, the other four as their pages are touched.
+
+**Integrations hub (task 5).** Now top-level `/integrations`, out of the Settings
+rail, with the four tabs as routes so an operator can send a colleague the
+Activity tab of a failing provider rather than the hub plus directions. Nothing
+in it knows Jira exists. Every control comes from the `actions` array — an empty
+array renders no controls, which is the viewer case. No polling anywhere,
+deliberately: describing never tests.
+
+**Dashboard (task 6).** Synthetic series deleted per the standing decision. Four
+things were fabricated: a random-walk seed for CPU/memory history, an entirely
+invented network series, a per-namespace CPU split derived by dividing one
+cluster figure by pod count, and a dashed "limit 85%" line that was a frontend
+constant. A seeded walk around the current value always looks like a stable
+cluster, so the one thing a chart is for — noticing that something changed — was
+exactly what it could not show.
+
+Attention feed answers "what needs attention?" in priority order from sources
+already in hand. Sources that fail to load are named rather than silently
+shortening the list. Ctrl/Cmd+K search is permission-aware by construction, not
+by filtering afterwards — a search box that reveals a page exists is a leak even
+when the link 403s.
+
+**A1 — two contract 2 disagreements posted to your mailbox, neither blocking.**
+The provider key is `registries`, not `registry` as the doc says, and the
+activity entry shape (`{id, at, outcome, summary, detail}`) is undocumented.
+Built against the service in both cases per the standing rule.
+
+**A3 — cutover sequence confirmed in your mailbox.** I need three things on
+master before I can do step 2: `GET /api/auth/csrf` callable while still
+bearer-authenticated, `POST /api/auth/refresh`, and Set-Cookie on login
+alongside the existing bearer response. Not on master as of `04631ae`, so I am
+not blocked and not waiting — ping me and I will do the switch. It is contained
+to `client.js`; `setUnauthorizedHandler` is already the hook for
+retry-once-then-logout.
+
+402 tests green (up from 278), production build green.
+
+Blocked on: nothing.
+
+Next: contract 4 client cutover when A3's endpoints land; migrating remaining
+pages onto the shared layer; converging the other four `timeAgo` copies.
