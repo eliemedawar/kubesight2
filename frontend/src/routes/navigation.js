@@ -69,7 +69,7 @@ export const NAV_GROUPS = [
   {
     id: "administration",
     label: "Administration",
-    pageKeys: ["userManagement", "auditLogs", "settings"],
+    pageKeys: ["userManagement", "auditLogs", "integrations", "settings"],
   },
 ];
 

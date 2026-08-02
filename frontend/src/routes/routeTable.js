@@ -218,6 +218,46 @@ export const ROUTES = [
     loading: "Loading settings...",
   },
   {
+    // Promoted out of the Settings rail to its own address. Every outside system
+    // KubeSight talks to, in one place, so "where do I configure X" has one
+    // answer — and so "which of these is broken" is answerable at a glance.
+    pageKey: "integrations",
+    path: "/integrations",
+    scope: SCOPE.NONE,
+    loading: "Loading integrations...",
+  },
+  {
+    // The detail screen's tabs are routes, not state, so an operator can send a
+    // colleague the Activity tab of a failing provider rather than the hub and
+    // a description of where to click.
+    pageKey: "integrationDetail",
+    path: "/integrations/:provider",
+    parent: "integrations",
+    scope: SCOPE.NONE,
+    loading: "Loading integration...",
+  },
+  {
+    pageKey: "integrationConfiguration",
+    path: "/integrations/:provider/configuration",
+    parent: "integrationDetail",
+    scope: SCOPE.NONE,
+    loading: "Loading configuration...",
+  },
+  {
+    pageKey: "integrationActivity",
+    path: "/integrations/:provider/activity",
+    parent: "integrationDetail",
+    scope: SCOPE.NONE,
+    loading: "Loading activity...",
+  },
+  {
+    pageKey: "integrationUsedBy",
+    path: "/integrations/:provider/used-by",
+    parent: "integrationDetail",
+    scope: SCOPE.NONE,
+    loading: "Loading dependents...",
+  },
+  {
     // Hidden from the sidebar (`NAV_PAGES.hidden` in authz.js) because a
     // registry is a connection and is configured in the integrations hub. The
     // route stays so existing deep links and its guided tour still resolve.

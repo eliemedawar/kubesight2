@@ -171,6 +171,10 @@ export const NAV_PAGES = [
     permission: "ticketing:view",
   },
   { key: "settings", label: "Settings", anyPermissions: SETTINGS_ENTRY_PERMISSIONS },
+  // Every outside system KubeSight talks to. Anyone who may see at least one
+  // integration may open the hub; the hub then shows only the cards that
+  // person's permissions cover, filtered server-side per contract 2.
+  { key: "integrations", label: "Integrations", anyPermissions: SETTINGS_ENTRY_PERMISSIONS },
 
   {
     key: "mobileApps",
@@ -961,9 +965,33 @@ export function pageNeedsNamespaceContext(pageKey) {
 }
 
 /** Routes reachable from nav but not listed in NAV_PAGES (sidebar). */
-const DRILL_DOWN_PAGES = new Set(["applicationDetails", "clusterOverview"]);
+/**
+ * The integrations detail screen and its tabs.
+ *
+ * All four gate on the same thing the hub does, and deliberately no more: which
+ * *providers* a user may see, and what they may do to each one, is decided
+ * server-side per integration (contract 2). A client-side check here would
+ * either duplicate that matrix or contradict it, and the backend already
+ * answers 403 for a provider this user may not see.
+ */
+const INTEGRATION_DETAIL_PAGES = new Set([
+  "integrationDetail",
+  "integrationConfiguration",
+  "integrationActivity",
+  "integrationUsedBy",
+]);
+
+const DRILL_DOWN_PAGES = new Set([
+  "applicationDetails",
+  "clusterOverview",
+  ...INTEGRATION_DETAIL_PAGES,
+]);
 
 export function pageAllowed(user, pageKey) {
+  if (INTEGRATION_DETAIL_PAGES.has(pageKey)) {
+    return hasAnyPermission(user, SETTINGS_ENTRY_PERMISSIONS);
+  }
+
   if (DRILL_DOWN_PAGES.has(pageKey)) {
     switch (pageKey) {
       case "applicationDetails":
@@ -1040,6 +1068,7 @@ export function pageAllowed(user, pageKey) {
           (pageGrantedByAdmin(user, "upgrade") && hasAnyClusterAccess(user)))
       );
     case "settings":
+    case "integrations":
       return hasAnyPermission(user, SETTINGS_ENTRY_PERMISSIONS);
     case "imageRegistries":
       return hasPermission(user, "registries:view");

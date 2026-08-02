@@ -29,8 +29,6 @@ import PreferencesPanel from "./settings/PreferencesPanel.jsx";
  * stays the same length as providers are added.
  */
 
-const IntegrationsHub = lazy(() => import("./settings/IntegrationsHub.jsx"));
-
 export default function SettingsPage({
   data,
   clusters,
@@ -146,7 +144,9 @@ export default function SettingsPage({
     dirtySections.push("Notifications");
   }
 
-  const canOpenIntegrations = panelSections.some((section) => section.id === "integrationsHub");
+  // The hub is a link-out now, so it is never a panel; the preferences panel
+  // still wants to know whether this user can reach it before offering a link.
+  const canOpenIntegrations = sections.some((section) => section.id === "integrationsHub");
   // The bar stays up while an integration panel is open: the draft survives the
   // panel switch, and hiding the only way to save it would read as discarded.
   const showSaveBar = canManage && dirtySections.length > 0;
@@ -176,8 +176,6 @@ export default function SettingsPage({
             onOpenSection={openSection}
           />
         );
-      case "integrationsHub":
-        return <IntegrationsHub hasPermission={hasPermission} isAdmin={isAdmin} />;
       default:
         return null;
     }

@@ -102,6 +102,10 @@ const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
 const ServiceCatalogPage = lazy(() => import("./pages/ServiceCatalogPage.jsx"));
 const ComponentsPage = lazy(() => import("./pages/ComponentsPage.jsx"));
 const NotFoundPage = lazy(() => import("./pages/NotFoundPage.jsx"));
+const IntegrationsHubPage = lazy(() => import("./pages/integrations/IntegrationsHubPage.jsx"));
+const IntegrationDetailPage = lazy(() =>
+  import("./pages/integrations/IntegrationDetailPage.jsx")
+);
 
 /**
  * Renders the matched route's page.
@@ -1640,6 +1644,18 @@ export default function App() {
         return <MyRequestsPage />;
       case "changeBundles":
         return <ChangeBundlesPage />;
+      case "integrations":
+        return <IntegrationsHubPage />;
+      // The four detail tabs are separate routes sharing one component, so a
+      // tab is a shareable address rather than component state.
+      case "integrationDetail":
+        return <IntegrationDetailPage tab="overview" />;
+      case "integrationConfiguration":
+        return <IntegrationDetailPage tab="configuration" />;
+      case "integrationActivity":
+        return <IntegrationDetailPage tab="activity" />;
+      case "integrationUsedBy":
+        return <IntegrationDetailPage tab="usedBy" />;
       case "settings":
         return (
           <SettingsPage

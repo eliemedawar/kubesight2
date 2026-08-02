@@ -10,8 +10,13 @@ import EmptyState from "./EmptyState.jsx";
  * it disagree on field names and normalising here would put a mapping table in
  * a presentation component.
  *
- * Entry shape: { id, at, title, detail, actor, outcome }
- * `outcome` is "ok" | "warn" | "error" | undefined, and drives only the marker.
+ * Entry shape, matching what the integrations service emits from `_event`:
+ *
+ *   { id, at, outcome, summary, detail }
+ *
+ * `outcome` is "ok" | "error" | "info"; anything else renders neutral. `actor`
+ * is accepted but optional — no integrations adapter records one, and the audit
+ * feed that will use this next does.
  *
  * An entry with no timestamp still renders. Activity feeds are assembled from
  * whatever the provider recorded, and dropping rows because one field is
@@ -32,7 +37,7 @@ export default function ActivityTimeline({ entries = [], emptyMessage = "No rece
           <span className="activity-marker" aria-hidden="true" />
           <div className="activity-body">
             <div className="activity-head">
-              <span className="activity-title">{entry.title}</span>
+              <span className="activity-title">{entry.summary || entry.title}</span>
               {entry.at ? (
                 <FreshnessIndicator timestamp={entry.at} prefix="" className="activity-time" />
               ) : (

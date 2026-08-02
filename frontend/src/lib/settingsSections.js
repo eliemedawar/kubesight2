@@ -110,13 +110,18 @@ export const SETTINGS_SECTIONS = [
   // integration — browsing tickets, field sync, deploy runs — stay on their own
   // pages; this is where the connection to the outside system is configured,
   // not where the work gets done.
+  // The hub is its own top-level address now, not a panel in here. It grew
+  // four tabs and a per-provider detail screen, which is a workspace rather
+  // than a setting -- and burying it under /admin/settings meant the answer to
+  // "is Jira working" was three clicks from anywhere.
+  //
+  // The rail keeps the row so the path from Settings to it is still obvious.
   {
     id: "integrationsHub",
     group: "integrations",
     label: "All integrations",
     icon: "plug",
-    panel: "integrationsHub",
-    wide: true,
+    link: "integrations",
     requires: { anyPermissions: INTEGRATION_VIEW_PERMISSIONS },
   },
 
