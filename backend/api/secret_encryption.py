@@ -1,4 +1,4 @@
-"""Encrypt sensitive alert-routing secrets at rest."""
+"""Encrypt stored credential secrets at rest with a dedicated key."""
 
 from __future__ import annotations
 
@@ -13,20 +13,13 @@ _INSECURE_DEVELOPMENT_KEY = "kubesight-dev-secret-change-me"
 
 def secret_encryption_key_configured() -> bool:
     """Whether secrets are protected by an operator-provided key."""
-    raw = (
-        os.getenv("ALERT_ROUTING_SECRET_KEY")
-        or os.getenv("JWT_SECRET_KEY")
-        or ""
-    ).strip()
+    raw = (os.getenv("ALERT_ROUTING_SECRET_KEY") or "").strip()
     return bool(raw and raw != _INSECURE_DEVELOPMENT_KEY)
 
 
 def _fernet() -> Fernet:
-    raw = (
-        os.getenv("ALERT_ROUTING_SECRET_KEY")
-        or os.getenv("JWT_SECRET_KEY")
-        or _INSECURE_DEVELOPMENT_KEY
-    )
+    raw = (os.getenv("ALERT_ROUTING_SECRET_KEY") or "").strip()
+    raw = raw or _INSECURE_DEVELOPMENT_KEY
     digest = hashlib.sha256(raw.encode("utf-8")).digest()
     key = base64.urlsafe_b64encode(digest)
     return Fernet(key)

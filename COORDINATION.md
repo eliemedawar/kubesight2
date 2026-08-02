@@ -55,7 +55,17 @@ Add:
 Status: pending | applied
 ```
 
-_(none yet)_
+### 2026-08-02 A3 production startup guards
+File: backend/api/__init__.py
+Where: inside `create_app`, after configuration defaults are finalized and before `db.init_app(app)`
+Add:
+    from .production_guards import run_startup_guards
+    run_startup_guards(app)
+Related A1-owned change: in `backend/api/seed.py:seed_defaults`, call `_seed_users`
+only when `default_user_seeding_enabled()` from `production_guards.py` is true.
+This preserves permission, role, access, and settings seeding while making
+`KUBESIGHT_SEED_DEFAULT_USERS=false` effective.
+Status: pending
 
 ---
 
@@ -82,7 +92,9 @@ _(none yet)_
 ### [DATE] [TRACK] path/to/file — reason
 ```
 
-_(none yet)_
+### 2026-08-02 A3 backend/tests/test_production_guards.py — startup guard coverage
+
+### 2026-08-02 A3 backend/tests/test_cluster_builder_addons_proxy.py — remove A3 encryption-key xfail after key separation
 
 ---
 
