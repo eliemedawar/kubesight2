@@ -53,7 +53,11 @@ def _is_insecure_secret(value: str) -> bool:
 
 
 def production_environment_enabled() -> bool:
-    """Whether strict startup validation applies to this process."""
+    """Whether strict startup validation applies to this process.
+
+    ``KUBESIGHT_ENV`` is the single authoritative environment-mode setting.
+    Legacy Flask environment signals deliberately do not participate here.
+    """
     return _environment_value("KUBESIGHT_ENV").lower() == "production"
 
 
@@ -62,7 +66,9 @@ def _cors_is_unsafe() -> bool:
     if not raw:
         return True
     origins = {item.strip().lower() for item in raw.split(",") if item.strip()}
-    return not origins or "*" in origins or "null" in origins
+    return not origins or any(
+        origin == "null" or "*" in origin for origin in origins
+    )
 
 
 def _default_seeded_usernames() -> list[str]:
@@ -78,7 +84,7 @@ def _default_seeded_usernames() -> list[str]:
 def _collect_violations(app: Flask) -> list[str]:
     violations: list[str] = []
 
-    jwt_secret = _environment_value("JWT_SECRET_KEY")
+    jwt_secret = str(app.config.get("JWT_SECRET_KEY") or "").strip()
     if _is_insecure_secret(jwt_secret):
         violations.append(
             "JWT_SECRET_KEY must be explicitly set to a non-placeholder value "

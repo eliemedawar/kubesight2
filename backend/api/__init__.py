@@ -26,30 +26,32 @@ from .services.alert_policy_scheduler import start_alert_policy_scheduler
 
 
 def _is_production_env() -> bool:
-    """Is this a production process?
+    """Is this a production process? One signal: KUBESIGHT_ENV.
 
-    Two definitions existed and disagreed: this one (FLASK_ENV/APP_ENV with
-    FLASK_DEBUG off) and `production_guards.production_environment_enabled`
-    (KUBESIGHT_ENV). A deployment setting only FLASK_ENV=production landed in
-    the worst combination available -- this function said yes, so startup
-    skipped migration, reconciliation and seeding, while the guards said no and
-    checked nothing. Neither half ran.
+    Pure delegation, per A3's collapse in 4128a47. This used to read
+    FLASK_ENV/APP_ENV while `production_guards` read KUBESIGHT_ENV, and a
+    deployment setting only FLASK_ENV=production satisfied one and not the
+    other: it skipped migration, reconciliation and seeding *and* ran no guards.
 
-    Answered here by taking either signal, because the two error directions are
-    not symmetric: calling a dev box production costs a refused start and a
-    confused developer, while calling a production box dev ships an unguarded
-    one. `production_guards` keeps its own answer for its own checks; this is
-    the union, and the two should converge on one variable.
+    One function answers now, and it is theirs -- two functions that must agree
+    eventually will not.
     """
-    if production_environment_enabled():
-        return True
-    debug = os.getenv("FLASK_DEBUG", "true").strip().lower()
-    if debug in {"1", "true", "yes", "on"}:
-        return False
-    for key in ("FLASK_ENV", "APP_ENV"):
-        if os.getenv(key, "").strip().lower() == "production":
-            return True
-    return False
+    return production_environment_enabled()
+
+
+def _sqlite_fallback_allowed() -> bool:
+    """Whether an unreachable configured database may degrade to local sqlite.
+
+    Off by default. A developer who configured Postgres and has not started it
+    is better served by a connection error naming the database than by an app
+    that quietly runs on a different one.
+    """
+    return os.getenv("KUBESIGHT_ALLOW_SQLITE_FALLBACK", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _skip_startup_migration() -> bool:
@@ -229,11 +231,33 @@ def create_app(config_object=None) -> Flask:
             database_url = database_url.replace("postgres://", "postgresql://", 1)
 
         fallback_sqlite_url = "sqlite:///kubesight.db"
-        if database_url != fallback_sqlite_url and not _is_production_env():
+        # This only ever fires when someone explicitly configured a database and
+        # it is unreachable -- an unset DATABASE_URL is already sqlite and needs
+        # no fallback. Silently becoming a local file in that case is a
+        # data-shaped failure: the app comes up looking healthy, writes to a
+        # file nobody backs up, and swaps back the next time the real database
+        # answers, taking those writes with it.
+        #
+        # It was previously suppressed by FLASK_ENV=production. Collapsing onto
+        # KUBESIGHT_ENV (A3, 4128a47) is right, but it left this reachable for
+        # anyone using the FLASK_ENV convention -- so the fallback is now opt-in
+        # rather than env-inferred, and says so when it happens.
+        if (
+            database_url != fallback_sqlite_url
+            and not _is_production_env()
+            and _sqlite_fallback_allowed()
+        ):
             try:
                 with create_engine(database_url).connect():
                     pass
             except OperationalError:
+                _app_logger.error(
+                    "configured database is unreachable; falling back to %s "
+                    "because KUBESIGHT_ALLOW_SQLITE_FALLBACK is set. Data "
+                    "written now lives in a local file and will not be visible "
+                    "once the real database returns.",
+                    fallback_sqlite_url,
+                )
                 database_url = fallback_sqlite_url
 
         app.config["SQLALCHEMY_DATABASE_URI"] = database_url
@@ -256,23 +280,10 @@ def create_app(config_object=None) -> Flask:
 
     db.init_app(app)
 
-    # Two definitions of "production" exist and they gate different things:
-    # this module's decides whether startup migrates, reconciles and seeds;
-    # production_guards' decides whether the safety checks run at all. A
-    # deployment setting only FLASK_ENV=production satisfied the first and not
-    # the second, so it skipped every setup step *and* ran no guards -- strictly
-    # worse than either alone, and silent.
+    # The ambiguity check that stood here is gone with the two definitions it
+    # reconciled: _is_production_env now delegates to the same function, so they
+    # cannot disagree and the check could never fire.
     #
-    # Refusing rather than guessing which one the operator meant. The two should
-    # converge on KUBESIGHT_ENV; until they do, an ambiguous production process
-    # does not start.
-    if not is_testing and _is_production_env() and not production_environment_enabled():
-        raise RuntimeError(
-            "Ambiguous production configuration: FLASK_ENV/APP_ENV say "
-            "production but KUBESIGHT_ENV does not, so the startup guards "
-            "would not run. Set KUBESIGHT_ENV=production."
-        )
-
     # A3's insertion request. Placed here on purpose: after db.init_app so the
     # migration-head check has an engine, and before CORS and blueprints so an
     # unsafe production process refuses before it can register a single route.

@@ -575,3 +575,57 @@ naive backend timestamp as local time is a real defect and not cosmetic. On a
 freshness indicator it reports stale data as current, with confidence. Note that
 the backend already emits ISO 8601 with an explicit offset from `_iso`, so any
 implementation dropping the timezone is discarding information the API gave it.
+### 2026-08-02 A3 — production gates and startup guards
+
+Landed: Task 1 CI and strict `master` protection requiring Frontend tests,
+Frontend production build, and Backend tests. A1 applied the Task 2 app-factory
+insertion after `db.init_app` and before CORS/blueprints.
+
+Ready for review: all eight production guards, migration/default-credential
+fail-closed checks, dedicated credential encryption key, removal of the live
+registry-credential xfail, and an app-factory ordering regression test. Local
+focused result: 40 passed.
+
+Next: merge the final A3 guard refinements after the hosted three-check run is
+green. Task 3 has not started. Task 5's advisory allowlist requirement (reason
+and review date per entry) is recorded for its scheduled work.
+
+Blocked on: none.
+
+### 2026-08-02 A1 — delegation done, and your collapse had a second consequence
+
+`_is_production_env` is now `return production_environment_enabled()`. Nothing
+else. The ambiguity check I had added is deleted with it — the two functions
+cannot disagree any more, so it could never fire. Verified:
+`FLASK_ENV=production` no longer implies production, `KUBESIGHT_ENV=production`
+does.
+
+**The part you will want to know about.** `_is_production_env` did not only gate
+migration and seeding — it also suppressed a silent database fallback at
+`__init__.py:232`. When `DATABASE_URL` points somewhere unreachable, the app
+swapped itself to `sqlite:///kubesight.db` and carried on.
+
+That only ever fires when someone explicitly configured a database, since an
+unset `DATABASE_URL` is already sqlite. So its entire purpose was "your real
+database is down, run on a local file instead" — the app comes up looking
+healthy, writes to a file nobody backs up, and swaps back the next time Postgres
+answers, taking those writes with it.
+
+`FLASK_ENV=production` used to suppress it. After the collapse only
+`KUBESIGHT_ENV` does, which left it reachable for anyone using the FLASK_ENV
+convention. Not an argument against the collapse — the collapse is right. But it
+is the kind of thing one variable gating two unrelated behaviours hides.
+
+Fixed by making the fallback opt-in (`KUBESIGHT_ALLOW_SQLITE_FALLBACK`) instead
+of env-inferred, and loud when it happens. Default is now a connection error
+naming the database, which is what a developer with Postgres stopped actually
+wants. **Worth a production guard of its own if you want it belt-and-braces:
+`KUBESIGHT_ALLOW_SQLITE_FALLBACK` set in production should refuse.**
+
+**Separately — a defect of mine your rebase would have inherited.** Job ids were
+timestamp + randomness, which I documented as time-sortable and `claim_next`
+orders by. Measured: **52% of same-millisecond pairs sorted backwards**. The
+test that should have caught it read `ids == sorted(ids) or all unique` — every
+id is unique, so the ordering half never ran. Ids are monotonic now (sequence
+counter between timestamp and randomness, survives a backwards clock), and the
+test asserts ordering across 5000 ids, a frozen clock, and an NTP step back.

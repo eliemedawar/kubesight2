@@ -47,15 +47,35 @@ def ctx(app):
 
 
 def test_ids_sort_chronologically():
-    """`ORDER BY id` has to be oldest-first: claim_next depends on it."""
-    ids = [new_job_id() for _ in range(50)]
-    assert ids == sorted(ids) or len(set(ids)) == 50
-    # Same millisecond may tie, but a later one never sorts before an earlier.
-    early = new_job_id()
-    import time as _t
+    """`ORDER BY id` has to be oldest-first: claim_next depends on it.
 
-    _t.sleep(0.005)
-    assert new_job_id() > early
+    The first version of this test allowed `ids == sorted(ids) OR all unique`,
+    and every id is unique, so the ordering half never ran. It passed against an
+    implementation where 52% of same-millisecond pairs sorted backwards.
+    """
+    ids = [new_job_id() for _ in range(5000)]
+    assert ids == sorted(ids), "ids minted in one burst must sort in mint order"
+    assert len(set(ids)) == len(ids), "and still be unique"
+
+
+def test_ids_stay_ordered_when_the_clock_does_not_move(monkeypatch):
+    """The case that broke it: a frozen clock must not produce ties."""
+    import api.models_jobs as mod
+
+    monkeypatch.setattr(mod.time, "time", lambda: 1_700_000_000.0)
+    ids = [new_job_id() for _ in range(1000)]
+    assert ids == sorted(ids)
+    assert len(set(ids)) == len(ids)
+
+
+def test_ids_survive_a_clock_stepping_backwards(monkeypatch):
+    """NTP correction must not mint ids that sort before existing rows."""
+    import api.models_jobs as mod
+
+    monkeypatch.setattr(mod.time, "time", lambda: 1_700_000_000.0)
+    before = new_job_id()
+    monkeypatch.setattr(mod.time, "time", lambda: 1_600_000_000.0)
+    assert new_job_id() > before
 
 
 # ─── idempotency ───

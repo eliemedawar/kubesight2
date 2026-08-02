@@ -6,6 +6,7 @@ from flask import Flask
 from api.production_guards import (
     ProductionGuardError,
     _default_seeded_usernames,
+    production_environment_enabled,
     run_startup_guards,
 )
 from api.secret_encryption import (
@@ -36,6 +37,7 @@ def production_app(monkeypatch):
     )
     app = Flask(__name__)
     app.config["DEBUG"] = False
+    app.config["JWT_SECRET_KEY"] = SAFE_ENVIRONMENT["JWT_SECRET_KEY"]
     return app
 
 
@@ -44,19 +46,67 @@ def test_non_production_environment_is_not_guarded(monkeypatch):
     run_startup_guards(Flask(__name__))
 
 
+@pytest.mark.parametrize("legacy_setting", ["FLASK_ENV", "APP_ENV"])
+def test_legacy_environment_signals_do_not_enable_production_guards(
+    monkeypatch, legacy_setting
+):
+    monkeypatch.delenv("KUBESIGHT_ENV", raising=False)
+    monkeypatch.setenv("FLASK_DEBUG", "false")
+    monkeypatch.setenv(legacy_setting, "production")
+
+    assert production_environment_enabled() is False
+
+
+def test_kubesight_environment_is_the_authoritative_production_signal(
+    monkeypatch,
+):
+    monkeypatch.setenv("KUBESIGHT_ENV", "  ProDucTion  ")
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.setenv("APP_ENV", "development")
+
+    assert production_environment_enabled() is True
+
+
 def test_safe_production_configuration_passes(production_app):
     run_startup_guards(production_app)
+
+
+def test_app_factory_runs_guards_before_blueprint_registration(monkeypatch):
+    import api as api_package
+
+    for name, value in SAFE_ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr("api.production_guards.is_at_head", lambda: True)
+    monkeypatch.setattr(
+        "api.production_guards._default_seeded_usernames", lambda: []
+    )
+
+    def blueprints_must_not_be_registered(_app):
+        raise AssertionError("blueprints registered before production guards")
+
+    monkeypatch.setattr(
+        api_package, "register_blueprints", blueprints_must_not_be_registered
+    )
+
+    class UnsafeProductionConfig:
+        TESTING = True
+        SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+        SQLALCHEMY_TRACK_MODIFICATIONS = False
+        JWT_SECRET_KEY = "change-me-generate-with-openssl-rand-hex-32"
+
+    with pytest.raises(ProductionGuardError, match="JWT_SECRET_KEY"):
+        api_package.create_app(UnsafeProductionConfig)
 
 
 @pytest.mark.parametrize(
     ("setting", "unsafe_value"),
     [
-        ("JWT_SECRET_KEY", "change-me-generate-with-openssl-rand-hex-32"),
         ("FLASK_DEBUG", "true"),
         ("AUTH_REQUIRED", "false"),
         ("ALERT_ROUTING_SECRET_KEY", ""),
         ("ALERT_ROUTING_SECRET_KEY", "change-me-credential-encryption-key"),
         ("CORS_ORIGINS", "*"),
+        ("CORS_ORIGINS", "https://*.example.com"),
         ("CORS_ORIGINS", "null"),
         ("K8S_REAL_MODE", "false"),
         ("K8S_REAL_MODE", "auto"),
@@ -71,8 +121,19 @@ def test_each_unsafe_setting_names_itself(
         run_startup_guards(production_app)
 
 
+def test_default_jwt_secret_config_is_rejected(production_app, monkeypatch):
+    monkeypatch.setenv("JWT_SECRET_KEY", SAFE_ENVIRONMENT["JWT_SECRET_KEY"])
+    production_app.config["JWT_SECRET_KEY"] = (
+        "change-me-generate-with-openssl-rand-hex-32"
+    )
+
+    with pytest.raises(ProductionGuardError, match="JWT_SECRET_KEY"):
+        run_startup_guards(production_app)
+
+
 def test_missing_jwt_secret_is_rejected(production_app, monkeypatch):
-    monkeypatch.delenv("JWT_SECRET_KEY")
+    monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
+    production_app.config.pop("JWT_SECRET_KEY", None)
 
     with pytest.raises(ProductionGuardError, match="JWT_SECRET_KEY"):
         run_startup_guards(production_app)
@@ -162,7 +223,7 @@ def test_shipped_seeded_credentials_are_detected(app):
 
 
 def test_all_violations_are_reported_together(production_app, monkeypatch):
-    monkeypatch.setenv("JWT_SECRET_KEY", "change-me")
+    production_app.config["JWT_SECRET_KEY"] = "change-me"
     monkeypatch.setenv("AUTH_REQUIRED", "off")
     monkeypatch.setenv("CORS_ORIGINS", "*")
 
