@@ -59,7 +59,7 @@ def refresh_session_days() -> int:
     return _positive_int("AUTH_REFRESH_SESSION_DAYS", 30)
 
 
-def _cookie_secure() -> bool:
+def auth_cookie_secure() -> bool:
     raw = os.getenv("AUTH_COOKIE_SECURE", "true").strip().lower()
     configured = raw not in {"0", "false", "no", "off"}
     if os.getenv("KUBESIGHT_ENV", "").strip().lower() == "production":
@@ -349,7 +349,7 @@ def _set_cookie(
         name,
         value,
         max_age=max_age,
-        secure=_cookie_secure(),
+        secure=auth_cookie_secure(),
         httponly=httponly,
         samesite="Lax",
         path=path,

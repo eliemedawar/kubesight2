@@ -18,6 +18,7 @@ from api.mfa_recovery import (
     mint_admin_recovery_grant,
     regenerate_recovery_codes,
 )
+from api.oidc_auth import complete_oidc_login, start_oidc_login
 from api.oidc import (
     OidcConfig,
     OidcConfigurationError,
@@ -26,6 +27,7 @@ from api.oidc import (
     begin_authorization,
     exchange_code,
     fetch_discovery,
+    hash_transaction_secret,
     oidc_enabled,
     principal_from_claims,
     safe_return_to,
@@ -181,6 +183,15 @@ def _environment(**overrides) -> dict[str, str]:
 
 def _config(**overrides) -> OidcConfig:
     return OidcConfig.from_environment(_environment(**overrides))
+
+
+def _set_oidc_environment(monkeypatch, **overrides):
+    for name, value in _environment(**overrides).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv(
+        "ALERT_ROUTING_SECRET_KEY",
+        "oidc-transaction-key-that-is-at-least-32-characters",
+    )
 
 
 def _discovery(config: OidcConfig | None = None) -> OidcDiscovery:
@@ -436,6 +447,15 @@ def test_id_token_validation_checks_signature_issuer_audience_nonce_and_azp():
     )
     assert claims["sub"] == "provider-subject-123"
 
+    hashed_nonce_claims = validate_id_token(
+        config,
+        _discovery(config),
+        id_token=valid,
+        expected_nonce_hash=hash_transaction_secret("expected-nonce"),
+        jwk_client_factory=factory,
+    )
+    assert hashed_nonce_claims["sub"] == "provider-subject-123"
+
     with pytest.raises(OidcProtocolError, match="nonce"):
         validate_id_token(
             config,
@@ -507,3 +527,146 @@ def test_claim_policy_requires_verified_allowed_email_and_one_role():
                 "groups": ["platform-admins", "platform-viewers"],
             },
         )
+
+
+def test_oidc_start_persists_only_hashes_and_encrypted_pkce(
+    app, monkeypatch
+):
+    from api.models import AuditLog
+    from api.models_auth import OidcAuthorizationRequest
+    from api.secret_encryption import decrypt_secret
+
+    _set_oidc_environment(monkeypatch)
+    monkeypatch.setattr(
+        "api.oidc_auth.fetch_discovery", lambda config: _discovery(config)
+    )
+
+    started = start_oidc_login(return_to="/clusters")
+    query = parse_qs(urlparse(started.authorization_url).query)
+    row = OidcAuthorizationRequest.query.one()
+
+    assert query["state"][0] not in {
+        row.state_hash,
+        row.nonce_hash,
+        row.browser_binding_hash,
+    }
+    assert started.browser_binding not in {
+        row.state_hash,
+        row.nonce_hash,
+        row.browser_binding_hash,
+    }
+    verifier = decrypt_secret(row.code_verifier_cipher)
+    assert 43 <= len(verifier) <= 128
+    assert verifier not in row.code_verifier_cipher
+    audit = AuditLog.query.filter_by(action="oidc_login_started").one()
+    assert audit.details == {
+        "ip": None,
+        "issuer": "https://idp.example.test/tenant",
+    }
+
+
+def test_oidc_callback_is_browser_bound_single_use_and_provisions_session(
+    app, monkeypatch
+):
+    from api.models import AuditLog, User
+    from api.models_auth import AuthSession, OidcAuthorizationRequest, OidcIdentity
+
+    _set_oidc_environment(monkeypatch)
+    monkeypatch.setattr(
+        "api.oidc_auth.fetch_discovery", lambda config: _discovery(config)
+    )
+    started = start_oidc_login(return_to="/clusters")
+    state = parse_qs(urlparse(started.authorization_url).query)["state"][0]
+    row = OidcAuthorizationRequest.query.one()
+    captured = {}
+
+    def fake_exchange(config, discovery, *, code, code_verifier):
+        captured["code"] = code
+        captured["verifier"] = code_verifier
+        return {"id_token": "validated-separately"}
+
+    def fake_validate(
+        config,
+        discovery,
+        *,
+        id_token,
+        expected_nonce_hash,
+    ):
+        assert expected_nonce_hash == row.nonce_hash
+        return {
+            "sub": "enterprise-subject",
+            "email": "oidc-admin@example.test",
+            "email_verified": True,
+            "preferred_username": "oidc-admin",
+            "name": "OIDC Admin",
+            "groups": ["platform-admins"],
+        }
+
+    monkeypatch.setattr("api.oidc_auth.exchange_code", fake_exchange)
+    monkeypatch.setattr("api.oidc_auth.validate_id_token", fake_validate)
+
+    with pytest.raises(OidcProtocolError, match="invalid or expired"):
+        complete_oidc_login(
+            state=state,
+            code="authorization-code",
+            browser_binding="wrong-browser",
+        )
+    with app.test_request_context("/api/auth/oidc/callback"):
+        completed = complete_oidc_login(
+            state=state,
+            code="authorization-code",
+            browser_binding=started.browser_binding,
+        )
+
+    assert completed.return_to == "/clusters"
+    assert completed.provisioned is True
+    assert completed.user.username == "oidc-admin"
+    assert captured["code"] == "authorization-code"
+    assert 43 <= len(captured["verifier"]) <= 128
+    assert OidcIdentity.query.one().user_id == completed.user.id
+    assert AuthSession.query.filter_by(user_id=completed.user.id).count() == 1
+    assert User.query.filter_by(username="oidc-admin").one().first_login_completed
+    assert AuditLog.query.filter_by(action="oidc_login_succeeded").count() == 1
+
+    with pytest.raises(OidcProtocolError, match="invalid or expired"):
+        complete_oidc_login(
+            state=state,
+            code="replayed-code",
+            browser_binding=started.browser_binding,
+        )
+
+
+def test_oidc_does_not_silently_link_an_existing_email(app, monkeypatch):
+    from api.db import db
+    from api.models import User
+
+    _set_oidc_environment(monkeypatch, OIDC_LINK_BY_EMAIL="false")
+    existing = User.query.filter_by(username="viewer").one()
+    existing.email = "collision@example.test"
+    db.session.commit()
+    monkeypatch.setattr(
+        "api.oidc_auth.fetch_discovery", lambda config: _discovery(config)
+    )
+    started = start_oidc_login()
+    state = parse_qs(urlparse(started.authorization_url).query)["state"][0]
+    monkeypatch.setattr(
+        "api.oidc_auth.exchange_code",
+        lambda *args, **kwargs: {"id_token": "validated-separately"},
+    )
+    monkeypatch.setattr(
+        "api.oidc_auth.validate_id_token",
+        lambda *args, **kwargs: {
+            "sub": "collision-subject",
+            "email": "collision@example.test",
+            "email_verified": True,
+            "groups": ["platform-viewers"],
+        },
+    )
+
+    with pytest.raises(OidcProtocolError, match="explicit linking"):
+        complete_oidc_login(
+            state=state,
+            code="authorization-code",
+            browser_binding=started.browser_binding,
+        )
+    assert User.query.filter_by(email="collision@example.test").count() == 1

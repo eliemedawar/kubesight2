@@ -160,6 +160,8 @@ class OidcConfig:
     clock_skew_seconds: int
     http_timeout_seconds: int
     allow_insecure_localhost: bool
+    auto_provision: bool
+    link_by_email: bool
 
     @classmethod
     def from_environment(
@@ -272,6 +274,8 @@ class OidcConfig:
             clock_skew_seconds=clock_skew,
             http_timeout_seconds=timeout,
             allow_insecure_localhost=allow_insecure,
+            auto_provision=_truthy(source.get("OIDC_AUTO_PROVISION", "true")),
+            link_by_email=_truthy(source.get("OIDC_LINK_BY_EMAIL")),
         )
 
 
@@ -463,9 +467,14 @@ def validate_id_token(
     discovery: OidcDiscovery,
     *,
     id_token: str,
-    expected_nonce: str,
+    expected_nonce: str | None = None,
+    expected_nonce_hash: str | None = None,
     jwk_client_factory: Callable[..., Any] = PyJWKClient,
 ) -> Mapping[str, Any]:
+    if bool(expected_nonce) == bool(expected_nonce_hash):
+        raise OidcProtocolError(
+            "Provide exactly one expected OIDC nonce or nonce hash."
+        )
     try:
         header = jwt.get_unverified_header(id_token)
         algorithm = str(header.get("alg") or "")
@@ -495,9 +504,14 @@ def validate_id_token(
         raise OidcProtocolError("OIDC ID token validation failed.") from exc
 
     nonce = claims.get("nonce")
-    if not isinstance(nonce, str) or not hmac.compare_digest(
-        nonce, expected_nonce
-    ):
+    nonce_valid = False
+    if isinstance(nonce, str) and expected_nonce is not None:
+        nonce_valid = hmac.compare_digest(nonce, expected_nonce)
+    elif isinstance(nonce, str) and expected_nonce_hash is not None:
+        nonce_valid = hmac.compare_digest(
+            hash_transaction_secret(nonce), expected_nonce_hash
+        )
+    if not nonce_valid:
         raise OidcProtocolError("OIDC ID token nonce validation failed.")
     audiences = claims.get("aud")
     if isinstance(audiences, list) and len(audiences) > 1:
