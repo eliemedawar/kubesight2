@@ -6,6 +6,7 @@ import os
 from typing import TYPE_CHECKING
 
 from .auth_utils import auth_required_enabled
+from .migrations import is_at_head
 from .secret_encryption import secret_encryption_key_configured
 
 if TYPE_CHECKING:
@@ -114,6 +115,14 @@ def _collect_violations(app: Flask) -> list[str]:
         violations.append(
             "K8S_REAL_MODE must be explicitly enabled so demo-mode fallback is off"
         )
+
+    try:
+        with app.app_context():
+            migrations_at_head = is_at_head()
+    except Exception:
+        migrations_at_head = False
+    if not migrations_at_head:
+        violations.append("DATABASE_MIGRATIONS must be at the Alembic head revision")
 
     return violations
 

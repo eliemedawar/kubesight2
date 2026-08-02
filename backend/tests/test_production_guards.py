@@ -31,6 +31,7 @@ SAFE_ENVIRONMENT = {
 def production_app(monkeypatch):
     for name, value in SAFE_ENVIRONMENT.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.setattr("api.production_guards.is_at_head", lambda: True)
     app = Flask(__name__)
     app.config["DEBUG"] = False
     return app
@@ -95,6 +96,27 @@ def test_signing_and_encryption_keys_must_be_different(
         match="ALERT_ROUTING_SECRET_KEY must be different from JWT_SECRET_KEY",
     ):
         run_startup_guards(production_app)
+
+
+def test_database_migrations_must_be_at_head(production_app, monkeypatch):
+    monkeypatch.setattr("api.production_guards.is_at_head", lambda: False)
+
+    with pytest.raises(ProductionGuardError, match="DATABASE_MIGRATIONS"):
+        run_startup_guards(production_app)
+
+
+def test_database_migration_check_fails_closed(production_app, monkeypatch):
+    def unavailable():
+        raise RuntimeError("database details must not escape")
+
+    monkeypatch.setattr("api.production_guards.is_at_head", unavailable)
+
+    with pytest.raises(ProductionGuardError) as exc_info:
+        run_startup_guards(production_app)
+
+    message = str(exc_info.value)
+    assert "DATABASE_MIGRATIONS" in message
+    assert "database details must not escape" not in message
 
 
 def test_all_violations_are_reported_together(production_app, monkeypatch):

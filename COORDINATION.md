@@ -57,7 +57,7 @@ Status: pending | applied
 
 ### 2026-08-02 A3 production startup guards
 File: backend/api/__init__.py
-Where: inside `create_app`, after configuration defaults are finalized and before `db.init_app(app)`
+Where: inside `create_app`, immediately after `db.init_app(app)` and before CORS or blueprint registration
 Add:
     from .production_guards import run_startup_guards
     run_startup_guards(app)
