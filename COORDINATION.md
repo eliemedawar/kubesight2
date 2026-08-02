@@ -106,6 +106,8 @@ _(none yet)_
 
 ### 2026-08-02 A3 backend/api/oidc_auth.py — one-time OIDC flow persistence and identity provisioning
 
+### 2026-08-02 A3 OIDC.md — operator configuration, rollout, and recovery runbook
+
 ---
 
 ## Status log
