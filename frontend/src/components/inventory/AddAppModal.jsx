@@ -143,6 +143,12 @@ export default function AddAppModal({
       setPreview(null);
       setDeployDiff(null);
       setError("");
+      // Clear the typed confirmations too. Leaving them set means reopening the
+      // wizard against the same namespace arrives at the confirm step with
+      // Apply already enabled, so the operator never names the target for
+      // *this* apply — which is the entire point of the input.
+      setYamlConfirmation("");
+      setImageConfirmation("");
     }
   }, [open]);
 
