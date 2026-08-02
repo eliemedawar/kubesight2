@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   getClusterOverview,
   getDashboardSummary,
@@ -51,6 +52,15 @@ import {
   getUserInitials,
 } from "./utils/formatters.js";
 import { applyTheme, readThemePreference, storeThemePreference } from "./utils/theme.js";
+import { matchPath, pathForPageKey } from "./routes/paths.js";
+import {
+  ROUTES,
+  navPageKeyFor,
+  routeHidesBundleFab,
+  routeLoadingLabel,
+  routeNeedsClusterContext,
+  routeNeedsNamespaceContext,
+} from "./routes/routeTable.js";
 import CoachMarks from "./components/tour/CoachMarks.jsx";
 import { getTourSteps, getWelcomeSteps, WELCOME_TOUR_KEY } from "./tours/tourDefinitions.js";
 import { markTourSeen, readTourState, setToursMuted } from "./utils/tourStorage.js";
@@ -93,6 +103,18 @@ const ApplicationIntelligencePage = lazy(() => import("./pages/ApplicationIntell
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
 const ServiceCatalogPage = lazy(() => import("./pages/ServiceCatalogPage.jsx"));
 const ComponentsPage = lazy(() => import("./pages/ComponentsPage.jsx"));
+const NotFoundPage = lazy(() => import("./pages/NotFoundPage.jsx"));
+
+/**
+ * Renders the matched route's page.
+ *
+ * The call is deferred into a component rather than passed as
+ * `element={renderPage(key)}` so only the matched route's props are built —
+ * otherwise every render would construct the element tree for all 27 routes.
+ */
+function RoutePage({ pageKey, render }) {
+  return render(pageKey);
+}
 
 export default function App() {
   const {
@@ -123,7 +145,19 @@ export default function App() {
     document.body.classList.toggle("has-bundle-fab", bundleFabVisible);
     return () => document.body.classList.remove("has-bundle-fab");
   }, [bundleFabVisible]);
-  const [activePage, setActivePage] = useState("dashboard");
+  // The URL is the single source of truth for which page is open. `activePage`
+  // is derived, not stored — the old `useState` copy and the effect that wrote
+  // the permission-resolved value back into it are both gone, so there is no
+  // longer a render in which the two disagree (ROUTING-AUDIT.md F4).
+  //
+  // It keeps the same page-key vocabulary the rest of the app already speaks
+  // (RBAC, tours, the sidebar), so effects and props below are unchanged.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const routeMatch = useMemo(() => matchPath(location.pathname), [location.pathname]);
+  const activePage = routeMatch?.pageKey || "";
+  const routeParams = routeMatch?.params;
+
   const [selectedClusterId, setSelectedClusterId] = useState("");
   const [selectedNamespace, setSelectedNamespace] = useState("");
   const [loadingState, setLoadingState] = useState({
@@ -141,7 +175,10 @@ export default function App() {
   const [dashboardSummary, setDashboardSummary] = useState(null);
   const [dashboardRefreshedAt, setDashboardRefreshedAt] = useState(null);
   const [inventoryItems, setInventoryItems] = useState([]);
-  const [selectedApplicationId, setSelectedApplicationId] = useState("");
+  // Identity comes from the URL, so an application detail page is now
+  // shareable and survives a refresh. This was previously state that only
+  // `handleSelectApplication` wrote — and nothing called it (F3).
+  const selectedApplicationId = routeParams?.applicationId || "";
   const [applicationDetailsTab, setApplicationDetailsTab] = useState("overview");
   const [applicationDetail, setApplicationDetail] = useState(null);
   const [editCatalogOpen, setEditCatalogOpen] = useState(false);
@@ -221,6 +258,12 @@ export default function App() {
     if (!visiblePages.length) {
       return null;
     }
+    // No route matched. Resolving that to "the first page you are allowed to
+    // see" would run the dashboard's fetches and start its guided tour behind
+    // the not-found page, so a 404 resolves to nothing at all.
+    if (!activePage) {
+      return null;
+    }
     // Drill-down routes (e.g. applicationDetails) are valid but not sidebar entries.
     if (isPageAllowed(activePage)) {
       return activePage;
@@ -276,12 +319,6 @@ export default function App() {
 
   const isDashboardPage = resolvedActivePage === "dashboard";
 
-  useEffect(() => {
-    if (resolvedActivePage && resolvedActivePage !== activePage) {
-      setActivePage(resolvedActivePage);
-    }
-  }, [resolvedActivePage, activePage]);
-
   const applyPageError = (message, { expectedDenied = false } = {}) => {
     if (!shouldShowAccessError(message, { expectedDenied })) {
       setErrorState((prev) => ({ ...prev, page: "" }));
@@ -309,11 +346,24 @@ export default function App() {
     }
   };
 
-  const handleNavigate = (pageKey) => {
-    if (isPageAllowed(pageKey)) {
-      setActivePage(pageKey);
-    }
-  };
+  // Same signature the ~8 existing call sites already use, so they are
+  // unchanged; only the mechanism moved from state to the URL.
+  //
+  // The permission check stays here for now. It becomes a route-level guard in
+  // the next step, at which point a denied page renders AccessDeniedPage at its
+  // own URL instead of the click silently doing nothing.
+  const handleNavigate = useCallback(
+    (pageKey, params) => {
+      if (!isPageAllowed(pageKey)) {
+        return;
+      }
+      const path = pathForPageKey(pageKey, params);
+      if (path) {
+        navigate(path);
+      }
+    },
+    [isPageAllowed, navigate]
+  );
 
   // ── Coach marks (guided page tips) ─────────────────────────────────────
   // Each page's tour auto-runs once per user (per browser, like the theme
@@ -405,10 +455,53 @@ export default function App() {
     if (!allowedKeys.length) {
       return;
     }
-    if (!allowedKeys.includes(activePage) && !isPageAllowed(activePage)) {
-      setActivePage(getFirstAllowedPage() || allowedKeys[0]);
+    // No route matched: that is a 404, not an authorization failure. Leave it
+    // alone so NotFoundPage renders instead of bouncing the user somewhere
+    // that looks like the link worked.
+    if (!activePage) {
+      return;
     }
-  }, [isAuthenticated, authLoading, visiblePages, activePage, getFirstAllowedPage, isPageAllowed]);
+    if (!allowedKeys.includes(activePage) && !isPageAllowed(activePage)) {
+      const target = getFirstAllowedPage() || allowedKeys[0];
+      const path = pathForPageKey(target);
+      if (path) {
+        // replace: the page they could not open should not sit in history as a
+        // back-button trap that re-redirects on every press.
+        navigate(path, { replace: true });
+      }
+    }
+  }, [
+    isAuthenticated,
+    authLoading,
+    visiblePages,
+    activePage,
+    getFirstAllowedPage,
+    isPageAllowed,
+    navigate,
+  ]);
+
+  // Bridge: routes that name a cluster/namespace in the path drive the topbar
+  // scope, so /workloads/prod-eu/kube-system opens on that namespace instead of
+  // wherever the selector happened to be.
+  //
+  // This is a step-1 shim. The ClusterScopeProvider takes ownership of the
+  // cluster/namespace pair and makes the binding two-way (selector writes the
+  // URL as well as reading it); until then the flow is URL -> state only, and
+  // the validation effects below still get the final say on whether the value
+  // is one the user may actually see.
+  useEffect(() => {
+    const paramCluster = routeParams?.clusterId;
+    if (paramCluster && paramCluster !== selectedClusterId) {
+      setSelectedClusterId(paramCluster);
+    }
+  }, [routeParams?.clusterId, selectedClusterId]);
+
+  useEffect(() => {
+    const paramNamespace = routeParams?.namespace;
+    if (paramNamespace && paramNamespace !== selectedNamespace) {
+      setSelectedNamespace(paramNamespace);
+    }
+  }, [routeParams?.namespace, selectedNamespace]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -1153,11 +1246,8 @@ export default function App() {
     if (!inventoryId) {
       return;
     }
-    setSelectedApplicationId(inventoryId);
     setApplicationDetailsTab(tab);
-    if (isPageAllowed("applicationDetails")) {
-      setActivePage("applicationDetails");
-    }
+    handleNavigate("applicationDetails", { applicationId: inventoryId });
   };
 
   const inventoryClusterOptions = useMemo(() => {
@@ -1651,7 +1741,7 @@ export default function App() {
               isPageAllowed("clusters")
                 ? (clusterId) => {
                   if (clusterId) setSelectedClusterId(clusterId);
-                  setActivePage("clusters");
+                  handleNavigate("clusters");
                 }
                 : null
             }
@@ -1720,27 +1810,10 @@ export default function App() {
           />
         );
       default:
-        return (
-          <DashboardPage
-            summary={dashboardSummary}
-            loading={loadingState.page}
-            refreshing={dashboardRefreshing}
-            coreLoading={loadingState.core}
-            accessError={errorState.page}
-            hasClusters={hasClusters}
-            selectedCluster={selectedCluster}
-            onRefresh={() =>
-              loadDashboardSummary(selectedClusterId, {
-                background: Boolean(dashboardSummary?.clusterId === selectedClusterId),
-              })
-            }
-            lastRefreshedAt={dashboardRefreshedAt}
-            onNavigateToUpgrade={() => handleNavigate("upgrade")}
-            onNavigateToInventory={() => handleNavigate("inventory")}
-            canOpenUpgrade={isPageAllowed("upgrade")}
-            canOpenInventory={isPageAllowed("inventory")}
-          />
-        );
+        // Reached only if a route exists with no render case — a table/switch
+        // mismatch, which routeTable.test.js guards against. Previously this
+        // arm silently re-rendered the dashboard for any unknown key (F1).
+        return <NotFoundPage />;
     }
   };
 
@@ -1751,16 +1824,19 @@ export default function App() {
         <NoFeaturesPage />
       </Suspense>
     );
-  } else if (!resolvedActivePage) {
-    pageNode = (
-      <Suspense fallback={<RouteLoadingFallback label="Loading..." />}>
-        <NoFeaturesPage />
-      </Suspense>
-    );
   } else {
     pageNode = (
-      <Suspense fallback={<RouteLoadingFallback pageKey={resolvedActivePage} />}>
-        {renderPage(resolvedActivePage)}
+      <Suspense fallback={<RouteLoadingFallback label={routeLoadingLabel(activePage)} />}>
+        <Routes>
+          {ROUTES.map((route) => (
+            <Route
+              key={route.pageKey}
+              path={route.path}
+              element={<RoutePage pageKey={route.pageKey} render={renderPage} />}
+            />
+          ))}
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
       </Suspense>
     );
   }
@@ -1809,14 +1885,15 @@ export default function App() {
     resourcesLoading,
   });
 
+  // Show the "no clusters assigned" banner only where the screen actually takes
+  // a cluster. This used to be a hardcoded list of four page keys that was never
+  // extended as pages were added, so Ticketing, Change Bundles, Clients and
+  // Components all nagged about missing clusters they never use (F-list, §D).
   const clusterBanner =
     !deferGlobalMessages &&
     isAuthenticated &&
     !hasClusters &&
-    activePage !== "userManagement" &&
-    activePage !== "auditLogs" &&
-    activePage !== "settings" &&
-    activePage !== "imageRegistries"
+    routeNeedsClusterContext(activePage)
       ? EMPTY_MESSAGES.noClusters
       : "";
 
@@ -1836,7 +1913,7 @@ export default function App() {
     <>
     <AppShell
       visiblePages={visiblePages}
-      activePage={activePage === "applicationDetails" ? "inventory" : activePage}
+      activePage={navPageKeyFor(activePage)}
       onNavigate={handleNavigate}
       allowedClusters={allowedClusters}
       allowedNamespaces={allowedNamespaces}
@@ -1853,8 +1930,8 @@ export default function App() {
       loadingOverlayHint={loadingOverlayHint}
       errorMessage={globalErrorMessage}
       clusterBannerMessage={clusterBanner}
-      showClusterSelector={pageNeedsClusterContext(activePage)}
-      showNamespaceSelector={pageNeedsNamespaceContext(activePage)}
+      showClusterSelector={routeNeedsClusterContext(activePage)}
+      showNamespaceSelector={routeNeedsNamespaceContext(activePage)}
       alertBadgeCount={alertBadgeCount}
       notifications={data.alerts}
       clusterLabel={activeClusterLabel}
@@ -1886,7 +1963,7 @@ export default function App() {
     ) : null}
     {changeBundle.enabled ? (
       <>
-        {!changeBundle.isOpen && activePage !== "resources" ? (
+        {!changeBundle.isOpen && !routeHidesBundleFab(activePage) ? (
         <button
           type="button"
           aria-label="Open change bundle"

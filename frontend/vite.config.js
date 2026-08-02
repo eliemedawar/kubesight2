@@ -23,8 +23,16 @@ function manualChunk(id) {
 }
 
 export default defineConfig({
-  // Relative asset URLs so opening via Flask (/) or file preview does not 404 on /assets/...
-  base: "./",
+  // Absolute asset URLs. Relative ones ("./") resolve against the current
+  // directory, which is fine at "/" but breaks the moment a real route has
+  // depth: at /fleet/clusters the browser would ask for /fleet/assets/index.js.
+  // Flask serves /assets/<path> explicitly (backend/api/frontend_static.py:29),
+  // so absolute paths are what that route already expects.
+  //
+  // Trade-off: opening dist/index.html over file:// no longer resolves assets.
+  // Bookmarkable URLs are a requirement; file:// preview of an SPA that needs a
+  // live API was not.
+  base: "/",
   plugins: [react()],
   test: {
     environment: "node",

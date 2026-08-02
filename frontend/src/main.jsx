@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
 import App from "./App.jsx";
 import ErrorBoundary from "./components/common/ErrorBoundary.jsx";
 import { AuthProvider } from "./context/AuthContext.jsx";
@@ -39,11 +40,13 @@ async function bootstrap() {
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
       <ErrorBoundary>
-        <AuthProvider>
-          <ChangeBundleProvider>
-            <App />
-          </ChangeBundleProvider>
-        </AuthProvider>
+        <BrowserRouter>
+          <AuthProvider>
+            <ChangeBundleProvider>
+              <App />
+            </ChangeBundleProvider>
+          </AuthProvider>
+        </BrowserRouter>
       </ErrorBoundary>
     </React.StrictMode>
   );

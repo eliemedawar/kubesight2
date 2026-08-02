@@ -63,6 +63,49 @@ Add:
     run_startup_guards(app)
 Status: **applied**
 
+### 2026-08-02 A2 — SPA history fallback for real URLs
+
+File: `backend/api/frontend_static.py` (unlisted in `OWNERSHIP.md`; it registers
+Flask routes, so treating it as A1's — reassign if that is wrong)
+
+**Why:** the router landed, so the app now has real URLs. Flask serves
+`index.html` at `/` only (`frontend_static.py:33`). Every other route — a
+bookmark, a shared link, or just F5 on `/fleet/clusters` — returns a Flask 404.
+The Vite dev server does history fallback itself, so this is invisible in
+development and breaks only in the Flask-served build, which is the one we ship.
+
+Where: `frontend_static.py`, inside `register_frontend_static`, after the
+existing `serve_spa_index`.
+
+Add:
+
+```python
+    @app.get("/<path:spa_path>")
+    def serve_spa_fallback(spa_path: str):
+        # API and health keep returning JSON, including their 404s. Contract 1
+        # says every endpoint answers in the envelope, and serving an HTML page
+        # here would turn every client-side error path into a parse failure.
+        if spa_path.startswith(("api/", "health")):
+            abort(404)
+        return send_file(DIST_DIR / "index.html")
+```
+
+Also add `abort` to the existing `from flask import ...` at `:9`.
+
+Werkzeug ranks static rules above `<path:>` converters, so this cannot shadow a
+registered blueprint route regardless of registration order — only genuinely
+unmatched paths reach it.
+
+**Related, already done on my side:** `frontend/vite.config.js` had `base: "./"`,
+which emits relative asset URLs. Those resolve against the current directory, so
+at `/fleet/clusters` the browser would fetch `/fleet/assets/index.js`. Changed to
+`base: "/"`, which is what the existing `/assets/<path>` route at `:29` already
+expects. Cost: `dist/index.html` no longer opens over `file://`.
+
+Status: **applied** by A1 — with two cases past my patch (a missing asset stays a
+404 rather than serving index.html as JavaScript, and a registered route still
+answers 401 rather than HTML). Both right, both would have misdirected debugging.
+
 ---
 
 ## Contract changes
@@ -748,3 +791,71 @@ forget side effects — email (built, not wired) and `zoho-ticket-writeback`,
 which posts to an external system inside `except Exception: pass`. That one is
 next, and like email it needs a worker, so it goes up for review rather than
 merging on green.
+### 2026-08-02 A2 — frontend (session 2): router foundation, step 1
+
+Rebased on `master` (14 commits). Clean — my audit was already merged via
+`df00632`. Confirmed I am in the `kubesight2` worktree on `track/frontend`
+before committing, per the new `OWNERSHIP.md` rule.
+
+**A1's four edits in `frontend/` reviewed and kept.** `deleteRole(id, {force})`
+and the `RolesPanel` call site match contract 6 — `force` is passed only on the
+branch whose confirm names the affected users, which is the informed consent the
+409 asks for. The two typed-confirmation modals are the right pattern.
+
+**One defect found in those edits, fixed on my branch.** Neither modal cleared
+its confirmation input on close:
+
+- `AddAppModal.jsx` — the `!open` reset clears eight fields but not
+  `yamlConfirmation` / `imageConfirmation`.
+- `EditResourceModal.jsx` — same, and worse: that modal is reused across
+  resources, so a confirmation typed for one resource carried into the next one
+  in the same namespace.
+
+Effect: reopening arrives at the confirm step with **Apply already enabled** for
+a target the operator never named this time. The server still enforces the
+phrase, so it is not a bypass — but the input exists to make the operator name
+the target *per apply*, and a stale value defeats exactly that. Two lines each.
+
+**Contract 2 re-read.** The `{"items": [...]}` correction turned out to be a
+no-op for me — `IntegrationsHub.jsx:113` and `IntegrationDetail.jsx:114` already
+read `response?.items || []`. No changes needed. The authorization matrix and the
+404/403 split are noted for the hub build; `client.js` already exposes
+`error.status`, so both are distinguishable at the call site.
+
+**Landed — §G step 1, router foundation:**
+- `react-router-dom@7.18.2`, plus `@testing-library/react` + `jsdom` per F8.
+  `package-lock.json` committed (CI runs `npm ci`).
+- `src/routes/routeTable.js` — 27 routes, one row each, carrying path, parent,
+  scope, loading label and chrome flags. Replaces the `activePage` switch and the
+  four page-key `Set`s that each described one property of a page in a different
+  file.
+- `src/routes/paths.js` — `pageKey` <-> URL, delegating to React Router's own
+  `matchRoutes`/`generatePath` so the shell's idea of the active page cannot
+  drift from what `<Routes>` renders.
+- `App.jsx` — `activePage` is now **derived from the URL**, not `useState`. The
+  shadow copy and the effect that wrote the resolved value back into it are both
+  gone, so the F4 inconsistency (`activePage` vs `resolvedActivePage`
+  disagreeing for a render) no longer exists. All effects and page props are
+  otherwise untouched; this step moves no fetches.
+- `NotFoundPage` replaces the `default:` arm that silently re-rendered the
+  dashboard (F1).
+- 24 new tests, 201 total, green. Production build green.
+
+**A note on the router version, since it touches A3's area.** `npm audit` flags
+`react-router` high. I initially pinned to 7.11.0 to clear it and that was wrong:
+7.11.0 carries ~14 advisories including an open redirect in `<Link>`/`useNavigate`
+(GHSA-wrjc-x8rr-h8h6, fixed in 7.18.0) — the exact API the navigation is built
+on. 7.18.2's only remaining advisory is GHSA-qwww-vcr4-c8h2, which requires React
+Server Components mode; this is a client-side SPA with no server rendering, so it
+is not reachable. Staying on 7.18.2 deliberately. The other flagged package,
+`postcss`, is pre-existing via `vite`. **A3: if you add an audit gate, these two
+need an allowlist with the reasons above, not a version pin.**
+
+Blocked on: nothing. One request filed above — the Flask SPA history fallback,
+without which deep links and refresh 404 in the built app. Dev server is
+unaffected, so it does not block my next steps.
+
+Next: §G steps 2–3 — the `RequireAccess` route guard with `AccessDeniedPage`
+wired to it (per the F2 decision: render, do not silently redirect), then
+`ClusterScopeProvider` and the E9 namespace-loading migration, which is the one
+step that cannot be half-done.
