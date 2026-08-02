@@ -20,6 +20,8 @@ user.
 
 from __future__ import annotations
 
+import logging
+
 import os
 import re
 import threading
@@ -45,6 +47,10 @@ from ..email_delivery import (
 from ..models import AuditLog, User
 from ..passwords import hash_password, verify_password
 from .totp_service import build_enrollment, generate_totp_secret, verify_totp
+
+from .notification_jobs import enqueue_email
+
+logger = logging.getLogger(__name__)
 
 # Onboarding stages surfaced to the client so it can render the right screen.
 STAGE_AUTHENTICATED = "authenticated"
@@ -236,13 +242,27 @@ def _recent_temp_lock_count(user: User) -> int:
 
 
 def _send_email_async(task: Callable[[], None]) -> None:
-    """Run an email-send task without blocking the request.
+    """Render now, deliver later, without blocking the request.
 
-    The SMTP handshake can take seconds (up to the 30s socket timeout when the
-    relay is slow or down), and these notifications sit directly on the login
-    path — the user must never wait on them for their session token. Under
-    TESTING the task runs inline so tests stay deterministic. Failures are
-    swallowed: notification email is always best-effort.
+    The SMTP handshake can take seconds -- up to a 30s socket timeout when the
+    relay is slow or down -- and these notifications sit directly on the login
+    path, so the user must never wait on one for their session token. That much
+    is unchanged.
+
+    What changed is what happens when delivery fails. This used to run the task
+    on a daemon thread whose body ended in `except Exception: pass`: a failed
+    send vanished, and a restart between spawning the thread and the handshake
+    dropped the mail with no trace it was attempted. These are password
+    resets, lockouts and sign-in notices -- the product tells an operator it
+    will email them, and the failure mode was that it silently did not.
+
+    `task` now renders the message and hands it to `enqueue_email`, so the
+    request still returns immediately but the send is durable, retried and
+    attributable. **It requires a running worker**; without one, mail queues
+    instead of sending -- a backlog you can count, in place of a silence you
+    cannot.
+
+    Under TESTING it still runs inline so tests stay deterministic.
     """
     app = current_app._get_current_object()
     if app.config.get("TESTING"):
@@ -252,14 +272,12 @@ def _send_email_async(task: Callable[[], None]) -> None:
             pass
         return
 
-    def _runner() -> None:
-        with app.app_context():
-            try:
-                task()
-            except Exception:
-                pass
-
-    threading.Thread(target=_runner, name="kubesight-auth-email", daemon=True).start()
+    # Rendering touches the session-bound user and the request context, so it
+    # happens here rather than in the worker. Only the finished message travels.
+    try:
+        task()
+    except Exception:
+        logger.exception("failed to queue a security notification email")
 
 
 def _send_security_email(user: User, subject: str, headline: str, lines, *, contact_admin=True) -> None:
@@ -276,6 +294,7 @@ def _send_security_email(user: User, subject: str, headline: str, lines, *, cont
     def _task() -> None:
         send_security_event_email(
             email,
+            deliver=enqueue_email,
             username=username,
             full_name=full_name,
             subject=subject,
@@ -440,6 +459,7 @@ def _send_login_email(user: User) -> None:
         try:
             send_login_notification_email(
                 email,
+                deliver=enqueue_email,
                 username=username,
                 full_name=full_name,
                 login_time=login_time,

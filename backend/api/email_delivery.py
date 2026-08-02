@@ -4,7 +4,7 @@ import os
 import smtplib
 import ssl
 from email.message import EmailMessage
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .secret_encryption import decrypt_secret
 
@@ -339,8 +339,17 @@ def send_temporary_password_email(
     full_name: str,
     temporary_password: str,
     expires_hours: int = 24,
+    deliver: Optional[Callable[..., object]] = None,
 ) -> None:
-    """Email a newly created user their one-time temporary password."""
+    """Email a newly created user their one-time temporary password.
+
+    ``deliver`` exists for symmetry, but **do not queue this one**: the body
+    contains the plaintext temporary password, and a queued job stores its
+    payload in the database until a worker drains it. Sending it inline keeps
+    the secret in memory for the length of one SMTP handshake instead of at
+    rest in a table. Durability is not worth that trade for a credential the
+    user can have reissued.
+    """
     greeting = full_name.strip() or username
     subject = "Your KubeSight account — temporary password"
     body = (
@@ -374,7 +383,7 @@ def send_temporary_password_email(
   <p style="color:#6b7280;font-size:13px">If you were not expecting this email, contact your administrator.</p>
   <p style="color:#6b7280;font-size:13px">— KubeSight</p>
 </div>"""
-    send_email(to_address, subject, body, html_body=html_body)
+    (deliver or send_email)(to_address, subject, body, html_body=html_body)
 
 
 def send_login_notification_email(
@@ -385,8 +394,14 @@ def send_login_notification_email(
     login_time: str,
     ip_address: str,
     user_agent: str = "",
+    deliver: Optional[Callable[..., object]] = None,
 ) -> None:
-    """Email a security notice after a successful sign-in."""
+    """Email a security notice after a successful sign-in.
+
+    ``deliver`` swaps the transport without moving any rendering: callers that
+    want the message queued rather than sent pass
+    ``notification_jobs.enqueue_email``. Rendering stays in one place either way.
+    """
     greeting = full_name.strip() or username
     subject = "KubeSight sign-in notification"
     ua_line = f"Browser / device: {user_agent}\n" if user_agent else ""
@@ -422,7 +437,7 @@ def send_login_notification_email(
   <p style="color:#b91c1c;font-weight:600">If this was not you, contact your administrator immediately.</p>
   <p style="color:#6b7280;font-size:13px">— KubeSight</p>
 </div>"""
-    send_email(to_address, subject, body, html_body=html_body)
+    (deliver or send_email)(to_address, subject, body, html_body=html_body)
 
 
 def send_security_event_email(
@@ -435,8 +450,12 @@ def send_security_event_email(
     lines: list,
     ip_address: str = "",
     show_contact_admin: bool = True,
+    deliver: Optional[Callable[..., object]] = None,
 ) -> None:
-    """Send a generic account-security notification (locks, resets, changes)."""
+    """Send a generic account-security notification (locks, resets, changes).
+
+    ``deliver`` swaps the transport; see send_login_notification_email.
+    """
     greeting = full_name.strip() or username
     body_lines = [f"Hello {greeting},", "", headline, ""]
     body_lines.extend(lines)
@@ -463,7 +482,7 @@ def send_security_event_email(
   {contact_html}
   <p style="color:#6b7280;font-size:13px">— KubeSight</p>
 </div>"""
-    send_email(to_address, subject, body, html_body=html_body)
+    (deliver or send_email)(to_address, subject, body, html_body=html_body)
 
 
 def send_alert_email(to_address: str, alert: Dict[str, Any], *, test: bool = False) -> None:
