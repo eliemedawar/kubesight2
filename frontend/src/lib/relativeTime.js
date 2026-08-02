@@ -19,10 +19,25 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-export function relativeTime(value, now = Date.now()) {
+/**
+ * @param value      an API timestamp
+ * @param options    `now` for testability; `style` "long" (default) or
+ *                   "compact" for dense table columns, where "5m" carries the
+ *                   same meaning as "5m ago" in a third of the width; `empty`
+ *                   for what an unparseable value renders as, because a table
+ *                   cell wants an em dash and a sentence wants nothing.
+ *
+ * Accepts a bare number as the second argument for callers that predate the
+ * options object.
+ */
+export function relativeTime(value, options = {}) {
+  const { now = Date.now(), style = "long", empty = "" } =
+    typeof options === "number" ? { now: options } : options;
+  const compact = style === "compact";
+
   const ts = parseApiTime(value);
   if (!Number.isFinite(ts)) {
-    return "";
+    return empty;
   }
 
   const delta = now - ts;
@@ -31,22 +46,21 @@ export function relativeTime(value, now = Date.now()) {
   // future. Reporting "in 4 seconds" for a row that was just written reads as a
   // bug; reporting "just now" is both truer and less alarming.
   if (delta < -MINUTE) {
-    return "in the future";
+    return compact ? "soon" : "in the future";
   }
   if (delta < MINUTE) {
-    return "just now";
+    return compact ? "now" : "just now";
   }
+  const suffix = compact ? "" : " ago";
   if (delta < HOUR) {
-    const minutes = Math.floor(delta / MINUTE);
-    return `${minutes}m ago`;
+    return `${Math.floor(delta / MINUTE)}m${suffix}`;
   }
   if (delta < DAY) {
-    const hours = Math.floor(delta / HOUR);
-    return `${hours}h ago`;
+    return `${Math.floor(delta / HOUR)}h${suffix}`;
   }
   const days = Math.floor(delta / DAY);
   if (days < 30) {
-    return `${days}d ago`;
+    return `${days}d${suffix}`;
   }
   return new Date(ts).toLocaleDateString();
 }
@@ -66,5 +80,5 @@ export function freshness(value, { staleAfterMs, now = Date.now() } = {}) {
   }
   const ageMs = Math.max(0, now - ts);
   const state = staleAfterMs && ageMs > staleAfterMs ? "stale" : "fresh";
-  return { state, label: relativeTime(value, now), ageMs };
+  return { state, label: relativeTime(value, { now }), ageMs };
 }

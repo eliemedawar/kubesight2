@@ -1,3 +1,4 @@
+import { relativeTime } from "../../lib/relativeTime.js";
 import { useState } from "react";
 import { IconCheck, IconCopy } from "./icons.jsx";
 
@@ -32,16 +33,11 @@ export function CopyButton({ text, label = "Copy URL", className = "" }) {
 
 // "4 min ago" style relative timestamps for the command bar / flow strip / feed.
 export function timeAgo(iso) {
-  if (!iso) return "";
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
-  const mins = Math.round((Date.now() - then) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins} min ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours} h ago`;
-  const days = Math.round(hours / 24);
-  return `${days} d ago`;
+  // Delegates so naive backend timestamps are parsed as UTC. This copy used
+  // `new Date(iso)`, which reads them as local time and shifts every age by
+  // the viewer's offset — on a "last synced" label that reports stale data as
+  // current.
+  return relativeTime(iso);
 }
 
 // Minutes until the next scheduled sync, or null when unknown / overdue.

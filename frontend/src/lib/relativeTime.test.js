@@ -51,6 +51,51 @@ describe("relativeTime", () => {
   });
 });
 
+describe("compact style", () => {
+  // Dense table columns: "5m" carries the same meaning as "5m ago" in a third
+  // of the width.
+  it("drops the suffix", () => {
+    expect(relativeTime(ago(5 * MINUTE), { now: NOW, style: "compact" })).toBe("5m");
+    expect(relativeTime(ago(3 * HOUR), { now: NOW, style: "compact" })).toBe("3h");
+    expect(relativeTime(ago(2 * DAY), { now: NOW, style: "compact" })).toBe("2d");
+  });
+
+  it("shortens the recent and future cases too", () => {
+    expect(relativeTime(ago(0), { now: NOW, style: "compact" })).toBe("now");
+    expect(
+      relativeTime(new Date(NOW + 2 * HOUR).toISOString(), { now: NOW, style: "compact" })
+    ).toBe("soon");
+  });
+
+  it("renders a caller-chosen placeholder for a missing value", () => {
+    expect(relativeTime(null, { now: NOW, empty: "—" })).toBe("—");
+    expect(relativeTime(null, { now: NOW })).toBe("");
+  });
+
+  // Callers written before the options object passed `now` positionally.
+  it("still accepts a bare timestamp as the second argument", () => {
+    expect(relativeTime(ago(5 * MINUTE), NOW)).toBe("5m ago");
+  });
+});
+
+describe("the copies that converged onto this", () => {
+  // Three of the four hand-rolled implementations used `new Date(iso)`, which
+  // reads a naive backend timestamp as local time and shifts every age by the
+  // viewer's offset. On a "last synced" label that reports stale data as
+  // current.
+  it("agrees with the naive-UTC reading the old copies got wrong", () => {
+    const naive = "2026-08-02T11:30:00";
+    expect(relativeTime(naive, { now: NOW })).toBe("30m ago");
+    expect(relativeTime(naive, { now: NOW, style: "compact" })).toBe("30m");
+
+    // What the old implementations did, for contrast: parsed as local.
+    const localReading = Math.round((NOW - new Date(naive).getTime()) / 60000);
+    const utcReading = 30;
+    const offsetMinutes = new Date().getTimezoneOffset();
+    expect(localReading - utcReading).toBe(-offsetMinutes);
+  });
+});
+
 describe("freshness", () => {
   it("is fresh inside the staleness window and stale outside it", () => {
     expect(freshness(ago(MINUTE), { staleAfterMs: 5 * MINUTE, now: NOW }).state).toBe("fresh");
