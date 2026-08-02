@@ -35,8 +35,9 @@ first thing you build and nothing else starts until it is green.
 
 Minimum viable pipeline:
 
-- Frontend: `cd frontend && npm ci && npm test` — `vitest run`, 79 existing test
-  files, must stay green.
+- Frontend: `cd frontend && npm ci && npm test` — `vitest run`, 9 test files /
+  177 tests, must stay green. (An earlier revision said 79; that was the combined
+  frontend + backend count.)
 - Frontend: production build must pass (`npm run build`, Vite 6).
 - Backend: pytest against `backend/tests`. Note
   `backend/api/testing_config.py` — tests default to

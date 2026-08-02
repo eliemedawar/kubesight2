@@ -6,11 +6,46 @@ one-line change. Violating this is the single most expensive mistake available,
 because the other agent cannot see your edit and will overwrite it on their next
 rebase.
 
-| Track | Agent | Branch |
-|---|---|---|
-| A1 — backend core | Claude Opus 5 (session 1) | `track/backend` |
-| A2 — frontend | Claude Opus 5 (session 2) | `track/frontend` |
-| A3 — platform & security | ChatGPT 5.6 | `track/platform` |
+| Track | Agent | Branch | Working directory |
+|---|---|---|---|
+| A1 — backend core | Claude Opus 5 (session 1) | `track/backend` | `../ks-backend` |
+| A2 — frontend | Claude Opus 5 (session 2) | `track/frontend` | `kubesight2` (main) |
+| A3 — platform & security | ChatGPT 5.6 | `track/platform` | `../ks-platform` |
+
+## One worktree per track — read this first
+
+The three tracks do **not** share a working directory. Each has its own `git
+worktree`, so all three branches are checked out at once in separate directories
+off the same repository.
+
+This is not a preference. A2 hit the failure it prevents: with one shared
+directory, `HEAD` is a single mutable pointer, so one track running
+`git checkout track/platform` silently redirected another track's next commit
+onto the wrong branch. Whoever checks out last owns everyone else's work.
+
+Already created — do not re-create:
+
+```
+kubesight2/     → track/frontend   (A2)
+../ks-backend   → track/backend    (A1)
+../ks-platform  → track/platform   (A3)
+```
+
+**Work only inside your own directory.** Never run `git checkout <branch>` in a
+worktree you did not create; `git worktree` refuses to check out a branch that is
+already checked out elsewhere, which is exactly the guard rail that was missing.
+
+Before every commit, confirm where you are:
+
+```bash
+git rev-parse --abbrev-ref HEAD
+```
+
+If it does not name your track's branch, stop and post in `COORDINATION.md`
+before doing anything else.
+
+Uncommitted work belonging to another track that appears in your directory is not
+yours to commit. Move it to that track's worktree and say so in the log.
 
 ## A1 — backend core
 

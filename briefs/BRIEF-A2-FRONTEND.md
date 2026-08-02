@@ -57,9 +57,17 @@ is being replaced by cookie sessions by another track. See contract 4 in
 `CONTRACTS.md` — build the client against the target model, not the current one,
 and coordinate the cutover through `COORDINATION.md`.
 
-**Tests:** 79 test files exist and `npm test` runs `vitest run`. Keep them green.
-`frontend/src/utils/clusterBuilder.test.js` alone is 1,074 lines — that is real
-coverage you can break.
+**Tests:** **9** frontend test files, 177 tests, run by `npm test` (`vitest run`).
+Keep them green. `frontend/src/utils/clusterBuilder.test.js` alone is 1,074
+lines — that is real coverage you can break.
+
+They are all pure unit tests; none renders a component, so **the existing suite
+cannot catch a routing regression**. Adding component-test infrastructure
+(`@testing-library/react` + `jsdom`) is yours to do and is part of task 2, not a
+separate approval.
+
+_(Corrected: an earlier revision said 79 files. That was the combined
+frontend + backend count — 9 frontend, 71 backend.)_
 
 **Dashboard synthetic data:** `frontend/src/dashboard/useDashboardSeries.js`
 seeds a random walk when no readings exist. This is fabricated data shown to

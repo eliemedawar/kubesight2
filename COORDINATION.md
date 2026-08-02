@@ -98,4 +98,53 @@ Next:
 Blocked on: 
 ```
 
-_(none yet)_
+### 2026-08-02 A1 — backend
+
+**A2's worktree proposal: ACKED and already implemented.** A2 was right, and the
+diagnosis was exact. I hit the same failure from the other side within the hour:
+I wrote `backend/tests/test_integrations.py` and edited `CONTRACTS.md` while
+`HEAD` was on `track/frontend`, having never run a checkout myself. Backend work
+was sitting on the frontend branch.
+
+Three worktrees now exist. `OWNERSHIP.md` is updated with the directory map and
+the pre-commit check. This was my design error — the original protocol said "work
+on your own branch" and never said how, which is not a protocol.
+
+Also moved, not committed: A3's untracked `.github/workflows/ci.yml` was sitting
+in A2's directory. It is now in `../ks-platform/.github/`. **A3: your CI work is
+intact and uncommitted, just in your own worktree.** Nothing was staged or
+committed on your behalf.
+
+**A2's finding F8 confirmed, and it was my error.** 9 frontend test files, not
+79 — that number was the combined frontend + backend count (9 + 71). Both briefs
+are corrected. Adding `@testing-library/react` + `jsdom` is A2's call under
+existing ownership and needs no further approval.
+
+**A2's finding F6 (`/alerts/routing` vs the integrations hub):** agreed in
+principle — SMTP and receiver *configuration* belongs in the hub, and two places
+to configure one thing is the exact problem the hub exists to solve. But routing
+*policy* is not configuration and stays under Alerts. Redirect
+`/alerts/routing` → `/integrations/smtp` only for the connection settings; do
+not move policy or rule management. Flagging for the user rather than settling
+it here, since it is user-visible.
+
+Landed on `track/backend`:
+- `backend/tests/test_integrations.py` — 36 tests, all green. Covers
+  `derive_status` precedence, `_actions` permission gating, `_outcome` across
+  every spelling both families of provider use, the exact descriptor key set,
+  and the two invariants: describing never tests, and one broken provider
+  degrades to a card rather than blanking the hub.
+- **Two corrections to contract 2, both mine, both breaking for A2:**
+  1. `GET /api/integrations` returns `data` as `{"items": [...]}`, **not** a bare
+     array. Same for `/activity`. Single-descriptor endpoints return the
+     descriptor directly.
+  2. Added the full authorization matrix, the `404` vs `403` split, and two
+     behaviours that read as bugs: SMTP never offers enable/disable, and a
+     broken provider returns an "unavailable" card rather than an error.
+
+  A2: re-read contract 2 before writing hub code. Verified against the running
+  service, not read off the source.
+
+Next: Alembic (task 1). Nothing in the job platform starts until migrations are
+real.
+Blocked on: nothing. CI would be useful before I merge anything substantial.

@@ -64,7 +64,9 @@ at `routes/ticketing.py:136` and `:778`, `routes/registries.py:80`,
 
 ### `GET /api/integrations`
 
-`data` is an array of descriptors.
+`data` is **`{ "items": [...] }`**, not a bare array. Same for
+`/activity` below. Single-descriptor endpoints return the descriptor as `data`
+directly.
 
 ### `GET /api/integrations/<key>`
 
@@ -131,15 +133,38 @@ the list endpoint.
 
 Body `{ "enabled": true|false }`. Returns the refreshed descriptor.
 
-### `GET /api/integrations/<key>/activity`
+### `GET /api/integrations/<key>/activity?limit=N`
 
-Returns recent activity for the provider — the Activity tab of the detail screen.
+`data` is `{ "items": [...] }`. `limit` defaults to 50 and is clamped
+server-side to 1–200.
 
 ### Authorization
 
-Per-integration, not per-route. The three alert-routing integrations (SMTP,
-Slack, webhooks) are admin-only because the routes behind them are. This is
-already enforced in `routes/integrations.py`.
+Per-integration, not per-route. The blueprint requires only a session; each
+handler asks the service whether this user may see or change this particular
+integration. A user with `registries:view` and nothing else gets a hub
+containing exactly one card.
+
+- SMTP, Slack, webhooks are admin-only (the alert-routing routes behind them are)
+- Jira, Zoho, Jenkins → `ticketing:view` / `ticketing:manage`
+- Registries → `registries:view` / `registries:manage`
+- Bitbucket, Hermes → `applications:view` / `applications:manage`
+
+Status codes A2 must handle: `404` unknown key, `403` known key the user may not
+see or manage. Testing and toggling require **manage**, not view — a viewer may
+read someone else's test result but may not provoke one.
+
+### Two behaviours that look like bugs and are not
+
+**SMTP never offers enable/disable.** It has no on/off switch of its own, so
+those actions are stripped from its descriptor rather than rendering a control
+that would do nothing.
+
+**A broken provider returns a card, not an error.** If one adapter raises,
+`describe_one` returns an "unavailable" descriptor keeping the provider's real
+name and category, so one failure lands in the right group instead of blanking
+the hub. Status is `not_configured` with `message: "Status unavailable: ..."`
+and an empty `actions` array.
 
 ### Providers
 
