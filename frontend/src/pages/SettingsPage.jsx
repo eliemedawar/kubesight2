@@ -1,11 +1,11 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { pathForPageKey } from "../routes/paths.js";
 import PageTitle from "../components/common/PageTitle.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import { normalizeSettings } from "../utils/formatters.js";
-import { setAlertsTabHint } from "../lib/alertDisplay.js";
 import { isAdminUser } from "../utils/authz.js";
 import {
-  consumeSettingsSectionHint,
   groupSettingsSections,
   PREFERENCE_ANCHORS,
   visibleSettingsSections,
@@ -61,10 +61,23 @@ export default function SettingsPage({
   // Sections that render a panel; the link-out rows are never "active".
   const panelSections = useMemo(() => sections.filter((section) => !section.link), [sections]);
 
-  const [activeId, setActiveId] = useState(() => {
-    const hint = consumeSettingsSectionHint();
-    return hint || "";
-  });
+  // The open section is in the URL: /admin/settings?section=integrationsHub is
+  // a link. It was a one-shot sessionStorage hint written by the caller and
+  // consumed on mount, which existed only because there was no router.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeId = searchParams.get("section") || "";
+  const setActiveId = useCallback(
+    (next) => {
+      const params = new URLSearchParams(searchParams);
+      if (next) {
+        params.set("section", next);
+      } else {
+        params.delete("section");
+      }
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
 
   // Resolve the active section once the visible set is known — a hint may point
   // at something this user cannot see, and the fallback differs per role.
@@ -121,11 +134,16 @@ export default function SettingsPage({
     setActiveId(sectionId);
   };
 
+  // Link-outs navigate to a real address, tab included, instead of stashing a
+  // hint for the destination to pick up.
+  const navigate = useNavigate();
+
   const followLink = (section) => {
-    if (section.alertsTab) {
-      setAlertsTabHint(section.alertsTab);
+    const path = pathForPageKey(section.link);
+    if (!path) {
+      return;
     }
-    onNavigate?.(section.link);
+    navigate(section.alertsTab ? `${path}?tab=${section.alertsTab}` : path);
   };
 
   // Dirty tracking against the last saved settings. Theme is excluded: it is

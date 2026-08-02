@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
@@ -12,7 +13,6 @@ import { listAlertHistory } from "../api/alertPoliciesApi.js";
 import { isNamespaceScopeLoading, SCOPE_LOADING_HINT } from "../utils/accessViewState.js";
 import {
   buildAlertsScopeSummary,
-  consumeAlertsTabHint,
   hasAlertMonitoringScope,
 } from "../lib/alertDisplay.js";
 import {
@@ -152,13 +152,25 @@ export default function AlertsPage({
   accessError = "",
 }) {
   const alerts = data.alerts || [];
-  const [tab, setTab] = useState(() => {
-    const hint = consumeAlertsTabHint();
-    if (hint === "history" || hint === "policies") {
-      return hint;
-    }
-    return "open";
-  });
+  // The tab is in the URL. It was a one-shot sessionStorage hint written by
+  // whoever linked here and consumed on mount, which existed only because there
+  // was no router to put it in the address — so /alerts/policies could not be
+  // bookmarked, sent, or reached with the back button.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab") || "";
+  const tab = requestedTab === "history" || requestedTab === "policies" ? requestedTab : "open";
+  const setTab = useCallback(
+    (next) => {
+      const params = new URLSearchParams(searchParams);
+      if (next && next !== "open") {
+        params.set("tab", next);
+      } else {
+        params.delete("tab");
+      }
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
   const [severityFilter, setSeverityFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [query, setQuery] = useState("");
