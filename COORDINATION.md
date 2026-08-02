@@ -92,6 +92,10 @@ _(none yet)_
 
 ### 2026-08-02 A3 backend/tests/test_cluster_builder_addons_proxy.py — remove A3 encryption-key xfail after key separation
 
+### 2026-08-02 A3 backend/api/session_auth.py — cookie sessions, refresh rotation, revocation, and CSRF
+
+### 2026-08-02 A3 backend/tests/test_sessions.py — contract 4 session and CSRF coverage
+
 ---
 
 ## Status log
