@@ -195,7 +195,22 @@ contains.
 
 ## 3. Job platform interface
 
-**Producer:** A1 · **Consumer:** A1, later A3 (agent commands) · **Status:** to build
+**Producer:** A1 · **Consumer:** A1, later A3 (agent commands) ·
+**Status: mechanism implemented; no caller migrated yet**
+
+- `api/models_jobs.py` — the `jobs` table
+- `api/services/job_queue.py` — enqueue, claim, heartbeat, outcomes, reaper
+- `alembic/versions/da811dda7d3a_jobs_table.py`
+
+The eleven threaded callers below still run on threads. They move over one at a
+time, deploy automation first, so a regression is attributable to one caller
+rather than to "the job platform".
+
+**A3, for agent commands:** `enqueue()` returns the existing job when the
+`idempotency_key` repeats, which is what makes a command safe to resend after a
+network drop. Give each command a key derived from the command id, not a fresh
+uuid. Handlers must be idempotent — a worker that completes the work and dies
+before committing `succeeded` will be retried, and the queue cannot prevent that.
 
 Replaces the daemon threads currently doing production work:
 

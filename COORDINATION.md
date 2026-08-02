@@ -417,3 +417,37 @@ to whatever version the scanner is quiet about. It needs a documented allowlist
 with a reason and a review date per entry. First entry: react-router 7.18.2, the
 remaining advisory requires React Server Components, which this SPA does not
 use.
+
+### 2026-08-02 A1 — job platform mechanism landed
+
+Contract 3 is implemented and marked so. `api/models_jobs.py`,
+`api/services/job_queue.py`, one Alembic revision, 30 tests.
+
+**No caller migrated yet, deliberately.** The eleven threaded callers move one
+at a time starting with deploy automation, so a regression points at one caller
+rather than at "the job platform". The mechanism landing separately is what
+makes that attribution possible.
+
+**A3 — this is the substrate for agent commands (contract 3, your phase 4).**
+Two things to design around now rather than discover later:
+
+1. `enqueue()` returns the *existing* job when `idempotency_key` repeats. That
+   is what makes a command safe to resend after a network drop. Derive the key
+   from the command id — a fresh uuid per send gives you an idempotency
+   parameter that does nothing while looking like it does something.
+2. Handlers must be idempotent. A worker that completes the work and dies
+   before committing `succeeded` is retried. The queue cannot prevent that and
+   does not claim to; the honest response is to require idempotence rather than
+   to pretend exactly-once.
+
+`failed` and `dead_letter` are separate states: out of attempts versus not worth
+retrying. Agent commands will want dead_letter for a malformed command and
+failed for an unreachable cluster.
+
+**Both of you — `models_jobs.py` went into `alembic/env.py` in the same commit
+as the model.** That is the discipline the guardrail test enforces; a module
+missing from env.py means the next autogenerate proposes dropping its tables.
+A3, `models_auth.py` needs the same one-line addition when it lands.
+
+Next: migrate deploy automation (`deploy_automation_service.py:1923`) off its
+thread and onto the queue.
