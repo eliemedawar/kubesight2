@@ -1073,3 +1073,55 @@ Next: contract 4 client cutover the day A3's `csrf`/`refresh`/Set-Cookie land �
 still not on master as of `e2c5711`, and nothing in my mailbox. Then migrating
 the remaining pages onto the shared component layer (2 of 33 use it) and
 converging the last four `timeAgo` copies.
+
+### 2026-08-02 A2 — frontend (session 6): shared layer, actually shared
+
+Rebased on master (`1add0b4`). Master still has not touched `frontend/`; the only
+conflict was this file, both sides appending.
+
+**Breadcrumbs are shipped.** They were a stated requirement of the routing work
+and were not actually delivered — I had built the component and only two screens
+used it. Rather than migrate nineteen pages by hand onto a second heading
+component, `PageTitle` now derives the trail from the current route, so every
+page that already renders a heading gets breadcrumbs without being touched: 21
+pages, zero page edits. The trail comes from the route table's `parent` chain,
+the same field that decides which nav entry is highlighted.
+
+**Two duplications of my own, corrected.** `AsyncState` duplicated
+`AccessScopeView`, which predates it and had seven callers. `PageHeader`
+duplicated `PageTitle`, which has nineteen. Both were mine, both from the same
+session, both from writing before reading. A shared layer whose components
+duplicate each other is worse than no shared layer — it adds a second thing to
+keep in sync while claiming to remove one. Consolidated onto the older component
+in each case, keeping the genuine additions (a degraded state that renders
+content *and* a warning; an explicit denied override).
+
+**`timeAgo` converged.** Three of the four hand-rolled copies used
+`new Date(iso)` on a naive backend timestamp, which the browser reads as local
+time — so every age was off by the viewer's UTC offset, and on a "last synced"
+label that reports stale data as current, in the reassuring direction for
+anyone west of UTC. They delegate to `lib/relativeTime` now.
+`utils/clusterBuilder` keeps its own: it already parsed correctly, its wording
+differs deliberately, and its tests assert that wording — changing the output to
+match would mean editing tests to accommodate a refactor.
+
+**Two pages moved onto the shared state gate** (AuditLogs, MyRequests), and the
+gate itself is now tested, which it was not despite seven callers. The rule
+worth protecting is that loading outranks everything: the recurring bug was an
+empty state rendering before the first fetch resolved.
+
+DeploymentRequests is deliberately left: its state chain is fused with tab
+branching in a way that needs the tabs restructured too, and it has no test
+coverage to catch a mistake.
+
+546 tests green, from 484.
+
+Blocked on: nothing.
+
+**A3 — still waiting on you, and still not blocked.** `GET /api/auth/csrf`,
+`POST /api/auth/refresh` and Set-Cookie-on-login are not on master as of
+`1add0b4`, and my mailbox is empty. The client change is contained to
+`client.js`. One thing from this session is relevant to yours: see my broadcast
+about `shouldShowAccessError` — if the 401 → refresh → retry path routes
+failures through it, non-auth failures on that path will vanish silently. Use
+`describeLoadError`.
