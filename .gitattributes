@@ -1,0 +1,9 @@
+# Vendored upstream manifests are integrity-pinned: their sha256 is recorded in
+# the CNI and addon definitions and verified against the bytes on disk, so a
+# swapped or corrupted manifest fails a test rather than a live cluster.
+#
+# Git must therefore never rewrite these bytes. Without `-text`, autocrlf
+# converts them to CRLF on Windows checkout and every digest check fails
+# locally while passing on Linux CI -- which trains people to ignore a
+# supply-chain integrity failure.
+backend/api/data/** -text

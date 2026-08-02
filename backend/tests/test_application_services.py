@@ -4,6 +4,21 @@ import pytest
 from tests.conftest import auth_headers
 
 
+@pytest.fixture()
+def no_mock_fallback(monkeypatch):
+    """Serve only real, DB-backed services.
+
+    `routes/application_services.py` falls back to the demo list when the table
+    is empty (`:44`), gated on `_use_mock()` -- true whenever no live cluster is
+    configured, i.e. always under test. Deliberate for demos, but it makes
+    "empty" read back demo rows and a deleted service still fetchable as its
+    mock twin. Tests asserting real CRUD semantics have to turn it off.
+    """
+    from api.routes import application_services as services_routes
+
+    monkeypatch.setattr(services_routes, "_use_mock", lambda: False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -22,7 +37,7 @@ def _sample_deployment(cluster="cluster-a", namespace="default", name="my-deploy
 # ---------------------------------------------------------------------------
 
 class TestListServices:
-    def test_list_empty(self, client, admin_token):
+    def test_list_empty(self, client, admin_token, no_mock_fallback):
         res = client.get("/api/application-services", headers=auth_headers(admin_token))
         assert res.status_code == 200
         data = res.get_json()["data"]
@@ -179,7 +194,7 @@ class TestUpdateService:
 # ---------------------------------------------------------------------------
 
 class TestDeleteService:
-    def test_delete_existing(self, client, admin_token):
+    def test_delete_existing(self, client, admin_token, no_mock_fallback):
         sid = _create_service(client, admin_token, "ToDelete").get_json()["data"]["id"]
         res = client.delete(f"/api/application-services/{sid}", headers=auth_headers(admin_token))
         assert res.status_code == 200
@@ -257,7 +272,7 @@ class TestHealthCalculation:
 # ---------------------------------------------------------------------------
 
 class TestEmptyState:
-    def test_list_empty_returns_zero_count(self, client, admin_token):
+    def test_list_empty_returns_zero_count(self, client, admin_token, no_mock_fallback):
         res = client.get("/api/application-services", headers=auth_headers(admin_token))
         assert res.get_json()["data"]["count"] == 0
 

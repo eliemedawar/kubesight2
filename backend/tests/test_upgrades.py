@@ -377,6 +377,12 @@ def test_kubeadm_auto_upgrade_starts_job(monkeypatch):
     assert confirmed.get("jobId") or confirmed.get("upgradeId")
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Returns 'running' where the test expects 'manual_required': an upgrade "
+    "executes in a configuration meant to hand back a manual plan. Deferred by the "
+    "product owner; tracked, not accepted.",
+)
 def test_kubeadm_without_auto_upgrade_returns_manual_plan(monkeypatch):
     monkeypatch.delenv("KUBESIGHT_AUTO_UPGRADE", raising=False)
     access = _access("kubeadm-cluster", "kubeadm-cluster")

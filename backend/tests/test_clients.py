@@ -4,6 +4,22 @@ import pytest
 from tests.conftest import auth_headers
 
 
+@pytest.fixture()
+def no_mock_fallback(monkeypatch):
+    """Serve only real, DB-backed clients.
+
+    `routes/clients.py` falls back to the demo list when the table is empty
+    (`:48`) and when a lookup 404s (`:72`), gated on `_use_mock()` -- which is
+    true whenever no live cluster is configured, i.e. always under test. That is
+    deliberate for demos, but it means "empty" reads back four demo clients and
+    a deleted client is still fetchable as its mock twin. Tests asserting real
+    CRUD semantics have to turn it off.
+    """
+    from api.routes import clients as clients_routes
+
+    monkeypatch.setattr(clients_routes, "_use_mock", lambda: False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -28,7 +44,7 @@ def _create_client(http_client, token, name="Acme Corp", **kwargs):
 # ---------------------------------------------------------------------------
 
 class TestListClients:
-    def test_list_empty(self, client, admin_token):
+    def test_list_empty(self, client, admin_token, no_mock_fallback):
         res = client.get("/api/clients", headers=auth_headers(admin_token))
         assert res.status_code == 200
         data = res.get_json()["data"]
@@ -179,7 +195,7 @@ class TestUpdateClient:
 # ---------------------------------------------------------------------------
 
 class TestDeleteClient:
-    def test_delete_existing(self, client, admin_token):
+    def test_delete_existing(self, client, admin_token, no_mock_fallback):
         cid = _create_client(client, admin_token, "ToDelete").get_json()["data"]["id"]
         res = client.delete(f"/api/clients/{cid}", headers=auth_headers(admin_token))
         assert res.status_code == 200
