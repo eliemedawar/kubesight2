@@ -1,7 +1,9 @@
 /*
  * Compact control-plane navigation.
- * Destinations expand inline below the hovered/focused section title, while
- * touch devices use the same structure as a tap-to-expand accordion.
+ *
+ * Destinations expand inline below their group heading, on click. Pointer,
+ * touch and keyboard all drive the same accordion — there is no hover-only
+ * path, and no separate mobile structure to keep in sync with the desktop one.
  */
 
 .sidebar nav {
@@ -63,13 +65,36 @@
 }
 
 .sidebar-section-title {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.sidebar-flyout {
+/*
+ * Expansion is now a deliberate act, so it needs a control that looks like one.
+ * The chevron is the affordance the hover version never needed and never had.
+ */
+.sidebar-section-chevron {
+  flex: 0 0 auto;
+  width: 1rem;
+  height: 1rem;
+  opacity: 0.65;
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.sidebar-section.is-open .sidebar-section-chevron {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-section-chevron {
+    transition: none;
+  }
+}
+
+.sidebar-group-pages {
   --sidebar-accordion-duration: 260ms;
   --sidebar-accordion-ease: cubic-bezier(0.4, 0, 0.2, 1);
   display: grid;
@@ -97,7 +122,7 @@
     visibility 0s linear var(--sidebar-accordion-duration);
 }
 
-.sidebar-section.is-open .sidebar-flyout {
+.sidebar-section.is-open .sidebar-group-pages {
   grid-template-rows: 1fr;
   margin: 0.2rem 0 0.5rem 0.7rem;
   padding: 0.2rem 0 0.2rem 0.6rem;
@@ -107,7 +132,7 @@
   transition-delay: 0s;
 }
 
-.sidebar-flyout-links {
+.sidebar-group-links {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
@@ -115,13 +140,13 @@
   overflow: hidden;
 }
 
-.sidebar-flyout .nav-link {
+.sidebar-group-pages .nav-link {
   min-height: 2.75rem;
   padding: 0.6rem 0.7rem;
   border-radius: var(--radius-md);
 }
 
-.sidebar-flyout .nav-link-label {
+.sidebar-group-pages .nav-link-label {
   white-space: normal;
   overflow: visible;
   text-overflow: clip;
@@ -139,7 +164,7 @@
     margin-top: 0.25rem;
   }
 
-  .sidebar-flyout .nav-link {
+  .sidebar-group-pages .nav-link {
     min-height: 2.75rem;
   }
 
@@ -185,8 +210,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sidebar-flyout,
-  .sidebar-section.is-open .sidebar-flyout {
+  .sidebar-group-pages,
+  .sidebar-section.is-open .sidebar-group-pages {
     transition-delay: 0s;
   }
 }

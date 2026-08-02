@@ -49,13 +49,8 @@ export default function AppShell({
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
   const toggleSidebar = useCallback(() => setSidebarOpen((open) => !open), []);
 
-  const handleNavigate = useCallback(
-    (pageKey) => {
-      onNavigate(pageKey);
-      closeSidebar();
-    },
-    [closeSidebar, onNavigate]
-  );
+  // Sidebar entries are real links now, so they navigate themselves; the shell
+  // only has to get the mobile drawer out of the way afterwards.
 
   useEffect(() => {
     const media = window.matchMedia("(min-width: 1024px)");
@@ -95,7 +90,12 @@ export default function AppShell({
         onClick={closeSidebar}
         tabIndex={sidebarOpen ? 0 : -1}
       />
-      <Sidebar pages={visiblePages} activePage={activePage} onNavigate={handleNavigate} open={sidebarOpen} />
+      <Sidebar
+        pages={visiblePages}
+        activePage={activePage}
+        onNavigated={closeSidebar}
+        open={sidebarOpen}
+      />
       <section className="workspace">
         <Topbar
           allowedClusters={allowedClusters}

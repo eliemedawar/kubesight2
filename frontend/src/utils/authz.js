@@ -72,87 +72,85 @@ export const SETTINGS_ENTRY_PERMISSIONS = [
   "applications:view",
 ];
 
+/**
+ * Every page that can appear in the sidebar, with the permission that gates it.
+ *
+ * Grouping is deliberately not here — it lives in `routes/navigation.js`. These
+ * entries answer "who may see this", which changes for security reasons; the
+ * groups answer "where does an operator look for this", which changes for
+ * product reasons. They used to be one list with a `section` string per entry,
+ * and the sections drifted into seven ad-hoc buckets that split related work.
+ */
 export const NAV_PAGES = [
-  // Dashboard
-  { key: "dashboard", label: "Dashboard", permission: "overview:view", section: "Dashboard" },
+  { key: "dashboard", label: "Dashboard", permission: "overview:view" },
 
-  // Infrastructure
-  { key: "clusters", label: "Clusters", permission: "clusters:view", section: "Infrastructure" },
+  { key: "clusters", label: "Clusters", permission: "clusters:view" },
   {
     key: "clusterManagement",
     label: "Cluster Management",
     anyPermissions: ["clusters:add", "clusters:update", "clusters:remove", "clusters:test"],
-    section: "Infrastructure",
   },
-  { key: "namespaces", label: "Namespaces", permission: "namespaces:view", section: "Infrastructure" },
-  { key: "resources", label: "Resources", permission: "resources:view", section: "Infrastructure" },
-  { key: "topology", label: "Topology", permission: "resources:view", section: "Infrastructure" },
+  // Labelled Workloads to match its route and its nav group. The page lists
+  // namespaces because that is how you pick which workloads to look at.
+  { key: "namespaces", label: "Workloads", permission: "namespaces:view" },
+  // Reached by picking a namespace, not from the menu — same `hidden` idiom
+  // as imageRegistries: who may open it is unchanged, it just is not a
+  // top-level destination now that /workloads is.
+  { key: "resources", label: "Resources", permission: "resources:view", hidden: true },
+  { key: "topology", label: "Topology", permission: "resources:view" },
 
-  // Inventory
-  { key: "inventory", label: "Inventory", permission: "inventory:view", section: "Inventory" },
+  { key: "inventory", label: "Inventory", permission: "inventory:view" },
   {
     key: "myRequests",
     label: "My Requests",
     permission: "deployment_requests:request",
-    section: "Inventory",
   },
   {
     key: "changeBundles",
     label: "Change Bundles",
     anyPermissions: ["change_bundles:create", "change_bundles:view"],
-    section: "Inventory",
   },
 
-  // Monitoring
-  { key: "logs", label: "Logs", permission: "logs:view", section: "Monitoring" },
+  { key: "logs", label: "Logs", permission: "logs:view" },
   // One Alerts address: History and Policies live as RBAC-gated tabs inside.
-  { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Monitoring" },
+  { key: "alerts", label: "Alerts", permission: "alerts:view" },
 
-  // Services
   {
     key: "serviceCatalog",
     label: "Service Catalog",
     permission: "service_blueprints:view",
-    section: "Services",
   },
   {
     key: "applicationServices",
     label: "App Services",
     permission: "app_services:view",
-    section: "Services",
   },
   {
     key: "applicationIntelligence",
     label: "Application Intelligence",
     permission: "applications:view",
-    section: "Services",
   },
   {
     key: "components",
     label: "Components",
     permission: "components:view",
-    section: "Services",
   },
   {
     key: "clients",
     label: "Clients",
     permission: "clients:view",
-    section: "Services",
   },
 
-  // Administration
   {
     key: "userManagement",
     label: "User Management",
     permission: "users:view",
-    section: "Administration",
   },
-  { key: "auditLogs", label: "Audit Logs", permission: "audit:view", section: "Administration" },
+  { key: "auditLogs", label: "Audit Logs", permission: "audit:view" },
   {
     key: "deploymentRequests",
     label: "Deployment Requests",
     permission: "deployment_requests:view",
-    section: "Administration",
   },
   // A registry entry is nothing but a connection, so it is configured entirely
   // in Settings → Integrations and no longer needs its own nav entry. `hidden`
@@ -162,7 +160,6 @@ export const NAV_PAGES = [
     key: "imageRegistries",
     label: "Image Registries",
     permission: "registries:view",
-    section: "Administration",
     hidden: true,
   },
   // Ticketing stays: browsing tickets, field sync, and deploy runs are work, not
@@ -172,28 +169,23 @@ export const NAV_PAGES = [
     key: "ticketing",
     label: "Ticketing",
     permission: "ticketing:view",
-    section: "Administration",
   },
-  { key: "settings", label: "Settings", anyPermissions: SETTINGS_ENTRY_PERMISSIONS, section: "Administration" },
+  { key: "settings", label: "Settings", anyPermissions: SETTINGS_ENTRY_PERMISSIONS },
 
-  // Operations
   {
     key: "mobileApps",
     label: "Mobile Applications",
     permission: "mobile_apps:view",
-    section: "Operations",
   },
   {
     key: "clusterBuilder",
     label: "Cluster Builder",
     anyPermissions: ["cluster_builds:view", "cluster_builds:create", "cluster_builds:execute"],
-    section: "Operations",
   },
   {
     key: "upgrade",
     label: "Upgrade Center",
     anyPermissions: ["upgrades:precheck", "upgrades:start"],
-    section: "Operations",
   },
 ];
 
