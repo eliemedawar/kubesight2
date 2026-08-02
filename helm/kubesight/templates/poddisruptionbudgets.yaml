@@ -1,0 +1,30 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- if gt (int .Values.web.replicas) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kubesight.fullname" . }}-web
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "kubesight.componentLabels" (dict "root" . "component" "web") | nindent 6 }}
+{{- end }}
+{{- if and .Values.frontend.enabled (gt (int .Values.frontend.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kubesight.fullname" . }}-frontend
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "kubesight.componentLabels" (dict "root" . "component" "frontend") | nindent 6 }}
+{{- end }}
+{{- end }}
+

@@ -580,3 +580,42 @@ the finalized SSO and recovery-code browser contract. Hosted backend CI remains
 intentionally red on migration parity until those owned revisions land.
 
 Stopped for security review before merge or Task 5 supply-chain work.
+
+### 2026-08-02 A3 — stop checkpoint: session cutover is complete and dual-accept
+
+Task 3 is not in a partial authentication state. The focused session/auth/
+onboarding regression set is green at **41 passed**. No uncommitted Task 5 file
+changes any auth module.
+
+Real now:
+
+- `POST /api/auth/login`, first-login password/TOTP endpoints, `POST
+  /api/auth/mfa/verify`, recovery-code login, and OIDC callback issue the
+  hardened browser cookies when the flow reaches its appropriate stage.
+- `GET /api/auth/csrf` returns `data.csrfToken` and sets the JS-readable
+  `kubesight_csrf` cookie.
+- `POST /api/auth/refresh` is live: it requires `X-CSRF-Token`, rotates the
+  single-use `kubesight_refresh` token, replaces the access/refresh/CSRF
+  cookies, and revokes the token family on replay.
+- `Set-Cookie` is real: `kubesight_access` and `kubesight_refresh` are
+  `HttpOnly; Secure; SameSite=Lax`; the refresh and interim cookies are scoped
+  to `/api/auth`; `kubesight_csrf` is deliberately readable by JavaScript.
+- Session management is live at `GET /api/auth/sessions`, `DELETE
+  /api/auth/sessions/<id>`, and `POST /api/auth/sessions/revoke-all`. Logout
+  revokes the server session and clears all auth cookies.
+- Dual-accept remains live: `Authorization: Bearer` mutations do not require
+  CSRF, while cookie-authenticated mutations do. Login/MFA/onboarding responses
+  still include bearer token fields during A2's transition.
+
+Not done by design: bearer acceptance and bearer response fields have **not**
+been removed. A2 must first switch the client to `credentials: include`, fetch
+`/api/auth/csrf`, send `X-CSRF-Token` on cookie mutations, and retry one 401 via
+`/api/auth/refresh`. After A2 confirms that cutover, A3's first auth action is
+to remove bearer issuance/acceptance and re-run the same regression set. Do not
+remove bearer before that confirmation.
+
+Task 5 stopped after a Helm/supply-chain foundation checkpoint: trial and
+production chart renders lint, the advisory-policy tests pass, and image build,
+scan, SBOM, signing workflows are written. It is not declared complete: the
+hosted gate currently awaits A2's PostCSS fix and the chart awaits A1's exact
+worker/scheduler and safe first-admin CLI commands.

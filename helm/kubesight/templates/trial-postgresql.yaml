@@ -1,0 +1,79 @@
+{{- if eq .Values.deploymentMode "trial" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kubesight.fullname" . }}-postgresql
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  clusterIP: None
+  selector:
+    {{- include "kubesight.componentLabels" (dict "root" . "component" "postgresql") | nindent 4 }}
+  ports:
+    - {name: postgresql, port: 5432, targetPort: postgresql}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "kubesight.fullname" . }}-postgresql
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  serviceName: {{ include "kubesight.fullname" . }}-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kubesight.componentLabels" (dict "root" . "component" "postgresql") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubesight.componentLabels" (dict "root" . "component" "postgresql") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "kubesight.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: postgresql
+          image: {{ include "kubesight.image" (dict "root" . "image" .Values.trial.postgresql.image) | quote }}
+          imagePullPolicy: {{ .Values.trial.postgresql.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          env:
+            - {name: POSTGRES_DB, value: kubesight}
+            - {name: POSTGRES_USER, value: kubesight}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kubesight.secretName" . }}
+                  key: POSTGRES_PASSWORD
+          ports:
+            - {name: postgresql, containerPort: 5432}
+          readinessProbe:
+            exec: {command: ["sh", "-ec", "pg_isready -U kubesight -d kubesight"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.trial.postgresql.resources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.trial.postgresql.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.trial.postgresql.storage }}
+{{- end }}
+

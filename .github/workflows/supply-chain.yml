@@ -1,0 +1,170 @@
+name: Supply chain
+
+on:
+  push:
+    branches:
+      - master
+      - "track/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Capture npm advisory report
+        id: npm-audit
+        working-directory: frontend
+        shell: bash
+        run: |
+          set +e
+          npm audit --json > npm-audit.json
+          status=$?
+          set -e
+          if [ "$status" -gt 1 ]; then
+            cat npm-audit.json
+            exit "$status"
+          fi
+
+      - name: Enforce reviewed npm advisory policy
+        run: >-
+          python helm/kubesight/tools/npm_audit_gate.py
+          --audit frontend/npm-audit.json
+          --lock frontend/package-lock.json
+          --allowlist .github/dependency-audit-allowlist.json
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Audit backend dependencies
+        run: |
+          python -m pip install --disable-pip-version-check pip-audit==2.10.1
+          python -m pip_audit --strict --requirement backend/requirements.txt
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install checksum-verified Helm
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=v3.20.2
+          archive="helm-${version}-linux-amd64.tar.gz"
+          curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+            "https://get.helm.sh/${archive}" --output "/tmp/${archive}"
+          echo "258e830a9e613c8a7a302d6059b4bb3b9758f2f3e1bb8ea0d707ce10a9a72fea  /tmp/${archive}" | sha256sum --check --strict
+          tar xzf "/tmp/${archive}" -C /tmp
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+
+      - name: Lint and render trial chart
+        run: |
+          helm lint helm/kubesight
+          helm template kubesight helm/kubesight --namespace kubesight > /tmp/kubesight-trial.yaml
+
+      - name: Lint and render production chart
+        run: |
+          helm lint helm/kubesight -f helm/kubesight/tests/production-values.yaml
+          helm template kubesight helm/kubesight --namespace kubesight \
+            -f helm/kubesight/tests/production-values.yaml \
+            > /tmp/kubesight-production.yaml
+
+      - name: Test audit policy implementation
+        run: python -m pytest helm/kubesight/tests -q
+
+  repository-security:
+    name: Secret and configuration scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Scan working tree for secrets and unsafe configuration
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0, immutable release
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          hide-progress: true
+
+  images:
+    name: Image scan (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: backend
+            context: ./backend
+            file: ./backend/Dockerfile
+          - component: frontend
+            context: ./frontend
+            file: ./Dockerfile.frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build image without pushing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          load: true
+          push: false
+          tags: kubesight/${{ matrix.component }}:ci
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      - name: Scan image vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0, immutable release
+        with:
+          image-ref: kubesight/${{ matrix.component }}:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          hide-progress: true
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: kubesight/${{ matrix.component }}:ci
+          format: spdx-json
+          artifact-name: kubesight-${{ matrix.component }}.spdx.json

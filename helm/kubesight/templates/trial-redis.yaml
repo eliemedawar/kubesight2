@@ -1,0 +1,79 @@
+{{- if eq .Values.deploymentMode "trial" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kubesight.fullname" . }}-redis
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  clusterIP: None
+  selector:
+    {{- include "kubesight.componentLabels" (dict "root" . "component" "redis") | nindent 4 }}
+  ports:
+    - {name: redis, port: 6379, targetPort: redis}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "kubesight.fullname" . }}-redis
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: {{ include "kubesight.fullname" . }}-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kubesight.componentLabels" (dict "root" . "component" "redis") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubesight.componentLabels" (dict "root" . "component" "redis") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "kubesight.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: redis
+          image: {{ include "kubesight.image" (dict "root" . "image" .Values.trial.redis.image) | quote }}
+          imagePullPolicy: {{ .Values.trial.redis.image.pullPolicy }}
+          command: ["sh", "-ec"]
+          args: ['exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"']
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kubesight.secretName" . }}
+                  key: REDIS_PASSWORD
+          ports:
+            - {name: redis, containerPort: 6379}
+          readinessProbe:
+            exec: {command: ["sh", "-ec", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep -q PONG"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.trial.redis.resources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.trial.redis.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.trial.redis.storage }}
+{{- end }}
+
