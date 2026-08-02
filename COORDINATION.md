@@ -98,6 +98,10 @@ _(none yet)_
 
 ### 2026-08-02 A3 backend/tests/conftest.py — isolate legacy bearer-token fixtures from session cookies
 
+### 2026-08-02 A3 backend/api/oidc.py — OIDC discovery, PKCE, token validation, and claim policy
+
+### 2026-08-02 A3 backend/tests/test_oidc.py — OIDC security-core contract coverage
+
 ---
 
 ## Status log
