@@ -155,6 +155,18 @@ def run_tick(app: Flask) -> None:
         logger.exception("Mobile applications tick failed")
     try:
         with app.app_context():
+            from .application_intelligence_service import reap_stale_analyses
+
+            # Analyses report back over a callback, and nothing watched for the
+            # container that never calls. Without this a dead analysis reads as
+            # "Running" indefinitely and blocks deleting its application.
+            closed = reap_stale_analyses()
+            if closed:
+                logger.warning("closed %s analysis(es) that stopped reporting", closed)
+    except Exception:
+        logger.exception("Stale analysis reap tick failed")
+    try:
+        with app.app_context():
             from .cluster_build.executor import advance_cluster_builds
 
             # Cluster Builder: resume builds orphaned by a backend restart

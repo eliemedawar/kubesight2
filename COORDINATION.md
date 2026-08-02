@@ -713,3 +713,38 @@ mean **A3: the worker Deployment is not optional once this is wired**, and a dev
 running only the API will need to start one.
 
 47 queue + notification tests green.
+
+### 2026-08-02 A1 — analyses that stopped reporting are now closed
+
+Continuing the audit of what actually loses work rather than what merely runs on
+a thread. Application analysis had no recovery at all.
+
+An analysis runs in a container that reports back over a callback. Nothing
+watched for the container that never calls — it died, its host went away, or the
+process restarted before the first callback. The row stayed non-terminal
+forever, and the operator had no way to tell a dead analysis from a live one
+because both say "Running".
+
+The consequence is not cosmetic: `delete_application` refuses while any analysis
+is non-terminal, so a phantom analysis blocks deleting its application until
+somebody works out what happened and cancels it by hand.
+
+`reap_stale_analyses()` closes them after 6h (`APPLICATION_ANALYSIS_TIMEOUT_SECONDS`),
+wired into the scheduler tick beside `advance_cluster_builds` — same shape, same
+place. Generous on purpose: killing a slow analysis is worse than leaving a dead
+one a little longer.
+
+Marked **Failed, not Cancelled**. Cancelled means a person decided to stop it,
+and attributing that to somebody who did nothing would put a lie in the audit
+trail. Each timeout is audited with the stage it died in and its age.
+
+10 tests, including that reaping unblocks the delete — the operator-visible
+consequence rather than just the status field.
+
+**Revised view of the remaining threads.** Of the eleven I catalogued, most do
+not lose work: the tick functions are DB-backed and resume, and cluster and
+mobile builds have advance ticks. The genuinely at-risk ones are the fire-and-
+forget side effects — email (built, not wired) and `zoho-ticket-writeback`,
+which posts to an external system inside `except Exception: pass`. That one is
+next, and like email it needs a worker, so it goes up for review rather than
+merging on green.
