@@ -1623,7 +1623,6 @@ export default function App() {
             allowedResources={allowedResources}
             selectedNamespace={selectedNamespace}
             canManageAlerts={hasPermission("alerts:manage")}
-            canViewRouting={isAdmin}
             hasClusters={hasClusters}
             authUser={authUser}
             coreLoading={loadingState.core}
@@ -1717,6 +1716,7 @@ export default function App() {
             authUser={authUser}
             onNavigate={handleNavigate}
             isPageAllowed={isPageAllowed}
+            hasPermission={hasPermission}
           />
         );
       default:

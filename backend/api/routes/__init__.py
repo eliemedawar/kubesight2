@@ -12,6 +12,7 @@ from .settings import settings_bp
 from .upgrades import upgrades_bp
 from .access_rules import access_rules_bp
 from .users import users_bp
+from .integrations import integrations_bp
 from .inventory import inventory_bp
 from .helm import helm_bp
 from .alert_routing import alert_routing_bp
@@ -46,6 +47,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(alert_policies_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(upgrades_bp)
+    app.register_blueprint(integrations_bp)
     app.register_blueprint(inventory_bp)
     app.register_blueprint(helm_bp)
     app.register_blueprint(alert_routing_bp)
