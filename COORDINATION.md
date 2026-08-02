@@ -102,6 +102,8 @@ _(none yet)_
 
 ### 2026-08-02 A3 backend/tests/test_oidc.py — OIDC security-core contract coverage
 
+### 2026-08-02 A3 backend/api/mfa_recovery.py — hash-only recovery codes and break-glass grants
+
 ---
 
 ## Status log
