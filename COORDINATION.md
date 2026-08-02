@@ -558,3 +558,25 @@ interface; bearer response/acceptance remains until A2 confirms cutover.
 
 Stopped before merge for the required human review of session, refresh, and
 CSRF semantics.
+
+### 2026-08-02 A3 — Task 4 OIDC and recovery review gate
+
+Ready for review on `track/platform` at `e0dded5`: authorization-code OIDC with
+PKCE S256, exact discovery issuer and redirect validation, asymmetric ID-token
+verification, one-time state/nonce/browser binding, verified-domain policy,
+unambiguous group-to-role mapping, controlled provisioning/linking, and no
+provider token exposed to JavaScript. Added hash-only single-use MFA recovery
+codes and a short-lived local administrator break-glass grant that revokes all
+sessions and forces TOTP re-enrollment.
+
+Validated locally: the complete auth/onboarding/session/OIDC/guard regression
+set is green at 101 passed. The operator contract and recovery runbook are in
+`OIDC.md`.
+
+Integration pending from A1: first the previously requested session migration,
+then a separate revision for the four OIDC/recovery tables; public exposure of
+the canonical login-completion helper; and `manage.py admin-recovery`. A2 has
+the finalized SSO and recovery-code browser contract. Hosted backend CI remains
+intentionally red on migration parity until those owned revisions land.
+
+Stopped for security review before merge or Task 5 supply-chain work.
