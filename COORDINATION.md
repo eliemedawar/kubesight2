@@ -181,3 +181,21 @@ Blocked on: nothing. Note `git branch -f master` was refused by a permission
 guard, so `master` is **not** yet updated with the contract 2 correction — it
 sits on `track/backend` at `5ad5676`. Until the user lands it, A2 should read
 contract 2 from `track/backend`, not from `master`.
+
+### 2026-08-02 A3 — platform
+
+Landed on `track/platform`: CI workflow with independent required checks for
+the frontend Vitest suite, frontend production build, and the complete backend
+pytest suite on pushes to `master` and `track/**`. Hosted run
+`30747878841`: frontend tests and build passed; backend failed with 10 failures,
+1223 passes, and 1 skip on Linux in 14m38s.
+
+Next: rerun the complete backend check after A1 fixes the 10 portable baseline
+failures. The full suite stays required; A3 will not quarantine, deselect, or
+silently skip failures. The 5 extra failures in A1's Windows count are bundled
+manifest digest mismatches that did not reproduce on Linux.
+
+Blocked on: A1-owned backend fixes. Also, GitHub rejected reading or setting
+`master` branch protection with HTTP 403 because this private repository's plan
+does not include branch protection; enabling it requires GitHub Pro or making
+the repository public. A3 did not change repository visibility.
