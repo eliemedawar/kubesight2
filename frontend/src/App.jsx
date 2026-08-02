@@ -4,7 +4,6 @@ import {
   getClusterOverview,
   getSettings,
   listAlerts,
-  listMyDeploymentRequests,
   listClusters,
   testAlertEmail,
   updateSettings,
@@ -37,6 +36,8 @@ import { applyTheme, readThemePreference, storeThemePreference } from "./utils/t
 import { matchPath, pathForPageKey } from "./routes/paths.js";
 import RequireAccess from "./routes/RequireAccess.jsx";
 import CommandPalette from "./components/search/CommandPalette.jsx";
+import { usePageTour } from "./hooks/usePageTour.js";
+import { useRequestNotifications } from "./hooks/useRequestNotifications.js";
 import { useAttentionSources } from "./dashboard/useAttentionSources.js";
 import { useClusterScope } from "./hooks/useClusterScope.js";
 import { useNamespaceContext } from "./hooks/useNamespaceContext.js";
@@ -49,8 +50,6 @@ import {
   routeNeedsNamespaceContext,
 } from "./routes/routeTable.js";
 import CoachMarks from "./components/tour/CoachMarks.jsx";
-import { getTourSteps, getWelcomeSteps, WELCOME_TOUR_KEY } from "./tours/tourDefinitions.js";
-import { markTourSeen, readTourState, setToursMuted } from "./utils/tourStorage.js";
 
 // Theme is a per-browser preference: the locally stored choice always wins
 // over the workspace value returned by the API, so one user's theme never
@@ -175,9 +174,6 @@ export default function App() {
   // Decided (approved/declined) deployment requests for the current user, shown
   // in the notifications bell. "Seen" signatures are persisted per user so the
   // badge only counts decisions the user has not opened yet.
-  const [requestUpdates, setRequestUpdates] = useState([]);
-  const [seenRequestSignatures, setSeenRequestSignatures] = useState(() => new Set());
-  const [dismissedRequestSignatures, setDismissedRequestSignatures] = useState(() => new Set());
   // Apply the selected theme (light/dark/system) to the document. Re-runs on
   // change so the UI updates immediately, and follows the OS when "system".
   useEffect(() => {
@@ -194,6 +190,19 @@ export default function App() {
   }, [settingsDraft.theme]);
 
   const alertsLoadRef = useRef({ key: "", at: 0 });
+
+  // Decided deployment requests for the bell. Page-independent by nature, which
+  // is why it is extracted rather than rehomed into a route.
+  const {
+    items: visibleRequestUpdates,
+    unseenCount: newRequestCount,
+    markAllSeen: markRequestUpdatesSeen,
+    dismiss: dismissRequestUpdate,
+    dismissAll: clearRequestUpdates,
+  } = useRequestNotifications({
+    enabled: Boolean(isAuthenticated) && hasPermission("deployment_requests:request"),
+    userId: authUser?.id,
+  });
 
   const applyPageError = useCallback((message, { expectedDenied = false } = {}) => {
     if (!shouldShowAccessError(message, { expectedDenied })) {
@@ -334,87 +343,21 @@ export default function App() {
     [isPageAllowed, navigate]
   );
 
-  // ── Coach marks (guided page tips) ─────────────────────────────────────
-  // Each page's tour auto-runs once per user (per browser, like the theme
-  // preference) and can be replayed from the topbar ? button. Steps are
-  // filtered with the same permission predicates the pages render with, so
-  // users only get tips for controls their role can actually see; the tour
-  // engine additionally skips steps whose target element isn't in the DOM.
-  const [activeTour, setActiveTour] = useState(null);
-
-  const buildTourSteps = (pageKey) => {
-    const ctx = { isAdmin, hasPermission, pageAllowed: isPageAllowed, pageKey };
-    const state = readTourState(authUser?.id);
-    const pageSteps = getTourSteps(pageKey, ctx);
-    const includesWelcome = !state.seen[WELCOME_TOUR_KEY];
-    const steps =
-      includesWelcome && pageSteps.length ? [...getWelcomeSteps(ctx), ...pageSteps] : pageSteps;
-    return { steps, includesWelcome };
-  };
-
-  const markActiveTourSeen = (tour) => {
-    if (!tour) {
-      return;
-    }
-    markTourSeen(authUser?.id, tour.pageKey);
-    if (tour.includesWelcome) {
-      markTourSeen(authUser?.id, WELCOME_TOUR_KEY);
-    }
-  };
-
-  const startPageTour = () => {
-    if (!authorizedPage) {
-      return;
-    }
-    const { steps, includesWelcome } = buildTourSteps(authorizedPage);
-    if (steps.length) {
-      setActiveTour({ pageKey: authorizedPage, steps, auto: false, includesWelcome });
-    }
-  };
-
-  const closeTour = () => {
-    markActiveTourSeen(activeTour);
-    setActiveTour(null);
-  };
-
-  const muteTours = () => {
-    setToursMuted(authUser?.id, true);
-    closeTour();
-  };
-
-  useEffect(() => {
-    if (!isAuthenticated || authLoading || needsOnboarding || !authorizedPage || activeTour) {
-      return undefined;
-    }
-    const state = readTourState(authUser?.id);
-    if (state.muted || state.seen[authorizedPage]) {
-      return undefined;
-    }
-    const { steps, includesWelcome } = buildTourSteps(authorizedPage);
-    if (!steps.length) {
-      return undefined;
-    }
-    // Small delay so the page renders its chrome before the spotlight looks
-    // for targets; slow data is handled by the engine's per-step polling.
-    const timer = setTimeout(
-      () => setActiveTour({ pageKey: authorizedPage, steps, auto: true, includesWelcome }),
-      800
-    );
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated, authLoading, needsOnboarding, authorizedPage, activeTour, authUser?.id]);
-
-  // Navigating away mid-tour ends it (and counts it as seen, so it doesn't
-  // nag again); logging out clears it so the next user starts fresh.
-  useEffect(() => {
-    if (activeTour && (!isAuthenticated || activeTour.pageKey !== authorizedPage)) {
-      if (isAuthenticated) {
-        markActiveTourSeen(activeTour);
-      }
-      setActiveTour(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTour, authorizedPage, isAuthenticated]);
+  // Guided page tips. Keyed by page key, which is why this came out last: it
+  // needed every route to have a stable one.
+  const {
+    activeTour,
+    start: startPageTour,
+    close: closeTour,
+    mute: muteTours,
+  } = usePageTour({
+    pageKey: authorizedPage,
+    userId: authUser?.id,
+    enabled: Boolean(isAuthenticated) && !authLoading && !needsOnboarding,
+    isAdmin,
+    hasPermission,
+    pageAllowed: isPageAllowed,
+  });
 
   // Landing only. "/" is the dashboard, which not every role may open, and a
   // user who typed no URL at all should not be met with a denial for a page
@@ -645,141 +588,6 @@ export default function App() {
     filterAlertsForUser,
     authorizedPage,
   ]);
-
-  const requestSignature = (req) => `${req.id}:${req.decidedAt || ""}`;
-  const seenRequestStorageKey = authUser?.id
-    ? `kubesight.seenRequestUpdates.${authUser.id}`
-    : null;
-  const dismissedRequestStorageKey = authUser?.id
-    ? `kubesight.dismissedRequestUpdates.${authUser.id}`
-    : null;
-
-  // Load which decisions this user has already seen so the badge starts correct.
-  useEffect(() => {
-    if (!seenRequestStorageKey) {
-      setSeenRequestSignatures(new Set());
-      return;
-    }
-    try {
-      const raw = window.localStorage.getItem(seenRequestStorageKey);
-      setSeenRequestSignatures(new Set(raw ? JSON.parse(raw) : []));
-    } catch {
-      setSeenRequestSignatures(new Set());
-    }
-  }, [seenRequestStorageKey]);
-
-  // Load decisions the user explicitly cleared so they stay hidden in the bell.
-  useEffect(() => {
-    if (!dismissedRequestStorageKey) {
-      setDismissedRequestSignatures(new Set());
-      return;
-    }
-    try {
-      const raw = window.localStorage.getItem(dismissedRequestStorageKey);
-      setDismissedRequestSignatures(new Set(raw ? JSON.parse(raw) : []));
-    } catch {
-      setDismissedRequestSignatures(new Set());
-    }
-  }, [dismissedRequestStorageKey]);
-
-  // Poll the current user's own requests and surface approved/declined ones in
-  // the notifications bell. Independent of the active cluster/page.
-  useEffect(() => {
-    if (!isAuthenticated || !hasPermission("deployment_requests:request")) {
-      setRequestUpdates([]);
-      return undefined;
-    }
-    let cancelled = false;
-    const loadRequestUpdates = async () => {
-      try {
-        const res = await listMyDeploymentRequests({ limit: 100 });
-        if (cancelled) {
-          return;
-        }
-        const decided = (res.items || [])
-          .filter((row) => row.status && row.status !== "pending")
-          .sort(
-            (a, b) =>
-              new Date(b.decidedAt || b.createdAt) - new Date(a.decidedAt || a.createdAt)
-          );
-        setRequestUpdates(decided);
-      } catch {
-        if (!cancelled) {
-          setRequestUpdates([]);
-        }
-      }
-    };
-    loadRequestUpdates();
-    const timer = window.setInterval(loadRequestUpdates, 30000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [isAuthenticated, authUser?.id, hasPermission]);
-
-  const visibleRequestUpdates = useMemo(
-    () =>
-      requestUpdates.filter(
-        (req) => !dismissedRequestSignatures.has(requestSignature(req))
-      ),
-    [requestUpdates, dismissedRequestSignatures]
-  );
-
-  const newRequestCount = useMemo(
-    () =>
-      visibleRequestUpdates.filter(
-        (req) => !seenRequestSignatures.has(requestSignature(req))
-      ).length,
-    [visibleRequestUpdates, seenRequestSignatures]
-  );
-
-  const markRequestUpdatesSeen = () => {
-    if (!seenRequestStorageKey || visibleRequestUpdates.length === 0) {
-      return;
-    }
-    setSeenRequestSignatures((prev) => {
-      const next = new Set(prev);
-      visibleRequestUpdates.forEach((req) => next.add(requestSignature(req)));
-      try {
-        window.localStorage.setItem(seenRequestStorageKey, JSON.stringify(Array.from(next)));
-      } catch {
-        // Ignore storage failures (e.g. private mode); badge will simply reappear.
-      }
-      return next;
-    });
-  };
-
-  const dismissRequestUpdate = (req) => {
-    if (!dismissedRequestStorageKey || !req) {
-      return;
-    }
-    setDismissedRequestSignatures((prev) => {
-      const next = new Set(prev);
-      next.add(requestSignature(req));
-      try {
-        window.localStorage.setItem(dismissedRequestStorageKey, JSON.stringify(Array.from(next)));
-      } catch {
-        // Ignore storage failures; the item will simply reappear next load.
-      }
-      return next;
-    });
-  };
-
-  const clearRequestUpdates = () => {
-    if (!dismissedRequestStorageKey || visibleRequestUpdates.length === 0) {
-      return;
-    }
-    setDismissedRequestSignatures((prev) => {
-      const next = new Set(prev);
-      visibleRequestUpdates.forEach((req) => next.add(requestSignature(req)));
-      try {
-        window.localStorage.setItem(dismissedRequestStorageKey, JSON.stringify(Array.from(next)));
-      } catch {
-        // Ignore storage failures; items will simply reappear next load.
-      }
-      return next;
-    });
-  };
 
   const testAlertEmailDelivery = async (routing) => {
     setTestingEmail(true);
