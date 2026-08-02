@@ -194,6 +194,14 @@ def reset_ssh_transport():
     set_transport_factory(None)
 
 
+@pytest.fixture(autouse=True)
+def dedicated_credential_encryption_key(monkeypatch):
+    monkeypatch.setenv(
+        "ALERT_ROUTING_SECRET_KEY",
+        "cluster-builder-test-encryption-key-32chars",
+    )
+
+
 @pytest.fixture()
 def ssh_profile(app):
     credential = ssh_profile_service.create_credential(
@@ -982,18 +990,10 @@ class TestImageAndForwardProxy:
         assert response.status_code == 400
         assert "immutable" in response.get_json()["error"].lower()
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Cannot pass until A3 separates the signing and encryption keys (contract 5). "
-        "secret_encryption.py:17 falls back from ALERT_ROUTING_SECRET_KEY to JWT_SECRET_KEY, "
-        "so the test must unset both to reach the 400 -- which also invalidates its own bearer "
-        "token, yielding 401. A3 owns secret_encryption.py.",
-    )
     def test_registry_credentials_require_operator_secret(
         self, client, admin_token, monkeypatch
     ):
         monkeypatch.delenv("ALERT_ROUTING_SECRET_KEY", raising=False)
-        monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
         response = client.post(
             "/api/build-profiles",
             json={
