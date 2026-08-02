@@ -369,3 +369,22 @@ def test_cookie_only_first_login_and_totp_flow(client, admin_token):
     assert client.get_cookie(ACCESS_COOKIE).http_only
     assert client.get_cookie(INTERIM_COOKIE, path="/api/auth") is None
     assert client.get("/api/auth/me").status_code == 200
+
+    logout_csrf = _csrf(client)
+    assert client.post(
+        "/api/auth/logout", headers={CSRF_HEADER: logout_csrf}
+    ).status_code == 200
+    challenge = _login(client, "cookie-newhire", "CookieOnlyPass!234")
+    assert challenge.get_json()["data"]["stage"] == "mfa_challenge"
+    assert client.get_cookie(INTERIM_COOKIE, path="/api/auth").http_only
+    mfa_csrf = _csrf(client)
+    completed = client.post(
+        "/api/auth/mfa/verify",
+        headers={CSRF_HEADER: mfa_csrf},
+        json={"code": pyotp.TOTP(secret).now()},
+    )
+
+    assert completed.status_code == 200
+    assert completed.get_json()["data"]["stage"] == "authenticated"
+    assert client.get_cookie(ACCESS_COOKIE).http_only
+    assert client.get_cookie(INTERIM_COOKIE, path="/api/auth") is None
