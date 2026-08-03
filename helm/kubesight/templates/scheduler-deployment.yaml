@@ -1,0 +1,76 @@
+{{- if .Values.scheduler.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kubesight.fullname" . }}-scheduler
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/component: scheduler
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kubesight.componentLabels" (dict "root" . "component" "scheduler") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubesight.componentLabels" (dict "root" . "component" "scheduler") | nindent 8 }}
+      {{- with .Values.scheduler.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kubesight.serviceAccountName" (dict "root" . "component" "scheduler") }}
+      automountServiceAccountToken: false
+      {{- include "kubesight.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "kubesight.waitForMigrations" . | nindent 6 }}
+      containers:
+        - name: scheduler
+          image: {{ include "kubesight.image" (dict "root" . "image" .Values.images.backend) | quote }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command: {{ toJson .Values.scheduler.command }}
+          {{- with .Values.scheduler.args }}
+          args: {{ toJson . }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- include "kubesight.backendEnv" . | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: {{ include "kubesight.secretName" . }}
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.scheduler.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- include "kubesight.csiMount" . | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- include "kubesight.csiVolume" . | nindent 8 }}
+      {{- with .Values.scheduler.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.scheduler.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.scheduler.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.scheduler.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,16 @@
+{{- if and (eq .Values.deploymentMode "production") (not .Values.secrets.existingSecret) -}}
+{{- fail "production mode requires secrets.existingSecret; credentials must never be stored in Helm values" -}}
+{{- end -}}
+{{- if and .Values.worker.enabled (eq (len .Values.worker.command) 0) -}}
+{{- fail "worker.command is required when worker.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.scheduler.enabled (eq (len .Values.scheduler.command) 0) -}}
+{{- fail "scheduler.command is required when scheduler.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.scheduler.enabled (ne (int .Values.scheduler.replicas) 1) -}}
+{{- fail "scheduler.replicas must be 1; multiple schedulers can duplicate scheduled work" -}}
+{{- end -}}
+{{- if and (eq .Values.deploymentMode "production") (not .Values.networkPolicy.enabled) -}}
+{{- fail "production mode requires networkPolicy.enabled=true" -}}
+{{- end -}}
+

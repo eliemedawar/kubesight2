@@ -1,0 +1,49 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "kubesight.fullname" . }}-migrate-{{ if .Release.IsUpgrade }}upgrade{{ else }}install{{ end }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  {{- if .Release.IsUpgrade }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  {{- end }}
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "kubesight.componentLabels" (dict "root" . "component" "migration") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "kubesight.serviceAccountName" (dict "root" . "component" "web") }}
+      automountServiceAccountToken: false
+      {{- include "kubesight.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "kubesight.image" (dict "root" . "image" .Values.images.backend) | quote }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command: {{ toJson .Values.migrations.command }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: {{ include "kubesight.secretName" . }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- include "kubesight.csiMount" . | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- include "kubesight.csiVolume" . | nindent 8 }}
+{{- end }}

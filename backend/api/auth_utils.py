@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any, Dict, Optional
@@ -43,17 +44,28 @@ def _encode_token(payload: Dict[str, Any]) -> str:
     return token if isinstance(token, str) else token.decode("utf-8")
 
 
-def create_access_token(user: User) -> str:
+def create_access_token(
+    user: User,
+    *,
+    session_id: str | None = None,
+    expiry_minutes: int | None = None,
+) -> str:
     now = datetime.now(timezone.utc)
-    return _encode_token(
-        {
-            "sub": str(user.id),
-            "username": user.username,
-            "purpose": PURPOSE_ACCESS,
-            "iat": now,
-            "exp": now + timedelta(hours=jwt_expiry_hours()),
-        }
-    )
+    payload = {
+        "sub": str(user.id),
+        "username": user.username,
+        "purpose": PURPOSE_ACCESS,
+        "jti": secrets.token_urlsafe(16),
+        "iat": now,
+        "exp": (
+            now + timedelta(minutes=expiry_minutes)
+            if expiry_minutes is not None
+            else now + timedelta(hours=jwt_expiry_hours())
+        ),
+    }
+    if session_id:
+        payload["sid"] = session_id
+    return _encode_token(payload)
 
 
 def create_interim_token(user: User, purpose: str) -> str:
@@ -84,6 +96,18 @@ def get_bearer_token() -> Optional[str]:
     if not auth_header.startswith("Bearer "):
         return None
     return auth_header[7:].strip() or None
+
+
+def get_interim_token() -> Optional[str]:
+    """Return a dual-accept onboarding/MFA token during the cookie cutover."""
+    bearer = get_bearer_token()
+    if bearer:
+        return bearer
+    from flask import request
+
+    from .session_auth import INTERIM_COOKIE
+
+    return request.cookies.get(INTERIM_COOKIE) or None
 
 
 def _user_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[User]:
@@ -145,26 +169,43 @@ def _load_user_from_api_token(raw_token: str) -> Optional[User]:
 
 
 def get_current_user() -> Optional[User]:
-    token = get_bearer_token()
+    from flask import request
+
+    bearer = get_bearer_token()
+    token = bearer
+    auth_method = "bearer" if bearer else None
+    if not token:
+        from .session_auth import ACCESS_COOKIE
+
+        token = request.cookies.get(ACCESS_COOKIE) or None
+        auth_method = "cookie" if token else None
     if not token:
         # Never reuse a user cached by an earlier request. This matters when an
         # outer application context spans requests (tests, CLI orchestration)
         # and is safer than assuming Flask's ``g`` always has request lifetime.
         g.current_user = None
         g.auth_token = None
+        g.auth_method = None
+        g.auth_session_id = None
         return None
 
+    cache_key = f"{auth_method}:{token}"
     cached_token = getattr(g, "auth_token", None)
-    if hasattr(g, "current_user") and cached_token == token:
+    if hasattr(g, "current_user") and cached_token == cache_key:
         return g.current_user
 
-    if token.startswith("ksa_"):
+    if auth_method == "cookie":
+        from .session_auth import load_user_from_cookie_token
+
+        user = load_user_from_cookie_token(token)
+    elif token.startswith("ksa_"):
         user = _load_user_from_api_token(token)
     else:
         user = load_user_from_token(token)
 
     g.current_user = user
-    g.auth_token = token
+    g.auth_token = cache_key
+    g.auth_method = auth_method
     return user
 
 

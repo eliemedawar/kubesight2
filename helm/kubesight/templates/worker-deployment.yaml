@@ -1,0 +1,85 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kubesight.fullname" . }}-worker
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "kubesight.componentLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubesight.componentLabels" (dict "root" . "component" "worker") | nindent 8 }}
+      {{- with .Values.worker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kubesight.serviceAccountName" (dict "root" . "component" "worker") }}
+      automountServiceAccountToken: true
+      {{- include "kubesight.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "kubesight.waitForMigrations" . | nindent 6 }}
+      containers:
+        - name: worker
+          image: {{ include "kubesight.image" (dict "root" . "image" .Values.images.backend) | quote }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command: {{ toJson .Values.worker.command }}
+          {{- with .Values.worker.args }}
+          args: {{ toJson . }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- include "kubesight.backendEnv" . | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: {{ include "kubesight.secretName" . }}
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: kube-home, mountPath: /home/kubesight/.kube}
+            {{- if .Values.objectStorage.enabled }}
+            - {name: artifacts, mountPath: {{ .Values.objectStorage.mountPath | quote }}}
+            {{- end }}
+            {{- include "kubesight.csiMount" . | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: kube-home
+          emptyDir: {}
+        {{- if .Values.objectStorage.enabled }}
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: {{ include "kubesight.artifactClaimName" . }}
+        {{- end }}
+        {{- include "kubesight.csiVolume" . | nindent 8 }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

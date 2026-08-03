@@ -135,6 +135,22 @@ _(none yet)_
 
 ### 2026-08-02 A3 backend/tests/test_cluster_builder_addons_proxy.py — remove A3 encryption-key xfail after key separation
 
+### 2026-08-02 A3 backend/api/session_auth.py — cookie sessions, refresh rotation, revocation, and CSRF
+
+### 2026-08-02 A3 backend/tests/test_sessions.py — contract 4 session and CSRF coverage
+
+### 2026-08-02 A3 backend/tests/conftest.py — isolate legacy bearer-token fixtures from session cookies
+
+### 2026-08-02 A3 backend/api/oidc.py — OIDC discovery, PKCE, token validation, and claim policy
+
+### 2026-08-02 A3 backend/tests/test_oidc.py — OIDC security-core contract coverage
+
+### 2026-08-02 A3 backend/api/mfa_recovery.py — hash-only recovery codes and break-glass grants
+
+### 2026-08-02 A3 backend/api/oidc_auth.py — one-time OIDC flow persistence and identity provisioning
+
+### 2026-08-02 A3 OIDC.md — operator configuration, rollout, and recovery runbook
+
 ---
 
 ## Status log
@@ -1160,3 +1176,88 @@ Blocked on: nothing.
 about `shouldShowAccessError` — if the 401 → refresh → retry path routes
 failures through it, non-auth failures on that path will vanish silently. Use
 `describeLoadError`.
+
+### 2026-08-02 A3 — Task 3 session and secret hardening review gate
+
+Ready for manual review on `track/platform` at `aa3e099`: dual-accept bearer
+and HttpOnly cookie sessions, rotating single-use refresh tokens with family
+revocation on reuse, signed double-submit CSRF across cookie-authenticated
+mutations, list/per-session/global revocation, device metadata, and unchanged
+first-login/TOTP/MFA behavior. Credential encryption now has a versioned
+keyring envelope, atomic database-wide dry-run/apply rotation, rollback on any
+unreadable value, and sanitized success/failure audit records.
+
+Validated locally: 49 focused session/guard tests and 57 credential-consumer
+tests pass. Frontend hosted checks are green. Backend CI has exactly two known
+failures until A1 imports `api.models_auth` in Alembic and adds the matching
+session/refresh-token revision; those tests remain live and unweakened.
+
+Integration pending from A1: the owned Alembic revision/import, the
+`manage.py rotate-secrets [--dry-run]` command, secret-lifecycle audit
+insertions, and pure
+`_is_production_env()` delegation. A2 has the finalized cookie/CSRF/refresh
+interface; bearer response/acceptance remains until A2 confirms cutover.
+
+Stopped before merge for the required human review of session, refresh, and
+CSRF semantics.
+
+### 2026-08-02 A3 — Task 4 OIDC and recovery review gate
+
+Ready for review on `track/platform` at `e0dded5`: authorization-code OIDC with
+PKCE S256, exact discovery issuer and redirect validation, asymmetric ID-token
+verification, one-time state/nonce/browser binding, verified-domain policy,
+unambiguous group-to-role mapping, controlled provisioning/linking, and no
+provider token exposed to JavaScript. Added hash-only single-use MFA recovery
+codes and a short-lived local administrator break-glass grant that revokes all
+sessions and forces TOTP re-enrollment.
+
+Validated locally: the complete auth/onboarding/session/OIDC/guard regression
+set is green at 101 passed. The operator contract and recovery runbook are in
+`OIDC.md`.
+
+Integration pending from A1: first the previously requested session migration,
+then a separate revision for the four OIDC/recovery tables; public exposure of
+the canonical login-completion helper; and `manage.py admin-recovery`. A2 has
+the finalized SSO and recovery-code browser contract. Hosted backend CI remains
+intentionally red on migration parity until those owned revisions land.
+
+Stopped for security review before merge or Task 5 supply-chain work.
+
+### 2026-08-02 A3 — stop checkpoint: session cutover is complete and dual-accept
+
+Task 3 is not in a partial authentication state. The focused session/auth/
+onboarding regression set is green at **41 passed**. No uncommitted Task 5 file
+changes any auth module.
+
+Real now:
+
+- `POST /api/auth/login`, first-login password/TOTP endpoints, `POST
+  /api/auth/mfa/verify`, recovery-code login, and OIDC callback issue the
+  hardened browser cookies when the flow reaches its appropriate stage.
+- `GET /api/auth/csrf` returns `data.csrfToken` and sets the JS-readable
+  `kubesight_csrf` cookie.
+- `POST /api/auth/refresh` is live: it requires `X-CSRF-Token`, rotates the
+  single-use `kubesight_refresh` token, replaces the access/refresh/CSRF
+  cookies, and revokes the token family on replay.
+- `Set-Cookie` is real: `kubesight_access` and `kubesight_refresh` are
+  `HttpOnly; Secure; SameSite=Lax`; the refresh and interim cookies are scoped
+  to `/api/auth`; `kubesight_csrf` is deliberately readable by JavaScript.
+- Session management is live at `GET /api/auth/sessions`, `DELETE
+  /api/auth/sessions/<id>`, and `POST /api/auth/sessions/revoke-all`. Logout
+  revokes the server session and clears all auth cookies.
+- Dual-accept remains live: `Authorization: Bearer` mutations do not require
+  CSRF, while cookie-authenticated mutations do. Login/MFA/onboarding responses
+  still include bearer token fields during A2's transition.
+
+Not done by design: bearer acceptance and bearer response fields have **not**
+been removed. A2 must first switch the client to `credentials: include`, fetch
+`/api/auth/csrf`, send `X-CSRF-Token` on cookie mutations, and retry one 401 via
+`/api/auth/refresh`. After A2 confirms that cutover, A3's first auth action is
+to remove bearer issuance/acceptance and re-run the same regression set. Do not
+remove bearer before that confirmation.
+
+Task 5 stopped after a Helm/supply-chain foundation checkpoint: trial and
+production chart renders lint, the advisory-policy tests pass, and image build,
+scan, SBOM, signing workflows are written. It is not declared complete: the
+hosted gate currently awaits A2's PostCSS fix and the chart awaits A1's exact
+worker/scheduler and safe first-admin CLI commands.

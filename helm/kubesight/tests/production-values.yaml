@@ -1,0 +1,14 @@
+# Render-only fixture. These commands are intentionally inert and are never an
+# operator-facing example; real worker/scheduler commands come from A1.
+deploymentMode: production
+secrets:
+  existingSecret: kubesight-production
+objectStorage:
+  existingClaim: kubesight-artifacts
+worker:
+  enabled: true
+  command: [python, -c, "print('worker fixture')"]
+scheduler:
+  enabled: true
+  command: [python, -c, "print('scheduler fixture')"]
+

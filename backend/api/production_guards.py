@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from .auth_utils import auth_required_enabled
 from .migrations import is_at_head
 from .models import User
+from .oidc import OidcConfig, OidcConfigurationError, oidc_enabled
 from .passwords import verify_password
 from .rbac_data import DEFAULT_USERS
 from .secret_encryption import secret_encryption_key_configured
@@ -110,6 +111,18 @@ def _collect_violations(app: Flask) -> list[str]:
         violations.append(
             "ALERT_ROUTING_SECRET_KEY must be different from JWT_SECRET_KEY"
         )
+
+    if oidc_enabled():
+        try:
+            oidc_config = OidcConfig.from_environment()
+        except OidcConfigurationError as exc:
+            violations.append(f"OIDC_CONFIGURATION is invalid: {exc}")
+        else:
+            if oidc_config.client_secret in {jwt_secret, encryption_key}:
+                violations.append(
+                    "OIDC_CLIENT_SECRET must be different from JWT_SECRET_KEY "
+                    "and ALERT_ROUTING_SECRET_KEY"
+                )
 
     if _cors_is_unsafe():
         violations.append(

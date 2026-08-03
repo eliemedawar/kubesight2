@@ -1,0 +1,194 @@
+# "trial" may create bundled PostgreSQL and Redis. "production" never does.
+deploymentMode: trial
+
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  commonLabels: {}
+
+images:
+  backend:
+    repository: kubesight/backend
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  frontend:
+    repository: kubesight/frontend
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+secrets:
+  # Required in production. It must contain DATABASE_URL, JWT_SECRET_KEY, and
+  # ALERT_ROUTING_SECRET_KEY. Optional integration secrets may live there too.
+  existingSecret: ""
+  # Set when a Secrets Store CSI SecretProviderClass syncs existingSecret.
+  secretProviderClass: ""
+
+config:
+  publicUrl: https://kubesight.example.com
+  corsOrigins: https://kubesight.example.com
+  databasePoolSize: "10"
+  databaseMaxOverflow: "20"
+  sessionAccessMinutes: "15"
+  sessionRefreshDays: "7"
+  extraEnv: []
+
+objectStorage:
+  # Mount an object-storage CSI-backed PVC for durable artifacts. Production
+  # operators provision the claim; trial mode gets a small filesystem claim.
+  enabled: true
+  existingClaim: ""
+  mountPath: /var/lib/kubesight/artifacts
+  accessModes: [ReadWriteOnce]
+  storage: 10Gi
+  storageClass: ""
+
+serviceAccounts:
+  create: true
+  annotations: {}
+  webName: ""
+  workerName: ""
+  schedulerName: ""
+  frontendName: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+
+web:
+  replicas: 1
+  command: []
+  args: []
+  service:
+    type: ClusterIP
+    port: 5000
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "2", memory: 2Gi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+worker:
+  enabled: false
+  replicas: 1
+  # Must be set when enabled until the durable-worker entrypoint lands.
+  command: []
+  args: []
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "2", memory: 2Gi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+scheduler:
+  enabled: false
+  replicas: 1
+  # Must be a singleton command. The chart refuses replicas other than one.
+  command: []
+  args: []
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+frontend:
+  enabled: true
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  host: kubesight.example.com
+  tls:
+    enabled: true
+    secretName: ""
+
+networkPolicy:
+  enabled: true
+  ingressNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: ingress-nginx
+  ingressPodSelector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  # External services cannot be represented by DNS in Kubernetes NetworkPolicy.
+  # Add their CIDRs here; an empty list denies arbitrary external egress.
+  externalEgress: []
+  extraEgress: []
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+rbac:
+  # Off by default. Bind access deliberately for each managed cluster.
+  create: false
+
+migrations:
+  enabled: true
+  command: ["python", "manage.py", "upgrade"]
+  activeDeadlineSeconds: 900
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+trial:
+  postgresql:
+    storage: 10Gi
+    storageClass: ""
+    image:
+      repository: postgres
+      tag: "16-alpine"
+      digest: "sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777"
+      pullPolicy: IfNotPresent
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: "1", memory: 1Gi}
+  redis:
+    storage: 2Gi
+    storageClass: ""
+    image:
+      repository: redis
+      tag: "7-alpine"
+      digest: "sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2"
+      pullPolicy: IfNotPresent
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+
+diagnostics:
+  includePodLogs: true
+  logTailLines: 500

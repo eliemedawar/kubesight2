@@ -1,0 +1,22 @@
+{{- if and .Values.objectStorage.enabled (not .Values.objectStorage.existingClaim) }}
+{{- if eq .Values.deploymentMode "production" }}
+{{- fail "production object storage requires objectStorage.existingClaim (for example an S3/Blob/GCS CSI-backed PVC)" }}
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "kubesight.artifactClaimName" . }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifacts
+spec:
+  accessModes:
+    {{- toYaml .Values.objectStorage.accessModes | nindent 4 }}
+  {{- with .Values.objectStorage.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.objectStorage.storage }}
+{{- end }}
+

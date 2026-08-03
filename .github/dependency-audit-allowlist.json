@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "advisory": "GHSA-qwww-vcr4-c8h2",
+      "package": "react-router",
+      "versions": ["7.18.2"],
+      "reason": "The advisory is confined to React Server Components mode. KubeSight is a client-rendered Vite SPA and does not install or execute an RSC server runtime. Pinning backward would reintroduce the Link/useNavigate open-redirect advisory fixed after 7.11.0.",
+      "reviewBy": "2026-09-02",
+      "owner": "A3 Platform Security"
+    }
+  ]
+}
+

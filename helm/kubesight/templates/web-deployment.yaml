@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kubesight.fullname" . }}-web
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicas }}
+  selector:
+    matchLabels:
+      {{- include "kubesight.componentLabels" (dict "root" . "component" "web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubesight.componentLabels" (dict "root" . "component" "web") | nindent 8 }}
+      {{- with .Values.web.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kubesight.serviceAccountName" (dict "root" . "component" "web") }}
+      automountServiceAccountToken: true
+      {{- include "kubesight.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "kubesight.waitForMigrations" . | nindent 6 }}
+      containers:
+        - name: web
+          image: {{ include "kubesight.image" (dict "root" . "image" .Values.images.backend) | quote }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          {{- with .Values.web.command }}
+          command: {{ toJson . }}
+          {{- end }}
+          {{- with .Values.web.args }}
+          args: {{ toJson . }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- include "kubesight.backendEnv" . | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: {{ include "kubesight.secretName" . }}
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: kube-home, mountPath: /home/kubesight/.kube}
+            {{- if .Values.objectStorage.enabled }}
+            - {name: artifacts, mountPath: {{ .Values.objectStorage.mountPath | quote }}}
+            {{- end }}
+            {{- include "kubesight.csiMount" . | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: kube-home
+          emptyDir: {}
+        {{- if .Values.objectStorage.enabled }}
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: {{ include "kubesight.artifactClaimName" . }}
+        {{- end }}
+        {{- include "kubesight.csiVolume" . | nindent 8 }}
+      {{- with .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

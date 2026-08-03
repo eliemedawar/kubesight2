@@ -67,43 +67,33 @@ def client(app):
     return app.test_client()
 
 
-@pytest.fixture()
-def admin_token(client):
-    response = client.post(
-        "/api/auth/login",
-        json={"username": "admin", "password": "admin123"},
-    )
+def _login_token(app, username: str, password: str) -> str:
+    """Create a bearer token without authenticating the test's shared client."""
+    with app.test_client() as login_client:
+        response = login_client.post(
+            "/api/auth/login",
+            json={"username": username, "password": password},
+        )
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["success"] is True
-    assert payload["data"]["user"]["username"] == "admin"
+    assert payload["data"]["user"]["username"] == username
     return payload["data"]["token"]
 
 
 @pytest.fixture()
-def viewer_token(client):
-    response = client.post(
-        "/api/auth/login",
-        json={"username": "viewer", "password": "viewer123"},
-    )
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload["success"] is True
-    assert payload["data"]["user"]["username"] == "viewer"
-    return payload["data"]["token"]
+def admin_token(app):
+    return _login_token(app, "admin", "admin123")
 
 
 @pytest.fixture()
-def operator_token(client):
-    response = client.post(
-        "/api/auth/login",
-        json={"username": "operator", "password": "operator123"},
-    )
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload["success"] is True
-    assert payload["data"]["user"]["username"] == "operator"
-    return payload["data"]["token"]
+def viewer_token(app):
+    return _login_token(app, "viewer", "viewer123")
+
+
+@pytest.fixture()
+def operator_token(app):
+    return _login_token(app, "operator", "operator123")
 
 
 def auth_headers(token: str) -> dict:
