@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { timeAgo as mobileAppsTimeAgo } from "../components/mobileApps/common.jsx";
 import { freshness, relativeTime } from "./relativeTime.js";
 
 const NOW = Date.parse("2026-08-02T12:00:00Z");
@@ -79,6 +80,10 @@ describe("compact style", () => {
 });
 
 describe("the copies that converged onto this", () => {
+  it("keeps the Mobile Apps wrapper connected to the shared formatter", () => {
+    expect(mobileAppsTimeAgo(null)).toBe("");
+  });
+
   // Three of the four hand-rolled implementations used `new Date(iso)`, which
   // reads a naive backend timestamp as local time and shifts every age by the
   // viewer's offset. On a "last synced" label that reports stale data as

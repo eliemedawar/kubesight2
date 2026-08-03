@@ -2,6 +2,8 @@
 // badges, build/publish status pills, publish-step chips, store/target labels,
 // small formatters, and the inline stroke icons the screens reuse.
 
+import { relativeTime } from "../../lib/relativeTime.js";
+
 // ── Inline stroke icons (Lucide outlines, explicit viewBox + size via base) ──
 const base = {
   viewBox: "0 0 24 24",
