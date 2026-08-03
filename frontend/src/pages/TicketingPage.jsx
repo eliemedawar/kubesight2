@@ -92,7 +92,7 @@ function ProviderCard({ provider, canManage, onOpen }) {
   );
 }
 
-export default function TicketingPage({ canManage = false }) {
+export default function TicketingPage({ canManage = false, embedded = false }) {
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -141,13 +141,19 @@ export default function TicketingPage({ canManage = false }) {
   return (
     <div className="zoho-page sg-tk-page">
       <header className="sg-zh-cmdbar">
-        <div>
-          <h2 className="sg-zh-cmdtitle">Ticketing</h2>
-          <p className="sg-zh-cmdsub">
-            Connect KubeSight to your ticketing platform. Deployment tickets flow in, Jenkins
-            deploys, and the outcome is written back onto the ticket.
-          </p>
-        </div>
+        {/* Embedded in Settings → Integrations the shell has already titled the
+            panel, so only the actions survive. */}
+        {embedded ? (
+          <div />
+        ) : (
+          <div>
+            <h2 className="sg-zh-cmdtitle">Ticketing</h2>
+            <p className="sg-zh-cmdsub">
+              Connect KubeSight to your ticketing platform. Deployment tickets flow in, Jenkins
+              deploys, and the outcome is written back onto the ticket.
+            </p>
+          </div>
+        )}
         <div className="sg-zh-cmdactions">
           <button
             type="button"

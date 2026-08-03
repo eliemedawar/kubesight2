@@ -46,7 +46,12 @@ def update_role(role_id: int):
 @roles_bp.route("/roles/<int:role_id>", methods=["DELETE"])
 @require_any_permission("roles:manage", "users:manage")
 def delete_role(role_id: int):
-    data, error, status = role_service.delete_role(role_id, actor=get_current_user())
+    # Deleting a role that still has users strips their permissions, so it needs
+    # an explicit opt-in rather than happening as a side effect of the delete.
+    force = str(request.args.get("force", "")).strip().lower() in ("1", "true", "yes")
+    data, error, status = role_service.delete_role(
+        role_id, actor=get_current_user(), force=force
+    )
     if error:
         return error_response(error, status)
     return success_response(data)

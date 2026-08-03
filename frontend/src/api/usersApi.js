@@ -42,7 +42,14 @@ export const getRole = (id) => request(`/api/roles/${id}`);
 export const createRole = (payload) => request("/api/roles", { method: "POST", body: payload });
 export const updateRole = (id, payload) =>
   request(`/api/roles/${id}`, { method: "PUT", body: payload });
-export const deleteRole = (id) => request(`/api/roles/${id}`, { method: "DELETE" });
+// The API refuses with 409 while users are still assigned, so that deleting a
+// role cannot strip their permissions as an unseen side effect. Pass force
+// only once the caller has shown who is affected and had that confirmed.
+export const deleteRole = (id, { force = false } = {}) =>
+  request(`/api/roles/${id}`, {
+    method: "DELETE",
+    query: force ? { force: "true" } : undefined,
+  });
 export const listPermissions = () => request("/api/permissions");
 export const updateRolePermissions = (roleId, permissions) =>
   request(`/api/roles/${roleId}/permissions`, { method: "PUT", body: { permissions } });

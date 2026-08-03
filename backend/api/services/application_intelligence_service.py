@@ -10,7 +10,7 @@ import re
 import secrets
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1970,3 +1970,74 @@ def artifact_path(artifact_id: int) -> tuple[ApplicationArtifact, Path]:
     if hashlib.sha256(path.read_bytes()).hexdigest() != artifact.checksum:
         raise ValueError("Artifact checksum validation failed.")
     return artifact, path
+
+
+# ─── stale analyses ───
+
+# Generous by design: an analysis clones a repository, builds an image and runs
+# scanners, so hours is normal and killing a slow one is worse than leaving a
+# dead one a little longer.
+STALE_ANALYSIS_TIMEOUT_SECONDS = int(
+    os.getenv("APPLICATION_ANALYSIS_TIMEOUT_SECONDS", str(6 * 60 * 60))
+)
+
+
+def reap_stale_analyses(*, now: datetime | None = None) -> int:
+    """Fail analyses that stopped reporting. Returns how many.
+
+    An analysis runs in a container that reports back over a callback. Nothing
+    watched for the container that never calls -- it died, the host went away,
+    or the process restarted between spawning it and the first callback. The row
+    stayed non-terminal forever.
+
+    That is not merely untidy. A non-terminal analysis blocks
+    `delete_application`, and the operator has no way to tell a genuinely
+    running analysis from one that died an hour ago, because both say "Running".
+    An operator can cancel it by hand once they work that out; this removes the
+    need to work it out.
+
+    Marked Failed rather than Cancelled: cancelled means somebody decided to
+    stop it, and attributing that to a person who did nothing would be a lie in
+    the audit trail.
+    """
+    now = now or _now()
+    cutoff = now - timedelta(seconds=STALE_ANALYSIS_TIMEOUT_SECONDS)
+
+    stale = (
+        ApplicationAnalysis.query.filter(
+            ~ApplicationAnalysis.status.in_(TERMINAL_STATUSES)
+        )
+        .filter(ApplicationAnalysis.created_at < cutoff)
+        .all()
+    )
+
+    for analysis in stale:
+        analysis.status = "Failed"
+        analysis.failure_stage = analysis.current_stage or "unknown"
+        analysis.failed_at = now
+        analysis.completed_at = now
+        analysis.safe_error_message = (
+            "The analysis stopped reporting and was closed automatically after "
+            f"{STALE_ANALYSIS_TIMEOUT_SECONDS // 3600}h. Its worker is gone; "
+            "re-run the analysis if you still need it."
+        )
+        log_audit(
+            "application_analysis_timed_out",
+            target_type="application_analysis",
+            target_id=str(analysis.id),
+            details={
+                "applicationId": analysis.application_id,
+                "stage": analysis.failure_stage,
+                "ageSeconds": int((now - _aware(analysis.created_at)).total_seconds()),
+            },
+            commit=False,
+        )
+
+    if stale:
+        db.session.commit()
+    return len(stale)
+
+
+def _aware(value: datetime) -> datetime:
+    """SQLite returns naive datetimes even for timezone=True columns."""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)

@@ -961,27 +961,31 @@ def _backfill_build_signature_state() -> None:
         logger.info("Backfilled signature_state for %s mobile build(s)", changed)
 
 
-def run_migrations() -> None:
-    db.create_all()
+def apply_legacy_schema() -> None:
+    """Column adds predating Alembic. Not run in production.
+
+    Every one is existence-guarded, so on a database Alembic has brought to head
+    they all no-op -- which is exactly why they must not run in production. A
+    missing column there does not mean "add it quietly", it means the database
+    is not at the revision this code expects, and the startup guard should
+    refuse to serve rather than reshape a production schema at boot.
+
+    Kept for development and for existing installations that predate the
+    baseline. Deletable once every deployment is stamped.
+    """
     _migrate_cluster_build_columns()
-    _sanitize_legacy_build_profile_proxies()
     _migrate_zoho_integration_columns()
-    _migrate_ticketing_tables()
-    _migrate_deploy_automation_columns()
     _migrate_mobile_app_columns()
-    _backfill_build_signature_state()
     _migrate_user_onboarding_columns()
     _migrate_application_intelligence_columns()
     _migrate_deployment_request_columns()
     _migrate_change_bundle_columns()
-    _migrate_alert_routing_user_receivers()
     _migrate_clusters_table()
     _migrate_app_catalog_helm_columns()
     _migrate_alert_policy_evaluation_columns()
     _migrate_alert_delivery_log_group_column()
     _migrate_log_alert_columns()
     _migrate_service_alert_columns()
-    _migrate_legacy_users()
     _migrate_app_service_deployments()
     _migrate_app_service_topology_positions()
     _migrate_app_service_topology_edge_meta()
@@ -990,6 +994,32 @@ def run_migrations() -> None:
     _migrate_client_service_connections()
     _migrate_client_service_egress_connections()
     _migrate_registry_connection_columns()
+
+
+def reconcile_data() -> None:
+    """Idempotent data repair. Runs on every boot, in every environment.
+
+    This is not migration and never was. Migrations run once against a schema
+    version; these run every start and are designed to -- `_sync_role_permissions`
+    is how a release grants a newly introduced permission to existing system
+    roles, and `migrate_all_users_legacy_rules` converts access rules written in
+    an older shape.
+
+    That distinction is the reason this split exists. Deleting the old
+    `run_migrations()` call to "stop mutating schema at startup" would also have
+    stopped RBAC reconciliation, with no error and no obvious symptom until
+    somebody's permissions were wrong.
+
+    The four entries here that also add columns are existence-guarded, so on a
+    database at head they perform no DDL and only their backfill runs.
+    """
+    _sanitize_legacy_build_profile_proxies()
+    _migrate_ticketing_tables()
+    _migrate_deploy_automation_columns()
+    _backfill_build_signature_state()
+    _migrate_alert_routing_user_receivers()
+    _migrate_legacy_users()
+
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations
 
@@ -999,3 +1029,15 @@ def run_migrations() -> None:
     # Must run BEFORE the prune: it reads the old rows the prune is about to drop.
     _migrate_renamed_permissions()
     _prune_obsolete_permissions()
+
+
+def run_migrations() -> None:
+    """Both halves, for callers that want the pre-Alembic behaviour.
+
+    No longer creates schema: `db.create_all()` is gone, because a table created
+    outside Alembic is invisible to it and makes `is_at_head()` a lie. Callers
+    that need tables built from the models -- the test fixtures -- call
+    `create_all` themselves.
+    """
+    apply_legacy_schema()
+    reconcile_data()

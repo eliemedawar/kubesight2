@@ -18,19 +18,55 @@ from .models import AppSettings, User
 from .routes import register_blueprints
 from .frontend_static import frontend_dist_available, register_frontend_static
 from .response import success_response
-from .migrate_rbac import run_migrations
+from .migrate_rbac import apply_legacy_schema, reconcile_data
+from .migrations import upgrade_to_head
+from .production_guards import production_environment_enabled, run_startup_guards
 from .seed import seed_defaults
 from .services.alert_policy_scheduler import start_alert_policy_scheduler
 
 
 def _is_production_env() -> bool:
-    debug = os.getenv("FLASK_DEBUG", "true").strip().lower()
-    if debug in {"1", "true", "yes", "on"}:
-        return False
-    for key in ("FLASK_ENV", "APP_ENV"):
-        if os.getenv(key, "").strip().lower() == "production":
-            return True
-    return False
+    """Is this a production process? One signal: KUBESIGHT_ENV.
+
+    Pure delegation, per A3's collapse in 4128a47. This used to read
+    FLASK_ENV/APP_ENV while `production_guards` read KUBESIGHT_ENV, and a
+    deployment setting only FLASK_ENV=production satisfied one and not the
+    other: it skipped migration, reconciliation and seeding *and* ran no guards.
+
+    One function answers now, and it is theirs -- two functions that must agree
+    eventually will not.
+    """
+    return production_environment_enabled()
+
+
+def _sqlite_fallback_allowed() -> bool:
+    """Whether an unreachable configured database may degrade to local sqlite.
+
+    Off by default. A developer who configured Postgres and has not started it
+    is better served by a connection error naming the database than by an app
+    that quietly runs on a different one.
+    """
+    return os.getenv("KUBESIGHT_ALLOW_SQLITE_FALLBACK", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _skip_startup_migration() -> bool:
+    """Whether this process must not bring the database to head itself.
+
+    Set by the job worker. Development startup normally migrates, which is fine
+    for one process and a race for several starting together -- and scaling
+    workers out is the ordinary reason to have more than one.
+    """
+    return os.getenv("KUBESIGHT_SKIP_STARTUP_MIGRATION", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _is_logs_fetch_path(path: str) -> bool:
@@ -195,11 +231,33 @@ def create_app(config_object=None) -> Flask:
             database_url = database_url.replace("postgres://", "postgresql://", 1)
 
         fallback_sqlite_url = "sqlite:///kubesight.db"
-        if database_url != fallback_sqlite_url and not _is_production_env():
+        # This only ever fires when someone explicitly configured a database and
+        # it is unreachable -- an unset DATABASE_URL is already sqlite and needs
+        # no fallback. Silently becoming a local file in that case is a
+        # data-shaped failure: the app comes up looking healthy, writes to a
+        # file nobody backs up, and swaps back the next time the real database
+        # answers, taking those writes with it.
+        #
+        # It was previously suppressed by FLASK_ENV=production. Collapsing onto
+        # KUBESIGHT_ENV (A3, 4128a47) is right, but it left this reachable for
+        # anyone using the FLASK_ENV convention -- so the fallback is now opt-in
+        # rather than env-inferred, and says so when it happens.
+        if (
+            database_url != fallback_sqlite_url
+            and not _is_production_env()
+            and _sqlite_fallback_allowed()
+        ):
             try:
                 with create_engine(database_url).connect():
                     pass
             except OperationalError:
+                _app_logger.error(
+                    "configured database is unreachable; falling back to %s "
+                    "because KUBESIGHT_ALLOW_SQLITE_FALLBACK is set. Data "
+                    "written now lives in a local file and will not be visible "
+                    "once the real database returns.",
+                    fallback_sqlite_url,
+                )
                 database_url = fallback_sqlite_url
 
         app.config["SQLALCHEMY_DATABASE_URI"] = database_url
@@ -221,6 +279,15 @@ def create_app(config_object=None) -> Flask:
     )
 
     db.init_app(app)
+
+    # The ambiguity check that stood here is gone with the two definitions it
+    # reconciled: _is_production_env now delegates to the same function, so they
+    # cannot disagree and the check could never fire.
+    #
+    # A3's insertion request. Placed here on purpose: after db.init_app so the
+    # migration-head check has an engine, and before CORS and blueprints so an
+    # unsafe production process refuses before it can register a single route.
+    run_startup_guards(app)
     _configure_cors(app)
     _configure_response_compression(app)
     _configure_access_log_filters()
@@ -233,8 +300,35 @@ def create_app(config_object=None) -> Flask:
 
     with app.app_context():
         if not is_testing:
-            run_migrations()
-            seed_defaults()
+            # Production does none of this to itself on boot.
+            #
+            # It never reshapes its own schema: bringing a database to head is a
+            # deliberate, reversible step an operator takes with a backup in
+            # hand, not a side effect of a pod restarting at 3am. The
+            # migration-head check that used to live here is gone --
+            # run_startup_guards above owns it now, reports it alongside every
+            # other violation rather than only the first, and refuses before a
+            # single route is registered. Two checks would mean two different
+            # messages for one condition.
+            #
+            # It does not reconcile or seed either. reconcile_data() rewrites
+            # permissions -- it is how a release grants system roles a new
+            # capability -- and seed_defaults() creates demo users, the exact
+            # condition one of A3's guards exists to reject. Both are
+            # `python manage.py upgrade`, run deliberately.
+            #
+            # Development keeps doing all of it, because the cost of a wrong
+            # guess there is a restart.
+            if _skip_startup_migration():
+                # Set by processes that must never be the migrator -- the job
+                # worker, which is scaled out, so several would race on the same
+                # upgrade. They verify the head themselves and refuse.
+                pass
+            elif not _is_production_env():
+                upgrade_to_head(app.config["SQLALCHEMY_DATABASE_URI"])
+                apply_legacy_schema()
+                reconcile_data()
+                seed_defaults()
 
     @app.route("/health", methods=["GET"])
     def health():

@@ -61,6 +61,11 @@ export default function EditResourceModal({
   const [deployDiff, setDeployDiff] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Applying edited YAML writes straight to a live namespace, so the operator
+  // names the target back before it runs. The server enforces the same phrase
+  // (deployment_service.expected_apply_confirmation); this is the prompt.
+  const [confirmation, setConfirmation] = useState("");
+  const expectedConfirmation = `APPLY ${namespace || ""}`.trim();
   const [eligibility, setEligibility] = useState(null);
 
   // Editing applies through the deploy pipeline, which a cluster may gate on an
@@ -175,6 +180,7 @@ export default function EditResourceModal({
         // Only Deployments register an inventory app; the backend ignores this
         // for other kinds, but we leave it unset to keep intent clear.
         deploymentName: kind === "deployment" ? resourceName : "",
+        confirmation,
       });
       onSuccess?.();
       onClose();
@@ -297,6 +303,16 @@ export default function EditResourceModal({
             {deployDiff?.hint ? (
               <p className="muted deploy-diff-hint">{deployDiff.hint}</p>
             ) : null}
+            <label>
+              <span>
+                Type <strong>{expectedConfirmation}</strong> to confirm
+              </span>
+              <input
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
+                placeholder={expectedConfirmation}
+              />
+            </label>
             <div className="modal-actions">
               <button type="button" className="btn-text" onClick={() => setStep("edit")}>
                 Back
@@ -304,7 +320,9 @@ export default function EditResourceModal({
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy || approvalBlocked}
+                disabled={
+                  busy || approvalBlocked || confirmation.trim() !== expectedConfirmation
+                }
                 onClick={applyYaml}
               >
                 {busy ? "Applying..." : "Apply to Cluster"}

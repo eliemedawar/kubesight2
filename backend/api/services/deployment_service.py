@@ -570,6 +570,15 @@ def _ensure_namespace(runner: RunKubectlFn, cluster_id: str, namespace: str) -> 
             raise
 
 
+def expected_apply_confirmation(namespace: str) -> str:
+    """The phrase an operator must type to apply raw YAML to a namespace.
+
+    Mirrors `helm_service.expected_confirmation`: naming the target back to the
+    server is what makes "I meant this namespace" checkable rather than assumed.
+    """
+    return f"APPLY {namespace}"
+
+
 def apply_yaml(
     user: Optional[User],
     cluster_id: str,
@@ -596,6 +605,21 @@ def apply_yaml(
             details={"action": "apply"},
         )
         return None, "Forbidden", 403
+
+    expected = expected_apply_confirmation(namespace)
+    if (confirmation or "").strip() != expected:
+        # The parameter was accepted and discarded, so every typed-confirmation
+        # prompt in front of this endpoint was decorative: a wrong phrase still
+        # applied arbitrary manifests to a live namespace. Checked before the
+        # approval gate so a typo fails fast rather than auditing an attempt.
+        log_audit(
+            "deployment_failed",
+            actor=user,
+            target_type="namespace",
+            target_id=f"{cluster_id}/{namespace}",
+            details={"action": "apply", "reason": "confirmation_mismatch"},
+        )
+        return None, f"Confirmation must be exactly: {expected}", 400
 
     # Gate the deploy on an approved deployment request when the cluster requires
     # one. Local import avoids a circular import at module load.

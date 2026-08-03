@@ -63,7 +63,9 @@ export default function RolesPanel({
     }
     onError("");
     try {
-      await deleteRole(role.id);
+      // The confirm above named the affected users, so this is the informed
+      // consent the API's 409 asks for. Without it the delete is refused.
+      await deleteRole(role.id, { force: userCount > 0 });
       await onRolesChanged();
     } catch (err) {
       onError(err.message);

@@ -1,0 +1,430 @@
+/* ═══ Integrations hub — Signal v3 ═══
+   A grid of provider cards grouped by category, and a four-tab detail screen
+   behind each one. The card language deliberately matches the ticketing
+   provider picker (.sg-tk-card) it generalizes: same panel, same hover lift,
+   same status-pill vocabulary — an operator who has used that screen already
+   knows this one. */
+
+.sg-int-hub {
+  min-width: 0;
+}
+
+.sg-int-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+/* One line of triage above the grid. */
+.sg-int-health {
+  margin: 0 0 var(--space-4);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+.sg-int-health.is-warn {
+  color: var(--warn);
+  font-weight: 550;
+}
+
+.sg-int-group {
+  margin-bottom: var(--space-5);
+}
+.sg-int-group-title {
+  margin: 0 0 0.6rem;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--sidebar-section-label);
+}
+
+/* auto-fill, not auto-fit: a category with one integration should show one
+   card-sized card, not one card stretched across the whole column. */
+.sg-int-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
+  gap: var(--space-4);
+}
+
+/* ─── Card ─── */
+.sg-int-card {
+  display: flex;
+  flex-direction: column;
+  /* The global `button` rule centres its content both ways. A card is a block
+     of left-aligned text that happens to be clickable, so both axes are reset
+     here — without this the name, status and detail cluster in the middle. */
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0.6rem;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease), translate var(--dur-fast) var(--ease);
+}
+.sg-int-card:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+  translate: 0 -1px;
+}
+.sg-int-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sg-int-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.sg-int-card-name {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.sg-int-card-name b {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-main);
+}
+.sg-int-card-name .muted {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.sg-int-card-head,
+.sg-int-card-detail,
+.sg-int-card-caps {
+  width: 100%;
+}
+
+.sg-int-card-detail {
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  color: var(--text-subtle);
+  /* Messages come from providers and vary wildly in length; two lines keeps the
+     grid even without truncating anything an operator needs. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.sg-int-card-caps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: auto;
+  padding-top: 0.2rem;
+}
+.sg-int-cap {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.02em;
+  padding: 0.12rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-interactive);
+  color: var(--text-muted);
+}
+.sg-int-cap--more {
+  opacity: 0.75;
+}
+
+/* ─── Detail screen ─── */
+.sg-int-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-4);
+}
+.sg-int-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+/* The shared chevron points right; this one is a back arrow. */
+.sg-int-back-icon {
+  display: inline-flex;
+  rotate: 180deg;
+}
+.sg-int-back-icon svg {
+  width: 14px;
+  height: 14px;
+}
+.sg-int-detail-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-right: auto;
+}
+.sg-int-detail-title h3 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 650;
+  color: var(--text-main);
+}
+
+.sg-int-tabs {
+  display: flex;
+  gap: 0.15rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-4);
+}
+.sg-int-tab {
+  border: 0;
+  background: transparent;
+  padding: 0.5rem 0.85rem;
+  font-size: var(--font-size-sm);
+  font-weight: 550;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.sg-int-tab:hover {
+  color: var(--text-main);
+}
+.sg-int-tab.is-on {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.sg-int-tabpanel {
+  min-width: 0;
+}
+
+/* ─── Overview ─── */
+.sg-int-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  flex-wrap: wrap;
+}
+.sg-int-state-main {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.sg-int-state-msg {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-subtle);
+}
+
+.sg-int-testresult {
+  margin: var(--space-3) 0 0;
+  padding: 0.55rem 0.85rem;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  border: 1px solid var(--border);
+}
+.sg-int-testresult.is-ok {
+  background: var(--ok-soft, var(--bg-interactive));
+  border-color: var(--ok-border, var(--border));
+  color: var(--text-subtle);
+}
+.sg-int-testresult.is-bad {
+  background: var(--danger-soft, var(--bg-interactive));
+  border-color: var(--danger-border, var(--border));
+  color: var(--text-main);
+}
+
+.sg-int-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-4);
+  margin: var(--space-4) 0;
+}
+.sg-int-facts dt {
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+.sg-int-facts dd {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-main);
+  font-weight: 550;
+}
+
+.sg-int-caps-card {
+  padding: var(--space-4);
+}
+.sg-int-caps-card h4 {
+  margin: 0 0 0.6rem;
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+  color: var(--text-main);
+}
+.sg-int-caplist {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: var(--font-size-sm);
+  color: var(--text-subtle);
+}
+
+/* ─── Activity ─── */
+.sg-int-activity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+.sg-int-activity-head p {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.sg-int-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.sg-int-event {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 0.65rem 0.9rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.sg-int-event:first-child {
+  border-top: 0;
+}
+.sg-int-event-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 0.42rem;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: var(--text-muted);
+}
+.sg-int-event.is-ok .sg-int-event-dot {
+  background: var(--ok, #2e7d5b);
+}
+.sg-int-event.is-error .sg-int-event-dot {
+  background: var(--danger, #c0392b);
+}
+.sg-int-event-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+.sg-int-event-title {
+  font-size: var(--font-size-sm);
+  color: var(--text-main);
+}
+.sg-int-event-detail {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  word-break: break-word;
+}
+.sg-int-event-when {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex: none;
+}
+
+/* ─── Used by ─── */
+.sg-int-usedby p {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-sm);
+}
+.sg-int-usedby-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.sg-int-usedby-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.6rem 0.9rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.sg-int-usedby-label {
+  font-size: var(--font-size-sm);
+  font-weight: 550;
+  color: var(--text-main);
+}
+.sg-int-usedby-detail {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* ─── Configuration hand-offs ─── */
+.sg-int-handoff {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+.sg-int-handoff h4 {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+  color: var(--text-main);
+}
+.sg-int-handoff p {
+  margin: 0;
+  max-width: 64ch;
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+.sg-int-readonly {
+  margin-top: var(--space-3);
+}
+.sg-int-crosslink {
+  margin-top: var(--space-4);
+  font-size: var(--font-size-sm);
+}
+
+@media (max-width: 720px) {
+  .sg-int-grid {
+    grid-template-columns: 1fr;
+  }
+  .sg-int-tabs {
+    overflow-x: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sg-int-card {
+    transition: none;
+  }
+  .sg-int-card:hover {
+    translate: none;
+  }
+}

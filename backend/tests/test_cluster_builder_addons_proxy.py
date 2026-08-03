@@ -194,6 +194,14 @@ def reset_ssh_transport():
     set_transport_factory(None)
 
 
+@pytest.fixture(autouse=True)
+def dedicated_credential_encryption_key(monkeypatch):
+    monkeypatch.setenv(
+        "ALERT_ROUTING_SECRET_KEY",
+        "cluster-builder-test-encryption-key-32chars",
+    )
+
+
 @pytest.fixture()
 def ssh_profile(app):
     credential = ssh_profile_service.create_credential(
@@ -986,7 +994,6 @@ class TestImageAndForwardProxy:
         self, client, admin_token, monkeypatch
     ):
         monkeypatch.delenv("ALERT_ROUTING_SECRET_KEY", raising=False)
-        monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
         response = client.post(
             "/api/build-profiles",
             json={
