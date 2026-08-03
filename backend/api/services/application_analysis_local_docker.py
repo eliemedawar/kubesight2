@@ -12,6 +12,22 @@ from pathlib import Path
 _cancelled: set[str] = set()
 _cancel_lock = threading.Lock()
 
+_WORKER_ENV_DEFAULTS = {
+    "APPLICATION_ANALYSIS_HERMES_QUICK_FILE_LIMIT": "40",
+    "APPLICATION_ANALYSIS_HERMES_DEEP_FILE_LIMIT": "500",
+    "APPLICATION_ANALYSIS_HERMES_FILE_BYTES": "65536",
+    "APPLICATION_ANALYSIS_HERMES_CONTENT_BYTES": "2000000",
+    "APPLICATION_ANALYSIS_SCANNER_OUTPUT_MAX_BYTES": "20000000",
+    "TRIVY_CACHE_DIR": "/tmp/trivy-cache",
+}
+
+
+def _worker_env_args() -> list[str]:
+    args: list[str] = []
+    for name, default in _WORKER_ENV_DEFAULTS.items():
+        args.extend(["-e", f"{name}={os.getenv(name, default)}"])
+    return args
+
 
 class LocalDockerLaunchError(RuntimeError):
     pass
@@ -110,7 +126,7 @@ def _run_build_verified_pipeline(
         "--user",
         "65532:65532",
         "--tmpfs",
-        "/tmp:rw,noexec,nosuid,nodev,size=256m,uid=65532,gid=65532",
+        f"/tmp:rw,noexec,nosuid,nodev,size={os.getenv('APPLICATION_ANALYSIS_TMP_LIMIT', '1g')},uid=65532,gid=65532",
         "--mount",
         f"type=bind,source={workspace_dir},target=/workspace",
         "-e",
@@ -125,6 +141,7 @@ def _run_build_verified_pipeline(
         f"ANALYSIS_MODE={analysis_mode}",
         "-e",
         f"ANALYSIS_SUBDIRECTORY={subdirectory}",
+        *_worker_env_args(),
     ]
     try:
         checkout_name = f"{root_name}-checkout"
@@ -391,7 +408,7 @@ def launch(
         "--user",
         "65532:65532",
         "--tmpfs",
-        "/tmp:rw,noexec,nosuid,nodev,size=256m,uid=65532,gid=65532",
+        f"/tmp:rw,noexec,nosuid,nodev,size={os.getenv('APPLICATION_ANALYSIS_TMP_LIMIT', '1g')},uid=65532,gid=65532",
         "--tmpfs",
         "/workspace:rw,nosuid,nodev,size=2g,uid=65532,gid=65532",
         "--mount",
@@ -412,6 +429,7 @@ def launch(
         f"ANALYSIS_REVISION={revision}",
         "-e",
         f"ANALYSIS_SUBDIRECTORY={subdirectory}",
+        *_worker_env_args(),
         "-e",
         f"ANALYSIS_REPOSITORY_CREDENTIAL_TYPE={repository_credential_type}",
         "-e",

@@ -166,6 +166,9 @@ adapters for Semgrep, Trivy, Syft, and Hadolint. An unavailable or failed scanne
 becomes a safe warning; remaining evidence can complete as **Completed With
 Warnings**. The worker image must place enabled scanners on `PATH`. Scanner name,
 version, times, exit status, and redacted warning are stored.
+`Dockerfile.application-worker` and its local-development variant include pinned
+Semgrep, Trivy, Syft, and Hadolint releases. Rebuild the worker whenever those
+pins change; do not substitute floating `latest` scanner tags in production.
 
 Relevant environment:
 
@@ -178,7 +181,26 @@ Relevant environment:
 | `APPLICATION_ANALYSIS_CPU_LIMIT` | `2` |
 | `APPLICATION_ANALYSIS_MEMORY_LIMIT` | `4Gi` |
 | `APPLICATION_ANALYSIS_EPHEMERAL_LIMIT` | `2Gi` |
+| `APPLICATION_ANALYSIS_TMP_LIMIT` | `1Gi`; writable scanner cache and temporary data |
 | `APPLICATION_ANALYSIS_DEADLINE_SECONDS` | `1800` |
+| `APPLICATION_ANALYSIS_JOB_TTL_SECONDS` | `900` |
+| `APPLICATION_ANALYSIS_MAX_FILES` | `12000`; checkout/discovery safety limit |
+| `APPLICATION_ANALYSIS_MAX_FILE_BYTES` | `1048576` |
+| `APPLICATION_ANALYSIS_MAX_REPOSITORY_BYTES` | `524288000` |
+| `APPLICATION_ANALYSIS_HERMES_QUICK_FILE_LIMIT` | `40` |
+| `APPLICATION_ANALYSIS_HERMES_DEEP_FILE_LIMIT` | `500`; also used by Build Verified |
+| `APPLICATION_ANALYSIS_HERMES_FILE_BYTES` | `65536` per file sent to Hermes |
+| `APPLICATION_ANALYSIS_HERMES_CONTENT_BYTES` | `2000000` total repository content sent to Hermes |
+| `APPLICATION_ANALYSIS_SCANNER_OUTPUT_MAX_BYTES` | `20000000` per scanner |
+| `HERMES_API_URL` | Required server-side Hermes endpoint |
+| `HERMES_API_TOKEN` | Required server-side token; never sent to the frontend |
+| `HERMES_APPLICATION_MODEL` | Hermes API model name; typically `hermes-agent` |
+| `HERMES_ALLOW_LOCAL_HTTP` | Development-only opt-in for an HTTP endpoint whose hostname is loopback |
+| `HERMES_SERVICE_NAMESPACE` | Optional explicit namespace for an in-cluster Hermes endpoint; normally derived from its `.svc` URL |
+| `HERMES_SERVICE_PORT` | Optional explicit Hermes service port; normally derived from the URL |
+| `APPLICATION_ANALYSIS_HERMES_TIMEOUT_SECONDS` | End-to-end Hermes request timeout; default `180` |
+| `APPLICATION_ANALYSIS_HERMES_MAX_BYTES` | Maximum request size sent to Hermes; default `4000000` |
+| `APPLICATION_ANALYSIS_HERMES_RESPONSE_MAX_BYTES` | Maximum Hermes response size; default `4000000` |
 | `APPLICATION_BUILD_CPU_LIMIT` | `2` |
 | `APPLICATION_BUILD_MEMORY_LIMIT` | `4Gi` |
 | `APPLICATION_BUILD_COMMAND_TIMEOUT_SECONDS` | `600` |
@@ -206,19 +228,6 @@ reach the loopback-only Hermes Compose service, and calls the host backend via
 `APPLICATION_ANALYSIS_LOCAL_CALLBACK_URL`. Production continues to use the
 default `kubernetes` execution mode and the namespace/RBAC resources in
 `k8s/application-analysis-worker.yaml`.
-| `APPLICATION_ANALYSIS_JOB_TTL_SECONDS` | `900` |
-| `APPLICATION_ANALYSIS_MAX_FILES` | `12000` |
-| `APPLICATION_ANALYSIS_MAX_FILE_BYTES` | `1048576` |
-| `APPLICATION_ANALYSIS_MAX_REPOSITORY_BYTES` | `524288000` |
-| `HERMES_API_URL` | Required server-side Hermes endpoint |
-| `HERMES_API_TOKEN` | Required server-side token; never sent to the frontend |
-| `HERMES_APPLICATION_MODEL` | Hermes API model name; typically `hermes-agent` |
-| `HERMES_ALLOW_LOCAL_HTTP` | Development-only opt-in for an HTTP endpoint whose hostname is loopback |
-| `HERMES_SERVICE_NAMESPACE` | Optional explicit namespace for an in-cluster Hermes endpoint; normally derived from its `.svc` URL |
-| `HERMES_SERVICE_PORT` | Optional explicit Hermes service port; normally derived from the URL |
-| `APPLICATION_ANALYSIS_HERMES_TIMEOUT_SECONDS` | End-to-end Hermes request timeout; default `180` |
-| `APPLICATION_ANALYSIS_HERMES_MAX_BYTES` | Maximum request size sent to Hermes; default `4000000` |
-| `APPLICATION_ANALYSIS_HERMES_RESPONSE_MAX_BYTES` | Maximum Hermes response size; default `4000000` |
 
 Apply [k8s/application-analysis-worker.yaml](k8s/application-analysis-worker.yaml)
 after adapting the launcher RoleBinding ServiceAccount name/namespace.

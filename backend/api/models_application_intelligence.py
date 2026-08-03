@@ -235,6 +235,12 @@ class ApplicationCommunication(db.Model):
     direction = db.Column(db.String(16), nullable=True)
     endpoint = db.Column(db.String(1024), nullable=True)
     configuration_key = db.Column(db.String(255), nullable=True)
+    # A broker edge also has a direction of *data* flow, which the wire facts
+    # above do not carry: the connection is dialled outbound either way, while
+    # the service may publish, consume, or both. Topics are the named channels
+    # the role acts on, each with the file that proved it.
+    messaging_role = db.Column(db.String(32), nullable=True)
+    topics = db.Column(db.JSON, nullable=True)
     required = db.Column(db.Boolean, nullable=False, default=True)
     evidence = db.Column(db.Text, nullable=True)
     file_path = db.Column(db.String(1024), nullable=True)

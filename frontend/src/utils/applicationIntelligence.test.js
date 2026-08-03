@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   coverageTone,
   isAnalysisActive,
+  normalizeDisplayList,
   normalizeDropdownNames,
+  revisionForReanalysis,
   riskLevelTone,
   sortFindings,
   validateApplicationForm,
@@ -79,5 +81,24 @@ describe("Application Intelligence form and status", () => {
       "production",
     ]);
     expect(normalizeDropdownNames({ items: "invalid" })).toEqual([]);
+  });
+
+  it("normalizes a legacy scalar narrative into a renderable list", () => {
+    expect(normalizeDisplayList("One primary risk")).toEqual(["One primary risk"]);
+    expect(normalizeDisplayList(["One", "Two"])).toEqual(["One", "Two"]);
+    expect(normalizeDisplayList(null)).toEqual([]);
+  });
+
+  it("reanalyzes the viewed branch, tag, or commit instead of the app default", () => {
+    const application = { defaultBranch: "1.1.0" };
+    expect(revisionForReanalysis(
+      { requestedRevision: "2.9.0", branch: "2.9.0" },
+      application,
+    )).toBe("2.9.0");
+    expect(revisionForReanalysis(
+      { requestedRevision: "", branch: "release/2026" },
+      application,
+    )).toBe("release/2026");
+    expect(revisionForReanalysis({}, application)).toBe("1.1.0");
   });
 });

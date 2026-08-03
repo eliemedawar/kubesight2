@@ -111,9 +111,20 @@ def _selected_file_evidence(root: Path, discovery: dict) -> tuple[list[dict], di
     the result rather than a silent implementation detail.
     """
     mode = os.getenv("ANALYSIS_MODE", "Quick")
-    default_file_limit = "40" if mode == "Quick" else "120"
+    # Quick stays deliberately small for latency. Deep and Build Verified use
+    # a much wider bounded slice so ordinary service repositories are normally
+    # reviewed in full; byte limits still protect the Hermes request size.
+    default_file_limit = "40" if mode == "Quick" else "500"
+    mode_file_limit = (
+        "APPLICATION_ANALYSIS_HERMES_QUICK_FILE_LIMIT"
+        if mode == "Quick"
+        else "APPLICATION_ANALYSIS_HERMES_DEEP_FILE_LIMIT"
+    )
     max_files = int(
-        os.getenv("APPLICATION_ANALYSIS_HERMES_FILE_LIMIT", default_file_limit)
+        os.getenv(
+            mode_file_limit,
+            os.getenv("APPLICATION_ANALYSIS_HERMES_FILE_LIMIT", default_file_limit),
+        )
     )
     max_file_bytes = int(os.getenv("APPLICATION_ANALYSIS_HERMES_FILE_BYTES", "65536"))
     max_total_bytes = int(
@@ -370,6 +381,11 @@ def main() -> int:
                         "port": item.get("port"),
                         "endpoint": item.get("endpoint"),
                         "configuration_key": item.get("configuration_key"),
+                        # The connection is dialled outbound either way; whether
+                        # the service publishes or consumes is a separate fact,
+                        # read from the client usage rather than from the model.
+                        "messaging_role": item.get("messaging_role"),
+                        "topics": item.get("topics"),
                         "direction": "Outbound",
                         "required": True,
                         "confidence": "Confirmed",
@@ -382,6 +398,12 @@ def main() -> int:
                 continue
             for field in ("protocol", "port", "endpoint", "configuration_key"):
                 if item.get(field) and not existing.get(field):
+                    existing[field] = item[field]
+            # Whether the service publishes or consumes, and the topics it names,
+            # are read from the client usage in source. They replace whatever the
+            # model said about the same broker rather than backfilling it.
+            for field in ("messaging_role", "topics"):
+                if item.get(field):
                     existing[field] = item[field]
             if item.get("evidence") and not existing.get("evidence"):
                 existing["evidence"] = item["evidence"]

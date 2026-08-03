@@ -12,6 +12,23 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 
+_WORKER_ENV_DEFAULTS = {
+    "APPLICATION_ANALYSIS_HERMES_QUICK_FILE_LIMIT": "40",
+    "APPLICATION_ANALYSIS_HERMES_DEEP_FILE_LIMIT": "500",
+    "APPLICATION_ANALYSIS_HERMES_FILE_BYTES": "65536",
+    "APPLICATION_ANALYSIS_HERMES_CONTENT_BYTES": "2000000",
+    "APPLICATION_ANALYSIS_SCANNER_OUTPUT_MAX_BYTES": "20000000",
+    "TRIVY_CACHE_DIR": "/tmp/trivy-cache",
+}
+
+
+def _worker_tuning_env() -> list[dict]:
+    return [
+        {"name": name, "value": os.getenv(name, default)}
+        for name, default in _WORKER_ENV_DEFAULTS.items()
+    ]
+
+
 @dataclass(frozen=True)
 class JobLaunch:
     job_name: str
@@ -194,7 +211,14 @@ def build_job_resources(
                                 )
                             },
                         },
-                        {"name": "tmp", "emptyDir": {"sizeLimit": "256Mi"}},
+                        {
+                            "name": "tmp",
+                            "emptyDir": {
+                                "sizeLimit": os.getenv(
+                                    "APPLICATION_ANALYSIS_TMP_LIMIT", "1Gi"
+                                )
+                            },
+                        },
                     ],
                     "initContainers": [
                         {
@@ -380,6 +404,7 @@ def build_job_resources(
                                         "HERMES_APPLICATION_MODEL", "hermes-analysis"
                                     ),
                                 },
+                                *_worker_tuning_env(),
                                 *proxy_env,
                             ],
                             "resources": {

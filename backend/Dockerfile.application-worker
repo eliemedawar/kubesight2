@@ -1,3 +1,7 @@
+FROM aquasec/trivy:0.70.0 AS trivy
+FROM anchore/syft:v1.44.0 AS syft
+FROM hadolint/hadolint:v2.14.0-debian AS hadolint
+
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
@@ -6,7 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         default-jdk-headless \
@@ -20,6 +25,18 @@ RUN apt-get update \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+ARG SEMGREP_VERSION=1.164.0
+ENV PATH=/opt/semgrep/bin:$PATH \
+    TRIVY_CACHE_DIR=/tmp/trivy-cache
+RUN python -m venv /opt/semgrep \
+    && /opt/semgrep/bin/pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}"
+
+# Pin deterministic scanners in the same isolated worker image. These stages
+# contain the vendors' release binaries; no Docker socket is exposed at run time.
+COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
+COPY --from=syft /syft /usr/local/bin/syft
+COPY --from=hadolint /bin/hadolint /usr/local/bin/hadolint
 
 COPY . .
 

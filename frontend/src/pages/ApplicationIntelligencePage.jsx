@@ -42,8 +42,10 @@ import {
   formatTimestamp,
   humanizeKey,
   isAnalysisActive,
+  normalizeDisplayList,
   normalizeDropdownNames,
   producedResult,
+  revisionForReanalysis,
   riskLevelTone,
   severityTone,
   shortCommit,
@@ -221,10 +223,11 @@ function DetailGrid({ source, compact = false, empty = "No evidence recorded." }
 }
 
 function BulletList({ items, tone = "" }) {
-  if (!items?.length) return null;
+  const safeItems = normalizeDisplayList(items);
+  if (!safeItems.length) return null;
   return (
     <ul className={`ai-bullets ${tone}`}>
-      {items.map((item, index) => <li key={index}>{String(item)}</li>)}
+      {safeItems.map((item, index) => <li key={index}>{String(item)}</li>)}
     </ul>
   );
 }
@@ -1158,6 +1161,87 @@ function edgeWireLabel(protocol, port) {
   return wire ? wire.toUpperCase() : "";
 }
 
+/**
+ * Which way messages move on a broker edge.
+ *
+ * The connection itself is dialled outbound either way — a consumer still opens
+ * the socket — so the data-flow role sits beside the direction instead of
+ * replacing it. A broker whose role the repository never states shows nothing
+ * here rather than a guess.
+ */
+function messagingFlows(role) {
+  const value = String(role || "");
+  return [
+    /producer/i.test(value) ? { tone: "produce", label: "produces" } : null,
+    /consumer/i.test(value) ? { tone: "consume", label: "consumes" } : null,
+  ].filter(Boolean);
+}
+
+function MessagingFlow({ role }) {
+  const flows = messagingFlows(role);
+  if (!flows.length) return null;
+  return (
+    <span className="ai-flow-row">
+      {flows.map((flow) => (
+        <span key={flow.tone} className={`ai-flow ai-flow--${flow.tone}`}>
+          {flow.tone === "consume" ? "←" : "→"} {flow.label}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** Kafka names them topics; AMQP and JMS name the same field differently. */
+function channelLabel(topics) {
+  const kinds = new Set((topics || []).map((topic) => topic.kind || "topic"));
+  if (kinds.size !== 1) return "Channels";
+  const [kind] = [...kinds];
+  if (kind === "queue") return "Queues";
+  return kind === "destination" ? "Destinations" : "Topics";
+}
+
+/**
+ * The named channels a broker edge acts on, each with its direction.
+ *
+ * A name is shown exactly as the repository writes it: a literal, a `${…}`
+ * property when the value is resolved at deploy time, or the variable itself
+ * when its value is assigned somewhere the analysis cannot read. Where the
+ * repository also declares the property's value, that value is shown beside it.
+ */
+function TopicList({ topics, showLocation = false }) {
+  if (!topics?.length) return null;
+  return (
+    <ul className="ai-topics">
+      {topics.map((topic, index) => {
+        const consumes = topic.role === "Consumer";
+        return (
+          <li key={`${topic.role}-${topic.name}-${index}`}>
+            <span className={`ai-flow ai-flow--${consumes ? "consume" : "produce"}`}>
+              {consumes ? "← consumes" : "→ produces"}
+            </span>
+            <code>{topic.name}</code>
+            {topic.resolved ? (
+              <small>
+                {topic.configurationKey ? `${topic.configurationKey} = ` : ""}
+                {topic.resolved}
+              </small>
+            ) : topic.configurationKey ? (
+              <small>resolved at deploy time</small>
+            ) : topic.variable && topic.variable !== topic.name ? (
+              <small>via {topic.variable}</small>
+            ) : null}
+            {showLocation && topic.file ? (
+              <small>
+                <code>{topic.file}{topic.line ? `:${topic.line}` : ""}</code>
+              </small>
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 /** Adapt source-topology rows to the shared TopologyViewer node/edge shape. */
 function toSourceGraph(topology) {
   const nodes = (topology?.nodes || []).map((node, index) => ({
@@ -1174,8 +1258,12 @@ function toSourceGraph(topology) {
       sourceNodeId: edge.source,
       targetNodeId: edge.destination,
       protocol: edgeWireLabel(edge.protocol, edge.port) || edge.destinationType || "",
-      description: [edge.confidence, edge.required ? "required" : "optional"]
-        .filter(Boolean).join(" · "),
+      // Each line of a description stacks under the edge label, so the message
+      // flow reads on the diagram without crowding the wire label.
+      description: [
+        messagingFlows(edge.messagingRole).map((flow) => flow.label).join(" and "),
+        [edge.confidence, edge.required ? "required" : "optional"].filter(Boolean).join(" · "),
+      ].filter(Boolean).join("\n"),
     }));
   return { nodes, edges };
 }
@@ -1218,6 +1306,13 @@ function AbsentValue({ configurationKey }) {
   return <span className="muted">not stated</span>;
 }
 
+/** The endpoint worth printing: not the topic names the row already lists. */
+function endpointText(edge) {
+  const endpoint = String(edge.endpoint || "");
+  const names = (edge.topics || []).map((topic) => topic.name).join(", ");
+  return endpoint && endpoint !== names ? endpoint : "";
+}
+
 function CommunicationsTable({ edges, onSelect, selectedId }) {
   const missingPorts = edges.filter((edge) => !edge.port);
   const externalized = missingPorts.filter((edge) => edge.configurationKey).length;
@@ -1251,8 +1346,17 @@ function CommunicationsTable({ edges, onSelect, selectedId }) {
                     ? <code>{edge.port}</code>
                     : <AbsentValue configurationKey={edge.configurationKey} />}
                 </td>
-                <td>{edge.direction || "Outbound"}</td>
-                <td className="ai-cell-path">{edge.endpoint ? <code>{edge.endpoint}</code> : "—"}</td>
+                <td>
+                  {edge.direction || "Outbound"}
+                  <MessagingFlow role={edge.messagingRole} />
+                </td>
+                <td className="ai-cell-path">
+                  {/* Topics carry their own direction, so the joined-name form
+                      the endpoint falls back to would only repeat them. */}
+                  {endpointText(edge) ? <code>{endpointText(edge)}</code> : null}
+                  <TopicList topics={edge.topics} />
+                  {!endpointText(edge) && !edge.topics?.length ? "—" : null}
+                </td>
                 <td>{edge.confidence}</td>
               </tr>
             ))}
@@ -1336,6 +1440,18 @@ function Architecture({ summary, topology, runtime }) {
                           <dd><code>{selected.configurationKey}</code></dd>
                         </div>
                       ) : null}
+                      {selected.messagingRole ? (
+                        <div>
+                          <dt>Message flow</dt>
+                          <dd><MessagingFlow role={selected.messagingRole} /></dd>
+                        </div>
+                      ) : null}
+                      {selected.topics?.length ? (
+                        <div>
+                          <dt>{channelLabel(selected.topics)}</dt>
+                          <dd><TopicList topics={selected.topics} showLocation /></dd>
+                        </div>
+                      ) : null}
                       <div><dt>Confidence</dt><dd>{selected.confidence}</dd></div>
                       <div><dt>Evidence state</dt><dd>{selected.evidenceState}</dd></div>
                       <div><dt>Required</dt><dd>{selected.required ? "Yes" : "No"}</dd></div>
@@ -1387,6 +1503,8 @@ function Overview({ analysis, application, artifacts }) {
   const build = profile.build_verification;
   delete profile.build_verification;
   const risk = result.risk_summary || {};
+  const riskNarrative = typeof risk.summary === "string" ? risk.summary.trim() : "";
+  const legacyOverallRisk = typeof risk.overall_risk === "string" ? risk.overall_risk.trim() : "";
   // Only KubeSight's own build stage may speak to build outcome. Analyses
   // recorded before that rule was enforced can still carry the model's claim.
   const { build_verified: _ignoredBuildClaim, ...operational } = result.operational_readiness || {};
@@ -1491,8 +1609,9 @@ function Overview({ analysis, application, artifacts }) {
           <DetailGrid source={profile} />
         </Section>
         <Section title="Risk summary" description="Hermes assessment, shown separately from the counted posture above.">
-          {risk.overall_risk ? (
-            <p className="ai-inline-fact"><span>Hermes overall risk</span><strong>{risk.overall_risk}</strong></p>
+          {riskNarrative ? <p>{riskNarrative}</p> : null}
+          {legacyOverallRisk ? (
+            <p className="ai-inline-fact"><span>Hermes overall risk</span><strong>{legacyOverallRisk}</strong></p>
           ) : null}
           {risk.primary_risks?.length ? (
             <>
@@ -1506,7 +1625,9 @@ function Overview({ analysis, application, artifacts }) {
               <BulletList items={risk.positive_controls} tone="ai-bullets--ok" />
             </>
           ) : null}
-          {!risk.overall_risk && !risk.primary_risks?.length ? <p className="muted">No risk summary was returned.</p> : null}
+          {!riskNarrative && !legacyOverallRisk && !risk.primary_risks?.length && !risk.positive_controls?.length
+            ? <p className="muted">No risk summary was returned.</p>
+            : null}
         </Section>
       </div>
 
@@ -2517,7 +2638,7 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
           onAnalyze={async (analysisMode) => {
             const next = await requestApplicationAnalysis(selected.id, {
               analysisMode,
-              revision: selected.defaultBranch,
+              revision: revisionForReanalysis(analysis, selected),
             });
             await loadList();
             await loadDetail(selected.id, next.id);

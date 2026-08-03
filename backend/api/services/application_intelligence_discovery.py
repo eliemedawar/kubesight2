@@ -78,15 +78,10 @@ URI_SCHEME_TECHNOLOGY = {
 }
 # Integration clients declared in source. A service that externalizes its
 # configuration (Spring Cloud Config, ConfigMaps, deploy-time environment) has
-# no broker address in the repository at all, but the client usage is still
-# right there in the code — this is what "it talks to Kafka" looks like on disk.
+# no address in the repository at all, but the client usage is still right there
+# in the code — this is what "it talks to Redis" looks like on disk. Message
+# brokers are handled separately below, because their edge carries a direction.
 SOURCE_INTEGRATION_MARKERS = (
-    (re.compile(r"@KafkaListener|@KafkaHandler|@EnableKafka|KafkaTemplate|KafkaProducer|KafkaConsumer|ProducerFactory|ConsumerFactory"),
-     ("Apache Kafka", "Message broker", "Kafka")),
-    (re.compile(r"@RabbitListener|RabbitTemplate|AmqpTemplate|ConnectionFactory\s*\(\s*[\"']amqp"),
-     ("RabbitMQ/AMQP broker", "Message broker", "AMQP")),
-    (re.compile(r"@JmsListener|JmsTemplate|ActiveMQConnectionFactory"),
-     ("ActiveMQ/JMS broker", "Message broker", "JMS")),
     (re.compile(r"RedisTemplate|StringRedisTemplate|JedisPool|LettuceConnectionFactory"),
      ("Redis", "Cache", "Redis")),
     (re.compile(r"MongoTemplate|MongoRepository|ReactiveMongoTemplate"),
@@ -94,11 +89,195 @@ SOURCE_INTEGRATION_MARKERS = (
     (re.compile(r"ElasticsearchRepository|RestHighLevelClient|ElasticsearchClient"),
      ("Elasticsearch", "Search engine", "HTTP")),
 )
-# Topic/queue names make the broker edge concrete for a reviewer.
-TOPIC_NAME_PATTERN = re.compile(
-    r"(?:topics|queues|destination)\s*=\s*[\{\s]*[\"']([\w.\-${}]+)[\"']"
-)
 SOURCE_SCAN_SUFFIXES = {".java", ".kt", ".py", ".js", ".ts", ".cs", ".go", ".rb", ".php"}
+
+# ------------------------------------------------------------------- messaging
+# A broker edge carries a direction that wire facts do not. "This service talks
+# to Kafka" leaves a reviewer unable to tell a pipeline's producer from its
+# consumer, and it hides the one identifier that makes the edge actionable: the
+# topic. Both are read from the client usage itself, per role, and aggregated
+# across the whole scan — publishing and listening rarely live in one file.
+KAFKA_TECHNOLOGY = ("Apache Kafka", "Message broker", "Kafka")
+AMQP_TECHNOLOGY = ("RabbitMQ/AMQP broker", "Message broker", "AMQP")
+JMS_TECHNOLOGY = ("ActiveMQ/JMS broker", "Message broker", "JMS")
+MAX_MESSAGING_TOPICS = int(os.getenv("APPLICATION_ANALYSIS_MAX_TOPICS", "12"))
+
+# One topic expression as it is written where it is used. Call arguments and
+# annotation attributes take different shapes, and keeping them apart is what
+# stops an unrelated quoted value inside a client's options object (`messages:
+# [{ value: "…" }]`) from being read as a topic.
+_QUOTED = r"[\"'][^\"'\r\n]{1,200}[\"']"
+_IDENTIFIER = r"[A-Za-z_$][\w.$]{0,80}"
+_QUOTED_LIST = rf"{_QUOTED}(?:\s*,\s*{_QUOTED})*"
+_ARGUMENT_VALUE = (
+    rf"(?P<value>{_QUOTED_LIST}"
+    rf"|\[[^\[\]]{{0,300}}\]"
+    rf"|{_IDENTIFIER}\s*\([^()]{{0,300}}\)"
+    rf"|{_IDENTIFIER})"
+)
+# `topics = {"a", "b"}` — a Java annotation array.
+_ANNOTATION_VALUE = (
+    rf"(?P<value>{_QUOTED_LIST}"
+    rf"|\{{[^{{}}]{{0,300}}\}}"
+    rf"|{_IDENTIFIER}\s*\([^()]{{0,300}}\)"
+    rf"|{_IDENTIFIER})"
+)
+# An annotation body nests one level (`@KafkaListener(topicPartitions =
+# @TopicPartition(...))`), where a plain `[^)]*` would stop at the inner
+# bracket and miss the attribute that follows it.
+_ANNOTATION_BODY = r"(?:[^()]|\([^()]*\))*?"
+# A client options object nests too: `{ topic: t, messages: [{ value: v }] }`.
+_OBJECT_BODY = r"(?:[^{}]|\{[^{}]{0,300}\}){0,400}?"
+
+KAFKA_TOPIC_PATTERNS = {
+    "Consumer": (
+        re.compile(
+            rf"@KafkaListener\s*\({_ANNOTATION_BODY}\b(?:topics|topicPattern)\s*=\s*{_ANNOTATION_VALUE}",
+            re.DOTALL,
+        ),
+        re.compile(
+            rf"@TopicPartition\s*\({_ANNOTATION_BODY}\btopic\s*=\s*{_ANNOTATION_VALUE}", re.DOTALL
+        ),
+        # kafkajs: `consumer.subscribe({ topic: "orders", fromBeginning: true })`.
+        re.compile(
+            rf"\.\s*subscribe\s*\(\s*\{{{_OBJECT_BODY}\btopics?\s*:\s*{_ARGUMENT_VALUE}", re.DOTALL
+        ),
+        # `consumer.subscribe(Arrays.asList(TOPIC))`, `.subscribe(["orders"])`.
+        re.compile(rf"\.\s*subscribe\s*\(\s*{_ARGUMENT_VALUE}", re.DOTALL),
+        # kafka-python takes its topics as the leading positional arguments.
+        re.compile(rf"KafkaConsumer\s*\(\s*(?P<value>{_QUOTED_LIST})"),
+    ),
+    "Producer": (
+        re.compile(
+            rf"\.\s*send(?:Batch)?\s*\(\s*\{{{_OBJECT_BODY}\btopics?\s*:\s*{_ARGUMENT_VALUE}",
+            re.DOTALL,
+        ),
+        re.compile(
+            rf"[\w.]*(?:[Kk]afka|[Tt]emplate|[Pp]roducer)[\w.]*\s*\.\s*send\s*\(\s*{_ARGUMENT_VALUE}",
+            re.DOTALL,
+        ),
+        re.compile(rf"new\s+ProducerRecord\s*(?:<[^<>]*>)?\s*\(\s*{_ARGUMENT_VALUE}", re.DOTALL),
+        re.compile(rf"@SendTo\s*\(\s*{_ANNOTATION_VALUE}"),
+    ),
+}
+AMQP_TOPIC_PATTERNS = {
+    "Consumer": (
+        re.compile(
+            rf"@RabbitListener\s*\({_ANNOTATION_BODY}\b(?:queues|queuesToDeclare)\s*=\s*{_ANNOTATION_VALUE}",
+            re.DOTALL,
+        ),
+    ),
+    "Producer": (
+        re.compile(rf"convertAndSend\s*\(\s*{_ARGUMENT_VALUE}", re.DOTALL),
+        re.compile(rf"basicPublish\s*\(\s*{_ARGUMENT_VALUE}", re.DOTALL),
+    ),
+}
+JMS_TOPIC_PATTERNS = {
+    "Consumer": (
+        re.compile(
+            rf"@JmsListener\s*\({_ANNOTATION_BODY}\b(?:destination|destinations)\s*=\s*{_ANNOTATION_VALUE}",
+            re.DOTALL,
+        ),
+    ),
+    "Producer": (
+        re.compile(rf"convertAndSend\s*\(\s*{_ARGUMENT_VALUE}", re.DOTALL),
+        re.compile(rf"createProducer\s*\(\s*{_ARGUMENT_VALUE}", re.DOTALL),
+    ),
+}
+# `client` proves the dependency even where the role is unclear; `roles` is what
+# separates a producer from a consumer. Topic patterns run only for a role the
+# same file already proved, so a generic `.subscribe(` or `.send(` from an
+# unrelated library can never invent a topic.
+MESSAGING_CLIENTS = (
+    {
+        "technology": KAFKA_TECHNOLOGY,
+        "channel": "topic",
+        "client": re.compile(
+            r"@Kafka(?:Listener|Listeners|Handler)\b|@EnableKafka\b"
+            r"|Kafka(?:Template|Producer|Consumer|Admin)\b"
+            r"|(?:Producer|Consumer)Factory\b|ProducerRecord\b|new\s+Kafka\s*\("
+            r"|[\w.]*[Kk]afka[\w.]*\s*\.\s*(?:producer|consumer)\s*\("
+        ),
+        "roles": (
+            (
+                "Consumer",
+                re.compile(
+                    r"@Kafka(?:Listener|Listeners|Handler)\b|@EnableKafka\b|KafkaConsumer\b"
+                    r"|ConsumerFactory\b|[\w.]*[Kk]afka[\w.]*\s*\.\s*consumer\s*\("
+                ),
+            ),
+            (
+                "Producer",
+                re.compile(
+                    r"Kafka(?:Template|Producer)\b|ProducerFactory\b|ProducerRecord\b|@SendTo\b"
+                    r"|[\w.]*[Kk]afka[\w.]*\s*\.\s*producer\s*\("
+                ),
+            ),
+        ),
+        "topics": KAFKA_TOPIC_PATTERNS,
+    },
+    {
+        "technology": AMQP_TECHNOLOGY,
+        "channel": "queue",
+        "client": re.compile(
+            r"@RabbitListener\b|RabbitTemplate\b|AmqpTemplate\b|basicPublish\b|basicConsume\b"
+            r"|ConnectionFactory\s*\(\s*[\"']amqp"
+        ),
+        "roles": (
+            ("Consumer", re.compile(r"@RabbitListener\b|basicConsume\b")),
+            ("Producer", re.compile(r"RabbitTemplate\b|AmqpTemplate\b|basicPublish\b")),
+        ),
+        "topics": AMQP_TOPIC_PATTERNS,
+    },
+    {
+        "technology": JMS_TECHNOLOGY,
+        "channel": "destination",
+        "client": re.compile(
+            r"@JmsListener\b|JmsTemplate\b|ActiveMQConnectionFactory\b"
+            r"|create(?:Producer|Consumer)\s*\("
+        ),
+        "roles": (
+            ("Consumer", re.compile(r"@JmsListener\b|createConsumer\s*\(")),
+            ("Producer", re.compile(r"JmsTemplate\b|createProducer\s*\(")),
+        ),
+        "topics": JMS_TOPIC_PATTERNS,
+    },
+)
+# `send(topic, …)` names a field, not a topic. Resolving the identifier where it
+# is declared is what turns the call site into a name a reviewer can search for.
+SYMBOL_LITERAL_PATTERNS = (
+    re.compile(
+        r"@Value\s*\(\s*[\"'](?P<value>[^\"'\r\n]+)[\"']\s*\)"
+        r"(?:\s*(?:private|protected|public|static|final|@\w+))*"
+        r"\s+[\w<>,.\[\]]+\s+(?P<name>\w+)"
+    ),
+    re.compile(
+        r"(?:const|let|var|val|final|String)\s+(?P<name>\w+)\s*(?::\s*[\w<>\[\].]+)?"
+        r"\s*=\s*[\"'](?P<value>[^\"'\r\n]+)[\"']"
+    ),
+    re.compile(r"(?m)^\s*(?P<name>[A-Z][A-Z0-9_]{1,80})\s*=\s*[\"'](?P<value>[^\"'\r\n]+)[\"']"),
+)
+# An identifier read out of the environment is externalized exactly like a
+# Spring placeholder, so it is reported in the same `${…}` form.
+SYMBOL_ENVIRONMENT_PATTERNS = (
+    re.compile(r"(?:const|let|var)\s+(?P<name>\w+)\s*=\s*process\.env\.(?P<value>\w+)"),
+    re.compile(
+        r"(?P<name>\w+)\s*=\s*os\.(?:getenv|environ\.get)\s*\(\s*[\"'](?P<value>\w+)[\"']"
+    ),
+)
+TOPIC_PLACEHOLDER_PATTERN = re.compile(r"^\$\{(?P<key>[^:}]+)(?::(?P<default>[^}]*))?\}$")
+# `spring.kafka.template.default-topic` is where a producer's topic lives when
+# the send call does not name one. Attributed to Kafka only when the same file
+# mentions Kafka, so an unrelated `default-topic` key is never claimed.
+DEFAULT_TOPIC_PATTERN = re.compile(
+    r"(?P<key>[\w.\-]*default[._-]topic)\s*[:=]\s*[\"']?(?P<value>[\w.\-${}:]+)", re.IGNORECASE
+)
+# Values that are syntax, not topic names.
+NON_TOPIC_TOKENS = {"true", "false", "null", "none", "undefined", "this", "self"}
+# An identifier whose value is not in the repository is only reported when the
+# name itself says what it holds. A callback (`subscribe(handler)`) is not a
+# topic, and publishing it as one would put an invented name on the diagram.
+TOPIC_IDENTIFIER_HINT = re.compile(r"topic|queue|destination|channel|stream|subject", re.IGNORECASE)
 
 # A declared HTTP client names its destination even when the address is a
 # placeholder resolved at runtime. Recording the property name answers "where
@@ -198,6 +377,212 @@ def _line_of(content: str, offset: int) -> int:
     return content.count("\n", 0, offset) + 1
 
 
+def _configuration_properties(text: str) -> dict[str, str]:
+    """Flatten `key: value` configuration into dotted keys.
+
+    Indentation-based rather than a YAML parse: repository configuration is
+    frequently templated and would not parse at all, and only scalar leaves are
+    needed here — resolving `${kafka.notif.topic}` to the value the repository
+    declares for it.
+    """
+    properties: dict[str, str] = {}
+    stack: list[tuple[int, str]] = []
+    for raw_line in text.splitlines()[:4000]:
+        line = raw_line.split("#", 1)[0].rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("-"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        key, separator, value = stripped.partition(":")
+        if not separator:
+            key, separator, value = stripped.partition("=")
+            if not separator:
+                continue
+            # A `.properties` or `.env` line carries the whole dotted path, so it
+            # never inherits a parent from indentation.
+            indent = -1
+        key = key.strip().strip("\"'")
+        if not re.fullmatch(r"[\w.\-]{1,200}", key or ""):
+            continue
+        value = value.strip().rstrip(",").strip().strip("\"'")
+        if indent < 0:
+            path = key
+        else:
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            path = ".".join([item[1] for item in stack] + [key])
+            if not value:
+                stack.append((indent, key))
+                continue
+        if len(properties) < 2000:
+            properties[path] = value
+    return properties
+
+
+def _file_symbols(content: str) -> dict[str, str]:
+    """Values for identifiers declared in one file, literal or externalized."""
+    symbols: dict[str, str] = {}
+    for pattern in SYMBOL_LITERAL_PATTERNS:
+        for match in pattern.finditer(content):
+            symbols.setdefault(match.group("name"), match.group("value").strip())
+    for pattern in SYMBOL_ENVIRONMENT_PATTERNS:
+        for match in pattern.finditer(content):
+            symbols.setdefault(match.group("name"), "${" + match.group("value") + "}")
+    return symbols
+
+
+def _topic_tokens(raw: str) -> list[tuple[str, str]]:
+    """Split one captured topic expression into (kind, text) tokens.
+
+    ``literal`` is a value quoted in the file; ``symbol`` is an identifier whose
+    value is declared elsewhere — possibly outside the repository entirely.
+    """
+    text = str(raw or "").strip()
+    # An escaped quote inside the string ends the capture on its backslash, and
+    # no broker topic contains one, so it is never part of the name.
+    literals = [
+        value.strip().strip("\\").strip()
+        for value in re.findall(r"[\"']([^\"'\r\n]{1,200})[\"']", text)
+        if value.strip().strip("\\").strip()
+    ]
+    if literals:
+        return [("literal", value) for value in literals]
+    # `Arrays.asList(TOPIC)` / `List.of(TOPIC)` — keep the arguments, drop the
+    # helper that wraps them.
+    inner = re.sub(r"^[A-Za-z_$][\w.$]*\s*\(", "", text).rstrip(")")
+    tokens: list[tuple[str, str]] = []
+    for part in inner.split(","):
+        # `topic: someVariable` in an options object.
+        name = part.strip().strip("{}[]").split(":")[-1].strip()
+        if re.fullmatch(r"[A-Za-z_$][\w.$]{0,80}", name or "") and name.lower() not in NON_TOPIC_TOKENS:
+            tokens.append(("symbol", name))
+    return tokens
+
+
+def _topic_reference(
+    kind: str, text: str, symbols: dict[str, str], properties: dict[str, str]
+) -> dict[str, Any] | None:
+    """Resolve one topic token as far as the repository honestly allows.
+
+    ``name`` is what the repository writes — a literal, a `${property}`, or the
+    variable itself when its value is assigned somewhere we cannot see. Nothing
+    here invents a topic name.
+    """
+    variable = None
+    value = text.strip()
+    if kind == "symbol":
+        variable = value
+        resolved_symbol = symbols.get(value) or symbols.get(value.split(".")[-1]) or ""
+        if not resolved_symbol:
+            # The variable's value is not in this file. Reporting the identifier
+            # is still actionable; guessing the topic it holds would not be.
+            if not TOPIC_IDENTIFIER_HINT.search(value):
+                return None
+            return {"name": value, "variable": value, "configuration_key": None, "resolved": None}
+        value = resolved_symbol.strip()
+    if not value or value.lower() in NON_TOPIC_TOKENS:
+        return None
+    placeholder = TOPIC_PLACEHOLDER_PATTERN.match(value)
+    if placeholder:
+        key = placeholder.group("key").strip()
+        declared = (placeholder.group("default") or "").strip() or properties.get(key) or None
+        return {
+            "name": value,
+            "variable": variable,
+            "configuration_key": key or None,
+            "resolved": declared,
+        }
+    inner = PLACEHOLDER_PATTERN.search(value)
+    return {
+        "name": value,
+        "variable": variable,
+        "configuration_key": inner.group(1).strip() if inner else None,
+        "resolved": None,
+    }
+
+
+def _messaging_state(
+    messaging: dict[str, dict[str, Any]], technology: tuple[str, str, str], channel: str
+) -> dict[str, Any]:
+    return messaging.setdefault(
+        technology[0],
+        {
+            "technology": technology,
+            "channel": channel,
+            "roles": {},
+            "topics": {},
+            "dropped": set(),
+            "usage": None,
+        },
+    )
+
+
+def _record_topic(
+    state: dict[str, Any], role: str, reference: dict[str, Any], relative: str, line: int
+) -> None:
+    key = (role, reference["name"])
+    if key in state["topics"] or key in state["dropped"]:
+        return
+    if len(state["topics"]) >= MAX_MESSAGING_TOPICS:
+        # A truncated list must say so rather than read as the whole picture.
+        state["dropped"].add(key)
+        return
+    state["topics"][key] = {
+        **reference,
+        "role": role,
+        "kind": state["channel"],
+        "file": relative,
+        "line": line,
+    }
+
+
+def _messaging_role(roles: dict[str, Any]) -> str:
+    if "Producer" in roles and "Consumer" in roles:
+        return "Producer and Consumer"
+    if "Producer" in roles:
+        return "Producer"
+    return "Consumer" if "Consumer" in roles else ""
+
+
+def _messaging_evidence(state: dict[str, Any], topics: list[dict[str, Any]]) -> str:
+    """One sentence a reviewer can check line by line."""
+    parts: list[str] = []
+    usages = [
+        f"{item[0]}:{item[1]} uses {item[2]} ({verb})"
+        for wanted, verb in (("Producer", "publishes"), ("Consumer", "consumes"))
+        for item in [state["roles"].get(wanted)]
+        if item
+    ]
+    if usages:
+        parts.append(" and ".join(usages))
+    elif state["usage"]:
+        usage_file, usage_line, marker = state["usage"]
+        parts.append(
+            f"{usage_file}:{usage_line} uses {marker}, which does not state whether the "
+            "service publishes or consumes"
+        )
+    channel = state["channel"]
+    for verb, wanted in (("publishes to", "Producer"), ("consumes", "Consumer")):
+        named = [item["name"] for item in topics if item["role"] == wanted]
+        if named:
+            label = channel if len(named) == 1 else f"{channel}s"
+            parts.append(f"{verb} {label} {', '.join(named)}")
+    externalized = sorted(
+        {item["configuration_key"] for item in topics if item.get("configuration_key")}
+    )
+    if externalized:
+        noun = "property" if len(externalized) == 1 else "properties"
+        parts.append(
+            f"the {channel} name is resolved at deploy time from the "
+            f"{', '.join(externalized)} {noun}"
+        )
+    if state["dropped"]:
+        parts.append(
+            f"{len(state['dropped'])} further {channel} reference(s) are not listed"
+        )
+    return ("; ".join(parts) + ".") if parts else ""
+
+
 def _connections_in_content(content: str, relative: str) -> list[dict[str, Any]]:
     """Extract literal connection targets from one configuration file.
 
@@ -271,6 +656,110 @@ def _connections_in_content(content: str, relative: str) -> list[dict[str, Any]]
     return found
 
 
+def _marker_text(match: re.Match) -> str:
+    """The client symbol a marker matched, without the call syntax around it."""
+    return match.group(0).strip().split("(")[0].strip() or match.group(0).strip()
+
+
+def _scan_messaging(
+    content: str,
+    relative: str,
+    messaging: dict[str, dict[str, Any]],
+    properties: dict[str, str],
+) -> None:
+    """Classify one source file's broker usage by role and collect its topics."""
+    for client in MESSAGING_CLIENTS:
+        marker = client["client"].search(content)
+        if not marker:
+            continue
+        technology = client["technology"]
+        state = _messaging_state(messaging, technology, client["channel"])
+        if state["usage"] is None:
+            state["usage"] = (relative, _line_of(content, marker.start()), _marker_text(marker))
+        roles_here: set[str] = set()
+        for role, pattern in client["roles"]:
+            hit = pattern.search(content)
+            if not hit:
+                continue
+            roles_here.add(role)
+            state["roles"].setdefault(
+                role, (relative, _line_of(content, hit.start()), _marker_text(hit))
+            )
+        if not roles_here:
+            continue
+        symbols = _file_symbols(content)
+        for role, patterns in client["topics"].items():
+            if role not in roles_here:
+                # Without the role proved in this file, a `.send(` or
+                # `.subscribe(` from another library would invent a topic.
+                continue
+            for pattern in patterns:
+                for match in pattern.finditer(content):
+                    line = _line_of(content, match.start())
+                    for kind, token in _topic_tokens(match.group("value")):
+                        reference = _topic_reference(kind, token, symbols, properties)
+                        if reference:
+                            _record_topic(state, role, reference, relative, line)
+
+
+def _apply_messaging(
+    messaging: dict[str, dict[str, Any]],
+    connections: list[dict[str, Any]],
+    declared: set[str],
+    add: Any,
+) -> None:
+    """Attach the aggregated role and topics to their broker dependency.
+
+    A broker whose address was already read from configuration keeps that
+    address; only the direction of flow and the topic names are added to it.
+    """
+    for state in messaging.values():
+        name, kind, protocol = state["technology"]
+        topics = list(state["topics"].values())
+        role = _messaging_role(state["roles"])
+        evidence = _messaging_evidence(state, topics)
+        existing = next(
+            (entry for entry in connections if entry.get("destination") == name), None
+        )
+        if existing is not None:
+            if role:
+                existing["messaging_role"] = role
+            if topics:
+                existing["topics"] = topics
+            if evidence:
+                address = str(existing.get("evidence") or "").strip()
+                if address and not address.endswith("."):
+                    address += "."
+                existing["evidence"] = f"{address} {evidence}".strip()
+            declared.add(name)
+            continue
+        if state["usage"] is None and not topics:
+            continue
+        declared.add(name)
+        relative, line, _marker = state["usage"] or (
+            topics[0]["file"],
+            topics[0]["line"],
+            "",
+        )
+        add(
+            {
+                "destination": name,
+                "destination_type": kind,
+                "protocol": protocol,
+                "port": None,
+                "endpoint": ", ".join(item["name"] for item in topics) or None,
+                "messaging_role": role or None,
+                "topics": topics or None,
+                "file": relative,
+                "line": line,
+                "evidence": (
+                    f"{evidence} No address is present in the repository; it is "
+                    "supplied at deploy time."
+                ).strip(),
+            }
+        )
+
+
 def _discover_connections(
     root: Path, files: list[dict[str, Any]], configuration_files: list[str], manifests: list[str]
 ) -> list[dict[str, Any]]:
@@ -299,14 +788,31 @@ def _discover_connections(
             }
         )
 
+    # Broker roles and topics are aggregated across the whole scan: a service
+    # publishes in one class and listens in another, so the first file that
+    # mentions Kafka almost never holds both halves of the story.
+    messaging: dict[str, dict[str, Any]] = {}
+    properties: dict[str, str] = {}
+
     for relative in configuration_files:
         path = root / relative
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        properties.update(_configuration_properties(content))
         for item in _connections_in_content(content, relative):
             add(item)
+        if "kafka" not in content.lower():
+            continue
+        for match in DEFAULT_TOPIC_PATTERN.finditer(content):
+            reference = _topic_reference("literal", match.group("value"), {}, properties)
+            if not reference:
+                continue
+            line = _line_of(content, match.start())
+            state = _messaging_state(messaging, KAFKA_TECHNOLOGY, "topic")
+            state["roles"].setdefault("Producer", (relative, line, match.group("key")))
+            _record_topic(state, "Producer", reference, relative, line)
 
     declared = {item["destination"] for item in connections}
 
@@ -315,7 +821,7 @@ def _discover_connections(
     scanned = 0
     max_scanned = int(os.getenv("APPLICATION_ANALYSIS_MAX_SOURCE_SCAN", "2000"))
     for entry in files:
-        if scanned >= max_scanned or len(SOURCE_INTEGRATION_MARKERS) == len(declared):
+        if scanned >= max_scanned:
             break
         relative = str(entry.get("path") or "")
         if not entry.get("eligible") or Path(relative).suffix.lower() not in SOURCE_SCAN_SUFFIXES:
@@ -382,25 +888,24 @@ def _discover_connections(
                 continue
             declared.add(name)
             line = _line_of(content, match.start())
-            topics = sorted({topic for topic in TOPIC_NAME_PATTERN.findall(content)})[:8]
-            evidence = f"{relative}:{line} uses {match.group(0)}"
-            if topics:
-                evidence += f"; declares {', '.join(topics)}"
             add(
                 {
                     "destination": name,
                     "destination_type": kind,
                     "protocol": protocol,
                     "port": None,
-                    "endpoint": ", ".join(topics) if topics else None,
+                    "endpoint": None,
                     "file": relative,
                     "line": line,
                     "evidence": (
-                        f"{evidence}. No address is present in the repository; it is "
-                        "supplied at deploy time."
+                        f"{relative}:{line} uses {match.group(0)}. No address is present "
+                        "in the repository; it is supplied at deploy time."
                     ),
                 }
             )
+        _scan_messaging(content, relative, messaging, properties)
+
+    _apply_messaging(messaging, connections, declared, add)
 
     # A client library in the build manifest proves the integration exists even
     # when its address is injected at deploy time. Reported without a port,

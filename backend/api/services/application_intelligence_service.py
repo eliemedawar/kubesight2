@@ -37,7 +37,10 @@ from . import application_analysis_local_docker
 from . import application_pull_request_local_docker
 from . import application_intelligence_bitbucket as bitbucket_metadata
 from .application_intelligence_hermes import analyze as analyze_with_hermes
-from .application_intelligence_schema import validate_hermes_output
+from .application_intelligence_schema import (
+    normalize_hermes_result_lists,
+    validate_hermes_output,
+)
 from .application_intelligence_security import (
     redact_structure,
     safe_error,
@@ -519,11 +522,19 @@ def analysis_to_dict(row: ApplicationAnalysis | None, *, compact=False) -> dict 
         "hermesModel": row.hermes_model,
         "hermesPromptVersion": row.hermes_prompt_version,
         "workspaceCleanupStatus": row.workspace_cleanup_status,
-        "warnings": row.warnings or [],
+        "warnings": (
+            row.warnings
+            if isinstance(row.warnings, list)
+            else [row.warnings]
+            if row.warnings
+            else []
+        ),
         "createdAt": _iso(row.created_at),
     }
     if not compact:
-        data["result"] = redact_structure(row.result_summary or {})
+        data["result"] = redact_structure(
+            normalize_hermes_result_lists(row.result_summary or {})
+        )
         data["dependencies"] = [
             {
                 "id": item.id,
@@ -1589,6 +1600,41 @@ def _store_sboms(row: ApplicationAnalysis) -> None:
     )
 
 
+MESSAGING_ROLES = {"Producer", "Consumer", "Producer and Consumer"}
+
+
+def _messaging_topics(value: Any) -> list[dict] | None:
+    """Bounded, typed topic evidence for one broker edge.
+
+    Every field is repository evidence — the name as written, the property that
+    resolves it, and the file that proved it — so each one is length-capped and
+    nothing outside the known shape is stored.
+    """
+    if not isinstance(value, list):
+        return None
+    topics = []
+    for item in value[:40]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:255]
+        role = str(item.get("role") or "").strip()
+        if not name or role not in {"Producer", "Consumer"}:
+            continue
+        topics.append(
+            {
+                "name": name,
+                "role": role,
+                "kind": str(item.get("kind") or "topic")[:32],
+                "variable": str(item.get("variable") or "")[:120] or None,
+                "configurationKey": str(item.get("configuration_key") or "")[:255] or None,
+                "resolved": str(item.get("resolved") or "")[:255] or None,
+                "file": str(item.get("file") or "")[:1024] or None,
+                "line": item.get("line") if isinstance(item.get("line"), int) else None,
+            }
+        )
+    return topics or None
+
+
 def record_worker_result(row: ApplicationAnalysis, payload: dict) -> dict:
     if row.status in {"Cancelled", "Completed", "Completed With Warnings"}:
         return analysis_to_dict(row)
@@ -1729,6 +1775,12 @@ def record_worker_result(row: ApplicationAnalysis, payload: dict) -> dict:
                 direction=str(item.get("direction") or "Outbound")[:16],
                 endpoint=str(item.get("endpoint") or "")[:1024] or None,
                 configuration_key=str(item.get("configuration_key") or "")[:255] or None,
+                messaging_role=(
+                    str(item.get("messaging_role") or "").strip()
+                    if str(item.get("messaging_role") or "").strip() in MESSAGING_ROLES
+                    else None
+                ),
+                topics=_messaging_topics(item.get("topics")),
                 required=bool(item.get("required", True)),
                 evidence=str(item.get("evidence") or "") or None,
                 file_path=str(item.get("file") or "")[:1024] or None,
@@ -1857,6 +1909,8 @@ def topology(analysis_id: int) -> dict:
             "direction": item.direction,
             "endpoint": item.endpoint,
             "configurationKey": item.configuration_key,
+            "messagingRole": item.messaging_role,
+            "topics": item.topics or [],
             "required": item.required,
             "evidence": item.evidence,
             "filePath": item.file_path,

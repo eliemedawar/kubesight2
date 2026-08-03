@@ -61,6 +61,23 @@ export function normalizeDropdownNames(response) {
   )].sort((left, right) => left.localeCompare(right));
 }
 
+/** Keep legacy one-item Hermes narratives renderable without calling map on a scalar. */
+export function normalizeDisplayList(value) {
+  if (Array.isArray(value)) return value;
+  if (value === null || value === undefined || value === "") return [];
+  return [value];
+}
+
+/** Reanalyze the revision represented by the run being viewed. */
+export function revisionForReanalysis(analysis, application) {
+  return String(
+    analysis?.requestedRevision
+      || analysis?.branch
+      || application?.defaultBranch
+      || "main"
+  ).trim() || "main";
+}
+
 /** Tone for a severity-derived risk level. Risk is never a 0-100 score. */
 export function riskLevelTone(level) {
   if (level === "Critical" || level === "High") return "fail";

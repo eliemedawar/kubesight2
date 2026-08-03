@@ -677,6 +677,11 @@ def _migrate_application_intelligence_columns() -> None:
     # unmapped: they held model-invented numbers that are no longer published.
     if "application_findings" in inspect(db.engine).get_table_names():
         _add_column_if_missing("application_findings", "evidence", "TEXT")
+    # Broker edges gained a data-flow role and the topics it acts on. Analyses
+    # recorded before this leave both empty rather than claiming a direction.
+    if "application_communications" in inspect(db.engine).get_table_names():
+        _add_column_if_missing("application_communications", "messaging_role", "VARCHAR(32)")
+        _add_column_if_missing("application_communications", "topics", "JSON")
 
 
 def _migrate_zoho_integration_columns() -> None:

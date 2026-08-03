@@ -1,5 +1,24 @@
-# Offline local-development overlay. Build the full worker image for production.
+# Local-development overlay: reuse the existing language-tool base while adding
+# the pinned scanner set and current application code. Build the full worker
+# image from Dockerfile.application-worker for production.
+FROM aquasec/trivy:0.70.0 AS trivy
+FROM anchore/syft:v1.44.0 AS syft
+FROM hadolint/hadolint:v2.14.0-debian AS hadolint
+
 FROM kubesight-application-worker:local
+
+USER root
+
+ARG SEMGREP_VERSION=1.164.0
+ENV PATH=/opt/semgrep/bin:$PATH \
+    TRIVY_CACHE_DIR=/tmp/trivy-cache
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m venv /opt/semgrep && \
+    /opt/semgrep/bin/pip install "semgrep==${SEMGREP_VERSION}"
+
+COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
+COPY --from=syft /syft /usr/local/bin/syft
+COPY --from=hadolint /bin/hadolint /usr/local/bin/hadolint
 
 WORKDIR /app
 COPY . .

@@ -42,6 +42,38 @@ EVIDENCE_STATES = {
     "Trace Confirmed",
 }
 
+# These narrative fields are rendered as bullet lists. Smaller/local models
+# occasionally emit one string for a one-item list even when the prompt asks
+# for an array. Preserve that evidence as one item, then enforce the normalized
+# list shape at the schema boundary.
+NESTED_LIST_FIELDS = {
+    "risk_summary": {"primary_risks", "positive_controls"},
+    "docker_analysis": {"confirmed_issues", "missing_evidence"},
+}
+
+
+def normalize_hermes_result_lists(payload: Any) -> Any:
+    """Return a copy with safe scalar-to-list compatibility normalization."""
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    for section_name, field_names in NESTED_LIST_FIELDS.items():
+        section = normalized.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        section = dict(section)
+        for field_name in field_names:
+            if field_name not in section:
+                continue
+            value = section[field_name]
+            if isinstance(value, str):
+                value = value.strip()
+                section[field_name] = [value] if value else []
+            elif value is None:
+                section[field_name] = []
+        normalized[section_name] = section
+    return normalized
+
 
 def validate_hermes_output(payload: Any) -> dict:
     if not isinstance(payload, dict):
@@ -62,6 +94,14 @@ def validate_hermes_output(payload: Any) -> dict:
     for key in OBJECT_KEYS:
         if not isinstance(payload[key], dict):
             raise ValueError(f"Hermes field '{key}' must be an object.")
+    payload = normalize_hermes_result_lists(payload)
+    for section_name, field_names in NESTED_LIST_FIELDS.items():
+        section = payload[section_name]
+        for field_name in field_names:
+            if field_name in section and not isinstance(section[field_name], list):
+                raise ValueError(
+                    f"Hermes field '{section_name}.{field_name}' must be an array."
+                )
     if len(payload["findings"]) > 5000 or len(payload["communications"]) > 5000:
         raise ValueError("Hermes response exceeds the item limit.")
     for index, finding in enumerate(payload["findings"]):

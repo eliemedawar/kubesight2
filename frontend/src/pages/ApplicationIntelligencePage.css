@@ -72,6 +72,25 @@
 .ai-sev--informational { color: var(--text-muted); background: var(--bg-inset); border-color: var(--border); }
 .ai-externalized { color: var(--info); font-size: var(--font-size-xs); }
 .ai-externalized code { font-size: inherit; }
+
+/* ------------------------------------------------------------- message flow */
+/* A broker edge publishes, consumes, or both. The two read as opposites so the
+   direction is legible at a glance in a column of otherwise identical rows. */
+/* Block-level so the badges start their own line under the wire direction
+   instead of trailing it and reading as part of the next column. */
+.ai-flow-row { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .3rem; }
+.ai-flow {
+  display: inline-flex; align-items: center; gap: .25rem; white-space: nowrap;
+  font-size: var(--font-size-xs); font-weight: 700; letter-spacing: .02em;
+  padding: .1rem .4rem; border-radius: var(--radius-sm); border: 1px solid transparent;
+}
+.ai-flow--produce { color: var(--ok); background: var(--ok-soft); border-color: var(--ok-border); }
+.ai-flow--consume { color: var(--info); background: var(--info-soft); border-color: var(--info-border); }
+.ai-topics { margin: .3rem 0 0; padding: 0; list-style: none; display: grid; gap: .3rem; }
+.ai-topics li { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem; }
+.ai-topics code { font-size: var(--font-size-xs); overflow-wrap: anywhere; color: var(--text-subtle); }
+.ai-table-wrap .ai-topics small,
+.ai-topics small { display: inline; color: var(--text-muted); font-size: var(--font-size-xs); margin: 0; }
 .ai-delta--worse { color: var(--danger); font-weight: 700; }
 .ai-delta--better { color: var(--ok); font-weight: 700; }
 
@@ -180,6 +199,7 @@
 
 /* --------------------------------------------------------------- topology */
 .ai-graph { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; gap: 1rem; align-items: start; }
+.ai-graph > * { min-width: 0; }
 /* A zoomable viewer sizes its SVG to the container. Without an explicit height
    the container has none, so the SVG stretches to the full panel width and its
    height follows the aspect ratio — a tall hub-and-spoke graph then renders at
@@ -192,7 +212,19 @@
   overflow: hidden;
 }
 .ai-graph__canvas .topo-viewer { height: 100%; }
-.ai-evidence { padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-panel); display: grid; gap: .55rem; align-content: start; }
+.ai-evidence {
+  min-width: 0; max-width: 100%; overflow: hidden;
+  padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg-panel); display: grid; gap: .55rem; align-content: start;
+}
+.ai-evidence > *,
+.ai-evidence .ai-detail-grid > div,
+.ai-evidence dt,
+.ai-evidence dd { min-width: 0; max-width: 100%; }
+.ai-evidence strong,
+.ai-evidence p,
+.ai-evidence dd,
+.ai-evidence code { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 .ai-evidence h4 { margin: 0; font-size: var(--font-size-sm); text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
 .ai-evidence p { margin: 0; font-size: var(--font-size-sm); color: var(--text-subtle); }
 

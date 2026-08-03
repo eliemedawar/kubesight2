@@ -19,6 +19,7 @@ from api.models import (
 )
 from api.rbac_data import HERMES_AGENT_PERMISSIONS
 from api.services.application_analysis_jobs import build_job_resources
+from api.application_worker import _selected_file_evidence
 from api.services.application_intelligence_discovery import (
     SemgrepAdapter,
     SyftAdapter,
@@ -527,6 +528,100 @@ def test_discovery_fixture_and_secret_redaction():
     assert "do-not-send-this-value" not in redact_structure({"DATABASE_URL": safe})["DATABASE_URL"]
 
 
+def _write(root: Path, relative: str, content: str) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def test_kafka_dependency_reports_role_and_topic_per_direction(tmp_path):
+    """A broker edge must say whether the service publishes, consumes, or both.
+
+    The topic is the identifier that makes the edge actionable, so it is
+    reported as the repository writes it — literal, `${property}`, or the
+    variable whose value is assigned outside the repository.
+    """
+    _write(
+        tmp_path,
+        "src/main/resources/application.yml",
+        "spring:\n"
+        "  kafka:\n"
+        "    bootstrap-servers: broker-a:9092,broker-b:9092\n"
+        "kafka:\n"
+        "  notif:\n"
+        "    topic: payments.notifications\n",
+    )
+    _write(
+        tmp_path,
+        "src/main/java/com/x/Publisher.java",
+        "package com.x;\n\n"
+        "public class Publisher {\n"
+        "    private static final String DLQ = \"payments.dlq\";\n\n"
+        "    @Value(\"${kafka.notif.topic}\")\n"
+        "    private String notifTopic;\n\n"
+        "    private final KafkaTemplate<String, String> kafkaTemplate;\n\n"
+        "    public void publish(String payload) {\n"
+        "        kafkaTemplate.send(notifTopic, payload);\n"
+        "        kafkaTemplate.send(DLQ, payload);\n"
+        "        kafkaTemplate.send(runtimeTopic, payload);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write(
+        tmp_path,
+        "src/main/java/com/x/Listener.java",
+        "package com.x;\n\n"
+        "public class Listener {\n"
+        "    @KafkaListener(topics = {\"orders.created\", \"orders.cancelled\"})\n"
+        "    public void onOrder(String message) {}\n"
+        "}\n",
+    )
+    # An unrelated `.subscribe()` in a Kafka file must not invent a topic.
+    _write(
+        tmp_path,
+        "web/stream.js",
+        'const { Kafka } = require("kafkajs");\n'
+        'const kafka = new Kafka({ brokers: ["broker-a:9092"] });\n'
+        'const consumer = kafka.consumer({ groupId: "web" });\n'
+        "new Observable().subscribe((handler) => handler);\n"
+        'consumer.subscribe({ topic: "events.raw", fromBeginning: true });\n',
+    )
+
+    connections = discover_repository(tmp_path)["connections"]
+    kafka = next(item for item in connections if item["destination"] == "Apache Kafka")
+
+    assert kafka["messaging_role"] == "Producer and Consumer"
+    # The literal broker address stays the endpoint; topics are their own field.
+    assert kafka["port"] == 9092
+    topics = {item["name"]: item for item in kafka["topics"]}
+    assert topics["${kafka.notif.topic}"]["role"] == "Producer"
+    assert topics["${kafka.notif.topic}"]["configuration_key"] == "kafka.notif.topic"
+    # The repository declares the property, so the resolved name is reported too.
+    assert topics["${kafka.notif.topic}"]["resolved"] == "payments.notifications"
+    assert topics["${kafka.notif.topic}"]["variable"] == "notifTopic"
+    assert topics["payments.dlq"]["role"] == "Producer"
+    assert topics["orders.created"]["role"] == "Consumer"
+    assert topics["orders.cancelled"]["role"] == "Consumer"
+    assert topics["events.raw"]["role"] == "Consumer"
+    # A variable whose value is not in the repository is reported as itself and
+    # never resolved to an invented name.
+    assert topics["runtimeTopic"]["resolved"] is None
+    assert topics["runtimeTopic"]["variable"] == "runtimeTopic"
+    assert "handler" not in topics
+    assert "publishes" in kafka["evidence"] and "consumes" in kafka["evidence"]
+
+
+def test_broker_role_is_absent_when_source_never_states_it(tmp_path):
+    """A declared client library proves the dependency, not its direction."""
+    _write(tmp_path, "package.json", json.dumps({"dependencies": {"kafkajs": "2.2.4"}}))
+
+    connections = discover_repository(tmp_path)["connections"]
+    kafka = next(item for item in connections if item["destination"] == "Apache Kafka")
+
+    assert kafka.get("messaging_role") is None
+    assert not kafka.get("topics")
+
+
 def test_scanner_normalization():
     semgrep = SemgrepAdapter().normalize(
         json.dumps(
@@ -598,6 +693,31 @@ def test_hermes_schema_and_prompt_injection_content_is_data_only():
         raise AssertionError("Unknown Hermes fields must be rejected")
 
 
+def test_hermes_normalizes_nested_single_item_narratives_to_arrays():
+    payload = empty_result()
+    payload["risk_summary"] = {
+        "primary_risks": "Missing runtime controls",
+        "positive_controls": ["Read-only checkout"],
+    }
+    payload["docker_analysis"] = {
+        "confirmed_issues": "Container runs as root",
+        "missing_evidence": None,
+    }
+
+    normalized = validate_hermes_output(payload)
+
+    assert normalized["risk_summary"]["primary_risks"] == [
+        "Missing runtime controls"
+    ]
+    assert normalized["risk_summary"]["positive_controls"] == [
+        "Read-only checkout"
+    ]
+    assert normalized["docker_analysis"]["confirmed_issues"] == [
+        "Container runs as root"
+    ]
+    assert normalized["docker_analysis"]["missing_evidence"] == []
+
+
 def test_job_security_controls_and_no_secret_in_job_spec(monkeypatch):
     monkeypatch.setenv(
         "HERMES_API_URL",
@@ -647,6 +767,40 @@ def test_job_security_controls_and_no_secret_in_job_spec(monkeypatch):
         assert security["allowPrivilegeEscalation"] is False
         assert security["readOnlyRootFilesystem"] is True
         assert security["capabilities"]["drop"] == ["ALL"]
+
+    analyzer = pod["containers"][0]
+    analyzer_env = {item["name"]: item.get("value") for item in analyzer["env"]}
+    assert analyzer_env["APPLICATION_ANALYSIS_HERMES_QUICK_FILE_LIMIT"] == "40"
+    assert analyzer_env["APPLICATION_ANALYSIS_HERMES_DEEP_FILE_LIMIT"] == "500"
+    assert analyzer_env["TRIVY_CACHE_DIR"] == "/tmp/trivy-cache"
+    assert pod["volumes"][1]["emptyDir"]["sizeLimit"] == "1Gi"
+
+
+def test_source_file_budget_keeps_quick_bounded_and_deep_reviews_normal_repo(
+    monkeypatch, tmp_path
+):
+    file_tree = []
+    for index in range(206):
+        relative = f"src/Service{index}.java"
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"class Service{index} {{}}", encoding="utf-8")
+        file_tree.append({"path": relative, "size": path.stat().st_size})
+    discovery = {"file_tree": file_tree}
+    monkeypatch.delenv("APPLICATION_ANALYSIS_HERMES_FILE_LIMIT", raising=False)
+    monkeypatch.delenv("APPLICATION_ANALYSIS_HERMES_QUICK_FILE_LIMIT", raising=False)
+    monkeypatch.delenv("APPLICATION_ANALYSIS_HERMES_DEEP_FILE_LIMIT", raising=False)
+
+    monkeypatch.setenv("ANALYSIS_MODE", "Quick")
+    quick_files, quick_coverage = _selected_file_evidence(tmp_path, discovery)
+    assert len(quick_files) == 40
+    assert quick_coverage["fileLimit"] == 40
+
+    monkeypatch.setenv("ANALYSIS_MODE", "Deep")
+    deep_files, deep_coverage = _selected_file_evidence(tmp_path, discovery)
+    assert len(deep_files) == 206
+    assert deep_coverage["fileLimit"] == 500
+    assert deep_coverage["eligibleFiles"] == 206
 
 
 def test_hermes_openai_chat_completions_adapter(monkeypatch):
@@ -715,6 +869,11 @@ def test_hermes_openai_chat_completions_adapter(monkeypatch):
     user_prompt = json.loads(request_payload["messages"][1]["content"])
     assert user_prompt["output_limits"]["findings"] == 40
     assert user_prompt["output_limits"]["deduplicate"] is True
+    assert user_prompt["section_contracts"]["risk_summary"] == {
+        "summary": "A concise evidence-based narrative; do not assign a model-generated score or rating.",
+        "primary_risks": "An array of concise evidence-supported risk statements.",
+        "positive_controls": "An array of controls directly supported by the supplied source evidence.",
+    }
     assert "user:secret" not in request_payload["messages"][1]["content"]
     assert (
         captured["request"].get_header("Authorization")
@@ -972,6 +1131,93 @@ def test_worker_result_persists_deduplicated_findings_and_cleanup(
         for artifact_file in report_path.parent.iterdir():
             artifact_file.unlink()
         report_path.parent.rmdir()
+
+
+def test_worker_result_persists_broker_role_and_topics(
+    app, client, operator_token, monkeypatch, tmp_path
+):
+    """The topology endpoint publishes the flow direction and the topic names."""
+    monkeypatch.setenv("APPLICATION_ANALYSIS_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    credential = _create_credential(client, operator_token, name="broker credential")
+    application = _create_application(client, operator_token, credential["id"])
+    created = client.post(
+        f"/api/applications/{application['id']}/analyses",
+        headers=auth_headers(operator_token),
+        json={"analysisMode": "Quick"},
+    ).get_json()["data"]
+
+    result = empty_result()
+    result["communications"] = [
+        {
+            "source": "Notification Service",
+            "destination": "Apache Kafka",
+            "destination_type": "Message broker",
+            "protocol": "Kafka",
+            "confidence": "Confirmed",
+            "evidence_state": "Configuration Declared",
+            "messaging_role": "Producer and Consumer",
+            "topics": [
+                {
+                    "name": "${kafka.notif.topic}",
+                    "role": "Producer",
+                    "kind": "topic",
+                    "variable": "notifTopic",
+                    "configuration_key": "kafka.notif.topic",
+                    "resolved": "payments.notifications",
+                    "file": "src/main/java/com/x/Publisher.java",
+                    "line": 12,
+                },
+                {"name": "orders.created", "role": "Consumer", "kind": "topic"},
+                # Neither a role nor a shape we recognize: both are dropped.
+                {"name": "mystery.topic", "role": ""},
+                "orders.created",
+            ],
+        },
+        {
+            "source": "Notification Service",
+            "destination": "postgres",
+            "destination_type": "PostgreSQL",
+            "protocol": "postgresql",
+            "port": 5432,
+            "confidence": "High",
+            "messaging_role": "Occasional publisher",
+        },
+    ]
+    with app.app_context():
+        from api.services.application_intelligence_service import record_worker_result
+
+        record_worker_result(
+            db.session.get(ApplicationAnalysis, created["id"]),
+            {
+                "result": result,
+                "scannerRuns": [],
+                "warnings": [],
+                "hermesModel": "hermes-test",
+                "hermesPromptVersion": "v1",
+                "workspaceCleanupStatus": "Completed",
+            },
+        )
+
+    response = client.get(
+        f"/api/application-analyses/{created['id']}/topology",
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 200
+    edges = response.get_json()["data"]["edges"]
+    kafka = next(item for item in edges if item["destination"] == "Apache Kafka")
+    assert kafka["messagingRole"] == "Producer and Consumer"
+    assert [item["name"] for item in kafka["topics"]] == [
+        "${kafka.notif.topic}",
+        "orders.created",
+    ]
+    assert kafka["topics"][0]["configurationKey"] == "kafka.notif.topic"
+    assert kafka["topics"][0]["resolved"] == "payments.notifications"
+    assert kafka["topics"][0]["line"] == 12
+    assert kafka["topics"][1]["role"] == "Consumer"
+    # A role outside the known set is not persisted, and a datastore has none.
+    postgres = next(item for item in edges if item["destination"] == "postgres")
+    assert postgres["messagingRole"] is None
+    assert postgres["topics"] == []
 
 
 def test_phase_three_collects_redacted_runtime_evidence_and_recommendations(

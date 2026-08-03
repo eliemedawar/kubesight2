@@ -10,7 +10,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from .application_intelligence_schema import empty_result, validate_hermes_output
+from .application_intelligence_schema import (
+    NESTED_LIST_FIELDS,
+    empty_result,
+    validate_hermes_output,
+)
 from .application_intelligence_security import bounded_json_bytes, redact_structure
 
 PROMPT_VERSION = "application-intelligence-v2"
@@ -99,6 +103,13 @@ ITEM_CONTRACTS = {
         "endpoint": "The literal host, URL, or connection string when present, with secrets redacted.",
         "confidence": ["Confirmed", "High", "Medium", "Low", "Informational"],
     },
+}
+SECTION_CONTRACTS = {
+    "risk_summary": {
+        "summary": "A concise evidence-based narrative; do not assign a model-generated score or rating.",
+        "primary_risks": "An array of concise evidence-supported risk statements.",
+        "positive_controls": "An array of controls directly supported by the supplied source evidence.",
+    }
 }
 
 
@@ -291,9 +302,14 @@ def analyze(evidence: dict) -> tuple[dict, str, str]:
             "trust_level": "untrusted_repository_evidence",
             "required_result_fields": REQUIRED_RESULT_FIELDS,
             "item_contracts": ITEM_CONTRACTS,
+            "section_contracts": SECTION_CONTRACTS,
             "result_contract": {
                 "exact_top_level_keys": True,
                 "template": empty_result(),
+                "nested_array_fields": {
+                    section: sorted(fields)
+                    for section, fields in NESTED_LIST_FIELDS.items()
+                },
                 "instruction": (
                     "Populate only evidence-supported fields. Use empty objects or "
                     "arrays when evidence is absent."
