@@ -1,6 +1,54 @@
+import json
 from unittest.mock import patch
 
 from tests.conftest import auth_headers
+
+
+def test_kubectl_environment_falls_back_to_in_cluster_service_account(tmp_path):
+    from api.k8s_provider import _configure_kubectl_environment
+
+    service_account_dir = tmp_path / "serviceaccount"
+    service_account_dir.mkdir()
+    (service_account_dir / "token").write_text("rotating-secret", encoding="utf-8")
+    (service_account_dir / "ca.crt").write_text("test-ca", encoding="utf-8")
+    runtime_config = tmp_path / "runtime" / "config.json"
+    missing_config = tmp_path / "empty-home" / "config"
+    env = {
+        "KUBERNETES_SERVICE_HOST": "10.96.0.1",
+        "KUBERNETES_SERVICE_PORT_HTTPS": "443",
+        "K8S_SERVICE_ACCOUNT_DIR": str(service_account_dir),
+        "KUBESIGHT_RUNTIME_KUBECONFIG": str(runtime_config),
+        # The hardened image sets this path before the emptyDir has a config.
+        "KUBECONFIG": str(missing_config),
+    }
+
+    _configure_kubectl_environment(env)
+
+    assert env["KUBECONFIG"] == str(runtime_config)
+    assert env["K8S_KUBECONFIG"] == str(runtime_config)
+    document = json.loads(runtime_config.read_text(encoding="utf-8"))
+    assert document["current-context"] == "in-cluster"
+    assert document["clusters"][0]["cluster"] == {
+        "server": "https://10.96.0.1:443",
+        "certificate-authority": str(service_account_dir / "ca.crt"),
+    }
+    assert document["users"][0]["user"] == {
+        "tokenFile": str(service_account_dir / "token")
+    }
+    assert "rotating-secret" not in runtime_config.read_text(encoding="utf-8")
+
+
+def test_kubectl_environment_keeps_an_existing_kubeconfig(tmp_path):
+    from api.k8s_provider import _configure_kubectl_environment
+
+    configured = tmp_path / "config"
+    configured.write_text("existing", encoding="utf-8")
+    env = {"KUBECONFIG": str(configured)}
+
+    _configure_kubectl_environment(env)
+
+    assert env == {"KUBECONFIG": str(configured)}
+    assert configured.read_text(encoding="utf-8") == "existing"
 
 
 def test_list_clusters_mock_mode(client, admin_token):

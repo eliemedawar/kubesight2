@@ -67,6 +67,19 @@ spec:
       ports:
         - {protocol: TCP, port: 5432}
         - {protocol: TCP, port: 6379}
+    {{- with .Values.networkPolicy.kubernetesApiEgress }}
+    {{- if .enabled }}
+    - to:
+        {{- range .cidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        {{- range .ports }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+    {{- end }}
+    {{- end }}
     {{- range .Values.networkPolicy.externalEgress }}
     - to:
         - ipBlock:

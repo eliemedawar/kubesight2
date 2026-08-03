@@ -123,6 +123,117 @@ _KUBECTL_REQUEST_TIMEOUT = int(os.getenv("KUBECTL_REQUEST_TIMEOUT_SECONDS", "10"
 # inside a container) — never clamp these to the short request timeout.
 _REQUEST_TIMEOUT_EXEMPT_VERBS = {"exec", "port-forward", "cp", "drain", "cordon", "uncordon"}
 
+_DEFAULT_SERVICE_ACCOUNT_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+_DEFAULT_RUNTIME_KUBECONFIG = "/tmp/kubesight-in-cluster-kubeconfig.json"
+
+
+def _in_cluster_server(env: Dict[str, str]) -> Optional[str]:
+    host = (env.get("KUBERNETES_SERVICE_HOST") or "").strip()
+    port = (
+        env.get("KUBERNETES_SERVICE_PORT_HTTPS")
+        or env.get("KUBERNETES_SERVICE_PORT")
+        or ""
+    ).strip()
+    if not host or not port:
+        return None
+    # Kubernetes may advertise the API service as an IPv6 literal. URLs need
+    # brackets around it, while the injected environment variable does not.
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"https://{host}:{port}"
+
+
+def _runtime_in_cluster_kubeconfig(env: Dict[str, str]) -> Optional[str]:
+    """Create a credential-safe kubeconfig for the pod's own cluster.
+
+    Recent container hardening stopped running ``k8s_entrypoint.sh``. That left
+    kubectl pointed at an empty file even though Kubernetes had mounted a valid
+    ServiceAccount. Build the in-cluster config at the transport boundary so it
+    also works for alternate process commands and workers.
+
+    The kubeconfig references ``tokenFile`` rather than copying the bearer
+    token. Projected ServiceAccount tokens rotate, and kubectl must read the
+    current token for every invocation.
+    """
+    server = _in_cluster_server(env)
+    service_account_dir = Path(
+        env.get("K8S_SERVICE_ACCOUNT_DIR") or _DEFAULT_SERVICE_ACCOUNT_DIR
+    )
+    token_path = service_account_dir / "token"
+    ca_path = service_account_dir / "ca.crt"
+    if not server or not token_path.is_file() or not ca_path.is_file():
+        return None
+
+    target = Path(
+        env.get("KUBESIGHT_RUNTIME_KUBECONFIG") or _DEFAULT_RUNTIME_KUBECONFIG
+    )
+    context_name = (env.get("K8S_CONTEXT_NAME") or "in-cluster").strip() or "in-cluster"
+    document = {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [
+            {
+                "name": "in-cluster",
+                "cluster": {
+                    "server": server,
+                    "certificate-authority": str(ca_path),
+                },
+            }
+        ],
+        "contexts": [
+            {
+                "name": context_name,
+                "context": {"cluster": "in-cluster", "user": "kubesight-service-account"},
+            }
+        ],
+        "current-context": context_name,
+        "users": [
+            {
+                "name": "kubesight-service-account",
+                "user": {"tokenFile": str(token_path)},
+            }
+        ],
+    }
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        temporary.write_text(json.dumps(document), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+    except OSError as exc:
+        raise K8sCommandError(f"Could not create in-cluster kubeconfig: {exc}") from exc
+    return str(target)
+
+
+def _configure_kubectl_environment(
+    env: Dict[str, str], kubeconfig_path: Optional[str] = None
+) -> None:
+    """Select an existing kubeconfig or fall back to the mounted ServiceAccount."""
+    if kubeconfig_path:
+        env["KUBECONFIG"] = kubeconfig_path
+        return
+
+    def config_exists(value: str) -> bool:
+        # KUBECONFIG accepts an OS-separated list and kubectl merges the files.
+        return bool(value) and any(Path(item).is_file() for item in value.split(os.pathsep) if item)
+
+    configured = (env.get("KUBECONFIG") or "").strip()
+    if config_exists(configured):
+        return
+
+    legacy = (env.get("K8S_KUBECONFIG") or "").strip()
+    if config_exists(legacy):
+        env["KUBECONFIG"] = legacy
+        return
+
+    generated = _runtime_in_cluster_kubeconfig(env)
+    if generated:
+        env["KUBECONFIG"] = generated
+        env["K8S_KUBECONFIG"] = generated
+
 
 def _request_timeout_flag(args: List[str], effective_timeout: int) -> List[str]:
     if any(str(a).startswith("--request-timeout") for a in args):
@@ -169,10 +280,7 @@ def _run_kubectl(
     command += args
 
     env = os.environ.copy()
-    if kubeconfig_path:
-        env["KUBECONFIG"] = kubeconfig_path
-    elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
-        env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
+    _configure_kubectl_environment(env, kubeconfig_path)
 
     try:
         completed = subprocess.run(
@@ -2146,10 +2254,7 @@ def _popen_kubectl(
     command += args
 
     env = os.environ.copy()
-    if kubeconfig_path:
-        env["KUBECONFIG"] = kubeconfig_path
-    elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
-        env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
+    _configure_kubectl_environment(env, kubeconfig_path)
 
     try:
         return subprocess.Popen(
