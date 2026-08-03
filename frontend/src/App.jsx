@@ -83,6 +83,7 @@ const AuditLogsPage = lazy(() => import("./pages/AuditLogsPage.jsx"));
 const DeploymentRequestsPage = lazy(() => import("./pages/DeploymentRequestsPage.jsx"));
 const MyRequestsPage = lazy(() => import("./pages/MyRequestsPage.jsx"));
 const ChangeBundlesPage = lazy(() => import("./pages/ChangeBundlesPage.jsx"));
+const IntegrationsHub = lazy(() => import("./pages/settings/IntegrationsHub.jsx"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage.jsx"));
 const ImageRegistriesPage = lazy(() => import("./pages/ImageRegistriesPage.jsx"));
 const TicketingPage = lazy(() => import("./pages/TicketingPage.jsx"));
@@ -1702,6 +1703,8 @@ export default function App() {
         return <MyRequestsPage />;
       case "changeBundles":
         return <ChangeBundlesPage />;
+      case "integrations":
+        return <IntegrationsHub hasPermission={hasPermission} isAdmin={isAdmin} />;
       case "settings":
         return (
           <SettingsPage

@@ -42,6 +42,25 @@ def _require_resource(kind: str, name: str) -> None:
         )
 
 
+def _require_worker_runtime(image: str) -> None:
+    """Reject stale worker images before they can orphan a queued analysis."""
+    result = _docker(
+        "run",
+        "--rm",
+        "--entrypoint",
+        "python",
+        image,
+        "-c",
+        "import api.application_checkout; import api.application_worker",
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise LocalDockerLaunchError(
+            f"The local analysis Docker image '{image}' is incompatible. "
+            "Rebuild it from backend/Dockerfile.application-worker-local."
+        )
+
+
 def _write_secret(directory: Path, name: str, value: str) -> None:
     path = directory / name
     path.write_text(value, encoding="utf-8")
@@ -333,6 +352,7 @@ def launch(
         raise LocalDockerLaunchError("Hermes is not configured for local analysis.")
     _require_resource("image", image)
     _require_resource("network", network)
+    _require_worker_runtime(image)
     if analysis_mode == "Build Verified":
         return _launch_build_verified(
             analysis_id=analysis_id,

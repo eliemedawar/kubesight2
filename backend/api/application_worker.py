@@ -104,16 +104,20 @@ def _source_rank(relative: str) -> int:
 
 
 def _selected_file_evidence(root: Path, discovery: dict) -> tuple[list[dict], dict]:
-    """Choose the file slice sent to Hermes, and report how much it covers.
+    """Choose the source sent to Hermes, and report how much it covers.
 
-    Returns the selection plus a coverage summary. A model reading 120 of 900
-    files cannot see what it was not given, so the size of that gap is part of
-    the result rather than a silent implementation detail.
+    Quick mode intentionally uses a small prioritized slice. Deep and Build
+    Verified read every eligible file unless an operator explicitly configures
+    a file limit. Any remaining size-based exclusions stay visible in coverage.
     """
     mode = os.getenv("ANALYSIS_MODE", "Quick")
-    default_file_limit = "40" if mode == "Quick" else "120"
-    max_files = int(
-        os.getenv("APPLICATION_ANALYSIS_HERMES_FILE_LIMIT", default_file_limit)
+    configured_file_limit = os.getenv(
+        "APPLICATION_ANALYSIS_HERMES_FILE_LIMIT", ""
+    ).strip()
+    max_files = (
+        max(1, int(configured_file_limit))
+        if configured_file_limit
+        else (40 if mode == "Quick" else None)
     )
     max_file_bytes = int(os.getenv("APPLICATION_ANALYSIS_HERMES_FILE_BYTES", "65536"))
     max_total_bytes = int(
@@ -154,7 +158,7 @@ def _selected_file_evidence(root: Path, discovery: dict) -> tuple[list[dict], di
     for item in candidates:
         relative = item.get("path", "")
         path = root / relative
-        if len(selected) >= max_files:
+        if max_files is not None and len(selected) >= max_files:
             break
         if item.get("size", 0) > max_file_bytes:
             continue
@@ -176,7 +180,7 @@ def _selected_file_evidence(root: Path, discovery: dict) -> tuple[list[dict], di
         "eligibleFiles": len(eligible),
         "repositoryFiles": len(discovery.get("file_tree", [])),
         "truncatedFiles": truncated,
-        "fileLimit": max_files,
+        "fileLimit": max_files if max_files is not None else len(eligible),
         "bytesSent": total_bytes,
         "analysisMode": mode,
     }

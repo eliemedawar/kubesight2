@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import PageTitle from "../components/common/PageTitle.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import { normalizeSettings } from "../utils/formatters.js";
@@ -17,7 +17,7 @@ import PreferencesPanel from "./settings/PreferencesPanel.jsx";
  * Settings — the one place things get configured.
  *
  * The rail lists every section the signed-in user may touch, grouped into
- * Preferences / Integrations / Administration; the column beside it renders
+ * Preferences / Administration; the column beside it renders
  * exactly one of them. What belongs in the rail lives in
  * `lib/settingsSections.js`, not here, so adding an integration is one entry
  * plus one panel rather than an edit spread across the nav registry, the page
@@ -25,11 +25,8 @@ import PreferencesPanel from "./settings/PreferencesPanel.jsx";
  *
  * Preference sections share a single panel and differ only by which card they
  * scroll to — five short cards read better as one column than as five screens.
- * Integrations are a single entry opening a hub of provider cards, so the rail
- * stays the same length as providers are added.
+ * Integrations have their own top-level workspace and sidebar entry.
  */
-
-const IntegrationsHub = lazy(() => import("./settings/IntegrationsHub.jsx"));
 
 export default function SettingsPage({
   data,
@@ -146,7 +143,7 @@ export default function SettingsPage({
     dirtySections.push("Notifications");
   }
 
-  const canOpenIntegrations = panelSections.some((section) => section.id === "integrationsHub");
+  const canOpenIntegrations = isPageAllowed?.("integrations") || false;
   // The bar stays up while an integration panel is open: the draft survives the
   // panel switch, and hiding the only way to save it would read as discarded.
   const showSaveBar = canManage && dirtySections.length > 0;
@@ -173,11 +170,9 @@ export default function SettingsPage({
             onNavigate={onNavigate}
             isPageAllowed={isPageAllowed}
             canOpenIntegrations={canOpenIntegrations}
-            onOpenSection={openSection}
+            onOpenIntegrations={() => onNavigate?.("integrations")}
           />
         );
-      case "integrationsHub":
-        return <IntegrationsHub hasPermission={hasPermission} isAdmin={isAdmin} />;
       default:
         return null;
     }
@@ -187,7 +182,7 @@ export default function SettingsPage({
     <>
       <PageTitle
         title="Settings"
-        subtitle="Preferences, integrations, and the systems KubeSight connects to."
+        subtitle="Personal preferences and shared workspace defaults."
       />
 
       <div className={`settings-layout${active?.wide ? " settings-layout--wide" : ""}`}>

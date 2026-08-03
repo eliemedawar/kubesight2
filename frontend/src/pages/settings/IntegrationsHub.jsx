@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import ErrorBanner from "../../components/common/ErrorBanner.jsx";
 import LoadingState from "../../components/common/LoadingState.jsx";
+import PageTitle from "../../components/common/PageTitle.jsx";
 import { listIntegrations } from "../../api/integrationsApi.js";
 import { groupByCategory, statusMeta, timeAgo } from "../../lib/integrations.js";
 
@@ -147,15 +148,12 @@ export default function IntegrationsHub({ hasPermission = () => false, isAdmin =
 
   return (
     <div className="sg-int-hub">
-      <header className="settings-panel-head sg-int-head">
-        <div>
-          <h3>Integrations</h3>
-          <p>{LEAD_LINE}</p>
-        </div>
+      <div className="sg-int-head">
+        <PageTitle title="Integrations" subtitle={LEAD_LINE} />
         <button type="button" className="btn-ghost" onClick={load} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}
         </button>
-      </header>
+      </div>
 
       {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
 

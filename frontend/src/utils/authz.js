@@ -58,14 +58,8 @@ const RESOURCE_SPECIFICITY = {
   service_port: 45,
 };
 
-/**
- * Settings is the single address for preferences *and* every integration, so
- * anyone who may configure one of those integrations can open it — the page
- * itself then shows only the sections that person's permissions allow. Gating
- * the whole page on `settings:view` would have locked a registry admin out of
- * the only place registries are now configured.
- */
-export const SETTINGS_ENTRY_PERMISSIONS = [
+/** Anyone who may see at least one provider can open the integrations hub. */
+export const INTEGRATION_VIEW_PERMISSIONS = [
   "settings:view",
   "registries:view",
   "ticketing:view",
@@ -174,7 +168,13 @@ export const NAV_PAGES = [
     permission: "ticketing:view",
     section: "Administration",
   },
-  { key: "settings", label: "Settings", anyPermissions: SETTINGS_ENTRY_PERMISSIONS, section: "Administration" },
+  {
+    key: "integrations",
+    label: "Integrations",
+    anyPermissions: INTEGRATION_VIEW_PERMISSIONS,
+    section: "Administration",
+  },
+  { key: "settings", label: "Settings", permission: "settings:view", section: "Administration" },
 
   // Operations
   {
@@ -1048,7 +1048,9 @@ export function pageAllowed(user, pageKey) {
           (pageGrantedByAdmin(user, "upgrade") && hasAnyClusterAccess(user)))
       );
     case "settings":
-      return hasAnyPermission(user, SETTINGS_ENTRY_PERMISSIONS);
+      return hasPermission(user, "settings:view");
+    case "integrations":
+      return hasAnyPermission(user, INTEGRATION_VIEW_PERMISSIONS);
     case "imageRegistries":
       return hasPermission(user, "registries:view");
     case "ticketing":

@@ -109,7 +109,7 @@ export default function PreferencesPanel({
   onNavigate,
   isPageAllowed,
   canOpenIntegrations = false,
-  onOpenSection,
+  onOpenIntegrations,
 }) {
   const clusterOptions = clusters || [];
   const refreshValue = Number(settingsDraft.refreshIntervalSeconds) || 30;
@@ -299,7 +299,7 @@ export default function PreferencesPanel({
             <button
               type="button"
               className="settings-link-row"
-              onClick={() => onOpenSection?.("integrationsHub")}
+              onClick={onOpenIntegrations}
             >
               {ICONS.routing}
               <span>

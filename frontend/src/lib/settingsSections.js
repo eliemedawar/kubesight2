@@ -1,46 +1,30 @@
 /**
  * The Settings registry — one list describing everything configurable in
- * KubeSight, grouped into the three things an operator is actually doing:
+ * KubeSight, grouped into preferences and administration links:
  *
  *   Preferences    what this browser and this workspace default to
- *   Integrations   every outside system KubeSight talks to
  *   Administration the people-and-history pages, which stay their own routes
  *
  * Connecting to an outside system used to happen in whichever screen happened
  * to use it: registries had their own sidebar entry, SMTP and receivers hid
  * behind an admin-only tab on the Alerts page, Jira and Zoho were configured
- * from inside the Ticketing workspace. Those connections all live in the hub
- * now, so "where do I configure X" has one answer.
+ * from inside the Ticketing workspace. Those connections now live in the
+ * top-level Integrations workspace.
  *
  * The split is connection versus use. The hub owns connections. Working with
  * what a connection enables — browsing tickets, running a sync, analysing a
  * repository — stays on its own page, because that is a job rather than a
  * setting.
  *
- * Each entry declares its own RBAC gate rather than relying on the page-level
- * `settings:view` check, because a user who may manage registries but not
- * workspace defaults still needs the hub — and nothing else in Settings.
+ * Each link declares its own RBAC gate rather than relying on the page-level
+ * `settings:view` check.
  */
 
 const SECTION_HINT_KEY = "kubesight.settings.section";
 
-/**
- * Anyone who may see at least one integration may open the hub; the hub then
- * shows only the cards that person's permissions cover. Admin-only concerns
- * (SMTP, Slack, webhooks) are filtered server-side, so this list is the union
- * of the non-admin gates plus `settings:view` for the admin case.
- */
-export const INTEGRATION_VIEW_PERMISSIONS = [
-  "settings:view",
-  "ticketing:view",
-  "registries:view",
-  "applications:view",
-];
-
 /** Rail groups, in render order. */
 export const SETTINGS_GROUPS = [
   { id: "preferences", label: "Preferences" },
-  { id: "integrations", label: "Integrations" },
   { id: "administration", label: "Administration" },
 ];
 
@@ -98,26 +82,6 @@ export const SETTINGS_SECTIONS = [
     icon: "security",
     panel: "preferences",
     anchor: "settings-security",
-  },
-
-  // ─── Integrations ───
-  // One entry, not one per provider. The hub behind it lists every integration
-  // as a card and opens a detail screen per provider, so the rail does not have
-  // to grow a row each time a provider is added — and so "which of these is
-  // broken" is answerable at a glance instead of by clicking through a rail.
-  //
-  // The hub holds *connections only*. Feature surfaces that sit on top of an
-  // integration — browsing tickets, field sync, deploy runs — stay on their own
-  // pages; this is where the connection to the outside system is configured,
-  // not where the work gets done.
-  {
-    id: "integrationsHub",
-    group: "integrations",
-    label: "All integrations",
-    icon: "plug",
-    panel: "integrationsHub",
-    wide: true,
-    requires: { anyPermissions: INTEGRATION_VIEW_PERMISSIONS },
   },
 
   // ─── Administration (link-outs) ───

@@ -15,6 +15,7 @@ const PAGE_LABELS = {
   upgrade: "Loading upgrade center...",
   userManagement: "Loading user management...",
   auditLogs: "Loading audit logs...",
+  integrations: "Loading integrations...",
   settings: "Loading settings...",
 };
 

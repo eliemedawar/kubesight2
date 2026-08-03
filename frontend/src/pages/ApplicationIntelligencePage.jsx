@@ -1451,7 +1451,9 @@ function Overview({ analysis, application, artifacts }) {
             : <span className="muted">—</span>}
           <small>
             {assessed && sourceCoverage
-              ? `Hermes read ${sourceCoverage.selectedFiles} of ${sourceCoverage.eligibleFiles} analyzable files (${analysis?.analysisMode} caps the slice at ${sourceCoverage.fileLimit}).`
+              ? sourceCoverage.reviewedPercent === 100
+                ? `Hermes read all ${sourceCoverage.eligibleFiles} analyzable files.`
+                : `Hermes read ${sourceCoverage.selectedFiles} of ${sourceCoverage.eligibleFiles} analyzable files.`
               : "Not recorded for this run."}
           </small>
         </article>
@@ -1471,12 +1473,14 @@ function Overview({ analysis, application, artifacts }) {
       {assessed && sourceCoverage && sourceCoverage.reviewedPercent < 100 ? (
         <p className="ai-caveat">
           <strong>Hermes read part of the repository, not all of it.</strong> {analysis.analysisMode} mode
-          sends at most {sourceCoverage.fileLimit} files, so {sourceCoverage.selectedFiles} of{" "}
-          {sourceCoverage.eligibleFiles} analyzable files were reviewed
+          {analysis.analysisMode === "Quick"
+            ? ` sends a prioritized slice of at most ${sourceCoverage.fileLimit} files, so `
+            : " attempted to include every analyzable file, but package-size safeguards meant "}
+          {sourceCoverage.selectedFiles} of {sourceCoverage.eligibleFiles} analyzable files were reviewed
           {sourceCoverage.truncatedFiles ? `, ${sourceCoverage.truncatedFiles} of them truncated` : ""}.
           Configuration, manifests, entrypoints, clients, and controllers are prioritized, but anything
           outside that slice is unexamined — its absence from the findings means nothing.
-          {analysis.analysisMode === "Quick" ? " Deep mode triples the slice." : ""}
+          {analysis.analysisMode === "Quick" ? " Deep mode reads all eligible files by default." : ""}
         </p>
       ) : null}
       {assessed && coverage?.unavailable?.length ? (
@@ -2196,7 +2200,14 @@ function ApplicationDetail({
                 searchThreshold={10}
                 aria-label="Rerun analysis mode"
               />
-              <button type="button" className="primary" onClick={() => onAnalyze(rerunMode)}>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => onAnalyze(
+                  rerunMode,
+                  analysis?.requestedRevision || analysis?.branch || application.defaultBranch,
+                )}
+              >
                 Re-analyze
               </button>
             </>
@@ -2375,7 +2386,7 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
     };
     load();
     return () => { cancelled = true; };
-  }, [analysis?.id, filters]);
+  }, [analysis?.id, analysis?.status, filters]);
 
   useEffect(() => {
     if (!analysis?.id || !isAnalysisActive(analysis.status)) return undefined;
@@ -2514,10 +2525,10 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
           }}
           canManage={canManage}
           canAnalyze={canAnalyze}
-          onAnalyze={async (analysisMode) => {
+          onAnalyze={async (analysisMode, revision) => {
             const next = await requestApplicationAnalysis(selected.id, {
               analysisMode,
-              revision: selected.defaultBranch,
+              revision: revision || selected.defaultBranch,
             });
             await loadList();
             await loadDetail(selected.id, next.id);
