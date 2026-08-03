@@ -8,6 +8,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+ARG TARGETARCH=amd64
+ARG SEMGREP_VERSION=1.170.0
+ARG TRIVY_VERSION=0.72.0
+ARG SYFT_VERSION=1.50.0
+ARG HADOLINT_VERSION=2.15.1
+
 RUN --mount=type=secret,id=trend_micro_cloud_ca,required=true \
     --mount=type=secret,id=trend_micro_onprem_ca,required=true \
     cp /run/secrets/trend_micro_cloud_ca \
@@ -17,12 +23,42 @@ RUN --mount=type=secret,id=trend_micro_cloud_ca,required=true \
     update-ca-certificates && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        default-jdk-headless git golang-go gradle maven nodejs npm && \
+        curl default-jdk-headless git golang-go gradle maven nodejs npm && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install --retries 10 --timeout 300 -r requirements.txt "semgrep==${SEMGREP_VERSION}"
+
+RUN --mount=type=cache,target=/root/.cache/scanner-downloads \
+    set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) trivy_arch="64bit"; syft_arch="amd64"; hadolint_arch="x86_64" ;; \
+        arm64) trivy_arch="ARM64"; syft_arch="arm64"; hadolint_arch="arm64" ;; \
+        *) echo "Unsupported worker architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cache=/root/.cache/scanner-downloads; \
+    trivy_archive="trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz"; \
+    curl -fsSL -o "${cache}/${trivy_archive}" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${trivy_archive}"; \
+    curl -fsSL -o "${cache}/trivy_checksums.txt" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_checksums.txt"; \
+    cd "${cache}"; \
+    grep " ${trivy_archive}$" trivy_checksums.txt | sha256sum -c -; \
+    tar -xzf "${trivy_archive}" -C /usr/local/bin trivy; \
+    syft_archive="syft_${SYFT_VERSION}_linux_${syft_arch}.tar.gz"; \
+    curl -fsSL -o "${cache}/${syft_archive}" "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/${syft_archive}"; \
+    curl -fsSL -o "${cache}/syft_checksums.txt" "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_checksums.txt"; \
+    grep " ${syft_archive}$" syft_checksums.txt | sha256sum -c -; \
+    tar -xzf "${syft_archive}" -C /usr/local/bin syft; \
+    hadolint_binary="hadolint-linux-${hadolint_arch}"; \
+    curl -fsSL -o "${cache}/${hadolint_binary}" "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/${hadolint_binary}"; \
+    curl -fsSL -o "${cache}/hadolint_checksums.sha256" "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/checksums.sha256"; \
+    grep "\\*${hadolint_binary}$" hadolint_checksums.sha256 | sha256sum -c -; \
+    install -m 0755 "${hadolint_binary}" /usr/local/bin/hadolint; \
+    chmod 0755 /usr/local/bin/trivy /usr/local/bin/syft; \
+    semgrep --version; \
+    trivy --version; \
+    syft version; \
+    hadolint --version
 
 COPY . .
 

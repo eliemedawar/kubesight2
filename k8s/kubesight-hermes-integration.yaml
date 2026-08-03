@@ -13,8 +13,9 @@ data:
   APPLICATION_ANALYSIS_SERVICE_ACCOUNT: kubesight-analysis-worker
   APPLICATION_ANALYSIS_WORKER_IMAGE: registry.example.com/kubesight/application-worker:replace-me
   APPLICATION_ANALYSIS_IMAGE_PULL_POLICY: IfNotPresent
-  APPLICATION_ANALYSIS_CALLBACK_URL: http://kubesight-backend.kubesight.svc.cluster.local:5000/api/application-analysis-worker
-  APPLICATION_PULL_REQUEST_CALLBACK_URL: http://kubesight-backend.kubesight.svc.cluster.local:5000/api/application-pull-request-worker
+  # The live KubeSight ingress targets backend-service in the kubesight namespace.
+  APPLICATION_ANALYSIS_CALLBACK_URL: http://backend-service.kubesight.svc.cluster.local:5000/api/application-analysis-worker
+  APPLICATION_PULL_REQUEST_CALLBACK_URL: http://backend-service.kubesight.svc.cluster.local:5000/api/application-pull-request-worker
   APPLICATION_ANALYSIS_ARTIFACT_ROOT: /var/lib/kubesight/application-analysis-artifacts
   APPLICATION_ANALYSIS_CPU_LIMIT: "2"
   APPLICATION_ANALYSIS_MEMORY_LIMIT: 4Gi

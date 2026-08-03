@@ -6,9 +6,16 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+ARG TARGETARCH=amd64
+ARG SEMGREP_VERSION=1.170.0
+ARG TRIVY_VERSION=0.72.0
+ARG SYFT_VERSION=1.50.0
+ARG HADOLINT_VERSION=2.15.1
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         default-jdk-headless \
         git \
         golang-go \
@@ -19,7 +26,39 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --retries 10 --timeout 300 \
+    -r requirements.txt "semgrep==${SEMGREP_VERSION}"
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) trivy_arch="64bit"; syft_arch="amd64"; hadolint_arch="x86_64" ;; \
+        arm64) trivy_arch="ARM64"; syft_arch="arm64"; hadolint_arch="arm64" ;; \
+        *) echo "Unsupported worker architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    cd "${workdir}"; \
+    trivy_archive="trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz"; \
+    curl -fsSLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${trivy_archive}"; \
+    curl -fsSLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_checksums.txt"; \
+    grep " ${trivy_archive}$" "trivy_${TRIVY_VERSION}_checksums.txt" | sha256sum -c -; \
+    tar -xzf "${trivy_archive}" -C /usr/local/bin trivy; \
+    syft_archive="syft_${SYFT_VERSION}_linux_${syft_arch}.tar.gz"; \
+    curl -fsSLO "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/${syft_archive}"; \
+    curl -fsSLO "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_checksums.txt"; \
+    grep " ${syft_archive}$" "syft_${SYFT_VERSION}_checksums.txt" | sha256sum -c -; \
+    tar -xzf "${syft_archive}" -C /usr/local/bin syft; \
+    hadolint_binary="hadolint-linux-${hadolint_arch}"; \
+    curl -fsSLO "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/${hadolint_binary}"; \
+    curl -fsSLO "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/checksums.sha256"; \
+    grep "\\*${hadolint_binary}$" checksums.sha256 | sha256sum -c -; \
+    install -m 0755 "${hadolint_binary}" /usr/local/bin/hadolint; \
+    chmod 0755 /usr/local/bin/trivy /usr/local/bin/syft; \
+    cd /; \
+    rm -rf "${workdir}"; \
+    semgrep --version; \
+    trivy --version; \
+    syft version; \
+    hadolint --version
 
 COPY . .
 

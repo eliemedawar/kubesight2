@@ -192,9 +192,18 @@
   overflow: hidden;
 }
 .ai-graph__canvas .topo-viewer { height: 100%; }
-.ai-evidence { padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-panel); display: grid; gap: .55rem; align-content: start; }
+.ai-evidence {
+  min-width: 0; max-width: 100%; padding: 1rem;
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-panel);
+  display: grid; gap: .55rem; align-content: start;
+}
 .ai-evidence h4 { margin: 0; font-size: var(--font-size-sm); text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
-.ai-evidence p { margin: 0; font-size: var(--font-size-sm); color: var(--text-subtle); }
+.ai-evidence > *, .ai-evidence .ai-detail-grid, .ai-evidence .ai-detail-grid > div,
+.ai-evidence .ai-detail-grid dd { min-width: 0; }
+.ai-evidence > strong, .ai-evidence p, .ai-evidence dd, .ai-evidence code {
+  overflow-wrap: anywhere; word-break: break-word; white-space: normal;
+}
+.ai-evidence p { margin: 0; font-size: var(--font-size-sm); line-height: 1.55; color: var(--text-subtle); }
 
 /* ------------------------------------------------------- container and gates */
 .ai-code {
