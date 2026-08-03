@@ -6,18 +6,21 @@
  *   Integrations   every outside system KubeSight talks to
  *   Administration the people-and-history pages, which stay their own routes
  *
- * Integrations used to be scattered: image registries and ticketing each had
- * their own sidebar entry, SMTP and receivers hid behind an admin-only tab on
- * the Alerts page, and the vSphere/SSH/build sources lived inside the Cluster
- * Builder. They are all reachable from here now, so "where do I configure X"
- * has one answer.
+ * Connecting to an outside system used to happen in whichever screen happened
+ * to use it: registries had their own sidebar entry, SMTP and receivers hid
+ * behind an admin-only tab on the Alerts page, Jira and Zoho were configured
+ * from inside the Ticketing workspace. Those connections all live in the hub
+ * now, so "where do I configure X" has one answer.
+ *
+ * The split is connection versus use. The hub owns connections. Working with
+ * what a connection enables — browsing tickets, running a sync, analysing a
+ * repository — stays on its own page, because that is a job rather than a
+ * setting.
  *
  * Each entry declares its own RBAC gate rather than relying on the page-level
  * `settings:view` check, because a user who may manage registries but not
- * workspace defaults still needs the registries section — and nothing else.
+ * workspace defaults still needs the hub — and nothing else in Settings.
  */
-
-const SECTION_HINT_KEY = "kubesight.settings.section";
 
 /**
  * Anyone who may see at least one integration may open the hub; the hub then
@@ -50,7 +53,7 @@ export const SETTINGS_GROUPS = [
  *   link    page key to navigate away to — used by Administration, whose
  *           pages are full workspaces rather than settings forms.
  *   wide    the panel wants the full content column (tables, not forms).
- *   requires / manage  RBAC gates, resolved by visibleSettingsSections().
+ *   requires  RBAC gate, resolved by visibleSettingsSections().
  */
 export const SETTINGS_SECTIONS = [
   // ─── Preferences ───
@@ -105,13 +108,18 @@ export const SETTINGS_SECTIONS = [
   // integration — browsing tickets, field sync, deploy runs — stay on their own
   // pages; this is where the connection to the outside system is configured,
   // not where the work gets done.
+  // The hub is its own top-level address now, not a panel in here. It grew
+  // four tabs and a per-provider detail screen, which is a workspace rather
+  // than a setting -- and burying it under /admin/settings meant the answer to
+  // "is Jira working" was three clicks from anywhere.
+  //
+  // The rail keeps the row so the path from Settings to it is still obvious.
   {
     id: "integrationsHub",
     group: "integrations",
     label: "All integrations",
     icon: "plug",
-    panel: "integrationsHub",
-    wide: true,
+    link: "integrations",
     requires: { anyPermissions: INTEGRATION_VIEW_PERMISSIONS },
   },
 
@@ -191,29 +199,4 @@ export function groupSettingsSections(sections) {
     ...group,
     sections: sections.filter((section) => section.group === group.id),
   })).filter((group) => group.sections.length > 0);
-}
-
-/**
- * Deep link into a settings section from elsewhere in the app. Session storage
- * rather than the URL, matching how the rest of the app deep-links — there is
- * no router, so navigation is app state plus a hint the target consumes once.
- */
-export function setSettingsSectionHint(sectionId) {
-  try {
-    window.sessionStorage.setItem(SECTION_HINT_KEY, sectionId);
-  } catch {
-    /* storage unavailable (private mode) — the link lands on the first section */
-  }
-}
-
-export function consumeSettingsSectionHint() {
-  try {
-    const hint = window.sessionStorage.getItem(SECTION_HINT_KEY);
-    if (hint) {
-      window.sessionStorage.removeItem(SECTION_HINT_KEY);
-    }
-    return hint || "";
-  } catch {
-    return "";
-  }
 }

@@ -91,6 +91,15 @@ export function formatClock(ms) {
   return `${pad(Math.floor(total / 3600))}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`;
 }
 
+/**
+ * Kept rather than delegated to lib/relativeTime.
+ *
+ * It already parses through `parseApiTime`, so it does not have the
+ * local-time bug the other three copies had, and it has its own wording — weeks
+ * rather than a date past a fortnight — that this page's tests assert. Changing
+ * the output to match the shared helper would mean editing those tests to
+ * accommodate a refactor, which is the wrong way round.
+ */
 export function timeAgo(value, now = Date.now()) {
   const at = parseApiTime(value);
   if (!Number.isFinite(at)) return "";

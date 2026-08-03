@@ -105,9 +105,15 @@
   --sidebar-nav-text: #55575e;
   --sidebar-nav-hover-bg: #f3f2ef;
   --sidebar-nav-hover-text: #1a1b1e;
-  --sidebar-nav-active-bg: #fff1ef;
-  --sidebar-nav-active-text: #d71f1f;
-  --sidebar-nav-active-border: #ff2929;
+  /*
+   * "You are here" is deliberately not the brand red. Red carries a meaning in
+   * this product -- degraded, failed, firing -- and the attention feed depends
+   * on that meaning being scarce. Spending it on the current nav item, which is
+   * on screen permanently and signals nothing wrong, devalues it everywhere
+   * else. Selection is a neutral tint plus weight instead.
+   */
+  --sidebar-nav-active-bg: #e8e6e1;
+  --sidebar-nav-active-text: #1a1b1e;
   --sidebar-section-label: #8b8d96;
   --sidebar-brand-text: #1a1b1e;
   --sidebar-brand-sub: #8b8d96;
@@ -189,9 +195,8 @@
   --sidebar-nav-text: #9a9ba0;
   --sidebar-nav-hover-bg: rgba(255, 255, 255, 0.05);
   --sidebar-nav-hover-text: #ececea;
-  --sidebar-nav-active-bg: rgba(255, 59, 59, 0.14);
-  --sidebar-nav-active-text: #ff7a70;
-  --sidebar-nav-active-border: #ff3b3b;
+  --sidebar-nav-active-bg: rgba(255, 255, 255, 0.11);
+  --sidebar-nav-active-text: #ececea;
   --sidebar-section-label: #6c6d73;
   --sidebar-brand-text: #fafaf9;
   --sidebar-brand-sub: #6c6d73;
@@ -475,12 +480,12 @@ button svg {
   padding: 0.5rem 0.625rem;
   font-weight: 500;
   font-size: var(--font-size-sm);
+  /*
+   * These are <a> elements now, so the browser underlines them by default.
+   * Every item underlined reads as unstyled rather than as navigation.
+   */
+  text-decoration: none;
   transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
-}
-
-.nav-link svg {
-  flex-shrink: 0;
-  opacity: 0.85;
 }
 
 .nav-link:hover {
@@ -494,12 +499,8 @@ button svg {
   background: var(--sidebar-nav-active-bg);
   color: var(--sidebar-nav-active-text);
   border-color: transparent;
-  border-left-color: var(--sidebar-nav-active-border);
+  border-left-color: transparent;
   font-weight: 600;
-}
-
-.nav-link.active svg {
-  opacity: 1;
 }
 
 .nav-link:focus-visible {

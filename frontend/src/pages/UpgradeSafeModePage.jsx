@@ -1,4 +1,7 @@
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
+import ConfirmDialog from "../components/common/ConfirmDialog.jsx";
+import { useAuth } from "../context/AuthContext.jsx";
+import { useUpgradeCenter } from "../hooks/useUpgradeCenter.js";
 import PageTitle from "../components/common/PageTitle.jsx";
 import InfoCard from "../components/common/InfoCard.jsx";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
@@ -28,19 +31,48 @@ function SupportBadge({ supported }) {
 }
 
 export default function UpgradeSafeModePage({
-  upgradeData,
-  targetVersion,
-  onTargetVersionChange,
-  onRunPrecheck,
-  onStartUpgrade,
+  clusterId,
+  clusterLabel,
   onViewInstructions,
-  loading,
   coreLoading = false,
   hasClusters = true,
-  accessError = "",
+  accessError: shellError = "",
   canPrecheck,
   canStart,
 }) {
+  const auth = useAuth();
+
+  // This page owns its load, its 3s job poll, and the confirmation for an
+  // upgrade that drains nodes. The poll stops when the route unmounts, which is
+  // exactly the "or the user leaves the page" its original comment described.
+  const {
+    upgrade: upgradeData,
+    targetVersion,
+    loading,
+    error: upgradeError,
+    confirmingStart,
+    confirmationLabel,
+    changeTargetVersion: onTargetVersionChange,
+    runPrecheck: onRunPrecheck,
+    requestStart,
+    confirmStart,
+    cancelStart,
+  } = useUpgradeCenter({
+    clusterId,
+    clusterLabel,
+    canAccessCluster: auth.canAccessCluster,
+  });
+
+  const accessError = upgradeError || shellError;
+
+  // Starting can resolve to "show them the instructions instead" for providers
+  // that only document the steps, so the scroll stays with the caller.
+  const onStartUpgrade = async () => {
+    const outcome = await requestStart();
+    if (outcome === "instructions") {
+      onViewInstructions?.();
+    }
+  };
   const clusterInfo = upgradeData?.clusterInfo;
   const provider = upgradeData?.provider;
   const versionInfo = upgradeData?.versionInfo;
@@ -375,6 +407,33 @@ export default function UpgradeSafeModePage({
           </p>
         ) : null}
       </section>
+
+      {/*
+        Replaces a window.confirm. This is the highest blast radius action in
+        the product -- it drains nodes and restarts kubelet on a live cluster --
+        and window.confirm could not list what it does, could not look different
+        from an ordinary "are you sure", and was dismissed by the same Enter
+        that reached it. The typed phrase is the cluster's own name, so the
+        operator states which cluster they mean rather than agreeing to one the
+        dialog chose for them.
+      */}
+      <ConfirmDialog
+        open={confirmingStart}
+        tone="danger"
+        title={`Upgrade ${confirmationLabel} to ${targetVersion}?`}
+        body="This modifies a live cluster and cannot be undone from here."
+        affected={[
+          "Nodes are drained one at a time",
+          "kubeadm upgrade runs on each node",
+          "kubelet is restarted on each node",
+          "Workloads reschedule while each node is unavailable",
+        ]}
+        requirePhrase={confirmationLabel}
+        confirmLabel="Start upgrade"
+        busy={loading}
+        onCancel={cancelStart}
+        onConfirm={confirmStart}
+      />
     </AccessScopeView>
   );
 }

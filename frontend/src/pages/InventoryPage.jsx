@@ -5,6 +5,7 @@ import PageTitle from "../components/common/PageTitle.jsx";
 import HelmChartCatalog from "../components/inventory/HelmChartCatalog.jsx";
 import TemplateMarketplace from "../components/inventory/TemplateMarketplace.jsx";
 import { getWizardTemplate } from "../api/inventoryApi.js";
+import { useInventoryClusterOptions } from "../hooks/useInventory.js";
 import { applyImportToWizard } from "../api/deploymentFormsApi.js";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
 import { normalizeClusterOptions } from "../utils/clusterOptions.js";
@@ -40,7 +41,7 @@ export default function InventoryPage({
   coreLoading = false,
   accessError = "",
   hasClusters,
-  clusterOptions = [],
+  allowedClusters = [],
   defaultClusterId = "",
   canRegister = false,
   canDeploy = false,
@@ -48,8 +49,13 @@ export default function InventoryPage({
   canHelmInstall = false,
   canManageTemplates = false,
   isAdmin = false,
-  onRefresh,
 }) {
+  // The dropdown's own fetch. App used to load the whole inventory to build
+  // this and passed the items nowhere; it lives with its consumer now.
+  const { options: clusterOptions, reload: onRefresh } = useInventoryClusterOptions({
+    clusterId: defaultClusterId,
+    allowedClusters,
+  });
   const [activeSection, setActiveSection] = useState("templates");
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);

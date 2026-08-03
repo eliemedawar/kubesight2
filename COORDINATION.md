@@ -63,6 +63,49 @@ Add:
     run_startup_guards(app)
 Status: **applied**
 
+### 2026-08-02 A2 — SPA history fallback for real URLs
+
+File: `backend/api/frontend_static.py` (unlisted in `OWNERSHIP.md`; it registers
+Flask routes, so treating it as A1's — reassign if that is wrong)
+
+**Why:** the router landed, so the app now has real URLs. Flask serves
+`index.html` at `/` only (`frontend_static.py:33`). Every other route — a
+bookmark, a shared link, or just F5 on `/fleet/clusters` — returns a Flask 404.
+The Vite dev server does history fallback itself, so this is invisible in
+development and breaks only in the Flask-served build, which is the one we ship.
+
+Where: `frontend_static.py`, inside `register_frontend_static`, after the
+existing `serve_spa_index`.
+
+Add:
+
+```python
+    @app.get("/<path:spa_path>")
+    def serve_spa_fallback(spa_path: str):
+        # API and health keep returning JSON, including their 404s. Contract 1
+        # says every endpoint answers in the envelope, and serving an HTML page
+        # here would turn every client-side error path into a parse failure.
+        if spa_path.startswith(("api/", "health")):
+            abort(404)
+        return send_file(DIST_DIR / "index.html")
+```
+
+Also add `abort` to the existing `from flask import ...` at `:9`.
+
+Werkzeug ranks static rules above `<path:>` converters, so this cannot shadow a
+registered blueprint route regardless of registration order — only genuinely
+unmatched paths reach it.
+
+**Related, already done on my side:** `frontend/vite.config.js` had `base: "./"`,
+which emits relative asset URLs. Those resolve against the current directory, so
+at `/fleet/clusters` the browser would fetch `/fleet/assets/index.js`. Changed to
+`base: "/"`, which is what the existing `/assets/<path>` route at `:29` already
+expects. Cost: `dist/index.html` no longer opens over `file://`.
+
+Status: **applied** by A1 — with two cases past my patch (a missing asset stays a
+404 rather than serving index.html as JavaScript, and a registered route still
+answers 401 rather than HTML). Both right, both would have misdirected debugging.
+
 ---
 
 ## Contract changes
@@ -748,7 +791,6 @@ forget side effects — email (built, not wired) and `zoho-ticket-writeback`,
 which posts to an external system inside `except Exception: pass`. That one is
 next, and like email it needs a worker, so it goes up for review rather than
 merging on green.
-
 ### 2026-08-02 — SCOPE DECISION: all five modules are kept
 
 `mobileApps`, `clusterBuilder`, `serviceCatalog`, `components`, `clients` all
@@ -783,3 +825,338 @@ write that down now than to discover it in month 6.
 
 Nothing about this is a bad decision; it is a decision with a cost, and the cost
 belongs in the plan rather than in someone's memory.
+
+### 2026-08-02 A2 — frontend (session 2): router foundation, step 1
+
+Rebased on `master` (14 commits). Clean — my audit was already merged via
+`df00632`. Confirmed I am in the `kubesight2` worktree on `track/frontend`
+before committing, per the new `OWNERSHIP.md` rule.
+
+**A1's four edits in `frontend/` reviewed and kept.** `deleteRole(id, {force})`
+and the `RolesPanel` call site match contract 6 — `force` is passed only on the
+branch whose confirm names the affected users, which is the informed consent the
+409 asks for. The two typed-confirmation modals are the right pattern.
+
+**One defect found in those edits, fixed on my branch.** Neither modal cleared
+its confirmation input on close:
+
+- `AddAppModal.jsx` — the `!open` reset clears eight fields but not
+  `yamlConfirmation` / `imageConfirmation`.
+- `EditResourceModal.jsx` — same, and worse: that modal is reused across
+  resources, so a confirmation typed for one resource carried into the next one
+  in the same namespace.
+
+Effect: reopening arrives at the confirm step with **Apply already enabled** for
+a target the operator never named this time. The server still enforces the
+phrase, so it is not a bypass — but the input exists to make the operator name
+the target *per apply*, and a stale value defeats exactly that. Two lines each.
+
+**Contract 2 re-read.** The `{"items": [...]}` correction turned out to be a
+no-op for me — `IntegrationsHub.jsx:113` and `IntegrationDetail.jsx:114` already
+read `response?.items || []`. No changes needed. The authorization matrix and the
+404/403 split are noted for the hub build; `client.js` already exposes
+`error.status`, so both are distinguishable at the call site.
+
+**Landed — §G step 1, router foundation:**
+- `react-router-dom@7.18.2`, plus `@testing-library/react` + `jsdom` per F8.
+  `package-lock.json` committed (CI runs `npm ci`).
+- `src/routes/routeTable.js` — 27 routes, one row each, carrying path, parent,
+  scope, loading label and chrome flags. Replaces the `activePage` switch and the
+  four page-key `Set`s that each described one property of a page in a different
+  file.
+- `src/routes/paths.js` — `pageKey` <-> URL, delegating to React Router's own
+  `matchRoutes`/`generatePath` so the shell's idea of the active page cannot
+  drift from what `<Routes>` renders.
+- `App.jsx` — `activePage` is now **derived from the URL**, not `useState`. The
+  shadow copy and the effect that wrote the resolved value back into it are both
+  gone, so the F4 inconsistency (`activePage` vs `resolvedActivePage`
+  disagreeing for a render) no longer exists. All effects and page props are
+  otherwise untouched; this step moves no fetches.
+- `NotFoundPage` replaces the `default:` arm that silently re-rendered the
+  dashboard (F1).
+- 24 new tests, 201 total, green. Production build green.
+
+**A note on the router version, since it touches A3's area.** `npm audit` flags
+`react-router` high. I initially pinned to 7.11.0 to clear it and that was wrong:
+7.11.0 carries ~14 advisories including an open redirect in `<Link>`/`useNavigate`
+(GHSA-wrjc-x8rr-h8h6, fixed in 7.18.0) — the exact API the navigation is built
+on. 7.18.2's only remaining advisory is GHSA-qwww-vcr4-c8h2, which requires React
+Server Components mode; this is a client-side SPA with no server rendering, so it
+is not reachable. Staying on 7.18.2 deliberately. The other flagged package,
+`postcss`, is pre-existing via `vite`. **A3: if you add an audit gate, these two
+need an allowlist with the reasons above, not a version pin.**
+
+Blocked on: nothing. One request filed above — the Flask SPA history fallback,
+without which deep links and refresh 404 in the built app. Dev server is
+unaffected, so it does not block my next steps.
+
+Next: §G steps 2–3 — the `RequireAccess` route guard with `AccessDeniedPage`
+wired to it (per the F2 decision: render, do not silently redirect), then
+`ClusterScopeProvider` and the E9 namespace-loading migration, which is the one
+step that cannot be half-done.
+
+### 2026-08-02 A2 — frontend (session 3): router steps 2 and 3
+
+Thanks for applying the SPA fallback, and for the two cases past my patch — a
+missing asset staying a 404 and a blueprint route still answering 401 are both
+right, and both would have sent me debugging in the wrong direction. Noted on
+contract 1: Flask's own handlers return {"error", "status"} rather than the
+envelope. `client.js` reads `payload.error` on any non-ok response, so router
+error handling is unaffected either way.
+
+**Step 2 — route-level authorization (F2).** RequireAccess renders
+AccessDeniedPage at the URL the user actually opened, instead of silently
+redirecting. AccessDeniedPage already existed and had never been mounted. The
+message names the page so the operator knows which permission to ask for.
+
+The landing redirect survives, narrowed to "/" alone: signing in still lands on
+the first allowed page, because a user who typed no URL should not be met with a
+denial for a page they did not choose.
+
+`resolvedActivePage` became `authorizedPage` and no longer falls back to the
+first allowed page. A 404, a denial, and a user with no visible pages now all
+yield null, so App stops firing a page's fetches and starting its guided tour
+behind whatever is actually on screen.
+
+**Step 3 — cluster/namespace in the URL, and the E9 migration.** The 167-line
+effect is gone, split three ways:
+
+- `hooks/useNamespaceContext.js` — the phased namespace load (lite -> counts ->
+  metrics), unchanged in behaviour. It is the reason large clusters are usable,
+  so it was moved verbatim rather than rewritten.
+- The cluster overview fetch is now its own effect. It used to ride inside the
+  same `Promise.allSettled` to save a round-trip, but the two were already
+  parallel, so separating them costs nothing and stops a namespace loader from
+  having to know which page is open.
+- `hooks/useClusterScope.js` + `routes/clusterScope.js` — two-way binding
+  between the topbar selectors and the URL. Scope goes in the path where the
+  route is *about* it (`/workloads/:clusterId/:namespace`) and in the query
+  where it merely filters (`/alerts?cluster=`). Back now restores the cluster
+  you were looking at, not just the page.
+
+**One thing worth flagging, because it is a trap and not an obvious one.** The
+first version of the scope binding had the selector write state while an effect
+mirrored state back into the URL. That oscillated: between the handler updating
+state and the URL catching up there is a render where the two disagree, and
+because resolution prefers the URL — correct on arrival, wrong mid-update — it
+kept reverting the change it had just been given. It hung the test runner rather
+than failing, which is how I found it.
+
+The fix is one writer: selector handlers change the address and nothing else,
+and a single effect derives state from the address. Anyone adding a third scope
+value (a time range, a namespace filter) should follow the same rule — the
+guard-based version looked correct and was not.
+
+The old cluster/namespace validation effects are deleted; resolution is one
+ordered rule (URL -> current -> workspace default -> first available), applied
+identically whether the value came from a stale bookmark, a dropdown, or a
+cluster being deleted out from under a tab. A URL naming a cluster the user
+cannot reach falls through to one they can rather than pinning an empty
+selection — a bookmark that outlived a permission change should still work.
+
+77 new tests (32 pure resolution + rendering, 12 binding, 10 guard, 23 table),
+278 total green. Production build green. App.jsx is down to ~1,850 lines from
+1,922 while absorbing the router; the reduction lands in steps 4-5 when leaf
+pages take their own fetches.
+
+Blocked on: nothing.
+
+Next: §G step 4 — leaf pages own their fetches, one route per commit (dashboard
+E11, upgrade E3/E4, inventory E5, application details E6, resources M2/M3), then
+step 5's providers.
+
+### 2026-08-02 A2 — frontend (session 4): navigation, shared layer, hub, dashboard
+
+Rebased on master (26 commits). One conflict, in this file, both sides appends —
+kept both. My SPA fallback request is marked applied above.
+
+**Navigation (task 3).** Five groups — Home, Operate, Applications, Changes,
+Administration — replacing seven ad-hoc sections that split related work; the
+upgrade centre sat under "Operations" while the clusters it upgrades sat under
+"Infrastructure".
+
+Hover-driven expansion is gone, and with it three timers: a 160ms open delay, a
+140ms close delay, and a 420ms switch lock. Those are what a hover menu needs to
+stop flickering when the pointer crosses a group on the way elsewhere, and they
+are also why it felt like the menu had opinions — it opened what you passed
+over, closed what you were reading, and did nothing on a trackpad. Entries are
+links with real hrefs now, so middle-click and "open in new tab" work.
+
+Grouping moved out of `authz.js` into `routes/navigation.js`: those entries
+answer "who may see this", which changes for security reasons, and groups answer
+"where does an operator look for this", which changes for product reasons.
+
+**Shared component layer (task 4).** PageHeader/breadcrumbs derived from the
+route table's existing parent chain; AsyncState centralising the
+loading/denied/error/degraded/empty precedence; StatusPill making contract 2's
+four states the shared vocabulary; SaveBar with the unsaved-changes guard that
+routing made necessary; ConfirmDialog replacing `window.confirm` for destructive
+actions; DataTable gaining search and sort; CopyableId, ActivityTimeline,
+FreshnessIndicator.
+
+Also `lib/relativeTime.js`, replacing guesswork. **There are five hand-rolled
+`timeAgo` copies in this tree and they disagree on whether a naive backend
+timestamp is UTC.** Reading it as local shifts every duration by the viewer's
+offset — on a freshness indicator that means confidently reporting stale data as
+current. New code uses the shared one; `lib/integrations.js` is the first copy to
+converge, the other four as their pages are touched.
+
+**Integrations hub (task 5).** Now top-level `/integrations`, out of the Settings
+rail, with the four tabs as routes so an operator can send a colleague the
+Activity tab of a failing provider rather than the hub plus directions. Nothing
+in it knows Jira exists. Every control comes from the `actions` array — an empty
+array renders no controls, which is the viewer case. No polling anywhere,
+deliberately: describing never tests.
+
+**Dashboard (task 6).** Synthetic series deleted per the standing decision. Four
+things were fabricated: a random-walk seed for CPU/memory history, an entirely
+invented network series, a per-namespace CPU split derived by dividing one
+cluster figure by pod count, and a dashed "limit 85%" line that was a frontend
+constant. A seeded walk around the current value always looks like a stable
+cluster, so the one thing a chart is for — noticing that something changed — was
+exactly what it could not show.
+
+Attention feed answers "what needs attention?" in priority order from sources
+already in hand. Sources that fail to load are named rather than silently
+shortening the list. Ctrl/Cmd+K search is permission-aware by construction, not
+by filtering afterwards — a search box that reveals a page exists is a leak even
+when the link 403s.
+
+**A1 — two contract 2 disagreements posted to your mailbox, neither blocking.**
+The provider key is `registries`, not `registry` as the doc says, and the
+activity entry shape (`{id, at, outcome, summary, detail}`) is undocumented.
+Built against the service in both cases per the standing rule.
+
+**A3 — cutover sequence confirmed in your mailbox.** I need three things on
+master before I can do step 2: `GET /api/auth/csrf` callable while still
+bearer-authenticated, `POST /api/auth/refresh`, and Set-Cookie on login
+alongside the existing bearer response. Not on master as of `04631ae`, so I am
+not blocked and not waiting — ping me and I will do the switch. It is contained
+to `client.js`; `setUnauthorizedHandler` is already the hook for
+retry-once-then-logout.
+
+402 tests green (up from 278), production build green.
+
+Blocked on: nothing.
+
+Next: contract 4 client cutover when A3's endpoints land; migrating remaining
+pages onto the shared layer; converging the other four `timeAgo` copies.
+
+### 2026-08-02 A2 — frontend (session 5): the decomposition, finished
+
+Rebased on master (`e2c5711`). Master has not touched `frontend/` since my last
+base, so the only conflicts were this file, both sides appending.
+
+**§G steps 4–7 are done. App.jsx is 1,142 lines and 9 effects, from 1,922 and 20.**
+Five sessions in, that is the number the audit was actually about: the router
+landed in session 2 but the shell kept owning everyone's data, so the file had
+only shrunk by 31 lines. What is left is the genuinely global — auth gates,
+theme, cluster scope, the change-bundle drawer, and the route table.
+
+Each route now owns its own fetching:
+
+- Dashboard (E11), upgrade (E3/E4), inventory (E5), application details (E6),
+  workloads (M2/M3). Every poller's lifetime is now its route's lifetime, so
+  the `page === "x"` checks that had to be right on every run are gone.
+- Notifications and the tour engine came out as hooks. The tour was last on
+  purpose: it is keyed by page key and needed every route to have a stable one.
+
+**Two bugs found while moving code, both worth knowing about.**
+
+*`shouldShowAccessError` means the opposite of how it reads.* It is true **only**
+for access-denied messages — its job was spotting an unexpected 403. App's
+`applyPageError` used it as a general gate, so every ordinary failure (a 500, a
+dropped connection) was silently swallowed on the dashboard, inventory, upgrade
+and cluster loads: an empty page, no explanation. I reproduced it faithfully in
+three new hooks before a test caught it. `describeLoadError` in `utils/authz.js`
+states the rule that was intended. **A1/A3: if you have anything calling
+`shouldShowAccessError` as a general error gate, it is not doing what it looks
+like.**
+
+*Two sources of truth for the current nav item.* `NavLink` matches by path
+prefix and appends its own `active` class even when `className` is a string, so
+`/applications` counted itself active on `/applications/clients` and Inventory
+stayed highlighted while you were on Clients. Now plain `Link` driven only by
+the resolved page key.
+
+**Three deep-link handshakes deleted.** Alerts tab and Settings section
+(`sessionStorage`), Ticketing provider (`localStorage`). Each existed only
+because there was no router; two said so in their own comments. The Ticketing
+one was also the only per-user key in the app not namespaced by user id, so it
+survived a sign-out on a shared machine.
+
+**Two `window.confirm` calls replaced with `ConfirmDialog`.** Starting an
+automatic upgrade — which drains nodes and restarts kubelet — now lists what
+happens and requires the operator to type the cluster's own name. Removing an
+application from inventory now says plainly that nothing is deleted from the
+cluster, which is the reassurance `window.confirm` renders worst.
+
+**F3 half-closed, and I want to be accurate about it.** I previously wrote that
+routing "fixed" the two unreachable drill-downs. It made them addressable; it
+did not add entry points. The cluster overview now has one — the cluster card
+name links to it. Application details still has none, deliberately: nothing in
+this codebase renders a list of registered applications (`InventoryPage` shows
+templates and Helm releases), so there is nowhere honest to put the link.
+**That is a product gap, not a routing one**, and inventing a list to close it
+would be building a feature under cover of a refactor.
+
+484 tests green, from 278 at the start of the session. Production build green.
+
+Blocked on: nothing.
+
+Next: contract 4 client cutover the day A3's `csrf`/`refresh`/Set-Cookie land —
+still not on master as of `e2c5711`, and nothing in my mailbox. Then migrating
+the remaining pages onto the shared component layer (2 of 33 use it) and
+converging the last four `timeAgo` copies.
+
+### 2026-08-02 A2 — frontend (session 6): shared layer, actually shared
+
+Rebased on master (`1add0b4`). Master still has not touched `frontend/`; the only
+conflict was this file, both sides appending.
+
+**Breadcrumbs are shipped.** They were a stated requirement of the routing work
+and were not actually delivered — I had built the component and only two screens
+used it. Rather than migrate nineteen pages by hand onto a second heading
+component, `PageTitle` now derives the trail from the current route, so every
+page that already renders a heading gets breadcrumbs without being touched: 21
+pages, zero page edits. The trail comes from the route table's `parent` chain,
+the same field that decides which nav entry is highlighted.
+
+**Two duplications of my own, corrected.** `AsyncState` duplicated
+`AccessScopeView`, which predates it and had seven callers. `PageHeader`
+duplicated `PageTitle`, which has nineteen. Both were mine, both from the same
+session, both from writing before reading. A shared layer whose components
+duplicate each other is worse than no shared layer — it adds a second thing to
+keep in sync while claiming to remove one. Consolidated onto the older component
+in each case, keeping the genuine additions (a degraded state that renders
+content *and* a warning; an explicit denied override).
+
+**`timeAgo` converged.** Three of the four hand-rolled copies used
+`new Date(iso)` on a naive backend timestamp, which the browser reads as local
+time — so every age was off by the viewer's UTC offset, and on a "last synced"
+label that reports stale data as current, in the reassuring direction for
+anyone west of UTC. They delegate to `lib/relativeTime` now.
+`utils/clusterBuilder` keeps its own: it already parsed correctly, its wording
+differs deliberately, and its tests assert that wording — changing the output to
+match would mean editing tests to accommodate a refactor.
+
+**Two pages moved onto the shared state gate** (AuditLogs, MyRequests), and the
+gate itself is now tested, which it was not despite seven callers. The rule
+worth protecting is that loading outranks everything: the recurring bug was an
+empty state rendering before the first fetch resolved.
+
+DeploymentRequests is deliberately left: its state chain is fused with tab
+branching in a way that needs the tabs restructured too, and it has no test
+coverage to catch a mistake.
+
+546 tests green, from 484.
+
+Blocked on: nothing.
+
+**A3 — still waiting on you, and still not blocked.** `GET /api/auth/csrf`,
+`POST /api/auth/refresh` and Set-Cookie-on-login are not on master as of
+`1add0b4`, and my mailbox is empty. The client change is contained to
+`client.js`. One thing from this session is relevant to yours: see my broadcast
+about `shouldShowAccessError` — if the 401 → refresh → retry path routes
+failures through it, non-auth failures on that path will vanish silently. Use
+`describeLoadError`.

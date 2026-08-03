@@ -210,25 +210,12 @@
   flex: none;
 }
 
-.ov-dashline {
-  width: 0.9rem;
-  border-top: 2px dashed var(--warn);
-  flex: none;
-}
-
-.ov-sample {
-  font-family: var(--font-mono);
-  font-size: 0.625rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--warn);
-  background: var(--warn-soft);
-  border: 1px solid var(--warn-border);
-  border-radius: var(--radius-sm);
-  padding: 0.1rem 0.45rem;
-  white-space: nowrap;
-}
+/*
+ * .ov-dashline and .ov-sample are gone with the synthetic series they existed
+ * for: a dashed line marking a "limit" that was a frontend constant, and a
+ * badge whose whole job was to admit that the chart beside it was invented.
+ * A chart that needs a disclaimer should not be drawn.
+ */
 
 /* chart canvases */
 .ov-chart-wrap {
@@ -437,4 +424,38 @@
   padding: 1.1rem 1.25rem;
   font-size: 0.78rem;
   color: var(--text-muted);
+}
+
+/*
+ * Honest empty states for charts.
+ *
+ * Occupies the same box the chart would, so a panel with no data reads as a
+ * panel with no data rather than as a layout fault.
+ */
+.ov-unavailable {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 8rem;
+  padding: var(--space-4);
+  text-align: center;
+}
+
+.ov-unavailable p {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.ov-unavailable p.muted {
+  max-width: 28rem;
+  font-size: var(--font-size-xs);
+}
+
+.ov-card-note {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
 }

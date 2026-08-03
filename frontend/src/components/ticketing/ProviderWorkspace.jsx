@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import { minutesToNextSync, timeAgo } from "../zoho/common.jsx";
 import { IconArrowLeft, IconRefresh } from "../zoho/icons.jsx";
@@ -7,21 +7,20 @@ import ZohoFlowStrip from "../zoho/ZohoFlowStrip.jsx";
 import ZohoOverviewTab from "../zoho/ZohoOverviewTab.jsx";
 import { ACTIVE_RUN_STATUSES } from "../zoho/ZohoRunDetail.jsx";
 import ZohoTicketsTab from "../zoho/ZohoTicketsTab.jsx";
-import TicketingSettingsTab from "./TicketingSettingsTab.jsx";
 import { useTicketing } from "./TicketingContext.jsx";
-import { configPayload, emptyForm, formFromConfig } from "./settingsSchema.js";
 
-// One provider's workspace: command bar → flow strip → four rooms. This is the
+// One provider's workspace: command bar → flow strip → three rooms. This is the
 // page the Ticketing tab opens when a provider card is picked, and it is
 // provider-agnostic — everything vendor-specific reaches it through
-// `useTicketing()` (the bound API client, the capability flags, and the form
-// schema that decides which settings inputs exist).
+// `useTicketing()` (the bound API client and the capability flags).
 
+// Connecting the provider — credentials, field ids, the webhook, Jenkins — moved
+// to Settings → Integrations, where every outside system is configured. What is
+// left here is the work you do once it is connected.
 const TABS = [
   { key: "overview", label: "Overview" },
   { key: "fieldsync", label: "Field sync" },
   { key: "tickets", label: "Tickets & runs" },
-  { key: "settings", label: "Settings" },
 ];
 
 export default function ProviderWorkspace({ canManage = false, onBack }) {
@@ -37,9 +36,6 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   const [notice, setNotice] = useState("");
   const [tab, setTab] = useState("overview");
 
-  const blankForm = useMemo(() => emptyForm(providerKey), [providerKey]);
-  const [form, setForm] = useState(blankForm);
-  const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -52,8 +48,6 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   const [jenkins, setJenkins] = useState(null);
   const [runs, setRuns] = useState([]);
   const [runsLoading, setRunsLoading] = useState(true);
-  const [savingJenkins, setSavingJenkins] = useState(false);
-  const [testingJenkins, setTestingJenkins] = useState(false);
   const [startingTicketId, setStartingTicketId] = useState(null);
   const [cancellingRunId, setCancellingRunId] = useState(null);
 
@@ -78,9 +72,7 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
       const jenkinsPromise = api.getJenkinsConfig().catch(() => null);
       const runsPromise = api.listAutomationRuns(50).catch(() => ({ items: [] }));
       try {
-        const cfg = await api.getConfig();
-        setConfig(cfg);
-        setForm(formFromConfig(providerKey, cfg));
+        setConfig(await api.getConfig());
       } catch (err) {
         setError(err.message || `Failed to load the ${providerName} integration.`);
       } finally {
@@ -145,41 +137,6 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
     }
   };
 
-  const saveJenkins = async (payload) => {
-    setSavingJenkins(true);
-    setError("");
-    try {
-      const updated = await api.updateJenkinsConfig(payload);
-      setJenkins(updated);
-      setNotice("Jenkins connection saved.");
-      return true;
-    } catch (err) {
-      setError(err.message || "Failed to save the Jenkins connection.");
-      return false;
-    } finally {
-      setSavingJenkins(false);
-    }
-  };
-
-  const runJenkinsTest = async () => {
-    setTestingJenkins(true);
-    setError("");
-    setNotice("");
-    try {
-      const result = await api.testJenkinsConnection();
-      setJenkins((prev) => ({ ...(prev || {}), ...result }));
-      if (result.status === "ok") {
-        setNotice(result.message || "Jenkins connection OK.");
-      } else {
-        setError(result.message || "Jenkins connection test failed.");
-      }
-    } catch (err) {
-      setError(err.message || "Jenkins connection test failed.");
-    } finally {
-      setTestingJenkins(false);
-    }
-  };
-
   const runTicketAutomation = async (ticket) => {
     setError("");
     setNotice("");
@@ -229,30 +186,11 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
     }
   };
 
-  const setField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
-
   const refreshPreview = async () => {
     try {
       setPreview(await api.getPreview());
     } catch {
       /* preview is best-effort */
-    }
-  };
-
-  const saveConfig = async () => {
-    setSaving(true);
-    setError("");
-    setNotice("");
-    try {
-      const updated = await api.updateConfig(configPayload(providerKey, form));
-      setConfig(updated);
-      setForm(formFromConfig(providerKey, updated));
-      setNotice("Configuration saved.");
-      refreshPreview();
-    } catch (err) {
-      setError(err.message || "Failed to save the configuration.");
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -317,7 +255,6 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   }
 
   const enabled = Boolean(config?.enabled);
-  const dirty = JSON.stringify(form) !== JSON.stringify(formFromConfig(providerKey, config || {}));
   const nextSync = minutesToNextSync(config);
   // Which config key names the account/site, per provider — the subtitle's
   // "connected to what" line.
@@ -361,6 +298,10 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
                 next auto-sync in {nextSync} min
               </>
             ) : null}
+            <span className="sg-zh-cmdsep">·</span>
+            {/* The Settings tab used to be right here, so say where it went
+                rather than leaving someone hunting for it. */}
+            <span className="muted">connection settings in Settings → Integrations</span>
           </p>
         </div>
         <div className="sg-zh-cmdactions">
@@ -474,24 +415,6 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
         />
       ) : null}
 
-      {tab === "settings" ? (
-        <TicketingSettingsTab
-          canManage={canManage}
-          config={config}
-          form={form}
-          setField={setField}
-          onSaveConfig={saveConfig}
-          savingConfig={saving}
-          dirty={dirty}
-          onDiscard={() => setForm(formFromConfig(providerKey, config || {}))}
-          webhookUrl={webhookUrl}
-          jenkins={jenkins}
-          onSaveJenkins={saveJenkins}
-          savingJenkins={savingJenkins}
-          onTestJenkins={runJenkinsTest}
-          testingJenkins={testingJenkins}
-        />
-      ) : null}
     </div>
   );
 }

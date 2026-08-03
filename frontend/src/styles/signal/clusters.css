@@ -30,3 +30,22 @@
   width: 0.8125rem;
   height: 0.8125rem;
 }
+
+/*
+ * The cluster name links to that cluster's overview. Inherits the heading's
+ * type so the card reads the same as before; only the affordance is new.
+ */
+.sg-ccard-link {
+  color: inherit;
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+}
+
+.sg-ccard-link:hover b {
+  text-decoration: underline;
+}
+
+.sg-ccard-link:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}

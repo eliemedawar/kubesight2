@@ -101,6 +101,10 @@ export default function EditResourceModal({
       setError("");
       setBusy(false);
       setLoading(false);
+      // This modal is reused across resources, so a confirmation left set
+      // carries into the next resource in the same namespace and pre-enables
+      // Apply for a target the operator never named.
+      setConfirmation("");
       return undefined;
     }
     if (!clusterId || !namespace || !resourceName) {

@@ -1,3 +1,4 @@
+import { relativeTime } from "../../lib/relativeTime.js";
 import { Fragment } from "react";
 
 export const STATUS_TONE = {
@@ -12,18 +13,10 @@ export function formatDate(value) {
 
 /* Compact relative age for table rows ("26m", "3h", "2d"). */
 export function timeAgo(value) {
-  if (!value) return "—";
-  const t = new Date(value).getTime();
-  if (!Number.isFinite(t)) return "—";
-  const s = Math.floor(Math.max(0, Date.now() - t) / 1000);
-  if (s < 60) return "now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d`;
-  return new Date(t).toLocaleDateString();
+  // Compact, because this is a narrow column. Delegates so it parses naive
+  // backend timestamps as UTC — this copy read them as local, which shifted
+  // every age by the viewer's offset.
+  return relativeTime(value, { style: "compact", empty: "—" });
 }
 
 /* Long-form waiting time for decision cards ("26 min", "1 h 12 min"). */

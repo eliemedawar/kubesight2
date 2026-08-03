@@ -79,7 +79,16 @@ export function shouldDeferAccessMessage({
   });
 }
 
-/** Pages that fetch namespace workload lists on demand (active tab or pods only). */
+/**
+ * @deprecated Nothing in the app reads these any more.
+ *
+ * They answered "does this page need resource data" from a list of page keys
+ * held here — a third place that had to be updated whenever a page started or
+ * stopped needing it. `ResourcesRoute` owns the cache now, so mounting is the
+ * condition, stated once. Kept only because their tests are the existing
+ * coverage of this module; delete both together when that module is next
+ * touched for its own reasons.
+ */
 export const RESOURCE_DATA_PAGES = new Set(["resources", "logs"]);
 
 export function pageNeedsResourceData(pageKey) {

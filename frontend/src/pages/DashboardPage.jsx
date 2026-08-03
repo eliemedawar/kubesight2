@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
@@ -8,30 +8,73 @@ import { useAuth } from "../context/AuthContext.jsx";
 import { getDashboardWidgetRegistry, sortWidgetsForUser } from "../dashboard/widgetRegistry.js";
 import { getVisibleWidgets, groupWidgetsBySection } from "../dashboard/widgetVisibility.js";
 import { useDashboardSeries } from "../dashboard/useDashboardSeries.js";
+import { useDashboardSummary } from "../dashboard/useDashboardSummary.js";
+import { buildAttentionFeed } from "../dashboard/attentionFeed.js";
+import AttentionFeed from "../dashboard/AttentionFeed.jsx";
 import OpsDashboard from "../dashboard/OpsDashboard.jsx";
 import DashboardSkeleton from "../dashboard/DashboardSkeleton.jsx";
 
 export default function DashboardPage({
-  summary,
-  loading,
-  refreshing = false,
   coreLoading = false,
-  accessError = "",
+  accessError: shellError = "",
   hasClusters = true,
   selectedCluster,
-  onRefresh,
-  lastRefreshedAt,
+  refreshIntervalSeconds,
+  onClusterMissing,
   onNavigateToUpgrade,
   onNavigateToInventory,
   canOpenUpgrade,
   canOpenInventory,
+  alerts,
+  integrations,
+  approvals,
+  unavailableSources,
 }) {
   const auth = useAuth();
   const [timeRange, setTimeRange] = useState("6h");
   const clusterId = selectedCluster?.id;
-  const summaryReady = Boolean(summary && clusterId && summary.clusterId === clusterId);
   const isAdmin = auth.isAdmin;
+
+  // This page owns its own fetch and poller now. Leaving the dashboard unmounts
+  // the component and stops the interval, so there is no active-page check left
+  // to get wrong.
+  const {
+    summary,
+    refreshedAt,
+    loading,
+    refreshing,
+    error: summaryError,
+    refresh,
+  } = useDashboardSummary({
+    clusterId,
+    enabled: Boolean(clusterId),
+    refreshIntervalSeconds,
+    canAccessCluster: auth.canAccessCluster,
+    onClusterMissing,
+  });
+
+  // The shell still reports failures that are not this page's own — losing the
+  // cluster list, for instance.
+  const accessError = summaryError || shellError;
+  const summaryReady = Boolean(summary && clusterId && summary.clusterId === clusterId);
   const series = useDashboardSeries(summaryReady ? summary : null, timeRange);
+
+  // "What needs attention?" in priority order, composed from what the app
+  // already holds. Sources that failed to load are named rather than silently
+  // shortening the list — see attentionFeed.js.
+  const feed = useMemo(
+    () =>
+      buildAttentionFeed({
+        alerts,
+        integrations,
+        approvals,
+        summary: summaryReady ? summary : null,
+        clusterId,
+        unavailable: unavailableSources,
+        limit: 8,
+      }),
+    [alerts, integrations, approvals, summary, summaryReady, clusterId, unavailableSources]
+  );
 
   const widgetRegistry = getDashboardWidgetRegistry(isAdmin);
   const visibleWidgets = sortWidgetsForUser(
@@ -153,6 +196,16 @@ export default function DashboardPage({
 
   return (
     <>
+      {/*
+        First, above everything. The dashboard reported state without ranking
+        it, so an operator opening it at the start of a shift had to assemble
+        the priority list themselves from several panels. The charts are still
+        below; they answer a different question.
+      */}
+      <section className="dashboard-row dashboard-row-single">
+        <AttentionFeed feed={feed} loading={loading || coreLoading} />
+      </section>
+
       {MyAccessPanel ? (
         <section className="dashboard-row dashboard-row-single dashboard-my-access-first">
           <MyAccessPanel key={myAccessWidget.id} {...widgetProps} />
@@ -164,8 +217,8 @@ export default function DashboardPage({
         series={series}
         timeRange={timeRange}
         onTimeRangeChange={setTimeRange}
-        lastRefreshedAt={lastRefreshedAt}
-        onRefresh={onRefresh}
+        lastRefreshedAt={refreshedAt}
+        onRefresh={refresh}
         canOpenUpgrade={canOpenUpgrade}
         onNavigateToUpgrade={onNavigateToUpgrade}
       />

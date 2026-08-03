@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { exportAuditLogs, listAuditLogs, listClusters } from "../api";
-import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
-import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
+import AccessScopeView from "../components/common/AccessScopeView.jsx";
+import PageTitle from "../components/common/PageTitle.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 
 // Audit entries reference a cluster in a few ways depending on the action:
@@ -138,10 +138,24 @@ export default function AuditLogsPage() {
   return (
     <div className="ops-page">
       <section className="card ops-section">
-        <h2>Audit Logs</h2>
-        <p className="muted">Security-relevant actions across the control plane.</p>
+        <PageTitle
+          title="Audit Logs"
+          subtitle="Security-relevant actions across the control plane."
+        />
 
-        {!loading && !isAccessDeniedError(error) && (
+        {exportError ? <ErrorBanner message={exportError} onDismiss={() => setExportError("")} /> : null}
+
+        {/*
+          One gate for the whole page. The filters, the count and the table all
+          hid behind the same three conditions, spelled out separately at each
+          of them; AccessScopeView states the precedence once and is the thing
+          that stops an empty state flashing before the first fetch resolves.
+        */}
+        <AccessScopeView
+          pageLoading={loading}
+          accessError={error}
+          loadingLabel="Loading audit logs..."
+        >
           <div className="user-filters" style={{ marginBottom: "1rem" }}>
             <label className="user-filters__search">
               Actor
@@ -205,23 +219,10 @@ export default function AuditLogsPage() {
                 : "Export CSV"}
             </button>
           </div>
-        )}
 
-        {exportError ? <ErrorBanner message={exportError} onDismiss={() => setExportError("")} /> : null}
-
-        {loading ? (
-          <p className="muted">Loading audit logs...</p>
-        ) : isAccessDeniedError(error) ? (
-          <AccessDeniedPage message={error} />
-        ) : formatAccessError(error) ? (
-          <ErrorBanner message={error} suppressAccessDenied={false} />
-        ) : null}
-
-        {!loading && !isAccessDeniedError(error) ? (
-          <>
-            <p className="muted" style={{ marginBottom: "0.5rem" }}>
-              Showing {filtered.length} of {entries.length} entries
-            </p>
+          <p className="muted" style={{ marginBottom: "0.5rem" }}>
+            Showing {filtered.length} of {entries.length} entries
+          </p>
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
@@ -258,9 +259,8 @@ export default function AuditLogsPage() {
                   )}
                 </tbody>
               </table>
-            </div>
-          </>
-        ) : null}
+          </div>
+        </AccessScopeView>
       </section>
     </div>
   );

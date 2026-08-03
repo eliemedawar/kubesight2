@@ -144,20 +144,11 @@ export function formatTimestamp(isoValue) {
   });
 }
 
-export function timeAgo(isoValue) {
-  if (!isoValue) return "never";
-  const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(isoValue) ? isoValue : `${isoValue}Z`;
-  const then = new Date(normalized).getTime();
-  if (Number.isNaN(then)) return "unknown";
-  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
-  if (seconds < 60) return "just now";
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  const months = Math.round(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.round(months / 12)}y ago`;
-}
+/**
+ * Relative time now lives in lib/relativeTime.js. This re-export keeps the
+ * import path working for callers that already had it while the other four
+ * hand-rolled copies in this tree converge on the same implementation — they
+ * disagreed on rounding and, more seriously, on whether a naive backend
+ * timestamp is UTC.
+ */
+export { relativeTime as timeAgo } from "./relativeTime.js";

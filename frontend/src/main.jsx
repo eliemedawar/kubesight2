@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
 import App from "./App.jsx";
 import ErrorBoundary from "./components/common/ErrorBoundary.jsx";
 import { AuthProvider } from "./context/AuthContext.jsx";
@@ -10,6 +11,7 @@ import "./index.css";
 import "./styles/ui-polish.css";
 import "./styles/premium.css";
 import "./styles/sidebar-flyout.css";
+import "./styles/signal/shared.css";
 import "./styles/signal/screens.css";
 import "./styles/signal/overview.css";
 import "./styles/signal/clusters.css";
@@ -39,11 +41,13 @@ async function bootstrap() {
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
       <ErrorBoundary>
-        <AuthProvider>
-          <ChangeBundleProvider>
-            <App />
-          </ChangeBundleProvider>
-        </AuthProvider>
+        <BrowserRouter>
+          <AuthProvider>
+            <ChangeBundleProvider>
+              <App />
+            </ChangeBundleProvider>
+          </AuthProvider>
+        </BrowserRouter>
       </ErrorBoundary>
     </React.StrictMode>
   );

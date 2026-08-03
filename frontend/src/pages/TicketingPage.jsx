@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { listTicketingProviders } from "../api/ticketingApi.js";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import ProviderWorkspace from "../components/ticketing/ProviderWorkspace.jsx";
@@ -12,28 +13,7 @@ import { timeAgo } from "../components/zoho/common.jsx";
 // inside a <TicketingProvider> so everything below it is bound to that provider
 // and never has to know which one it is.
 //
-// The chosen provider is remembered in localStorage, not the URL: this page is
-// reached through the app's own nav state (there is no router), so a per-browser
-// memory is what makes "open Ticketing" land back where the operator left off.
-const LAST_PROVIDER_KEY = "kubesight.ticketing.provider";
-
-function readLastProvider() {
-  try {
-    return window.localStorage.getItem(LAST_PROVIDER_KEY) || "";
-  } catch {
-    return "";
-  }
-}
-
-function rememberProvider(key) {
-  try {
-    if (key) window.localStorage.setItem(LAST_PROVIDER_KEY, key);
-    else window.localStorage.removeItem(LAST_PROVIDER_KEY);
-  } catch {
-    /* private mode — the picker simply doesn't remember */
-  }
-}
-
+// The chosen provider is in the URL, so a workspace is a link.
 /** Status line under a card: what an operator needs before clicking Configure. */
 function cardStatus(provider) {
   if (!provider.configured) {
@@ -96,7 +76,26 @@ export default function TicketingPage({ canManage = false, embedded = false }) {
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState(() => readLastProvider());
+  // The open provider is in the URL. It was localStorage, which meant the
+  // workspace an operator was in could not be linked to, did not survive being
+  // opened in a second tab as a different view, and -- unlike every other
+  // per-user key in this app -- was not namespaced by user id, so it persisted
+  // across sign-outs on a shared machine.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selected = searchParams.get("provider") || "";
+
+  const setSelected = useCallback(
+    (key) => {
+      const params = new URLSearchParams(searchParams);
+      if (key) {
+        params.set("provider", key);
+      } else {
+        params.delete("provider");
+      }
+      setSearchParams(params);
+    },
+    [searchParams, setSearchParams]
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -116,12 +115,10 @@ export default function TicketingPage({ canManage = false, embedded = false }) {
   }, [load]);
 
   const open = (key) => {
-    rememberProvider(key);
     setSelected(key);
   };
 
   const back = () => {
-    rememberProvider("");
     setSelected("");
     // The cards show each provider's last sync, which the workspace may have
     // just changed — re-read rather than showing a stale card.

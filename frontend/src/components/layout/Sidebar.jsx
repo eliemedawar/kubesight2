@@ -1,286 +1,75 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import BrandMark from "../BrandMark.jsx";
+import { buildNavTree, groupIdForPageKey } from "../../routes/navigation.js";
 
-const NAV_ICONS = {
-  dashboard: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path d="M2 4.5A2.5 2.5 0 014.5 2h2A2.5 2.5 0 019 4.5v2A2.5 2.5 0 016.5 9h-2A2.5 2.5 0 012 6.5v-2zM2 13.5A2.5 2.5 0 014.5 11h2A2.5 2.5 0 019 13.5v2A2.5 2.5 0 016.5 18h-2A2.5 2.5 0 012 15.5v-2zM11 4.5A2.5 2.5 0 0113.5 2h2A2.5 2.5 0 0118 4.5v2A2.5 2.5 0 0115.5 9h-2A2.5 2.5 0 0111 6.5v-2zM11 13.5A2.5 2.5 0 0113.5 11h2A2.5 2.5 0 0118 13.5v2A2.5 2.5 0 0115.5 18h-2A2.5 2.5 0 0111 15.5v-2z" />
-    </svg>
-  ),
-  clusters: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm14 1a1 1 0 11-2 0 1 1 0 012 0zM2 13a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 01-2 2H4a2 2 0 01-2-2v-2zm14 1a1 1 0 11-2 0 1 1 0 012 0z" clipRule="evenodd" />
-    </svg>
-  ),
-  clusterOverview: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
-    </svg>
-  ),
-  clusterManagement: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
-    </svg>
-  ),
-  namespaces: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
-    </svg>
-  ),
-  inventory: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M5 3a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2V5a2 2 0 00-2-2H5zm0 2h10v7h-2l-1 2H8l-1-2H5V5z" clipRule="evenodd" />
-    </svg>
-  ),
-  resources: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z" />
-    </svg>
-  ),
-  topology: (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="10" cy="4" r="2" />
-      <circle cx="4" cy="15" r="2" />
-      <circle cx="16" cy="15" r="2" />
-      <path d="M10 6v3m0 0l-4.6 4.2M10 9l4.6 4.2" />
-    </svg>
-  ),
-  logs: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
-    </svg>
-  ),
-  alerts: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-    </svg>
-  ),
-  userManagement: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path d="M9 6a3 3 0 11-6 0 3 3 0 016 0zM17 6a3 3 0 11-6 0 3 3 0 016 0zM12.93 17c.046-.327.07-.66.07-1a6.97 6.97 0 00-1.5-4.33A5 5 0 0119 16v1h-6.07zM6 11a5 5 0 015 5v1H1v-1a5 5 0 015-5z" />
-    </svg>
-  ),
-  auditLogs: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
-    </svg>
-  ),
-  imageRegistries: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path d="M3 4a2 2 0 012-2h10a2 2 0 012 2v2H3V4z" />
-      <path fillRule="evenodd" d="M3 8h14v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8zm3 3a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1z" clipRule="evenodd" />
-    </svg>
-  ),
-  settings: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
-    </svg>
-  ),
-  upgradeSafeMode: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 0l-3 3a1 1 0 001.414 1.414L9 9.414V13a1 1 0 102 0V9.414l1.293 1.293a1 1 0 001.414-1.414z" clipRule="evenodd" />
-    </svg>
-  ),
-  mobileApps: (
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="5" y="2" width="14" height="20" rx="2" />
-      <path d="M12 18h.01" />
-    </svg>
-  ),
-  serviceCatalog: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path d="M3 3a2 2 0 012-2h4a1 1 0 011 1v16a1 1 0 01-1.447.894L5 17.118l-1.553.776A1 1 0 012 17V3zm10-2a2 2 0 00-2 2v14a1 1 0 001.447.894L15 16.882l1.553.776A1 1 0 0018 16.764V3a2 2 0 00-2-2h-3z" />
-    </svg>
-  ),
-  applicationServices: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm3.293 1.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L7.586 10 5.293 7.707a1 1 0 010-1.414zM11 12a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
-    </svg>
-  ),
-  applicationIntelligence: (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M10 2v2M4.3 4.3l1.4 1.4M2 10h2m.3 5.7 1.4-1.4M10 16v2m5.7-2.3-1.4-1.4M16 10h2m-2.3-5.7-1.4 1.4" />
-      <circle cx="10" cy="10" r="4" />
-      <path d="M8.4 10.2l1.1 1.1 2.3-2.6" />
-    </svg>
-  ),
-  clients: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-6-3a2 2 0 11-4 0 2 2 0 014 0zm-2 4a5 5 0 00-4.546 2.916A5.986 5.986 0 0010 16a5.986 5.986 0 004.546-2.084A5 5 0 0010 11z" clipRule="evenodd" />
-    </svg>
-  ),
-  components: (
-    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path d="M9 2.5a1 1 0 011 0l4.5 2.598a1 1 0 01.5.866V8L10 10.5 5 8V5.964a1 1 0 01.5-.866L9 2.5z" />
-      <path d="M3 9.5l4.5 2.598V17L3 14.402V9.5zM17 9.5v4.902L12.5 17v-4.902L17 9.5z" opacity="0.6" />
-    </svg>
-  ),
-};
+/**
+ * Primary navigation.
+ *
+ * Two things changed here, and the first is the reason for the rework.
+ *
+ * **Click controls expansion, not hover.** The previous version opened and
+ * closed groups on pointer enter and leave, mediated by three timers — a 160ms
+ * open delay, a 140ms close delay, and a 420ms "switch lock" that suppressed
+ * opening a second group too soon after the first. Those numbers are what a
+ * hover menu needs to stop flickering when the pointer crosses a group on its
+ * way somewhere else, and they are also why the menu felt like it had opinions:
+ * it opened things you were only passing over, closed things you were reading,
+ * and did nothing at all on a trackpad where the pointer stops moving. Groups
+ * now open only when you ask them to, and stay open until you say otherwise.
+ *
+ * **One group open at a time, and by default it is the active one.** An earlier
+ * version let groups accumulate, on the reasoning that closing something the
+ * user opened is its own kind of interference. That was wrong for a specific
+ * reason: with three groups open, "open" stops meaning "this is where you are"
+ * and degrades to "this is where you have been". Expansion is the only signal
+ * the sidebar has for current section, so it has to be spent on exactly one.
+ *
+ * Opening another group therefore closes the current one, and the group you are
+ * actually in is never left collapsed.
+ *
+ * **Entries are links, not buttons.** They have real hrefs, so middle-click,
+ * ctrl-click, "open in new tab" and "copy link address" all work. On an app
+ * whose whole point is now addressable URLs, a nav that could only be operated
+ * by left-click was the wrong shape.
+ *
+ * **No per-item icons.** There was a partial set: 21 glyphs for ~28
+ * destinations, mixing filled and stroked styles, with the rest falling back to
+ * a hollow circle — which reads as an unselected radio button, "choose one"
+ * rather than "go here". (The upgrade page's glyph was keyed `upgradeSafeMode`
+ * against a `upgrade` page key, so it had silently never rendered at all.) A
+ * complete, consistent family would earn its place; a partial one costs more
+ * than it gives, and the labels here are short and unambiguous.
+ */
+export default function Sidebar({ pages, activePage, onNavigated, open = false }) {
+  const groups = useMemo(() => buildNavTree(pages), [pages]);
+  const activeGroupId = groupIdForPageKey(activePage);
 
-export default function Sidebar({ pages, activePage, onNavigate, open = false }) {
-  const [openSection, setOpenSection] = useState(null);
-  const sidebarRef = useRef(null);
-  const triggerRefs = useRef(new Map());
-  const lastPointerTypeRef = useRef(null);
-  const suppressFocusOpenRef = useRef(false);
-  const hoverOpenTimerRef = useRef(null);
-  const hoverCloseTimerRef = useRef(null);
-  const hoverSwitchLockRef = useRef({ section: null, until: 0 });
-  const sections = [];
-  const sectionIndex = new Map();
+  const [openGroup, setOpenGroup] = useState(activeGroupId);
 
-  pages.forEach((page) => {
-    const sectionLabel = page.section || "";
-    if (!sectionIndex.has(sectionLabel)) {
-      sectionIndex.set(sectionLabel, sections.length);
-      sections.push({ label: sectionLabel, pages: [] });
-    }
-    sections[sectionIndex.get(sectionLabel)].pages.push(page);
-  });
-
-  const activeSection = sections.find((section) =>
-    section.pages.some((page) => page.key === activePage)
-  );
-  const activeSectionLabel = activeSection?.label || null;
-
+  // Navigating moves the open group to wherever you landed.
   useEffect(() => {
-    setOpenSection(open ? activeSectionLabel : null);
-  }, [activeSectionLabel, open]);
-
-  useEffect(
-    () => () => {
-      window.clearTimeout(hoverOpenTimerRef.current);
-      window.clearTimeout(hoverCloseTimerRef.current);
-    },
-    []
-  );
-
-  const clearHoverTimers = () => {
-    window.clearTimeout(hoverOpenTimerRef.current);
-    window.clearTimeout(hoverCloseTimerRef.current);
-    hoverOpenTimerRef.current = null;
-    hoverCloseTimerRef.current = null;
-  };
-
-  const scheduleSectionOpen = (sectionLabel) => {
-    const activeLock = hoverSwitchLockRef.current;
-    if (Date.now() < activeLock.until && activeLock.section !== sectionLabel) {
-      return;
+    if (activeGroupId) {
+      setOpenGroup(activeGroupId);
     }
-    window.clearTimeout(hoverCloseTimerRef.current);
-    window.clearTimeout(hoverOpenTimerRef.current);
-    hoverCloseTimerRef.current = null;
-    if (openSection === sectionLabel) {
-      return;
-    }
-    hoverOpenTimerRef.current = window.setTimeout(() => {
-      if (openSection && openSection !== sectionLabel) {
-        hoverSwitchLockRef.current = {
-          section: sectionLabel,
-          until: Date.now() + 420,
-        };
+  }, [activeGroupId]);
+
+  const toggleGroup = (groupId) => {
+    setOpenGroup((current) => {
+      if (current !== groupId) {
+        return groupId;
       }
-      setOpenSection(sectionLabel);
-      hoverOpenTimerRef.current = null;
-    }, 160);
-  };
-
-  const scheduleSectionClose = (sectionLabel) => {
-    const activeLock = hoverSwitchLockRef.current;
-    if (activeLock.section === sectionLabel && Date.now() < activeLock.until) {
-      return;
-    }
-    window.clearTimeout(hoverOpenTimerRef.current);
-    window.clearTimeout(hoverCloseTimerRef.current);
-    hoverOpenTimerRef.current = null;
-    hoverCloseTimerRef.current = window.setTimeout(() => {
-      setOpenSection((current) => (current === sectionLabel ? null : current));
-      hoverCloseTimerRef.current = null;
-    }, 140);
-  };
-
-  useEffect(() => {
-    if (!openSection) {
-      return undefined;
-    }
-
-    const handlePointerDown = (event) => {
-      if (sidebarRef.current && !sidebarRef.current.contains(event.target)) {
-        clearHoverTimers();
-        hoverSwitchLockRef.current = { section: null, until: 0 };
-        setOpenSection(null);
-      }
-    };
-
-    const handleKeyDown = (event) => {
-      if (event.key !== "Escape") {
-        return;
-      }
-      const sectionLabel = openSection;
-      const trigger = triggerRefs.current.get(sectionLabel);
-      suppressFocusOpenRef.current = true;
-      try {
-        trigger?.focus({ preventScroll: true });
-      } finally {
-        suppressFocusOpenRef.current = false;
-      }
-      clearHoverTimers();
-      hoverSwitchLockRef.current = { section: null, until: 0 };
-      setOpenSection(null);
-    };
-
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [openSection]);
-
-  const handleSectionClick = (sectionLabel) => {
-    const pointerType = lastPointerTypeRef.current;
-    lastPointerTypeRef.current = null;
-    clearHoverTimers();
-    hoverSwitchLockRef.current = { section: null, until: 0 };
-    setOpenSection((current) => {
-      if (pointerType === "mouse") {
-        return sectionLabel;
-      }
-      return current === sectionLabel ? null : sectionLabel;
+      // Collapsing the group you are browsing would leave nothing open and no
+      // indication of where you are, so it falls back to the active group
+      // rather than to nothing.
+      return groupId === activeGroupId ? groupId : activeGroupId;
     });
-  };
-
-  const handleNavigate = (pageKey) => {
-    clearHoverTimers();
-    hoverSwitchLockRef.current = { section: null, until: 0 };
-    setOpenSection(null);
-    onNavigate(pageKey);
   };
 
   return (
     <aside
-      ref={sidebarRef}
       className={`sidebar${open ? " sidebar--open" : ""}`}
       aria-label="Primary navigation"
-      onPointerEnter={(event) => {
-        if (event.pointerType !== "touch") {
-          window.clearTimeout(hoverCloseTimerRef.current);
-          hoverCloseTimerRef.current = null;
-        }
-      }}
-      onPointerLeave={(event) => {
-        if (
-          event.pointerType !== "touch" &&
-          !event.currentTarget.querySelector(":focus-visible")
-        ) {
-          clearHoverTimers();
-          hoverCloseTimerRef.current = window.setTimeout(() => {
-            hoverSwitchLockRef.current = { section: null, until: 0 };
-            setOpenSection(null);
-            hoverCloseTimerRef.current = null;
-          }, 140);
-        }
-      }}
     >
       <div className="sidebar-brand">
         <div className="sidebar-brand-inner">
@@ -291,107 +80,80 @@ export default function Sidebar({ pages, activePage, onNavigate, open = false })
           </div>
         </div>
       </div>
+
       <nav aria-label="Main navigation" data-tour="sidebar-nav">
-        {sections.map((section, index) => {
-          const sectionLabel = section.label || section.pages[0]?.label || "Navigation";
-          const sectionSlug =
-            sectionLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") ||
-            `section-${index}`;
-          const panelId = `sidebar-${sectionSlug}-pages`;
-          const isOpen = openSection === sectionLabel;
-          const isActive = section.pages.some((page) => page.key === activePage);
+        {groups.map((group) => {
+          const isActive = group.id === activeGroupId;
+          const isOpen = group.id === openGroup;
+          const panelId = `sidebar-${group.id}-pages`;
 
           return (
             <div
-              key={sectionLabel}
+              key={group.id}
               className={`sidebar-section${isOpen ? " is-open" : ""}${
                 isActive ? " is-active" : ""
               }`}
-              onPointerEnter={(event) => {
-                if (event.pointerType !== "touch") {
-                  scheduleSectionOpen(sectionLabel);
-                }
-              }}
-              onPointerLeave={(event) => {
-                if (
-                  event.pointerType !== "touch" &&
-                  !event.currentTarget.querySelector(":focus-visible")
-                ) {
-                  scheduleSectionClose(sectionLabel);
-                }
-              }}
-              onFocus={() => {
-                if (!suppressFocusOpenRef.current && !lastPointerTypeRef.current) {
-                  clearHoverTimers();
-                  hoverSwitchLockRef.current = { section: null, until: 0 };
-                  setOpenSection(sectionLabel);
-                }
-              }}
-              onBlur={(event) => {
-                if (
-                  !event.currentTarget.contains(event.relatedTarget) &&
-                  !event.currentTarget.matches(":hover")
-                ) {
-                  clearHoverTimers();
-                  hoverSwitchLockRef.current = { section: null, until: 0 };
-                  setOpenSection((current) => (current === sectionLabel ? null : current));
-                }
-              }}
             >
               <button
-                ref={(element) => {
-                  if (element) {
-                    triggerRefs.current.set(sectionLabel, element);
-                  } else {
-                    triggerRefs.current.delete(sectionLabel);
-                  }
-                }}
                 type="button"
                 className="sidebar-section-trigger"
                 aria-expanded={isOpen}
                 aria-controls={panelId}
-                aria-label={isActive ? `${sectionLabel}, current section` : sectionLabel}
-                onPointerDown={(event) => {
-                  lastPointerTypeRef.current = event.pointerType;
-                }}
-                onPointerCancel={() => {
-                  lastPointerTypeRef.current = null;
-                }}
-                onClick={() => handleSectionClick(sectionLabel)}
+                onClick={() => toggleGroup(group.id)}
               >
-                <span className="sidebar-section-title">{sectionLabel}</span>
+                <span className="sidebar-section-title">{group.label}</span>
+                <svg
+                  className="sidebar-section-chevron"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                    clipRule="evenodd"
+                  />
+                </svg>
               </button>
 
+              {/*
+                Collapsed panels use `inert` rather than `hidden`: the height
+                transition needs the element to stay in the box tree, and inert
+                is what keeps its links out of the tab order while it is closed.
+              */}
               <div
                 id={panelId}
-                className="sidebar-flyout"
+                className="sidebar-group-pages"
                 role="group"
-                aria-label={`${sectionLabel} pages`}
+                aria-label={`${group.label} pages`}
                 aria-hidden={!isOpen}
                 inert={!isOpen}
               >
-                <div className="sidebar-flyout-links">
-                  {section.pages.map((page) => (
-                    <button
-                      key={page.key}
-                      type="button"
-                      className={`nav-link ${activePage === page.key ? "active" : ""}`}
-                      onClick={() => handleNavigate(page.key)}
-                      aria-current={activePage === page.key ? "page" : undefined}
+                <div className="sidebar-group-links">
+                  {/*
+                    Plain Link, not NavLink. NavLink brings its own matching --
+                    by path prefix, and it appends its own `active` class even
+                    when className is a string -- so `/applications` counted
+                    itself active on `/applications/clients` and Inventory
+                    stayed lit while you were on Clients.
+
+                    `activePage` is already resolved through the route table's
+                    parent chain, which is the one place that knows a drill-down
+                    belongs to its parent and a sibling does not. Two sources of
+                    truth for "current" is what caused the bug; suppressing the
+                    second would have left it there to be re-enabled.
+                  */}
+                  {group.items.map((item) => (
+                    <Link
+                      key={item.pageKey}
+                      to={item.href}
+                      className={`nav-link${activePage === item.pageKey ? " active" : ""}`}
+                      // The link itself navigates; this only reports that it
+                      // happened, so the mobile drawer can close behind it.
+                      onClick={() => onNavigated?.(item.pageKey)}
                     >
-                      <span className="nav-link-icon">
-                        {NAV_ICONS[page.key] || (
-                          <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                            <path
-                              fillRule="evenodd"
-                              d="M10 18a8 8 0 100-16 8 8 0 000 16zm0-2a6 6 0 100-12 6 6 0 000 12z"
-                              clipRule="evenodd"
-                            />
-                          </svg>
-                        )}
-                      </span>
-                      <span className="nav-link-label">{page.label}</span>
-                    </button>
+                      <span className="nav-link-label">{item.label}</span>
+                    </Link>
                   ))}
                 </div>
               </div>
@@ -399,6 +161,7 @@ export default function Sidebar({ pages, activePage, onNavigate, open = false })
           );
         })}
       </nav>
+
       <div className="sidebar-footer">
         <span className="sidebar-footer-version">v1.0.0</span>
       </div>

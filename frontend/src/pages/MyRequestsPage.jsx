@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listMyDeploymentRequests } from "../api";
-import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
-import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
+import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import RequestsTable from "../components/clusters/RequestsTable.jsx";
 
@@ -103,7 +102,8 @@ export default function MyRequestsPage() {
             </p>
           </div>
           <div className="sg-ph-actions">
-            {!isAccessDeniedError(error) ? (
+            {/* Nothing to refresh if the list is denied rather than empty. */}
+            {!error ? (
               <button type="button" className="btn-outline btn-compact" onClick={load} disabled={loading}>
                 Refresh
               </button>
@@ -129,13 +129,17 @@ export default function MyRequestsPage() {
           ))}
         </nav>
 
-        {loading ? (
-          <p className="muted">Loading your requests...</p>
-        ) : isAccessDeniedError(error) ? (
-          <AccessDeniedPage message={error} />
-        ) : formatAccessError(error) ? (
-          <ErrorBanner message={error} suppressAccessDenied={false} />
-        ) : activeTab === "active" ? (
+        {/*
+          The state chain and the tab branch were one ternary, so a reader had
+          to hold four failure cases in mind to find out what the tabs render.
+          AccessScopeView takes the first four; what is left is the tabs.
+        */}
+        <AccessScopeView
+          pageLoading={loading}
+          accessError={error}
+          loadingLabel="Loading your requests..."
+        >
+        {activeTab === "active" ? (
           <RequestsTable
             rows={activeRequests}
             canManage={false}
@@ -199,6 +203,7 @@ export default function MyRequestsPage() {
             />
           </>
         )}
+        </AccessScopeView>
       </section>
     </div>
   );

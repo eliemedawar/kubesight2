@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import RequestDeploymentModal from "../components/clusters/RequestDeploymentModal.jsx";
 import ConfigureRecipientsModal from "../components/clusters/ConfigureRecipientsModal.jsx";
@@ -208,7 +209,14 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
             <article key={clusterRef.id} className="sg-ccard">
               <header>
                 <div>
-                  <b>{clusterRef.name}</b>
+                  {/*
+                    The cluster overview screen existed with a full render path,
+                    a data fetch, a tour and an RBAC gate, and nothing anywhere
+                    linked to it (audit finding F3). This is that link.
+                  */}
+                  <Link className="sg-ccard-link" to={`/fleet/clusters/${clusterRef.id}`}>
+                    <b>{clusterRef.name}</b>
+                  </Link>
                   {headerSub ? <span className="sg-ccard-sub">{headerSub}</span> : null}
                 </div>
                 <span className={`status-pill ${statusTone(status)}`}>{status}</span>
