@@ -257,7 +257,9 @@ def launch(resources: list[dict]) -> str:
     command.extend(["apply", "-f", "-"])
     completed = subprocess.run(
         command,
-        input="\n---\n".join(json.dumps(item) for item in resources),
+        input=json.dumps(
+            {"apiVersion": "v1", "kind": "List", "items": resources}
+        ),
         text=True,
         capture_output=True,
         timeout=30,

@@ -18,7 +18,7 @@ from api.models import (
     UserClusterAccess,
 )
 from api.rbac_data import HERMES_AGENT_PERMISSIONS
-from api.services.application_analysis_jobs import build_job_resources
+from api.services.application_analysis_jobs import build_job_resources, launch
 from api.services.application_intelligence_discovery import (
     SemgrepAdapter,
     SyftAdapter,
@@ -647,6 +647,44 @@ def test_job_security_controls_and_no_secret_in_job_spec(monkeypatch):
         assert security["allowPrivilegeEscalation"] is False
         assert security["readOnlyRootFilesystem"] is True
         assert security["capabilities"]["drop"] == ["ALL"]
+
+
+def test_job_launcher_sends_one_valid_kubernetes_list(monkeypatch):
+    resources = build_job_resources(
+        analysis_id=46,
+        repository_url="https://bitbucket.org/workspace/payment-service.git",
+        revision="main",
+        subdirectory="",
+        repository_token="read-token",
+        callback_token="callback-token",
+    )
+    calls = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return Completed()
+
+    monkeypatch.setattr(
+        "api.services.application_analysis_jobs.subprocess.run", fake_run
+    )
+
+    job_name = launch(resources)
+
+    assert job_name == next(
+        item["metadata"]["name"] for item in resources if item["kind"] == "Job"
+    )
+    payload = json.loads(calls[0][1]["input"])
+    assert payload["apiVersion"] == "v1"
+    assert payload["kind"] == "List"
+    assert [item["kind"] for item in payload["items"]] == [
+        "Secret",
+        "NetworkPolicy",
+        "Job",
+    ]
 
 
 def test_hermes_openai_chat_completions_adapter(monkeypatch):

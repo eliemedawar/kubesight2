@@ -471,7 +471,13 @@ def launch(resources: list[dict]) -> str:
     if kubeconfig:
         command.extend(["--kubeconfig", kubeconfig])
     command.extend(["apply", "-f", "-"])
-    manifest = "\n---\n".join(json.dumps(item) for item in resources)
+    # A stream that starts with ``{`` is parsed by kubectl as JSON, so joining
+    # JSON objects with YAML ``---`` separators applies the first object and
+    # then fails at the separator.  Send one valid Kubernetes List document so
+    # all resources are parsed and applied together.
+    manifest = json.dumps(
+        {"apiVersion": "v1", "kind": "List", "items": resources}
+    )
     completed = subprocess.run(
         command,
         input=manifest,
