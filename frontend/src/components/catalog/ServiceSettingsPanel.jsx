@@ -6,10 +6,15 @@ import {
   listCiSecrets,
   updateCiService,
 } from "../../api/ciApi.js";
+import { listRegistries } from "../../api/registriesApi.js";
 import { CRITICALITIES, PlusIcon, TrashIcon, formatRelative } from "./ciShared.jsx";
 
 /**
- * Settings tab: behaviour, secrets, danger zone.
+ * Settings tab: behaviour, registry, secrets, danger zone.
+ *
+ * The registry is where container_image stages push. Without one those stages
+ * skip with an explanation rather than pretending to have built something, and
+ * that explanation points here — so the field has to live here.
  *
  * Secret values are write-only. The list shows names and metadata because the
  * API has no path that returns a value — rotating means entering a new one.
@@ -28,7 +33,9 @@ export default function ServiceSettingsPanel({
     criticality: service.criticality || "medium",
     ownerTeam: service.ownerTeam || "",
     maxConcurrentBuilds: service.maxConcurrentBuilds || 1,
+    registryConnectionId: service.registryConnectionId || "",
   });
+  const [registries, setRegistries] = useState([]);
   const [secrets, setSecrets] = useState([]);
   const [newSecret, setNewSecret] = useState({ key: "", value: "", description: "" });
   const [saving, setSaving] = useState(false);
@@ -44,6 +51,14 @@ export default function ServiceSettingsPanel({
   };
 
   useEffect(loadSecrets, [service.id, canViewSecrets]);
+
+  // Best effort: a user who cannot list registries still sees the field, with
+  // whatever is already linked preserved on save.
+  useEffect(() => {
+    listRegistries()
+      .then((data) => setRegistries(data.items || []))
+      .catch(() => setRegistries([]));
+  }, []);
 
   const save = async () => {
     setSaving(true);
@@ -136,6 +151,27 @@ export default function ServiceSettingsPanel({
               disabled={!canEdit}
               onChange={(event) => set("ownerTeam", event.target.value)}
             />
+          </label>
+          <label>
+            Image registry
+            <select
+              value={form.registryConnectionId || ""}
+              disabled={!canEdit}
+              onChange={(event) => set("registryConnectionId", event.target.value)}
+            >
+              <option value="">No registry — image stages skip</option>
+              {registries.map((registry) => (
+                <option key={registry.id} value={registry.id}>
+                  {registry.name}
+                  {registry.baseUrl ? ` — ${registry.baseUrl}` : ""}
+                </option>
+              ))}
+            </select>
+            <span className="field-hint">
+              Where container_image stages push. The image is
+              <code> &lt;registry&gt;/{service.slug}:&lt;tag&gt;</code> unless the stage sets
+              IMAGE_NAME / IMAGE_TAG.
+            </span>
           </label>
           <label>
             Max concurrent builds
