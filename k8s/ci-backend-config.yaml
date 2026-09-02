@@ -1,0 +1,58 @@
+# Native CI — backend configuration.
+#
+# Apply this, then add ONE block to the kubesight-backend container (alongside
+# its existing `env:` list — `env:` entries win over `envFrom`, so this is
+# additive and safe):
+#
+#   envFrom:
+#     - configMapRef:
+#         name: kubesight-ci-integration
+#
+# Then restart the backend. Values below are cluster-specific; the two marked
+# REPLACE-ME will not work as shipped.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubesight-ci-integration
+  namespace: kubesight
+data:
+  # --- Where builds run -----------------------------------------------------
+  CI_KUBERNETES_NAMESPACE: kubesight-ci
+  CI_SERVICE_ACCOUNT: kubesight-ci-build
+
+  # REPLACE-ME. The build pod's checkout/collector containers run the backend
+  # image (it carries git + python3). The default is `kubesight-backend:latest`,
+  # a bare tag no node can pull — every build fails at checkout until this is a
+  # real registry path.
+  CI_WORKER_IMAGE: registry.example.com/kubesight/kubesight-backend:replace-me
+  CI_IMAGE_PULL_POLICY: IfNotPresent
+
+  # Where the collector posts logs, status and artifacts back to. The code
+  # default assumes a Service named `kubesight-backend`; this cluster's Service
+  # is `backend-service` (same one the ingress and the Hermes ConfigMap use), so
+  # this MUST be set or every build hangs with no callback.
+  CI_WORKER_CALLBACK_URL: http://backend-service.kubesight.svc.cluster.local:5000/api/ci/worker
+  # The per-build NetworkPolicy opens egress to this namespace/port so the
+  # callback above can be reached. Keep the three in agreement.
+  CI_BACKEND_NAMESPACE: kubesight
+  CI_BACKEND_PORT: "5000"
+
+  # --- Container image builds ----------------------------------------------
+  # Empty/unset = container_image stages skip with an explanation. Set once
+  # k8s/ci-buildkitd.yaml is applied and the buildkitd pod is 1/1 Ready.
+  CI_BUILDKIT_ADDR: tcp://buildkitd.kubesight-buildkit.svc.cluster.local:1234
+
+  # --- Per-stage resources --------------------------------------------------
+  # Sized for nodes with ~4.5Gi allocatable ephemeral-storage. The request is
+  # what the scheduler matches; the limit only caps. Raise both on bigger nodes.
+  CI_STAGE_CPU_LIMIT: "2"
+  CI_STAGE_MEMORY_LIMIT: 4Gi
+  CI_STAGE_EPHEMERAL_REQUEST: 256Mi
+  CI_STAGE_EPHEMERAL_LIMIT: 1Gi
+  # The /workspace emptyDir shared by every stage of a build. Must fit on the
+  # node's ephemeral storage next to buildkitd's layer cache.
+  CI_WORKSPACE_SIZE_LIMIT: 2Gi
+
+  # --- Housekeeping ---------------------------------------------------------
+  CI_JOB_TTL_SECONDS: "900"
+  CI_STALE_BUILD_MINUTES: "120"
