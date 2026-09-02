@@ -552,10 +552,14 @@ Why not the alternatives:
   buildkitd.
 
 **The one security concession, stated plainly:** rootless `buildkitd` still needs
-`seccompProfile: Unconfined` (and usually `/dev/fuse` or a userns-enabled kernel).
-That relaxation applies to **one deployment in its own namespace** — not to build
-Jobs, which stay `restricted`. If the cluster cannot permit that, the fallback is a
-Linux runner agent on a dedicated VM running rootless buildkit there.
+`seccompProfile: Unconfined` and AppArmor `Unconfined` (and usually `/dev/fuse` or
+a userns-enabled kernel). Because of that, its namespace must carry PSA
+`enforce: privileged` — `baseline` rejects Unconfined just as `restricted` does, so
+there is no middle level to hide in. The namespace label is the only thing that is
+"privileged": the pod itself stays non-root, no-caps, no-escalation. That relaxation
+applies to **one deployment in its own namespace** — not to build Jobs, which stay
+`restricted`. If the cluster cannot permit that, the fallback is a Linux runner agent
+on a dedicated VM running rootless buildkit there.
 
 Also handled: `--export-cache`/`--import-cache` against a Nexus `:buildcache` tag
 (Phase 7), and `RegistryConnection.ca_cert` + `verify_tls` honored for self-signed

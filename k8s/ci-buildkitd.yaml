@@ -18,7 +18,7 @@
 #
 # EXACT SECURITY CONTEXT GRANTED (and nothing more):
 #   - seccompProfile: Unconfined            (the one relaxation)
-#   - AppArmor unconfined annotation        (same reason, on hosts w/ AppArmor)
+#   - AppArmor: Unconfined                  (same reason, on hosts w/ AppArmor)
 #   - runAsUser 1000 / runAsNonRoot: true   (never root)
 #   - allowPrivilegeEscalation: false
 #   - capabilities: drop ALL
@@ -27,7 +27,13 @@
 #
 # BLAST RADIUS / IMPACT
 #   The relaxation applies to THIS one Deployment in its own namespace
-#   (kubesight-buildkit, baseline PSS — restricted PSS would reject Unconfined).
+#   (kubesight-buildkit). That namespace must run at PSA level `privileged`,
+#   because BOTH `restricted` AND `baseline` reject Unconfined seccomp/AppArmor
+#   (baseline allows only unset/RuntimeDefault/Localhost). Read `privileged`
+#   here as "PSA does not police this namespace" — it does NOT make the
+#   container privileged: privileged stays false, uid stays 1000, all
+#   capabilities stay dropped, escalation stays off. The pod spec below is the
+#   real boundary, so deploy nothing else into this namespace.
 #   Build pods in kubesight-ci remain fully `restricted`; they only hold a
 #   buildctl *client*, which needs no relaxation. An escape from buildkitd is
 #   bounded by: non-root uid, no capabilities, no privilege escalation, no host
@@ -58,10 +64,12 @@ metadata:
   name: kubesight-buildkit
   labels:
     kubesight.io/purpose: image-builder
-    # baseline, not restricted: restricted forbids seccompProfile Unconfined.
-    pod-security.kubernetes.io/enforce: baseline
-    pod-security.kubernetes.io/audit: baseline
-    pod-security.kubernetes.io/warn: baseline
+    # `privileged` is the only PSA level that admits Unconfined seccomp and
+    # AppArmor, which rootless buildkitd needs (see the disclosure above).
+    # baseline rejects both — it is NOT a usable middle ground here.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -104,6 +112,12 @@ spec:
           securityContext:
             # The single, documented relaxation. Everything else stays locked.
             seccompProfile:
+              type: Unconfined
+            # AppArmor, same reason. The pod annotation above is the pre-1.30
+            # spelling (deprecated); this field is the 1.30+ one. Both ship so
+            # one manifest covers either: older API servers prune the unknown
+            # field, newer ones check the two agree — and they do.
+            appArmorProfile:
               type: Unconfined
             runAsUser: 1000
             runAsGroup: 1000
