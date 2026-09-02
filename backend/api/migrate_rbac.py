@@ -1047,6 +1047,10 @@ def _backfill_build_signature_state() -> None:
             .all()
         )
     except Exception:  # column not there yet on a very old DB
+        # PostgreSQL aborts the whole transaction on a failed statement, so
+        # returning without a rollback would fail every later ORM query in this
+        # session with InFailedSqlTransaction — far from the real cause.
+        db.session.rollback()
         return
     if not pending:
         return
@@ -1070,6 +1074,10 @@ def _backfill_build_signature_state() -> None:
 
 def run_migrations() -> None:
     db.create_all()
+    # DDL for columns added to pre-existing tables must run before ANY step that
+    # issues an ORM query: a mapped column missing from the table makes the whole
+    # SELECT fail, and on PostgreSQL that aborts the session's transaction.
+    _migrate_ci_columns()
     _migrate_cluster_build_columns()
     _sanitize_legacy_build_profile_proxies()
     _migrate_zoho_integration_columns()
@@ -1097,7 +1105,6 @@ def run_migrations() -> None:
     _migrate_client_service_connections()
     _migrate_client_service_egress_connections()
     _migrate_registry_connection_columns()
-    _migrate_ci_columns()
     _seed_builtin_ci_runners()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations
