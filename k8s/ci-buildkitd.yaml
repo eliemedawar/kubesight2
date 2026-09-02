@@ -236,13 +236,18 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # buildkitd is the process that PUSHES the built image, so the registry's
+    # port must be listed here or the push hangs with no useful error. Trim this
+    # list to the ports your registries actually use.
     - ports:
         - protocol: TCP
           port: 443
-        # Common self-hosted Nexus docker connector ports; trim to yours.
+        # Common self-hosted Nexus docker connector ports.
         - protocol: TCP
           port: 8443
         - protocol: TCP
           port: 8082
         - protocol: TCP
           port: 5000
+        - protocol: TCP
+          port: 9443
