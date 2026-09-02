@@ -110,6 +110,31 @@ def test_job_manifest_orders_stages_as_init_containers():
     ] == "2"
 
 
+def test_checkout_authenticates_git_per_credential_type():
+    """Git over HTTPS needs a fixed username per credential type.
+
+    An Atlassian API token clones as ``x-bitbucket-api-token-auth`` even though
+    the same token pairs with the account email on the REST API; sending the
+    email here earns a 401. Interactive prompting stays off so a rejected
+    credential reports that 401 instead of "could not read Username".
+    """
+    first = _plan(
+        _execution(0, "checkout", secrets={
+            "KUBESIGHT_GIT_TOKEN": "tok",
+            "KUBESIGHT_GIT_CREDENTIAL_TYPE": "api_token",
+            "KUBESIGHT_GIT_PRINCIPAL": "someone@areeba.com",
+        }),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    script = job["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
+
+    assert 'api_token) GIT_USER="x-bitbucket-api-token-auth"' in script
+    assert '*)         GIT_USER="x-token-auth"' in script
+    assert "GIT_TERMINAL_PROMPT=0" in script
+    # The principal is a REST-API identity; it must never become the git user.
+    assert "KUBESIGHT_GIT_PRINCIPAL" not in script
+
+
 def test_secrets_travel_as_secret_refs_never_inline():
     first = _plan(
         _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "clone-tok",

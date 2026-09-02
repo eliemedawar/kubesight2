@@ -155,8 +155,15 @@ def _b64(value: str) -> str:
 _CHECKOUT_SCRIPT = r"""set -eu
 umask 077
 export HOME=/tmp TMPDIR=/tmp
+# Never fall back to an interactive prompt: without this a rejected credential
+# surfaces as "could not read Username", which hides the actual 401.
+export GIT_TERMINAL_PROMPT=0
+# Git over HTTPS wants a fixed username per credential type -- an Atlassian API
+# token authenticates as x-bitbucket-api-token-auth here, even though the same
+# token pairs with the account email on the REST API. Keep this in step with
+# application_checkout._git_username.
 case "${KUBESIGHT_GIT_CREDENTIAL_TYPE:-}" in
-  api_token) GIT_USER="${KUBESIGHT_GIT_PRINCIPAL:?an api_token credential needs a principal}" ;;
+  api_token) GIT_USER="x-bitbucket-api-token-auth" ;;
   *)         GIT_USER="x-token-auth" ;;
 esac
 # Auth as env-provided git config: never in argv, never in the remote URL.
