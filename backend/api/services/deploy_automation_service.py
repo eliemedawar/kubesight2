@@ -581,7 +581,20 @@ def cancel_run(run_id: int, user=None) -> Dict[str, Any]:
     if run.status == WAITING_STATUS:
         note = "Cancelled by operator while queued — it never started."
     if run.status == "building":
-        note = "Cancelled by operator — the Jenkins build itself keeps running."
+        if run.ci_build_id:
+            # Native CI builds are ours to stop — cancel it with the run.
+            from ..models_ci import CiBuild
+            from .ci import engine as ci_engine
+
+            build = db.session.get(CiBuild, run.ci_build_id)
+            if build is not None and build.status in ("queued", "running"):
+                try:
+                    ci_engine.cancel_build(build, actor=user)
+                    note = "Cancelled by operator — the CI build was cancelled with it."
+                except ci_engine.BuildError:
+                    note = "Cancelled by operator — the CI build had already finished."
+        else:
+            note = "Cancelled by operator — the Jenkins build itself keeps running."
     bundle_note = _withdraw_bundle(run, user)
     if bundle_note:
         note = f"{note} {bundle_note}"
@@ -651,6 +664,8 @@ def serialize_run(run: DeployAutomationRun) -> Dict[str, Any]:
         "steps": run.steps or [],
         "jenkinsBuildUrl": run.jenkins_build_url,
         "jenkinsBuildNumber": run.jenkins_build_number,
+        "ciBuildId": run.ci_build_id,
+        "buildEngine": "kubesight-ci" if run.ci_build_id else ("jenkins" if run.jenkins_queue_url else None),
         "bundleId": run.bundle_id,
         "bundleStatus": bundle_status,
         "auto": bool(run.auto),
@@ -874,13 +889,14 @@ def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
         mode = "change bundle" if run.bundle_id else "direct apply"
         if _is_custom_run(run):
             shown_tag = run.ticket_tag or run.image_tag
+            engine_name = "KubeSight CI build" if run.ci_build_id else "Jenkins job"
             comment = (
-                f"Deploy succeeded: the Jenkins job for {run.namespace} finished successfully "
+                f"Deploy succeeded: the {engine_name} for {run.namespace} finished successfully "
                 f"({run.deployment_name} @ {shown_tag})."
             )
             resolution = (
-                f"KubeSight routed {run.deployment_name} (tag {shown_tag}) for {run.namespace} "
-                f"to Jenkins; the build succeeded. ({who})"
+                f"KubeSight built {run.deployment_name} (tag {shown_tag}) for {run.namespace} "
+                f"via {engine_name}; the build succeeded. ({who})"
             )
         elif env_run:
             comment = (
@@ -1254,6 +1270,13 @@ def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> Non
 
     _set_step(run, "image_check", "skip", "custom environment — no live cluster image to gate on")
 
+    # Native CI first: a CI service named after the environment (or the app)
+    # builds the binaries in-house — the mobile APK/AAB/IPA flow without Jenkins.
+    ci_service = _native_ci_service(run)
+    if ci_service is not None:
+        _trigger_native_build(run, ci_service)
+        return
+
     env_cfg = custom_environment_by_name(run.namespace, _run_provider(run)) or {}
     job_path = str(env_cfg.get("jenkinsJobPath") or "").strip()
     path = job_path or (jrow.router_job_path or "")
@@ -1261,8 +1284,10 @@ def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> Non
         _fail(
             run,
             "build",
-            f"'{run.namespace}' is a custom environment — it deploys only through Jenkins, "
-            "and the Jenkins connection (or a job path for it) is not configured.",
+            f"'{run.namespace}' is a custom environment with no builder configured. "
+            f"Register a CI service with the slug '{run.namespace}' or "
+            f"'{run.deployment_name}' in the Service Catalog (preferred), or configure "
+            "the legacy Jenkins connection with a job path for it.",
         )
         return
 
@@ -1297,6 +1322,139 @@ def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> Non
             "queueUrl": queue_url,
         },
         commit=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Native CI build path — KubeSight builds the image itself; no Jenkins needed.
+# ---------------------------------------------------------------------------
+
+def _native_ci_service(run: DeployAutomationRun):
+    """The CI service that builds this run's application, or None.
+
+    Mapping is by slug: a CI service whose slug matches the deployment name
+    (or, for custom environments, the environment name) is the builder. The
+    slug is stable, DNS-safe, and shown on every service card, so 'name your
+    CI service after the deployment' is the entire configuration story.
+    """
+    import re as _re
+
+    from ..models_ci import CiService
+
+    def _slug(value: str) -> str:
+        return _re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")[:180]
+
+    for candidate in (_slug(run.deployment_name), _slug(run.namespace)):
+        if not candidate:
+            continue
+        row = CiService.query.filter_by(slug=candidate, status="active").first()
+        if row is not None:
+            return row
+    return None
+
+
+def _trigger_native_build(run: DeployAutomationRun, service) -> bool:
+    """queued/checking → building on KubeSight's own CI. False = could not start."""
+    from .ci import engine as ci_engine
+
+    variables = {
+        # Image stages push exactly the tag the deploy will verify and roll out.
+        "IMAGE_TAG": run.image_tag or "",
+        # The raw ticket tag, for pipelines that name things themselves.
+        "TICKET_TAG": run.ticket_tag or run.image_tag or "",
+        "KUBESIGHT_TICKET": run.ticket_number or "",
+    }
+    try:
+        build = ci_engine.trigger_build(
+            service,
+            trigger_type="automation",
+            variables={k: v for k, v in variables.items() if v},
+        )
+    except ci_engine.BuildError as exc:
+        _fail(
+            run, "build",
+            f"CI service '{service.name}' cannot build right now: {exc}",
+        )
+        return False
+
+    run.ci_build_id = build["id"]
+    run.build_triggered_at = datetime.now(timezone.utc)
+    run.retry_count = 0
+    run.status = "building"
+    _set_step(
+        run, "build", "run",
+        f"KubeSight CI build #{build['number']} queued on service '{service.name}'",
+    )
+    log_audit(
+        "automation_build_triggered",
+        actor=None,
+        target_type="deploy_automation_run",
+        target_id=str(run.id),
+        details={
+            "ticket": run.ticket_number,
+            "deployment": run.deployment_name,
+            "engine": "kubesight-ci",
+            "ciService": service.slug,
+            "ciBuildId": build["id"],
+            "ciBuildNumber": build["number"],
+            "tag": run.ticket_tag or run.image_tag,
+        },
+        commit=False,
+    )
+    return True
+
+
+def _do_poll_native_build(run: DeployAutomationRun) -> None:
+    """building → verifying_image | failed, reading the native CI build."""
+    from ..db import db as _db
+    from ..models_ci import CiBuild
+
+    build = _db.session.get(CiBuild, run.ci_build_id or 0)
+    if build is None:
+        _fail(run, "build", "The CI build backing this run no longer exists.")
+        return
+
+    if build.status == "queued":
+        _set_step(
+            run, "build", "run",
+            f"CI build #{build.number} queued"
+            + (f" — {build.queue_reason}" if build.queue_reason else ""),
+        )
+        return
+    if build.status == "running":
+        stage = next((s for s in build.stages if s.status == "running"), None)
+        detail = f"CI build #{build.number} running"
+        if stage is not None:
+            detail += f" — stage '{stage.name}'"
+        _set_step(run, "build", "run", detail)
+        return
+
+    if build.status == "success":
+        if _is_custom_run(run):
+            # A custom environment's build IS the outcome. Mobile binaries come
+            # straight out of the CI artifact store — no Jenkins download.
+            _set_step(run, "build", "done", f"CI build #{build.number} succeeded")
+            _set_step(run, "verify", "skip", "no registry gate for a custom environment")
+            _set_step(run, "approval", "skip", "the CI build is the deploy for custom environments")
+            _set_step(run, "deploy", "done", "performed by the CI build")
+            from .mobile_app_service import on_native_build_success
+
+            on_native_build_success(run)
+            _complete_deployed(run, "no cluster rollout to watch — the CI build result is the outcome")
+            return
+        _set_step(run, "build", "done", f"CI build #{build.number} succeeded")
+        run.status = "verifying_image"
+        _set_step(run, "verify", "run", "re-checking the registry for the built tag")
+        return
+
+    failed_stage = next(
+        (s for s in build.stages if s.status in ("failed", "timeout")), None
+    )
+    where = f" (stage '{failed_stage.name}')" if failed_stage is not None else ""
+    _fail(
+        run, "build",
+        f"CI build #{build.number} finished {build.status}{where}. "
+        f"Open the build in the Service Catalog for its logs.",
     )
 
 
@@ -1335,6 +1493,15 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     else:
         _set_step(run, "image_check", "done", f"{run.image_tag} not in the registry — build required")
 
+    # KubeSight's own CI is the build engine of choice: a CI service whose slug
+    # matches the deployment name builds the image natively — no Jenkins in the
+    # path. The Jenkins router below remains only as the legacy fallback for
+    # applications not yet registered in the Service Catalog.
+    ci_service = _native_ci_service(run)
+    if ci_service is not None:
+        _trigger_native_build(run, ci_service)
+        return
+
     # A job override from the source picker (a rule for this namespace, or for
     # this specific deployment — the specific rule wins) replaces the global
     # router call: its own job path (blank = the router job) and parameter map
@@ -1349,8 +1516,10 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     if not (jrow.enabled and jrow.base_url and path and jrow.api_token_encrypted):
         _fail(
             run, "build",
-            "The image tag is not in the registry and Jenkins is not configured — configure the "
-            "Jenkins router connection or push the image manually.",
+            "The image tag is not in the registry and no builder is configured for "
+            f"'{run.deployment_name}'. Register a CI service with the slug "
+            f"'{run.deployment_name}' in the Service Catalog (preferred), or configure "
+            "the legacy Jenkins router connection.",
         )
         return
 
@@ -1401,6 +1570,10 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
 
 def _do_poll_build(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     """building → verifying_image | failed. Polls queue item, then the router build."""
+    if run.ci_build_id:
+        # The build runs on KubeSight's own CI — no Jenkins anywhere in this path.
+        _do_poll_native_build(run)
+        return
     cfg = _to_client_config(jrow)
     triggered = _aware(run.build_triggered_at) or datetime.now(timezone.utc)
     now = datetime.now(timezone.utc)

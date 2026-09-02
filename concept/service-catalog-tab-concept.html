@@ -1,0 +1,449 @@
+<title>Service Catalog Tab — UI/UX Concept</title>
+<style>
+  :root {
+    --bg-page: #fdfdfc; --bg-panel: #ffffff; --bg-inset: #f6f5f3;
+    --text-strong: #131417; --text-main: #1a1b1e; --text-muted: #6e7076;
+    --accent: #ff2929; --accent-text: #d71f1f; --accent-soft: #fdeaea;
+    --ok: #178a45; --ok-soft: #e8f5ee; --warn: #a66104; --warn-soft: #fdf3e4;
+    --info: #0e7490; --info-soft: #e6f4f7; --danger: #d71f1f; --danger-soft: #fdeaea;
+    --border: #e9e7e3; --border-strong: #d9d6d0;
+    --code-bg: #131417; --code-ink: #e8eaed;
+    --shadow: 0 1px 2px rgba(19,20,23,.05), 0 8px 24px rgba(19,20,23,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-page: #101113; --bg-panel: #17181a; --bg-inset: #1d1e21;
+      --text-strong: #fafaf9; --text-main: #ececea; --text-muted: #85868c;
+      --accent: #ff3b3b; --accent-text: #ff7a70; --accent-soft: rgba(255,59,59,.12);
+      --ok: #2fbe6b; --ok-soft: rgba(47,190,107,.14); --warn: #f0a32b; --warn-soft: rgba(240,163,43,.14);
+      --info: #2cb8dc; --info-soft: rgba(44,184,220,.14); --danger: #ff4d4d; --danger-soft: rgba(255,77,77,.14);
+      --border: rgba(235,232,225,.12); --border-strong: rgba(235,232,225,.24);
+      --code-bg: #0b0c0e; --code-ink: #d5dbe4;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg-page: #fdfdfc; --bg-panel: #ffffff; --bg-inset: #f6f5f3;
+    --text-strong: #131417; --text-main: #1a1b1e; --text-muted: #6e7076;
+    --accent: #ff2929; --accent-text: #d71f1f; --accent-soft: #fdeaea;
+    --ok: #178a45; --ok-soft: #e8f5ee; --warn: #a66104; --warn-soft: #fdf3e4;
+    --info: #0e7490; --info-soft: #e6f4f7; --danger: #d71f1f; --danger-soft: #fdeaea;
+    --border: #e9e7e3; --border-strong: #d9d6d0;
+    --code-bg: #131417; --code-ink: #e8eaed;
+    --shadow: 0 1px 2px rgba(19,20,23,.05), 0 8px 24px rgba(19,20,23,.06);
+  }
+  :root[data-theme="dark"] {
+    --bg-page: #101113; --bg-panel: #17181a; --bg-inset: #1d1e21;
+    --text-strong: #fafaf9; --text-main: #ececea; --text-muted: #85868c;
+    --accent: #ff3b3b; --accent-text: #ff7a70; --accent-soft: rgba(255,59,59,.12);
+    --ok: #2fbe6b; --ok-soft: rgba(47,190,107,.14); --warn: #f0a32b; --warn-soft: rgba(240,163,43,.14);
+    --info: #2cb8dc; --info-soft: rgba(44,184,220,.14); --danger: #ff4d4d; --danger-soft: rgba(255,77,77,.14);
+    --border: rgba(235,232,225,.12); --border-strong: rgba(235,232,225,.24);
+    --code-bg: #0b0c0e; --code-ink: #d5dbe4;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg-page); color: var(--text-main);
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15.5px; line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 3.5rem 1.5rem 6rem; }
+  h1, h2, h3 { color: var(--text-strong); text-wrap: balance; line-height: 1.15; }
+  h1 { font-size: clamp(2rem, 5vw, 2.8rem); font-weight: 800; letter-spacing: -0.03em; margin: 0.6rem 0 1rem; }
+  h2 { font-size: 1.3rem; font-weight: 750; letter-spacing: -0.015em; margin: 0 0 0.9rem; }
+  p { margin: 0 0 1rem; max-width: 66ch; }
+  code, .mono { font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace; font-size: 0.86em; }
+  code { background: var(--bg-inset); border: 1px solid var(--border); border-radius: 5px; padding: 0.08em 0.35em; }
+  section { margin-top: 4rem; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--accent-text);
+  }
+  .eyebrow::before { content: ""; width: 1.4rem; height: 2px; background: var(--accent); }
+  .lede { font-size: 1.05rem; max-width: 60ch; }
+  .meta-chips { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1.1rem; }
+  .chip {
+    font-size: 0.72rem; font-weight: 650; padding: 0.28rem 0.8rem; border-radius: 999px;
+    border: 1px solid var(--border-strong); color: var(--text-muted); background: var(--bg-panel);
+  }
+
+  /* mock frame */
+  .frame {
+    border: 1px solid var(--border); border-radius: 18px; background: var(--bg-page);
+    box-shadow: var(--shadow); padding: 1.4rem; margin: 1.2rem 0 0.8rem; overflow-x: auto;
+  }
+  .frame-label {
+    font-size: 0.7rem; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-muted); margin-bottom: 0.9rem;
+  }
+
+  /* annotation dots */
+  .dot {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.15rem; height: 1.15rem; flex: none; border-radius: 999px;
+    background: var(--accent); color: #fff; font-size: 0.66rem; font-weight: 800;
+    vertical-align: middle; box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .legend { list-style: none; margin: 0.9rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .legend li { display: flex; gap: 0.6rem; font-size: 0.86rem; align-items: baseline; }
+  .legend .dot { transform: translateY(0.15rem); }
+  .legend b { color: var(--text-strong); }
+
+  /* pills */
+  .pill { display: inline-block; font-size: 0.66rem; font-weight: 750; letter-spacing: 0.03em; padding: 0.13rem 0.58rem; border-radius: 999px; white-space: nowrap; }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.info { background: var(--info-soft); color: var(--info); }
+  .pill.danger { background: var(--danger-soft); color: var(--danger); }
+  .pill.mutedp { background: var(--bg-inset); color: var(--text-muted); }
+
+  /* health strip */
+  .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.7rem; margin-bottom: 1rem; }
+  .tile {
+    background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 0.65rem 0.9rem; cursor: pointer; position: relative;
+  }
+  .tile b { display: block; font-size: 1.25rem; font-weight: 800; color: var(--text-strong); font-variant-numeric: tabular-nums; }
+  .tile span { font-size: 0.7rem; color: var(--text-muted); font-weight: 650; }
+  .tile.hot { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .tile.bad b { color: var(--danger); }
+  .tile.run b { color: var(--info); }
+
+  /* cards grid */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); gap: 0.8rem; }
+  .card {
+    background: var(--bg-panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 0.95rem 1.05rem; position: relative;
+  }
+  .card header { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.45rem; }
+  .glyph {
+    width: 1.9rem; height: 1.9rem; flex: none; border-radius: 9px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg-inset); color: var(--text-muted); font-size: 0.62rem; font-weight: 800;
+  }
+  .glyph.crit { background: var(--accent-soft); color: var(--accent-text); }
+  .card header b { font-size: 0.92rem; color: var(--text-strong); }
+  .card header small { display: block; font-size: 0.7rem; color: var(--text-muted); }
+  .card .pill { margin-left: auto; }
+  .repoline { display: flex; gap: 0.7rem; font-size: 0.74rem; color: var(--text-muted); margin: 0.3rem 0 0.55rem; flex-wrap: wrap; }
+  .buildline { display: flex; align-items: center; gap: 0.5rem; font-size: 0.74rem; color: var(--text-muted); }
+  .spark { display: inline-flex; gap: 2px; align-items: flex-end; height: 0.9rem; }
+  .spark i { width: 4px; border-radius: 1px; background: var(--ok); }
+  .spark i.f { background: var(--danger); }
+  .card footer { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-top: 0.6rem; }
+  .runbtn {
+    margin-left: auto; font-size: 0.7rem; font-weight: 750; padding: 0.25rem 0.8rem;
+    border-radius: 999px; background: var(--accent); color: #fff; border: 0; cursor: pointer;
+  }
+
+  /* detail mock */
+  .dtabs { display: flex; gap: 0.3rem; border-bottom: 1px solid var(--border); margin: 0.9rem 0; flex-wrap: wrap; }
+  .dtab { font-size: 0.8rem; font-weight: 650; color: var(--text-muted); padding: 0.4rem 0.85rem; border-bottom: 2px solid transparent; }
+  .dtab.on { color: var(--accent-text); border-bottom-color: var(--accent); }
+  .dtab .pill { margin-left: 0.3rem; }
+  .stagebar { display: flex; align-items: center; gap: 0.25rem; flex-wrap: wrap; margin: 0.6rem 0; }
+  .stg { font-size: 0.72rem; font-weight: 650; padding: 0.22rem 0.75rem; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--bg-panel); }
+  .stg.ok { border-color: var(--ok); color: var(--ok); }
+  .stg.run { border-color: var(--info); color: var(--info); }
+  .stg.skip { border-style: dashed; color: var(--text-muted); }
+  .sep { color: var(--border-strong); font-size: 0.7rem; }
+
+  .btable { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  .btable th { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); }
+  .btable td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); }
+  .btable tr:last-child td { border-bottom: 0; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* drawer mock */
+  .drawer { display: grid; grid-template-columns: 200px 1fr; gap: 0.9rem; }
+  @media (max-width: 700px) { .drawer { grid-template-columns: 1fr; } }
+  .stg-rail { display: flex; flex-direction: column; gap: 0.25rem; }
+  .stg-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; padding: 0.4rem 0.6rem; border-radius: 8px; }
+  .stg-row.on { background: var(--bg-inset); border: 1px solid var(--border-strong); }
+  .stg-row .t { margin-left: auto; font-size: 0.7rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .mark { width: 0.8rem; text-align: center; font-weight: 800; }
+  .mark.ok { color: var(--ok); } .mark.run { color: var(--info); } .mark.skip { color: var(--text-muted); }
+  .logbox {
+    background: var(--code-bg); color: var(--code-ink); border-radius: 12px;
+    padding: 0.8rem 1rem; font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.72rem; line-height: 1.6; overflow-x: auto;
+  }
+  .logbox .sys { color: #8fb8ff; } .logbox .msk { color: #f0a32b; }
+
+  /* tables */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-panel); }
+  .doc-table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  .doc-table th, .doc-table td { text-align: left; padding: 0.6rem 0.95rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .doc-table th { font-size: 0.7rem; font-weight: 750; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); background: var(--bg-inset); }
+  .doc-table tr:last-child td { border-bottom: 0; }
+
+  .callout {
+    border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 0 12px 12px 0;
+    background: var(--bg-panel); padding: 0.9rem 1.15rem; font-size: 0.88rem; margin: 1.2rem 0;
+  }
+  .callout b { color: var(--text-strong); }
+  footer.page { margin-top: 5rem; padding-top: 1.2rem; border-top: 1px solid var(--border); font-size: 0.76rem; color: var(--text-muted); }
+</style>
+
+<main>
+  <header>
+    <span class="eyebrow">KubeSight · Signal v3 · UI/UX Concept</span>
+    <h1>The Service Catalog tab:<br>a build floor, not a list.</h1>
+    <p class="lede">
+      With native CI replacing Jenkins, the Service Catalog is where every build in the
+      organisation starts, runs, and hands off to deploy. This concept redesigns the tab around
+      that role: <strong>the grid answers "is everything building?" at a glance</strong>, a card
+      answers it per service, and everything actionable is one click from where the question arose.
+    </p>
+    <div class="meta-chips">
+      <span class="chip">catalog grid + service page + build drawer</span>
+      <span class="chip">pairs with the one-field onboarding concept</span>
+      <span class="chip">no new backend required for P1</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Design position</h2>
+    <p>
+      Four decisions shape everything below — each corrects a real weakness of the current v1 tab:
+    </p>
+    <div class="table-scroll">
+      <table class="doc-table">
+        <thead><tr><th>Decision</th><th>Corrects</th></tr></thead>
+        <tbody>
+          <tr><td><b>Health strip with tiles-as-filters</b> — running / failing / queued / needs-setup counts at the top; clicking a tile filters the grid (the proven Alerts pattern).</td>
+              <td>v1 opens on an undifferentiated grid; a failing build looks exactly as loud as a healthy one until you read every card.</td></tr>
+          <tr><td><b>The card is a verdict, not a record</b> — one dominant signal (last build outcome), sparkline of the last 10 builds, and a hover-revealed Run action.</td>
+              <td>v1 cards list facts (repo, branch, stages) with equal weight; scanning 30 services means reading 30 cards.</td></tr>
+          <tr><td><b>Every incomplete state carries its next action</b> — "Source needed → Connect", "Pipeline needed → Configure", "Runner offline → Enable".</td>
+              <td>v1 shows warning chips but the fix lives two navigations away.</td></tr>
+          <tr><td><b>Traceability is a first-class row</b> — commit → build → artifact → deploy rendered as one chain on artifacts and automation-triggered builds.</td>
+              <td>The Jenkins-free promise is invisible unless the UI shows the whole chain happening inside KubeSight.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>1 · The grid</h2>
+    <div class="frame" role="img" aria-label="Annotated mock of the Service Catalog grid">
+      <div class="frame-label">Service Catalog — default view</div>
+
+      <div class="strip">
+        <div class="tile"><b>24</b><span>SERVICES</span></div>
+        <div class="tile run"><b>3</b><span>BUILDING NOW <span class="dot">1</span></span></div>
+        <div class="tile bad hot"><b>2</b><span>FAILING</span></div>
+        <div class="tile"><b>1</b><span>QUEUED</span></div>
+        <div class="tile"><b>4</b><span>NEEDS SETUP <span class="dot">2</span></span></div>
+      </div>
+
+      <div class="cards">
+        <div class="card">
+          <header>
+            <span class="glyph crit">JV</span>
+            <span><b>Payment Service</b><small>Java · Payments</small></span>
+            <span class="pill danger">#146 failed</span>
+          </header>
+          <div class="repoline"><span>areeba/payment-service</span><span>develop</span></div>
+          <div class="buildline">
+            <span class="spark" aria-label="last 10 builds"><i style="height:10px"></i><i style="height:12px"></i><i style="height:9px"></i><i style="height:12px"></i><i class="f" style="height:13px"></i><i style="height:10px"></i><i style="height:12px"></i><i style="height:11px"></i><i class="f" style="height:13px"></i><i class="f" style="height:13px"></i></span>
+            <span>failed in Unit Tests · 12m ago</span> <span class="dot">3</span>
+          </div>
+          <footer>
+            <span class="pill mutedp">jar · v146</span>
+            <span class="pill info">automation</span> <span class="dot">4</span>
+            <button class="runbtn">Run ▸</button> <span class="dot">5</span>
+          </footer>
+        </div>
+
+        <div class="card">
+          <header>
+            <span class="glyph">ND</span>
+            <span><b>Ledger UI</b><small>Node.js · Ledger</small></span>
+            <span class="pill info">#88 building</span>
+          </header>
+          <div class="repoline"><span>areeba/ledger-ui</span><span>main</span></div>
+          <div class="buildline">
+            <span class="spark"><i style="height:10px"></i><i style="height:11px"></i><i style="height:12px"></i><i style="height:10px"></i><i style="height:12px"></i><i style="height:11px"></i><i style="height:9px"></i><i style="height:12px"></i><i style="height:10px"></i><i style="height:12px"></i></span>
+            <span>stage 3/5 · Unit Tests · 1m 40s</span>
+          </div>
+          <footer>
+            <span class="pill mutedp">image · main-87</span>
+            <button class="runbtn" disabled style="opacity:.4">Run ▸</button>
+          </footer>
+        </div>
+
+        <div class="card" style="border-style: dashed;">
+          <header>
+            <span class="glyph">PY</span>
+            <span><b>Risk Worker</b><small>Python · Risk</small></span>
+            <span class="pill mutedp">no builds</span>
+          </header>
+          <div class="repoline"><span style="color: var(--warn)">No repository connected</span></div>
+          <div class="buildline"><span>Registered 2d ago by nsalame</span></div>
+          <footer>
+            <span class="pill warn">Source needed → Connect</span> <span class="dot">6</span>
+          </footer>
+        </div>
+      </div>
+    </div>
+    <ol class="legend">
+      <li><span class="dot">1</span><span><b>Health strip, tiles are filters.</b> Live counts (4s poll, only while something is active). Clicking FAILING shows the two red cards and nothing else — same mechanics as the Alerts tiles, so it needs no learning.</span></li>
+      <li><span class="dot">2</span><span><b>Needs-setup is a first-class state.</b> Half-registered services stop hiding in the grid; the tile collects them for a setup sweep.</span></li>
+      <li><span class="dot">3</span><span><b>Verdict line.</b> Outcome + failing stage + recency in one line, and a 10-build sparkline for trend (three reds in the last four ≠ one flake). Clicking the verdict opens the failing build's drawer directly — not the service page.</span></li>
+      <li><span class="dot">4</span><span><b>Trigger provenance.</b> Builds started by tickets wear an <i>automation</i> chip; the card shows the org that CI runs itself, no Jenkins.</span></li>
+      <li><span class="dot">5</span><span><b>Run from the card</b> (hover/focus-revealed, permission-gated). The most common action must not cost a navigation. Disabled with a tooltip while a build is running at the concurrency cap.</span></li>
+      <li><span class="dot">6</span><span><b>Incomplete cards are dashed</b> and their chip <em>is</em> the action — "Connect" deep-links to the Source tab. A dead-end chip is a design bug.</span></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>2 · The service page</h2>
+    <div class="frame" role="img" aria-label="Annotated mock of the service detail page">
+      <div class="frame-label">Payment Service — Overview</div>
+      <div style="display:flex; align-items:center; gap:0.7rem; flex-wrap:wrap;">
+        <span class="glyph crit" style="width:2.4rem;height:2.4rem;font-size:0.75rem">JV</span>
+        <div>
+          <b style="color:var(--text-strong); font-size:1.05rem;">Payment Service</b>
+          <span class="pill danger">#146 failed</span>
+          <div style="font-size:0.74rem;color:var(--text-muted)">areeba/payment-service @ develop · Payments · critical</div>
+        </div>
+        <div style="margin-left:auto; display:flex; gap:0.4rem;">
+          <button class="runbtn" style="font-size:0.78rem; padding:0.4rem 1.1rem;">Run build ▸</button>
+        </div>
+      </div>
+      <div class="dtabs">
+        <span class="dtab on">Overview</span>
+        <span class="dtab">Source</span>
+        <span class="dtab">Pipeline</span>
+        <span class="dtab">Builds <span class="pill danger">1</span> <span class="dot">1</span></span>
+        <span class="dtab">Artifacts</span>
+        <span class="dtab">Settings</span>
+      </div>
+
+      <div class="stagebar">
+        <span class="stg ok">Checkout</span><span class="sep">→</span>
+        <span class="stg ok">Build</span><span class="sep">→</span>
+        <span class="stg" style="border-color:var(--danger);color:var(--danger)">Unit Tests ✕</span><span class="sep">→</span>
+        <span class="stg skip">Package</span><span class="sep">→</span>
+        <span class="stg skip">Build Image</span>
+        <span class="dot" style="margin-left:0.4rem">2</span>
+      </div>
+
+      <table class="btable">
+        <thead><tr><th>Build</th><th>Branch</th><th>Trigger</th><th>Status</th><th class="num">Duration</th><th>Deployed</th></tr></thead>
+        <tbody>
+          <tr><td><b>#146</b></td><td>develop</td><td><span class="pill info">automation · DR-152</span></td><td><span class="pill danger">failed</span></td><td class="num">1m 11s</td><td>—</td></tr>
+          <tr><td><b>#145</b></td><td>develop</td><td>manual · elie</td><td><span class="pill ok">success</span></td><td class="num">3m 42s</td><td><span class="pill ok">prod-us-east</span> <span class="dot">3</span></td></tr>
+          <tr><td><b>#144</b></td><td>main</td><td><span class="pill info">automation · DR-149</span></td><td><span class="pill ok">success</span></td><td class="num">4m 03s</td><td><span class="pill ok">prod-eu</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ol class="legend">
+      <li><span class="dot">1</span><span><b>Tabs carry state.</b> A red count on Builds, a warn dot on Source when the credential fails its probe — the tab bar is a status bar, not just navigation.</span></li>
+      <li><span class="dot">2</span><span><b>The pipeline strip is the last build's truth</b>, not the definition: the failing stage is marked, skipped stages are dashed. Clicking a node opens that stage's log in the drawer. The definition lives one tab over.</span></li>
+      <li><span class="dot">3</span><span><b>The Deployed column closes the loop.</b> A build whose artifact was rolled out (via the existing CD or ticket automation) shows its target; clicking opens the deployment record. Commit → build → artifact → deploy, all inside KubeSight.</span></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>3 · The build drawer</h2>
+    <div class="frame" role="img" aria-label="Annotated mock of the build drawer">
+      <div class="frame-label">Build #146 — drawer (right side, 60% width)</div>
+      <div style="display:flex;align-items:baseline;gap:0.6rem;flex-wrap:wrap;margin-bottom:0.7rem;">
+        <b style="color:var(--text-strong)">Build #146</b>
+        <span class="pill danger">failed</span>
+        <span style="font-size:0.75rem;color:var(--text-muted)">develop · <span class="mono">ab12cd34</span> · automation (ticket DR-152) · 1m 11s</span>
+        <span style="margin-left:auto;display:flex;gap:0.4rem">
+          <span class="chip">Retry</span><span class="chip">Close</span>
+        </span>
+      </div>
+      <div class="drawer">
+        <div class="stg-rail">
+          <div class="stg-row"><span class="mark ok">✓</span>Checkout<span class="t">15s</span></div>
+          <div class="stg-row"><span class="mark ok">✓</span>Build<span class="t">31s</span></div>
+          <div class="stg-row on"><span class="mark" style="color:var(--danger)">✕</span>Unit Tests<span class="t">25s</span></div>
+          <div class="stg-row"><span class="mark skip">◌</span>Package<span class="t">—</span></div>
+          <div class="stg-row"><span class="mark skip">◌</span>Build Image<span class="t">—</span></div>
+          <span class="dot" style="margin:0.3rem 0 0 0.4rem">1</span>
+        </div>
+        <div>
+          <div class="logbox">$ mvn -B test
+[INFO] Running com.areeba.payments.LedgerReconciliationTest
+[ERROR] LedgerReconciliationTest.rollover:112 expected 4102.50 but was 4102.49
+<span class="msk">[INFO] nexus deploy credentials: ***</span> <span class="dot" style="box-shadow:none">2</span>
+[ERROR] Tests run: 214, Failures: 1
+<span class="sys">[kubesight] stage 'Unit Tests' failed (exit 1)</span></div>
+          <div style="display:flex;gap:0.5rem;margin-top:0.5rem;align-items:center;">
+            <span class="chip">Follow ✓</span><span class="chip">Download log</span>
+            <span class="chip" style="border-color:var(--danger);color:var(--danger)">Jump to first error</span>
+            <span class="dot">3</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <ol class="legend">
+      <li><span class="dot">1</span><span><b>Stage rail auto-follows the action:</b> selects the running stage live, lands on the failed one when the build ends. The user's first click is already done for them.</span></li>
+      <li><span class="dot">2</span><span><b>Masking is visible, deliberately.</b> Secrets show as <code>***</code> — evidence that the masker ran, and a reminder that pasting secrets into build output is pointless.</span></li>
+      <li><span class="dot">3</span><span><b>"Jump to first error"</b> scans the stored log for the first <code>stderr</code>/ERROR line — the single most repeated manual action in any CI log viewer.</span></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>4 · States that must be designed, not defaulted</h2>
+    <div class="table-scroll">
+      <table class="doc-table">
+        <thead><tr><th>State</th><th>Treatment</th></tr></thead>
+        <tbody>
+          <tr><td>Empty catalog</td><td>The one-field onboarding sheet inline in the empty state — not a hint pointing at a button somewhere else. First service ≤ 60 seconds.</td></tr>
+          <tr><td>Build queued with a reason</td><td>The queue reason verbatim where the spinner would be: “Waiting: every runner with <code>macos</code> is at capacity”, with a link to Runners for <code>ci_runners:manage</code> holders.</td></tr>
+          <tr><td>Stage skipped (BuildKit off, registry unlinked)</td><td>Dashed pill + the stage log's explanation surfaced as a tooltip. Never rendered as success; never rendered as failure.</td></tr>
+          <tr><td>Runner fleet down</td><td>Banner above the grid — a grid of “queued” cards with no explanation reads as a broken product.</td></tr>
+          <tr><td>Automation build failed</td><td>The failure card links both ways: to the build drawer AND to the originating ticket run in Ticketing.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>5 · Motion, keyboard, a11y</h2>
+    <p style="max-width:70ch">
+      Motion budget: sparkline bars grow once on load (120ms, opt-out via
+      <code>prefers-reduced-motion</code>); the building-card pill pulses at 2s; nothing else moves.
+      Grid cards are buttons: <kbd>Enter</kbd> opens, <kbd>R</kbd> runs (with permission), drawer
+      traps focus and restores it on close. Status never rides on colour alone — every state pairs
+      colour with a word or glyph, which is also what makes the dashed/solid card distinction work
+      in both themes.
+    </p>
+    <div class="callout">
+      <b>What this costs the backend: almost nothing.</b> The strip counts come from the existing
+      list endpoints (one aggregate added to <code>GET /api/ci/services</code>); the sparkline is the
+      last 10 build statuses already on the summary; “Jump to first error” is a client-side scan of
+      the log payload; the Deployed column reads <code>application_deployment_versions.ci_build_id</code>,
+      which the CD handoff already writes.
+    </div>
+  </section>
+
+  <section>
+    <h2>6 · Build order</h2>
+    <div class="table-scroll">
+      <table class="doc-table">
+        <thead><tr><th class="num">Step</th><th>Ships</th><th>Why this order</th></tr></thead>
+        <tbody>
+          <tr><td class="num">1</td><td>Health strip + card redesign (verdict line, sparkline, action chips, hover Run)</td><td>Highest daily-use surface; pure frontend + one aggregate.</td></tr>
+          <tr><td class="num">2</td><td>Drawer upgrades: auto-follow rail, jump-to-error, provenance header</td><td>Where failures are diagnosed; second most-visited surface.</td></tr>
+          <tr><td class="num">3</td><td>Deployed column + ticket/run cross-links</td><td>Needs the CD-handoff write path; completes the traceability story.</td></tr>
+          <tr><td class="num">4</td><td>Inline one-field onboarding in the empty state</td><td>Depends on <code>/source/inspect</code> from the onboarding concept.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="page">
+    KubeSight · Service Catalog tab UI/UX concept · Signal v3 tokens · September 2026 ·
+    companion to the one-field onboarding concept
+  </footer>
+</main>

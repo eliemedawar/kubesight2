@@ -93,6 +93,7 @@ const ApplicationServicesPage = lazy(() => import("./pages/ApplicationServicesPa
 const ApplicationIntelligencePage = lazy(() => import("./pages/ApplicationIntelligencePage.jsx"));
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
 const ServiceCatalogPage = lazy(() => import("./pages/ServiceCatalogPage.jsx"));
+const BlueprintsPage = lazy(() => import("./pages/BlueprintsPage.jsx"));
 const ComponentsPage = lazy(() => import("./pages/ComponentsPage.jsx"));
 
 export default function App() {
@@ -1679,6 +1680,8 @@ export default function App() {
         );
       case "serviceCatalog":
         return <ServiceCatalogPage clusters={allowedClusters} />;
+      case "blueprints":
+        return <BlueprintsPage clusters={allowedClusters} />;
       case "applicationServices":
         return <ApplicationServicesPage clusters={allowedClusters} />;
       case "applicationIntelligence":

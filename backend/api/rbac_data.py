@@ -96,6 +96,21 @@ PERMISSIONS = [
         "applications:execute",
         "Execute the bounded Application Intelligence analysis pipeline as a service account",
     ),
+    ("ci_services:view", "View the CI Service Catalog"),
+    ("ci_services:create", "Register services in the CI Service Catalog"),
+    ("ci_services:edit", "Edit a CI service and its source configuration"),
+    ("ci_services:delete", "Delete a CI service and its build history"),
+    ("ci_pipelines:view", "View CI pipeline definitions"),
+    ("ci_pipelines:edit", "Create and edit CI pipeline definitions"),
+    ("ci_builds:view", "View CI builds, stages, and build logs"),
+    ("ci_builds:run", "Trigger CI builds"),
+    ("ci_builds:cancel", "Cancel running or queued CI builds"),
+    ("ci_builds:retry", "Retry CI builds"),
+    ("ci_artifacts:view", "View and download CI build artifacts"),
+    ("ci_runners:view", "View CI runners and their capacity"),
+    ("ci_runners:manage", "Enable, label, and configure CI runners"),
+    ("ci_secrets:view", "View the names of CI secrets (never their values)"),
+    ("ci_secrets:manage", "Create, update, and delete CI secrets and source credentials"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -199,6 +214,18 @@ PERMISSION_GROUPS = [
         ],
     },
     {
+        "id": "ci",
+        "label": "CI / Service Catalog",
+        "keys": [
+            "ci_services:view", "ci_services:create", "ci_services:edit", "ci_services:delete",
+            "ci_pipelines:view", "ci_pipelines:edit",
+            "ci_builds:view", "ci_builds:run", "ci_builds:cancel", "ci_builds:retry",
+            "ci_artifacts:view",
+            "ci_runners:view", "ci_runners:manage",
+            "ci_secrets:view", "ci_secrets:manage",
+        ],
+    },
+    {
         "id": "administration",
         "label": "Administration",
         "keys": [
@@ -228,6 +255,10 @@ DANGEROUS_PERMISSION_KEYS = {
     # own RBAC, for as long as the certificate lives.
     "cluster_builds:kubeconfig",
     "ssh_credentials:manage", "vsphere:manage",
+    # Running a build executes repository-controlled commands on a runner, and
+    # editing a pipeline decides which commands those are.
+    "ci_services:delete", "ci_pipelines:edit", "ci_builds:run", "ci_secrets:manage",
+    "ci_runners:manage",
 }
 
 
@@ -287,6 +318,10 @@ VIEWER_PERMISSIONS = [
     "change_bundles:view",
     "components:view",
     "applications:view",
+    "ci_services:view",
+    "ci_pipelines:view",
+    "ci_builds:view",
+    "ci_artifacts:view",
 ]
 
 OPERATOR_PERMISSIONS = [
@@ -330,6 +365,16 @@ OPERATOR_PERMISSIONS = [
     "applications:view",
     "applications:manage",
     "applications:analyze",
+    # Operators run and watch builds but do not reshape the catalog.
+    "ci_services:view",
+    "ci_pipelines:view",
+    "ci_builds:view",
+    "ci_builds:run",
+    "ci_builds:cancel",
+    "ci_builds:retry",
+    "ci_artifacts:view",
+    "ci_runners:view",
+    "ci_secrets:view",
 ]
 
 CLUSTER_ADMIN_PERMISSIONS = [
@@ -385,6 +430,19 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "applications:view",
     "applications:manage",
     "applications:analyze",
+    "ci_services:view",
+    "ci_services:create",
+    "ci_services:edit",
+    "ci_pipelines:view",
+    "ci_pipelines:edit",
+    "ci_builds:view",
+    "ci_builds:run",
+    "ci_builds:cancel",
+    "ci_builds:retry",
+    "ci_artifacts:view",
+    "ci_runners:view",
+    "ci_secrets:view",
+    "ci_secrets:manage",
 ]
 
 HERMES_AGENT_PERMISSIONS = [

@@ -1,0 +1,101 @@
+# Native CI — Kubernetes Job runner prerequisites.
+#
+# Apply once per cluster that should execute builds, then enable the
+# "kubesight-kubernetes" runner in KubeSight (Runners page or PUT /api/ci/runners).
+#
+# Build pods are untrusted: they execute repository-controlled commands. The
+# namespace enforces the *restricted* Pod Security Standard, every pod runs
+# non-root with all capabilities dropped, and a per-build NetworkPolicy limits
+# egress to DNS, the KubeSight callback, and TLS (git/package registries).
+# No Docker socket, no privileged containers — container images are built by
+# the separate BuildKit service (see k8s/ci-buildkitd.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubesight-ci
+  labels:
+    kubesight.io/purpose: untrusted-ci-builds
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Identity for build pods themselves. Deliberately powerless: no token is even
+# mounted (automountServiceAccountToken: false on the pod).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesight-ci-build
+  namespace: kubesight-ci
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ci-quota
+  namespace: kubesight-ci
+spec:
+  hard:
+    count/jobs.batch: "30"
+    count/secrets: "60"
+    requests.cpu: "12"
+    requests.memory: 24Gi
+    limits.cpu: "24"
+    limits.memory: 48Gi
+    requests.ephemeral-storage: 40Gi
+    limits.ephemeral-storage: 80Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: ci-defaults
+  namespace: kubesight-ci
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+        ephemeral-storage: 256Mi
+      default:
+        cpu: "2"
+        memory: 4Gi
+        ephemeral-storage: 2Gi
+---
+# What the KubeSight backend may do here: create/observe/delete build Jobs and
+# their short-lived Secrets and NetworkPolicies, and read pod status + logs.
+# It cannot read anything outside this namespace through this role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesight-ci-launcher
+  namespace: kubesight-ci
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "delete", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "delete", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubesight-ci-launcher
+  namespace: kubesight-ci
+subjects:
+  - kind: ServiceAccount
+    name: kubesight-backend
+    namespace: kubesight
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubesight-ci-launcher

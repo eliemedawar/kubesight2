@@ -149,6 +149,16 @@ def _scheduler_loop(app: Flask) -> None:
             logger.exception("Mobile applications tick failed")
         try:
             with app.app_context():
+                from .ci.engine import advance_ci_builds
+
+                # Native CI: reap lost builds, honour cancellations, advance
+                # running stages, and dispatch queued builds to a compatible
+                # runner. No-ops instantly when nothing is queued or running.
+                advance_ci_builds()
+        except Exception:
+            logger.exception("CI build tick failed")
+        try:
+            with app.app_context():
                 from .cluster_build.executor import advance_cluster_builds
 
                 # Cluster Builder: resume builds orphaned by a backend restart

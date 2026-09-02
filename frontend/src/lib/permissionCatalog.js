@@ -150,6 +150,27 @@ export const PERMISSION_GROUPS = [
     label: "Mobile Applications",
     keys: ["mobile_apps:view", "mobile_apps:manage"],
   },
+  {
+    id: "ci",
+    label: "CI / Service Catalog",
+    keys: [
+      "ci_services:view",
+      "ci_services:create",
+      "ci_services:edit",
+      "ci_services:delete",
+      "ci_pipelines:view",
+      "ci_pipelines:edit",
+      "ci_builds:view",
+      "ci_builds:run",
+      "ci_builds:cancel",
+      "ci_builds:retry",
+      "ci_artifacts:view",
+      "ci_runners:view",
+      "ci_runners:manage",
+      "ci_secrets:view",
+      "ci_secrets:manage",
+    ],
+  },
 ];
 
 export const PERMISSION_CATALOG = [
@@ -218,6 +239,21 @@ export const PERMISSION_CATALOG = [
   { key: "change_bundles:manage", label: "Approve or reject change bundles", dangerous: true },
   { key: "mobile_apps:view", label: "View mobile applications", dangerous: false },
   { key: "mobile_apps:manage", label: "Manage mobile applications and store credentials", dangerous: true },
+  { key: "ci_services:view", label: "View the CI Service Catalog", dangerous: false },
+  { key: "ci_services:create", label: "Register CI services", dangerous: false },
+  { key: "ci_services:edit", label: "Edit CI services and their source", dangerous: false },
+  { key: "ci_services:delete", label: "Delete CI services and build history", dangerous: true },
+  { key: "ci_pipelines:view", label: "View CI pipelines", dangerous: false },
+  { key: "ci_pipelines:edit", label: "Edit CI pipelines", dangerous: true },
+  { key: "ci_builds:view", label: "View CI builds and logs", dangerous: false },
+  { key: "ci_builds:run", label: "Trigger CI builds", dangerous: true },
+  { key: "ci_builds:cancel", label: "Cancel CI builds", dangerous: false },
+  { key: "ci_builds:retry", label: "Retry CI builds", dangerous: false },
+  { key: "ci_artifacts:view", label: "View and download CI artifacts", dangerous: false },
+  { key: "ci_runners:view", label: "View CI runners", dangerous: false },
+  { key: "ci_runners:manage", label: "Configure CI runners", dangerous: true },
+  { key: "ci_secrets:view", label: "View CI secret names", dangerous: false },
+  { key: "ci_secrets:manage", label: "Manage CI secrets and source credentials", dangerous: true },
 ];
 
 const BLOCKED_HIGHLIGHT_KEYS = new Set([

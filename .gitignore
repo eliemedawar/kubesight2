@@ -2,3 +2,7 @@
 # state, histories, sessions, databases, caches, and generated dependencies.
 hermes/
 hermes-local.runtime.env
+
+# Backend runtime data: cluster kubeconfigs (embedded credentials) and CI /
+# mobile build artifacts. Generated at runtime, never source.
+backend/data/

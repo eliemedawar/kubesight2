@@ -560,6 +560,118 @@ def _migrate_client_service_egress_connections() -> None:
         _add_column_if_missing("client_service_egress_connections", col, sql_type)
 
 
+def _seed_builtin_ci_runners() -> None:
+    """Ensure the runners KubeSight manages itself exist.
+
+    ``mock`` executes pipelines without touching a cluster — it backs mock mode
+    and the test suite. ``kubernetes`` is the real in-cluster Job executor and
+    ships disabled until its adapter lands, so a build can never silently
+    dispatch to a runner that cannot run it.
+    """
+    if "ci_runners" not in inspect(db.engine).get_table_names():
+        return
+    from .models_ci import CiRunner
+
+    builtins = [
+        {
+            "name": "kubesight-mock",
+            "runner_type": "mock",
+            "description": "Simulated executor. Runs pipelines without a cluster.",
+            "status": "online",
+            "enabled": True,
+            "os": "linux",
+            "arch": "amd64",
+            "labels": ["mock"],
+            "capabilities": [
+                "mock", "linux", "java", "java21", "node", "python",
+                "docker", "android", "generic",
+            ],
+            "max_concurrent": 4,
+        },
+        {
+            "name": "kubesight-kubernetes",
+            "runner_type": "kubernetes",
+            "description": (
+                "Ephemeral Kubernetes Job executor: one Job per build, stages as "
+                "ordered initContainers on a shared workspace. Apply k8s/ci-runner.yaml, "
+                "then enable this runner."
+            ),
+            "status": "offline",
+            "enabled": False,
+            "os": "linux",
+            "arch": "amd64",
+            "labels": ["kubernetes"],
+            # A Kubernetes runner satisfies any Linux toolchain label because the
+            # stage's own image brings the tools; only macOS-bound labels are
+            # genuinely out of reach.
+            "capabilities": [
+                "linux", "kubernetes", "docker", "java", "java17", "java21",
+                "node", "python", "android", "flutter", "generic",
+            ],
+            "max_concurrent": 4,
+        },
+    ]
+    changed = False
+    for spec in builtins:
+        row = CiRunner.query.filter_by(name=spec["name"]).first()
+        if row is not None:
+            # Operators own enabled/capacity after first creation, but default
+            # capabilities are union-merged so shipped rows learn new ones.
+            if not row.is_builtin:
+                row.is_builtin = True
+                changed = True
+            merged = sorted(set(row.capabilities or []) | set(spec["capabilities"]))
+            if merged != sorted(row.capabilities or []):
+                row.capabilities = merged
+                db.session.add(row)
+                changed = True
+            continue
+        db.session.add(CiRunner(is_builtin=True, **spec))
+        changed = True
+    if changed:
+        db.session.commit()
+
+
+def _migrate_ci_columns() -> None:
+    """Columns native CI adds to tables it did not create.
+
+    The ``ci_*`` tables themselves come from ``db.create_all()``. These three
+    are additions to pre-existing tables, so a deployed database needs them
+    backfilled. Idempotent and safe on a fresh database.
+    """
+    existing = set(inspect(db.engine).get_table_names())
+    if "bitbucket_credential_profiles" in existing:
+        # Shared credential store: CI and Application Intelligence both read it.
+        _add_column_if_missing(
+            "bitbucket_credential_profiles",
+            "provider",
+            "VARCHAR(32) DEFAULT 'bitbucket'",
+        )
+        with db.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE bitbucket_credential_profiles "
+                    "SET provider = 'bitbucket' WHERE provider IS NULL"
+                )
+            )
+    if "intelligence_applications" in existing:
+        _add_column_if_missing("intelligence_applications", "ci_service_id", "INTEGER")
+    if "application_deployment_versions" in existing:
+        # Closes the commit -> build -> artifact -> deployment trace.
+        _add_column_if_missing("application_deployment_versions", "ci_build_id", "INTEGER")
+        _add_column_if_missing(
+            "application_deployment_versions", "ci_artifact_id", "INTEGER"
+        )
+    # Jenkins retirement: the automation and Mobile Applications can build on
+    # native CI instead of a Jenkins job.
+    if "deploy_automation_runs" in existing:
+        _add_column_if_missing("deploy_automation_runs", "ci_build_id", "INTEGER")
+    if "mobile_applications" in existing:
+        _add_column_if_missing("mobile_applications", "ci_service_id", "INTEGER")
+    if "mobile_app_builds" in existing:
+        _add_column_if_missing("mobile_app_builds", "ci_build_id", "INTEGER")
+
+
 def _migrate_registry_connection_columns() -> None:
     """Forward-compatible column adds for the registry_connections table.
 
@@ -985,6 +1097,8 @@ def run_migrations() -> None:
     _migrate_client_service_connections()
     _migrate_client_service_egress_connections()
     _migrate_registry_connection_columns()
+    _migrate_ci_columns()
+    _seed_builtin_ci_runners()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations
 

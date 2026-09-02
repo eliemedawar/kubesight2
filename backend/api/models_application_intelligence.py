@@ -21,6 +21,10 @@ class BitbucketCredentialProfile(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    # Which source host this credential authenticates against. Application
+    # Intelligence and CI share this store; the column exists so adding GitLab
+    # or GitHub later is a data change, not a second credential table.
+    provider = db.Column(db.String(32), nullable=False, default="bitbucket")
     credential_type = db.Column(db.String(32), nullable=False)
     principal = db.Column(db.String(255), nullable=True)
     secret_cipher = db.Column(db.Text, nullable=False)
@@ -56,6 +60,9 @@ class IntelligenceApplication(db.Model):
     mapped_namespace = db.Column(db.String(253), nullable=True)
     mapped_workload_kind = db.Column(db.String(64), nullable=True)
     mapped_workload_name = db.Column(db.String(253), nullable=True)
+    # Optional cross-link to the CI service that builds this repository. Purely
+    # navigational — analysis never requires it, and CI never reads it.
+    ci_service_id = db.Column(db.Integer, nullable=True)
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
     updated_at = db.Column(

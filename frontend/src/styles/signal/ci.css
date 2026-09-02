@@ -1,0 +1,992 @@
+/* Signal page-specific styles — native CI (Service Catalog, pipelines, builds).
+   Shared vocabulary lives in screens.css; catalog.css keeps the toolbar/grid. */
+
+/* ── Service cards ──────────────────────────────────────────────── */
+.sg-ci-card > header .sg-ci-card-id {
+  min-width: 0;
+}
+
+.sg-ci-card-source {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: 0.6rem;
+}
+
+.sg-ci-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-meta svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  flex: none;
+  color: var(--text-muted);
+}
+
+.sg-ci-meta--todo,
+.sg-ci-meta--todo svg {
+  color: var(--warn);
+}
+
+.sg-ci-card-build {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 0.78rem;
+  margin-bottom: 0.7rem;
+}
+
+.sg-ci-duration {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+.sg-tag.sg-ci-tag--todo {
+  background: var(--warn-soft);
+  border-color: var(--warn-border, var(--border-strong));
+  color: var(--warn);
+}
+
+.sg-tag.sg-ci-tag--artifact {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-type-filter {
+  width: auto;
+  min-width: 11rem;
+}
+
+/* ── Health strip: tiles are filters (the Alerts pattern) ───────── */
+.sg-ci-health {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.sg-ci-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  padding: 0.55rem 0.9rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 0.6rem);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast, 120ms) var(--ease, ease),
+    box-shadow var(--dur-fast, 120ms) var(--ease, ease);
+}
+
+.sg-ci-tile:hover {
+  background: var(--bg-panel);
+  border-color: var(--border-strong);
+}
+
+.sg-ci-tile.is-on {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.sg-ci-tile b {
+  font-size: 1.3rem;
+  font-weight: 750;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.sg-ci-tile span {
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sg-ci-tile--bad b { color: var(--danger); }
+.sg-ci-tile--run b { color: var(--info); }
+.sg-ci-tile--warn b { color: var(--warn); }
+
+/* ── Card verdict + sparkline + hover Run ───────────────────────── */
+.sg-ci-card--setup {
+  border-style: dashed;
+}
+
+.sg-ci-spark {
+  display: inline-flex;
+  gap: 2px;
+  align-items: flex-end;
+  height: 0.85rem;
+  flex: none;
+}
+
+.sg-ci-spark-bar {
+  width: 4px;
+  height: 0.65rem;
+  border-radius: 1px;
+  background: var(--border-strong);
+}
+
+.sg-ci-spark-bar--success { background: var(--ok); height: 0.72rem; }
+.sg-ci-spark-bar--failed,
+.sg-ci-spark-bar--timeout { background: var(--danger); height: 0.85rem; }
+.sg-ci-spark-bar--cancelled { background: var(--warn); height: 0.55rem; }
+.sg-ci-spark-bar--running { background: var(--info); height: 0.78rem; }
+.sg-ci-spark-bar--queued { background: var(--border-strong); height: 0.5rem; }
+
+.sg-ci-verdict {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-verdict:hover {
+  background: none;
+  border: 0;
+  color: var(--text-main);
+  text-decoration: underline;
+}
+
+.sg-ci-verdict--failed,
+.sg-ci-verdict--timeout { color: var(--danger); font-weight: 600; }
+.sg-ci-verdict--running { color: var(--info); }
+
+.sg-ci-verdict-text {
+  font-size: 0.78rem;
+}
+
+.sg-tag.sg-ci-tag--action {
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.sg-tag.sg-ci-tag--action:hover {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+}
+
+.sg-tag.sg-ci-tag--auto {
+  background: var(--info-soft);
+  border-color: var(--info-border, var(--border-strong));
+  color: var(--info);
+}
+
+.sg-ci-card-run {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.26rem 0.85rem;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast, 120ms) var(--ease, ease);
+}
+
+.sg-ci-card-run svg { width: 0.7rem; height: 0.7rem; }
+
+.sg-ci-card-run:hover {
+  background: var(--accent-strong, var(--accent));
+  border-color: transparent;
+  color: #fff;
+}
+.sg-ci-card-run[disabled] { opacity: 0; cursor: default; }
+
+.sg-ci-card:hover .sg-ci-card-run,
+.sg-ci-card:focus-within .sg-ci-card-run {
+  opacity: 1;
+}
+
+.sg-ci-card:hover .sg-ci-card-run[disabled],
+.sg-ci-card:focus-within .sg-ci-card-run[disabled] {
+  opacity: 0.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sg-ci-card-run { transition: none; }
+  .sg-ci-tile { transition: none; }
+}
+
+/* Tab-state dot: the tab bar is a status bar, not just navigation. */
+.sg-ci-tab-dot {
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-left: 0.35rem;
+  border-radius: 999px;
+  background: var(--danger);
+  vertical-align: middle;
+}
+
+.sg-ci-jump-error {
+  border-color: var(--danger-border, var(--danger));
+  color: var(--danger);
+}
+
+/* ── Detail page shell ──────────────────────────────────────────── */
+.sg-ci-back {
+  padding: 0;
+  margin-bottom: 0.3rem;
+  border: 0;
+  background: none;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sg-ci-back:hover {
+  color: var(--accent);
+}
+
+.sg-ph h2 .status-pill {
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+.sg-ci-tabpanel {
+  margin-top: var(--space-4);
+}
+
+.sg-ci-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.sg-ci-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* The shared stroke icons carry no width/height of their own: any button
+   inside a CI panel gets a pill-sized glyph by default (specific rules like
+   the stage-card actions may still override). */
+.sg-ci-panel button svg {
+  width: 0.8rem;
+  height: 0.8rem;
+}
+
+/* A form section's own actions need air after the last field, and prose
+   inside one needs to read as separate paragraphs rather than a run-on. */
+.sg-ci-panel .form-section > .sg-ci-panel-actions {
+  margin-top: var(--space-3);
+}
+
+.sg-ci-panel .form-section > p + p {
+  margin-top: 0.4rem;
+}
+
+.sg-ci-panel-note {
+  margin-left: auto;
+  font-size: 0.78rem;
+}
+
+.sg-ci-inline-field {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.sg-ci-inline-field select {
+  flex: 1;
+  min-width: 0;
+}
+
+.sg-ci-dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.sg-ci-dl dt {
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+
+.sg-ci-dl dd {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+
+/* ── Overview: readiness + stats ────────────────────────────────── */
+.sg-ci-readiness {
+  padding: var(--space-3) var(--space-4);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border, var(--border-strong));
+  border-radius: var(--radius-md, 0.6rem);
+}
+
+.sg-ci-readiness ul {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.sg-ci-readiness li {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.82rem;
+  flex-wrap: wrap;
+}
+
+.sg-ci-readiness li > .muted {
+  font-size: 0.78rem;
+}
+
+.sg-ci-readiness li button {
+  margin-left: auto;
+}
+
+.sg-ci-readiness-icon svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  display: block;
+}
+
+.sg-ci-readiness li.is-ok .sg-ci-readiness-icon {
+  color: var(--ok);
+}
+
+.sg-ci-readiness li.is-todo .sg-ci-readiness-icon {
+  color: var(--warn);
+}
+
+.sg-ci-stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: var(--space-3);
+}
+
+.sg-ci-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: var(--space-3);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 0.6rem);
+}
+
+.sg-ci-stat-value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.sg-ci-stat-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sg-ci-recent {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.sg-ci-recent button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 0.45rem 0.7rem;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 0.4rem);
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sg-ci-recent button:hover {
+  background: var(--bg-interactive);
+  border-color: var(--border);
+}
+
+/* ── Pipeline strip ─────────────────────────────────────────────── */
+.sg-ci-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+}
+
+.sg-ci-strip-item {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.sg-ci-strip-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.8rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+
+button.sg-ci-strip-node {
+  cursor: pointer;
+}
+
+button.sg-ci-strip-node:hover {
+  border-color: var(--border-strong);
+  color: var(--text-main);
+}
+
+.sg-ci-strip-node.is-active {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.sg-ci-strip-icon svg {
+  width: 0.72rem;
+  height: 0.72rem;
+  display: block;
+}
+
+.sg-ci-strip-node--success { border-color: var(--ok-border, var(--ok)); color: var(--ok); }
+.sg-ci-strip-node--running { border-color: var(--info-border, var(--info)); color: var(--info); }
+.sg-ci-strip-node--failed,
+.sg-ci-strip-node--timeout { border-color: var(--danger-border, var(--danger)); color: var(--danger); }
+.sg-ci-strip-node--cancelled,
+.sg-ci-strip-node--skipped { color: var(--text-muted); }
+
+.sg-ci-strip-arrow {
+  width: 1.1rem;
+  height: 1px;
+  margin: 0 0.2rem;
+  background: var(--border-strong);
+  flex: none;
+}
+
+/* ── Pipeline editor ────────────────────────────────────────────── */
+.sg-ci-stage-editor {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sg-ci-stage-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 0.6rem);
+  overflow: hidden;
+}
+
+.sg-ci-stage-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.3rem 0.7rem 0.3rem 0;
+}
+
+/* The row IS a button, but it must read as a row: undo the global button
+   pill (border, background, centered content) explicitly. */
+.sg-ci-stage-card-toggle,
+.sg-ci-stage-card-toggle:hover {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.55rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0.55rem 0.7rem;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-md, 0.6rem) 0 0 var(--radius-md, 0.6rem);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sg-ci-stage-card-toggle:hover {
+  background: var(--bg-interactive);
+}
+
+.sg-ci-stage-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  background: var(--bg-interactive);
+  border-radius: var(--radius-full);
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-subtle);
+}
+
+.sg-ci-stage-title {
+  font-weight: 650;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-stage-card-actions {
+  display: flex;
+  gap: 0.2rem;
+  flex: none;
+}
+
+/* Reorder/delete: compact square icon buttons with explicitly sized glyphs —
+   the shared stroke icons carry no width/height of their own. */
+.sg-ci-stage-card-actions .icon-button {
+  width: 1.9rem;
+  height: 1.9rem;
+  border: 1px solid transparent;
+}
+
+.sg-ci-stage-card-actions .icon-button:hover {
+  border-color: var(--border-strong);
+}
+
+.sg-ci-stage-card-actions .icon-button svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.sg-ci-stage-card-actions .icon-button.danger {
+  color: var(--danger);
+}
+
+/* Toolbar buttons (Add stage, Reset, Save): keep their glyphs pill-sized. */
+.sg-ci-panel-actions button svg {
+  width: 0.8rem;
+  height: 0.8rem;
+}
+
+.sg-ci-stage-card-body {
+  padding: 0.2rem 0.7rem 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.sg-ci-secret-refs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.sg-ci-envvar-input {
+  max-width: 14rem;
+  margin-left: auto;
+}
+
+.sg-ci-secret-form {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+}
+
+.sg-ci-secret-form input {
+  flex: 1;
+  min-width: 9rem;
+}
+
+.sg-ci-danger {
+  border: 1px solid var(--danger-border, var(--danger));
+  border-radius: var(--radius-md, 0.6rem);
+  padding: var(--space-3) var(--space-4);
+}
+
+/* ── Builds ─────────────────────────────────────────────────────── */
+.sg-ci-build-row {
+  cursor: pointer;
+}
+
+.sg-ci-build-row:hover {
+  background: var(--bg-interactive);
+}
+
+.sg-ci-build-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.sg-ci-build-table code {
+  font-size: 0.75rem;
+}
+
+.sg-ci-artifact-uri code {
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+/* ── Build drawer ───────────────────────────────────────────────── */
+.sg-ci-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(62rem, 100vw);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  overflow-y: auto;
+  background: var(--bg-page, var(--bg-panel));
+  border-left: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg, var(--shadow-md));
+}
+
+.sg-ci-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.sg-ci-drawer-head h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sg-ci-drawer-sub {
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+}
+
+.sg-ci-drawer-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.sg-ci-drawer-body {
+  display: grid;
+  grid-template-columns: minmax(12rem, 16rem) 1fr;
+  gap: var(--space-3);
+  align-items: start;
+  min-height: 0;
+}
+
+@media (max-width: 900px) {
+  .sg-ci-drawer-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sg-ci-stage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.sg-ci-stage-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 0.4rem);
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sg-ci-stage-row:hover {
+  background: var(--bg-interactive);
+}
+
+.sg-ci-stage-row.is-active {
+  background: var(--bg-interactive);
+  border-color: var(--border-strong);
+}
+
+.sg-ci-stage-icon svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  display: block;
+}
+
+.sg-ci-stage-icon--success { color: var(--ok); }
+.sg-ci-stage-icon--running { color: var(--info); }
+.sg-ci-stage-icon--failed,
+.sg-ci-stage-icon--timeout { color: var(--danger); }
+.sg-ci-stage-icon--cancelled,
+.sg-ci-stage-icon--skipped,
+.sg-ci-stage-icon--pending { color: var(--text-muted); }
+
+.sg-ci-stage-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-stage-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.sg-ci-drawer-artifacts ul {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.sg-ci-drawer-artifacts li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ── Log viewer ─────────────────────────────────────────────────── */
+.sg-ci-logs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.sg-ci-logs-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sg-ci-logs-title {
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.sg-ci-logs-follow {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.sg-ci-logs-body {
+  margin: 0;
+  padding: 0.7rem 0.85rem;
+  max-height: 26rem;
+  min-height: 10rem;
+  overflow: auto;
+  background: var(--bg-code, #0d1117);
+  color: var(--text-code, #d5dbe4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md, 0.6rem);
+  font-family: var(--font-mono, ui-monospace, "SFMono-Regular", Menlo, monospace);
+  font-size: 0.74rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-logs-body:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.sg-ci-log-line--stderr { color: #ff9a8b; }
+.sg-ci-log-line--system { color: #8fb8ff; }
+
+/* ── Run build modal — the branch/tag picker ───────────────────────────── */
+.sg-ci-run-modal {
+  max-width: 30rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sg-ci-run-modal .modal-actions button {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.sg-ci-run-modal .modal-actions svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  flex: none;
+}
+
+.sg-ci-run-modes .sg-cat-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.sg-ci-run-modes .sg-cat-tab svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.sg-ci-run-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.sg-ci-run-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 13rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 0.6rem);
+  padding: 0.3rem;
+}
+
+.sg-ci-run-note {
+  margin: 0;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.78rem;
+}
+
+.sg-ci-run-option {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.5rem;
+  border: none;
+  border-radius: var(--radius-sm, 0.4rem);
+  background: transparent;
+  color: var(--text-main);
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sg-ci-run-option svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  flex: none;
+  color: var(--text-muted);
+}
+
+.sg-ci-run-option:hover,
+.sg-ci-run-option:focus-visible {
+  background: var(--bg-interactive);
+}
+
+.sg-ci-run-option.is-on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.sg-ci-run-option.is-on svg {
+  color: var(--accent);
+}
+
+.sg-ci-run-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-run-option code {
+  font-size: 0.7rem;
+}
+
+/* A build's ref, marked as a git tag — in the builds table and the drawer. */
+.sg-ci-ref--tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.sg-ci-ref--tag svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  color: var(--accent);
+}

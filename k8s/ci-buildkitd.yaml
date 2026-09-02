@@ -1,0 +1,188 @@
+# BuildKit for native CI container image builds — OPT-IN, off by default.
+#
+# KubeSight does not run this automatically. Container image stages stay
+# skipped (with an explanation in the stage log) until an operator applies this
+# file AND sets CI_BUILDKIT_ADDR on the backend, e.g.:
+#   CI_BUILDKIT_ADDR=tcp://buildkitd.kubesight-buildkit.svc.cluster.local:1234
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SECURITY DISCLOSURE — read before applying
+#
+# WHY seccompProfile: Unconfined IS REQUIRED HERE
+#   Rootless BuildKit executes Dockerfile RUN steps inside nested user
+#   namespaces. Creating those namespaces needs syscalls (unshare/clone with
+#   CLONE_NEWUSER, mount) that the RuntimeDefault seccomp profile blocks for
+#   unprivileged processes. There is no rootless-daemon configuration that
+#   works under RuntimeDefault today; this is a documented upstream
+#   requirement of buildkit rootless mode, not a KubeSight choice.
+#
+# EXACT SECURITY CONTEXT GRANTED (and nothing more):
+#   - seccompProfile: Unconfined            (the one relaxation)
+#   - AppArmor unconfined annotation        (same reason, on hosts w/ AppArmor)
+#   - runAsUser 1000 / runAsNonRoot: true   (never root)
+#   - allowPrivilegeEscalation: false
+#   - capabilities: drop ALL
+#   - privileged: NOT set (false)
+#   - no host mounts, no docker socket, no hostNetwork/hostPID
+#
+# BLAST RADIUS / IMPACT
+#   The relaxation applies to THIS one Deployment in its own namespace
+#   (kubesight-buildkit, baseline PSS — restricted PSS would reject Unconfined).
+#   Build pods in kubesight-ci remain fully `restricted`; they only hold a
+#   buildctl *client*, which needs no relaxation. An escape from buildkitd is
+#   bounded by: non-root uid, no capabilities, no privilege escalation, no host
+#   mounts, and a NetworkPolicy that only admits traffic from kubesight-ci and
+#   only lets buildkitd reach registries/DNS. What Unconfined concedes is a
+#   larger kernel syscall attack surface for the buildkitd process itself.
+#
+# ALTERNATIVES CONSIDERED
+#   - DinD / privileged builders ............ strictly worse; rejected outright
+#   - Host docker socket mount .............. root-equivalent on the node; rejected
+#   - Kaniko ................................ archived upstream; rejected
+#   - buildctl-daemonless in each build pod . would need Unconfined on EVERY
+#                                             build pod; centralizing it here
+#                                             keeps untrusted stages restricted
+#   - Dedicated build VM (rootless buildkit
+#     outside Kubernetes) ................... valid alternative when cluster
+#                                             policy forbids Unconfined anywhere;
+#                                             lands with the external Linux
+#                                             runner agent (Phase 5)
+#
+# HARDENING TODO (tracked): mTLS on the buildkitd listener. Until then the
+# listener is plain TCP restricted by NetworkPolicy to the kubesight-ci
+# namespace. Do not expose this Service outside the cluster.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubesight-buildkit
+  labels:
+    kubesight.io/purpose: image-builder
+    # baseline, not restricted: restricted forbids seccompProfile Unconfined.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: buildkitd
+  namespace: kubesight-buildkit
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkitd
+  namespace: kubesight-buildkit
+  labels:
+    app: buildkitd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: buildkitd
+  template:
+    metadata:
+      labels:
+        app: buildkitd
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
+    spec:
+      serviceAccountName: buildkitd
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: buildkitd
+          image: moby/buildkit:v0.23.2-rootless
+          args:
+            - --addr
+            - tcp://0.0.0.0:1234
+            - --oci-worker-no-process-sandbox
+          ports:
+            - containerPort: 1234
+          securityContext:
+            # The single, documented relaxation. Everything else stays locked.
+            seccompProfile:
+              type: Unconfined
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            exec:
+              command: ["buildctl", "debug", "workers"]
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          volumeMounts:
+            - name: cache
+              mountPath: /home/user/.local/share/buildkit
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+              ephemeral-storage: 20Gi
+      volumes:
+        # Layer cache. Swap for a PVC to keep cache across restarts.
+        - name: cache
+          emptyDir:
+            sizeLimit: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd
+  namespace: kubesight-buildkit
+spec:
+  selector:
+    app: buildkitd
+  ports:
+    - port: 1234
+      targetPort: 1234
+      protocol: TCP
+---
+# Only CI build pods may talk to buildkitd; buildkitd may only reach DNS and
+# registries (TLS + optional custom Nexus docker port).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: buildkitd
+  namespace: kubesight-buildkit
+spec:
+  podSelector:
+    matchLabels:
+      app: buildkitd
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kubesight-ci
+      ports:
+        - protocol: TCP
+          port: 1234
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443
+        # Common self-hosted Nexus docker connector ports; trim to yours.
+        - protocol: TCP
+          port: 8443
+        - protocol: TCP
+          port: 8082
+        - protocol: TCP
+          port: 5000

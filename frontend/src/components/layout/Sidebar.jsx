@@ -94,6 +94,12 @@ const NAV_ICONS = {
     </svg>
   ),
   serviceCatalog: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M17.5 6.8a1.6 1.6 0 0 0-.8-1.39l-5.9-3.2a1.6 1.6 0 0 0-1.6 0l-5.9 3.2a1.6 1.6 0 0 0-.8 1.39v6.4a1.6 1.6 0 0 0 .8 1.39l5.9 3.2a1.6 1.6 0 0 0 1.6 0l5.9-3.2a1.6 1.6 0 0 0 .8-1.39z" />
+      <path d="m2.7 6 7.3 4 7.3-4M10 18V10" />
+    </svg>
+  ),
+  blueprints: (
     <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path d="M3 3a2 2 0 012-2h4a1 1 0 011 1v16a1 1 0 01-1.447.894L5 17.118l-1.553.776A1 1 0 012 17V3zm10-2a2 2 0 00-2 2v14a1 1 0 001.447.894L15 16.882l1.553.776A1 1 0 0018 16.764V3a2 2 0 00-2-2h-3z" />
     </svg>

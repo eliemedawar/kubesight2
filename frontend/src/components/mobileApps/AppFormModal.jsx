@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { IconClose, TestStatusPill } from "./common.jsx";
+import { listCiServices } from "../../api/ciApi.js";
 
 // Extra Jenkins build parameters are edited as KEY=value lines — the natural
 // shape for job parameters, and it keeps the form from needing a repeater.
@@ -40,6 +41,7 @@ function formFromApp(app) {
     description: app?.description || "",
     enabled: app ? Boolean(app.enabled) : true,
     zohoEnvironment: app?.zohoEnvironment || "",
+    ciServiceId: app?.ciServiceId || "",
     jenkinsJobPath: app?.jenkinsJobPath || "",
     // Per-platform artifact config
     androidEnabled: Boolean(android),
@@ -229,6 +231,12 @@ export default function AppFormModal({
   testingAppStore = false,
 }) {
   const [form, setForm] = useState(() => formFromApp(app));
+  const [ciServices, setCiServices] = useState([]);
+  useEffect(() => {
+    listCiServices()
+      .then((data) => setCiServices(data.items || []))
+      .catch(() => setCiServices([]));
+  }, []);
   if (!open) return null;
 
   const isEdit = mode === "edit";
@@ -285,6 +293,7 @@ export default function AppFormModal({
       description: form.description.trim(),
       enabled: form.enabled,
       zohoEnvironment: form.zohoEnvironment.trim(),
+      ciServiceId: form.ciServiceId ? Number(form.ciServiceId) : null,
       jenkinsJobPath: form.jenkinsJobPath.trim(),
       artifactConfig,
       resignConfig,
@@ -398,14 +407,37 @@ export default function AppFormModal({
               </span>
             </label>
             <label>
-              Jenkins job path
+              CI service (KubeSight builds the binaries)
+              <select
+                value={form.ciServiceId}
+                onChange={(e) => set("ciServiceId", e.target.value)}
+              >
+                <option value="">Not linked — use legacy Jenkins below</option>
+                {ciServices.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.slug})
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">
+                Preferred. Fetches and ticket builds use this service&apos;s APK/AAB/IPA
+                artifacts — no Jenkins involved.
+              </span>
+            </label>
+            <label>
+              Legacy Jenkins job path
               <input
                 value={form.jenkinsJobPath}
                 onChange={(e) => set("jenkinsJobPath", e.target.value)}
                 placeholder="POS-APK"
                 className="mono"
+                disabled={Boolean(form.ciServiceId)}
               />
-              <span className="field-hint">Folder-style, e.g. POS-APK or mobile/pos-apk.</span>
+              <span className="field-hint">
+                {form.ciServiceId
+                  ? "Ignored while a CI service is linked."
+                  : "Folder-style, e.g. POS-APK or mobile/pos-apk."}
+              </span>
             </label>
             <div className="sg-ma-span">
               <span className="sg-ma-pick-label">Artifact resolution</span>

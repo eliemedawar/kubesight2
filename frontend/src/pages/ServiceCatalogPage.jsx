@@ -1,370 +1,155 @@
-import { useEffect, useState } from "react";
-import {
-  createServiceBlueprint,
-  deleteServiceBlueprint,
-  getServiceBlueprint,
-  listServiceBlueprints,
-  updateServiceBlueprint,
-} from "../api/serviceBlueprintsApi.js";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createCiService, listCiServices } from "../api/ciApi.js";
 import { useAuth } from "../context/AuthContext";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
-import LoadingState from "../components/common/LoadingState.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
-import BlueprintEditorModal from "../components/catalog/BlueprintEditorModal.jsx";
-import DeployFromBlueprintWizard from "../components/catalog/DeployFromBlueprintWizard.jsx";
+import LoadingState from "../components/common/LoadingState.jsx";
+import RunBuildModal from "../components/catalog/RunBuildModal.jsx";
+import ServiceCard from "../components/catalog/ServiceCard.jsx";
+import ServiceFormModal from "../components/catalog/ServiceFormModal.jsx";
+import ServiceDetailPage from "./ServiceDetailPage.jsx";
+import {
+  APPLICATION_TYPES,
+  PlusIcon,
+  SearchIcon,
+  isBuildActive,
+} from "../components/catalog/ciShared.jsx";
 
-// Real blueprint states → existing status-pill tones (Signal: certified=ok / caution=warn / new=muted)
-const STATUS_PILL_TONE = {
-  ready: "ok",
-  draft: "unknown",
-  deprecated: "warn",
-};
+const REFRESH_MS = 4000;
 
-const STATUS_TABS = [
-  ["all", "All"],
-  ["ready", "Ready"],
-  ["draft", "Draft"],
-  ["deprecated", "Deprecated"],
+// Health-strip tiles ARE the filters (the Alerts pattern): each shows a live
+// count and clicking it narrows the grid to exactly the cards it counted.
+const TILES = [
+  { key: "all", label: "Services", countKey: "total", tone: "" },
+  { key: "building", label: "Building now", countKey: "building", tone: "run" },
+  { key: "failing", label: "Failing", countKey: "failing", tone: "bad" },
+  { key: "queued", label: "Queued", countKey: "queued", tone: "" },
+  { key: "needsSetup", label: "Needs setup", countKey: "needsSetup", tone: "warn" },
 ];
 
-/* ── Inline stroke icons (no emoji, tokens only via currentColor) ── */
-function IconBase({ children, ...props }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      {...props}
-    >
-      {children}
-    </svg>
-  );
-}
+const tileMatch = {
+  all: () => true,
+  building: (s) => s.latestBuild?.status === "running",
+  failing: (s) => ["failed", "timeout"].includes(s.latestBuild?.status),
+  queued: (s) => s.latestBuild?.status === "queued",
+  needsSetup: (s) => !(s.sourceConfigured && s.pipelineConfigured),
+};
 
-const BoxIcon = () => (
-  <IconBase>
-    <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" />
-    <path d="m3.3 7 8.7 5 8.7-5" />
-    <path d="M12 22V12" />
-  </IconBase>
-);
-
-const RocketIcon = () => (
-  <IconBase>
-    <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" />
-    <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" />
-    <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
-    <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
-  </IconBase>
-);
-
-const PlusIcon = () => (
-  <IconBase>
-    <path d="M12 5v14" />
-    <path d="M5 12h14" />
-  </IconBase>
-);
-
-const SearchIcon = () => (
-  <IconBase>
-    <circle cx="11" cy="11" r="7" />
-    <path d="m21 21-4.35-4.35" />
-  </IconBase>
-);
-
-function StatusPill({ status }) {
-  if (!status) return null;
-  return (
-    <span className={`status-pill ${STATUS_PILL_TONE[status] || "unknown"}`}>{status}</span>
-  );
-}
-
-const teamInitials = (name) =>
-  name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((w) => w[0])
-    .join("")
-    .toUpperCase();
-
-function BlueprintCard({ blueprint, active, onView, onDeploy, canDeploy }) {
-  const iconTone =
-    blueprint.criticality === "critical" || blueprint.criticality === "high"
-      ? "sg-ico--accent"
-      : "sg-ico--muted";
-  const showDeploy = canDeploy && blueprint.status !== "deprecated";
-
-  const handleKeyDown = (e) => {
-    // Only act on the card itself — not on keys bubbling from the Deploy button.
-    if (e.target !== e.currentTarget) return;
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      onView();
-    }
-  };
-
-  return (
-    <article
-      className={`sg-ccard sg-ccard--clickable sg-bp${active ? " sg-bp--active" : ""}`}
-      role="button"
-      tabIndex={0}
-      onClick={onView}
-      onKeyDown={handleKeyDown}
-      aria-label={`View blueprint ${blueprint.name}`}
-    >
-      <header>
-        <span className={`sg-ico ${iconTone}`}>
-          <BoxIcon />
-        </span>
-        <div className="sg-bp-id">
-          <b>{blueprint.name}</b>
-          <span className="sg-ccard-sub">
-            v{blueprint.version}
-            {blueprint.category ? ` · ${blueprint.category}` : ""}
-          </span>
-        </div>
-        <StatusPill status={blueprint.status} />
-      </header>
-
-      {blueprint.description && <p className="sg-ccard-desc">{blueprint.description}</p>}
-
-      {(blueprint.ownerTeam || blueprint.appServiceCount > 0) && (
-        <div className="sg-ccard-meta">
-          {blueprint.ownerTeam && (
-            <>
-              <span className="sg-avatar sg-avatar--sm">{teamInitials(blueprint.ownerTeam)}</span>
-              <span className="sg-bp-team">{blueprint.ownerTeam}</span>
-            </>
-          )}
-          {blueprint.appServiceCount > 0 && (
-            <span className="sg-bp-deploys">
-              {blueprint.appServiceCount} deploy{blueprint.appServiceCount !== 1 ? "s" : ""}
-            </span>
-          )}
-        </div>
-      )}
-
-      <footer>
-        <span className="sg-tag">
-          {blueprint.componentCount} component{blueprint.componentCount !== 1 ? "s" : ""}
-        </span>
-        <span className="sg-tag">
-          {blueprint.dependencyCount} dependenc{blueprint.dependencyCount !== 1 ? "ies" : "y"}
-        </span>
-        {blueprint.criticality && <span className="sg-tag">{blueprint.criticality}</span>}
-        {showDeploy && (
-          <button
-            type="button"
-            className="primary btn-compact sg-bp-deploy"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDeploy();
-            }}
-          >
-            <RocketIcon />
-            Deploy
-          </button>
-        )}
-      </footer>
-    </article>
-  );
-}
-
-function BlueprintDetail({ detail, onClose, onEdit, onDelete, onDeploy, canUpdate, canDelete, canDeploy }) {
-  const componentName = (id) =>
-    detail.components.find((c) => c.id === id)?.name || `#${id}`;
-
-  return (
-    <div className="card" style={{ padding: "1.25rem", position: "sticky", top: "1rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem" }}>
-        <div>
-          <h3 style={{ margin: 0 }}>{detail.name}</h3>
-          <p className="muted" style={{ marginTop: "0.25rem", fontSize: "0.85rem" }}>
-            v{detail.version} · <StatusPill status={detail.status} />
-          </p>
-        </div>
-        <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-          {canDeploy && detail.status !== "deprecated" && (
-            <button type="button" className="primary btn-compact" onClick={onDeploy}>Deploy</button>
-          )}
-          {canUpdate && (
-            <button type="button" className="btn-outline btn-compact" onClick={onEdit}>Edit</button>
-          )}
-          {canDelete && (
-            <button type="button" className="btn-outline btn-compact danger" onClick={onDelete}>Delete</button>
-          )}
-          <button type="button" className="btn-outline btn-compact" onClick={onClose}>Close</button>
-        </div>
-      </div>
-
-      {detail.description && (
-        <p style={{ marginTop: "0.75rem", fontSize: "0.875rem" }}>{detail.description}</p>
-      )}
-
-      <section style={{ marginTop: "1rem" }}>
-        <p className="form-label">Components ({detail.components.length})</p>
-        <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
-          {detail.components.map((c) => (
-            <div key={c.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem" }}>
-              <strong>{c.name}</strong>
-              <span className="chip">{c.componentType}</span>
-              {c.role && <span className="muted">{c.role}</span>}
-              {!c.required && <span className="muted" style={{ fontSize: "0.75rem" }}>optional</span>}
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {detail.connections.length > 0 && (
-        <section style={{ marginTop: "1rem" }}>
-          <p className="form-label">Topology ({detail.connections.length})</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", fontSize: "0.85rem" }}>
-            {detail.connections.map((cn) => (
-              <div key={cn.id} className="muted">
-                {componentName(cn.sourceComponentId)} → {componentName(cn.targetComponentId)}
-                {cn.protocol ? ` (${cn.protocol}${cn.port ? `:${cn.port}` : ""})` : ""}
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {detail.requirements.length > 0 && (
-        <section style={{ marginTop: "1rem" }}>
-          <p className="form-label">Requirements ({detail.requirements.length})</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", fontSize: "0.85rem" }}>
-            {detail.requirements.map((r) => (
-              <div key={r.id} style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                <code>{r.key}</code>
-                <span className="chip">{r.requirementType}</span>
-                {r.secret && <span className="status-pill warn">secret</span>}
-                {r.autoGenerate && <span className="muted" style={{ fontSize: "0.75rem" }}>auto</span>}
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-    </div>
-  );
-}
-
+/**
+ * The CI Service Catalog — a build floor, not a list.
+ *
+ * The strip answers "is everything building?" before a single card is read;
+ * cards are verdicts with the Run action in reach; anything incomplete carries
+ * its own fix. Polls only while something is actually building or queued.
+ */
 export default function ServiceCatalogPage({ clusters = [] }) {
   const { hasPermission } = useAuth();
-  const canView = hasPermission("service_blueprints:view");
-  const canCreate = hasPermission("service_blueprints:create");
-  const canUpdate = hasPermission("service_blueprints:update");
-  const canDelete = hasPermission("service_blueprints:delete");
-  const canDeploy = hasPermission("service_blueprints:deploy");
+  const canView = hasPermission("ci_services:view");
+  const canCreate = hasPermission("ci_services:create");
+  const canRun = hasPermission("ci_builds:run");
 
-  const [blueprints, setBlueprints] = useState([]);
+  const [services, setServices] = useState([]);
+  const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [detail, setDetail] = useState(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editorBlueprint, setEditorBlueprint] = useState(null);
+  const [tile, setTile] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  // {serviceId, tab?, buildId?} — deep links from cards land on the right tab.
+  const [opened, setOpened] = useState(null);
+  const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
-  const [deployBlueprint, setDeployBlueprint] = useState(null);
+  const timerRef = useRef(null);
 
-  const loadData = async () => {
-    setLoading(true);
-    setError("");
+  const load = useCallback(async ({ background = false } = {}) => {
+    if (!background) setLoading(true);
     try {
-      const res = await listServiceBlueprints();
-      setBlueprints(res.items || []);
+      const data = await listCiServices();
+      setServices(data.items || []);
+      setSummary(data.summary || null);
+      setError("");
+      return (data.items || []).some(
+        (item) => item.latestBuild && isBuildActive(item.latestBuild.status)
+      );
     } catch (err) {
-      setError(err.message || "Failed to load service blueprints.");
+      setError(err.message || "Could not load the service catalog.");
+      return false;
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
+  // Poll only while a build is in flight — a quiet catalog costs nothing.
   useEffect(() => {
-    if (canView) loadData();
-  }, [canView]);
+    if (!canView || opened) return undefined;
+    let cancelled = false;
+    const tick = async (background) => {
+      const active = await load({ background });
+      if (cancelled || !active) return;
+      timerRef.current = window.setTimeout(() => tick(true), REFRESH_MS);
+    };
+    tick(false);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerRef.current);
+    };
+  }, [canView, opened, load]);
 
-  const openDetail = async (id) => {
-    setDetailLoading(true);
-    try {
-      const data = await getServiceBlueprint(id);
-      setDetail(data);
-    } catch (err) {
-      setError(err.message || "Failed to load blueprint.");
-    } finally {
-      setDetailLoading(false);
-    }
-  };
-
-  const openCreate = () => {
-    setEditorBlueprint(null);
-    setSaveError("");
-    setEditorOpen(true);
-  };
-
-  const openEdit = async () => {
-    // The detail panel already holds the full blueprint; reuse it.
-    setEditorBlueprint(detail);
-    setSaveError("");
-    setEditorOpen(true);
-  };
-
-  const handleSave = async (payload) => {
+  const handleCreate = async (payload) => {
     setSaving(true);
     setSaveError("");
     try {
-      const saved = editorBlueprint?.id
-        ? await updateServiceBlueprint(editorBlueprint.id, payload)
-        : await createServiceBlueprint(payload);
-      setEditorOpen(false);
-      setEditorBlueprint(null);
-      setDetail(saved);
-      await loadData();
+      const created = await createCiService(payload);
+      setCreating(false);
+      // Straight into the new service: the next step is connecting its source.
+      setOpened({ serviceId: created.id, tab: "source" });
     } catch (err) {
-      setSaveError(err.message || "Save failed.");
+      setSaveError(err.message || "Could not register the service.");
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDelete = async () => {
-    if (!detail) return;
-    if (!window.confirm(`Delete blueprint "${detail.name}"? This cannot be undone.`)) return;
-    try {
-      await deleteServiceBlueprint(detail.id);
-      setDetail(null);
-      await loadData();
-    } catch (err) {
-      setError(err.message || "Delete failed.");
-    }
-  };
+  // Run from a card opens the ref picker in place; only after the build has
+  // actually started does the view jump into the service's Builds tab.
+  const [runFor, setRunFor] = useState(null);
 
   if (!canView) return <AccessDeniedPage />;
 
-  const filtered = blueprints.filter((bp) => {
-    if (statusFilter !== "all" && bp.status !== statusFilter) return false;
-    if (search) {
-      const q = search.toLowerCase();
-      return (
-        bp.name.toLowerCase().includes(q) ||
-        (bp.category || "").toLowerCase().includes(q) ||
-        (bp.ownerTeam || "").toLowerCase().includes(q)
-      );
-    }
-    return true;
+  if (opened) {
+    return (
+      <ServiceDetailPage
+        serviceId={opened.serviceId}
+        initialTab={opened.tab}
+        initialBuildId={opened.buildId}
+        clusters={clusters}
+        onBack={() => setOpened(null)}
+        onDeleted={() => setOpened(null)}
+      />
+    );
+  }
+
+  const filtered = services.filter((service) => {
+    if (!tileMatch[tile](service)) return false;
+    if (typeFilter !== "all" && service.applicationType !== typeFilter) return false;
+    if (!search) return true;
+    const term = search.toLowerCase();
+    return (
+      service.name.toLowerCase().includes(term) ||
+      (service.ownerTeam || "").toLowerCase().includes(term) ||
+      (service.repositoryName || "").toLowerCase().includes(term)
+    );
   });
 
   const subtitle = loading
-    ? "Reusable business service blueprints — deploy real app services from a logical design."
-    : `${blueprints.length} blueprint${blueprints.length === 1 ? "" : "s"} · deploy real app services from a logical design`;
+    ? "Applications KubeSight builds — source, pipeline, builds, artifacts."
+    : summary?.failing
+    ? `${summary.failing} service${summary.failing === 1 ? "" : "s"} failing`
+    : summary?.building
+    ? `${summary.building} build${summary.building === 1 ? "" : "s"} running`
+    : "All quiet — every service green.";
 
   return (
     <div className="ops-page">
@@ -375,9 +160,16 @@ export default function ServiceCatalogPage({ clusters = [] }) {
         </div>
         {canCreate && (
           <div className="sg-ph-actions">
-            <button type="button" className="primary sg-cat-new" onClick={openCreate}>
+            <button
+              type="button"
+              className="primary sg-cat-new"
+              onClick={() => {
+                setSaveError("");
+                setCreating(true);
+              }}
+            >
               <PlusIcon />
-              New blueprint
+              Register service
             </button>
           </div>
         )}
@@ -385,99 +177,107 @@ export default function ServiceCatalogPage({ clusters = [] }) {
 
       {error && <ErrorBanner message={error} />}
 
-      <div className="sg-cat-toolbar">
-        <div className="sg-cat-tabs" role="group" aria-label="Filter by status">
-          {STATUS_TABS.map(([value, label]) => (
+      {summary && (
+        <div className="sg-ci-health" role="group" aria-label="Catalog health — click to filter">
+          {TILES.map((entry) => (
             <button
-              key={value}
+              key={entry.key}
               type="button"
-              className={`sg-cat-tab${statusFilter === value ? " is-on" : ""}`}
-              aria-pressed={statusFilter === value}
-              onClick={() => setStatusFilter(value)}
+              className={`sg-ci-tile sg-ci-tile--${entry.tone}${
+                tile === entry.key ? " is-on" : ""
+              }`}
+              aria-pressed={tile === entry.key}
+              onClick={() => setTile(tile === entry.key ? "all" : entry.key)}
             >
-              {label}
+              <b>{summary[entry.countKey] ?? 0}</b>
+              <span>{entry.label}</span>
             </button>
           ))}
         </div>
+      )}
+
+      <div className="sg-cat-toolbar">
+        <select
+          className="sg-ci-type-filter"
+          value={typeFilter}
+          aria-label="Filter by application type"
+          onChange={(event) => setTypeFilter(event.target.value)}
+        >
+          <option value="all">All types</option>
+          {APPLICATION_TYPES.map((type) => (
+            <option key={type.value} value={type.value}>
+              {type.label}
+            </option>
+          ))}
+        </select>
         <label className="sg-cat-search">
           <SearchIcon />
           <input
             type="search"
-            placeholder="Search by name, category, or owner team…"
+            placeholder="Search by name, team, or repository…"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            aria-label="Search blueprints"
+            onChange={(event) => setSearch(event.target.value)}
+            aria-label="Search services"
           />
         </label>
       </div>
 
-      <div className={`sg-cat-layout${detail ? " sg-cat-layout--split" : ""}`}>
-        <div>
-          {loading ? (
-            <LoadingState label="Loading service catalog…" />
-          ) : filtered.length === 0 ? (
-            <EmptyState
-              message="No service blueprints found."
-              hint={
-                blueprints.length > 0
-                  ? "Try adjusting the search or filter."
-                  : "Service blueprints define reusable service designs that can be deployed per client/environment."
+      {loading ? (
+        <LoadingState label="Loading service catalog…" />
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          message={
+            services.length
+              ? tile !== "all"
+                ? `No services match “${TILES.find((t) => t.key === tile)?.label}”.`
+                : "No services match those filters."
+              : "No services registered yet."
+          }
+          hint={
+            services.length
+              ? "Clear the filter or adjust the search."
+              : "Register an application, connect its Bitbucket repository, and define how it builds."
+          }
+        />
+      ) : (
+        <div className="sg-card-grid">
+          {filtered.map((service) => (
+            <ServiceCard
+              key={service.id}
+              service={service}
+              canRun={canRun}
+              onOpen={(tab) =>
+                setOpened({
+                  serviceId: service.id,
+                  tab: typeof tab === "string" ? tab : undefined,
+                })
               }
+              onOpenBuild={(buildId) =>
+                setOpened({ serviceId: service.id, tab: "builds", buildId })
+              }
+              onRun={() => setRunFor(service)}
             />
-          ) : (
-            <div className="sg-card-grid">
-              {filtered.map((bp) => (
-                <BlueprintCard
-                  key={bp.id}
-                  blueprint={bp}
-                  active={detail?.id === bp.id}
-                  onView={() => openDetail(bp.id)}
-                  onDeploy={() => setDeployBlueprint(bp)}
-                  canDeploy={canDeploy}
-                />
-              ))}
-            </div>
-          )}
+          ))}
         </div>
+      )}
 
-        {detail && (
-          <div>
-            {detailLoading ? (
-              <LoadingState label="Loading blueprint…" />
-            ) : (
-              <BlueprintDetail
-                detail={detail}
-                onClose={() => setDetail(null)}
-                onEdit={openEdit}
-                onDelete={handleDelete}
-                onDeploy={() => setDeployBlueprint(detail)}
-                canUpdate={canUpdate}
-                canDelete={canDelete}
-                canDeploy={canDeploy}
-              />
-            )}
-          </div>
-        )}
-      </div>
-
-      {editorOpen && (
-        <BlueprintEditorModal
-          blueprint={editorBlueprint}
-          categories={[...new Set(blueprints.map((b) => b.category).filter(Boolean))]}
-          onClose={() => { setEditorOpen(false); setEditorBlueprint(null); }}
-          onSave={handleSave}
+      {creating && (
+        <ServiceFormModal
+          onClose={() => setCreating(false)}
+          onSave={handleCreate}
           saving={saving}
           error={saveError}
         />
       )}
 
-      {deployBlueprint && (
-        <DeployFromBlueprintWizard
-          blueprintId={deployBlueprint.id}
-          blueprintName={deployBlueprint.name}
-          clusters={clusters}
-          onClose={() => setDeployBlueprint(null)}
-          onDeployed={() => loadData()}
+      {runFor && (
+        <RunBuildModal
+          service={runFor}
+          onClose={() => setRunFor(null)}
+          onStarted={(build) => {
+            setRunFor(null);
+            setOpened({ serviceId: runFor.id, tab: "builds", buildId: build.id });
+          }}
         />
       )}
     </div>

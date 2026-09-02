@@ -258,6 +258,7 @@ def serialize_app(app: MobileApplication, *, with_stats: bool = False) -> Dict[s
         "enabled": bool(app.enabled),
         "zohoEnvironment": app.zoho_environment or "",
         "jenkinsJobPath": app.jenkins_job_path or "",
+        "ciServiceId": app.ci_service_id,
         "artifactConfig": app.artifact_config or {},
         "resignConfig": app.resign_config or {},
         "androidPackageName": app.android_package_name or "",
@@ -299,6 +300,7 @@ def serialize_build(build: MobileAppBuild) -> Dict[str, Any]:
         "signatureState": build.signature_state or "unknown",
         "jenkinsBuildNumber": build.jenkins_build_number,
         "jenkinsBuildUrl": build.jenkins_build_url or "",
+        "ciBuildId": build.ci_build_id,
         "ticketNumber": build.ticket_number or "",
         "source": build.source or "ticket",
         "parentBuildId": build.parent_build_id,
@@ -362,6 +364,19 @@ def _apply_payload(app: MobileApplication, payload: Dict[str, Any]) -> None:
             setattr(app, attr, str(payload.get(key)).strip())
     if "enabled" in payload:
         app.enabled = bool(payload.get("enabled"))
+    if "ciServiceId" in payload:
+        # Native CI source: when set, binaries come from KubeSight's own CI
+        # artifacts and the Jenkins job path is ignored.
+        raw = payload.get("ciServiceId")
+        if raw in (None, "", 0, "0"):
+            app.ci_service_id = None
+        else:
+            from ..models_ci import CiService
+
+            row = db.session.get(CiService, int(raw))
+            if row is None:
+                raise MobileAppError("That CI service does not exist.")
+            app.ci_service_id = row.id
     if "artifactConfig" in payload:
         app.artifact_config = _normalize_artifact_config(payload.get("artifactConfig"))
     if "resignConfig" in payload:
@@ -534,11 +549,185 @@ def _existing_build(app_id: int, platform: str, build_number: Optional[int]) -> 
     )
 
 
+# ---------------------------------------------------------------------------
+# Native CI ingest — binaries come from KubeSight's own build artifacts.
+# No Jenkins, no download job: the file is already in the CI artifact store and
+# is copied into the mobile binary store synchronously.
+# ---------------------------------------------------------------------------
+
+_CI_MOBILE_TYPES = {"apk": "android", "aab": "android", "ipa": "ios"}
+
+
+def ingest_ci_build(
+    app: MobileApplication,
+    ci_build,
+    *,
+    source: str = "manual",
+    run=None,
+    commit: bool = True,
+) -> List[MobileAppBuild]:
+    """Create ``available`` build rows from a CI build's mobile artifacts."""
+    import shutil
+
+    from ..models_ci import CiArtifact
+    from .ci import artifacts as ci_artifacts_service
+
+    artifacts = (
+        CiArtifact.query.filter(
+            CiArtifact.build_id == ci_build.id,
+            CiArtifact.artifact_type.in_(tuple(_CI_MOBILE_TYPES)),
+            CiArtifact.storage_backend == "local",
+            CiArtifact.storage_ref.isnot(None),
+        )
+        .order_by(CiArtifact.id.asc())
+        .all()
+    )
+    created: List[MobileAppBuild] = []
+    for artifact in artifacts:
+        platform = _CI_MOBILE_TYPES[artifact.artifact_type]
+        duplicate = MobileAppBuild.query.filter_by(
+            app_id=app.id, ci_build_id=ci_build.id, artifact_type=artifact.artifact_type
+        ).first()
+        if duplicate is not None:
+            continue
+        try:
+            source_stream = ci_artifacts_service.get_store("local").open(artifact)
+        except (OSError, ValueError):
+            logger.warning("CI artifact %s file is missing; skipped", artifact.id)
+            continue
+
+        build = MobileAppBuild(
+            app_id=app.id,
+            platform=platform,
+            artifact_type=artifact.artifact_type,
+            version=(run.ticket_tag if run is not None else None)
+            or artifact.version
+            or f"CI build #{ci_build.number}",
+            ci_build_id=ci_build.id,
+            ticket_record_id=getattr(run, "ticket_record_id", None),
+            ticket_number=getattr(run, "ticket_number", None),
+            run_id=getattr(run, "id", None),
+            source=source,
+            status="downloading",
+        )
+        db.session.add(build)
+        db.session.flush()
+
+        rel_dir = _store_dir_for(build)
+        file_name = _safe_filename(artifact.name)
+        dest = os.path.join(artifact_root(), rel_dir, file_name)
+        with source_stream, open(dest, "wb") as sink:
+            shutil.copyfileobj(source_stream, sink)
+        sha, size = _hash_and_size(dest)
+        build.file_name = file_name
+        build.storage_path = os.path.join(rel_dir, file_name).replace("\\", "/")
+        build.sha256 = sha
+        build.file_size = size
+        build.status = "available"
+        build.downloaded_at = datetime.now(timezone.utc)
+        build.signature_state = binary_signature.detect_safe(dest, artifact.artifact_type)
+        db.session.add(build)
+        created.append(build)
+
+    if created and commit:
+        db.session.commit()
+    return created
+
+
+def on_native_build_success(run) -> None:
+    """Ticket-driven ingest for a custom environment built on native CI.
+
+    Mirrors :func:`on_custom_build_success` (the Jenkins path) but there is
+    nothing to download — the binaries already sit in the CI artifact store.
+    Rows join the caller's transaction.
+    """
+    from ..models_ci import CiBuild
+
+    app = app_for_environment(run.namespace)
+    if app is None or not run.ci_build_id:
+        return
+    ci_build = db.session.get(CiBuild, run.ci_build_id)
+    if ci_build is None:
+        return
+    created = ingest_ci_build(app, ci_build, source="ticket", run=run, commit=False)
+    if created:
+        log_audit(
+            "mobile_build_registered",
+            actor=None,
+            target_type="mobile_app",
+            target_id=str(app.id),
+            details={
+                "app": app.name,
+                "ciBuild": ci_build.number,
+                "ticket": run.ticket_number,
+                "platforms": sorted({b.platform for b in created}),
+            },
+            commit=False,
+        )
+
+
+def _fetch_latest_from_ci(app: MobileApplication, user=None) -> List[Dict[str, Any]]:
+    """Ingest the newest successful CI build that produced mobile artifacts."""
+    from ..models_ci import CiArtifact, CiBuild, CiService
+
+    service = db.session.get(CiService, app.ci_service_id)
+    if service is None:
+        raise MobileAppError("The linked CI service no longer exists.")
+    candidates = (
+        CiBuild.query.filter_by(service_id=service.id, status="success")
+        .order_by(CiBuild.number.desc())
+        .limit(25)
+        .all()
+    )
+    for ci_build in candidates:
+        has_mobile = (
+            CiArtifact.query.filter(
+                CiArtifact.build_id == ci_build.id,
+                CiArtifact.artifact_type.in_(tuple(_CI_MOBILE_TYPES)),
+            ).count()
+            > 0
+        )
+        if not has_mobile:
+            continue
+        created = ingest_ci_build(app, ci_build, source="manual")
+        if not created:
+            raise MobileAppError(
+                f"CI build #{ci_build.number} is already ingested for every platform it produced.",
+                409,
+            )
+        log_audit(
+            "mobile_app_fetch_requested",
+            actor=user,
+            target_type="mobile_app",
+            target_id=str(app.id),
+            details={
+                "app": app.name,
+                "ciService": service.slug,
+                "ciBuild": ci_build.number,
+                "platforms": sorted({b.platform for b in created}),
+            },
+        )
+        return [serialize_build(b) for b in created]
+    raise MobileAppError(
+        f"No successful build of '{service.name}' has produced an APK, AAB, or IPA yet.",
+        404,
+    )
+
+
 def fetch_latest(app_id: int, user=None) -> List[Dict[str, Any]]:
-    """Manually ingest the last successful Jenkins build (no ticket needed)."""
+    """Manually ingest the last successful build (no ticket needed).
+
+    Native CI when the app is linked to a CI service; the legacy Jenkins job
+    otherwise.
+    """
     app = get_app(app_id)
+    if app.ci_service_id:
+        return _fetch_latest_from_ci(app, user=user)
     if not (app.jenkins_job_path or "").strip():
-        raise MobileAppError("No Jenkins job path is configured for this app.")
+        raise MobileAppError(
+            "No build source is configured — link a CI service (preferred) or a "
+            "legacy Jenkins job path."
+        )
     platforms = configured_platforms(app)
     if not platforms:
         raise MobileAppError("No artifact is configured for any platform.")

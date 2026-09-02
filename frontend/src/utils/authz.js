@@ -103,9 +103,18 @@ export const NAV_PAGES = [
   { key: "alerts", label: "Alerts", permission: "alerts:view", section: "Monitoring" },
 
   // Services
+  // The catalog is now the CI catalog: what we build. The logical-architecture
+  // blueprints that used to live at this address keep their own page below —
+  // different question, different model, unchanged permissions.
   {
     key: "serviceCatalog",
     label: "Service Catalog",
+    permission: "ci_services:view",
+    section: "Services",
+  },
+  {
+    key: "blueprints",
+    label: "Blueprints",
     permission: "service_blueprints:view",
     section: "Services",
   },

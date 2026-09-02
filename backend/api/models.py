@@ -302,6 +302,11 @@ class ApplicationDeploymentVersion(db.Model):
     change_summary = db.Column(db.Text, nullable=True)
     yaml_snapshot = db.Column(db.Text, nullable=False)
     wizard_config = db.Column(db.JSON, nullable=True)
+    # Traceability back to native CI: git commit -> build -> artifact -> this
+    # deployment. Plain ids rather than FKs — a deployment record must outlive
+    # a pruned build, exactly like ``DeployAutomationRun.bundle_id``.
+    ci_build_id = db.Column(db.Integer, nullable=True)
+    ci_artifact_id = db.Column(db.Integer, nullable=True)
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
     created_at = db.Column(
         db.DateTime(timezone=True),
@@ -2332,6 +2337,10 @@ class DeployAutomationRun(db.Model):
     jenkins_queue_url = db.Column(db.Text, nullable=True)
     jenkins_build_url = db.Column(db.Text, nullable=True)
     jenkins_build_number = db.Column(db.Integer, nullable=True)
+    # Native CI build doing this run's build stage (plain id, not a FK — builds
+    # may be pruned independently). Set = the build ran on KubeSight's own CI;
+    # unset = the legacy Jenkins router path.
+    ci_build_id = db.Column(db.Integer, nullable=True)
     build_triggered_at = db.Column(db.DateTime(timezone=True), nullable=True)
     # When the post-deploy pod-health wait began (anchors the rollout timeout).
     rollout_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
@@ -2388,6 +2397,10 @@ class MobileApplication(db.Model):
     # ("folder/pos-apk" -> /job/folder/job/pos-apk). Used for manual fetches;
     # ticket-driven runs already carry their own build URL.
     jenkins_job_path = db.Column(db.String(255), nullable=False, default="")
+    # Native CI service that builds this app's binaries. When set, fetches and
+    # ticket-driven ingestion come from KubeSight's own CI artifacts and the
+    # Jenkins job path above is ignored.
+    ci_service_id = db.Column(db.Integer, nullable=True)
     # Per-platform signing-job setup (JSON). Shielding strips the signature, so
     # the shielded binary must be signed again before any store will take it.
     # Signing runs on Jenkins, where the keys already are — the Android upload
@@ -2481,6 +2494,8 @@ class MobileAppBuild(db.Model):
 
     jenkins_build_number = db.Column(db.Integer, nullable=True)
     jenkins_build_url = db.Column(db.Text, nullable=True)
+    # Native CI build this binary came out of (plain id — builds may be pruned).
+    ci_build_id = db.Column(db.Integer, nullable=True)
 
     ticket_record_id = db.Column(
         db.Integer, db.ForeignKey("zoho_inbound_tickets.id", ondelete="SET NULL"), nullable=True
@@ -2843,4 +2858,19 @@ from .models_application_intelligence import (  # noqa: E402,F401
     ApplicationRuntimeSnapshot,
     BitbucketCredentialProfile,
     IntelligenceApplication,
+)
+
+# Native CI. Self-contained domain (services, pipelines, builds, runners,
+# artifacts, secrets) re-exported so migrations and services keep importing
+# from ``api.models``.
+from .models_ci import (  # noqa: E402,F401
+    CiArtifact,
+    CiBuild,
+    CiBuildStage,
+    CiLogChunk,
+    CiPipeline,
+    CiPipelineStage,
+    CiRunner,
+    CiSecret,
+    CiService,
 )

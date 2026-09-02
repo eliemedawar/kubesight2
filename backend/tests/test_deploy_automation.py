@@ -176,7 +176,10 @@ def test_run_fails_when_build_needed_but_jenkins_off(client, admin_token, app):
     ticket = _make_ticket()
     run = _start(client, admin_token, ticket.id)
     assert run["status"] == "failed"
-    assert "Jenkins is not configured" in run["error"]
+    # No CI service is registered for this app and Jenkins is off — the error
+    # points at the preferred fix (the Service Catalog) first.
+    assert "Register a CI service" in run["error"]
+    assert "Jenkins" in run["error"]
     assert _step(run, "image_check")["status"] == "done"
     assert _step(run, "build")["status"] == "fail"
 
