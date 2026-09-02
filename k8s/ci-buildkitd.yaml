@@ -24,6 +24,16 @@
 #   outside the bounding set — dropping ALL removes them. Deny either and the
 #   daemon dies at startup: "newuidmap ... operation not permitted".
 #
+# WHAT --oci-worker-no-process-sandbox CONCEDES (buildkitd warns about it on
+# every boot, so it is stated here rather than left as a surprise)
+#   Without the process sandbox, a Dockerfile RUN step can signal — and
+#   potentially ptrace — other processes inside THIS pod's namespace. The pod
+#   runs nothing but buildkitd, so the reachable set is buildkitd itself and
+#   concurrent builds sharing it. That is the accepted cost of one shared
+#   builder; if builds from different trust levels must not touch each other,
+#   run separate buildkitd Deployments rather than removing the flag (the flag
+#   is required for rootless operation in an unprivileged container).
+#
 # EXACT SECURITY CONTEXT GRANTED (and nothing more):
 #   - seccompProfile: Unconfined            (relaxation 1)
 #   - AppArmor: Unconfined                  (same reason, on hosts w/ AppArmor)
@@ -147,7 +157,12 @@ spec:
               add: ["SETUID", "SETGID"]
           readinessProbe:
             exec:
-              command: ["buildctl", "debug", "workers"]
+              # --addr is mandatory here: the daemon is started with an explicit
+              # --addr, which REPLACES the default unix socket rather than
+              # adding to it. A bare `buildctl debug workers` dials
+              # unix:///run/user/1000/buildkit/buildkitd.sock, finds nothing,
+              # and the pod never becomes Ready even though the daemon is fine.
+              command: ["buildctl", "--addr", "tcp://127.0.0.1:1234", "debug", "workers"]
             initialDelaySeconds: 5
             periodSeconds: 20
           volumeMounts:
