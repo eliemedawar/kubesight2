@@ -80,8 +80,12 @@ _STAGE_TYPE_PENDING_REASON = {
     "scan": "Security scanning arrives with the scanner integration.",
 }
 
+# `backend-service` is the Service name k8s/ingress.yaml ships, so it is what a
+# cluster built from this repo actually resolves. (The application-analysis
+# modules still default to `kubesight-backend`, which is stale — deployments
+# override it via the Hermes ConfigMap.) Override here with CI_WORKER_CALLBACK_URL.
 _DEFAULT_CALLBACK_URL = (
-    "http://kubesight-backend.kubesight.svc.cluster.local:5000/api/ci/worker"
+    "http://backend-service.kubesight.svc.cluster.local:5000/api/ci/worker"
 )
 
 
