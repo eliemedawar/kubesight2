@@ -223,10 +223,16 @@ export default function ServiceSettingsPanel({
                   setNewSecret((prev) => ({ ...prev, key: event.target.value }))
                 }
               />
-              <input
-                type="password"
-                placeholder="Value"
-                autoComplete="new-password"
+              {/* A textarea, not a password input: the useful secrets here are
+                  whole files — a gradle.properties, a Dockerfile, a PEM — and a
+                  single-line input silently eats the newlines. Values stay
+                  write-only; nothing displays one again after it is saved. */}
+              <textarea
+                className="sg-ci-secret-value"
+                placeholder="Value — paste a whole file if that is what it is"
+                rows={2}
+                spellCheck={false}
+                autoComplete="off"
                 value={newSecret.value}
                 onChange={(event) =>
                   setNewSecret((prev) => ({ ...prev, value: event.target.value }))

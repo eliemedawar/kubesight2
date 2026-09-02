@@ -656,6 +656,16 @@ button.sg-ci-strip-node:hover {
   min-width: 9rem;
 }
 
+/* Secret values are often whole files — give the field room and a code face,
+   and let it grow without pushing the Add button off the row. */
+.sg-ci-secret-value {
+  flex: 2;
+  min-width: 14rem;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.78rem;
+  resize: vertical;
+}
+
 .sg-ci-danger {
   border: 1px solid var(--danger-border, var(--danger));
   border-radius: var(--radius-md, 0.6rem);
