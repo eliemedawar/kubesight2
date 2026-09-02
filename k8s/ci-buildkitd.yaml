@@ -16,12 +16,21 @@
 #   works under RuntimeDefault today; this is a documented upstream
 #   requirement of buildkit rootless mode, not a KubeSight choice.
 #
+# WHY SETUID/SETGID AND no_new_privs ARE REQUIRED HERE
+#   Before buildkitd starts, rootlesskit maps a range of subordinate UIDs into
+#   the namespace using the setuid helpers /usr/bin/newuidmap and newgidmap.
+#   A setuid binary cannot elevate when allowPrivilegeEscalation is false
+#   (no_new_privs), and cannot hold CAP_SETUID/CAP_SETGID when those are
+#   outside the bounding set — dropping ALL removes them. Deny either and the
+#   daemon dies at startup: "newuidmap ... operation not permitted".
+#
 # EXACT SECURITY CONTEXT GRANTED (and nothing more):
-#   - seccompProfile: Unconfined            (the one relaxation)
+#   - seccompProfile: Unconfined            (relaxation 1)
 #   - AppArmor: Unconfined                  (same reason, on hosts w/ AppArmor)
+#   - allowPrivilegeEscalation: true        (relaxation 2, for the setuid map
+#     + capabilities: SETUID, SETGID         helpers — nothing else is added)
 #   - runAsUser 1000 / runAsNonRoot: true   (never root)
-#   - allowPrivilegeEscalation: false
-#   - capabilities: drop ALL
+#   - capabilities: drop ALL, then add back exactly those two
 #   - privileged: NOT set (false)
 #   - no host mounts, no docker socket, no hostNetwork/hostPID
 #
@@ -31,15 +40,16 @@
 #   because BOTH `restricted` AND `baseline` reject Unconfined seccomp/AppArmor
 #   (baseline allows only unset/RuntimeDefault/Localhost). Read `privileged`
 #   here as "PSA does not police this namespace" — it does NOT make the
-#   container privileged: privileged stays false, uid stays 1000, all
-#   capabilities stay dropped, escalation stays off. The pod spec below is the
+#   container privileged: privileged stays false, uid stays 1000, and every
+#   capability except SETUID/SETGID stays dropped. The pod spec below is the
 #   real boundary, so deploy nothing else into this namespace.
 #   Build pods in kubesight-ci remain fully `restricted`; they only hold a
 #   buildctl *client*, which needs no relaxation. An escape from buildkitd is
-#   bounded by: non-root uid, no capabilities, no privilege escalation, no host
-#   mounts, and a NetworkPolicy that only admits traffic from kubesight-ci and
-#   only lets buildkitd reach registries/DNS. What Unconfined concedes is a
-#   larger kernel syscall attack surface for the buildkitd process itself.
+#   bounded by: non-root uid, only SETUID/SETGID available, no host mounts, and
+#   a NetworkPolicy that only admits traffic from kubesight-ci and
+#   only lets buildkitd reach registries/DNS. What this concedes is a larger
+#   kernel syscall attack surface for the buildkitd process itself, and a
+#   setuid path it can use to become another UID inside its own namespace.
 #
 # ALTERNATIVES CONSIDERED
 #   - DinD / privileged builders ............ strictly worse; rejected outright
@@ -117,15 +127,24 @@ spec:
           ports:
             - containerPort: 1234
           securityContext:
-            # The single, documented relaxation. Everything else stays locked.
+            # Relaxation 1 of 2. See the disclosure at the top of this file.
             seccompProfile:
               type: Unconfined
             runAsUser: 1000
             runAsGroup: 1000
             runAsNonRoot: true
-            allowPrivilegeEscalation: false
+            # Relaxation 2 of 2: rootlesskit maps a range of subordinate UIDs
+            # via the setuid helpers /usr/bin/newuidmap and newgidmap. Those
+            # need no_new_privs OFF (so the setuid bit still elevates) and
+            # SETUID/SETGID in the bounding set (so the elevated helper may
+            # hold them). With either missing, buildkitd dies at startup with
+            # "newuidmap ... operation not permitted" and CrashLoopBackOffs.
+            # Everything outside those two capabilities is still dropped, the
+            # process still runs as uid 1000, and it is still not privileged.
+            allowPrivilegeEscalation: true
             capabilities:
               drop: ["ALL"]
+              add: ["SETUID", "SETGID"]
           readinessProbe:
             exec:
               command: ["buildctl", "debug", "workers"]

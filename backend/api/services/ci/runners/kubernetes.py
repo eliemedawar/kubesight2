@@ -351,7 +351,13 @@ def _stage_resources(execution: StageExecution) -> Dict[str, Any]:
         "ephemeral-storage": (execution.resources or {}).get("ephemeralStorage")
         or _env("CI_STAGE_EPHEMERAL_LIMIT", "2Gi"),
     }
-    return {"requests": dict(_DEFAULT_REQUESTS), "limits": limits}
+    # The scheduler matches REQUESTS. A limit with no request makes Kubernetes
+    # default the request to the limit, so the ephemeral-storage cap above would
+    # silently demand its full size on every node — unschedulable on hosts with
+    # small root disks. Request a modest floor explicitly and let the limit cap.
+    requests = dict(_DEFAULT_REQUESTS)
+    requests["ephemeral-storage"] = _env("CI_STAGE_EPHEMERAL_REQUEST", "256Mi")
+    return {"requests": requests, "limits": limits}
 
 
 def _mounts() -> List[Dict[str, str]]:
