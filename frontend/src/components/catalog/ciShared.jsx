@@ -163,6 +163,15 @@ export const PlayIcon = () => (
   </IconBase>
 );
 
+/** Stacked machines — the fleet that executes builds. */
+export const RunnerIcon = () => (
+  <IconBase>
+    <rect x="3" y="4" width="18" height="7" rx="2" />
+    <rect x="3" y="13" width="18" height="7" rx="2" />
+    <path d="M7 7.5h.01M7 16.5h.01" />
+  </IconBase>
+);
+
 export const BranchIcon = () => (
   <IconBase>
     <circle cx="6" cy="5" r="2.5" />

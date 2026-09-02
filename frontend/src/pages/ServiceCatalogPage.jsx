@@ -6,12 +6,14 @@ import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import RunBuildModal from "../components/catalog/RunBuildModal.jsx";
+import RunnersModal from "../components/catalog/RunnersModal.jsx";
 import ServiceCard from "../components/catalog/ServiceCard.jsx";
 import ServiceFormModal from "../components/catalog/ServiceFormModal.jsx";
 import ServiceDetailPage from "./ServiceDetailPage.jsx";
 import {
   APPLICATION_TYPES,
   PlusIcon,
+  RunnerIcon,
   SearchIcon,
   isBuildActive,
 } from "../components/catalog/ciShared.jsx";
@@ -48,6 +50,8 @@ export default function ServiceCatalogPage({ clusters = [] }) {
   const canView = hasPermission("ci_services:view");
   const canCreate = hasPermission("ci_services:create");
   const canRun = hasPermission("ci_builds:run");
+  const canViewRunners = hasPermission("ci_runners:view");
+  const canManageRunners = hasPermission("ci_runners:manage");
 
   const [services, setServices] = useState([]);
   const [summary, setSummary] = useState(null);
@@ -115,6 +119,7 @@ export default function ServiceCatalogPage({ clusters = [] }) {
   // Run from a card opens the ref picker in place; only after the build has
   // actually started does the view jump into the service's Builds tab.
   const [runFor, setRunFor] = useState(null);
+  const [showRunners, setShowRunners] = useState(false);
 
   if (!canView) return <AccessDeniedPage />;
 
@@ -158,8 +163,18 @@ export default function ServiceCatalogPage({ clusters = [] }) {
           <h2>Service Catalog</h2>
           <p className="sg-ph-sub">{subtitle}</p>
         </div>
-        {canCreate && (
-          <div className="sg-ph-actions">
+        <div className="sg-ph-actions">
+          {canViewRunners && (
+            <button
+              type="button"
+              className="btn-outline sg-cat-new"
+              onClick={() => setShowRunners(true)}
+            >
+              <RunnerIcon />
+              Runners
+            </button>
+          )}
+          {canCreate && (
             <button
               type="button"
               className="primary sg-cat-new"
@@ -171,8 +186,8 @@ export default function ServiceCatalogPage({ clusters = [] }) {
               <PlusIcon />
               Register service
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {error && <ErrorBanner message={error} />}
@@ -268,6 +283,10 @@ export default function ServiceCatalogPage({ clusters = [] }) {
           saving={saving}
           error={saveError}
         />
+      )}
+
+      {showRunners && (
+        <RunnersModal canManage={canManageRunners} onClose={() => setShowRunners(false)} />
       )}
 
       {runFor && (
