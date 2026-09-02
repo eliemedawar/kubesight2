@@ -135,18 +135,29 @@ spec:
             - name: cache
               mountPath: /home/user/.local/share/buildkit
           resources:
+            # Requests are what the SCHEDULER matches against free capacity;
+            # limits only cap. Give ephemeral-storage an explicit, small request
+            # — omitting it makes Kubernetes default the request to the limit,
+            # so a 20Gi cap turned into a 20Gi demand and the pod went
+            # unschedulable on every worker. The limit still bounds a runaway
+            # build. If your nodes are disk-tight (check `kubectl describe node`
+            # → Allocatable → ephemeral-storage), lower both and the emptyDir
+            # sizeLimit below to match, or switch the cache volume to a PVC.
             requests:
               cpu: 500m
               memory: 1Gi
+              ephemeral-storage: 2Gi
             limits:
               cpu: "4"
               memory: 8Gi
-              ephemeral-storage: 20Gi
+              ephemeral-storage: 10Gi
       volumes:
-        # Layer cache. Swap for a PVC to keep cache across restarts.
+        # Layer cache. Swap for a PVC to keep cache across restarts — and do
+        # that rather than raising this if node disk is the constraint.
+        # Keep in step with the container's ephemeral-storage limit above.
         - name: cache
           emptyDir:
-            sizeLimit: 20Gi
+            sizeLimit: 10Gi
 ---
 apiVersion: v1
 kind: Service
