@@ -95,6 +95,13 @@ spec:
       labels:
         app: buildkitd
       annotations:
+        # AppArmor, same reason as seccomp below. This beta annotation is the
+        # portable spelling: it is honoured on every version KubeSight targets,
+        # including 1.30+ where it is deprecated in favour of
+        # securityContext.appArmorProfile. Do NOT swap to that field until every
+        # target cluster is 1.30+ — older API servers reject the unknown field
+        # outright under kubectl's default strict validation (they do not prune
+        # it), and the whole Deployment apply fails.
         container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
     spec:
       serviceAccountName: buildkitd
@@ -112,12 +119,6 @@ spec:
           securityContext:
             # The single, documented relaxation. Everything else stays locked.
             seccompProfile:
-              type: Unconfined
-            # AppArmor, same reason. The pod annotation above is the pre-1.30
-            # spelling (deprecated); this field is the 1.30+ one. Both ship so
-            # one manifest covers either: older API servers prune the unknown
-            # field, newer ones check the two agree — and they do.
-            appArmorProfile:
               type: Unconfined
             runAsUser: 1000
             runAsGroup: 1000
