@@ -53,11 +53,15 @@ data:
   # images are NOT stored here — only their registry coordinates and digest are
   # recorded, the bytes stay in the registry.
   #
-  # This is a directory in the backend container, so it MUST be backed by a
-  # PersistentVolume: without one, every rollout of the backend deletes every
-  # artifact, breaking old download links and "Rerun from here", which restores
-  # from exactly these files. Mount a PVC at this path on the Deployment.
-  CI_ARTIFACT_DIR: /var/lib/kubesight/ci-artifacts
+  # Left unset deliberately, so the default applies: /app/data/ci_artifacts in
+  # the backend container, laid out as <serviceId>/<buildId>/<filename>.
+  #
+  # Note what that means: it is a directory INSIDE the container, so every
+  # rollout of the backend deletes every stored artifact — old download links
+  # break, and "Rerun from here" stops working, because it restores from
+  # exactly these files. To make them durable, set this to a path with a
+  # PersistentVolume mounted over it on the Deployment:
+  #   CI_ARTIFACT_DIR: /var/lib/kubesight/ci-artifacts
 
   # --- Dependency cache -----------------------------------------------------
   # The single biggest build-time saving: without it every build re-downloads
