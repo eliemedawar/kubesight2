@@ -30,8 +30,11 @@ SUCCEEDED = "succeeded"
 FAILED = "failed"
 TIMEOUT = "timeout"
 CANCELLED = "cancelled"
+# The stage did not run because an earlier one failed. Distinct from
+# "failed": nothing was attempted, so nothing can be blamed on it.
+SKIPPED = "skipped"
 
-TERMINAL_STATUSES = frozenset({SUCCEEDED, FAILED, TIMEOUT, CANCELLED})
+TERMINAL_STATUSES = frozenset({SUCCEEDED, FAILED, TIMEOUT, CANCELLED, SKIPPED})
 
 
 class RunnerError(RuntimeError):

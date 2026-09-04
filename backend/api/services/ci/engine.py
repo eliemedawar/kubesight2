@@ -46,6 +46,7 @@ from .runners import (
     CANCELLED,
     FAILED,
     RUNNING,
+    SKIPPED,
     SUCCEEDED,
     TERMINAL_STATUSES,
     TIMEOUT,
@@ -379,6 +380,16 @@ def _advance_running() -> None:
             db.session.commit()
 
 
+def _runs_whole_build(adapter) -> bool:
+    """Whether one dispatch of this adapter executes the entire build.
+
+    The Kubernetes runner builds one Job per build, so every stage's container
+    exists from the start and the pod must be allowed to finish — the collector
+    that uploads artifacts is the pod's last act.
+    """
+    return bool(getattr(adapter, "runs_whole_build", False))
+
+
 def _advance_one(build: CiBuild) -> None:
     stage = _current_stage(build)
     if stage is None:
@@ -439,6 +450,10 @@ def _advance_one(build: CiBuild) -> None:
     if status == SUCCEEDED:
         _collect_artifacts(build, stage, adapter, handle, definition)
         _close_stage(stage, "success", None)
+    elif status == SKIPPED:
+        # The runner reports a stage that declined to run because an earlier one
+        # failed. It is not a failure of this stage, and it has no artifacts.
+        _close_stage(stage, "skipped", "An earlier stage failed.")
     elif status == TIMEOUT:
         _close_stage(stage, "timeout", f"Stage exceeded its {timeout}s timeout.")
     elif status == CANCELLED:
@@ -451,7 +466,16 @@ def _advance_one(build: CiBuild) -> None:
     except Exception:
         logger.exception("Runner cleanup failed for stage %s", stage.id)
 
-    if stage.status != "success" and not bool(definition.get("continueOnFailure")):
+    # A whole-build runner keeps its pod walking after a failure so the collector
+    # still uploads what earlier stages produced; its remaining stages report
+    # themselves as skipped through the normal poll path. Marking them here
+    # would end the build early and lose those artifacts. Per-stage runners have
+    # nothing left to run, so they still need the shortcut.
+    if (
+        stage.status not in ("success", "skipped")
+        and not bool(definition.get("continueOnFailure"))
+        and not _runs_whole_build(adapter)
+    ):
         for pending in build.stages:
             if pending.status == "pending":
                 pending.status = "skipped"

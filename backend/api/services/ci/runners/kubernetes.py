@@ -51,6 +51,7 @@ from .base import (
     FAILED,
     QUEUED,
     RUNNING,
+    SKIPPED,
     SUCCEEDED,
     TIMEOUT,
     ArtifactRef,
@@ -65,6 +66,8 @@ logger = logging.getLogger(__name__)
 
 _COF_ANNOTATION = "kubesight.io/continue-on-failure-stages"
 _EXIT_MARKER = "[kubesight-exit]"
+# Emitted by a stage that declined to run because an earlier one failed.
+_SKIP_MARKER = "[kubesight-skip]"
 
 
 def _env(name: str, default: str) -> str:
@@ -294,23 +297,52 @@ print("[kubesight] artifact collection complete")
 """
 
 
+_FAIL_FLAG = "/workspace/.kubesight/failed"
+
+
+def _wrap_stage_script(body: str, *, continue_on_failure: bool) -> str:
+    """Every stage exits 0 and reports its real code as a log marker.
+
+    Kubernetes only starts a pod's main containers once EVERY initContainer has
+    succeeded — so a stage that exits non-zero means the collector never runs
+    and the artifacts of the stages that DID succeed are lost, exactly when
+    they are most wanted. Exiting 0 keeps the pod walking to the collector.
+
+    Sequential semantics are preserved by a flag on the shared workspace: the
+    first failure writes it, and every later stage sees it and skips itself
+    instead of running against a broken tree. The adapter turns the markers
+    back into real per-stage statuses, so nothing reports success it did not
+    earn. A continue-on-failure stage records its failure without writing the
+    flag — that is what makes it "continue".
+    """
+    guard = (
+        f'KS_FLAG={_FAIL_FLAG}\n'
+        'mkdir -p /workspace/.kubesight 2>/dev/null || true\n'
+        'if [ -e "$KS_FLAG" ]; then\n'
+        '  echo "[kubesight] Skipped: an earlier stage failed."\n'
+        f'  echo "{_SKIP_MARKER}"\n'
+        "  exit 0\n"
+        "fi\n"
+    )
+    record = "" if continue_on_failure else 'if [ "$EC" -ne 0 ]; then : > "$KS_FLAG"; fi\n'
+    return (
+        "set -u\nexport HOME=/tmp TMPDIR=/tmp\n"
+        + guard
+        + f"(\nset -e\n{body}\n)\nEC=$?\n"
+        + record
+        + f'echo "{_EXIT_MARKER} $EC"\nexit 0\n'
+    )
+
+
 def _command_stage_script(execution: StageExecution) -> str:
     workdir = "/workspace/source"
     if execution.working_directory:
         workdir = f"/workspace/source/{execution.working_directory}"
     commands = "\n".join(execution.commands or ["true"])
-    if execution.continue_on_failure:
-        # Real exit code goes to the log as a marker; the container exits 0 so
-        # Kubernetes lets the next initContainer run. The adapter reads the
-        # marker back and reports the stage as FAILED — the pipeline continues
-        # but the truth is preserved.
-        return (
-            "set -u\nexport HOME=/tmp TMPDIR=/tmp\n"
-            f"cd {workdir}\n"
-            f"(\nset -e\n{commands}\n)\nEC=$?\n"
-            f"echo \"{_EXIT_MARKER} $EC\"\nexit 0\n"
-        )
-    return f"set -eu\nexport HOME=/tmp TMPDIR=/tmp\ncd {workdir}\n{commands}\n"
+    return _wrap_stage_script(
+        f"cd {workdir}\n{commands}",
+        continue_on_failure=bool(execution.continue_on_failure),
+    )
 
 
 INLINE_DOCKERFILE_DIR = "/kubesight-dockerfile"
@@ -512,7 +544,11 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
             container = {
                 **base,
                 "image": _worker_image(),
-                "command": ["/bin/sh", "-c", _CHECKOUT_SCRIPT],
+                "command": [
+                    "/bin/sh",
+                    "-c",
+                    _wrap_stage_script(_CHECKOUT_SCRIPT, continue_on_failure=False),
+                ],
                 "env": _plain_env(
                     execution,
                     {
@@ -539,7 +575,11 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                 "command": [
                     "/bin/sh",
                     "-c",
-                    "mkdir -p /workspace/.kubesight && " + _buildctl_args(execution, meta_file),
+                    _wrap_stage_script(
+                        "mkdir -p /workspace/.kubesight\n"
+                        + _buildctl_args(execution, meta_file),
+                        continue_on_failure=bool(execution.continue_on_failure),
+                    ),
                 ],
                 "env": _plain_env(execution, {"DOCKER_CONFIG": "/kubesight-docker"})
                 + _secret_env(secret_name, execution),
@@ -803,6 +843,9 @@ class KubernetesJobRunnerAdapter:
     """Drives one Job per build over kubectl. See the module docstring."""
 
     runner_type = "kubernetes"
+    # One Job per build: every stage's container exists from the start, and
+    # the pod must be allowed to reach its collector even after a failure.
+    runs_whole_build = True
 
     # -- capabilities --------------------------------------------------------
 
@@ -986,9 +1029,17 @@ class KubernetesJobRunnerAdapter:
         if terminated is not None:
             if int(terminated.get("exitCode") or 0) != 0:
                 return TIMEOUT if deadline_exceeded else FAILED
-            # Exit 0 — but a continue-on-failure wrapper hides the real code in
-            # a log marker, and the LAST stage must also wait for the collector.
-            if self._cof_failed(pod, job_name, container):
+            # Exit 0 is now what EVERY stage does, so the real outcome lives in
+            # a log marker. Read it before deciding anything.
+            marker = self._exit_marker(job_name, container)
+            if marker == "skip":
+                return SKIPPED
+            if marker == "failed":
+                # The last stage still has to wait for the collector, otherwise
+                # a failed final stage would end the build before its artifacts
+                # were uploaded — which is the whole point of exiting 0.
+                if self._is_last_stage(pod, container) and not self._job_finished(job_status):
+                    return RUNNING
                 return FAILED
             if self._is_last_stage(pod, container):
                 if int(job_status.get("succeeded") or 0) > 0:
@@ -1018,12 +1069,14 @@ class KubernetesJobRunnerAdapter:
         init = (pod.get("spec") or {}).get("initContainers") or []
         return bool(init) and init[-1].get("name") == container
 
-    def _cof_failed(self, pod: dict, job_name: str, container: str) -> bool:
-        annotations = (pod.get("metadata") or {}).get("annotations") or {}
-        cof = {p for p in (annotations.get(_COF_ANNOTATION) or "").split(",") if p}
-        position = container.rsplit("-", 1)[-1]
-        if position not in cof:
-            return False
+    def _exit_marker(self, job_name: str, container: str) -> str:
+        """What a stage's own log says about how it ended.
+
+        Every stage exits 0 so the pod reaches the collector, so the container's
+        exit code no longer carries the outcome — the marker does. Returns
+        "skip", "failed", or "ok" (also when no marker is found, which is the
+        pre-wrapper shape and means the exit code already told the truth).
+        """
         rc, out, _ = _kubectl(
             [
                 "logs", f"job/{job_name}", "-c", container, "-n", _namespace(),
@@ -1032,12 +1085,18 @@ class KubernetesJobRunnerAdapter:
             timeout=20,
         )
         if rc != 0:
-            return False
+            return "ok"
         for line in out.splitlines():
+            if line.startswith(_SKIP_MARKER):
+                return "skip"
             if line.startswith(_EXIT_MARKER):
                 code = line.replace(_EXIT_MARKER, "").strip()
-                return code not in ("", "0")
-        return False
+                return "ok" if code in ("", "0") else "failed"
+        return "ok"
+
+    @staticmethod
+    def _job_finished(job_status: dict) -> bool:
+        return bool(int(job_status.get("succeeded") or 0) or int(job_status.get("failed") or 0))
 
     def drain_logs(self, handle: RunnerHandle, after_seq: int) -> Iterator[LogChunk]:
         job_name, container = _split_ref(handle.external_ref)

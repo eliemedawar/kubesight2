@@ -619,3 +619,67 @@ def test_without_inline_dockerfile_the_repository_file_is_used(monkeypatch):
     script = spec["initContainers"][1]["command"][2]
     assert "--local dockerfile=/workspace/source/docker " in script
     assert "--opt filename=Dockerfile " in script
+
+
+def test_every_stage_exits_zero_so_the_collector_always_runs():
+    """Kubernetes starts main containers only when EVERY initContainer
+    succeeded, so a stage that exits non-zero means the collector never runs and
+    the artifacts of stages that DID succeed are lost. Every stage therefore
+    exits 0 and reports its real code as a marker, guarding on a shared flag so
+    later stages still decline to run."""
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, commands=["gradle build"]),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    for container in job["spec"]["template"]["spec"]["initContainers"]:
+        script = container["command"][2]
+        assert script.rstrip().endswith("exit 0")
+        assert k8s._EXIT_MARKER in script
+        assert k8s._SKIP_MARKER in script
+        assert k8s._FAIL_FLAG in script
+
+
+def test_continue_on_failure_does_not_stop_later_stages():
+    """A cof stage records its failure without writing the flag — that is
+    precisely what 'continue' means."""
+    normal = k8s._wrap_stage_script("false", continue_on_failure=False)
+    cof = k8s._wrap_stage_script("false", continue_on_failure=True)
+    assert f': > "$KS_FLAG"' in normal
+    assert f': > "$KS_FLAG"' not in cof
+
+
+def test_poll_maps_markers_to_stage_outcomes():
+    adapter = k8s.KubernetesJobRunnerAdapter()
+    logs = {}
+
+    def fake(args, input_text=None):
+        if args[0] == "get" and args[1] == "job":
+            return 0, json.dumps({"status": {"succeeded": 1}}), ""
+        if args[0] == "get" and args[1] == "pods":
+            return 0, json.dumps({"items": [{
+                "metadata": {"name": "p", "creationTimestamp": "1", "annotations": {}},
+                "status": {"initContainerStatuses": [
+                    {"name": "stage-0", "state": {"terminated": {"exitCode": 0}}},
+                    {"name": "stage-1", "state": {"terminated": {"exitCode": 0}}},
+                ]},
+                "spec": {"initContainers": [{"name": "stage-0"}, {"name": "stage-1"}]},
+            }]}), ""
+        if args[0] == "logs":
+            container = args[args.index("-c") + 1]
+            return 0, logs.get(container, ""), ""
+        return 1, "", ""
+
+    k8s.set_kubectl_runner(fake)
+    handle = k8s.RunnerHandle(runner_id=1, external_ref="job#stage-0")
+
+    logs["stage-0"] = "building\n[kubesight-exit] 0\n"
+    assert adapter.poll(handle) == k8s.SUCCEEDED
+
+    logs["stage-0"] = "boom\n[kubesight-exit] 1\n"
+    assert adapter.poll(handle) == k8s.FAILED
+
+    logs["stage-0"] = "[kubesight] Skipped: an earlier stage failed.\n[kubesight-skip]\n"
+    assert adapter.poll(handle) == k8s.SKIPPED

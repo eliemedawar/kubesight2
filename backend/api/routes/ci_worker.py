@@ -15,6 +15,7 @@ from __future__ import annotations
 import hmac
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Optional, Tuple
 
@@ -29,9 +30,14 @@ from ..services.ci.runners.base import ArtifactRef
 ci_worker_bp = Blueprint("ci_worker", __name__, url_prefix="/api/ci/worker")
 
 _MAX_ARTIFACT_BYTES = int(os.getenv("CI_MAX_ARTIFACT_MB", "512")) * 1024 * 1024
+# How long after a build ends its own collector may still upload. Sized to
+# outlast a large artifact upload, not to keep a pod useful indefinitely.
+_UPLOAD_GRACE_SECONDS = int(os.getenv("CI_ARTIFACT_UPLOAD_GRACE_SECONDS", "900"))
 
 
-def _authorized_build(build_id: int) -> Tuple[Optional[CiBuild], Optional[tuple]]:
+def _authorized_build(
+    build_id: int, *, allow_finished: bool = False
+) -> Tuple[Optional[CiBuild], Optional[tuple]]:
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         return None, error_response("Unauthorized", 401)
@@ -44,9 +50,23 @@ def _authorized_build(build_id: int) -> Tuple[Optional[CiBuild], Optional[tuple]
         return None, error_response("Unauthorized", 401)
     if build.status != "running":
         # A finished or cancelled build is immutable; a stale pod must not be
-        # able to append to it.
-        return None, error_response("This build is no longer running.", 409)
+        # able to append to it. Artifacts are the exception: a build pod keeps
+        # running after a stage fails so its collector can still upload what
+        # earlier stages produced, and that upload legitimately lands after the
+        # build has been marked failed. Bounded by the grace window AND by the
+        # per-build token, so it is the build's own pod or nobody.
+        if not (allow_finished and _within_upload_grace(build)):
+            return None, error_response("This build is no longer running.", 409)
     return build, None
+
+
+def _within_upload_grace(build: CiBuild) -> bool:
+    finished = build.finished_at or build.started_at
+    if finished is None:
+        return False
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - finished <= timedelta(seconds=_UPLOAD_GRACE_SECONDS)
 
 
 def _stage_for_position(build: CiBuild, raw_position) -> Optional[CiBuildStage]:
@@ -79,7 +99,7 @@ def report_meta(build_id: int):
 
 @ci_worker_bp.route("/builds/<int:build_id>/artifacts", methods=["POST"])
 def upload_artifact(build_id: int):
-    build, err = _authorized_build(build_id)
+    build, err = _authorized_build(build_id, allow_finished=True)
     if err:
         return err
 

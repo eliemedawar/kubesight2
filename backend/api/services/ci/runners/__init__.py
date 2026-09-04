@@ -10,6 +10,7 @@ from .base import (  # noqa: F401
     FAILED,
     QUEUED,
     RUNNING,
+    SKIPPED,
     SUCCEEDED,
     TERMINAL_STATUSES,
     TIMEOUT,
