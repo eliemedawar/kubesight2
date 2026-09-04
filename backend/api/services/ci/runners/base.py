@@ -146,6 +146,12 @@ class RunnerAdapter(Protocol):
     the engine skips (never dispatches) a stage whose type the assigned
     adapter does not support, so an unexecuted stage can never report success.
     Adapters without the method are assumed to support checkout + command.
+
+    An adapter may also expose ``list_workspace(handle, path) -> list[dict]``
+    returning ``{"name", "type", "size"}`` entries for one directory of a
+    running build's workspace. It is optional: an adapter with no way to look
+    inside a live workspace simply does not implement it, and the API says so
+    rather than pretending the workspace is empty.
     """
 
     runner_type: str

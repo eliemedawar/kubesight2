@@ -28,6 +28,7 @@ from ..services.ci import queue as queue_service
 from ..services.ci import scheduler as scheduler_service
 from ..services.ci import secrets as secrets_service
 from ..services.ci import templates as templates_service
+from ..services.ci import workspace as workspace_service
 from ..services.ci.serializers import (
     artifact_to_dict,
     build_summary,
@@ -480,6 +481,25 @@ def retry_build(build_id: int):
             engine_service.retry_build(row, actor=_actor()), status_code=201
         )
     except _USER_ERRORS as exc:
+        return error_response(str(exc), 409)
+
+
+@ci_bp.route("/builds/<int:build_id>/workspace", methods=["GET"])
+@require_permission("ci_builds:view")
+def get_build_workspace(build_id: int):
+    """One directory of a running build's shared workspace.
+
+    Live only: the workspace is an emptyDir that dies with the build pod, so a
+    finished build reports why there is nothing to show rather than an empty
+    listing. Names, sizes and types only — never file content, which would
+    expose credentials a stage wrote for its own use.
+    """
+    build = engine_service.get_build(build_id)
+    try:
+        return success_response(
+            workspace_service.list_directory(build, request.args.get("path") or "")
+        )
+    except workspace_service.WorkspaceError as exc:
         return error_response(str(exc), 409)
 
 

@@ -86,6 +86,14 @@ export const applyCiPipelineTemplate = (serviceId, applicationType) =>
 // Builds
 // ---------------------------------------------------------------------------
 
+// One directory of a running build's shared workspace. Live only: the
+// workspace goes away with the build pod, and the API says so rather than
+// returning an empty listing.
+export const getCiBuildWorkspace = (buildId, path) =>
+  request(`/api/ci/builds/${encodeURIComponent(buildId)}/workspace`, {
+    query: path ? { path } : {},
+  });
+
 export const listCiBuilds = (query = {}) => request("/api/ci/builds", { query });
 
 export const listCiServiceBuilds = (serviceId, query = {}) =>

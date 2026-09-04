@@ -1110,3 +1110,97 @@ button.sg-ci-strip-node:hover {
   margin: 0 0 var(--space-2);
   font-size: 0.78rem;
 }
+
+/* ---------------------------------------------------------------------------
+   Live workspace browser — replaces the log pane inside the build drawer.
+   --------------------------------------------------------------------------- */
+
+.sg-ci-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sg-ci-workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.sg-ci-workspace-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+.sg-ci-workspace-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.sg-ci-workspace-note {
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.sg-ci-workspace-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.sg-ci-workspace-list > li + li {
+  border-top: 1px solid var(--border);
+}
+
+.sg-ci-workspace-entry {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.35rem 0.6rem;
+  background: none;
+  border: 0;
+  text-align: left;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+button.sg-ci-workspace-entry {
+  cursor: pointer;
+}
+
+button.sg-ci-workspace-entry:hover,
+button.sg-ci-workspace-entry:focus-visible {
+  background: var(--bg-interactive);
+  color: var(--accent);
+}
+
+.sg-ci-workspace-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-workspace-size {
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+
+/* A zero-byte file is usually the bug being hunted — mark it. */
+.sg-ci-workspace-size.is-empty {
+  color: var(--warn);
+}

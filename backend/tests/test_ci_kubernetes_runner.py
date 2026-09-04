@@ -515,3 +515,48 @@ def test_pod_spec_omits_host_aliases_when_none_configured():
     )
     _, _, job = k8s.build_job_resources(first)
     assert "hostAliases" not in job["spec"]["template"]["spec"]
+
+
+def test_workspace_listing_parses_entries_and_confines_paths():
+    """The path is interpolated into a shell command, so escaping it is a
+    security boundary, not tidying."""
+    import pytest as _pytest
+
+    from api.services.ci import workspace as workspace_service
+
+    assert workspace_service._normalize("") == "/workspace"
+    assert workspace_service._normalize("/workspace/source/") == "/workspace/source"
+    assert workspace_service._normalize("source") == "/workspace/source"
+
+    for bad in ["/etc", "/workspace/../etc", "/workspace/a'b", "/workspace/$(id)", "/workspace/a`b`"]:
+        with _pytest.raises(workspace_service.WorkspaceError):
+            workspace_service._normalize(bad)
+
+
+def test_workspace_listing_reads_ls_output():
+    adapter = k8s.KubernetesJobRunnerAdapter()
+    calls = []
+
+    def fake(args, input_text=None):
+        calls.append(args)
+        if args[0] == "get" and args[1] == "job":
+            return 0, json.dumps({"metadata": {"name": "ci-b7-payment-service"}}), ""
+        if args[0] == "get" and args[1] == "pods":
+            return 0, json.dumps({"items": [{"metadata": {"name": "ci-b7-pod", "creationTimestamp": "1"}}]}), ""
+        if args[0] == "exec":
+            return 0, "dir\t0\tsource\nfile\t4096\tapp.jar\nbroken-line\n", ""
+        return 1, "", "unexpected"
+
+    k8s.set_kubectl_runner(fake)
+    entries = adapter.list_workspace(
+        RunnerHandle(runner_id=1, external_ref="ci-b7-payment-service#stage-1"), "/workspace"
+    )
+
+    # Directories first, then files, each case-insensitively by name.
+    assert entries == [
+        {"name": "source", "type": "dir", "size": 0},
+        {"name": "app.jar", "type": "file", "size": 4096},
+    ]
+    exec_args = next(args for args in calls if args[0] == "exec")
+    assert exec_args[1] == "ci-b7-pod"
+    assert "-c" in exec_args and "stage-1" in exec_args

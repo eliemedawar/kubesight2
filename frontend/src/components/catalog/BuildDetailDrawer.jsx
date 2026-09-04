@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { cancelCiBuild, getCiBuild, listCiBuildArtifacts, retryCiBuild } from "../../api/ciApi.js";
 import PipelineStrip from "./PipelineStrip.jsx";
 import StageLogViewer from "./StageLogViewer.jsx";
+import WorkspaceBrowser from "./WorkspaceBrowser.jsx";
 import {
   StageStatusIcon,
   StatusPill,
@@ -32,6 +33,9 @@ export default function BuildDetailDrawer({
   const [selectedStageId, setSelectedStageId] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // The workspace replaces the log pane rather than sitting beside it: both
+  // answer "what is this build doing", and the drawer has one pane.
+  const [showWorkspace, setShowWorkspace] = useState(false);
 
   // Follows the running stage until the user picks one themselves.
   const userPickedRef = useRef(false);
@@ -99,6 +103,7 @@ export default function BuildDetailDrawer({
   const selectStage = (stage) => {
     userPickedRef.current = true;
     setSelectedStageId(stage.id);
+    setShowWorkspace(false);
   };
 
   const selectedStage = build?.stages?.find((stage) => stage.id === selectedStageId);
@@ -152,6 +157,17 @@ export default function BuildDetailDrawer({
             )}
           </div>
           <div className="sg-ci-drawer-actions">
+            {build && active && (
+              <button
+                type="button"
+                className={`btn-outline btn-compact${showWorkspace ? " is-on" : ""}`}
+                aria-pressed={showWorkspace}
+                onClick={() => setShowWorkspace((prev) => !prev)}
+                title="Browse the files this build has produced so far"
+              >
+                {showWorkspace ? "Logs" : "Workspace"}
+              </button>
+            )}
             {build && active && canCancel && (
               <button
                 type="button"
@@ -216,7 +232,9 @@ export default function BuildDetailDrawer({
               </ul>
 
               <div className="sg-ci-drawer-logs">
-                {selectedStage ? (
+                {showWorkspace ? (
+                  <WorkspaceBrowser buildId={build.id} active={active} />
+                ) : selectedStage ? (
                   <StageLogViewer buildId={build.id} stage={selectedStage} />
                 ) : (
                   <p className="muted">Select a stage to see its output.</p>

@@ -843,6 +843,67 @@ class KubernetesJobRunnerAdapter:
                 pod = sorted(items, key=lambda p: p["metadata"].get("creationTimestamp") or "")[-1]
         return job, pod
 
+    # -- workspace inspection ------------------------------------------------
+
+    def list_workspace(self, handle: RunnerHandle, path: str) -> List[Dict[str, Any]]:
+        """One directory of the live build workspace: names, sizes, types.
+
+        Deliberately a listing and not a reader. A workspace routinely holds
+        credentials a stage wrote for its own use (a gradle.properties, a
+        kubeconfig), so serving file CONTENT through the API would turn "view
+        the build" into "read the build's secrets". Names and sizes answer the
+        question this exists for — did the previous stage produce the file the
+        next one expects, and is it empty?
+
+        Only works while a container of this build is running; kubectl exec has
+        nothing to attach to otherwise, and the emptyDir is gone once the pod is
+        removed. The caller turns that into an explanation.
+        """
+        job_name, container = _split_ref(handle.external_ref)
+        _, pod = self._read_job_and_pod(job_name)
+        if pod is None:
+            raise RunnerError("The build pod is no longer there.")
+        pod_name = pod["metadata"]["name"]
+
+        # Portable across the images stages run on (debian, alpine, distroless
+        # is excluded by needing a shell at all): no find -printf, no stat.
+        # Field 5 of `ls -ldn` is the size on both GNU coreutils and busybox.
+        script = (
+            f"cd '{path}' 2>/dev/null || {{ echo '__KS_NO_PATH__'; exit 0; }}\n"
+            "for e in * .*; do\n"
+            '  [ "$e" = "." ] && continue\n'
+            '  [ "$e" = ".." ] && continue\n'
+            '  [ -e "$e" ] || continue\n'
+            '  if [ -d "$e" ]; then t=dir; else t=file; fi\n'
+            '  set -- $(ls -ldn "$e" 2>/dev/null)\n'
+            '  printf "%s\\t%s\\t%s\\n" "$t" "${5:-0}" "$e"\n'
+            "done\n"
+        )
+        rc, out, err = _kubectl(
+            ["exec", pod_name, "-n", _namespace(), "-c", container, "--", "/bin/sh", "-c", script],
+            timeout=20,
+        )
+        if rc != 0:
+            detail = (err or "").strip().splitlines()
+            hint = detail[-1] if detail else "kubectl exec failed."
+            raise RunnerError(hint)
+        if "__KS_NO_PATH__" in out:
+            raise RunnerError(f"{path} does not exist in the workspace.")
+
+        entries: List[Dict[str, Any]] = []
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 3:
+                continue
+            kind, size, name = parts
+            try:
+                size_bytes = int(size)
+            except ValueError:
+                size_bytes = 0
+            entries.append({"name": name, "type": kind, "size": size_bytes})
+        entries.sort(key=lambda item: (item["type"] != "dir", item["name"].lower()))
+        return entries
+
     def poll(self, handle: RunnerHandle) -> str:
         job_name, container = _split_ref(handle.external_ref)
         job, pod = self._read_job_and_pod(job_name)
