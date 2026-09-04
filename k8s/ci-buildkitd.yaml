@@ -124,6 +124,18 @@ spec:
         # it), and the whole Deployment apply fails.
         container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
     spec:
+      # buildkitd resolves registry hosts ITSELF — it performs the base-image
+      # pull and the final push, not the build pod. So a stage's host aliases
+      # cannot redirect them; if one DNS name fronts several registries here,
+      # map it for the daemon:
+      #
+      # hostAliases:
+      #   - ip: "10.4.23.182"
+      #     hostnames: ["registry.areeba.com"]
+      #
+      # Note this applies to EVERY image build, including base-image pulls, so
+      # the address must serve both. Addressing the registry by IP in its
+      # KubeSight connection avoids the question entirely.
       serviceAccountName: buildkitd
       automountServiceAccountToken: false
       enableServiceLinks: false

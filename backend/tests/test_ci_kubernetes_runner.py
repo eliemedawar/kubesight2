@@ -752,3 +752,35 @@ def test_registry_layer_cache_is_opt_in(monkeypatch):
     script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][2]
     assert "--import-cache type=registry,ref=nexus:9443/profile-ms:buildcache" in script
     assert "--export-cache type=registry,ref=nexus:9443/profile-ms:buildcache,mode=max" in script
+
+
+def test_host_aliases_reach_the_image_build_but_not_the_registry(monkeypatch):
+    """Pod-level hostAliases cannot help a Dockerfile's RUN steps — those run
+    inside buildkitd, in another pod — so they are passed to the frontend too.
+    The registry host is deliberately NOT redirected: buildkitd resolves that
+    itself, before any frontend option applies."""
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", "tcp://buildkitd:1234")
+    registry = {
+        "host": "registry.areeba.com:9443", "port": 9443, "repository": "profile-ms",
+        "tag": "v1", "dockerfile": "Dockerfile", "username": "u", "password": "p",
+        "verifyTls": True, "connectionId": 1,
+    }
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, "container_image", registry=registry, host_aliases=[
+            {"ip": "10.4.23.182", "hostnames": ["registry.areeba.com", "nexus"]},
+        ]),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    spec = job["spec"]["template"]["spec"]
+    script = spec["initContainers"][1]["command"][2]
+
+    assert "--opt add-hosts=registry.areeba.com=10.4.23.182,nexus=10.4.23.182 " in script
+    # The push target still names the host as configured — the alias does not
+    # rewrite it, and pretending otherwise would be the actual bug.
+    assert "name=registry.areeba.com:9443/profile-ms:v1,push=true" in script
+    assert spec["hostAliases"] == [
+        {"ip": "10.4.23.182", "hostnames": ["registry.areeba.com", "nexus"]}
+    ]

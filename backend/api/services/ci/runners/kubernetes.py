@@ -398,6 +398,34 @@ def _buildctl_output(registry: Dict[str, Any], image_ref: str) -> str:
     return output
 
 
+def _buildctl_add_hosts(execution: StageExecution) -> str:
+    """Host aliases for the RUN steps inside the image build.
+
+    Pod-level hostAliases cannot help here: they apply to the build pod, while
+    the Dockerfile's RUN steps execute inside buildkitd, in another pod. This
+    passes the same mappings to the frontend so a RUN that reaches an internal
+    host resolves it.
+
+    It does NOT affect where the image is pulled from or pushed to — buildkitd
+    resolves the registry host itself, before any frontend option applies. That
+    is an operator concern: either address the registry by IP in its connection,
+    or give the buildkitd Deployment its own hostAliases.
+    """
+    pairs = []
+    for alias in execution.host_aliases or []:
+        if not isinstance(alias, dict):
+            continue
+        ip = str(alias.get("ip") or "").strip()
+        names = alias.get("hostnames")
+        if not ip or not isinstance(names, (list, tuple)):
+            continue
+        for name in names:
+            name = str(name).strip()
+            if name:
+                pairs.append(f"{name}={ip}")
+    return f"--opt add-hosts={','.join(pairs)} " if pairs else ""
+
+
 def _buildctl_cache(registry: Dict[str, Any]) -> str:
     """Layer cache kept in the registry beside the image.
 
@@ -436,6 +464,7 @@ def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
             f"--local context={context} "
             f"--local dockerfile={INLINE_DOCKERFILE_DIR} "
             f"--opt filename=Dockerfile "
+            f"{_buildctl_add_hosts(execution)}"
             f"{_buildctl_cache(registry)}"
             f"--output {_buildctl_output(registry, image_ref)} "
             f"--metadata-file {meta_file}"
@@ -446,6 +475,7 @@ def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
         f"--local context={context} "
         f"--local dockerfile={context}/{dockerfile_dir} "
         f"--opt filename={os.path.basename(dockerfile)} "
+        f"{_buildctl_add_hosts(execution)}"
         f"{_buildctl_cache(registry)}"
         f"--output {_buildctl_output(registry, image_ref)} "
         f"--metadata-file {meta_file}"

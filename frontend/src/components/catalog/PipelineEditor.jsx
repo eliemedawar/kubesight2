@@ -523,6 +523,15 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
               line, as <code>ip=hostname</code>; separate several names for one address
               with commas. Kubernetes applies these to the whole build pod, so every
               stage of this build resolves every stage's mappings.
+              {stage.stageType === "container_image" && (
+                <>
+                  {" "}
+                  They reach this image build's <code>RUN</code> steps too — but not the
+                  pull of its base image or the push of the result, which BuildKit's own
+                  daemon resolves. Address the registry by IP in its connection, or give
+                  the buildkitd Deployment hostAliases.
+                </>
+              )}
             </span>
           </label>
         )}
