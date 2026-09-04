@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   applyCiPipelineTemplate,
   listCiPipelines,
@@ -54,6 +54,42 @@ const envFromText = (text) => {
   });
   return out;
 };
+
+/**
+ * A textarea whose stored form cannot represent everything a person types.
+ *
+ * Commands are stored as an array and env as an object, so re-serialising on
+ * every keystroke deletes the blank line you just made with Enter — the value
+ * snaps back and the key appears dead. Hold the raw text while the field has
+ * focus, publish the parsed form as you type so nothing is lost on save, and
+ * re-sync to the canonical text on blur.
+ */
+function DraftTextarea({ value, onChangeText, ...props }) {
+  const [draft, setDraft] = useState(value);
+  const focused = useRef(false);
+
+  useEffect(() => {
+    if (!focused.current) setDraft(value);
+  }, [value]);
+
+  return (
+    <textarea
+      {...props}
+      value={draft}
+      onFocus={() => {
+        focused.current = true;
+      }}
+      onBlur={() => {
+        focused.current = false;
+        setDraft(value);
+      }}
+      onChange={(event) => {
+        setDraft(event.target.value);
+        onChangeText(event.target.value);
+      }}
+    />
+  );
+}
 
 /**
  * Pipeline tab: the ordered stage list plus one expanded stage editor.
@@ -438,13 +474,16 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
         {shows("commands") && (
           <label className="form-grid__full">
             Commands
-            <textarea
-              rows={4}
+            <DraftTextarea
+              rows={8}
               style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
               value={toLines(stage.commands)}
               placeholder={"mvn -B clean package\nmvn -B test"}
               disabled={!canEdit}
-              onChange={(event) => onChange({ commands: fromLines(event.target.value) })}
+              spellCheck={false}
+              // Lines are kept verbatim: these join back into one shell script,
+              // where a heredoc's blank lines and indentation are content.
+              onChangeText={(text) => onChange({ commands: text.split("\n") })}
             />
             <span className="field-hint">
               One per line. Never put a secret here — reference it below instead.
@@ -455,8 +494,8 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
         {shows("env") && (
           <label className="form-grid__full">
             Environment
-            <textarea
-              rows={3}
+            <DraftTextarea
+              rows={4}
               style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
               value={envToText(stage.env)}
               placeholder={
@@ -465,7 +504,7 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
                   : "MAVEN_OPTS=-Xmx2g"
               }
               disabled={!canEdit}
-              onChange={(event) => onChange({ env: envFromText(event.target.value) })}
+              onChangeText={(text) => onChange({ env: envFromText(text) })}
             />
             <span className="field-hint">
               {stage.stageType === "container_image"
@@ -529,17 +568,18 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
         {shows("artifacts") && (
         <label className="form-grid__full">
           Artifacts to collect
-          <textarea
-            rows={2}
+          <DraftTextarea
+            rows={3}
             style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
             value={(stage.artifacts || [])
               .map((item) => `${item.path}:${item.type || "binary"}`)
               .join("\n")}
             placeholder={"target/*.jar:jar\ntarget/surefire-reports/*.xml:test-report"}
             disabled={!canEdit}
-            onChange={(event) =>
+            spellCheck={false}
+            onChangeText={(text) =>
               onChange({
-                artifacts: fromLines(event.target.value).map((line) => {
+                artifacts: fromLines(text).map((line) => {
                   const index = line.lastIndexOf(":");
                   return index > 0
                     ? { path: line.slice(0, index), type: line.slice(index + 1) }

@@ -431,3 +431,27 @@ def test_operator_can_run_builds_but_not_edit_pipelines(client, admin_token, ope
 
 def test_unauthenticated_requests_are_rejected(client):
     assert client.get("/api/ci/services").status_code == 401
+
+
+def test_command_stage_keeps_heredoc_shape():
+    """Commands join back into one shell script, so blank lines and leading
+    indentation inside a heredoc are content, not formatting to be tidied."""
+    from api.services.ci import pipelines as pipelines_service
+
+    commands = [
+        "cat > Dockerfile <<'EOF'",
+        "FROM alpine",
+        "",
+        "    RUN echo indented",
+        "EOF",
+        "",
+    ]
+    parsed = pipelines_service._command_lines(commands)
+
+    assert parsed == [
+        "cat > Dockerfile <<'EOF'",
+        "FROM alpine",
+        "",
+        "    RUN echo indented",
+        "EOF",
+    ]

@@ -58,6 +58,30 @@ def _string_list(value: Any, *, limit: int, item_limit: int) -> List[str]:
     return out
 
 
+def _command_lines(value: Any) -> List[str]:
+    """Stage commands, kept as the author wrote them.
+
+    These lines are joined back into one shell script, so unlike a list of
+    labels they are whitespace-sensitive: a heredoc that writes a Dockerfile or
+    a properties file breaks if interior blank lines vanish or leading
+    indentation is stripped. Only trailing whitespace is removed, and only
+    leading/trailing blank lines are dropped — an entirely empty list still
+    fails the "command stage with no commands" check above.
+    """
+    if isinstance(value, str):
+        items = value.splitlines()
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = []
+    lines = [str(item or "").rstrip()[:MAX_COMMAND_CHARS] for item in items[:MAX_COMMANDS_PER_STAGE]]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
 def _label_list(value: Any) -> List[str]:
     seen: List[str] = []
     for item in _string_list(value, limit=20, item_limit=64):
@@ -158,9 +182,7 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
             f"Stage '{name}' targets an unknown runner type '{runner_type}'."
         )
 
-    commands = _string_list(
-        payload.get("commands"), limit=MAX_COMMANDS_PER_STAGE, item_limit=MAX_COMMAND_CHARS
-    )
+    commands = _command_lines(payload.get("commands"))
     if stage_type == "command" and not commands:
         raise PipelineError(f"Stage '{name}' is a command stage but has no commands.")
 
