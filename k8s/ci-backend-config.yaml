@@ -48,6 +48,17 @@ data:
   # k8s/ci-buildkitd.yaml is applied and the buildkitd pod is 1/1 Ready.
   CI_BUILDKIT_ADDR: tcp://buildkitd.kubesight-buildkit.svc.cluster.local:1234
 
+  # --- Artifact store -------------------------------------------------------
+  # Where uploaded artifacts (jars, reports, APKs) are written. Container
+  # images are NOT stored here — only their registry coordinates and digest are
+  # recorded, the bytes stay in the registry.
+  #
+  # This is a directory in the backend container, so it MUST be backed by a
+  # PersistentVolume: without one, every rollout of the backend deletes every
+  # artifact, breaking old download links and "Rerun from here", which restores
+  # from exactly these files. Mount a PVC at this path on the Deployment.
+  CI_ARTIFACT_DIR: /var/lib/kubesight/ci-artifacts
+
   # --- Dependency cache -----------------------------------------------------
   # The single biggest build-time saving: without it every build re-downloads
   # its whole dependency graph. Set to a StorageClass that supports
