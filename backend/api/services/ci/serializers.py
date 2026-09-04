@@ -7,6 +7,7 @@ key and metadata; credential profiles serialize to their name and type.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +25,25 @@ from ...models_ci import (
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value else None
+
+
+def _json_list(value: Any) -> List[Any]:
+    """A JSON list column, whatever the database handed back.
+
+    A db.JSON attribute normally arrives as a list. It arrives as a *string* when
+    the underlying column is text — which happens on PostgreSQL if a migration
+    added the column with the wrong type, since psycopg2 only parses values from
+    a real json column. ``list()`` over that string would silently produce one
+    entry per character, so decode it instead of trusting the type.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "[]")
+        except ValueError:
+            return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +120,7 @@ def pipeline_stage_to_dict(row: CiPipelineStage) -> Dict[str, Any]:
         "artifacts": list(row.artifacts or []),
         "resources": row.resources or {},
         # NULL on stages saved before host aliases existed — read as none set.
-        "hostAliases": list(row.host_aliases or []),
+        "hostAliases": _json_list(row.host_aliases),
         "timeoutSeconds": row.timeout_seconds,
         "continueOnFailure": bool(row.continue_on_failure),
         "parallelGroup": row.parallel_group,

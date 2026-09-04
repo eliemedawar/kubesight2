@@ -44,6 +44,40 @@ def _add_column_if_missing(table_name: str, col: str, sql_type: str) -> None:
         conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col} {_portable_type(sql_type)}"))
 
 
+def _retype_json_column(table_name: str, col: str) -> None:
+    """Repair a JSON column that an earlier migration created as TEXT.
+
+    PostgreSQL is the case that matters: a db.JSON attribute over a text column
+    reads back as the raw JSON string instead of a list, so callers iterate its
+    characters. SQLite has no typed columns, so there is nothing to fix there.
+    Stored values are already valid JSON documents, which is what makes the
+    USING cast safe. Best effort — a boot must not fail over this.
+    """
+    if db.engine.dialect.name == "sqlite":
+        return
+    try:
+        columns = {c["name"]: c for c in inspect(db.engine).get_columns(table_name)}
+    except Exception:
+        return
+    column = columns.get(col)
+    if column is None or "json" in str(column.get("type", "")).lower():
+        return
+    try:
+        with db.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"ALTER TABLE {table_name} ALTER COLUMN {col} "
+                    f"TYPE JSON USING {col}::json"
+                )
+            )
+    except Exception:
+        logger.warning(
+            "Could not convert %s.%s to JSON; values are coerced on read instead.",
+            table_name,
+            col,
+        )
+
+
 def _drop_column_if_exists(table_name: str, col: str) -> None:
     cols = _table_columns(table_name)
     if col not in cols:
@@ -674,7 +708,13 @@ def _migrate_ci_columns() -> None:
         # Added after the table shipped: db.create_all() will not alter an
         # existing table, so a deployed database needs this backfilled. Existing
         # rows read as NULL, which the serializer renders as an empty list.
-        _add_column_if_missing("ci_pipeline_stages", "host_aliases", "TEXT")
+        #
+        # The type must be JSON, not TEXT: the model declares db.JSON, and on
+        # PostgreSQL psycopg2 only parses a value back into a list when the
+        # column's real type is json. Against a TEXT column the attribute reads
+        # as the raw JSON string, which then iterates as characters.
+        _add_column_if_missing("ci_pipeline_stages", "host_aliases", "JSON")
+        _retype_json_column("ci_pipeline_stages", "host_aliases")
 
 
 def _migrate_registry_connection_columns() -> None:

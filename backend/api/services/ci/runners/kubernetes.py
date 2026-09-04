@@ -623,10 +623,13 @@ def _merged_host_aliases(plan: List[StageExecution]) -> List[Dict[str, Any]]:
     by_ip: Dict[str, Dict[str, Any]] = {}
     for execution in plan:
         for alias in execution.host_aliases or []:
-            ip = str((alias or {}).get("ip") or "").strip()
+            if not isinstance(alias, dict):
+                continue  # never let a malformed snapshot break a whole build
+            ip = str(alias.get("ip") or "").strip()
+            raw_names = alias.get("hostnames")
             hostnames = [
                 str(name).strip()
-                for name in (alias or {}).get("hostnames") or []
+                for name in (raw_names if isinstance(raw_names, (list, tuple)) else [])
                 if str(name).strip()
             ]
             if not ip or not hostnames:

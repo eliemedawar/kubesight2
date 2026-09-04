@@ -506,3 +506,21 @@ def test_host_aliases_absent_means_none():
 
     for empty in (None, "", [], {}):
         assert pipelines_service._host_aliases(empty, "s") == []
+
+
+def test_json_list_column_survives_a_text_typed_column():
+    """PostgreSQL hands a db.JSON attribute back as a raw string when the column
+    was created as TEXT. list() over that string yields one entry per character,
+    which reached the editor as a row of 'undefined=' lines — decode instead.
+    """
+    from api.services.ci.serializers import _json_list
+
+    stored = '[{"ip": "10.10.10.20", "hostnames": ["nexus.areeba.com", "nexus"]}]'
+    assert _json_list(stored) == [
+        {"ip": "10.10.10.20", "hostnames": ["nexus.areeba.com", "nexus"]}
+    ]
+    assert _json_list([{"ip": "10.0.0.1", "hostnames": ["a"]}]) == [
+        {"ip": "10.0.0.1", "hostnames": ["a"]}
+    ]
+    for empty in (None, "", "not json", {}, 7):
+        assert _json_list(empty) == []
