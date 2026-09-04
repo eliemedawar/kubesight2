@@ -289,13 +289,58 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
   );
 }
 
+/**
+ * Which fields a stage type actually consumes at run time. Offering the rest
+ * is a lie the runner then ignores: a checkout runs a fixed script in the
+ * worker image, so its `image` and `commands` go nowhere, and artifacts are
+ * explicitly skipped for container_image stages (the image IS the artifact).
+ * Keep this in step with runners/kubernetes.py.
+ */
+const STAGE_FIELDS = {
+  checkout: new Set(["runner"]),
+  command: new Set(["runner", "image", "workdir", "commands", "env", "secrets", "artifacts"]),
+  container_image: new Set(["runner", "workdir", "env"]),
+  publish_artifact: new Set([]),
+  scan: new Set([]),
+};
+
+// Everything the new type will not use, cleared on the way — otherwise a value
+// typed under one type lingers invisibly in the saved pipeline.
+const CLEARED_BY_FIELD = {
+  image: { image: "" },
+  workdir: { workingDirectory: "" },
+  commands: { commands: [] },
+  env: { env: {} },
+  secrets: { secretRefs: [] },
+  artifacts: { artifacts: [] },
+};
+
 function StageFields({ stage, secretKeys, canEdit, onChange }) {
   const unimplemented = UNIMPLEMENTED_STAGE_TYPES.has(stage.stageType);
+  const fields = STAGE_FIELDS[stage.stageType] || STAGE_FIELDS.command;
+  const shows = (field) => fields.has(field);
+
+  const changeType = (stageType) => {
+    const next = STAGE_FIELDS[stageType] || STAGE_FIELDS.command;
+    const patch = { stageType };
+    for (const [field, cleared] of Object.entries(CLEARED_BY_FIELD)) {
+      if (!next.has(field)) Object.assign(patch, cleared);
+    }
+    onChange(patch);
+  };
 
   return (
     <div className="sg-ci-stage-card-body">
       {unimplemented && (
         <p className="banner-message info">{CONDITIONAL_STAGE_TYPES[stage.stageType]}</p>
+      )}
+
+      {stage.stageType === "checkout" && (
+        <p className="muted sg-ci-stage-note">
+          Clones the repository into <code>/workspace/source</code> using a fixed script.
+          The repository, branch and credentials come from the Source tab — there is
+          nothing to configure here.
+        </p>
       )}
 
       <div className="form-grid">
@@ -313,7 +358,7 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
           <select
             value={stage.stageType}
             disabled={!canEdit}
-            onChange={(event) => onChange({ stageType: event.target.value })}
+            onChange={(event) => changeType(event.target.value)}
           >
             {STAGE_TYPES.map((type) => (
               <option key={type.value} value={type.value}>
@@ -323,88 +368,114 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
           </select>
         </label>
 
-        <label>
-          Runner
-          <select
-            value={stage.runnerType || ""}
-            disabled={!canEdit}
-            onChange={(event) => onChange({ runnerType: event.target.value })}
-          >
-            {RUNNER_TYPES.map((type) => (
-              <option key={type.value} value={type.value}>
-                {type.label}
-              </option>
-            ))}
-          </select>
-          <span className="field-hint">Leave as "any" and let labels decide.</span>
-        </label>
-        <label>
-          Required capabilities
-          <input
-            value={(stage.runnerLabels || []).join(", ")}
-            placeholder="linux, java21"
-            disabled={!canEdit}
-            onChange={(event) =>
-              onChange({
-                runnerLabels: event.target.value
-                  .split(",")
-                  .map((item) => item.trim().toLowerCase())
-                  .filter(Boolean),
-              })
-            }
-          />
-          <span className="field-hint">
-            A runner must advertise all of these to be eligible.
-          </span>
-        </label>
+        {shows("runner") && (
+          <>
+            <label>
+              Runner
+              <select
+                value={stage.runnerType || ""}
+                disabled={!canEdit}
+                onChange={(event) => onChange({ runnerType: event.target.value })}
+              >
+                {RUNNER_TYPES.map((type) => (
+                  <option key={type.value} value={type.value}>
+                    {type.label}
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">Leave as "any" and let labels decide.</span>
+            </label>
+            <label>
+              Required capabilities
+              <input
+                value={(stage.runnerLabels || []).join(", ")}
+                placeholder="linux, java21"
+                disabled={!canEdit}
+                onChange={(event) =>
+                  onChange({
+                    runnerLabels: event.target.value
+                      .split(",")
+                      .map((item) => item.trim().toLowerCase())
+                      .filter(Boolean),
+                  })
+                }
+              />
+              <span className="field-hint">
+                A runner must advertise all of these to be eligible.
+              </span>
+            </label>
+          </>
+        )}
 
-        <label>
-          Container image
-          <input
-            value={stage.image || ""}
-            placeholder="maven:3.9-eclipse-temurin-21"
-            disabled={!canEdit}
-            onChange={(event) => onChange({ image: event.target.value })}
-          />
-        </label>
-        <label>
-          Working directory
-          <input
-            value={stage.workingDirectory || ""}
-            placeholder="(service default)"
-            disabled={!canEdit}
-            onChange={(event) => onChange({ workingDirectory: event.target.value })}
-          />
-        </label>
+        {shows("image") && (
+          <label>
+            Container image
+            <input
+              value={stage.image || ""}
+              placeholder="maven:3.9-eclipse-temurin-21"
+              disabled={!canEdit}
+              onChange={(event) => onChange({ image: event.target.value })}
+            />
+          </label>
+        )}
+        {shows("workdir") && (
+          <label>
+            Working directory
+            <input
+              value={stage.workingDirectory || ""}
+              placeholder="(service default)"
+              disabled={!canEdit}
+              onChange={(event) => onChange({ workingDirectory: event.target.value })}
+            />
+            {stage.stageType === "container_image" && (
+              <span className="field-hint">
+                The build context — where the Dockerfile is looked for.
+              </span>
+            )}
+          </label>
+        )}
 
-        <label className="form-grid__full">
-          Commands
-          <textarea
-            rows={4}
-            style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
-            value={toLines(stage.commands)}
-            placeholder={"mvn -B clean package\nmvn -B test"}
-            disabled={!canEdit}
-            onChange={(event) => onChange({ commands: fromLines(event.target.value) })}
-          />
-          <span className="field-hint">
-            One per line. Never put a secret here — reference it below instead.
-          </span>
-        </label>
+        {shows("commands") && (
+          <label className="form-grid__full">
+            Commands
+            <textarea
+              rows={4}
+              style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
+              value={toLines(stage.commands)}
+              placeholder={"mvn -B clean package\nmvn -B test"}
+              disabled={!canEdit}
+              onChange={(event) => onChange({ commands: fromLines(event.target.value) })}
+            />
+            <span className="field-hint">
+              One per line. Never put a secret here — reference it below instead.
+            </span>
+          </label>
+        )}
 
-        <label className="form-grid__full">
-          Environment
-          <textarea
-            rows={3}
-            style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
-            value={envToText(stage.env)}
-            placeholder="MAVEN_OPTS=-Xmx2g"
-            disabled={!canEdit}
-            onChange={(event) => onChange({ env: envFromText(event.target.value) })}
-          />
-          <span className="field-hint">KEY=value, one per line. Not for secrets.</span>
-        </label>
+        {shows("env") && (
+          <label className="form-grid__full">
+            Environment
+            <textarea
+              rows={3}
+              style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
+              value={envToText(stage.env)}
+              placeholder={
+                stage.stageType === "container_image"
+                  ? "IMAGE_NAME=profile-ms\nIMAGE_TAG=V1.0.27\nDOCKERFILE_PATH=Dockerfile"
+                  : "MAVEN_OPTS=-Xmx2g"
+              }
+              disabled={!canEdit}
+              onChange={(event) => onChange({ env: envFromText(event.target.value) })}
+            />
+            <span className="field-hint">
+              {stage.stageType === "container_image"
+                ? "KEY=value, one per line. IMAGE_NAME, IMAGE_TAG and DOCKERFILE_PATH override the defaults (service slug, git ref, Dockerfile)."
+                : "KEY=value, one per line. Not for secrets."}
+            </span>
+          </label>
+        )}
 
+        {shows("secrets") && (
         <div className="form-grid__full">
           <p className="form-label">Secrets</p>
           {secretKeys.length === 0 ? (
@@ -453,7 +524,9 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
             </div>
           )}
         </div>
+        )}
 
+        {shows("artifacts") && (
         <label className="form-grid__full">
           Artifacts to collect
           <textarea
@@ -477,6 +550,7 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
           />
           <span className="field-hint">One per line, as path:type.</span>
         </label>
+        )}
 
         <label>
           Timeout (seconds)

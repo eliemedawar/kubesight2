@@ -1104,3 +1104,9 @@ button.sg-ci-strip-node:hover {
   font-size: 0.75rem;
   text-align: right;
 }
+
+/* Explanatory line at the top of a stage that has little to configure. */
+.sg-ci-stage-note {
+  margin: 0 0 var(--space-2);
+  font-size: 0.78rem;
+}
