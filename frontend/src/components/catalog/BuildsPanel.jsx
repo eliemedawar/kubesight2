@@ -3,6 +3,7 @@ import { listCiServiceBuilds } from "../../api/ciApi.js";
 import EmptyState from "../common/EmptyState.jsx";
 import LoadingState from "../common/LoadingState.jsx";
 import BuildDetailDrawer from "./BuildDetailDrawer.jsx";
+import StageMatrix from "./StageMatrix.jsx";
 import {
   StatusPill,
   TagIcon,
@@ -26,19 +27,47 @@ const STATUS_FILTERS = [
 // newest-first — older runs are reached through the status filters.
 const PAGE_SIZE = 10;
 
+const VIEWS = [
+  ["table", "Table"],
+  ["stages", "Stages"],
+];
+
+const viewKey = (serviceId) => `ks.ci.buildsview.${serviceId}`;
+
 /**
- * Builds tab: the list, plus the drawer.
+ * Which view this service opens on.
  *
- * Auto-refreshes only while at least one build is active, so a service whose
- * builds have all finished stops polling entirely.
+ * The grid earns its place once there is a history of multi-stage builds to
+ * compare; before that it is one row of durations, which the table says better.
+ * A choice the user makes is remembered per service and wins from then on.
+ */
+function initialView(service) {
+  try {
+    const saved = window.localStorage.getItem(viewKey(service.id));
+    if (saved === "table" || saved === "stages") return saved;
+  } catch {
+    // Private mode or blocked storage: fall through to the default.
+  }
+  return (service.pipelineStageCount || 0) >= 2 && (service.buildCount || 0) >= 2
+    ? "stages"
+    : "table";
+}
+
+/**
+ * Builds tab: the history, in either of its two readings, plus the drawer.
+ *
+ * Table answers "what happened in this build"; Stages answers "where does this
+ * pipeline keep breaking". Both share the status filter and the same drawer, so
+ * switching never loses the user's place.
  */
 export default function BuildsPanel({ service, canCancel, canRetry, refreshToken }) {
+  const [view, setView] = useState(() => initialView(service));
   const [builds, setBuilds] = useState([]);
   const [queueDepth, setQueueDepth] = useState(0);
   const [status, setStatus] = useState("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [openBuildId, setOpenBuildId] = useState(null);
+  const [openBuild, setOpenBuild] = useState(null);
   const timerRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -59,7 +88,10 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
     }
   }, [service.id, status]);
 
+  // Only the visible view polls. The grid fetches its own payload, so keeping
+  // the table's loop alive underneath it would double the traffic for nothing.
   useEffect(() => {
+    if (view !== "table") return undefined;
     let cancelled = false;
     const tick = async () => {
       const active = await load();
@@ -71,7 +103,86 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
       cancelled = true;
       window.clearTimeout(timerRef.current);
     };
-  }, [load, refreshToken]);
+  }, [load, refreshToken, view]);
+
+  const chooseView = (next) => {
+    setView(next);
+    try {
+      window.localStorage.setItem(viewKey(service.id), next);
+    } catch {
+      // Not remembering the choice is survivable; failing to switch is not.
+    }
+  };
+
+  const toolbar = (
+    <div className="sg-cat-toolbar">
+      <div className="sg-cat-tabs" role="group" aria-label="Filter builds by status">
+        {STATUS_FILTERS.map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            className={`sg-cat-tab${status === value ? " is-on" : ""}`}
+            aria-pressed={status === value}
+            onClick={() => setStatus(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {/* Queue depth comes with the list response, so it is only ever shown by
+          the view that fetched it. */}
+      {view === "table" && queueDepth > 0 && (
+        <span className="muted">
+          {queueDepth} build{queueDepth === 1 ? "" : "s"} waiting in the queue
+        </span>
+      )}
+      <div
+        className="sg-cat-tabs sg-ci-view-switch"
+        role="group"
+        aria-label="How to read the build history"
+      >
+        {VIEWS.map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            className={`sg-cat-tab${view === value ? " is-on" : ""}`}
+            aria-pressed={view === value}
+            onClick={() => chooseView(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  const drawer = openBuild && (
+    <BuildDetailDrawer
+      buildId={openBuild.buildId}
+      initialStageId={openBuild.stageId}
+      onClose={() => setOpenBuild(null)}
+      onChanged={load}
+      canCancel={canCancel}
+      canRetry={canRetry}
+    />
+  );
+
+  if (view === "stages") {
+    return (
+      <div className="sg-ci-panel">
+        {toolbar}
+        <StageMatrix
+          service={service}
+          status={status}
+          canRetry={canRetry}
+          refreshToken={refreshToken}
+          onOpenStage={(buildId, stageId) => setOpenBuild({ buildId, stageId })}
+          onStatusChange={setStatus}
+        />
+        {drawer}
+      </div>
+    );
+  }
 
   if (loading) return <LoadingState label="Loading builds…" />;
 
@@ -79,26 +190,7 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
     <div className="sg-ci-panel">
       {error && <p className="banner-message error">{error}</p>}
 
-      <div className="sg-cat-toolbar">
-        <div className="sg-cat-tabs" role="group" aria-label="Filter builds by status">
-          {STATUS_FILTERS.map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              className={`sg-cat-tab${status === value ? " is-on" : ""}`}
-              aria-pressed={status === value}
-              onClick={() => setStatus(value)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        {queueDepth > 0 && (
-          <span className="muted">
-            {queueDepth} build{queueDepth === 1 ? "" : "s"} waiting in the queue
-          </span>
-        )}
-      </div>
+      {toolbar}
 
       {builds.length === 0 ? (
         <EmptyState
@@ -128,11 +220,11 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
                   tabIndex={0}
                   role="button"
                   aria-label={`Open build ${build.number}`}
-                  onClick={() => setOpenBuildId(build.id)}
+                  onClick={() => setOpenBuild({ buildId: build.id, stageId: null })}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
-                      setOpenBuildId(build.id);
+                      setOpenBuild({ buildId: build.id, stageId: null });
                     }
                   }}
                 >
@@ -204,15 +296,7 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
         </div>
       )}
 
-      {openBuildId && (
-        <BuildDetailDrawer
-          buildId={openBuildId}
-          onClose={() => setOpenBuildId(null)}
-          onChanged={load}
-          canCancel={canCancel}
-          canRetry={canRetry}
-        />
-      )}
+      {drawer}
     </div>
   );
 }

@@ -1,0 +1,816 @@
+<title>CI Stage Matrix</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* ── Signal tokens (frontend/src/index.css v3) — light is the default ── */
+  :root {
+    --bg-page: #f8f7f5; --bg-panel: #ffffff; --bg-inset: #f4f3f0; --bg-interactive: #f3f2ef;
+    --text-strong: #131417; --text-main: #1a1b1e; --text-subtle: #494b52; --text-muted: #6e7076;
+    --accent: #ff2929; --accent-text: #d71f1f; --accent-soft: #fff1ef; --accent-border: rgba(255,41,41,.35);
+    --ok: #178a45; --ok-soft: #f0f8f3; --ok-border: rgba(23,138,69,.3);
+    --warn: #a66104; --warn-soft: #fdf6ea; --warn-border: rgba(166,97,4,.34);
+    --danger: #d71f1f; --danger-soft: #fdeeee; --danger-border: rgba(215,31,31,.3);
+    --info: #0e7490; --info-soft: #eef7fa; --info-border: rgba(14,116,144,.28);
+    --border: #e9e7e3; --border-soft: #f0efeb; --border-strong: #d8d6d0;
+    --well-bg: #101113; --well-ink: #dfe3e8; --well-border: #24262a;
+    --shadow-sm: 0 1px 2px rgba(26,27,30,.05);
+    --shadow-md: 0 2px 8px rgba(26,27,30,.06), 0 1px 2px rgba(26,27,30,.05);
+    --shadow-lg: 0 24px 60px -12px rgba(26,27,30,.16), 0 4px 14px rgba(26,27,30,.07);
+    --ring: 0 0 0 3px rgba(255,41,41,.18);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg-page: #131416; --bg-panel: #1a1b1e; --bg-inset: #202124; --bg-interactive: #24262a;
+      --text-strong: #fafaf9; --text-main: #ececea; --text-subtle: #b9bac0; --text-muted: #8b8d96;
+      --accent: #ff3b3b; --accent-text: #ff8078; --accent-soft: rgba(255,59,59,.14); --accent-border: rgba(255,59,59,.42);
+      --ok: #34c46f; --ok-soft: rgba(52,196,111,.13); --ok-border: rgba(52,196,111,.34);
+      --warn: #e9a83a; --warn-soft: rgba(233,168,58,.13); --warn-border: rgba(233,168,58,.36);
+      --danger: #ff5a5a; --danger-soft: rgba(255,90,90,.13); --danger-border: rgba(255,90,90,.34);
+      --info: #38b6d6; --info-soft: rgba(56,182,214,.13); --info-border: rgba(56,182,214,.32);
+      --border: rgba(236,236,234,.13); --border-soft: rgba(236,236,234,.08); --border-strong: rgba(236,236,234,.26);
+      --well-bg: #0b0c0e; --well-ink: #d5dbe4; --well-border: rgba(236,236,234,.13);
+      --shadow-sm: 0 1px 2px rgba(0,0,0,.5);
+      --shadow-md: 0 2px 8px rgba(0,0,0,.45);
+      --shadow-lg: 0 24px 60px -12px rgba(0,0,0,.6), 0 4px 14px rgba(0,0,0,.4);
+      --ring: 0 0 0 3px rgba(255,59,59,.24);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg-page: #131416; --bg-panel: #1a1b1e; --bg-inset: #202124; --bg-interactive: #24262a;
+    --text-strong: #fafaf9; --text-main: #ececea; --text-subtle: #b9bac0; --text-muted: #8b8d96;
+    --accent: #ff3b3b; --accent-text: #ff8078; --accent-soft: rgba(255,59,59,.14); --accent-border: rgba(255,59,59,.42);
+    --ok: #34c46f; --ok-soft: rgba(52,196,111,.13); --ok-border: rgba(52,196,111,.34);
+    --warn: #e9a83a; --warn-soft: rgba(233,168,58,.13); --warn-border: rgba(233,168,58,.36);
+    --danger: #ff5a5a; --danger-soft: rgba(255,90,90,.13); --danger-border: rgba(255,90,90,.34);
+    --info: #38b6d6; --info-soft: rgba(56,182,214,.13); --info-border: rgba(56,182,214,.32);
+    --border: rgba(236,236,234,.13); --border-soft: rgba(236,236,234,.08); --border-strong: rgba(236,236,234,.26);
+    --well-bg: #0b0c0e; --well-ink: #d5dbe4; --well-border: rgba(236,236,234,.13);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.5);
+    --shadow-md: 0 2px 8px rgba(0,0,0,.45);
+    --shadow-lg: 0 24px 60px -12px rgba(0,0,0,.6), 0 4px 14px rgba(0,0,0,.4);
+    --ring: 0 0 0 3px rgba(255,59,59,.24);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg-page); color: var(--text-main);
+    font-family: 'Inter', 'Segoe UI', Roboto, Arial, sans-serif;
+    font-size: 15.5px; line-height: 1.62; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 3rem 1.5rem 6rem; }
+  .col { max-width: 68ch; }
+  h1, h2, h3 { font-family: 'Plus Jakarta Sans', 'Inter', sans-serif; color: var(--text-strong); text-wrap: balance; line-height: 1.14; }
+  h1 { font-size: clamp(2rem, 4.6vw, 2.9rem); font-weight: 800; letter-spacing: -.032em; margin: .5rem 0 .9rem; }
+  h2 { font-size: 1.32rem; font-weight: 700; letter-spacing: -.018em; margin: 0 0 .55rem; }
+  h3 { font-size: .95rem; font-weight: 700; letter-spacing: -.005em; margin: 0 0 .3rem; }
+  p { margin: 0 0 1rem; }
+  a { color: var(--accent-text); }
+  section { margin-top: 3.9rem; }
+  .mono, code, .dur { font-family: 'IBM Plex Mono', Consolas, Menlo, monospace; font-variant-numeric: tabular-nums; }
+  code { background: var(--bg-inset); border: 1px solid var(--border); border-radius: 5px; padding: .06em .34em; font-size: .84em; }
+  .eyebrow {
+    font-size: .69rem; font-weight: 600; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--text-muted); margin: 0;
+  }
+  .dek { font-size: 1.08rem; color: var(--text-subtle); max-width: 66ch; }
+  .lede { color: var(--text-subtle); }
+  .muted { color: var(--text-muted); }
+  hr.rule { border: 0; border-top: 1px solid var(--border); margin: 2.2rem 0 0; }
+
+  /* ── page head ── */
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .brandmark { display: flex; align-items: center; gap: .55rem; font-weight: 600; font-size: .82rem; color: var(--text-subtle); }
+  .dot-mark { width: 16px; height: 16px; border-radius: 999px; background: var(--accent); flex: none; }
+  .themebtn {
+    font: inherit; font-size: .78rem; font-weight: 600; color: var(--text-subtle);
+    background: var(--bg-panel); border: 1px solid var(--border); border-radius: 999px;
+    padding: .34rem .85rem; cursor: pointer;
+  }
+  .themebtn:hover { border-color: var(--border-strong); color: var(--text-main); }
+  .themebtn:focus-visible { outline: none; box-shadow: var(--ring); }
+
+  /* ── generic panel ── */
+  .panel {
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 18px; box-shadow: var(--shadow-md);
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    flex-wrap: wrap; padding: 1rem 1.15rem; border-bottom: 1px solid var(--border);
+  }
+  .panel-title { display: flex; align-items: baseline; gap: .55rem; }
+  .panel-title strong { font-family: 'Plus Jakarta Sans', sans-serif; font-size: 1.02rem; letter-spacing: -.01em; color: var(--text-strong); }
+
+  /* segmented control (Signal: pill, red-soft active) */
+  .seg { display: inline-flex; gap: .2rem; padding: .2rem; background: var(--bg-inset); border-radius: 999px; }
+  .seg button {
+    font: inherit; font-size: .78rem; font-weight: 600; color: var(--text-subtle);
+    background: transparent; border: 0; border-radius: 999px; padding: .32rem .8rem; cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] { background: var(--bg-panel); color: var(--accent-text); box-shadow: var(--shadow-sm); }
+  .seg button:focus-visible { outline: none; box-shadow: var(--ring); }
+  .btn {
+    font: inherit; font-size: .78rem; font-weight: 600; cursor: pointer;
+    border-radius: 999px; padding: .38rem .9rem;
+    background: var(--bg-panel); border: 1px solid var(--border); color: var(--text-subtle);
+  }
+  .btn:hover { border-color: var(--border-strong); color: var(--text-main); }
+  .btn:focus-visible { outline: none; box-shadow: var(--ring); }
+  .btn--primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn--primary:hover { background: var(--accent-text); border-color: var(--accent-text); color: #fff; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: .28rem;
+    font-size: .68rem; font-weight: 600; letter-spacing: .01em;
+    border-radius: 999px; padding: .1rem .48rem;
+    background: var(--bg-inset); border: 1px solid var(--border); color: var(--text-subtle);
+  }
+  .chip--ok { background: var(--ok-soft); border-color: var(--ok-border); color: var(--ok); }
+  .chip--danger { background: var(--danger-soft); border-color: var(--danger-border); color: var(--danger); }
+  .chip--info { background: var(--info-soft); border-color: var(--info-border); color: var(--info); }
+  .chip--warn { background: var(--warn-soft); border-color: var(--warn-border); color: var(--warn); }
+  .chip--accent { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent-text); }
+
+  /* ── the matrix ── */
+  .mx-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
+  table.mx { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 900px; }
+  table.mx th, table.mx td { padding: 0; }
+
+  /* column headers = stage identity + its own average */
+  .mx thead th {
+    position: sticky; top: 0; z-index: 3;
+    background: var(--bg-panel); border-bottom: 1px solid var(--border);
+    vertical-align: bottom; text-align: left;
+  }
+  .mx thead th.gut {
+    left: 0; z-index: 4; min-width: 240px; width: 240px;
+    border-right: 1px solid var(--border);
+    padding: .7rem 1.1rem;
+  }
+  .mx thead th.stg { min-width: 118px; padding: .7rem .7rem .6rem; border-left: 1px solid var(--border-soft); }
+  .stg-name {
+    display: block; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700;
+    font-size: .8rem; letter-spacing: -.005em; color: var(--text-strong);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .stg-avg { display: block; font-size: .68rem; color: var(--text-muted); margin-top: .12rem; }
+  .stg-bar { display: block; height: 3px; border-radius: 999px; background: var(--bg-inset); margin-top: .4rem; overflow: hidden; }
+  .stg-bar > i { display: block; height: 100%; background: var(--border-strong); border-radius: 999px; }
+  .stg--hot .stg-name { color: var(--danger); }
+  .stg--hot .stg-bar > i { background: var(--danger-border); }
+  .hdr-label { font-size: .66rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--text-muted); }
+
+  /* left gutter = the build, same vocabulary as the Builds table */
+  .mx tbody th.gut {
+    position: sticky; left: 0; z-index: 2; text-align: left;
+    background: var(--bg-panel); border-right: 1px solid var(--border);
+    padding: .55rem 1.1rem; vertical-align: middle; font-weight: 400;
+  }
+  .mx tbody tr + tr th.gut, .mx tbody tr + tr td { border-top: 1px solid var(--border-soft); }
+  .gut-l1 { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+  .gut-num { font-family: 'IBM Plex Mono', monospace; font-weight: 500; font-size: .9rem; color: var(--text-strong); }
+  .gut-l2 { display: flex; align-items: center; gap: .42rem; margin-top: .15rem; font-size: .71rem; color: var(--text-muted); flex-wrap: wrap; }
+  .gut-l2 .sha { font-family: 'IBM Plex Mono', monospace; }
+  .row--live th.gut { box-shadow: inset 3px 0 0 var(--accent); }
+
+  /* cells */
+  .cell {
+    position: relative; display: block; width: 100%; min-height: 56px;
+    background: transparent; border: 0; border-left: 1px solid var(--border-soft);
+    font: inherit; text-align: center; padding: .5rem .4rem .55rem; cursor: pointer;
+    color: var(--text-subtle);
+  }
+  .cell:focus-visible { outline: none; box-shadow: var(--ring); z-index: 5; }
+  .cell::after { content: ""; position: absolute; inset: auto 0 0 0; height: 2px; background: transparent; }
+  .cell .dur { display: block; font-size: .8rem; font-weight: 500; }
+  .cell .note { display: block; font-size: .63rem; margin-top: .1rem; color: var(--text-muted); }
+  .cell .glyph { position: absolute; top: .34rem; right: .42rem; font-size: .62rem; line-height: 1; opacity: .8; }
+
+  .cell--success { background: var(--ok-soft); color: var(--ok); }
+  .cell--success::after { background: var(--ok); }
+  .cell--running { background: var(--info-soft); color: var(--info); }
+  .cell--running::after { background: var(--info-border); }
+  .cell--failed, .cell--timeout { background: var(--danger-soft); color: var(--danger); }
+  .cell--failed::after, .cell--timeout::after { background: var(--danger); }
+  .cell--skipped { background: var(--warn-soft); color: var(--warn); }
+  .cell--skipped::after { background: var(--warn-border); }
+  .cell--cancelled { background: var(--bg-inset); color: var(--text-muted); }
+  .cell--cancelled::after { background: var(--border-strong); }
+  .cell--pending, .cell--unreached { color: var(--text-muted); }
+  .cell--void {
+    cursor: default;
+    background-image: repeating-linear-gradient(135deg, transparent 0 6px, var(--border-soft) 6px 7px);
+  }
+  .cell--void .dur { visibility: hidden; }
+  .cell:hover:not(.cell--void) { filter: saturate(1.12) brightness(.985); }
+  :root[data-theme="dark"] .cell:hover:not(.cell--void) { filter: saturate(1.1) brightness(1.15); }
+  .cell.is-open { box-shadow: inset 0 0 0 2px var(--accent-border); z-index: 4; }
+
+  /* the running stage: an indeterminate sweep on the status rule */
+  .sweep { position: absolute; inset: auto 0 0 0; height: 2px; overflow: hidden; }
+  .sweep > i { display: block; width: 38%; height: 100%; background: var(--info); border-radius: 999px; animation: sweep 1.6s cubic-bezier(.4,0,.6,1) infinite; }
+  @keyframes sweep { 0% { transform: translateX(-110%); } 100% { transform: translateX(300%); } }
+
+  .slow { color: var(--warn); font-size: .68rem; font-weight: 600; }
+  .cof { color: var(--warn); font-weight: 600; }
+
+  /* the verdict line — where this pipeline actually breaks */
+  .verdict {
+    display: flex; align-items: flex-start; gap: .6rem;
+    padding: .7rem 1.15rem; border-bottom: 1px solid var(--border);
+    background: var(--danger-soft); font-size: .84rem; color: var(--text-main);
+  }
+  .verdict b { color: var(--danger); }
+  .verdict .btn { margin-left: auto; flex: none; }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: .35rem .9rem; padding: .7rem 1.15rem; border-top: 1px solid var(--border); font-size: .73rem; color: var(--text-muted); }
+  .legend span { display: inline-flex; align-items: center; gap: .35rem; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--border); flex: none; }
+
+  /* pinned card */
+  .pop {
+    position: absolute; z-index: 40; width: 308px;
+    background: var(--bg-panel); border: 1px solid var(--border-strong);
+    border-radius: 14px; box-shadow: var(--shadow-lg); padding: .8rem .85rem .7rem;
+  }
+  .pop h4 { margin: 0 0 .35rem; font-family: 'Plus Jakarta Sans', sans-serif; font-size: .86rem; color: var(--text-strong); }
+  .pop dl { margin: .55rem 0 .1rem; display: grid; grid-template-columns: auto 1fr; gap: .18rem .7rem; font-size: .74rem; }
+  .pop dt { color: var(--text-muted); }
+  .pop dd { margin: 0; color: var(--text-main); font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; }
+  .pop .why { font-size: .76rem; color: var(--text-subtle); margin: .5rem 0 .1rem; }
+  .pop-acts { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .65rem; }
+  .pop-acts .btn { font-size: .74rem; padding: .3rem .7rem; }
+
+  /* log well (Signal keeps terminal wells dark in both themes) */
+  .well {
+    background: var(--well-bg); border: 1px solid var(--well-border); border-radius: 12px;
+    color: var(--well-ink); font-family: 'IBM Plex Mono', monospace; font-size: .74rem; line-height: 1.65;
+    padding: .75rem .9rem; overflow-x: auto; white-space: pre; margin: 0;
+  }
+  .well .err { color: #ff8078; }
+  .well .ok { color: #7ddba3; }
+  .well .dim { color: #8b8d96; }
+  .drawer { margin-top: 1rem; }
+  .drawer-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .5rem; }
+
+  /* cards, notes, tables */
+  .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 1rem; }
+  .card { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 16px; padding: 1rem 1.1rem; box-shadow: var(--shadow-sm); }
+  .card p:last-child { margin-bottom: 0; }
+  .card--keep { border-left: 3px solid var(--ok); }
+  .card--change { border-left: 3px solid var(--accent); }
+  ul.tight { margin: 0; padding-left: 1.15rem; }
+  ul.tight li { margin-bottom: .45rem; }
+  ul.tight li:last-child { margin-bottom: 0; }
+
+  .states { display: grid; grid-template-columns: repeat(auto-fill, minmax(212px, 1fr)); gap: .9rem; }
+  .state { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--bg-panel); }
+  .state .demo { border-bottom: 1px solid var(--border); }
+  .state .demo .cell { border-left: 0; cursor: default; }
+  .state .demo .cell:hover { filter: none; }
+  .state .txt { padding: .6rem .75rem .7rem; }
+  .state .txt strong { display: block; font-size: .78rem; color: var(--text-strong); }
+  .state .txt span { display: block; font-size: .73rem; color: var(--text-muted); margin-top: .1rem; }
+
+  table.spec { width: 100%; border-collapse: collapse; font-size: .8rem; }
+  table.spec th, table.spec td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  table.spec th { font-size: .68rem; letter-spacing: .1em; text-transform: uppercase; color: var(--text-muted); font-weight: 600; }
+  table.spec td:first-child { white-space: nowrap; font-family: 'IBM Plex Mono', monospace; color: var(--text-main); }
+  .spec-wrap { overflow-x: auto; }
+
+  .steps { counter-reset: s; display: grid; gap: .8rem; }
+  .step { display: grid; grid-template-columns: 1.7rem 1fr; gap: .75rem; align-items: start; }
+  .step::before {
+    counter-increment: s; content: counter(s);
+    font-family: 'IBM Plex Mono', monospace; font-size: .78rem; color: var(--accent-text);
+    background: var(--accent-soft); border: 1px solid var(--accent-border); border-radius: 999px;
+    width: 1.7rem; height: 1.7rem; display: grid; place-items: center;
+  }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  @media (prefers-reduced-motion: reduce) { .sweep > i { animation: none; width: 100%; } }
+</style>
+
+<div class="wrap">
+  <div class="topbar">
+    <div class="brandmark"><span class="dot-mark"></span> KubeSight · Native CI · Builds tab</div>
+    <button class="themebtn" id="theme" type="button">Dark preview</button>
+  </div>
+
+  <header style="margin-top:2.2rem">
+    <p class="eyebrow">UI/UX concept · stage view</p>
+    <h1>Every build, every stage,<br>one grid.</h1>
+    <p class="dek">Jenkins' Stage View answers a question our Builds table cannot: <em>where does this pipeline keep breaking?</em> This is that grid, rebuilt in Signal — and taught the four things our engine knows that Jenkins never did.</p>
+  </header>
+
+  <hr class="rule">
+
+  <section style="margin-top:2.4rem">
+    <h2>Design position</h2>
+    <div class="two" style="margin-top:1rem">
+      <div class="card card--keep">
+        <h3>Kept from Jenkins</h3>
+        <ul class="tight lede">
+          <li>Stages are <strong>columns</strong>, builds are <strong>rows</strong>, newest on top. The eye reads a column to judge a stage and a row to judge a build.</li>
+          <li>Every cell is a <strong>duration</strong>. Time is the number engineers actually compare.</li>
+          <li>Per-stage <strong>averages</strong>, so a cell reads as fast or slow without arithmetic.</li>
+          <li>The whole recent history on one screen — a pattern needs no drill-down to be seen.</li>
+        </ul>
+      </div>
+      <div class="card card--change">
+        <h3>Changed for KubeSight</h3>
+        <ul class="tight lede">
+          <li><strong>Colour means state, not brand.</strong> Signal's red stays on actions and the live rail; a failed cell is <span style="color:var(--danger)">danger</span> and a running one <span style="color:var(--info)">info</span> — the same semantics as every status pill in the app.</li>
+          <li><strong>Skipped is neither green nor red.</strong> Our engine skips a stage it cannot honestly run and writes down why. Jenkins has no such state, so it would paint a build that produced no image as a success.</li>
+          <li><strong>Not reached ≠ skipped.</strong> Stages after a failure go quiet rather than amber — nothing is wrong with them.</li>
+          <li><strong>Cells act.</strong> Open the logs at the first error, or rerun the build from that stage. The engine already does both.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The grid</h2>
+    <p class="col lede">Live mock. Click a cell to pin its card, then open the logs below. Arrow keys walk the grid; <code>Esc</code> closes.</p>
+
+    <div class="panel" id="mxpanel" style="position:relative; margin-top:1.2rem">
+      <div class="panel-head">
+        <div class="panel-title">
+          <strong>profile-ms</strong>
+          <span class="chip chip--ok">active</span>
+          <span class="muted" style="font-size:.78rem">Builds</span>
+        </div>
+        <div style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap">
+          <div class="seg" role="group" aria-label="Build history view">
+            <button type="button" aria-pressed="false">Table</button>
+            <button type="button" aria-pressed="true">Stages</button>
+          </div>
+          <button class="btn btn--primary" type="button">Run build</button>
+        </div>
+      </div>
+
+      <p class="verdict" id="verdict"></p>
+
+      <div class="mx-scroll">
+        <table class="mx" id="mx">
+          <caption class="sr">Build stages for profile-ms, newest build first. Each cell carries a stage's status and duration.</caption>
+        </table>
+      </div>
+
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--ok-soft); border-color:var(--ok-border)"></i> passed</span>
+        <span><i class="swatch" style="background:var(--info-soft); border-color:var(--info-border)"></i> running</span>
+        <span><i class="swatch" style="background:var(--danger-soft); border-color:var(--danger-border)"></i> failed</span>
+        <span><i class="swatch" style="background:var(--warn-soft); border-color:var(--warn-border)"></i> skipped, with a reason</span>
+        <span><i class="swatch" style="background:var(--bg-panel)"></i> not reached</span>
+        <span><i class="swatch" style="background-image:repeating-linear-gradient(135deg,transparent 0 4px,var(--border-strong) 4px 5px)"></i> stage didn't exist yet</span>
+      </div>
+    </div>
+
+    <div class="drawer" id="drawer" hidden>
+      <div class="drawer-head">
+        <strong id="drawer-title" style="font-family:'Plus Jakarta Sans',sans-serif; font-size:.95rem"></strong>
+        <span id="drawer-meta" class="muted" style="font-size:.78rem"></span>
+        <button class="btn" type="button" id="drawer-jump" style="margin-left:auto">Jump to first error</button>
+        <button class="btn" type="button" id="drawer-close">Close</button>
+      </div>
+      <pre class="well" id="drawer-log"></pre>
+    </div>
+
+    <div class="two" style="margin-top:1.6rem">
+      <div class="card">
+        <h3>Alignment is the hard part</h3>
+        <p class="lede" style="margin:0">A build snapshots its pipeline, so the history holds pipelines that no longer exist. Columns align on <strong>stage name</strong>, ordered by the newest build's positions; a stage a build never had is drawn as a void rather than a gap. Rename a stage and it becomes a new column — truthful, and visible.</p>
+      </div>
+      <div class="card">
+        <h3>The gutter carries provenance</h3>
+        <p class="lede" style="margin:0">The same vocabulary as the Builds table it toggles with: number, ref (tag chip for a tag build), commit, who or what asked for it, where it landed. A grid of durations that cannot say whose build this was sends people straight back to the table.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The cell states</h2>
+    <p class="col lede">Ten, and every one is a state the engine can actually produce. Tint, glyph and wording together — never colour alone.</p>
+    <div class="states" id="states" style="margin-top:1.1rem"></div>
+  </section>
+
+  <section>
+    <h2>Averages live in the header</h2>
+    <div class="two" style="margin-top:1rem">
+      <div class="card">
+        <h3>Not a row of its own</h3>
+        <p class="lede" style="margin:0">Jenkins puts “average stage times” in a row above the builds, where it reads like another build. Here the average belongs to its column: stage name, <span class="mono">avg 62s</span>, and a bar for that stage's share of a typical build. The slowest stage in the pipeline then falls out of the bar lengths alone.</p>
+      </div>
+      <div class="card">
+        <h3>Averaged over passes only</h3>
+        <p class="lede" style="margin:0">A stage that fails in 30ms would drag its own average down and make every real run look slow, so averages come from successful runs. A cell above 1.6× its column average gets a <span class="slow">▲</span> and, in its card, “2.5× slower than usual”. Under three passes there is no average yet and the header says so rather than inventing one.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where it lives</h2>
+    <ul class="tight lede col">
+      <li><strong>Builds tab</strong> — a <em>Table / Stages</em> segmented control. Stages leads when the pipeline has two or more stages and the service has two or more builds; otherwise the table, because one row of durations is not a grid.</li>
+      <li><strong>Overview keeps its single-build strip.</strong> That strip answers “what is happening now”; the matrix answers “what keeps happening”.</li>
+      <li><strong>A cell click never navigates.</strong> It pins a card, and the logs open in the pane below — losing the grid to read one stage is what makes Jenkins' view a dead end. The full build drawer stays reachable from the gutter.</li>
+      <li><strong>Density.</strong> Gutter and header stay pinned while the grid scrolls sideways on its own; past eight stages the columns shrink to 92px and names truncate, with the full name in the card. The page body never scrolls sideways.</li>
+      <li><strong>Polling</strong> keeps the existing rule — 4s while a build is active, nothing once the history has settled. Only the live row changes, so the grid is patched rather than rebuilt.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Keyboard &amp; screen readers</h2>
+    <ul class="tight lede col">
+      <li>A real <code>&lt;table&gt;</code> with <code>scope="col"</code> stage headers and a row header per build, so a screen reader announces “Build Image, build 28: failed, 19 seconds”.</li>
+      <li>Roving <code>tabindex</code>: one stop enters the grid, arrows move within it, <code>Enter</code> pins the card, <code>Esc</code> leaves. Tab does not visit seventy cells.</li>
+      <li>The running cell is an <code>aria-live="polite"</code> region naming its stage and elapsed time — the one thing here that changes without input.</li>
+      <li>Every status carries a glyph and a word, so the grid survives greyscale printing and colour-vision deficiency.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>What the backend owes it</h2>
+    <p class="col lede">Rendering this from today's API would cost one request per build. One endpoint instead, because alignment and averaging are set operations over <code>ci_build_stages</code>:</p>
+    <pre class="well" style="margin-top:1rem">GET /api/ci/services/&lt;id&gt;/stage-matrix?limit=12&amp;status=all
+
+{
+  "columns": [
+    { "key": "build-image", "name": "Build Image", "stageType": "container_image",
+      "avgSeconds": 24, "sampleSize": 9, "shareOfBuild": 0.18 }
+  ],
+  "rows": [
+    { <span class="dim">…build_summary + automation, exactly as the Builds table gets it…</span>
+      "cells": {
+        "build-image": { "stageId": 412, "status": "failed", "durationSeconds": 19,
+                         "exitCode": 1, "error": "The stage reported failure.",
+                         "continueOnFailure": false, "logTail": [<span class="dim">…3 lines…</span>] }
+      } }
+  ]
+}</pre>
+    <div class="spec-wrap" style="margin-top:1.2rem">
+      <table class="spec">
+        <thead><tr><th>Field</th><th>Why the grid needs it</th></tr></thead>
+        <tbody>
+          <tr><td>cells[key] = null</td><td>The build never had that stage — draws the void instead of an empty pass.</td></tr>
+          <tr><td>error</td><td>The engine already writes the skip reason (“This runner cannot build container images…”). It is the entire point of the amber cell.</td></tr>
+          <tr><td>continueOnFailure</td><td>A red cell in a build that kept going has to say so, or the row reads as a lie.</td></tr>
+          <tr><td>logTail</td><td>Three lines in the card means most failures get diagnosed without opening anything.</td></tr>
+          <tr><td>avgSeconds, sampleSize</td><td>The header average — and the honesty to hide it under three samples.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="col lede" style="margin-top:1rem">All of it exists per row already: <code>build_stage_to_dict</code> carries status, duration, exit code and error, and <code>rerun_from(build, position)</code> is the cell's second action. No new columns, no new state.</p>
+  </section>
+
+  <section>
+    <h2>Build order</h2>
+    <div class="steps" style="margin-top:1rem">
+      <div class="step"><div><strong>The endpoint.</strong> <span class="lede">One query for the last N builds, one for their stages, aligned by name in Python, averages from passes only. Tests: a pipeline edited mid-history, a build with one stage, a service with none.</span></div></div>
+      <div class="step"><div><strong>The grid, read-only.</strong> <span class="lede">Table markup, sticky gutter and header, the ten cell states, the header averages. Ships behind the segmented control with Table still the default.</span></div></div>
+      <div class="step"><div><strong>The card and its two actions.</strong> <span class="lede">Log tail, open-at-first-error into the existing viewer, rerun-from-here through <code>rerun_from</code>. Then flip the default to Stages.</span></div></div>
+      <div class="step"><div><strong>The verdict line.</strong> <span class="lede">Worst column by failed + timed out + skipped, said in one sentence and clickable as a filter. Cheap — and it is the reason anyone opens a stage view at all.</span></div></div>
+    </div>
+  </section>
+</div>
+
+<script>
+  // ── theme preview toggle ───────────────────────────────────────────────
+  const root = document.documentElement;
+  const tbtn = document.getElementById("theme");
+  const prefersDark = () => window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const isDark = () => root.dataset.theme === "dark" || (!root.dataset.theme && prefersDark());
+  const paintBtn = () => { tbtn.textContent = isDark() ? "Light preview" : "Dark preview"; };
+  tbtn.addEventListener("click", () => {
+    root.dataset.theme = isDark() ? "light" : "dark";
+    paintBtn();
+  });
+  paintBtn();
+
+  // ── the data: profile-ms, last eight builds ────────────────────────────
+  // Stage names, refs and log lines mirror the real service in the screenshots.
+  const COLUMNS = [
+    { key: "checkout",    name: "Checkout",    type: "git_checkout" },
+    { key: "build-jar",   name: "Build JAR",   type: "shell" },
+    { key: "unit-tests",  name: "Unit Tests",  type: "shell" },
+    { key: "sonar",       name: "Sonar Scan",  type: "shell" },
+    { key: "build-image", name: "Build Image", type: "container_image" },
+    { key: "push-image",  name: "Push Image",  type: "container_image" },
+    { key: "notify",      name: "Notify",      type: "notify" },
+  ];
+
+  const S = (d) => ({ status: "success", d });
+  const ROWS = [
+    { n: 29, status: "running", ref: "2.9.3", refType: "tag", sha: "cc145ac5", when: "3m 22s ago",
+      by: "admin", cells: {
+        checkout: S(21),
+        "build-jar": { status: "running", d: 165, log: [
+          ["dim", "Welcome to Gradle 9.1.0!"],
+          ["dim", "Starting a Gradle Daemon (subsequent builds will be faster)"],
+          ["dim", "> Task :clean UP-TO-DATE"],
+          ["dim", "> Task :bootBuildInfo"]] },
+        "unit-tests": { status: "pending" }, sonar: { status: "pending" },
+        "build-image": { status: "pending" }, "push-image": { status: "pending" }, notify: { status: "pending" } } },
+
+    { n: 28, status: "failed", ref: "2.9.3", refType: "tag", sha: "cc145ac5", when: "24m ago",
+      by: "admin", cells: {
+        checkout: S(18), "build-jar": S(58), "unit-tests": S(39), sonar: S(91),
+        "build-image": { status: "failed", d: 19, exit: 1,
+          why: "The stage reported failure.",
+          log: [["dim", "#5 [2/5] COPY build/libs/*.jar app.jar"],
+                ["err", "#5 ERROR: failed to calculate checksum of ref: \"/build/libs/*.jar\": not found"],
+                ["dim", "[kubesight-exit] 1"]] },
+        "push-image": { status: "unreached" }, notify: { status: "unreached" } } },
+
+    { n: 27, status: "cancelled", ref: "main", sha: "9f3ab120", when: "1h ago",
+      by: "e.medawar", cells: {
+        checkout: S(20), "build-jar": S(61),
+        "unit-tests": { status: "cancelled", d: 44, why: "The runner cancelled this stage." },
+        sonar: { status: "unreached" }, "build-image": { status: "unreached" },
+        "push-image": { status: "unreached" }, notify: { status: "unreached" } } },
+
+    { n: 26, status: "success", ref: "main", sha: "9f3ab120", when: "2h ago",
+      by: "automation · ZD-1188", cells: {
+        checkout: S(17), "build-jar": S(63), "unit-tests": S(40), sonar: S(86),
+        "build-image": { status: "skipped",
+          why: "This runner cannot build container images: CI_BUILDKIT_ADDR is not set. Set it on the API deployment, or assign a runner with the buildkit capability." },
+        "push-image": { status: "skipped", why: "There is no image to push — Build Image was skipped." },
+        notify: S(1) } },
+
+    { n: 25, status: "failed", ref: "main", sha: "41c07de5", when: "yesterday",
+      by: "automation · ZD-1174", cells: {
+        checkout: S(19), "build-jar": S(60), "unit-tests": S(43),
+        sonar: { status: "failed", d: 12, exit: 2, cof: true,
+          why: "The stage reported failure. continueOnFailure is set, so the build carried on — and still failed.",
+          log: [["dim", "Analysis report: quality gate FAILED"],
+                ["err", "ERROR: coverage on new code 61.2% < 80%"],
+                ["dim", "[kubesight-exit] 2"]] },
+        "build-image": S(22), "push-image": S(11), notify: S(1) } },
+
+    { n: 24, status: "success", ref: "main", sha: "41c07de5", when: "yesterday",
+      by: "e.medawar", cells: {
+        checkout: S(20), "build-jar": S(148), "unit-tests": S(45), sonar: S(84),
+        "build-image": S(26), "push-image": S(12), notify: S(1) } },
+
+    { n: 23, status: "timeout", ref: "main", sha: "7b21c9aa", when: "2 days ago",
+      by: "e.medawar", cells: {
+        checkout: S(20),
+        "build-jar": { status: "timeout", d: 600, why: "Stage exceeded its 600s timeout.",
+          log: [["dim", "> Task :test"],
+                ["dim", "ProfileRepositoryIT > findByMsisdn() STARTED"],
+                ["err", "Stage exceeded its 600s timeout."]] },
+        "unit-tests": { status: "unreached" }, sonar: null,
+        "build-image": { status: "unreached" }, "push-image": { status: "unreached" }, notify: { status: "unreached" } } },
+
+    { n: 22, status: "success", ref: "2.9.1", refType: "tag", sha: "7b21c9aa", when: "3 days ago",
+      by: "automation · ZD-1160", deployed: "uat-lebanon", cells: {
+        checkout: S(18), "build-jar": S(57), "unit-tests": S(38), sonar: null,
+        "build-image": S(23), "push-image": S(10), notify: S(1) } },
+  ];
+
+  // ── derived: averages over passes only, slow flags, worst stage ────────
+  const stats = {};
+  COLUMNS.forEach((col) => {
+    const passes = ROWS.map((r) => r.cells[col.key]).filter((c) => c && c.status === "success" && c.d != null);
+    const avg = passes.length ? Math.round(passes.reduce((a, c) => a + c.d, 0) / passes.length) : null;
+    const bad = ROWS.filter((r) => {
+      const c = r.cells[col.key];
+      return c && ["failed", "timeout", "skipped"].includes(c.status);
+    }).length;
+    stats[col.key] = { avg, samples: passes.length, bad };
+  });
+  const avgTotal = COLUMNS.reduce((a, c) => a + (stats[c.key].avg || 0), 0);
+  const worst = COLUMNS.slice().sort((a, b) => stats[b.key].bad - stats[a.key].bad)[0];
+
+  const fmt = (s) => {
+    if (s == null) return "—";
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return r ? m + "m " + r + "s" : m + "m";
+  };
+  const GLYPH = { success: "✓", running: "◐", failed: "✕", timeout: "⧖", skipped: "⊘", cancelled: "⊝", unreached: "", pending: "○" };
+  const WORD = { success: "passed", running: "running", failed: "failed", timeout: "timed out", skipped: "skipped", cancelled: "cancelled", unreached: "not reached", pending: "waiting" };
+  const CHIP = { success: "chip--ok", failed: "chip--danger", timeout: "chip--danger", running: "chip--info", skipped: "chip--warn" };
+
+  // ── the verdict line ───────────────────────────────────────────────────
+  document.getElementById("verdict").innerHTML =
+    '<span aria-hidden="true" style="color:var(--danger);font-weight:700">!</span>' +
+    "<span><b>" + worst.name + "</b> ended " + stats[worst.key].bad + " of the last " + ROWS.length +
+    " builds early — more than any other stage. One was a failed image build, one a runner without BuildKit.</span>" +
+    '<button class="btn" type="button">Show only those builds</button>';
+
+  // ── render the grid ────────────────────────────────────────────────────
+  const mx = document.getElementById("mx");
+  const thead = document.createElement("thead");
+  const hrow = document.createElement("tr");
+  hrow.innerHTML = '<th class="gut" scope="col"><span class="hdr-label">Build</span></th>';
+  COLUMNS.forEach((col) => {
+    const st = stats[col.key];
+    const th = document.createElement("th");
+    th.className = "stg" + (col.key === worst.key ? " stg--hot" : "");
+    th.scope = "col";
+    const pct = avgTotal && st.avg ? Math.max(4, Math.round((st.avg / avgTotal) * 100)) : 0;
+    th.innerHTML =
+      '<span class="stg-name" title="' + col.name + " · " + col.type + '">' + col.name + "</span>" +
+      '<span class="stg-avg mono">' + (st.samples >= 3 ? "avg " + fmt(st.avg) : "no average yet") + "</span>" +
+      '<span class="stg-bar" aria-hidden="true"><i style="width:' + pct + '%"></i></span>';
+    hrow.appendChild(th);
+  });
+  thead.appendChild(hrow);
+  mx.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  ROWS.forEach((row, ri) => {
+    const tr = document.createElement("tr");
+    if (row.status === "running") tr.className = "row--live";
+
+    const gut = document.createElement("th");
+    gut.className = "gut";
+    gut.scope = "row";
+    gut.innerHTML =
+      '<span class="gut-l1">' +
+        '<span class="gut-num">#' + row.n + "</span>" +
+        '<span class="chip ' + (CHIP[row.status] || "") + '">' + row.status + "</span>" +
+        (row.deployed ? '<span class="chip chip--ok" title="Deployed by automation">' + row.deployed + "</span>" : "") +
+      "</span>" +
+      '<span class="gut-l2">' +
+        '<span class="chip ' + (row.refType === "tag" ? "chip--accent" : "") + '">' +
+          (row.refType === "tag" ? "⌗ " : "") + row.ref + "</span>" +
+        '<span class="sha">' + row.sha + "</span><span>·</span><span>" + row.when +
+        "</span><span>·</span><span>" + row.by + "</span>" +
+      "</span>";
+    tr.appendChild(gut);
+
+    COLUMNS.forEach((col, ci) => {
+      const td = document.createElement("td");
+      const c = row.cells[col.key];
+      const state = c ? c.status : "void";
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "cell cell--" + state;
+      btn.dataset.r = ri;
+      btn.dataset.c = ci;
+      btn.tabIndex = ri === 0 && ci === 0 ? 0 : -1;
+
+      if (!c) {
+        btn.disabled = true;
+        btn.title = col.name + " did not exist when build #" + row.n + " ran";
+        btn.innerHTML = '<span class="dur">—</span>';
+        btn.setAttribute("aria-label", col.name + ", build " + row.n + ": this stage did not exist yet");
+      } else {
+        const st = stats[col.key];
+        const slow = state === "success" && st.avg && c.d > st.avg * 1.6;
+        btn.innerHTML =
+          '<span class="glyph" aria-hidden="true">' + (GLYPH[state] || "") + "</span>" +
+          '<span class="dur">' + (slow ? '<span class="slow">▲ </span>' : "") +
+            (c.d != null ? fmt(c.d) : state === "skipped" ? "skipped" : "—") + "</span>" +
+          (state === "running" ? '<span class="note">running</span><span class="sweep" aria-hidden="true"><i></i></span>' : "") +
+          (c.cof ? '<span class="note cof">↷ build continued</span>' : "") +
+          (slow ? '<span class="note">' + (c.d / st.avg).toFixed(1) + "× usual</span>" : "");
+        btn.setAttribute("aria-label",
+          col.name + ", build " + row.n + ": " + WORD[state] + (c.d != null ? ", " + fmt(c.d) : ""));
+        if (state === "running") btn.setAttribute("aria-live", "polite");
+      }
+      td.appendChild(btn);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  mx.appendChild(tbody);
+
+  // ── the pinned card ────────────────────────────────────────────────────
+  const panel = document.getElementById("mxpanel");
+  let pop = null;
+  let openCell = null;
+
+  const closePop = () => {
+    if (pop) pop.remove();
+    pop = null;
+    if (openCell) openCell.classList.remove("is-open");
+    openCell = null;
+  };
+
+  const openPop = (btn) => {
+    closePop();
+    const row = ROWS[+btn.dataset.r];
+    const col = COLUMNS[+btn.dataset.c];
+    const c = row.cells[col.key];
+    if (!c) return;
+    const st = stats[col.key];
+    const slow = c.status === "success" && st.avg && c.d > st.avg * 1.6;
+
+    pop = document.createElement("div");
+    pop.className = "pop";
+    pop.setAttribute("role", "dialog");
+    pop.setAttribute("aria-label", col.name + ", build " + row.n);
+    pop.innerHTML =
+      "<h4>" + col.name + " · #" + row.n + "</h4>" +
+      '<span class="chip ' + (CHIP[c.status] || "") + '">' + WORD[c.status] + "</span>" +
+      "<dl>" +
+        "<dt>Duration</dt><dd>" + (c.d != null ? fmt(c.d) : "—") +
+          (slow ? " (" + (c.d / st.avg).toFixed(1) + "× usual)" : "") + "</dd>" +
+        (st.samples >= 3 ? "<dt>Stage average</dt><dd>" + fmt(st.avg) + " over " + st.samples + " passes</dd>" : "") +
+        (c.exit != null ? "<dt>Exit code</dt><dd>" + c.exit + "</dd>" : "") +
+        "<dt>Runner</dt><dd>kubesight-kubernetes</dd>" +
+      "</dl>" +
+      (c.why ? '<p class="why">' + c.why + "</p>" : "") +
+      '<div class="pop-acts">' +
+        '<button class="btn' + (c.log ? " btn--primary" : "") + '" type="button" data-act="logs">Open logs</button>' +
+        '<button class="btn" type="button" data-act="rerun">Rerun from here</button>' +
+      "</div>";
+    panel.appendChild(pop);
+
+    const pr = panel.getBoundingClientRect();
+    const br = btn.getBoundingClientRect();
+    let left = br.left - pr.left + br.width / 2 - pop.offsetWidth / 2;
+    left = Math.min(Math.max(8, left), panel.clientWidth - pop.offsetWidth - 8);
+    let top = br.bottom - pr.top + 8;
+    if (top + pop.offsetHeight > panel.clientHeight - 4) {
+      top = Math.max(8, br.top - pr.top - pop.offsetHeight - 8);
+    }
+    pop.style.left = left + "px";
+    pop.style.top = top + "px";
+
+    btn.classList.add("is-open");
+    openCell = btn;
+
+    pop.querySelector('[data-act="logs"]').addEventListener("click", () => showLog(row, col, c));
+    const rerun = pop.querySelector('[data-act="rerun"]');
+    rerun.addEventListener("click", () => {
+      rerun.textContent = "Rerunning #" + row.n + " from " + col.name + "…";
+    });
+  };
+
+  // ── the log pane ───────────────────────────────────────────────────────
+  const drawer = document.getElementById("drawer");
+  const showLog = (row, col, c) => {
+    const lines = c.log || [
+      ["dim", "$ " + col.name.toLowerCase().replace(/ /g, "-")],
+      ["ok", col.name + (c.d != null ? " finished in " + fmt(c.d) : " has not run")],
+    ];
+    document.getElementById("drawer-title").textContent = col.name + " · build #" + row.n;
+    document.getElementById("drawer-meta").textContent =
+      WORD[c.status] + (c.d != null ? " · " + fmt(c.d) : "") + " · runner kubesight-kubernetes";
+    document.getElementById("drawer-log").innerHTML =
+      lines.map((l) => '<span class="' + l[0] + '">' + l[1].replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</span>").join("\n");
+    document.getElementById("drawer-jump").hidden = !(c.log && ["failed", "timeout"].includes(c.status));
+    drawer.hidden = false;
+    drawer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  };
+  document.getElementById("drawer-close").addEventListener("click", () => { drawer.hidden = true; });
+
+  // ── interaction: click to pin, arrows to walk ──────────────────────────
+  mx.addEventListener("click", (e) => {
+    const btn = e.target.closest("button.cell");
+    if (!btn || btn.disabled) return;
+    if (btn === openCell) { closePop(); return; }
+    openPop(btn);
+  });
+  document.addEventListener("click", (e) => {
+    if (!pop) return;
+    if (e.target.closest(".pop") || e.target.closest("button.cell")) return;
+    closePop();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { closePop(); return; }
+    const btn = document.activeElement;
+    if (!btn || !btn.classList || !btn.classList.contains("cell")) return;
+    const step = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const next = mx.querySelector(
+      'button.cell[data-r="' + (+btn.dataset.r + step[0]) + '"][data-c="' + (+btn.dataset.c + step[1]) + '"]'
+    );
+    if (!next) return;
+    btn.tabIndex = -1;
+    next.tabIndex = 0;
+    next.focus();
+  });
+
+  // ── the states gallery ─────────────────────────────────────────────────
+  const STATES = [
+    { cls: "success", dur: "58s", glyph: "✓", t: "Passed", s: "Tint, glyph, and a 2px rule. The duration is the message." },
+    { cls: "success", dur: "2m 28s", slow: true, glyph: "✓", note: "2.5× usual", t: "Passed, but slow", s: "Over 1.6× its column average. Green, and still worth a look." },
+    { cls: "running", dur: "2m 45s", glyph: "◐", note: "running", sweep: true, t: "Running", s: "Elapsed counts up and the rule sweeps. Info blue, never brand red." },
+    { cls: "failed", dur: "19s", glyph: "✕", t: "Failed", s: "Exit code and three log lines sit one click away in the card." },
+    { cls: "failed", dur: "12s", glyph: "✕", note: "↷ build continued", cof: true, t: "Failed, continued", s: "continueOnFailure: a red cell whose row says the build kept walking." },
+    { cls: "timeout", dur: "10m", glyph: "⧖", t: "Timed out", s: "Its own glyph — the stage never reported, it was cut off." },
+    { cls: "skipped", dur: "skipped", glyph: "⊘", t: "Skipped, with a reason", s: "Amber, because a green build with no image is the failure Jenkins hides." },
+    { cls: "cancelled", dur: "44s", glyph: "⊝", t: "Cancelled", s: "Someone stopped it. Neutral — the pipeline is not at fault." },
+    { cls: "unreached", dur: "—", glyph: "", t: "Not reached", s: "An earlier stage failed. Quiet, so the real failure stays the loudest cell." },
+    { cls: "void", dur: "—", glyph: "", t: "Didn't exist yet", s: "This build's pipeline had no such stage. Hatched, never an empty pass." },
+  ];
+  document.getElementById("states").innerHTML = STATES.map((s) =>
+    '<div class="state"><div class="demo"><span class="cell cell--' + s.cls + '" aria-hidden="true">' +
+      (s.glyph ? '<span class="glyph">' + s.glyph + "</span>" : "") +
+      '<span class="dur">' + (s.slow ? '<span class="slow">▲ </span>' : "") + s.dur + "</span>" +
+      (s.note ? '<span class="note' + (s.cof ? " cof" : "") + '">' + s.note + "</span>" : "") +
+      (s.sweep ? '<span class="sweep"><i></i></span>' : "") +
+    "</span></div>" +
+    '<div class="txt"><strong>' + s.t + "</strong><span>" + s.s + "</span></div></div>"
+  ).join("");
+</script>

@@ -1268,3 +1268,513 @@ button.sg-ci-workspace-entry:focus-visible {
   margin: 0.15rem 0 0.4rem 1.9rem;
   font-size: 0.7rem;
 }
+
+/* ══ Builds → Stages: the stage matrix ═══════════════════════════════════
+   Builds are rows, stages are columns, every cell is a duration. Colour here
+   is semantic only — the brand red stays on actions and the live row's rail,
+   so a red cell always means a failure and never "this one is ours". */
+
+.sg-mx {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* One sentence naming the stage that ends builds early most often. It is the
+   reason anyone opens a stage view, so it sits above the grid, not under it. */
+.sg-mx-verdict {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.6rem 0.9rem;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-lg);
+  font-size: 0.82rem;
+}
+
+.sg-mx-verdict p {
+  margin: 0;
+}
+
+.sg-mx-verdict button {
+  margin-left: auto;
+  flex: none;
+}
+
+.sg-mx-verdict-mark {
+  font-weight: 800;
+  color: var(--danger);
+  line-height: 1;
+}
+
+.sg-mx-scroll {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.sg-mx-table {
+  width: 100%;
+  min-width: 46rem;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+/* The global bare-`th` rule is written for data tables: uppercase, tracked,
+   muted and bottom-bordered. None of that suits a grid whose row headers carry
+   branch names and commit shas — an uppercased sha is not the sha. */
+.sg-mx-table th,
+.sg-mx-table td {
+  padding: 0;
+  border-bottom: 0;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: inherit;
+  color: inherit;
+  background: transparent;
+}
+
+/* The build's own column: pinned, because a grid of durations that cannot say
+   whose build a row is sends people back to the flat table. */
+.sg-mx-gut {
+  position: sticky;
+  top: auto;
+  left: 0;
+  z-index: 2;
+  min-width: 15.5rem;
+  width: 15.5rem;
+  padding: 0.5rem 0.85rem;
+  text-align: left;
+  vertical-align: middle;
+  font-weight: 400;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+}
+
+.sg-mx-table thead .sg-mx-gut {
+  z-index: 3;
+  vertical-align: bottom;
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-mx-table tbody tr + tr th,
+.sg-mx-table tbody tr + tr td {
+  border-top: 1px solid var(--border-soft);
+}
+
+/* A build still running gets the brand rail — the one red that is not danger. */
+.sg-mx-table tbody tr.is-live .sg-mx-gut {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.sg-mx-gut-top {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.sg-mx-build {
+  padding: 0;
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-strong);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.sg-mx-build:hover {
+  color: var(--accent-strong);
+  text-decoration: underline;
+}
+
+.sg-mx-build:focus-visible {
+  outline: none;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--ring);
+}
+
+.sg-mx-gut-sub {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-top: 0.15rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.sg-mx-gut-sub code {
+  font-size: 0.7rem;
+  padding: 0 0.2rem;
+}
+
+.sg-mx-gut-sub svg {
+  width: 0.65rem;
+  height: 0.65rem;
+}
+
+/* Column head = the stage, plus the average that belongs to it. Jenkins puts
+   averages in a row of their own, where they read like another build. */
+.sg-mx-col {
+  min-width: 7.2rem;
+  padding: 0.6rem 0.6rem 0.5rem;
+  text-align: left;
+  vertical-align: bottom;
+  border-left: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-mx-col-name {
+  display: block;
+  font-family: var(--font-display, inherit);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sg-mx-col-avg {
+  display: block;
+  margin-top: 0.1rem;
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.sg-mx-col-bar {
+  display: block;
+  height: 3px;
+  margin-top: 0.35rem;
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.sg-mx-col-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+
+.sg-mx-col.is-hot .sg-mx-col-name {
+  color: var(--danger);
+}
+
+.sg-mx-col.is-hot .sg-mx-col-bar > i {
+  background: var(--danger-border);
+}
+
+.sg-mx-hdr-label {
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ── the cells ── */
+.sg-mx-cell {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-height: 3.4rem;
+  padding: 0.45rem 0.4rem 0.5rem;
+  text-align: center;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--border-soft);
+  color: var(--text-subtle);
+  cursor: pointer;
+}
+
+.sg-mx-cell:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  z-index: 4;
+}
+
+/* Status also reads as a rule along the bottom edge, so a printed or
+   colour-blind grid still separates a pass from a failure. */
+.sg-mx-cell::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 2px;
+  background: transparent;
+}
+
+.sg-mx-dur {
+  display: block;
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.sg-mx-note {
+  display: block;
+  margin-top: 0.1rem;
+  font-size: 0.6rem;
+  color: var(--text-muted);
+}
+
+.sg-mx-note--warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.sg-mx-slow {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.sg-mx-glyph {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.35rem;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.sg-mx-glyph svg {
+  width: 0.62rem;
+  height: 0.62rem;
+  display: block;
+}
+
+.sg-mx-cell--success { background: var(--ok-soft); color: var(--ok); }
+.sg-mx-cell--success::after { background: var(--ok); }
+
+.sg-mx-cell--running { background: var(--info-soft); color: var(--info); }
+.sg-mx-cell--running::after { background: var(--info-border); }
+
+.sg-mx-cell--failed,
+.sg-mx-cell--timeout { background: var(--danger-soft); color: var(--danger); }
+.sg-mx-cell--failed::after,
+.sg-mx-cell--timeout::after { background: var(--danger); }
+
+/* Amber, and deliberately loud: a build can be green and still have produced
+   nothing because the runner could not run this stage. */
+.sg-mx-cell--skipped { background: var(--warn-soft); color: var(--warn); }
+.sg-mx-cell--skipped::after { background: var(--warn-border); }
+
+.sg-mx-cell--reused { background: var(--bg-inset); color: var(--text-muted); }
+.sg-mx-cell--reused::after { background: var(--border); }
+
+.sg-mx-cell--cancelled { background: var(--bg-inset); color: var(--text-muted); }
+.sg-mx-cell--cancelled::after { background: var(--border-strong); }
+
+/* Quiet on purpose: nothing is wrong with a stage an earlier failure
+   pre-empted, and the real failure has to stay the loudest cell in the row. */
+.sg-mx-cell--unreached,
+.sg-mx-cell--pending,
+.sg-mx-cell--queued { color: var(--text-muted); }
+
+/* A stage this build's pipeline never had. Hatched, never an empty pass. */
+.sg-mx-cell--void {
+  cursor: default;
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 6px,
+    var(--border-soft) 6px 7px
+  );
+}
+
+.sg-mx-cell:hover:not(.sg-mx-cell--void) {
+  filter: saturate(1.1) brightness(0.985);
+}
+
+[data-theme="dark"] .sg-mx-cell:hover:not(.sg-mx-cell--void) {
+  filter: saturate(1.08) brightness(1.15);
+}
+
+.sg-mx-cell.is-pinned {
+  box-shadow: inset 0 0 0 2px var(--accent-border);
+  z-index: 3;
+}
+
+/* The running stage sweeps its status rule: the build is working, and no
+   percentage would be honest about how far along it is. */
+.sg-mx-sweep {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 2px;
+  overflow: hidden;
+}
+
+.sg-mx-sweep > i {
+  display: block;
+  width: 38%;
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--info);
+  animation: sg-mx-sweep 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes sg-mx-sweep {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(300%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sg-mx-sweep > i {
+    animation: none;
+    width: 100%;
+  }
+}
+
+.sg-mx-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.9rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.sg-mx-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.sg-mx-swatch {
+  width: 0.75rem;
+  height: 0.75rem;
+  min-height: 0;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  flex: none;
+}
+
+/* ── the pinned cell card ── */
+.sg-mx-card-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+}
+
+.sg-mx-card {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 901;
+  width: 20rem;
+  max-width: calc(100vw - 1rem);
+  padding: 0.75rem 0.8rem 0.7rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.sg-mx-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.sg-mx-card-head h4 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.sg-mx-pill {
+  padding: 0.05rem 0.45rem;
+  border-radius: var(--radius-full);
+  border: 1px solid currentColor;
+  font-size: 0.66rem;
+  font-weight: 600;
+}
+
+.sg-mx-card-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.1rem 0.6rem;
+  margin: 0.55rem 0 0;
+  font-size: 0.74rem;
+}
+
+.sg-mx-card-facts dt {
+  color: var(--text-muted);
+}
+
+.sg-mx-card-facts dd {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-main);
+}
+
+.sg-mx-card-why {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-subtle);
+}
+
+/* The last few lines of a stage that failed — enough to name the error
+   without opening anything. */
+.sg-mx-card-log {
+  margin: 0.55rem 0 0;
+  padding: 0.5rem 0.6rem;
+  max-height: 8rem;
+  overflow: auto;
+  background: var(--bg-code, #0d1117);
+  color: var(--text-code, #d5dbe4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* An action that failed says so where the action was taken. */
+.sg-mx-card-error {
+  margin: 0.55rem 0 0;
+  padding: 0.4rem 0.55rem;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  font-size: 0.74rem;
+  color: var(--danger);
+}
+
+.sg-mx-card-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-top: 0.65rem;
+}
+
+.sg-mx-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Table | Stages: the same pill vocabulary as the status filters, parked at
+   the far end of the toolbar so it reads as a view choice, not a filter. */
+.sg-ci-view-switch {
+  margin-left: auto;
+}

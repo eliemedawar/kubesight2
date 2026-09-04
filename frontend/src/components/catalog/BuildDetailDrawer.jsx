@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { parseApiTime } from "../../lib/apiTime.js";
 import {
   cancelCiBuild,
   getCiBuild,
@@ -29,6 +30,7 @@ const REFRESH_MS = 2500;
  */
 export default function BuildDetailDrawer({
   buildId,
+  initialStageId,
   onClose,
   onChanged,
   canCancel,
@@ -52,10 +54,12 @@ export default function BuildDetailDrawer({
   const timerRef = useRef(null);
 
   useEffect(() => {
-    userPickedRef.current = false;
-    setSelectedStageId(null);
+    // Opened on a specific stage (a cell in the stage matrix): that is a
+    // choice, so auto-follow must not move off it.
+    userPickedRef.current = Boolean(initialStageId);
+    setSelectedStageId(initialStageId || null);
     setBuild(null);
-  }, [buildId]);
+  }, [buildId, initialStageId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,7 +135,7 @@ export default function BuildDetailDrawer({
   const stageDuration = (stage) => {
     if (stage.durationSeconds != null) return formatDuration(stage.durationSeconds);
     if (stage.status !== "running" || !stage.startedAt) return formatDuration(null);
-    const started = Date.parse(stage.startedAt);
+    const started = parseApiTime(stage.startedAt);
     if (Number.isNaN(started)) return formatDuration(null);
     return formatDuration(Math.max(0, Math.floor((now - started) / 1000)));
   };
@@ -176,9 +180,9 @@ export default function BuildDetailDrawer({
                 ·{" "}
                 {build.durationSeconds != null
                   ? formatDuration(build.durationSeconds)
-                  : build.startedAt && !Number.isNaN(Date.parse(build.startedAt))
+                  : build.startedAt && !Number.isNaN(parseApiTime(build.startedAt))
                   ? formatDuration(
-                      Math.max(0, Math.floor((now - Date.parse(build.startedAt)) / 1000))
+                      Math.max(0, Math.floor((now - parseApiTime(build.startedAt)) / 1000))
                     )
                   : formatDuration(null)}
                 {build.automation?.deployed && (

@@ -1,3 +1,5 @@
+import { parseApiTime } from "../../lib/apiTime.js";
+
 /**
  * Shared vocabulary for the CI Service Catalog: icons, status mapping, and the
  * small formatters every tab needs. Kept in one place so a build status looks
@@ -100,7 +102,10 @@ export function formatDuration(seconds) {
 
 export function formatRelative(iso) {
   if (!iso) return "—";
-  const then = new Date(iso).getTime();
+  // parseApiTime, not Date.parse: the API serializes UTC without a suffix, and
+  // a browser reads that as local time — "3h ago" for a build queued seconds
+  // ago, everywhere the offset is not zero.
+  const then = parseApiTime(iso);
   if (Number.isNaN(then)) return "—";
   const diff = Math.round((Date.now() - then) / 1000);
   if (diff < 60) return "just now";

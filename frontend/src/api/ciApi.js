@@ -107,6 +107,11 @@ export const listCiBuilds = (query = {}) => request("/api/ci/builds", { query })
 export const listCiServiceBuilds = (serviceId, query = {}) =>
   request(`/api/ci/services/${encodeURIComponent(serviceId)}/builds`, { query });
 
+// The Builds tab's Stages view: one grid of the recent history, aligned by
+// stage name, with per-stage averages the client does not have to compute.
+export const getCiStageMatrix = (serviceId, query = {}) =>
+  request(`/api/ci/services/${encodeURIComponent(serviceId)}/stage-matrix`, { query });
+
 export const runCiBuild = (serviceId, payload = {}) =>
   request(`/api/ci/services/${encodeURIComponent(serviceId)}/builds`, {
     method: "POST",

@@ -3,6 +3,7 @@ import { getCiStageLogs } from "../../api/ciApi.js";
 import { formatDuration } from "./ciShared.jsx";
 import { getBaseUrl } from "../../api/client.js";
 import { ciStageLogDownloadPath } from "../../api/ciApi.js";
+import { parseApiTime } from "../../lib/apiTime.js";
 
 const POLL_MS = 2000;
 
@@ -124,7 +125,7 @@ export default function StageLogViewer({ buildId, stage }) {
   const quietSeconds = Math.max(0, Math.floor((now - lastLineAt) / 1000));
   // Prefer the server's own start time; fall back to when this view opened so
   // the clock still moves for a stage that started before the drawer did.
-  const startedMs = stage.startedAt ? Date.parse(stage.startedAt) : NaN;
+  const startedMs = stage.startedAt ? parseApiTime(stage.startedAt) : NaN;
   const elapsedSeconds = Math.max(
     0,
     Math.floor((now - (Number.isNaN(startedMs) ? lastLineAt : startedMs)) / 1000)

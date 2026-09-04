@@ -27,6 +27,7 @@ from ..services.ci import pipelines as pipelines_service
 from ..services.ci import queue as queue_service
 from ..services.ci import scheduler as scheduler_service
 from ..services.ci import secrets as secrets_service
+from ..services.ci import stage_matrix as stage_matrix_service
 from ..services.ci import templates as templates_service
 from ..services.ci import workspace as workspace_service
 from ..services.ci.serializers import (
@@ -429,6 +430,22 @@ def list_service_builds(service_id: int):
             "queueDepth": queue_service.depth(service_id),
         }
     )
+
+
+@ci_bp.route("/services/<int:service_id>/stage-matrix", methods=["GET"])
+@require_permission("ci_builds:view")
+def get_stage_matrix(service_id: int):
+    """The Builds tab's Stages view: one grid of the recent build history."""
+    catalog_service.get_service(service_id)
+    data = stage_matrix_service.stage_matrix(
+        service_id,
+        limit=_int_arg("limit", stage_matrix_service.DEFAULT_BUILDS),
+        status=request.args.get("status"),
+    )
+    # Same provenance the Builds table shows, so the row gutter can name who or
+    # what asked for a build and where it landed.
+    data["rows"] = _merge_automation_info(data["rows"])
+    return success_response(data)
 
 
 @ci_bp.route("/services/<int:service_id>/builds", methods=["POST"])
