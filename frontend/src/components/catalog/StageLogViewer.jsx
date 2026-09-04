@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCiStageLogs } from "../../api/ciApi.js";
+import { formatDuration } from "./ciShared.jsx";
 import { getBaseUrl } from "../../api/client.js";
 import { ciStageLogDownloadPath } from "../../api/ciApi.js";
 
@@ -18,6 +19,11 @@ export default function StageLogViewer({ buildId, stage }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [follow, setFollow] = useState(true);
+  // A build tool can be busy and silent for minutes — Gradle resolving
+  // dependencies prints nothing. Without a moving clock that reads as "hung",
+  // so the viewer states when output last arrived and keeps counting.
+  const [lastLineAt, setLastLineAt] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
 
   const cursorRef = useRef(0);
   const bodyRef = useRef(null);
@@ -32,7 +38,15 @@ export default function StageLogViewer({ buildId, stage }) {
     setLines([]);
     setLoading(true);
     setError("");
+    setLastLineAt(Date.now());
   }, [stage?.id]);
+
+  // One tick per second, and only while this stage is actually running.
+  useEffect(() => {
+    if (stage?.status !== "running") return undefined;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [stage?.status]);
 
   const poll = useCallback(async () => {
     if (!buildId || !stage?.id) return true;
@@ -40,6 +54,7 @@ export default function StageLogViewer({ buildId, stage }) {
       const data = await getCiStageLogs(buildId, stage.id, cursorRef.current, 2000);
       if (data.lines?.length) {
         cursorRef.current = Math.max(cursorRef.current, data.nextSeq);
+        setLastLineAt(Date.now());
         // De-dupe by seq: overlapping polls (StrictMode double-mount, a reset
         // racing an in-flight request) must never render a line twice.
         setLines((prev) => {
@@ -106,6 +121,15 @@ export default function StageLogViewer({ buildId, stage }) {
 
   const downloadUrl = `${getBaseUrl()}${ciStageLogDownloadPath(buildId, stage.id)}`;
 
+  const quietSeconds = Math.max(0, Math.floor((now - lastLineAt) / 1000));
+  // Prefer the server's own start time; fall back to when this view opened so
+  // the clock still moves for a stage that started before the drawer did.
+  const startedMs = stage.startedAt ? Date.parse(stage.startedAt) : NaN;
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor((now - (Number.isNaN(startedMs) ? lastLineAt : startedMs)) / 1000)
+  );
+
   return (
     <div className="sg-ci-logs">
       <div className="sg-ci-logs-bar">
@@ -162,6 +186,21 @@ export default function StageLogViewer({ buildId, stage }) {
           ? "This stage was skipped because an earlier stage failed."
           : "No output."}
       </pre>
+
+      {stage.status === "running" && (
+        <p className="sg-ci-logs-heartbeat">
+          <span className="sg-ci-pulse" aria-hidden="true" />
+          <span>
+            Running for {formatDuration(elapsedSeconds)} · {lines.length}{" "}
+            line{lines.length === 1 ? "" : "s"}
+            {quietSeconds >= 15 && (
+              // The reassurance that matters: silence is not a stall. Gradle
+              // resolving dependencies prints nothing for minutes.
+              <> · no new output for {formatDuration(quietSeconds)}</>
+            )}
+          </span>
+        </p>
+      )}
 
       {stage.logTruncated && (
         <p className="field-hint">

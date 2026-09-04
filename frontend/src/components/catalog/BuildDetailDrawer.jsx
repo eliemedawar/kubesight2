@@ -36,6 +36,10 @@ export default function BuildDetailDrawer({
   // The workspace replaces the log pane rather than sitting beside it: both
   // answer "what is this build doing", and the drawer has one pane.
   const [showWorkspace, setShowWorkspace] = useState(false);
+  // Ticks once a second while the build is live so every duration on screen
+  // moves. A stage that has started but not finished has no server-side
+  // duration yet, and a frozen "—" is what makes a working build look hung.
+  const [now, setNow] = useState(() => Date.now());
 
   // Follows the running stage until the user picks one themselves.
   const userPickedRef = useRef(false);
@@ -85,6 +89,14 @@ export default function BuildDetailDrawer({
     };
   }, [buildId]);
 
+  // Keyed on the status, not the build object: the poll replaces that object
+  // every couple of seconds, which would tear down and rebuild the interval.
+  useEffect(() => {
+    if (!build?.status || !isBuildActive(build.status)) return undefined;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [build?.status]);
+
   const act = async (action) => {
     setBusy(true);
     setError("");
@@ -108,6 +120,15 @@ export default function BuildDetailDrawer({
 
   const selectedStage = build?.stages?.find((stage) => stage.id === selectedStageId);
   const active = build ? isBuildActive(build.status) : false;
+
+  // Elapsed time for a stage the server has not timed yet.
+  const stageDuration = (stage) => {
+    if (stage.durationSeconds != null) return formatDuration(stage.durationSeconds);
+    if (stage.status !== "running" || !stage.startedAt) return formatDuration(null);
+    const started = Date.parse(stage.startedAt);
+    if (Number.isNaN(started)) return formatDuration(null);
+    return formatDuration(Math.max(0, Math.floor((now - started) / 1000)));
+  };
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
@@ -146,7 +167,14 @@ export default function BuildDetailDrawer({
                   : build.requestedBy
                   ? ` · by ${build.requestedBy}`
                   : ""}{" "}
-                · {formatDuration(build.durationSeconds)}
+                ·{" "}
+                {build.durationSeconds != null
+                  ? formatDuration(build.durationSeconds)
+                  : build.startedAt && !Number.isNaN(Date.parse(build.startedAt))
+                  ? formatDuration(
+                      Math.max(0, Math.floor((now - Date.parse(build.startedAt)) / 1000))
+                    )
+                  : formatDuration(null)}
                 {build.automation?.deployed && (
                   <>
                     {" "}
@@ -223,9 +251,7 @@ export default function BuildDetailDrawer({
                         <StageStatusIcon status={stage.status} />
                       </span>
                       <span className="sg-ci-stage-name">{stage.name}</span>
-                      <span className="sg-ci-stage-time">
-                        {formatDuration(stage.durationSeconds)}
-                      </span>
+                      <span className="sg-ci-stage-time">{stageDuration(stage)}</span>
                     </button>
                   </li>
                 ))}

@@ -860,7 +860,9 @@ button.sg-ci-strip-node:hover {
 .sg-ci-logs-body {
   margin: 0;
   padding: 0.7rem 0.85rem;
-  max-height: 26rem;
+  /* Tall enough to read a build tool's output without scrolling for it, and
+     bounded by the viewport so the drawer's own chrome stays reachable. */
+  max-height: min(60vh, 44rem);
   min-height: 10rem;
   overflow: auto;
   background: var(--bg-code, #0d1117);
@@ -1203,4 +1205,45 @@ button.sg-ci-workspace-entry:focus-visible {
 /* A zero-byte file is usually the bug being hunted — mark it. */
 .sg-ci-workspace-size.is-empty {
   color: var(--warn);
+}
+
+/* ---------------------------------------------------------------------------
+   Running-stage heartbeat. A build tool can be busy and silent for minutes;
+   without a moving clock that reads as a hang.
+   --------------------------------------------------------------------------- */
+
+.sg-ci-logs-heartbeat {
+  margin: var(--space-2) 0 0;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.74rem;
+  color: var(--text-subtle);
+}
+
+.sg-ci-pulse {
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: none;
+  border-radius: var(--radius-full, 999px);
+  background: var(--info);
+  animation: sg-ci-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes sg-ci-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.75);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sg-ci-pulse {
+    animation: none;
+  }
 }
