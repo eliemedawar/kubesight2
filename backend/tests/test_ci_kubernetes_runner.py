@@ -784,3 +784,27 @@ def test_host_aliases_reach_the_image_build_but_not_the_registry(monkeypatch):
     assert spec["hostAliases"] == [
         {"ip": "10.4.23.182", "hostnames": ["registry.areeba.com", "nexus"]}
     ]
+
+
+def test_log_reader_says_when_it_hits_its_byte_cap(monkeypatch):
+    """--limit-bytes counts from the START of the log, so a stage past the cap
+    stops appearing to produce anything new. Silence there reads as a hang;
+    saying so does not."""
+    monkeypatch.setenv("CI_LOG_LIMIT_BYTES", "64")
+    adapter = k8s.KubernetesJobRunnerAdapter()
+
+    def fake(args, input_text=None):
+        if args[0] == "logs":
+            return 0, "x" * 64, ""
+        return 1, "", ""
+
+    k8s.set_kubectl_runner(fake)
+    lines = adapter._container_log_lines("job", "stage-1")
+    assert lines[-1].startswith("[kubesight] Output passed 64 bytes")
+
+
+def test_log_reader_is_quiet_below_the_cap(monkeypatch):
+    monkeypatch.setenv("CI_LOG_LIMIT_BYTES", "64000")
+    adapter = k8s.KubernetesJobRunnerAdapter()
+    k8s.set_kubectl_runner(lambda args, input_text=None: (0, "one\ntwo\n", ""))
+    assert adapter._container_log_lines("job", "stage-1") == ["one", "two"]

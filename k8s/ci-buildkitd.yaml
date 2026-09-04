@@ -129,10 +129,10 @@ spec:
       # cannot redirect them; if one DNS name fronts several registries here,
       # map it for the daemon:
       #
-      # hostAliases:
-      #   - ip: "10.4.23.182"
-      #     hostnames: ["registry.areeba.com"]
-      #
+      hostAliases:
+         - ip: "10.4.23.182"
+           hostnames: ["registry.areeba.com"]
+      
       # Note this applies to EVERY image build, including base-image pulls, so
       # the address must serve both. Addressing the registry by IP in its
       # KubeSight connection avoids the question entirely.

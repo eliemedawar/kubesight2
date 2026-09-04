@@ -1308,16 +1308,32 @@ class KubernetesJobRunnerAdapter:
                 yield LogChunk(seq=index, content=content)
 
     def _container_log_lines(self, job_name: str, container: str) -> Optional[List[str]]:
+        """The stage's whole output so far, as lines.
+
+        Read in full rather than tailed because a line's sequence number IS its
+        position from the start — that is what makes the reader resumable. The
+        byte cap is the price: ``--limit-bytes`` counts from the beginning, so a
+        stage whose output exceeds it stops appearing to produce anything new
+        rather than losing its oldest lines. Generous by default, configurable,
+        and it says when it bites instead of going quiet.
+        """
+        limit = int(_env("CI_LOG_LIMIT_BYTES", "16000000"))
         rc, out, stderr = _kubectl(
             [
                 "logs", f"job/{job_name}", "-c", container, "-n", _namespace(),
-                "--limit-bytes", "2000000",
+                "--limit-bytes", str(limit),
             ],
             timeout=30,
         )
         if rc != 0:
             return None  # Container is still waiting; no logs yet.
-        return out.splitlines()
+        lines = out.splitlines()
+        if len(out.encode("utf-8", "ignore")) >= limit:
+            lines.append(
+                f"[kubesight] Output passed {limit} bytes — later lines are not shown. "
+                "Raise CI_LOG_LIMIT_BYTES, or have the stage print less."
+            )
+        return lines
 
     def collect_artifacts(self, handle: RunnerHandle) -> List[ArtifactRef]:
         # Artifacts arrive through the worker callback (the collector container

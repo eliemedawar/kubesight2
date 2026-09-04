@@ -525,6 +525,9 @@ def get_build_workspace(build_id: int):
 def get_stage_logs(build_id: int, stage_id: int):
     build = engine_service.get_build(build_id)
     stage = engine_service.get_build_stage(build, stage_id)
+    # Fetch what the pod has printed since the last drain, so a viewer sees
+    # output at its own polling rate rather than the scheduler's tick.
+    engine_service.pump_stage_logs(build, stage)
     payload = logs_service.read(
         stage.id, after_seq=_int_arg("after", 0), limit=_int_arg("limit", 1000)
     )

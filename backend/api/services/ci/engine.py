@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import re
 import secrets as secrets_module
 from datetime import datetime, timedelta, timezone
@@ -972,6 +973,41 @@ def _build_plan(build: CiBuild, adapter, callback_token: str) -> List[StageExecu
             _build_execution(build, stage_row, definition, callback_token=callback_token)
         )
     return plan
+
+
+
+# A viewer polls a running stage every couple of seconds, but logs were only
+# ingested on the shared scheduler tick — so output could sit unseen for a whole
+# tick even though the pod had already printed it. Draining on demand closes
+# that gap; the cooldown keeps several viewers of one build from turning into
+# several `kubectl logs` calls a second.
+_LOG_PUMP_COOLDOWN_SECONDS = float(os.getenv("CI_LOG_PUMP_COOLDOWN_SECONDS", "2"))
+_last_log_pump: Dict[int, float] = {}
+
+
+def pump_stage_logs(build: CiBuild, stage: CiBuildStage) -> None:
+    """Drain a running stage's newest output now, if it is not too soon."""
+    if stage.status != "running":
+        return
+    now = time.monotonic()
+    if now - _last_log_pump.get(stage.id, 0.0) < _LOG_PUMP_COOLDOWN_SECONDS:
+        return
+    if len(_last_log_pump) > 500:
+        _last_log_pump.clear()  # Bounded: these are only rate-limit timestamps.
+    _last_log_pump[stage.id] = now
+
+    adapter = _adapter_for(build)
+    handle = _handle_for(build, stage)
+    if adapter is None or handle is None:
+        return
+    try:
+        _pump_logs(build, stage, adapter, handle)
+        db.session.commit()
+    except Exception:
+        # Reading logs must never break reading logs: the scheduler tick will
+        # drain the same output shortly.
+        db.session.rollback()
+        logger.exception("On-demand log pump failed for stage %s", stage.id)
 
 
 def _mask_values(build: CiBuild) -> List[str]:
