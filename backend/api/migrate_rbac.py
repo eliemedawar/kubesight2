@@ -704,6 +704,10 @@ def _migrate_ci_columns() -> None:
         _add_column_if_missing("mobile_applications", "ci_service_id", "INTEGER")
     if "mobile_app_builds" in existing:
         _add_column_if_missing("mobile_app_builds", "ci_build_id", "INTEGER")
+    if "ci_services" in existing:
+        # Inline Dockerfile, added after the table shipped. TEXT is right here:
+        # it is a document, not a JSON structure.
+        _add_column_if_missing("ci_services", "dockerfile", "TEXT")
     if "ci_pipeline_stages" in existing:
         # Added after the table shipped: db.create_all() will not alter an
         # existing table, so a deployed database needs this backfilled. Existing

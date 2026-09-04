@@ -524,3 +524,43 @@ def test_json_list_column_survives_a_text_typed_column():
     ]
     for empty in (None, "", "not json", {}, 7):
         assert _json_list(empty) == []
+
+
+def test_service_dockerfile_round_trips_and_clears(app, admin_token):
+    """A Dockerfile is a document: its blank lines and indentation are content.
+    Clearing it must restore the original behaviour of using the repository's
+    own file, so empty is stored as NULL rather than an empty string."""
+    from api.db import db
+    from api.models_ci import CiService
+    from api.services.ci import catalog as catalog_service
+
+    with app.app_context():
+        row = CiService(name="Dockerfile Svc", slug="dockerfile-svc")
+        db.session.add(row)
+        db.session.commit()
+
+        body = "FROM alpine\n\n    RUN echo indented\nADD app.jar app.jar"
+        detail = catalog_service.update_service(row, {"dockerfile": body + "\n\n"})
+        assert detail["dockerfile"] == body  # only trailing whitespace removed
+        assert detail["hasInlineDockerfile"] is True
+
+        cleared = catalog_service.update_service(row, {"dockerfile": "   "})
+        assert cleared["dockerfile"] == ""
+        assert cleared["hasInlineDockerfile"] is False
+        assert db.session.get(CiService, row.id).dockerfile is None
+
+
+def test_service_dockerfile_has_a_size_limit(app, admin_token):
+    import pytest as _pytest
+
+    from api.db import db
+    from api.models_ci import CiService
+    from api.services.ci import catalog as catalog_service
+    from api.services.ci.catalog import MAX_DOCKERFILE_CHARS, CatalogError
+
+    with app.app_context():
+        row = CiService(name="Big Dockerfile", slug="big-dockerfile")
+        db.session.add(row)
+        db.session.commit()
+        with _pytest.raises(CatalogError):
+            catalog_service.update_service(row, {"dockerfile": "x" * (MAX_DOCKERFILE_CHARS + 1)})

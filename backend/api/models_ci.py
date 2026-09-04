@@ -126,6 +126,12 @@ class CiService(db.Model):
         db.Integer, db.ForeignKey("bitbucket_credential_profiles.id"), nullable=True
     )
 
+    # An inline Dockerfile, for repositories that do not carry one. When set it
+    # is what container_image stages build; when empty the Dockerfile in the
+    # checkout is used, as before. Kept on the service rather than a stage
+    # because it describes the application, not one step of one pipeline.
+    dockerfile = db.Column(db.Text, nullable=True)
+
     # --- Optional links. All nullable; none is read on the build path. -------
     registry_connection_id = db.Column(
         db.Integer, db.ForeignKey("registry_connections.id"), nullable=True

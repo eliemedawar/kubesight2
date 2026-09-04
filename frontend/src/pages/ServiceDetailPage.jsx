@@ -6,6 +6,7 @@ import LoadingState from "../components/common/LoadingState.jsx";
 import ArtifactsPanel from "../components/catalog/ArtifactsPanel.jsx";
 import BuildDetailDrawer from "../components/catalog/BuildDetailDrawer.jsx";
 import BuildsPanel from "../components/catalog/BuildsPanel.jsx";
+import DockerfilePanel from "../components/catalog/DockerfilePanel.jsx";
 import PipelineEditor from "../components/catalog/PipelineEditor.jsx";
 import RunBuildModal from "../components/catalog/RunBuildModal.jsx";
 import ServiceFormModal from "../components/catalog/ServiceFormModal.jsx";
@@ -18,13 +19,14 @@ const TABS = [
   ["overview", "Overview"],
   ["source", "Source"],
   ["pipeline", "Pipeline"],
+  ["dockerfile", "Dockerfile"],
   ["builds", "Builds"],
   ["artifacts", "Artifacts"],
   ["settings", "Settings"],
 ];
 
 /**
- * One service, six tabs.
+ * One service, seven tabs.
  *
  * Run Build lives in the header so it is reachable from every tab, and is
  * disabled with a reason when the service is not ready — never silently
@@ -216,6 +218,9 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             canEdit={can.editPipeline}
             onChanged={load}
           />
+        )}
+        {tab === "dockerfile" && (
+          <DockerfilePanel service={service} canEdit={can.edit} onSaved={() => load()} />
         )}
         {tab === "builds" && (
           <BuildsPanel

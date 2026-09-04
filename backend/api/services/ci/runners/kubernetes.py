@@ -313,6 +313,17 @@ def _command_stage_script(execution: StageExecution) -> str:
     return f"set -eu\nexport HOME=/tmp TMPDIR=/tmp\ncd {workdir}\n{commands}\n"
 
 
+INLINE_DOCKERFILE_DIR = "/kubesight-dockerfile"
+
+
+def _buildctl_output(registry: Dict[str, Any], image_ref: str) -> str:
+    """Where buildkitd sends the finished image: straight to the registry."""
+    output = f"type=image,name={image_ref},push=true"
+    if registry.get("verifyTls") is False:
+        output += ",registry.insecure=true"
+    return output
+
+
 def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
     registry = execution.registry or {}
     image_ref = f"{registry['host']}/{registry['repository']}:{registry['tag']}"
@@ -321,16 +332,26 @@ def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
         context = f"/workspace/source/{execution.working_directory}"
     dockerfile = registry.get("dockerfile") or "Dockerfile"
     dockerfile_dir = os.path.dirname(dockerfile) or "."
-    output = f"type=image,name={image_ref},push=true"
-    if registry.get("verifyTls") is False:
-        output += ",registry.insecure=true"
+    if registry.get("dockerfileContent"):
+        # buildctl takes the context and the Dockerfile as SEPARATE locals, so
+        # an inline Dockerfile needs no copy into the context: point the
+        # dockerfile local at the mounted file and leave the context alone.
+        return (
+            f"buildctl --addr {buildkit_addr()} build "
+            f"--frontend dockerfile.v0 "
+            f"--local context={context} "
+            f"--local dockerfile={INLINE_DOCKERFILE_DIR} "
+            f"--opt filename=Dockerfile "
+            f"--output {_buildctl_output(registry, image_ref)} "
+            f"--metadata-file {meta_file}"
+        )
     return (
         f"buildctl --addr {buildkit_addr()} build "
         f"--frontend dockerfile.v0 "
         f"--local context={context} "
         f"--local dockerfile={context}/{dockerfile_dir} "
         f"--opt filename={os.path.basename(dockerfile)} "
-        f"--output {output} "
+        f"--output {_buildctl_output(registry, image_ref)} "
         f"--metadata-file {meta_file}"
     )
 
@@ -428,6 +449,7 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
             secret_data[_secret_key(execution.position, env_name)] = _b64(value)
 
     docker_config_needed = False
+    inline_dockerfile = ""
     for execution in plan:
         if execution.stage_type == "container_image" and execution.registry:
             registry = execution.registry
@@ -435,6 +457,13 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
             docker_config = json.dumps({"auths": {registry["host"]: {"auth": auth}}})
             secret_data["docker-config"] = _b64(docker_config)
             docker_config_needed = True
+            # An inline Dockerfile rides in the per-build Secret and is mounted
+            # read-only beside the build context. It is NOT written into the
+            # workspace: the checkout stays exactly as the repository has it, so
+            # building never mutates the source a later stage might read.
+            if registry.get("dockerfileContent"):
+                inline_dockerfile = registry["dockerfileContent"]
+                secret_data["inline-dockerfile"] = _b64(inline_dockerfile)
 
     secret = {
         "apiVersion": "v1",
@@ -515,7 +544,18 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                 "env": _plain_env(execution, {"DOCKER_CONFIG": "/kubesight-docker"})
                 + _secret_env(secret_name, execution),
                 "volumeMounts": _mounts()
-                + [{"name": "docker-config", "mountPath": "/kubesight-docker", "readOnly": True}],
+                + [{"name": "docker-config", "mountPath": "/kubesight-docker", "readOnly": True}]
+                + (
+                    [
+                        {
+                            "name": "inline-dockerfile",
+                            "mountPath": INLINE_DOCKERFILE_DIR,
+                            "readOnly": True,
+                        }
+                    ]
+                    if (execution.registry or {}).get("dockerfileContent")
+                    else []
+                ),
             }
         else:  # command
             container = {
@@ -562,6 +602,18 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                 "secret": {
                     "secretName": secret_name,
                     "items": [{"key": "docker-config", "path": "config.json"}],
+                },
+            }
+        )
+    if inline_dockerfile:
+        # Read-only, beside the context rather than inside it: the checkout is
+        # left exactly as the repository has it.
+        volumes.append(
+            {
+                "name": "inline-dockerfile",
+                "secret": {
+                    "secretName": secret_name,
+                    "items": [{"key": "inline-dockerfile", "path": "Dockerfile"}],
                 },
             }
         )

@@ -97,6 +97,10 @@ def service_to_dict(
     if include_counts:
         data["buildCount"] = row.builds.count()
         data["artifactCount"] = row.artifacts.count()
+        # Detail view only: a Dockerfile is a document, and shipping one per
+        # card would bloat every catalog listing.
+        data["dockerfile"] = row.dockerfile or ""
+    data["hasInlineDockerfile"] = bool(row.dockerfile)
     return data
 
 

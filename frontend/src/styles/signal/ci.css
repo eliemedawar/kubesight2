@@ -1247,3 +1247,18 @@ button.sg-ci-workspace-entry:focus-visible {
     animation: none;
   }
 }
+
+/* Dockerfile tab — a document editor, not a form field. */
+.sg-ci-dockerfile {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, "SFMono-Regular", Menlo, monospace);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+.sg-ci-dockerfile-note {
+  margin: 0 0 var(--space-2);
+  font-size: 0.78rem;
+}

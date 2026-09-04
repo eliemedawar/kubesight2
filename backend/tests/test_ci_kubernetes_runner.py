@@ -560,3 +560,62 @@ def test_workspace_listing_reads_ls_output():
     exec_args = next(args for args in calls if args[0] == "exec")
     assert exec_args[1] == "ci-b7-pod"
     assert "-c" in exec_args and "stage-1" in exec_args
+
+
+def test_inline_dockerfile_is_mounted_beside_the_context(monkeypatch):
+    """An inline Dockerfile must not be written into the checkout: buildctl
+    takes context and dockerfile as separate locals, so it is mounted read-only
+    and the repository is left exactly as cloned."""
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", "tcp://buildkitd:1234")
+    registry = {
+        "host": "nexus.company.local:9443", "port": 9443, "repository": "profile-ms",
+        "tag": "V1.0.27", "dockerfile": "Dockerfile", "username": "ci",
+        "password": "reg-pass", "verifyTls": True, "connectionId": 1,
+        "dockerfileContent": "FROM alpine\nADD app.jar app.jar\n",
+    }
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, "container_image", registry=registry),
+    )
+    secret, _, job = k8s.build_job_resources(first)
+
+    assert "inline-dockerfile" in secret["data"]
+    spec = job["spec"]["template"]["spec"]
+    stage = spec["initContainers"][1]
+    script = stage["command"][2]
+    assert "--local context=/workspace/source " in script
+    assert f"--local dockerfile={k8s.INLINE_DOCKERFILE_DIR} " in script
+    assert "--opt filename=Dockerfile " in script
+    mount = next(m for m in stage["volumeMounts"] if m["name"] == "inline-dockerfile")
+    assert mount == {
+        "name": "inline-dockerfile",
+        "mountPath": k8s.INLINE_DOCKERFILE_DIR,
+        "readOnly": True,
+    }
+    volume = next(v for v in spec["volumes"] if v["name"] == "inline-dockerfile")
+    assert volume["secret"]["items"] == [{"key": "inline-dockerfile", "path": "Dockerfile"}]
+
+
+def test_without_inline_dockerfile_the_repository_file_is_used(monkeypatch):
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", "tcp://buildkitd:1234")
+    registry = {
+        "host": "nexus.company.local", "port": None, "repository": "profile-ms",
+        "tag": "V1.0.27", "dockerfile": "docker/Dockerfile", "username": "ci",
+        "password": "p", "verifyTls": True, "connectionId": 1,
+    }
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, "container_image", registry=registry),
+    )
+    secret, _, job = k8s.build_job_resources(first)
+
+    assert "inline-dockerfile" not in secret["data"]
+    spec = job["spec"]["template"]["spec"]
+    assert not [v for v in spec["volumes"] if v["name"] == "inline-dockerfile"]
+    script = spec["initContainers"][1]["command"][2]
+    assert "--local dockerfile=/workspace/source/docker " in script
+    assert "--opt filename=Dockerfile " in script

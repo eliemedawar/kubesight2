@@ -40,6 +40,11 @@ class CatalogError(ValueError):
     """A service payload was rejected. Message is user-facing."""
 
 
+# An inline Dockerfile travels to the build pod inside the per-build Secret,
+# which Kubernetes caps at 1MiB for all keys together. This leaves ample room.
+MAX_DOCKERFILE_CHARS = 64_000
+
+
 def _clean(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
@@ -291,6 +296,18 @@ def _apply_identity(row: CiService, payload: Dict[str, Any], *, creating: bool) 
                 f"Application type must be one of: {', '.join(APPLICATION_TYPES)}."
             )
         row.application_type = app_type
+
+    if "dockerfile" in payload:
+        # A document, not a field: line endings and indentation are content, so
+        # only trailing whitespace on the whole thing is removed. Empty means
+        # "use the Dockerfile in the repository", which is the original
+        # behaviour and must stay reachable by clearing the box.
+        text = str(payload.get("dockerfile") or "").replace("\r\n", "\n").rstrip()
+        if len(text) > MAX_DOCKERFILE_CHARS:
+            raise CatalogError(
+                f"The Dockerfile may not exceed {MAX_DOCKERFILE_CHARS:,} characters."
+            )
+        row.dockerfile = text or None
 
     if "status" in payload:
         status = _clean(payload.get("status"), 16).lower() or "active"

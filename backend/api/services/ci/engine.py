@@ -763,6 +763,10 @@ def _registry_for(
             "repository": _sanitize_tag(env.get("IMAGE_NAME") or service.slug).lower(),
             "tag": _sanitize_tag(env.get("IMAGE_TAG") or default_tag),
             "dockerfile": env.get("DOCKERFILE_PATH") or "Dockerfile",
+            # An inline Dockerfile replaces the one in the checkout. The runner
+            # mounts it beside the context rather than writing into the
+            # workspace, so the repository is never modified by building it.
+            "dockerfileContent": service.dockerfile or "",
             "username": row.username or "",
             "password": decrypt_secret(row.password_encrypted or ""),
             "verifyTls": bool(row.verify_tls),
