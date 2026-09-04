@@ -22,6 +22,10 @@ const STATUS_FILTERS = [
   ["failed", "Failed"],
 ];
 
+// Ten is what fits on screen without scrolling, and a build history is read
+// newest-first — older runs are reached through the status filters.
+const PAGE_SIZE = 10;
+
 /**
  * Builds tab: the list, plus the drawer.
  *
@@ -41,7 +45,7 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
     try {
       const data = await listCiServiceBuilds(service.id, {
         status: status === "all" ? undefined : status,
-        limit: 50,
+        limit: PAGE_SIZE,
       });
       setBuilds(data.items || []);
       setQueueDepth(data.queueDepth || 0);
@@ -190,6 +194,13 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
               ))}
             </tbody>
           </table>
+          {/* Say it rather than let a truncated list read as the whole history. */}
+          {builds.length === PAGE_SIZE && (
+            <p className="muted sg-ci-build-note">
+              Showing the {PAGE_SIZE} most recent builds
+              {status === "all" ? "" : ` with status “${status}”`}.
+            </p>
+          )}
         </div>
       )}
 

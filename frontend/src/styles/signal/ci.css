@@ -1097,3 +1097,10 @@ button.sg-ci-strip-node:hover {
 .sg-ci-runner-slots input {
   width: 4rem;
 }
+
+/* Footnote under a truncated build list. */
+.sg-ci-build-note {
+  margin: var(--space-2) 0 0;
+  font-size: 0.75rem;
+  text-align: right;
+}
