@@ -567,6 +567,7 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
         )
 
     total_timeout = sum(int(execution.timeout_seconds or 1800) for execution in plan) + 900
+    host_aliases = _merged_host_aliases(plan)
 
     job = {
         "apiVersion": "batch/v1",
@@ -590,6 +591,10 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                     "serviceAccountName": _env("CI_SERVICE_ACCOUNT", "kubesight-ci-build"),
                     "automountServiceAccountToken": False,
                     "enableServiceLinks": False,
+                    # Kubelet writes these into /etc/hosts before any container
+                    # starts, so a stage's commands never have to patch a file
+                    # they cannot write (the root filesystem is read-only).
+                    **({"hostAliases": host_aliases} if host_aliases else {}),
                     "securityContext": {
                         "runAsNonRoot": True,
                         "seccompProfile": {"type": "RuntimeDefault"},
@@ -604,6 +609,37 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
 
     network_policy = _network_policy(job_name, namespace, labels, plan)
     return [secret, network_policy, job]
+
+
+def _merged_host_aliases(plan: List[StageExecution]) -> List[Dict[str, Any]]:
+    """Every stage's host aliases, as ONE pod-level ``hostAliases`` list.
+
+    Kubernetes writes /etc/hosts per POD, and a build is one pod whose stages
+    are initContainers, so aliases cannot be scoped to a single stage: entries
+    from every stage are merged and all stages resolve all of them. The editor
+    says so. Merging by IP keeps the spec readable and the ordering stable.
+    """
+    merged: List[Dict[str, Any]] = []
+    by_ip: Dict[str, Dict[str, Any]] = {}
+    for execution in plan:
+        for alias in execution.host_aliases or []:
+            ip = str((alias or {}).get("ip") or "").strip()
+            hostnames = [
+                str(name).strip()
+                for name in (alias or {}).get("hostnames") or []
+                if str(name).strip()
+            ]
+            if not ip or not hostnames:
+                continue
+            entry = by_ip.get(ip)
+            if entry is None:
+                entry = {"ip": ip, "hostnames": []}
+                by_ip[ip] = entry
+                merged.append(entry)
+            for name in hostnames:
+                if name not in entry["hostnames"]:
+                    entry["hostnames"].append(name)
+    return merged
 
 
 def _extra_egress_ports() -> List[int]:

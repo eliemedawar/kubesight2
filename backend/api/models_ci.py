@@ -267,6 +267,11 @@ class CiPipelineStage(db.Model):
     # [{"path": "target/*.jar", "type": "jar", "name": "app"}]
     artifacts = db.Column(db.JSON, nullable=False, default=list)
     resources = db.Column(db.JSON, nullable=True)
+    # [{"ip": "10.10.10.20", "hostnames": ["nexus.areeba.com", "nexus"]}] — extra
+    # /etc/hosts entries for the build. Kubernetes applies hostAliases to the
+    # POD, and a build is one pod, so every stage's entries are merged and every
+    # stage sees all of them. Empty list on stages saved before this existed.
+    host_aliases = db.Column(db.JSON, nullable=False, default=list)
 
     # HOW it behaves.
     timeout_seconds = db.Column(db.Integer, nullable=False, default=1800)

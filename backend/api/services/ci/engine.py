@@ -842,6 +842,9 @@ def _build_execution(
         secrets=stage_secrets,
         resources=definition.get("resources") or {},
         artifacts=list(definition.get("artifacts") or []),
+        # Absent from snapshots taken before host aliases existed — a build
+        # retried from such a snapshot simply gets none.
+        host_aliases=list(definition.get("hostAliases") or []),
         timeout_seconds=int(definition.get("timeoutSeconds") or 1800),
         continue_on_failure=bool(definition.get("continueOnFailure")),
         position=stage.position,

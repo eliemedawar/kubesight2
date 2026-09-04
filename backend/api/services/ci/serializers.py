@@ -99,6 +99,8 @@ def pipeline_stage_to_dict(row: CiPipelineStage) -> Dict[str, Any]:
         "secretRefs": list(row.secret_refs or []),
         "artifacts": list(row.artifacts or []),
         "resources": row.resources or {},
+        # NULL on stages saved before host aliases existed — read as none set.
+        "hostAliases": list(row.host_aliases or []),
         "timeoutSeconds": row.timeout_seconds,
         "continueOnFailure": bool(row.continue_on_failure),
         "parallelGroup": row.parallel_group,

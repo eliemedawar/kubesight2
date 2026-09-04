@@ -40,6 +40,7 @@ def _execution(position, stage_type="command", **kw):
         env=kw.get("env", {}),
         secrets=kw.get("secrets", {}),
         artifacts=kw.get("artifacts", []),
+        host_aliases=kw.get("host_aliases", []),
         timeout_seconds=600,
         continue_on_failure=kw.get("cof", False),
         position=position,
@@ -476,3 +477,41 @@ def test_no_extra_egress_ports_by_default(monkeypatch):
     _, policy, _ = k8s.build_job_resources(first)
     ports = [p["port"] for rule in policy["spec"]["egress"] for p in rule.get("ports", [])]
     assert ports == [53, 53, 5000, 443]
+
+
+def test_host_aliases_become_pod_level_entries():
+    """Kubernetes writes /etc/hosts per POD, so every stage's aliases merge into
+    one list and the kubelet applies them before any stage container runs — no
+    stage ever has to append to a file on a read-only root filesystem."""
+    first = _plan(
+        _execution(0, "checkout", host_aliases=[
+            {"ip": "10.10.10.20", "hostnames": ["nexus.areeba.com", "nexus"]},
+        ], secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                    "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                    "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, commands=["mvn package"], host_aliases=[
+            {"ip": "10.10.10.30", "hostnames": ["db.internal"]},
+            {"ip": "10.10.10.20", "hostnames": ["nexus"]},  # already covered
+        ]),
+    )
+    _, _, job = k8s.build_job_resources(first)
+
+    assert job["spec"]["template"]["spec"]["hostAliases"] == [
+        {"ip": "10.10.10.20", "hostnames": ["nexus.areeba.com", "nexus"]},
+        {"ip": "10.10.10.30", "hostnames": ["db.internal"]},
+    ]
+    # The commands are untouched: no `echo >> /etc/hosts` is injected.
+    stage1 = job["spec"]["template"]["spec"]["initContainers"][1]
+    assert "/etc/hosts" not in stage1["command"][2]
+
+
+def test_pod_spec_omits_host_aliases_when_none_configured():
+    """Existing stages have no aliases; the key must not appear at all."""
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, commands=["mvn package"]),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    assert "hostAliases" not in job["spec"]["template"]["spec"]

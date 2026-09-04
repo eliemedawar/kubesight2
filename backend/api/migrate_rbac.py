@@ -670,6 +670,11 @@ def _migrate_ci_columns() -> None:
         _add_column_if_missing("mobile_applications", "ci_service_id", "INTEGER")
     if "mobile_app_builds" in existing:
         _add_column_if_missing("mobile_app_builds", "ci_build_id", "INTEGER")
+    if "ci_pipeline_stages" in existing:
+        # Added after the table shipped: db.create_all() will not alter an
+        # existing table, so a deployed database needs this backfilled. Existing
+        # rows read as NULL, which the serializer renders as an empty list.
+        _add_column_if_missing("ci_pipeline_stages", "host_aliases", "TEXT")
 
 
 def _migrate_registry_connection_columns() -> None:

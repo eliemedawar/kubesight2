@@ -12,6 +12,8 @@ be one KubeSight knows. Everything else is normalized rather than rejected.
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -145,6 +147,106 @@ def _artifact_specs(value: Any) -> List[Dict[str, Any]]:
     return out
 
 
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+)
+
+MAX_HOST_ALIASES = 20
+MAX_HOSTNAMES_PER_ALIAS = 10
+
+
+def _host_aliases(value: Any, stage_name: str) -> List[Dict[str, Any]]:
+    """Extra /etc/hosts entries for the build pod.
+
+    Accepts either the text form the editor shows (``ip=host,host`` per line)
+    or the structured form the API round-trips (``[{"ip", "hostnames"}]``), so
+    a saved stage reloads and re-saves unchanged.
+
+    A bad entry raises rather than being dropped: silently ignoring a typo'd
+    mapping would surface much later as a connect timeout inside a build tool,
+    which is exactly the failure this field exists to prevent.
+    """
+    if value in (None, "", [], {}):
+        return []
+
+    entries: List[Any] = []
+    if isinstance(value, str):
+        entries = value.splitlines()
+    elif isinstance(value, (list, tuple)):
+        entries = list(value)
+    else:
+        raise PipelineError(f"Stage '{stage_name}' has malformed host aliases.")
+
+    merged: List[Dict[str, Any]] = []
+    by_ip: Dict[str, Dict[str, Any]] = {}
+
+    for entry in entries[: MAX_HOST_ALIASES * MAX_HOSTNAMES_PER_ALIAS]:
+        if isinstance(entry, dict):
+            raw_ip = _clean(entry.get("ip"), 64)
+            raw_names = entry.get("hostnames")
+            names = (
+                [str(name) for name in raw_names]
+                if isinstance(raw_names, (list, tuple))
+                else str(raw_names or "").split(",")
+            )
+        else:
+            line = str(entry or "").strip()
+            if not line:
+                continue  # blank lines are formatting, not entries
+            if "=" not in line:
+                raise PipelineError(
+                    f"Stage '{stage_name}' has a host alias without '=': '{line}'. "
+                    "Use ip=hostname, for example 10.10.10.20=nexus.areeba.com."
+                )
+            raw_ip, _, raw_names = line.partition("=")
+            raw_ip = raw_ip.strip()
+            names = raw_names.split(",")
+
+        if not raw_ip and not any(name.strip() for name in names):
+            continue
+        try:
+            ip = str(ipaddress.ip_address(raw_ip))
+        except ValueError:
+            raise PipelineError(
+                f"Stage '{stage_name}' has an invalid host alias IP address: '{raw_ip}'."
+            )
+
+        cleaned: List[str] = []
+        for name in names:
+            name = name.strip()
+            if not name:
+                continue
+            if not _HOSTNAME_RE.match(name):
+                raise PipelineError(
+                    f"Stage '{stage_name}' has an invalid host alias hostname: '{name}'."
+                )
+            if name not in cleaned:
+                cleaned.append(name)
+        if not cleaned:
+            raise PipelineError(
+                f"Stage '{stage_name}' has a host alias for {ip} with no hostname."
+            )
+
+        # One entry per IP: Kubernetes accepts duplicates, but merging keeps the
+        # generated pod spec readable and the round-trip stable.
+        existing = by_ip.get(ip)
+        if existing is None:
+            existing = {"ip": ip, "hostnames": []}
+            by_ip[ip] = existing
+            merged.append(existing)
+        for name in cleaned:
+            if name not in existing["hostnames"]:
+                existing["hostnames"].append(name)
+        del existing["hostnames"][MAX_HOSTNAMES_PER_ALIAS:]
+
+    if len(merged) > MAX_HOST_ALIASES:
+        raise PipelineError(
+            f"Stage '{stage_name}' may not define more than {MAX_HOST_ALIASES} host aliases."
+        )
+    return merged
+
+
 def _resources(value: Any) -> Optional[Dict[str, str]]:
     if not isinstance(value, dict):
         return None
@@ -210,6 +312,7 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         "secret_refs": _secret_refs(payload.get("secretRefs"), known_keys),
         "artifacts": _artifact_specs(payload.get("artifacts")),
         "resources": _resources(payload.get("resources")),
+        "host_aliases": _host_aliases(payload.get("hostAliases"), name),
         "timeout_seconds": timeout,
         "continue_on_failure": bool(payload.get("continueOnFailure")),
         "parallel_group": _clean(payload.get("parallelGroup"), 64) or None,

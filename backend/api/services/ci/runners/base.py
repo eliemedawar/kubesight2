@@ -75,6 +75,9 @@ class StageExecution:
     secrets: Dict[str, str] = field(default_factory=dict)
     resources: Dict[str, Any] = field(default_factory=dict)
     artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    # [{"ip": ..., "hostnames": [...]}] — extra name resolution for the build.
+    # Pod-scoped on Kubernetes, so a whole-build runner merges every stage's.
+    host_aliases: List[Dict[str, Any]] = field(default_factory=list)
     timeout_seconds: int = 1800
     continue_on_failure: bool = False
     position: int = 0

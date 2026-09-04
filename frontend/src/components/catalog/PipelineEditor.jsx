@@ -29,6 +29,7 @@ const blankStage = () => ({
   env: {},
   secretRefs: [],
   artifacts: [],
+  hostAliases: [],
   timeoutSeconds: 1800,
   continueOnFailure: false,
   enabled: true,
@@ -39,6 +40,28 @@ const fromLines = (text) =>
   String(text || "")
     .split("\n")
     .map((line) => line.trim())
+    .filter(Boolean);
+
+// ip=host,host per line, mirroring how the backend accepts and validates them.
+const aliasesToText = (aliases) =>
+  (aliases || [])
+    .map((entry) => `${entry.ip}=${(entry.hostnames || []).join(",")}`)
+    .join("\n");
+
+// Parsed leniently here — the backend is the validator, so a half-typed line
+// does not throw while somebody is still typing it.
+const aliasesFromText = (text) =>
+  fromLines(text)
+    .map((line) => {
+      const index = line.indexOf("=");
+      if (index <= 0) return null;
+      const hostnames = line
+        .slice(index + 1)
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean);
+      return { ip: line.slice(0, index).trim(), hostnames };
+    })
     .filter(Boolean);
 
 const envToText = (env) =>
@@ -333,9 +356,20 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
  * Keep this in step with runners/kubernetes.py.
  */
 const STAGE_FIELDS = {
-  checkout: new Set(["runner"]),
-  command: new Set(["runner", "image", "workdir", "commands", "env", "secrets", "artifacts"]),
-  container_image: new Set(["runner", "workdir", "env"]),
+  // hostAliases is offered wherever a stage reaches the network — a checkout
+  // clones from a git host, so it needs name resolution too.
+  checkout: new Set(["runner", "hostAliases"]),
+  command: new Set([
+    "runner",
+    "image",
+    "workdir",
+    "hostAliases",
+    "commands",
+    "env",
+    "secrets",
+    "artifacts",
+  ]),
+  container_image: new Set(["runner", "workdir", "hostAliases", "env"]),
   publish_artifact: new Set([]),
   scan: new Set([]),
 };
@@ -343,6 +377,7 @@ const STAGE_FIELDS = {
 // Everything the new type will not use, cleared on the way — otherwise a value
 // typed under one type lingers invisibly in the saved pipeline.
 const CLEARED_BY_FIELD = {
+  hostAliases: { hostAliases: [] },
   image: { image: "" },
   workdir: { workingDirectory: "" },
   commands: { commands: [] },
@@ -468,6 +503,27 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
                 The build context — where the Dockerfile is looked for.
               </span>
             )}
+          </label>
+        )}
+
+        {shows("hostAliases") && (
+          <label className="form-grid__full">
+            Host aliases
+            <DraftTextarea
+              rows={3}
+              style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
+              value={aliasesToText(stage.hostAliases)}
+              placeholder={"10.10.10.20=nexus.areeba.com,nexus\n10.10.10.30=db.internal"}
+              disabled={!canEdit}
+              spellCheck={false}
+              onChangeText={(text) => onChange({ hostAliases: aliasesFromText(text) })}
+            />
+            <span className="field-hint">
+              Optional host mappings added to the build container's /etc/hosts. One per
+              line, as <code>ip=hostname</code>; separate several names for one address
+              with commas. Kubernetes applies these to the whole build pod, so every
+              stage of this build resolves every stage's mappings.
+            </span>
           </label>
         )}
 

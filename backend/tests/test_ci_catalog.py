@@ -455,3 +455,54 @@ def test_command_stage_keeps_heredoc_shape():
         "    RUN echo indented",
         "EOF",
     ]
+
+
+def test_host_aliases_parse_text_and_structured_forms():
+    """The editor sends structured entries; the text form is accepted too so a
+    pasted `ip=host` block works and a saved stage round-trips unchanged."""
+    from api.services.ci import pipelines as pipelines_service
+
+    text_form = pipelines_service._host_aliases(
+        "10.10.10.20=nexus.areeba.com,nexus\n\n  10.10.10.30 = db.internal  \n", "s"
+    )
+    assert text_form == [
+        {"ip": "10.10.10.20", "hostnames": ["nexus.areeba.com", "nexus"]},
+        {"ip": "10.10.10.30", "hostnames": ["db.internal"]},
+    ]
+    # Feeding the parsed form back in is a no-op — save/load/save is stable.
+    assert pipelines_service._host_aliases(text_form, "s") == text_form
+
+
+def test_host_aliases_merge_repeated_ips():
+    from api.services.ci import pipelines as pipelines_service
+
+    assert pipelines_service._host_aliases(
+        "10.0.0.1=a.example\n10.0.0.1=b.example,a.example", "s"
+    ) == [{"ip": "10.0.0.1", "hostnames": ["a.example", "b.example"]}]
+
+
+def test_host_aliases_reject_malformed_entries():
+    """A typo'd mapping must fail loudly: dropped silently, it resurfaces much
+    later as a connect timeout inside a build tool."""
+    import pytest as _pytest
+
+    from api.services.ci import pipelines as pipelines_service
+    from api.services.ci.pipelines import PipelineError
+
+    for bad, expected in [
+        ("not-an-ip=host.example", "invalid host alias IP"),
+        ("10.0.0.1=", "no hostname"),
+        ("10.0.0.1=bad host", "invalid host alias hostname"),
+        ("10.0.0.1 host.example", "without '='"),
+    ]:
+        with _pytest.raises(PipelineError) as excinfo:
+            pipelines_service._host_aliases(bad, "Build JAR")
+        assert expected in str(excinfo.value)
+
+
+def test_host_aliases_absent_means_none():
+    """Stages saved before this field existed carry no value at all."""
+    from api.services.ci import pipelines as pipelines_service
+
+    for empty in (None, "", [], {}):
+        assert pipelines_service._host_aliases(empty, "s") == []
