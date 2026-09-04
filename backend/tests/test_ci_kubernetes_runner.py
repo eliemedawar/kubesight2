@@ -445,3 +445,34 @@ def test_worker_cannot_write_to_a_finished_build(app, client, running_build):
         headers=_worker_headers(),
     )
     assert response.status_code == 409
+
+
+def test_extra_egress_ports_open_dependency_repositories(monkeypatch):
+    """A self-hosted Nexus serves Maven on its own port, and a blocked port
+    surfaces as a connect timeout inside Gradle rather than as anything
+    network-shaped. Operators declare those ports; typos are ignored, not fatal.
+    """
+    monkeypatch.setenv("CI_EXTRA_EGRESS_PORTS", "4443, 8081 ,,not-a-port,4443")
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+    )
+    _, policy, _ = k8s.build_job_resources(first)
+
+    ports = [p["port"] for rule in policy["spec"]["egress"] for p in rule.get("ports", [])]
+    assert ports.count(4443) == 1  # de-duplicated
+    assert 8081 in ports
+    assert 443 in ports  # the standing TLS rule is untouched
+
+
+def test_no_extra_egress_ports_by_default(monkeypatch):
+    monkeypatch.delenv("CI_EXTRA_EGRESS_PORTS", raising=False)
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+    )
+    _, policy, _ = k8s.build_job_resources(first)
+    ports = [p["port"] for rule in policy["spec"]["egress"] for p in rule.get("ports", [])]
+    assert ports == [53, 53, 5000, 443]

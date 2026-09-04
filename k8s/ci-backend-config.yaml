@@ -37,6 +37,12 @@ data:
   CI_BACKEND_NAMESPACE: kubesight
   CI_BACKEND_PORT: "5000"
 
+  # Dependency repositories build pods must reach on non-standard TCP ports.
+  # Build pods get DNS, the callback, 443 and the container registry's port by
+  # default — a Maven/npm repo on its own port is invisible to that logic and
+  # fails as a connect TIMEOUT inside Gradle/npm. 4443 is the Nexus Maven port.
+  CI_EXTRA_EGRESS_PORTS: "4443"
+
   # --- Container image builds ----------------------------------------------
   # Empty/unset = container_image stages skip with an explanation. Set once
   # k8s/ci-buildkitd.yaml is applied and the buildkitd pod is 1/1 Ready.

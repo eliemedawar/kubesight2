@@ -606,6 +606,25 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
     return [secret, network_policy, job]
 
 
+def _extra_egress_ports() -> List[int]:
+    """Operator-declared TCP ports build pods may reach, from
+    ``CI_EXTRA_EGRESS_PORTS`` (comma-separated). Unparseable entries are
+    ignored rather than failing a build over a typo in configuration."""
+    ports: List[int] = []
+    for chunk in os.getenv("CI_EXTRA_EGRESS_PORTS", "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            port = int(chunk)
+        except ValueError:
+            logger.warning("Ignoring non-numeric CI_EXTRA_EGRESS_PORTS entry %r", chunk)
+            continue
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+    return ports
+
+
 def _network_policy(
     job_name: str, namespace: str, labels: Dict[str, str], plan: List[StageExecution]
 ) -> Dict[str, Any]:
@@ -664,6 +683,13 @@ def _network_policy(
         port = registry.get("port")
         if port and port != 443:
             egress.append({"ports": [{"protocol": "TCP", "port": int(port)}]})
+    # Dependency repositories on non-standard ports: a self-hosted Nexus often
+    # serves Maven/npm on its own port, distinct from the container registry's.
+    # Nothing else can infer them, and a blocked port fails as a connect
+    # TIMEOUT deep inside the build tool rather than anything obviously
+    # network-shaped, so make them declarable.
+    for port in _extra_egress_ports():
+        egress.append({"ports": [{"protocol": "TCP", "port": port}]})
 
     return {
         "apiVersion": "networking.k8s.io/v1",
