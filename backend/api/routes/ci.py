@@ -484,6 +484,23 @@ def retry_build(build_id: int):
         return error_response(str(exc), 409)
 
 
+@ci_bp.route("/builds/<int:build_id>/rerun-from/<int:position>", methods=["POST"])
+@require_permission("ci_builds:retry")
+def rerun_build_from(build_id: int, position: int):
+    """Queue a build that starts at ``position``, reusing this build's outputs.
+
+    For retrying one stage after changing its settings without paying for the
+    stages before it again. The pipeline is re-read, so the edits apply.
+    """
+    row = engine_service.get_build(build_id)
+    try:
+        return success_response(
+            engine_service.rerun_from(row, position, actor=_actor()), status_code=201
+        )
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 409)
+
+
 @ci_bp.route("/builds/<int:build_id>/workspace", methods=["GET"])
 @require_permission("ci_builds:view")
 def get_build_workspace(build_id: int):

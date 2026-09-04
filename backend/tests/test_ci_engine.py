@@ -905,3 +905,59 @@ def test_queue_depth_is_reported(client, admin_token, runnable_service):
         f"/api/ci/services/{runnable_service}/builds", headers=auth_headers(admin_token)
     )
     assert response.get_json()["data"]["queueDepth"] == 1
+
+
+def test_rerun_from_reuses_earlier_stages_and_restores_artifacts(app, admin_token):
+    """A rerun is not a resume: the workspace died with the previous pod, so the
+    checkout runs again and the earlier build's artifacts are restored into it.
+    Stages before the chosen one are skipped with a reason that says 'reused'
+    rather than implying they ran."""
+    from api.services.ci import engine as engine_service
+
+    build = type("B", (), {})()
+    build.pipeline_snapshot = {
+        "restore": {"fromBuildId": 7, "fromBuildNumber": 12, "startFromPosition": 2}
+    }
+
+    class _Adapter:
+        runner_type = "kubernetes"
+
+        def supported_stage_types(self):
+            return {"checkout", "command", "container_image"}
+
+    adapter = _Adapter()
+
+    # Checkout always runs — the restored files sit beside the source.
+    assert engine_service._skip_reason(
+        build, adapter, {"stageType": "checkout", "position": 0}
+    ) is None
+    # A stage before the restart point is reused, not re-run.
+    reason = engine_service._skip_reason(
+        build, adapter, {"stageType": "command", "position": 1}
+    )
+    assert reason is not None and "Reused from build #12" in reason
+    # The chosen stage and everything after it runs.
+    assert engine_service._skip_reason(
+        build, adapter, {"stageType": "command", "position": 2}
+    ) is None
+
+
+def test_rerun_from_the_first_stage_is_refused(app, admin_token):
+    """Position 0 is the checkout, which always runs — that is a plain retry,
+    and saying so beats silently doing something else."""
+    import pytest as _pytest
+
+    from api.db import db
+    from api.models_ci import CiBuild, CiService
+    from api.services.ci import engine as engine_service
+    from api.services.ci.engine import BuildError
+
+    with app.app_context():
+        service = CiService(name="Rerun Svc", slug="rerun-svc")
+        db.session.add(service)
+        db.session.commit()
+        build = CiBuild(service_id=service.id, number=1, status="failed", branch="main")
+        db.session.add(build)
+        db.session.commit()
+        with _pytest.raises(BuildError):
+            engine_service.rerun_from(build, 0)

@@ -202,6 +202,36 @@ try:
 except Exception as exc:  # Reporting the commit is best-effort, never fatal.
     print("[kubesight] commit report failed:", exc)
 PYEOF
+if [ "${KUBESIGHT_RESTORE:-0}" = "1" ]; then
+python3 - <<'PYEOF'
+# Rerun-from-a-stage: put the earlier build's artifacts back where they were,
+# so the stages being skipped do not have to run again. Restoring is the whole
+# point of the rerun, so unlike the commit report a failure here is fatal.
+import json, os, sys, urllib.request
+
+base = os.environ["KUBESIGHT_CALLBACK_URL"].rstrip("/") + "/builds/" + os.environ["KUBESIGHT_BUILD_ID"] + "/restore"
+headers = {"Authorization": "Bearer " + os.environ["KUBESIGHT_CALLBACK_TOKEN"]}
+listing = json.load(urllib.request.urlopen(urllib.request.Request(base, headers=headers), timeout=60))
+items = (listing.get("data") or {}).get("items") or []
+if not items:
+    print("[kubesight] nothing to restore from the previous build.")
+for item in items:
+    rel = (item.get("sourcePath") or item.get("name") or "").lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        print("[kubesight] skipped an artifact with an unusable path:", rel)
+        continue
+    target = os.path.join("/workspace/source", rel)
+    os.makedirs(os.path.dirname(target) or "/workspace/source", exist_ok=True)
+    req = urllib.request.Request(base + "/" + str(item["id"]), headers=headers)
+    with urllib.request.urlopen(req, timeout=600) as response, open(target, "wb") as sink:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            sink.write(chunk)
+    print("[kubesight] restored", rel, "(%d bytes)" % os.path.getsize(target))
+PYEOF
+fi
 echo "Checkout complete."
 """
 
@@ -231,6 +261,10 @@ def post_file(path, spec):
         "type": spec.get("type") or "binary",
         "stagePosition": str(spec.get("stagePosition", "")),
         "declaredPath": spec.get("path", ""),
+        # Where the file sat in the workspace. Recorded so a later build can
+        # restore it to the same place instead of re-running the stage that
+        # produced it.
+        "sourcePath": os.path.relpath(path, "/workspace/source"),
     }
     for key, value in fields.items():
         body.write(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % (boundary, key, value)).encode())
@@ -554,6 +588,9 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                     {
                         "KUBESIGHT_REPO_URL": execution.repository_url or "",
                         "KUBESIGHT_REVISION": execution.commit_sha or execution.branch or "",
+                        # Set when this build reruns from a later stage: the
+                        # checkout also restores the earlier build's artifacts.
+                        "KUBESIGHT_RESTORE": "1" if execution.restore_artifacts else "0",
                     },
                 )
                 + callback_env

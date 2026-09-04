@@ -86,6 +86,14 @@ export const applyCiPipelineTemplate = (serviceId, applicationType) =>
 // Builds
 // ---------------------------------------------------------------------------
 
+// Queue a build that starts at this stage, restoring the previous build's
+// artifacts instead of re-running the stages before it.
+export const rerunCiBuildFrom = (buildId, position) =>
+  request(
+    `/api/ci/builds/${encodeURIComponent(buildId)}/rerun-from/${encodeURIComponent(position)}`,
+    { method: "POST" }
+  );
+
 // One directory of a running build's shared workspace. Live only: the
 // workspace goes away with the build pod, and the API says so rather than
 // returning an empty listing.

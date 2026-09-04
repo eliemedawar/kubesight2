@@ -98,6 +98,9 @@ class StageExecution:
     # and the fresh plaintext token authorizing it (its hash is on the build).
     callback_url: str = ""
     callback_token: str = ""
+    # Rerun-from-a-stage: the checkout also restores the artifacts of the
+    # build this one continues from, so skipped stages need not run again.
+    restore_artifacts: bool = False
     # Set on the FIRST stage only: the full resolved stage list for the build.
     # Whole-build runners (one Kubernetes Job per build) construct everything
     # from this; per-stage runners ignore it.

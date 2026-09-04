@@ -17,12 +17,12 @@ import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
-from flask import Blueprint, request
+from flask import Blueprint, request, send_file
 
 from ..db import db
-from ..models_ci import CiBuild, CiBuildStage
+from ..models_ci import CiArtifact, CiBuild, CiBuildStage
 from ..response import error_response, success_response
 from ..services.ci import artifacts as artifacts_service
 from ..services.ci.runners.base import ArtifactRef
@@ -124,7 +124,11 @@ def upload_artifact(build_id: int):
                     name=name,
                     artifact_type=artifact_type,
                     local_path=temp_path,
-                    metadata={"declaredPath": str(request.form.get("declaredPath") or "")[:512]},
+                    metadata={
+                        "declaredPath": str(request.form.get("declaredPath") or "")[:512],
+                        # Restorable position in a future build's workspace.
+                        "sourcePath": str(request.form.get("sourcePath") or "")[:512],
+                    },
                 ),
                 commit_sha=build.commit_sha,
                 branch=build.branch,
@@ -166,3 +170,67 @@ def upload_artifact(build_id: int):
         commit=True,
     )
     return success_response({"id": row.id, "name": row.name}, status_code=201)
+
+
+def _restore_source(build: CiBuild) -> Optional[int]:
+    """The build whose artifacts this one is allowed to restore, if any.
+
+    Taken from this build's own snapshot rather than from the request, so a
+    token can only ever reach the build KubeSight itself linked it to.
+    """
+    restore = (build.pipeline_snapshot or {}).get("restore") or {}
+    try:
+        return int(restore.get("fromBuildId"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _restorable(build: CiBuild) -> List[CiArtifact]:
+    source_id = _restore_source(build)
+    if source_id is None:
+        return []
+    source = db.session.get(CiBuild, source_id)
+    # Same service only: a build may not read another application's outputs
+    # even if someone managed to point a snapshot at one.
+    if source is None or source.service_id != build.service_id:
+        return []
+    return [
+        row
+        for row in artifacts_service.list_for_build(source.id)
+        if row.storage_backend == "local" and row.storage_ref
+    ]
+
+
+@ci_worker_bp.route("/builds/<int:build_id>/restore", methods=["GET"])
+def list_restorable(build_id: int):
+    """What the previous build produced, and where it sat in the workspace."""
+    build, err = _authorized_build(build_id)
+    if err:
+        return err
+    items = [
+        {
+            "id": row.id,
+            "name": row.name,
+            "sourcePath": (row.artifact_metadata or {}).get("sourcePath") or row.name,
+            "sizeBytes": row.size_bytes,
+        }
+        for row in _restorable(build)
+    ]
+    return success_response({"items": items, "count": len(items)})
+
+
+@ci_worker_bp.route("/builds/<int:build_id>/restore/<int:artifact_id>", methods=["GET"])
+def download_restorable(build_id: int, artifact_id: int):
+    build, err = _authorized_build(build_id)
+    if err:
+        return err
+    row = next((item for item in _restorable(build) if item.id == artifact_id), None)
+    if row is None:
+        return error_response("That artifact is not restorable for this build.", 404)
+    store = artifacts_service.get_store(row.storage_backend)
+    return send_file(
+        store.open(row),
+        mimetype="application/octet-stream",
+        as_attachment=True,
+        download_name=row.name,
+    )

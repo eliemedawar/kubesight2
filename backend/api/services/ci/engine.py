@@ -135,6 +135,7 @@ def trigger_build(
     retry_of: Optional[CiBuild] = None,
     variables: Optional[Dict[str, str]] = None,
     ref_type: Optional[str] = None,
+    restore: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a queued build. Does not execute anything — the tick does that.
 
@@ -170,6 +171,9 @@ def trigger_build(
         "pipelineVersion": pipeline.version,
         "variables": clean_variables,
         "refType": ref_type if ref_type in ("branch", "tag") else "branch",
+        # Present only on a rerun-from-a-stage: which build's outputs to
+        # restore, and where in the pipeline to pick up.
+        **({"restore": restore} if restore else {}),
         "stages": [stage_definition(stage) for stage in stages],
     }
 
@@ -558,6 +562,18 @@ def _skip_reason(build: CiBuild, adapter, definition: Dict[str, Any]) -> Optiona
     build) contains exactly the containers the engine will actually advance.
     """
     stage_type = definition.get("stageType") or "command"
+    # Rerunning from a later stage: everything before it was already done by the
+    # build this one continues, and its outputs are restored into the workspace
+    # instead. Checkout is the exception — the source itself is what the
+    # restored files sit beside, so it always runs.
+    restore = (build.pipeline_snapshot or {}).get("restore") or {}
+    start_from = restore.get("startFromPosition")
+    if (
+        start_from is not None
+        and stage_type != "checkout"
+        and int(definition.get("position") or 0) < int(start_from)
+    ):
+        return f"Reused from build #{restore.get('fromBuildNumber')} — rerun started later in the pipeline."
     if stage_type not in _supported_stage_types(adapter):
         reason = None
         asker = getattr(adapter, "skip_reason", None)
@@ -694,6 +710,56 @@ def _finish_build(build: CiBuild, status: str, error: Optional[str]) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def rerun_from(build: CiBuild, position: int, *, actor=None) -> Dict[str, Any]:
+    """Queue a build that starts at ``position``, reusing ``build``'s outputs.
+
+    Not a resume: the workspace is an emptyDir that died with the previous pod,
+    so this re-runs the checkout and restores that build's ARTIFACTS into it,
+    then runs from the chosen stage. That reproduces what the skipped stages
+    contributed only insofar as they declared it — a stage whose real output was
+    never collected as an artifact has nothing to restore, which is why the
+    reason string says "reused" rather than pretending the stage ran.
+
+    The pipeline is re-resolved rather than replayed from the old snapshot: the
+    entire point is to retry a stage after changing its settings.
+    """
+    if build.status not in ("success", "failed", "cancelled", "timeout"):
+        raise BuildError(f"Build #{build.number} is still {build.status}.")
+    service = build.service
+    if service is None:
+        raise BuildError("The service for this build no longer exists.")
+    if position <= 0:
+        # Position 0 is the checkout, which always runs — a rerun from there is
+        # just a retry, and saying so is better than silently doing something else.
+        raise BuildError("Rerunning from the first stage is the same as a retry.")
+
+    old_snapshot = build.pipeline_snapshot or {}
+    result = trigger_build(
+        service,
+        branch=build.branch,
+        commit_sha=build.commit_sha,
+        trigger_type="retry",
+        actor=actor,
+        retry_of=build,
+        variables=old_snapshot.get("variables") or None,
+        ref_type=old_snapshot.get("refType"),
+        restore={
+            "fromBuildId": build.id,
+            "fromBuildNumber": build.number,
+            "startFromPosition": int(position),
+        },
+    )
+    log_audit(
+        "ci_build_rerun_from_stage",
+        actor=actor,
+        target_type="ci_build",
+        target_id=str(build.id),
+        details={"newBuildId": result.get("id"), "fromPosition": int(position)},
+    )
+    return result
+
 
 def _current_stage(build: CiBuild) -> Optional[CiBuildStage]:
     """The first stage not yet in a terminal state."""
@@ -883,6 +949,10 @@ def _build_execution(
         registry=registry,
         callback_url=_callback_url(),
         callback_token=callback_token,
+        restore_artifacts=bool(
+            (build.pipeline_snapshot or {}).get("restore")
+            and stage_type == "checkout"
+        ),
     )
 
 

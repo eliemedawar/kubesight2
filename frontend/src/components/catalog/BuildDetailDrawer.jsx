@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { cancelCiBuild, getCiBuild, listCiBuildArtifacts, retryCiBuild } from "../../api/ciApi.js";
+import {
+  cancelCiBuild,
+  getCiBuild,
+  listCiBuildArtifacts,
+  rerunCiBuildFrom,
+  retryCiBuild,
+} from "../../api/ciApi.js";
 import PipelineStrip from "./PipelineStrip.jsx";
 import StageLogViewer from "./StageLogViewer.jsx";
 import WorkspaceBrowser from "./WorkspaceBrowser.jsx";
@@ -253,6 +259,20 @@ export default function BuildDetailDrawer({
                       <span className="sg-ci-stage-name">{stage.name}</span>
                       <span className="sg-ci-stage-time">{stageDuration(stage)}</span>
                     </button>
+                    {/* Retrying one stage after changing its settings, without
+                        paying for the stages before it again. Position 0 is the
+                        checkout, which always runs, so it has no button. */}
+                    {!active && canRetry && stage.position > 0 && (
+                      <button
+                        type="button"
+                        className="btn-outline btn-compact sg-ci-stage-rerun"
+                        disabled={busy}
+                        title={`Start a new build at "${stage.name}", restoring this build's artifacts`}
+                        onClick={() => act(() => rerunCiBuildFrom(build.id, stage.position))}
+                      >
+                        Rerun from here
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>

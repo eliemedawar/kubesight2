@@ -1262,3 +1262,9 @@ button.sg-ci-workspace-entry:focus-visible {
   margin: 0 0 var(--space-2);
   font-size: 0.78rem;
 }
+
+/* "Rerun from here" sits under its stage row, out of the way until wanted. */
+.sg-ci-stage-rerun {
+  margin: 0.15rem 0 0.4rem 1.9rem;
+  font-size: 0.7rem;
+}
