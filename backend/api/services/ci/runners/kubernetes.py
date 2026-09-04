@@ -175,14 +175,22 @@ export GIT_CONFIG_COUNT=2
 export GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $AUTH"
 export GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1=/workspace/source
 echo "Cloning $KUBESIGHT_REPO_URL"
-git clone --no-tags --depth 50 "$KUBESIGHT_REPO_URL" /workspace/source
-cd /workspace/source
-if [ -n "${KUBESIGHT_REVISION:-}" ]; then
-  echo "Checking out $KUBESIGHT_REVISION"
-  if git fetch --no-tags --depth 50 origin "$KUBESIGHT_REVISION" 2>/dev/null; then
-    git checkout --quiet FETCH_HEAD
-  else
-    git checkout --quiet "$KUBESIGHT_REVISION"
+# One shallow clone of the ref being built, rather than cloning the default
+# branch and then fetching. --branch takes a tag as happily as a branch; a
+# pinned commit sha is the case it cannot express, so that still falls back.
+if [ -n "${KUBESIGHT_REVISION:-}" ] &&    git clone --no-tags --depth 1 --branch "$KUBESIGHT_REVISION"        "$KUBESIGHT_REPO_URL" /workspace/source 2>/dev/null; then
+  cd /workspace/source
+  echo "Checked out $KUBESIGHT_REVISION"
+else
+  git clone --no-tags --depth 50 "$KUBESIGHT_REPO_URL" /workspace/source
+  cd /workspace/source
+  if [ -n "${KUBESIGHT_REVISION:-}" ]; then
+    echo "Checking out $KUBESIGHT_REVISION"
+    if git fetch --no-tags --depth 50 origin "$KUBESIGHT_REVISION" 2>/dev/null; then
+      git checkout --quiet FETCH_HEAD
+    else
+      git checkout --quiet "$KUBESIGHT_REVISION"
+    fi
   fi
 fi
 COMMIT="$(git rev-parse HEAD)"
@@ -390,6 +398,26 @@ def _buildctl_output(registry: Dict[str, Any], image_ref: str) -> str:
     return output
 
 
+def _buildctl_cache(registry: Dict[str, Any]) -> str:
+    """Layer cache kept in the registry beside the image.
+
+    buildkitd's own cache is an emptyDir: warm while that pod lives, gone when
+    it restarts, and invisible to a second builder. Pushing the cache to a
+    ``:buildcache`` tag makes it survive both. Off unless asked for, because it
+    writes an extra tag into somebody's registry.
+    """
+    if _env("CI_BUILDKIT_REGISTRY_CACHE", "0") not in ("1", "true", "yes"):
+        return ""
+    ref = f"{registry['host']}/{registry['repository']}:buildcache"
+    insecure = ",registry.insecure=true" if registry.get("verifyTls") is False else ""
+    return (
+        f"--import-cache type=registry,ref={ref}{insecure} "
+        # mode=max caches intermediate layers too, which is what makes a
+        # dependency-heavy build cheap on the second run.
+        f"--export-cache type=registry,ref={ref},mode=max{insecure} "
+    )
+
+
 def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
     registry = execution.registry or {}
     image_ref = f"{registry['host']}/{registry['repository']}:{registry['tag']}"
@@ -408,6 +436,7 @@ def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
             f"--local context={context} "
             f"--local dockerfile={INLINE_DOCKERFILE_DIR} "
             f"--opt filename=Dockerfile "
+            f"{_buildctl_cache(registry)}"
             f"--output {_buildctl_output(registry, image_ref)} "
             f"--metadata-file {meta_file}"
         )
@@ -417,6 +446,7 @@ def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
         f"--local context={context} "
         f"--local dockerfile={context}/{dockerfile_dir} "
         f"--opt filename={os.path.basename(dockerfile)} "
+        f"{_buildctl_cache(registry)}"
         f"--output {_buildctl_output(registry, image_ref)} "
         f"--metadata-file {meta_file}"
     )
@@ -454,11 +484,65 @@ def _stage_resources(execution: StageExecution) -> Dict[str, Any]:
     return {"requests": requests, "limits": limits}
 
 
+
+# ---------------------------------------------------------------------------
+# Dependency cache
+#
+# Without one, every build re-downloads its whole dependency graph: a Gradle or
+# Maven project spends minutes doing it, on a workspace that is then deleted.
+# The cache is a per-SERVICE PersistentVolumeClaim mounted at /cache, so a
+# service's builds warm each other's while different services stay isolated.
+#
+# Per-service and ReadWriteOnce on purpose: build tools lock their cache
+# directory, and lock semantics over shared network storage are exactly where
+# they misbehave. A service's own builds are serialised by its
+# maxConcurrentBuilds, so one pod holds the volume at a time.
+#
+# Off unless CI_CACHE_STORAGE_CLASS names a class: nothing should start
+# demanding storage on a cluster that has none to give.
+# ---------------------------------------------------------------------------
+
+CACHE_MOUNT_PATH = "/cache"
+
+
+def cache_storage_class() -> str:
+    return os.getenv("CI_CACHE_STORAGE_CLASS", "").strip()
+
+
+def cache_claim_name(service_slug: str) -> str:
+    return f"ci-cache-{_dns(service_slug, 50)}"
+
+
+def cache_claim(service_slug: str) -> Dict[str, Any]:
+    """The per-service cache PVC. Applied separately from the Job and never
+    given an ownerReference — it must outlive the build that created it."""
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": cache_claim_name(service_slug),
+            "namespace": _namespace(),
+            "labels": {
+                "app.kubernetes.io/name": "kubesight-ci",
+                "kubesight.io/cache-for": _dns(service_slug, 63),
+            },
+        },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "storageClassName": cache_storage_class(),
+            "resources": {"requests": {"storage": _env("CI_CACHE_SIZE", "10Gi")}},
+        },
+    }
+
+
 def _mounts() -> List[Dict[str, str]]:
-    return [
+    mounts = [
         {"name": "workspace", "mountPath": "/workspace"},
         {"name": "tmp", "mountPath": "/tmp"},
     ]
+    if cache_storage_class():
+        mounts.append({"name": "cache", "mountPath": CACHE_MOUNT_PATH})
+    return mounts
 
 
 def _plain_env(execution: StageExecution, extra: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -471,6 +555,9 @@ def _plain_env(execution: StageExecution, extra: Dict[str, str]) -> List[Dict[st
         "KUBESIGHT_SERVICE": execution.service_slug,
         "KUBESIGHT_BRANCH": execution.branch or "",
         "KUBESIGHT_COMMIT": execution.commit_sha or "",
+        # Empty when no cache volume is configured, so a pipeline can use it
+        # unconditionally and simply get a cold build where there is none.
+        "KUBESIGHT_CACHE": CACHE_MOUNT_PATH if cache_storage_class() else "",
         **(execution.env or {}),
         **extra,
     }
@@ -672,6 +759,13 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
         {"name": "workspace", "emptyDir": {"sizeLimit": _env("CI_WORKSPACE_SIZE_LIMIT", "5Gi")}},
         {"name": "tmp", "emptyDir": {"sizeLimit": "512Mi"}},
     ]
+    if cache_storage_class():
+        volumes.append(
+            {
+                "name": "cache",
+                "persistentVolumeClaim": {"claimName": cache_claim_name(first.service_slug)},
+            }
+        )
     if docker_config_needed:
         volumes.append(
             {
@@ -915,6 +1009,8 @@ class KubernetesJobRunnerAdapter:
         return RunnerHandle(runner_id=0, external_ref=ref)
 
     def _create_job(self, execution: StageExecution) -> None:
+        if cache_storage_class():
+            self._ensure_cache_claim(execution.service_slug)
         resources = build_job_resources(execution)
         manifest = json.dumps({"apiVersion": "v1", "kind": "List", "items": resources})
         rc, _, stderr = _kubectl(["apply", "-f", "-"], input_text=manifest, timeout=60)
@@ -922,6 +1018,36 @@ class KubernetesJobRunnerAdapter:
             logger.error("CI job apply failed: %s", stderr[-2000:])
             raise RunnerError("The build job could not be scheduled on the cluster.")
         self._attach_owner_refs(resources)
+
+    def _ensure_cache_claim(self, service_slug: str) -> None:
+        """Create the service's cache volume once, and only once.
+
+        Create-if-missing rather than apply: a bound PVC has immutable fields,
+        so re-applying it on every build would start failing the moment the
+        configured size changed.
+
+        A claim that cannot be created is fatal for this build, deliberately.
+        The Job below mounts it by name, so continuing would leave a pod Pending
+        until its deadline with nothing explaining why — a clear failure now is
+        kinder than a silent twenty-minute one later.
+        """
+        name = cache_claim_name(service_slug)
+        rc, _, _ = _kubectl(
+            ["get", "pvc", name, "-n", _namespace(), "-o", "name"], timeout=20
+        )
+        if rc == 0:
+            return
+        rc, _, stderr = _kubectl(
+            ["apply", "-f", "-"], input_text=json.dumps(cache_claim(service_slug)), timeout=30
+        )
+        if rc != 0:
+            detail = (stderr or "").strip().splitlines()
+            logger.error("CI cache claim failed: %s", (stderr or "")[-2000:])
+            raise RunnerError(
+                "The build cache volume could not be created: "
+                + (detail[-1] if detail else "unknown error")
+                + " — clear CI_CACHE_STORAGE_CLASS to build without a cache."
+            )
 
     def _attach_owner_refs(self, resources: List[Dict[str, Any]]) -> None:
         """Point the Secret and NetworkPolicy at the Job so Kubernetes GC

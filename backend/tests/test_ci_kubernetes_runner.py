@@ -683,3 +683,72 @@ def test_poll_maps_markers_to_stage_outcomes():
 
     logs["stage-0"] = "[kubesight] Skipped: an earlier stage failed.\n[kubesight-skip]\n"
     assert adapter.poll(handle) == k8s.SKIPPED
+
+
+def test_no_cache_volume_unless_a_storage_class_is_configured(monkeypatch):
+    """Nothing should demand storage on a cluster that has none to give."""
+    monkeypatch.delenv("CI_CACHE_STORAGE_CLASS", raising=False)
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, commands=["gradle build"]),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    spec = job["spec"]["template"]["spec"]
+    assert not [v for v in spec["volumes"] if v["name"] == "cache"]
+    stage = spec["initContainers"][1]
+    cache_env = next(e for e in stage["env"] if e["name"] == "KUBESIGHT_CACHE")
+    assert cache_env["value"] == ""
+
+
+def test_cache_volume_is_per_service_and_mounted_everywhere(monkeypatch):
+    """One PVC per service: a service's builds warm each other's cache while
+    different services stay isolated."""
+    monkeypatch.setenv("CI_CACHE_STORAGE_CLASS", "nfs-client")
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, commands=["gradle build"]),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    spec = job["spec"]["template"]["spec"]
+
+    volume = next(v for v in spec["volumes"] if v["name"] == "cache")
+    assert volume["persistentVolumeClaim"]["claimName"] == "ci-cache-payment-service"
+    for container in spec["initContainers"]:
+        assert {"name": "cache", "mountPath": "/cache"} in container["volumeMounts"]
+    stage = spec["initContainers"][1]
+    assert next(e for e in stage["env"] if e["name"] == "KUBESIGHT_CACHE")["value"] == "/cache"
+
+    claim = k8s.cache_claim("payment-service")
+    assert claim["spec"]["accessModes"] == ["ReadWriteOnce"]
+    assert claim["spec"]["storageClassName"] == "nfs-client"
+    # No ownerReference: the cache must outlive the build that created it.
+    assert "ownerReferences" not in claim["metadata"]
+
+
+def test_registry_layer_cache_is_opt_in(monkeypatch):
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", "tcp://buildkitd:1234")
+    registry = {
+        "host": "nexus:9443", "port": 9443, "repository": "profile-ms", "tag": "v1",
+        "dockerfile": "Dockerfile", "username": "u", "password": "p",
+        "verifyTls": True, "connectionId": 1,
+    }
+    plan = lambda: _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, "container_image", registry=registry),
+    )
+
+    monkeypatch.delenv("CI_BUILDKIT_REGISTRY_CACHE", raising=False)
+    _, _, job = k8s.build_job_resources(plan())
+    assert "--export-cache" not in job["spec"]["template"]["spec"]["initContainers"][1]["command"][2]
+
+    monkeypatch.setenv("CI_BUILDKIT_REGISTRY_CACHE", "1")
+    _, _, job = k8s.build_job_resources(plan())
+    script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][2]
+    assert "--import-cache type=registry,ref=nexus:9443/profile-ms:buildcache" in script
+    assert "--export-cache type=registry,ref=nexus:9443/profile-ms:buildcache,mode=max" in script

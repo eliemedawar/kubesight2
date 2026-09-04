@@ -85,6 +85,12 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "get", "delete", "patch"]
+  # Dependency caches (CI_CACHE_STORAGE_CLASS): one PVC per service, created on
+  # first use. Deliberately NOT deletable through this role — a cache outlives
+  # the builds that fill it, and removing one is an operator's decision.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

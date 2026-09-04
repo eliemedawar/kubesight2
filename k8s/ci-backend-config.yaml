@@ -48,6 +48,23 @@ data:
   # k8s/ci-buildkitd.yaml is applied and the buildkitd pod is 1/1 Ready.
   CI_BUILDKIT_ADDR: tcp://buildkitd.kubesight-buildkit.svc.cluster.local:1234
 
+  # --- Dependency cache -----------------------------------------------------
+  # The single biggest build-time saving: without it every build re-downloads
+  # its whole dependency graph. Set to a StorageClass that supports
+  # ReadWriteOnce and KubeSight creates one PVC per service, mounted at /cache.
+  # Empty (the default) means no cache and every build starts cold.
+  #   CI_CACHE_STORAGE_CLASS: "your-storage-class"
+  #   CI_CACHE_SIZE: 10Gi
+  # Then point the build tool at it from the stage's Environment, e.g.
+  #   GRADLE_USER_HOME=/cache/gradle
+  # Because the volume is ReadWriteOnce, keep the service's max concurrent
+  # builds at 1 — build tools lock their cache directory.
+
+  # Keep BuildKit's layer cache in the registry beside the image, so it
+  # survives a buildkitd restart instead of living in that pod's emptyDir.
+  # Writes an extra <repository>:buildcache tag.
+  #   CI_BUILDKIT_REGISTRY_CACHE: "1"
+
   # --- Per-stage resources --------------------------------------------------
   # Sized for nodes with ~4.5Gi allocatable ephemeral-storage. The request is
   # what the scheduler matches; the limit only caps. Raise both on bigger nodes.
