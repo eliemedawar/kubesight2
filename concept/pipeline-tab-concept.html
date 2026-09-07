@@ -1,0 +1,856 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KubeSight — Pipeline Workspace Concept</title>
+  <style>
+    :root {
+      --page: #f8f7f5;
+      --panel: #ffffff;
+      --panel-strong: #faf9f7;
+      --interactive: #f3f2ef;
+      --inset: #f4f3f0;
+      --ink: #131417;
+      --text: #1a1b1e;
+      --subtle: #494b52;
+      --muted: #6e7076;
+      --faint: #a7a8ac;
+      --border: #e9e7e3;
+      --border-strong: #d8d6d0;
+      --accent: #ff2929;
+      --accent-text: #d71f1f;
+      --accent-soft: #fff1ef;
+      --ok: #178a45;
+      --ok-soft: #eaf7ef;
+      --warn: #a66104;
+      --warn-soft: #fff6e8;
+      --info: #0e7490;
+      --info-soft: #eaf7fa;
+      --code: #101113;
+      --code-text: #e7e9ed;
+      --shadow-sm: 0 1px 2px rgba(26, 27, 30, .05);
+      --shadow-md: 0 10px 30px rgba(26, 27, 30, .08), 0 2px 8px rgba(26, 27, 30, .04);
+      --ring: 0 0 0 3px rgba(255, 41, 41, .14);
+    }
+
+    html[data-theme="dark"] {
+      --page: #101112;
+      --panel: #17181a;
+      --panel-strong: #1c1d20;
+      --interactive: #2a2b30;
+      --inset: #202124;
+      --ink: #fafaf9;
+      --text: #ececea;
+      --subtle: #b9bab6;
+      --muted: #929399;
+      --faint: #64656a;
+      --border: rgba(235, 232, 225, .12);
+      --border-strong: rgba(235, 232, 225, .24);
+      --accent: #ff3b3b;
+      --accent-text: #ff7a70;
+      --accent-soft: rgba(255, 59, 59, .12);
+      --ok: #2fbe6b;
+      --ok-soft: rgba(47, 190, 107, .12);
+      --warn: #f0a32b;
+      --warn-soft: rgba(240, 163, 43, .12);
+      --info: #2cb8dc;
+      --info-soft: rgba(44, 184, 220, .12);
+      --code: #0b0c0d;
+      --code-text: #d8dbe2;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35);
+      --shadow-md: 0 14px 34px rgba(0, 0, 0, .32), 0 2px 8px rgba(0, 0, 0, .28);
+      --ring: 0 0 0 3px rgba(255, 59, 59, .16);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--page);
+      font: 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select, textarea { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+    summary:focus-visible {
+      outline: none;
+      border-color: var(--accent) !important;
+      box-shadow: var(--ring);
+    }
+    code, .mono {
+      font-family: "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    svg { display: block; }
+
+    .concept-head {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 60px 28px 34px;
+    }
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--accent-text);
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 24px; height: 2px; background: var(--accent); }
+    .concept-head h1 {
+      max-width: 800px;
+      margin: 12px 0 14px;
+      color: var(--ink);
+      font-size: clamp(34px, 5vw, 54px);
+      line-height: 1.04;
+      letter-spacing: -.045em;
+    }
+    .concept-head > p { max-width: 710px; margin: 0; color: var(--subtle); font-size: 17px; }
+    .principles { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+    .principle {
+      padding: 6px 11px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .prototype-shell {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 0 20px 52px;
+    }
+    .prototype-label {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin: 0 4px 10px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .theme-button, .icon-button {
+      display: inline-grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: var(--panel);
+      cursor: pointer;
+    }
+    .theme-button:hover, .icon-button:hover { background: var(--interactive); }
+    .theme-button svg, .icon-button svg { width: 16px; height: 16px; }
+
+    .browser {
+      overflow: hidden;
+      min-height: 820px;
+      border: 1px solid var(--border-strong);
+      border-radius: 22px;
+      background: var(--panel);
+      box-shadow: var(--shadow-md);
+    }
+    .browser-bar {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      height: 40px;
+      padding: 0 15px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-strong);
+    }
+    .browser-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
+    .browser-address {
+      width: min(430px, 48vw);
+      margin: 0 auto;
+      padding: 4px 12px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--panel);
+      font-size: 11px;
+      text-align: center;
+    }
+    .app { min-height: 780px; background: var(--page); }
+    .app-topbar {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      height: 56px;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .brand { display: flex; align-items: center; gap: 9px; color: var(--ink); font-size: 15px; font-weight: 800; }
+    .brand-mark { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: white; }
+    .brand-mark svg { width: 15px; height: 15px; }
+    .top-context { color: var(--muted); font-size: 12px; }
+    .top-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+    .avatar { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--ink); color: var(--panel); font-size: 10px; font-weight: 800; }
+
+    .service-head { padding: 25px 28px 0; background: var(--panel); }
+    .breadcrumb { margin-bottom: 13px; color: var(--muted); font-size: 12px; }
+    .service-title-row { display: flex; align-items: center; gap: 12px; }
+    .service-title-row h2 { margin: 0; color: var(--ink); font-size: 22px; letter-spacing: -.025em; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border: 1px solid color-mix(in srgb, var(--ok) 26%, transparent);
+      border-radius: 999px;
+      color: var(--ok);
+      background: var(--ok-soft);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .service-meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .tabs { display: flex; gap: 25px; margin-top: 22px; overflow-x: auto; }
+    .tab {
+      position: relative;
+      padding: 0 0 13px;
+      border: 0;
+      background: none;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .tab.active { color: var(--ink); }
+    .tab.active::after { content: ""; position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; background: var(--accent); }
+
+    .workspace { padding: 22px 28px 32px; }
+    .pipeline-bar {
+      position: sticky;
+      top: 0;
+      z-index: 8;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 64px;
+      margin-bottom: 16px;
+      padding: 11px 14px 11px 18px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--panel) 93%, transparent);
+      box-shadow: var(--shadow-sm);
+      backdrop-filter: blur(12px);
+    }
+    .pipeline-identity { min-width: 0; }
+    .pipeline-identity strong { display: block; color: var(--ink); font-size: 14px; }
+    .pipeline-identity span { display: block; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .health-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: var(--ok-soft);
+      color: var(--ok);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .health-chip svg { width: 12px; height: 12px; }
+    .save-state { margin-left: auto; color: var(--muted); font-size: 11px; }
+    .save-state.dirty { color: var(--warn); }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      min-height: 36px;
+      padding: 0 14px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .button:hover { background: var(--interactive); }
+    .button svg { width: 14px; height: 14px; }
+    .button.primary { border-color: var(--accent); background: var(--accent); color: white; box-shadow: 0 2px 10px -2px rgba(255, 41, 41, .45); }
+    .button.primary:hover { background: var(--accent-text); }
+    .button[disabled] { opacity: .45; cursor: default; }
+    .button[disabled]:hover { background: var(--panel); }
+
+    .editor-layout { display: grid; grid-template-columns: 310px minmax(0, 1fr); gap: 16px; align-items: start; }
+    .stage-rail, .inspector {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--panel);
+      box-shadow: var(--shadow-sm);
+    }
+    .stage-rail { position: sticky; top: 82px; overflow: hidden; }
+    .rail-head { display: flex; align-items: center; padding: 16px 16px 12px; }
+    .rail-head strong { color: var(--ink); font-size: 13px; }
+    .rail-count { margin-left: 7px; color: var(--muted); font-size: 11px; }
+    .rail-help { margin-left: auto; color: var(--muted); font-size: 10px; }
+    .stages { display: flex; flex-direction: column; gap: 4px; padding: 0 8px 8px; }
+    .stage-item {
+      position: relative;
+      display: grid;
+      grid-template-columns: 18px 30px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 58px;
+      padding: 8px 8px;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+    .stage-item::after {
+      content: "";
+      position: absolute;
+      left: 43px;
+      bottom: -7px;
+      width: 1px;
+      height: 9px;
+      background: var(--border-strong);
+    }
+    .stage-item:last-child::after { display: none; }
+    .stage-item:hover { background: var(--interactive); }
+    .stage-item.active { border-color: var(--border-strong); background: var(--interactive); box-shadow: inset 3px 0 0 var(--accent); }
+    .drag { color: var(--faint); cursor: grab; }
+    .drag svg { width: 14px; height: 14px; }
+    .stage-number {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--border-strong);
+      border-radius: 50%;
+      background: var(--panel);
+      color: var(--subtle);
+      font-size: 11px;
+      font-weight: 750;
+    }
+    .stage-item.active .stage-number { border-color: var(--accent); background: var(--accent); color: white; }
+    .stage-copy { min-width: 0; }
+    .stage-copy strong { display: block; overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .stage-copy span { display: block; overflow: hidden; margin-top: 1px; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .stage-kind { padding: 2px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 9px; white-space: nowrap; }
+    .add-stage {
+      width: calc(100% - 16px);
+      margin: 2px 8px 10px;
+      border-style: dashed;
+      color: var(--accent-text);
+      background: transparent;
+    }
+    .rail-section {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      padding: 13px 16px;
+      border: 0;
+      border-top: 1px solid var(--border);
+      background: var(--panel-strong);
+      color: var(--subtle);
+      font-size: 11px;
+      font-weight: 700;
+      text-align: left;
+      cursor: pointer;
+    }
+    .rail-section:hover { background: var(--interactive); }
+    .rail-section span { margin-left: auto; color: var(--muted); font-weight: 500; }
+    .rail-section svg { width: 14px; height: 14px; margin-left: 8px; }
+
+    .inspector { overflow: hidden; }
+    .inspector-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 19px 22px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .inspector-title { min-width: 0; }
+    .inspector-title .kicker { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .inspector-title h3 { margin: 3px 0 2px; color: var(--ink); font-size: 17px; letter-spacing: -.02em; }
+    .inspector-title p { margin: 0; color: var(--muted); font-size: 11px; }
+    .head-tools { display: flex; gap: 6px; margin-left: auto; }
+    .head-tools .icon-button { width: 32px; height: 32px; border-color: transparent; }
+    .head-tools .danger { color: var(--accent-text); }
+
+    .form-section { padding: 18px 22px; }
+    .section-heading { margin-bottom: 13px; }
+    .section-heading strong { display: block; color: var(--ink); font-size: 12px; }
+    .section-heading span { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+    .field { min-width: 0; }
+    .field.full { grid-column: 1 / -1; }
+    .field label { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 5px; color: var(--subtle); font-size: 10px; font-weight: 700; }
+    .field label span { color: var(--muted); font-weight: 500; }
+    .control {
+      width: 100%;
+      min-height: 38px;
+      padding: 8px 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 9px;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 12px;
+    }
+    textarea.control { min-height: 116px; resize: vertical; }
+    textarea.code-input { border-color: #34363a; background: var(--code); color: var(--code-text); line-height: 1.65; }
+    .hint { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
+    .inline-fields { display: grid; grid-template-columns: 1.4fr .6fr; gap: 8px; }
+    .switch-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel-strong);
+    }
+    .switch { position: relative; width: 30px; height: 18px; flex: none; border-radius: 999px; background: var(--border-strong); cursor: pointer; }
+    .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: white; transition: transform .15s ease; }
+    .switch.on { background: var(--accent); }
+    .switch.on::after { transform: translateX(12px); }
+    .switch-copy strong { display: block; color: var(--text); font-size: 11px; }
+    .switch-copy span { display: block; margin-top: 1px; color: var(--muted); font-size: 10px; }
+
+    .advanced { border-top: 1px solid var(--border); }
+    .advanced details { border-bottom: 1px solid var(--border); }
+    .advanced details:last-child { border-bottom: 0; }
+    .advanced summary {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr) auto 16px;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 22px;
+      border: 1px solid transparent;
+      list-style: none;
+      cursor: pointer;
+    }
+    .advanced summary::-webkit-details-marker { display: none; }
+    .advanced summary:hover { background: var(--panel-strong); }
+    .advanced .section-icon { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 8px; background: var(--inset); color: var(--subtle); }
+    .advanced .section-icon svg { width: 14px; height: 14px; }
+    .advanced .summary-copy strong { display: block; color: var(--text); font-size: 11px; }
+    .advanced .summary-copy span { display: block; color: var(--muted); font-size: 10px; }
+    .summary-value { color: var(--muted); font-size: 10px; }
+    .chevron { color: var(--muted); transition: transform .16s ease; }
+    details[open] .chevron { transform: rotate(180deg); }
+    .details-body { padding: 2px 22px 18px 60px; }
+    .tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--subtle); background: var(--panel); font-size: 10px; }
+    .tag .remove { color: var(--muted); cursor: pointer; }
+    .empty-inline { padding: 12px; border: 1px dashed var(--border-strong); border-radius: 10px; color: var(--muted); font-size: 10px; }
+
+    .validation {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin: 16px 22px 20px;
+      padding: 11px 12px;
+      border: 1px solid color-mix(in srgb, var(--ok) 25%, transparent);
+      border-radius: 11px;
+      background: var(--ok-soft);
+      color: var(--ok);
+      font-size: 10px;
+      font-weight: 650;
+    }
+    .validation svg { width: 14px; height: 14px; }
+    .validation span { color: var(--subtle); font-weight: 500; }
+
+    .annotation-wrap { max-width: 1180px; margin: 0 auto; padding: 8px 28px 70px; }
+    .annotation-wrap h2 { margin: 0 0 8px; color: var(--ink); font-size: 24px; letter-spacing: -.03em; }
+    .annotation-wrap > p { max-width: 720px; margin: 0 0 22px; color: var(--muted); }
+    .decisions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .decision { padding: 18px; border: 1px solid var(--border); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow-sm); }
+    .decision .number { display: grid; place-items: center; width: 24px; height: 24px; margin-bottom: 12px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-text); font-size: 10px; font-weight: 800; }
+    .decision strong { display: block; margin-bottom: 5px; color: var(--ink); font-size: 13px; }
+    .decision p { margin: 0; color: var(--muted); font-size: 12px; }
+    .implementation-note { margin-top: 22px; padding: 17px 19px; border-left: 3px solid var(--accent); border-radius: 0 13px 13px 0; background: var(--panel); color: var(--subtle); font-size: 12px; }
+    .implementation-note strong { color: var(--ink); }
+
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: var(--ink);
+      color: var(--panel);
+      box-shadow: var(--shadow-md);
+      font-size: 11px;
+      font-weight: 650;
+      opacity: 0;
+      transform: translateY(12px);
+      pointer-events: none;
+      transition: opacity .18s ease, transform .18s ease;
+    }
+    .toast.show { opacity: 1; transform: none; }
+
+    @media (max-width: 900px) {
+      .service-head, .workspace { padding-right: 18px; padding-left: 18px; }
+      .editor-layout { grid-template-columns: 1fr; }
+      .stage-rail { position: static; }
+      .stages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stage-item::after { display: none; }
+      .decisions { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 620px) {
+      .concept-head { padding-top: 38px; }
+      .prototype-shell { padding-right: 8px; padding-left: 8px; }
+      .browser { border-radius: 16px; }
+      .app-topbar { padding: 0 14px; }
+      .top-context { display: none; }
+      .service-title-row { flex-wrap: wrap; }
+      .pipeline-bar { align-items: flex-start; flex-wrap: wrap; }
+      .pipeline-identity { width: calc(100% - 100px); }
+      .save-state { order: 4; margin-left: 0; }
+      .pipeline-bar .primary { margin-left: auto; }
+      .stages, .form-grid { grid-template-columns: 1fr; }
+      .field.full { grid-column: auto; }
+      .inspector-head { padding: 16px; }
+      .form-section { padding: 16px; }
+      .advanced summary { padding-right: 16px; padding-left: 16px; }
+      .details-body { padding-right: 16px; padding-left: 16px; }
+      .decisions { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition-duration: .001ms !important; animation-duration: .001ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="concept-head">
+    <div class="eyebrow">KubeSight · Signal v3 · UI/UX concept</div>
+    <h1>A pipeline editor that behaves like a workspace.</h1>
+    <p>The whole pipeline stays visible while one stage gets your attention. Common settings lead, advanced settings wait, and the page always answers three questions: where am I, what changed, and can this pipeline run?</p>
+    <div class="principles" aria-label="Concept principles">
+      <span class="principle">One stage in focus</span>
+      <span class="principle">Progressive disclosure</span>
+      <span class="principle">Persistent save state</span>
+      <span class="principle">Validation before runtime</span>
+    </div>
+  </header>
+
+  <main class="prototype-shell">
+    <div class="prototype-label">
+      <span>Interactive prototype · click stages and settings</span>
+      <button class="theme-button" id="themeToggle" type="button" aria-label="Toggle dark theme" title="Toggle theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20.2 15.2A8.6 8.6 0 0 1 8.8 3.8 8.7 8.7 0 1 0 20.2 15.2Z"/></svg>
+      </button>
+    </div>
+
+    <section class="browser" aria-label="Interactive pipeline tab concept">
+      <div class="browser-bar" aria-hidden="true">
+        <span class="browser-dot"></span><span class="browser-dot"></span><span class="browser-dot"></span>
+        <div class="browser-address">kubesight.local/services/payment-service/pipeline</div>
+      </div>
+
+      <div class="app">
+        <header class="app-topbar">
+          <div class="brand">
+            <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m7 5 10 6-10 6V5Z"/></svg></span>
+            KubeSight
+          </div>
+          <span class="top-context">Payments platform / Development</span>
+          <div class="top-actions">
+            <button class="icon-button" type="button" aria-label="Notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></button>
+            <div class="avatar">EM</div>
+          </div>
+        </header>
+
+        <header class="service-head">
+          <div class="breadcrumb">Service Catalog&nbsp;&nbsp;/&nbsp;&nbsp;Payment Service</div>
+          <div class="service-title-row">
+            <h2>Payment Service</h2>
+            <span class="status">Healthy</span>
+          </div>
+          <div class="service-meta">areeba/payment-service @ develop · Java · Payments</div>
+          <nav class="tabs" aria-label="Service sections">
+            <button class="tab" type="button">Overview</button>
+            <button class="tab" type="button">Source</button>
+            <button class="tab active" type="button">Pipeline</button>
+            <button class="tab" type="button">Dockerfile</button>
+            <button class="tab" type="button">Builds</button>
+            <button class="tab" type="button">Artifacts</button>
+            <button class="tab" type="button">Settings</button>
+          </nav>
+        </header>
+
+        <div class="workspace">
+          <div class="pipeline-bar">
+            <div class="pipeline-identity">
+              <strong>default</strong>
+              <span>Revision 12 · last changed by Elie 18 min ago</span>
+            </div>
+            <span class="health-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"/></svg> Ready to run</span>
+            <span class="save-state" id="saveState">All changes saved</span>
+            <button class="button" type="button" id="previewButton"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></svg>Preview run</button>
+            <button class="button primary" type="button" id="saveButton" disabled>Save pipeline</button>
+          </div>
+
+          <div class="editor-layout">
+            <aside class="stage-rail" aria-label="Pipeline structure">
+              <div class="rail-head"><strong>Pipeline stages</strong><span class="rail-count" id="stageCount">5</span><span class="rail-help">Drag to reorder</span></div>
+              <div class="stages" id="stageList"></div>
+              <button class="button add-stage" id="addStage" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Add stage</button>
+              <button class="rail-section" id="parameterButton" type="button">Build inputs <span>2 configured</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 18 6-6-6-6"/></svg></button>
+              <button class="rail-section" id="defaultsButton" type="button">Pipeline defaults <span>30 min timeout</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 18 6-6-6-6"/></svg></button>
+            </aside>
+
+            <article class="inspector">
+              <header class="inspector-head">
+                <div class="inspector-title">
+                  <span class="kicker" id="stageKicker">Stage 2 of 5 · Command</span>
+                  <h3 id="stageTitle">Build</h3>
+                  <p id="stageDescription">Runs the project build inside a container.</p>
+                </div>
+                <div class="head-tools">
+                  <button class="icon-button" type="button" aria-label="Duplicate stage" title="Duplicate stage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>
+                  <button class="icon-button danger" id="deleteStage" type="button" aria-label="Delete stage" title="Delete stage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg></button>
+                </div>
+              </header>
+
+              <section class="form-section">
+                <div class="section-heading"><strong>Essentials</strong><span>Only the fields this stage type actually uses.</span></div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="stageName">Stage name <span>Required</span></label>
+                    <input class="control changeable" id="stageName" value="Build" />
+                  </div>
+                  <div class="field">
+                    <label for="stageType">Stage type</label>
+                    <select class="control changeable" id="stageType">
+                      <option value="checkout">Checkout source</option>
+                      <option value="command" selected>Run commands</option>
+                      <option value="container_image">Build container image</option>
+                      <option value="publish_artifact">Publish artifact</option>
+                      <option value="scan">Security scan</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="runner">Runner <span>Auto is recommended</span></label>
+                    <select class="control changeable" id="runner"><option>Auto — match capabilities</option><option>Kubernetes</option><option>Local Docker</option></select>
+                  </div>
+                  <div class="field">
+                    <label for="capabilities">Required capabilities</label>
+                    <input class="control changeable mono" id="capabilities" value="linux, java21" />
+                  </div>
+                  <div class="field full">
+                    <label for="image">Container image</label>
+                    <input class="control changeable mono" id="image" value="maven:3.9-eclipse-temurin-21" />
+                    <p class="hint">The environment used to run this stage. The image is pulled before commands start.</p>
+                  </div>
+                  <div class="field full">
+                    <label for="commands">Commands <span>Executed top to bottom</span></label>
+                    <textarea class="control code-input changeable mono" id="commands" spellcheck="false">mvn -B clean package
+mvn -B test</textarea>
+                    <p class="hint">Secrets are injected below. They never belong in this script.</p>
+                  </div>
+                </div>
+              </section>
+
+              <div class="advanced">
+                <details>
+                  <summary>
+                    <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M7 12h10M10 18h4"/></svg></span>
+                    <span class="summary-copy"><strong>Runtime & networking</strong><span>Working directory, timeout, host aliases</span></span>
+                    <span class="summary-value mono">/workspace/source</span>
+                    <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 9 6 6 6-6"/></svg>
+                  </summary>
+                  <div class="details-body form-grid">
+                    <div class="field"><label>Working directory</label><input class="control changeable mono" value="/workspace/source" /></div>
+                    <div class="field"><label>Timeout</label><div class="inline-fields"><input class="control changeable mono" value="30" /><select class="control changeable"><option>minutes</option><option>seconds</option><option>hours</option></select></div></div>
+                    <div class="field full"><label>Host aliases</label><textarea class="control changeable mono" rows="2" placeholder="10.10.10.20=nexus.areeba.com,nexus"></textarea><p class="hint">Optional. One address mapping per line.</p></div>
+                  </div>
+                </details>
+
+                <details open>
+                  <summary>
+                    <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></span>
+                    <span class="summary-copy"><strong>Environment & secrets</strong><span>Plain values and protected credentials</span></span>
+                    <span class="summary-value">2 values · 1 secret</span>
+                    <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 9 6 6 6-6"/></svg>
+                  </summary>
+                  <div class="details-body form-grid">
+                    <div class="field full"><label>Environment variables</label><textarea class="control changeable mono" rows="3">MAVEN_OPTS=-Xmx2g
+CI=true</textarea><p class="hint">One <span class="mono">KEY=value</span> per line. Use a secret reference for protected values.</p></div>
+                    <div class="field full"><label>Injected secrets</label><div class="tag-row"><span class="tag"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span class="mono">NEXUS_PASSWORD</span> as <span class="mono">NEXUS_PASSWORD</span><span class="remove">×</span></span><button class="button" type="button">Add secret</button></div></div>
+                  </div>
+                </details>
+
+                <details>
+                  <summary>
+                    <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h6l2 2h8v10H4V7Z"/><path d="M12 12v5M9.5 14.5 12 17l2.5-2.5"/></svg></span>
+                    <span class="summary-copy"><strong>Artifacts</strong><span>Files collected after this stage finishes</span></span>
+                    <span class="summary-value">2 patterns</span>
+                    <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 9 6 6 6-6"/></svg>
+                  </summary>
+                  <div class="details-body">
+                    <div class="field"><label>Artifact patterns</label><textarea class="control changeable mono" rows="3">target/*.jar:jar
+target/surefire-reports/*.xml:test-report</textarea><p class="hint">One <span class="mono">path:type</span> pattern per line.</p></div>
+                  </div>
+                </details>
+
+                <details>
+                  <summary>
+                    <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3"/></svg></span>
+                    <span class="summary-copy"><strong>Failure behavior</strong><span>Control what happens when this stage fails</span></span>
+                    <span class="summary-value">Stop pipeline</span>
+                    <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 9 6 6 6-6"/></svg>
+                  </summary>
+                  <div class="details-body">
+                    <div class="switch-row">
+                      <button class="switch" id="failureSwitch" type="button" role="switch" aria-checked="false" aria-label="Continue if stage fails"></button>
+                      <span class="switch-copy"><strong>Continue if this stage fails</strong><span>Later stages still run, but the build remains failed.</span></span>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <div class="validation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"/></svg>Stage is valid <span>· Runner capacity is available for linux + java21</span></div>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <section class="annotation-wrap">
+    <h2>Why this feels simpler</h2>
+    <p>The design reduces simultaneous choices without removing capability. All existing pipeline data still has a home; it is just organized by the moment in which a person needs it.</p>
+    <div class="decisions">
+      <article class="decision"><span class="number">1</span><strong>Structure stays in sight</strong><p>The left rail is the pipeline’s table of contents. Selection, order, type, and summary are readable without opening and closing five large cards.</p></article>
+      <article class="decision"><span class="number">2</span><strong>Essentials before edge cases</strong><p>Name, type, runner, image, and commands lead. Host aliases, artifacts, secrets, and failure behavior sit in scannable disclosure groups.</p></article>
+      <article class="decision"><span class="number">3</span><strong>Global and local settings separate</strong><p>Build inputs and pipeline defaults live beside the stage list, clearly outside the selected stage’s inspector.</p></article>
+      <article class="decision"><span class="number">4</span><strong>Save state never disappears</strong><p>The sticky command bar communicates revision, validation, dirty state, preview, and the single primary action throughout the edit.</p></article>
+      <article class="decision"><span class="number">5</span><strong>Type controls the form</strong><p>Changing a stage type swaps in only fields consumed at runtime. A checkout stage becomes a short explanation instead of an empty technical form.</p></article>
+      <article class="decision"><span class="number">6</span><strong>Validation happens in context</strong><p>Stage validity and runner compatibility appear next to the edited configuration, before a user spends a build discovering a typo.</p></article>
+    </div>
+    <div class="implementation-note"><strong>Scope:</strong> this concept can reuse the current pipeline payload and single-request save model. The main implementation change is component composition and local selection state; richer preflight validation can ship incrementally.</div>
+  </section>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const icons = {
+      grip: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg>'
+    };
+    const stages = [
+      { name: 'Checkout', type: 'Checkout', detail: 'Repository source', description: 'Clones the configured repository using its source credential.' },
+      { name: 'Build', type: 'Command', detail: 'maven · linux + java21', description: 'Runs the project build inside a container.' },
+      { name: 'Unit tests', type: 'Command', detail: '2 commands · test reports', description: 'Runs the automated test suite and collects its reports.' },
+      { name: 'Package', type: 'Artifact', detail: '2 output patterns', description: 'Collects the versioned application packages.' },
+      { name: 'Build image', type: 'Container', detail: 'Dockerfile · BuildKit', description: 'Builds and pushes the deployable container image.' }
+    ];
+    let activeIndex = 1;
+    let dirty = false;
+    const stageList = document.querySelector('#stageList');
+    const stageCount = document.querySelector('#stageCount');
+    const saveButton = document.querySelector('#saveButton');
+    const saveState = document.querySelector('#saveState');
+    const toast = document.querySelector('#toast');
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      window.clearTimeout(showToast.timer);
+      showToast.timer = window.setTimeout(() => toast.classList.remove('show'), 1900);
+    }
+
+    function setDirty(next = true) {
+      dirty = next;
+      saveButton.disabled = !dirty;
+      saveState.textContent = dirty ? 'Unsaved changes' : 'All changes saved';
+      saveState.classList.toggle('dirty', dirty);
+    }
+
+    function renderStages() {
+      stageList.innerHTML = '';
+      stageCount.textContent = stages.length;
+      stages.forEach((stage, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `stage-item${index === activeIndex ? ' active' : ''}`;
+        button.setAttribute('aria-pressed', index === activeIndex ? 'true' : 'false');
+        button.innerHTML = `<span class="drag" aria-hidden="true">${icons.grip}</span><span class="stage-number">${index + 1}</span><span class="stage-copy"><strong>${stage.name}</strong><span>${stage.detail}</span></span><span class="stage-kind">${stage.type}</span>`;
+        button.addEventListener('click', () => selectStage(index));
+        stageList.appendChild(button);
+      });
+    }
+
+    function selectStage(index) {
+      activeIndex = index;
+      const stage = stages[index];
+      document.querySelector('#stageKicker').textContent = `Stage ${index + 1} of ${stages.length} · ${stage.type}`;
+      document.querySelector('#stageTitle').textContent = stage.name;
+      document.querySelector('#stageDescription').textContent = stage.description;
+      document.querySelector('#stageName').value = stage.name;
+      renderStages();
+      document.querySelector('.inspector').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    document.querySelector('#stageName').addEventListener('input', event => {
+      stages[activeIndex].name = event.target.value || 'Unnamed stage';
+      document.querySelector('#stageTitle').textContent = stages[activeIndex].name;
+      renderStages();
+    });
+
+    document.querySelectorAll('.changeable').forEach(control => control.addEventListener('input', () => setDirty()));
+    document.querySelector('#failureSwitch').addEventListener('click', event => {
+      const on = event.currentTarget.classList.toggle('on');
+      event.currentTarget.setAttribute('aria-checked', String(on));
+      setDirty();
+    });
+    document.querySelector('#addStage').addEventListener('click', () => {
+      stages.push({ name: 'New stage', type: 'Command', detail: 'Not configured', description: 'Configure what this stage should run.' });
+      activeIndex = stages.length - 1;
+      setDirty();
+      selectStage(activeIndex);
+      showToast('Stage added');
+    });
+    document.querySelector('#deleteStage').addEventListener('click', () => {
+      if (stages.length === 1) return showToast('A pipeline needs at least one stage');
+      const removed = stages.splice(activeIndex, 1)[0];
+      activeIndex = Math.max(0, activeIndex - 1);
+      setDirty();
+      selectStage(activeIndex);
+      showToast(`${removed.name} removed`);
+    });
+    saveButton.addEventListener('click', () => {
+      saveButton.textContent = 'Saving…';
+      saveButton.disabled = true;
+      window.setTimeout(() => {
+        saveButton.textContent = 'Save pipeline';
+        setDirty(false);
+        showToast('Pipeline saved · revision 13');
+      }, 650);
+    });
+    document.querySelector('#previewButton').addEventListener('click', () => showToast('Preflight passed · 5 stages ready'));
+    document.querySelector('#parameterButton').addEventListener('click', () => showToast('Build inputs: GIT_REF and DEPLOY_ENV'));
+    document.querySelector('#defaultsButton').addEventListener('click', () => showToast('Pipeline defaults: 30 minute timeout'));
+    document.querySelector('#themeToggle').addEventListener('click', () => {
+      const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+      document.documentElement.dataset.theme = next;
+    });
+
+    renderStages();
+  </script>
+</body>
+</html>

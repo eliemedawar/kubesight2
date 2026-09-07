@@ -6,3 +6,6 @@ hermes-local.runtime.env
 # Backend runtime data: cluster kubeconfigs (embedded credentials) and CI /
 # mobile build artifacts. Generated at runtime, never source.
 backend/data/
+
+# Throwaway browser profile from concept previews — 167MB of cache.
+concept/.runtime-preview-profile/

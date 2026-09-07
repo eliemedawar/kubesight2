@@ -1824,3 +1824,585 @@ button.sg-ci-workspace-entry:focus-visible {
   padding-top: var(--space-2);
   border-top: 1px solid var(--border);
 }
+
+/* ══ Pipeline workspace ════════════════════════════════════════════════════
+   The stage rail is the pipeline's table of contents. Only the selected stage
+   owns the inspector, so a five-stage pipeline never becomes five long forms. */
+.sg-ci-pipeline-bar {
+  position: sticky;
+  top: var(--space-2);
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 4rem;
+  padding: 0.65rem 0.8rem 0.65rem 1rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.sg-ci-pipeline-identity {
+  min-width: 0;
+}
+
+.sg-ci-pipeline-identity strong,
+.sg-ci-pipeline-identity span {
+  display: block;
+}
+
+.sg-ci-pipeline-identity strong {
+  color: var(--text-strong);
+  font-size: 0.88rem;
+}
+
+.sg-ci-pipeline-identity span {
+  margin-top: 0.05rem;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.sg-ci-pipeline-ready svg {
+  width: 0.72rem;
+  height: 0.72rem;
+}
+
+.sg-ci-save-state {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.sg-ci-save-state.is-dirty {
+  color: var(--warn);
+}
+
+.sg-ci-pipeline-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sg-ci-pipeline-workspace {
+  display: grid;
+  grid-template-columns: minmax(16rem, 19rem) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.sg-ci-pipeline-rail,
+.sg-ci-pipeline-inspector {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.sg-ci-pipeline-rail {
+  position: sticky;
+  top: 5.25rem;
+}
+
+.sg-ci-pipeline-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0.9rem 0.9rem 0.65rem;
+}
+
+.sg-ci-pipeline-rail-head > div {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.sg-ci-pipeline-rail-head strong {
+  color: var(--text-strong);
+  font-size: 0.82rem;
+}
+
+.sg-ci-pipeline-rail-head span,
+.sg-ci-pipeline-rail-head small {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.sg-ci-stage-rail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+  padding: 0 0.45rem 0.45rem;
+  list-style: none;
+}
+
+.sg-ci-stage-rail-list li {
+  position: relative;
+}
+
+.sg-ci-stage-rail-list li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 1.48rem;
+  bottom: -0.3rem;
+  width: 1px;
+  height: 0.4rem;
+  background: var(--border-strong);
+}
+
+.sg-ci-stage-rail-item {
+  display: grid;
+  grid-template-columns: 1.7rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  min-height: 3.45rem;
+  padding: 0.45rem 0.5rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sg-ci-stage-rail-item:hover {
+  background: var(--bg-interactive);
+}
+
+.sg-ci-stage-rail-item.is-active {
+  background: var(--bg-interactive);
+  border-color: var(--border-strong);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.sg-ci-stage-rail-item.is-active .sg-ci-stage-index {
+  background: var(--accent);
+  color: #fff;
+}
+
+.sg-ci-stage-rail-copy {
+  min-width: 0;
+}
+
+.sg-ci-stage-rail-copy strong,
+.sg-ci-stage-rail-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-stage-rail-copy strong {
+  color: var(--text-strong);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.sg-ci-stage-rail-copy small {
+  margin-top: 0.08rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+}
+
+.sg-ci-stage-kind {
+  max-width: 5.6rem;
+  overflow: hidden;
+  padding: 0.14rem 0.42rem;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  font-size: 0.6rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-stage-rail-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0 0.65rem 0.55rem;
+  padding: 0.8rem;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: 0.72rem;
+}
+
+.sg-ci-stage-rail-empty strong {
+  color: var(--text-main);
+}
+
+.sg-ci-add-stage {
+  width: calc(100% - 0.9rem);
+  margin: 0 0.45rem 0.6rem;
+  border-style: dashed;
+  color: var(--accent-strong);
+}
+
+.sg-ci-pipeline-section-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 0.75rem 0.9rem;
+  background: var(--bg-panel-strong);
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sg-ci-pipeline-section-link:hover,
+.sg-ci-pipeline-section-link.is-active {
+  background: var(--bg-interactive);
+}
+
+.sg-ci-pipeline-section-link.is-active {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.sg-ci-pipeline-section-link > span:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.sg-ci-pipeline-section-link strong,
+.sg-ci-pipeline-section-link small {
+  display: block;
+}
+
+.sg-ci-pipeline-section-link strong {
+  color: var(--text-main);
+  font-size: 0.75rem;
+}
+
+.sg-ci-pipeline-section-link small,
+.sg-ci-section-count {
+  color: var(--text-muted);
+  font-size: 0.63rem;
+}
+
+.sg-ci-section-count {
+  white-space: nowrap;
+}
+
+.sg-ci-inspector-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: 1rem 1.15rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-ci-inspector-head > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.sg-ci-inspector-kicker {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.sg-ci-inspector-head h3,
+.sg-ci-params-head h3 {
+  margin: 0.15rem 0 0;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  letter-spacing: -0.015em;
+}
+
+.sg-ci-inspector-head p,
+.sg-ci-params-head p {
+  margin: 0.08rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.sg-ci-inspector-actions {
+  display: flex;
+  gap: 0.2rem;
+}
+
+.sg-ci-inspector-actions .icon-button,
+.sg-ci-param-actions .icon-button {
+  width: 1.9rem;
+  height: 1.9rem;
+  border: 1px solid transparent;
+}
+
+.sg-ci-inspector-actions .icon-button:hover,
+.sg-ci-param-actions .icon-button:hover {
+  border-color: var(--border-strong);
+}
+
+.sg-ci-inspector-actions .icon-button svg,
+.sg-ci-param-actions .icon-button svg {
+  width: 0.82rem;
+  height: 0.82rem;
+}
+
+.sg-ci-inspector-actions .icon-button.danger,
+.sg-ci-param-actions .icon-button.danger {
+  color: var(--danger);
+}
+
+.sg-ci-pipeline-inspector .sg-ci-stage-card-body {
+  padding: 1rem 1.15rem 1.15rem;
+  border-top: 0;
+}
+
+.sg-ci-pipeline-inspector .sg-ci-stage-card-body::before {
+  content: "Essentials";
+  display: block;
+  margin-bottom: 0.65rem;
+  color: var(--text-strong);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.sg-ci-pipeline-empty {
+  padding: 2.5rem 1.25rem;
+  text-align: center;
+}
+
+.sg-ci-pipeline-empty strong {
+  color: var(--text-strong);
+}
+
+.sg-ci-pipeline-empty p {
+  margin: 0.25rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+/* Build inputs use the same focused inspector as a stage, including the
+   user's Add parameter action. */
+.sg-ci-pipeline-inspector .sg-ci-params {
+  padding: 0;
+}
+
+.sg-ci-params-head {
+  align-items: flex-start;
+  padding: 1rem 1.15rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-ci-params-head > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.sg-ci-params-head .btn-outline svg {
+  width: 0.78rem;
+  height: 0.78rem;
+}
+
+.sg-ci-pipeline-inspector .sg-ci-params-note {
+  margin: 0;
+  padding: 0.8rem 1.15rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-ci-pipeline-inspector .sg-ci-param-list {
+  padding: 0.8rem;
+}
+
+.sg-ci-pipeline-inspector .sg-ci-param {
+  padding: 0;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+}
+
+.sg-ci-param-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--bg-panel-strong);
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-ci-param-head > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+
+.sg-ci-param-head strong,
+.sg-ci-param-head small {
+  display: block;
+}
+
+.sg-ci-param-head strong {
+  color: var(--text-strong);
+  font-size: 0.78rem;
+}
+
+.sg-ci-param-head small {
+  color: var(--text-muted);
+  font-size: 0.65rem;
+}
+
+.sg-ci-param-head + .form-grid {
+  padding: 0.8rem;
+}
+
+.sg-ci-param-actions {
+  margin: 0 0 0 auto;
+}
+
+.sg-ci-stage-options {
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.sg-ci-stage-options > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0.7rem 0.8rem;
+  color: var(--text-main);
+  background: var(--bg-panel-strong);
+  border-radius: var(--radius-md);
+  list-style: none;
+  cursor: pointer;
+}
+
+.sg-ci-stage-options > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sg-ci-stage-options > summary::after {
+  content: "+";
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.sg-ci-stage-options[open] > summary {
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+.sg-ci-stage-options[open] > summary::after {
+  content: "−";
+}
+
+.sg-ci-stage-options > summary:hover {
+  background: var(--bg-interactive);
+}
+
+.sg-ci-stage-options > summary > span:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.sg-ci-stage-options > summary strong,
+.sg-ci-stage-options > summary small {
+  display: block;
+}
+
+.sg-ci-stage-options > summary strong {
+  font-size: 0.75rem;
+}
+
+.sg-ci-stage-options > summary small,
+.sg-ci-option-value {
+  color: var(--text-muted);
+  font-size: 0.65rem;
+}
+
+.sg-ci-option-value {
+  white-space: nowrap;
+}
+
+.sg-ci-stage-options-body {
+  padding: 0.8rem;
+}
+
+.sg-ci-stage-options-body > label {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.sg-ci-stage-options-body.form-grid {
+  display: grid;
+}
+
+@media (max-width: 1000px) {
+  .sg-ci-pipeline-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .sg-ci-pipeline-rail {
+    position: static;
+  }
+
+  .sg-ci-stage-rail-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sg-ci-stage-rail-list li::after {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .sg-ci-pipeline-bar {
+    position: static;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .sg-ci-pipeline-ready {
+    margin-left: auto;
+  }
+
+  .sg-ci-save-state {
+    order: 4;
+    margin: 0;
+  }
+
+  .sg-ci-pipeline-actions {
+    width: 100%;
+  }
+
+  .sg-ci-pipeline-actions button {
+    flex: 1;
+  }
+
+  .sg-ci-stage-rail-list {
+    grid-template-columns: 1fr;
+  }
+
+  .sg-ci-inspector-head,
+  .sg-ci-params-head {
+    padding: 0.85rem;
+  }
+
+  .sg-ci-pipeline-inspector .sg-ci-stage-card-body,
+  .sg-ci-pipeline-inspector .sg-ci-params-note {
+    padding-right: 0.85rem;
+    padding-left: 0.85rem;
+  }
+
+  .sg-ci-param-head + .form-grid {
+    grid-template-columns: 1fr;
+  }
+}

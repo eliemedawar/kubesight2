@@ -7,8 +7,8 @@ import {
   updateCiPipeline,
 } from "../../api/ciApi.js";
 import LoadingState from "../common/LoadingState.jsx";
-import PipelineStrip from "./PipelineStrip.jsx";
 import {
+  CheckIcon,
   CONDITIONAL_STAGE_TYPES,
   DownIcon,
   PlusIcon,
@@ -79,6 +79,30 @@ const envFromText = (text) => {
   return out;
 };
 
+const stageTypeLabel = (stageType) =>
+  STAGE_TYPES.find((type) => type.value === stageType)?.label || stageType;
+
+const stageSummary = (stage) => {
+  if (stage.stageType === "checkout") return "Repository source";
+  if (stage.stageType === "container_image") {
+    return stage.workingDirectory || "Dockerfile from service root";
+  }
+  if (stage.stageType === "publish_artifact") {
+    const count = (stage.artifacts || []).length;
+    return count ? `${count} artifact ${count === 1 ? "pattern" : "patterns"}` : "Artifact handoff";
+  }
+  if (stage.stageType === "scan") return "Security policy scan";
+
+  const parts = [];
+  if (stage.image) parts.push(stage.image);
+  if ((stage.runnerLabels || []).length) parts.push(stage.runnerLabels.join(" + "));
+  if ((stage.commands || []).length) {
+    const count = stage.commands.filter(Boolean).length;
+    parts.push(`${count} ${count === 1 ? "command" : "commands"}`);
+  }
+  return parts.join(" · ") || "Not configured";
+};
+
 /**
  * A textarea whose stored form cannot represent everything a person types.
  *
@@ -126,7 +150,8 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
   const [stages, setStages] = useState([]);
   const [parameters, setParameters] = useState([]);
   const [secretKeys, setSecretKeys] = useState([]);
-  const [openIndex, setOpenIndex] = useState(null);
+  const [selectedIndex, setSelectedIndex] = useState(null);
+  const [activePanel, setActivePanel] = useState("stage");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -137,9 +162,14 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
     try {
       const data = await listCiPipelines(service.id);
       const first = data.items?.[0] || null;
+      const nextStages = first?.stages
+        ? first.stages.map((stage) => ({ ...stage }))
+        : [];
       setPipeline(first);
-      setStages(first?.stages ? first.stages.map((stage) => ({ ...stage })) : []);
+      setStages(nextStages);
       setParameters(first?.parameters ? first.parameters.map((item) => ({ ...item })) : []);
+      setSelectedIndex(nextStages.length ? 0 : null);
+      setActivePanel(nextStages.length ? "stage" : "parameters");
       setDirty(false);
       setError("");
     } catch (err) {
@@ -173,19 +203,28 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
       [next[index], next[target]] = [next[target], next[index]];
       return next;
     });
-    setOpenIndex(openIndex === index ? target : openIndex === target ? index : openIndex);
+    setSelectedIndex((current) =>
+      current === index ? target : current === target ? index : current
+    );
+    setActivePanel("stage");
     setDirty(true);
   };
 
   const remove = (index) => {
     setStages((prev) => prev.filter((_, position) => position !== index));
-    setOpenIndex(null);
+    setSelectedIndex((current) => {
+      if (stages.length <= 1) return null;
+      if (current === index) return Math.min(index, stages.length - 2);
+      return current > index ? current - 1 : current;
+    });
+    if (stages.length <= 1) setActivePanel("parameters");
     setDirty(true);
   };
 
   const add = () => {
     setStages((prev) => [...prev, blankStage()]);
-    setOpenIndex(stages.length);
+    setSelectedIndex(stages.length);
+    setActivePanel("stage");
     setDirty(true);
   };
 
@@ -205,6 +244,9 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
       setPipeline(saved);
       setStages(saved.stages.map((stage) => ({ ...stage })));
       setParameters((saved.parameters || []).map((item) => ({ ...item })));
+      setSelectedIndex((current) =>
+        saved.stages.length ? Math.min(current ?? 0, saved.stages.length - 1) : null
+      );
       setDirty(false);
       onChanged?.();
     } catch (err) {
@@ -227,6 +269,8 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
       const saved = await applyCiPipelineTemplate(service.id, service.applicationType);
       setPipeline(saved);
       setStages(saved.stages.map((stage) => ({ ...stage })));
+      setSelectedIndex(saved.stages.length ? 0 : null);
+      setActivePanel(saved.stages.length ? "stage" : "parameters");
       setDirty(false);
       onChanged?.();
     } catch (err) {
@@ -242,23 +286,24 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
     <div className="sg-ci-panel">
       {error && <p className="banner-message error">{error}</p>}
 
-      {stages.length > 0 && <PipelineStrip stages={stages} />}
-
-      <BuildParameters
-        parameters={parameters}
-        canEdit={canEdit}
-        onChange={(next) => {
-          setParameters(next);
-          setDirty(true);
-        }}
-      />
-
-      <div className="sg-ci-panel-actions">
+      <div className="sg-ci-pipeline-bar">
+        {pipeline && (
+          <div className="sg-ci-pipeline-identity">
+            <strong>{pipeline.name}</strong>
+            <span>Revision {pipeline.version}</span>
+          </div>
+        )}
+        <span className={`status-pill ${stages.length ? "ok" : "warn"} sg-ci-pipeline-ready`}>
+          {stages.length > 0 && <CheckIcon />}
+          {stages.length > 0
+            ? `${stages.length} ${stages.length === 1 ? "stage" : "stages"} configured`
+            : "No stages configured"}
+        </span>
+        <span className={`sg-ci-save-state${dirty ? " is-dirty" : ""}`} aria-live="polite">
+          {dirty ? "Unsaved changes" : "All changes saved"}
+        </span>
         {canEdit && (
-          <>
-            <button type="button" className="btn-outline btn-compact" onClick={add}>
-              <PlusIcon /> Add stage
-            </button>
+          <div className="sg-ci-pipeline-actions">
             <button
               type="button"
               className="btn-outline btn-compact"
@@ -277,60 +322,113 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
             >
               {saving ? "Saving…" : dirty ? "Save pipeline" : "Saved ✓"}
             </button>
-          </>
-        )}
-        {pipeline && (
-          <span className="muted sg-ci-panel-note">
-            {pipeline.name} · revision {pipeline.version}
-          </span>
+          </div>
         )}
       </div>
 
-      {stages.length === 0 ? (
-        <p className="muted">
-          This pipeline has no stages yet.{" "}
-          {canEdit ? "Add one, or reset to the starter template." : ""}
-        </p>
-      ) : (
-        <ol className="sg-ci-stage-editor">
-          {stages.map((stage, index) => (
-            <li key={index} className="sg-ci-stage-card">
-              <div className="sg-ci-stage-card-head">
-                <button
-                  type="button"
-                  className="sg-ci-stage-card-toggle"
-                  onClick={() => setOpenIndex(openIndex === index ? null : index)}
-                  aria-expanded={openIndex === index}
-                >
-                  <span className="sg-ci-stage-index">{index + 1}</span>
-                  <span className="sg-ci-stage-title">
-                    {stage.name || <em className="muted">Unnamed stage</em>}
-                  </span>
-                  <span className="chip">{stage.stageType}</span>
-                  {UNIMPLEMENTED_STAGE_TYPES.has(stage.stageType) && (
-                    <span className="status-pill warn">
-                      {stage.stageType === "container_image" ? "needs BuildKit" : "no executor yet"}
+      <div className="sg-ci-pipeline-workspace">
+        <aside className="sg-ci-pipeline-rail" aria-label="Pipeline structure">
+          <div className="sg-ci-pipeline-rail-head">
+            <div>
+              <strong>Pipeline stages</strong>
+              <span>{stages.length}</span>
+            </div>
+            <small>Select to edit</small>
+          </div>
+
+          {stages.length > 0 ? (
+            <ol className="sg-ci-stage-rail-list">
+              {stages.map((stage, index) => (
+                <li key={index}>
+                  <button
+                    type="button"
+                    className={`sg-ci-stage-rail-item${
+                      activePanel === "stage" && selectedIndex === index ? " is-active" : ""
+                    }`}
+                    onClick={() => {
+                      setSelectedIndex(index);
+                      setActivePanel("stage");
+                    }}
+                    aria-current={
+                      activePanel === "stage" && selectedIndex === index ? "step" : undefined
+                    }
+                  >
+                    <span className="sg-ci-stage-index">{index + 1}</span>
+                    <span className="sg-ci-stage-rail-copy">
+                      <strong>{stage.name || <em>Unnamed stage</em>}</strong>
+                      <small>{stageSummary(stage)}</small>
                     </span>
-                  )}
-                  {stage.continueOnFailure && <span className="chip">continues on failure</span>}
-                </button>
+                    <span className="sg-ci-stage-kind">{stageTypeLabel(stage.stageType)}</span>
+                  </button>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <div className="sg-ci-stage-rail-empty">
+              <strong>No stages yet</strong>
+              <span>Add a stage or restore the starter template.</span>
+            </div>
+          )}
+
+          {canEdit && (
+            <button type="button" className="btn-outline btn-compact sg-ci-add-stage" onClick={add}>
+              <PlusIcon /> Add stage
+            </button>
+          )}
+
+          <button
+            type="button"
+            className={`sg-ci-pipeline-section-link${activePanel === "parameters" ? " is-active" : ""}`}
+            onClick={() => setActivePanel("parameters")}
+          >
+            <span>
+              <strong>Build inputs</strong>
+              <small>Shown before a manual run</small>
+            </span>
+            <span className="sg-ci-section-count">{parameters.length} configured</span>
+          </button>
+        </aside>
+
+        <section className="sg-ci-pipeline-inspector">
+          {activePanel === "parameters" ? (
+            <BuildParameters
+              parameters={parameters}
+              canEdit={canEdit}
+              onChange={(next) => {
+                setParameters(next);
+                setDirty(true);
+              }}
+            />
+          ) : selectedIndex !== null && stages[selectedIndex] ? (
+            <>
+              <header className="sg-ci-inspector-head">
+                <div>
+                  <span className="sg-ci-inspector-kicker">
+                    Stage {selectedIndex + 1} of {stages.length} ·{" "}
+                    {stageTypeLabel(stages[selectedIndex].stageType)}
+                  </span>
+                  <h3>{stages[selectedIndex].name || "Unnamed stage"}</h3>
+                  <p>{stageSummary(stages[selectedIndex])}</p>
+                </div>
                 {canEdit && (
-                  <div className="sg-ci-stage-card-actions">
+                  <div className="sg-ci-inspector-actions">
                     <button
                       type="button"
                       className="icon-button"
-                      aria-label="Move up"
-                      disabled={index === 0}
-                      onClick={() => move(index, -1)}
+                      aria-label="Move stage up"
+                      title="Move stage up"
+                      disabled={selectedIndex === 0}
+                      onClick={() => move(selectedIndex, -1)}
                     >
                       <UpIcon />
                     </button>
                     <button
                       type="button"
                       className="icon-button"
-                      aria-label="Move down"
-                      disabled={index === stages.length - 1}
-                      onClick={() => move(index, 1)}
+                      aria-label="Move stage down"
+                      title="Move stage down"
+                      disabled={selectedIndex === stages.length - 1}
+                      onClick={() => move(selectedIndex, 1)}
                     >
                       <DownIcon />
                     </button>
@@ -338,26 +436,33 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
                       type="button"
                       className="icon-button danger"
                       aria-label="Remove stage"
-                      onClick={() => remove(index)}
+                      title="Remove stage"
+                      onClick={() => remove(selectedIndex)}
                     >
                       <TrashIcon />
                     </button>
                   </div>
                 )}
-              </div>
-
-              {openIndex === index && (
-                <StageFields
-                  stage={stage}
-                  secretKeys={secretKeys}
-                  canEdit={canEdit}
-                  onChange={(patch) => mutate(index, patch)}
-                />
-              )}
-            </li>
-          ))}
-        </ol>
-      )}
+              </header>
+              <StageFields
+                stage={stages[selectedIndex]}
+                secretKeys={secretKeys}
+                canEdit={canEdit}
+                onChange={(patch) => mutate(selectedIndex, patch)}
+              />
+            </>
+          ) : (
+            <div className="sg-ci-pipeline-empty">
+              <strong>This pipeline has no stages yet.</strong>
+              <p>
+                {canEdit
+                  ? "Add one, or reset to the starter template."
+                  : "There is nothing to configure."}
+              </p>
+            </div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }
@@ -520,36 +625,6 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
           </label>
         )}
 
-        {shows("hostAliases") && (
-          <label className="form-grid__full">
-            Host aliases
-            <DraftTextarea
-              rows={3}
-              style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
-              value={aliasesToText(stage.hostAliases)}
-              placeholder={"10.10.10.20=nexus.areeba.com,nexus\n10.10.10.30=db.internal"}
-              disabled={!canEdit}
-              spellCheck={false}
-              onChangeText={(text) => onChange({ hostAliases: aliasesFromText(text) })}
-            />
-            <span className="field-hint">
-              Optional host mappings added to the build container's /etc/hosts. One per
-              line, as <code>ip=hostname</code>; separate several names for one address
-              with commas. Kubernetes applies these to the whole build pod, so every
-              stage of this build resolves every stage's mappings.
-              {stage.stageType === "container_image" && (
-                <>
-                  {" "}
-                  They reach this image build's <code>RUN</code> steps too — but not the
-                  pull of its base image or the push of the result, which BuildKit's own
-                  daemon resolves. Address the registry by IP in its connection, or give
-                  the buildkitd Deployment hostAliases.
-                </>
-              )}
-            </span>
-          </label>
-        )}
-
         {shows("commands") && (
           <label className="form-grid__full">
             Commands
@@ -570,10 +645,63 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
           </label>
         )}
 
+        {shows("hostAliases") && (
+          <details className="sg-ci-stage-options form-grid__full">
+            <summary>
+              <span>
+                <strong>Runtime &amp; networking</strong>
+                <small>Host aliases used by the build container</small>
+              </span>
+              <span className="sg-ci-option-value">
+                {(stage.hostAliases || []).length
+                  ? `${stage.hostAliases.length} configured`
+                  : "Optional"}
+              </span>
+            </summary>
+            <div className="sg-ci-stage-options-body">
+              <label>
+                Host aliases
+                <DraftTextarea
+                  rows={3}
+                  style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
+                  value={aliasesToText(stage.hostAliases)}
+                  placeholder={"10.10.10.20=nexus.areeba.com,nexus\n10.10.10.30=db.internal"}
+                  disabled={!canEdit}
+                  spellCheck={false}
+                  onChangeText={(text) => onChange({ hostAliases: aliasesFromText(text) })}
+                />
+                <span className="field-hint">
+                  One per line as <code>ip=hostname</code>. Separate several hostnames for
+                  one address with commas.
+                  {stage.stageType === "container_image" && (
+                    <>
+                      {" "}These reach Dockerfile <code>RUN</code> steps, but not the base
+                      image pull or result push handled by BuildKit.
+                    </>
+                  )}
+                </span>
+              </label>
+            </div>
+          </details>
+        )}
+
         {shows("env") && (
-          <label className="form-grid__full">
-            Environment
-            <DraftTextarea
+          <details className="sg-ci-stage-options form-grid__full">
+            <summary>
+              <span>
+                <strong>Environment</strong>
+                <small>Plain runtime values</small>
+              </span>
+              <span className="sg-ci-option-value">
+                {Object.keys(stage.env || {}).length
+                  ? `${Object.keys(stage.env).length} configured`
+                  : "Optional"}
+              </span>
+            </summary>
+            <div className="sg-ci-stage-options-body">
+              <label>
+                Environment variables
+                <DraftTextarea
               rows={4}
               style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
               value={envToText(stage.env)}
@@ -584,116 +712,158 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
               }
               disabled={!canEdit}
               onChangeText={(text) => onChange({ env: envFromText(text) })}
-            />
-            <span className="field-hint">
-              {stage.stageType === "container_image"
-                ? "KEY=value, one per line. IMAGE_NAME, IMAGE_TAG and DOCKERFILE_PATH override the defaults (service slug, git ref, Dockerfile)."
-                : "KEY=value, one per line. Not for secrets."}
-            </span>
-          </label>
+                />
+                <span className="field-hint">
+                  {stage.stageType === "container_image"
+                    ? "KEY=value, one per line. IMAGE_NAME, IMAGE_TAG and DOCKERFILE_PATH override the defaults (service slug, git ref, Dockerfile)."
+                    : "KEY=value, one per line. Not for secrets."}
+                </span>
+              </label>
+            </div>
+          </details>
         )}
 
         {shows("secrets") && (
-        <div className="form-grid__full">
-          <p className="form-label">Secrets</p>
-          {secretKeys.length === 0 ? (
-            <p className="muted">
-              No secrets are defined for this service yet. Add them on the Settings tab.
-            </p>
-          ) : (
-            <div className="sg-ci-secret-refs">
-              {secretKeys.map((key) => {
-                const ref = (stage.secretRefs || []).find((item) => item.name === key);
-                return (
-                  <label key={key} className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(ref)}
-                      disabled={!canEdit}
-                      onChange={(event) =>
-                        onChange({
-                          secretRefs: event.target.checked
-                            ? [...(stage.secretRefs || []), { name: key, envVar: key }]
-                            : (stage.secretRefs || []).filter((item) => item.name !== key),
-                        })
-                      }
-                    />
-                    <code>{key}</code>
-                    {ref && (
-                      <input
-                        className="sg-ci-envvar-input"
-                        value={ref.envVar}
-                        aria-label={`Environment variable for ${key}`}
-                        disabled={!canEdit}
-                        onChange={(event) =>
-                          onChange({
-                            secretRefs: (stage.secretRefs || []).map((item) =>
-                              item.name === key
-                                ? { ...item, envVar: event.target.value }
-                                : item
-                            ),
-                          })
-                        }
-                      />
-                    )}
-                  </label>
-                );
-              })}
+          <details className="sg-ci-stage-options form-grid__full">
+            <summary>
+              <span>
+                <strong>Secrets</strong>
+                <small>Protected values injected as environment variables</small>
+              </span>
+              <span className="sg-ci-option-value">
+                {(stage.secretRefs || []).length
+                  ? `${stage.secretRefs.length} selected`
+                  : "None selected"}
+              </span>
+            </summary>
+            <div className="sg-ci-stage-options-body">
+              {secretKeys.length === 0 ? (
+                <p className="muted">
+                  No secrets are defined for this service yet. Add them on the Settings tab.
+                </p>
+              ) : (
+                <div className="sg-ci-secret-refs">
+                  {secretKeys.map((key) => {
+                    const ref = (stage.secretRefs || []).find((item) => item.name === key);
+                    return (
+                      <label key={key} className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(ref)}
+                          disabled={!canEdit}
+                          onChange={(event) =>
+                            onChange({
+                              secretRefs: event.target.checked
+                                ? [...(stage.secretRefs || []), { name: key, envVar: key }]
+                                : (stage.secretRefs || []).filter((item) => item.name !== key),
+                            })
+                          }
+                        />
+                        <code>{key}</code>
+                        {ref && (
+                          <input
+                            className="sg-ci-envvar-input"
+                            value={ref.envVar}
+                            aria-label={`Environment variable for ${key}`}
+                            disabled={!canEdit}
+                            onChange={(event) =>
+                              onChange({
+                                secretRefs: (stage.secretRefs || []).map((item) =>
+                                  item.name === key
+                                    ? { ...item, envVar: event.target.value }
+                                    : item
+                                ),
+                              })
+                            }
+                          />
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          </details>
         )}
 
         {shows("artifacts") && (
-        <label className="form-grid__full">
-          Artifacts to collect
-          <DraftTextarea
-            rows={3}
-            style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
-            value={(stage.artifacts || [])
-              .map((item) => `${item.path}:${item.type || "binary"}`)
-              .join("\n")}
-            placeholder={"target/*.jar:jar\ntarget/surefire-reports/*.xml:test-report"}
-            disabled={!canEdit}
-            spellCheck={false}
-            onChangeText={(text) =>
-              onChange({
-                artifacts: fromLines(text).map((line) => {
-                  const index = line.lastIndexOf(":");
-                  return index > 0
-                    ? { path: line.slice(0, index), type: line.slice(index + 1) }
-                    : { path: line, type: "binary" };
-                }),
-              })
-            }
-          />
-          <span className="field-hint">One per line, as path:type.</span>
-        </label>
+          <details className="sg-ci-stage-options form-grid__full">
+            <summary>
+              <span>
+                <strong>Artifacts</strong>
+                <small>Files collected after this stage finishes</small>
+              </span>
+              <span className="sg-ci-option-value">
+                {(stage.artifacts || []).length
+                  ? `${stage.artifacts.length} patterns`
+                  : "None"}
+              </span>
+            </summary>
+            <div className="sg-ci-stage-options-body">
+              <label>
+                Artifacts to collect
+                <DraftTextarea
+                  rows={3}
+                  style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
+                  value={(stage.artifacts || [])
+                    .map((item) => `${item.path}:${item.type || "binary"}`)
+                    .join("\n")}
+                  placeholder={"target/*.jar:jar\ntarget/surefire-reports/*.xml:test-report"}
+                  disabled={!canEdit}
+                  spellCheck={false}
+                  onChangeText={(text) =>
+                    onChange({
+                      artifacts: fromLines(text).map((line) => {
+                        const index = line.lastIndexOf(":");
+                        return index > 0
+                          ? { path: line.slice(0, index), type: line.slice(index + 1) }
+                          : { path: line, type: "binary" };
+                      }),
+                    })
+                  }
+                />
+                <span className="field-hint">One per line, as path:type.</span>
+              </label>
+            </div>
+          </details>
         )}
 
-        <label>
-          Timeout (seconds)
-          <input
-            type="number"
-            min={30}
-            max={86400}
-            value={stage.timeoutSeconds}
-            disabled={!canEdit}
-            onChange={(event) => onChange({ timeoutSeconds: event.target.value })}
-          />
-        </label>
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={Boolean(stage.continueOnFailure)}
-            disabled={!canEdit}
-            onChange={(event) => onChange({ continueOnFailure: event.target.checked })}
-          />
-          Continue if this stage fails
-          <span className="field-hint">
-            Later stages still run, but the build is still reported as failed.
-          </span>
-        </label>
+        <details className="sg-ci-stage-options form-grid__full">
+          <summary>
+            <span>
+              <strong>Failure behavior</strong>
+              <small>Timeout and what happens after an error</small>
+            </span>
+            <span className="sg-ci-option-value">
+              {stage.continueOnFailure ? "Continue pipeline" : "Stop pipeline"}
+            </span>
+          </summary>
+          <div className="sg-ci-stage-options-body form-grid">
+            <label>
+              Timeout (seconds)
+              <input
+                type="number"
+                min={30}
+                max={86400}
+                value={stage.timeoutSeconds}
+                disabled={!canEdit}
+                onChange={(event) => onChange({ timeoutSeconds: event.target.value })}
+              />
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={Boolean(stage.continueOnFailure)}
+                disabled={!canEdit}
+                onChange={(event) => onChange({ continueOnFailure: event.target.checked })}
+              />
+              Continue if this stage fails
+              <span className="field-hint">
+                Later stages still run, but the build is still reported as failed.
+              </span>
+            </label>
+          </div>
+        </details>
       </div>
     </div>
   );

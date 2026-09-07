@@ -1,3 +1,5 @@
+import { DownIcon, PlusIcon, TrashIcon, UpIcon } from "./ciShared.jsx";
+
 const TYPES = [
   ["text", "Text"],
   ["choice", "Choice"],
@@ -49,21 +51,25 @@ export default function BuildParameters({ parameters, canEdit, onChange }) {
   return (
     <section className="form-section sg-ci-params">
       <div className="sg-ci-params-head">
-        <h4>Build parameters</h4>
+        <div>
+          <span className="sg-ci-inspector-kicker">Pipeline configuration</span>
+          <h3>Build inputs</h3>
+          <p>Values requested in the Run Build dialog and passed to every stage.</p>
+        </div>
         {canEdit && (
           <button
             type="button"
             className="btn-outline btn-compact"
             onClick={() => onChange([...items, blankParameter()])}
           >
-            Add parameter
+            <PlusIcon /> Add parameter
           </button>
         )}
       </div>
 
       <p className="muted sg-ci-params-note">
-        Asked in the Run Build dialog and passed to every stage as an environment
-        variable of the same name. A container image stage also reads{" "}
+        Each accepted value becomes an environment variable with the same name.
+        A container image stage also reads{" "}
         <code>IMAGE_NAME</code> and <code>IMAGE_TAG</code> from these.
       </p>
 
@@ -75,6 +81,46 @@ export default function BuildParameters({ parameters, canEdit, onChange }) {
         <ol className="sg-ci-param-list">
           {items.map((param, index) => (
             <li key={index} className="sg-ci-param">
+              <div className="sg-ci-param-head">
+                <span className="sg-ci-stage-index">{index + 1}</span>
+                <span>
+                  <strong>{param.label || param.name || "New parameter"}</strong>
+                  <small>{TYPES.find(([value]) => value === param.type)?.[1] || "Text"}</small>
+                </span>
+                {canEdit && (
+                  <div className="sg-ci-param-actions">
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label="Move parameter up"
+                      title="Move parameter up"
+                      disabled={index === 0}
+                      onClick={() => move(index, -1)}
+                    >
+                      <UpIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label="Move parameter down"
+                      title="Move parameter down"
+                      disabled={index === items.length - 1}
+                      onClick={() => move(index, 1)}
+                    >
+                      <DownIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button danger"
+                      aria-label="Remove parameter"
+                      title="Remove parameter"
+                      onClick={() => remove(index)}
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="form-grid">
                 <label>
                   Name *
@@ -196,23 +242,6 @@ export default function BuildParameters({ parameters, canEdit, onChange }) {
                 )}
               </div>
 
-              {canEdit && (
-                <div className="sg-ci-param-actions">
-                  <button type="button" className="btn-outline btn-compact" onClick={() => move(index, -1)}>
-                    Up
-                  </button>
-                  <button type="button" className="btn-outline btn-compact" onClick={() => move(index, 1)}>
-                    Down
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-outline btn-compact danger"
-                    onClick={() => remove(index)}
-                  >
-                    Remove
-                  </button>
-                </div>
-              )}
             </li>
           ))}
         </ol>
