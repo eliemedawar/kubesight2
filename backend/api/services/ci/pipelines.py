@@ -60,6 +60,117 @@ def _string_list(value: Any, *, limit: int, item_limit: int) -> List[str]:
     return out
 
 
+PARAMETER_TYPES = ("text", "choice", "boolean", "dynamic_choice")
+# What a dynamic_choice can be filled from. Resolved server-side at run time so
+# the Run Build dialog receives a ready list rather than discovering how to
+# build one.
+PARAMETER_SOURCES = ("branches", "tags", "branches_and_tags")
+MAX_PARAMETERS = 25
+MAX_CHOICES = 100
+# Values become environment variables for every stage, so a name has to be one.
+_PARAM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _parameter_choices(value: Any, name: str) -> List[str]:
+    if isinstance(value, str):
+        items = value.splitlines()
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = []
+    cleaned: List[str] = []
+    for item in items[:MAX_CHOICES]:
+        text = str(item or "").strip()[:255]
+        if text and text not in cleaned:
+            cleaned.append(text)
+    if not cleaned:
+        raise PipelineError(f"Parameter '{name}' is a choice but lists no options.")
+    return cleaned
+
+
+def _parameters(value: Any) -> List[Dict[str, Any]]:
+    """What a person is asked before a build starts.
+
+    Rejected rather than repaired when malformed: a parameter whose definition
+    is wrong produces a build configured differently from what was intended,
+    which is worse than being told to fix the definition.
+    """
+    if value in (None, "", [], {}):
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise PipelineError("Build parameters must be a list.")
+    if len(value) > MAX_PARAMETERS:
+        raise PipelineError(f"A pipeline may not define more than {MAX_PARAMETERS} parameters.")
+
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise PipelineError("Each build parameter must be an object.")
+        name = _clean(entry.get("name"), 128)
+        if not name:
+            raise PipelineError("Every build parameter needs a name.")
+        if not _PARAM_NAME_RE.match(name):
+            raise PipelineError(
+                f"Parameter name '{name}' is not usable as an environment variable "
+                "— letters, digits and underscores only, not starting with a digit."
+            )
+        if name in seen:
+            raise PipelineError(f"Build parameter '{name}' is defined twice.")
+        seen.add(name)
+
+        param_type = _clean(entry.get("type"), 24).lower() or "text"
+        if param_type not in PARAMETER_TYPES:
+            raise PipelineError(
+                f"Parameter '{name}' has unknown type '{param_type}'. "
+                f"Use one of: {', '.join(PARAMETER_TYPES)}."
+            )
+
+        param: Dict[str, Any] = {
+            "name": name,
+            "type": param_type,
+            "label": _clean(entry.get("label"), 160) or name,
+            "description": _clean(entry.get("description"), 500) or "",
+            "required": bool(entry.get("required")),
+        }
+
+        if param_type == "boolean":
+            # Stored as the strings a shell sees, since that is what a stage gets.
+            param["default"] = "true" if _truthy(entry.get("default")) else "false"
+            param["required"] = False  # A checkbox always has a value.
+        elif param_type == "choice":
+            param["choices"] = _parameter_choices(entry.get("choices"), name)
+            default = _clean(entry.get("default"), 255)
+            if default and default not in param["choices"]:
+                raise PipelineError(
+                    f"Parameter '{name}' defaults to '{default}', which is not one of its options."
+                )
+            param["default"] = default or param["choices"][0]
+        elif param_type == "dynamic_choice":
+            source = _clean(entry.get("source"), 32).lower() or "branches"
+            if source not in PARAMETER_SOURCES:
+                raise PipelineError(
+                    f"Parameter '{name}' has unknown source '{source}'. "
+                    f"Use one of: {', '.join(PARAMETER_SOURCES)}."
+                )
+            param["source"] = source
+            # No validation against the live list: it is resolved at run time and
+            # a repository that is briefly unreachable must not invalidate a
+            # saved pipeline.
+            param["default"] = _clean(entry.get("default"), 255)
+        else:
+            param["default"] = str(entry.get("default") or "")[:4000]
+
+        out.append(param)
+    return out
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def _command_lines(value: Any) -> List[str]:
     """Stage commands, kept as the author wrote them.
 
@@ -423,6 +534,9 @@ def update_pipeline(
     if payload.get("isDefault"):
         pipeline.is_default = True
 
+    if "parameters" in payload:
+        pipeline.parameters = _parameters(payload.get("parameters"))
+
     if "stages" in payload:
         _apply_stages(pipeline, payload.get("stages") or [])
     # Bumped on every save so a build's snapshot records which revision ran.
@@ -493,6 +607,128 @@ def _demote_other_defaults(service_id: int, keep_id: int) -> None:
         CiPipeline.id != keep_id,
         CiPipeline.is_default.is_(True),
     ).update({"is_default": False}, synchronize_session=False)
+
+
+
+def parameter_definitions(pipeline: CiPipeline) -> List[Dict[str, Any]]:
+    """The stored definitions, unresolved — what a snapshot keeps."""
+    from .serializers import _json_list
+
+    return [p for p in _json_list(pipeline.parameters) if isinstance(p, dict)]
+
+
+def resolve_parameters(service: CiService, pipeline: CiPipeline) -> List[Dict[str, Any]]:
+    """The pipeline's parameters with dynamic choices filled in.
+
+    Resolution happens here, server-side, so the Run Build dialog receives a
+    ready list rather than learning how to build one. A repository that cannot
+    be reached yields an empty ``choices`` and an ``error`` the dialog shows —
+    the parameter stays usable by typing, because a listing outage should not
+    stop a release.
+    """
+    from .serializers import _json_list
+
+    resolved: List[Dict[str, Any]] = []
+    listing: Optional[List[Dict[str, str]]] = None
+    listing_error = ""
+
+    for param in _json_list(pipeline.parameters):
+        if not isinstance(param, dict):
+            continue
+        param = dict(param)
+        if param.get("type") == "dynamic_choice":
+            if listing is None:
+                listing, listing_error = _repository_refs(service)
+            source = param.get("source") or "branches"
+            wanted = (
+                ("branch", "tag")
+                if source == "branches_and_tags"
+                else ("tag",) if source == "tags" else ("branch",)
+            )
+            param["choices"] = [item["value"] for item in listing if item["type"] in wanted]
+            if listing_error:
+                param["error"] = listing_error
+        resolved.append(param)
+    return resolved
+
+
+def _repository_refs(service: CiService) -> Tuple[List[Dict[str, str]], str]:
+    """Branches and tags, or an empty list and why not."""
+    if not service.source_ready():
+        return [], "The service's source is not configured yet."
+    try:
+        from . import source as source_port
+
+        handler = source_port.get_provider(service.repository_provider)
+        ref = handler.parse_repository_url(service.repository_url)
+        items = handler.list_revisions(ref, service.credential_profile)
+        return [
+            {"value": item.value, "type": item.kind}
+            for item in items
+            if getattr(item, "value", "")
+        ], ""
+    except Exception as exc:  # A listing failure must not block a build.
+        return [], str(exc) or "The repository could not be listed."
+
+
+def validate_parameter_values(
+    pipeline: CiPipeline, values: Optional[Dict[str, Any]]
+) -> Dict[str, str]:
+    """Submitted values checked against the pipeline's own definitions.
+
+    Returns the accepted values, which the caller passes as the build's
+    ``variables``. Rejects rather than drops: a build that silently ignored a
+    parameter would run differently from what was asked for, and say nothing.
+    """
+    from .serializers import _json_list
+
+    definitions = [p for p in _json_list(pipeline.parameters) if isinstance(p, dict)]
+    submitted = {str(k): v for k, v in (values or {}).items()}
+    known = {str(p.get("name")) for p in definitions}
+
+    unknown = [name for name in submitted if name not in known]
+    if unknown and definitions:
+        # Only complain when the pipeline HAS parameters: automation still
+        # passes free-form variables to pipelines that declare none.
+        raise PipelineError(
+            f"This pipeline has no parameter named '{sorted(unknown)[0]}'."
+        )
+
+    accepted: Dict[str, str] = {}
+    for param in definitions:
+        name = str(param.get("name") or "")
+        if not name:
+            continue
+        param_type = param.get("type") or "text"
+        raw = submitted.get(name, None)
+
+        if param_type == "boolean":
+            accepted[name] = "true" if _truthy(
+                param.get("default") if raw is None else raw
+            ) else "false"
+            continue
+
+        value = str(param.get("default") or "" if raw is None else raw).strip()
+        if not value:
+            if param.get("required"):
+                raise PipelineError(f"'{param.get('label') or name}' is required.")
+            accepted[name] = ""
+            continue
+
+        if param_type == "choice":
+            choices = [str(c) for c in (param.get("choices") or [])]
+            if value not in choices:
+                raise PipelineError(
+                    f"'{param.get('label') or name}' must be one of: {', '.join(choices)}."
+                )
+        # dynamic_choice is deliberately not checked against the live list: it
+        # is a convenience, and a ref created seconds ago must still be usable.
+        accepted[name] = value[:4000]
+
+    # Values a pipeline without parameters was given still travel through.
+    if not definitions:
+        return {str(k): str(v)[:4000] for k, v in submitted.items()}
+    return accepted
 
 
 def resolve_for_build(

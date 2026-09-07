@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import BuildParameters from "./BuildParameters.jsx";
 import {
   applyCiPipelineTemplate,
   listCiPipelines,
@@ -123,6 +124,7 @@ function DraftTextarea({ value, onChangeText, ...props }) {
 export default function PipelineEditor({ service, onChanged, canEdit }) {
   const [pipeline, setPipeline] = useState(null);
   const [stages, setStages] = useState([]);
+  const [parameters, setParameters] = useState([]);
   const [secretKeys, setSecretKeys] = useState([]);
   const [openIndex, setOpenIndex] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -137,6 +139,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
       const first = data.items?.[0] || null;
       setPipeline(first);
       setStages(first?.stages ? first.stages.map((stage) => ({ ...stage })) : []);
+      setParameters(first?.parameters ? first.parameters.map((item) => ({ ...item })) : []);
       setDirty(false);
       setError("");
     } catch (err) {
@@ -193,6 +196,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
     try {
       const saved = await updateCiPipeline(pipeline.id, {
         name: pipeline.name,
+        parameters,
         stages: stages.map((stage) => ({
           ...stage,
           timeoutSeconds: Number(stage.timeoutSeconds) || 1800,
@@ -200,6 +204,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
       });
       setPipeline(saved);
       setStages(saved.stages.map((stage) => ({ ...stage })));
+      setParameters((saved.parameters || []).map((item) => ({ ...item })));
       setDirty(false);
       onChanged?.();
     } catch (err) {
@@ -238,6 +243,15 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
       {error && <p className="banner-message error">{error}</p>}
 
       {stages.length > 0 && <PipelineStrip stages={stages} />}
+
+      <BuildParameters
+        parameters={parameters}
+        canEdit={canEdit}
+        onChange={(next) => {
+          setParameters(next);
+          setDirty(true);
+        }}
+      />
 
       <div className="sg-ci-panel-actions">
         {canEdit && (

@@ -564,3 +564,113 @@ def test_service_dockerfile_has_a_size_limit(app, admin_token):
         db.session.commit()
         with _pytest.raises(CatalogError):
             catalog_service.update_service(row, {"dockerfile": "x" * (MAX_DOCKERFILE_CHARS + 1)})
+
+
+def _params(*entries):
+    from api.services.ci import pipelines as pipelines_service
+
+    return pipelines_service._parameters(list(entries))
+
+
+def test_build_parameters_normalise_each_type():
+    parsed = _params(
+        {"name": "DEPLOY_ENV", "type": "choice", "choices": "uat\nprod\nuat", "default": "prod"},
+        {"name": "SKIP_TESTS", "type": "boolean", "default": "yes", "required": True},
+        {"name": "RELEASE_REF", "type": "dynamic_choice", "source": "tags"},
+        {"name": "NOTE", "label": "Release note"},
+    )
+    choice, boolean, dynamic, text = parsed
+
+    assert choice["choices"] == ["uat", "prod"]  # de-duplicated, order kept
+    assert choice["default"] == "prod"
+    # A checkbox always has a value, so "required" is meaningless on it.
+    assert boolean["default"] == "true" and boolean["required"] is False
+    # Nothing is stored for a dynamic choice: the list is read from the
+    # repository when Run Build opens, so a saved pipeline cannot go stale.
+    assert dynamic["source"] == "tags" and "choices" not in dynamic
+    assert text["type"] == "text" and text["label"] == "Release note"
+
+
+def test_build_parameters_reject_unusable_definitions():
+    import pytest as _pytest
+
+    from api.services.ci.pipelines import PipelineError
+
+    for entry, expected in [
+        ({"name": "2BAD", "type": "text"}, "not usable as an environment variable"),
+        ({"name": "OK", "type": "nonsense"}, "unknown type"),
+        ({"name": "OK", "type": "choice", "choices": []}, "lists no options"),
+        ({"name": "OK", "type": "choice", "choices": ["a"], "default": "b"}, "not one of its options"),
+        ({"name": "OK", "type": "dynamic_choice", "source": "moon"}, "unknown source"),
+    ]:
+        with _pytest.raises(PipelineError) as excinfo:
+            _params(entry)
+        assert expected in str(excinfo.value)
+
+    with _pytest.raises(PipelineError) as excinfo:
+        _params({"name": "DUP", "type": "text"}, {"name": "DUP", "type": "text"})
+    assert "defined twice" in str(excinfo.value)
+
+
+def test_parameter_values_are_validated_not_dropped(app, admin_token):
+    """A build that silently ignored a parameter would run differently from what
+    was asked for and say nothing about it."""
+    import pytest as _pytest
+
+    from api.db import db
+    from api.models_ci import CiPipeline, CiService
+    from api.services.ci import pipelines as pipelines_service
+    from api.services.ci.pipelines import PipelineError
+
+    with app.app_context():
+        service = CiService(name="Param Svc", slug="param-svc")
+        db.session.add(service)
+        db.session.commit()
+        pipeline = CiPipeline(
+            service_id=service.id,
+            name="default",
+            parameters=_params(
+                {"name": "DEPLOY_ENV", "type": "choice", "choices": ["uat", "prod"]},
+                {"name": "SKIP_TESTS", "type": "boolean"},
+                {"name": "TICKET", "type": "text", "required": True},
+            ),
+        )
+        db.session.add(pipeline)
+        db.session.commit()
+
+        accepted = pipelines_service.validate_parameter_values(
+            pipeline, {"DEPLOY_ENV": "prod", "TICKET": "OPS-1", "SKIP_TESTS": True}
+        )
+        assert accepted == {"DEPLOY_ENV": "prod", "SKIP_TESTS": "true", "TICKET": "OPS-1"}
+
+        # Defaults fill in what was not submitted.
+        filled = pipelines_service.validate_parameter_values(pipeline, {"TICKET": "OPS-2"})
+        assert filled["DEPLOY_ENV"] == "uat" and filled["SKIP_TESTS"] == "false"
+
+        for bad, expected in [
+            ({"TICKET": "OPS-3", "DEPLOY_ENV": "staging"}, "must be one of"),
+            ({"DEPLOY_ENV": "uat"}, "is required"),
+            ({"TICKET": "OPS-4", "NOPE": "x"}, "no parameter named"),
+        ]:
+            with _pytest.raises(PipelineError) as excinfo:
+                pipelines_service.validate_parameter_values(pipeline, bad)
+            assert expected in str(excinfo.value)
+
+
+def test_a_pipeline_without_parameters_still_takes_free_variables(app, admin_token):
+    """The deploy automation pins IMAGE_TAG on pipelines that declare nothing."""
+    from api.db import db
+    from api.models_ci import CiPipeline, CiService
+    from api.services.ci import pipelines as pipelines_service
+
+    with app.app_context():
+        service = CiService(name="Free Svc", slug="free-svc")
+        db.session.add(service)
+        db.session.commit()
+        pipeline = CiPipeline(service_id=service.id, name="default", parameters=[])
+        db.session.add(pipeline)
+        db.session.commit()
+
+        assert pipelines_service.validate_parameter_values(
+            pipeline, {"IMAGE_TAG": "V1.0.27-prod"}
+        ) == {"IMAGE_TAG": "V1.0.27-prod"}

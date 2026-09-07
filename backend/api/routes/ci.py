@@ -501,6 +501,28 @@ def retry_build(build_id: int):
         return error_response(str(exc), 409)
 
 
+@ci_bp.route("/services/<int:service_id>/parameters", methods=["GET"])
+@require_permission("ci_builds:run")
+def get_service_parameters(service_id: int):
+    """What the Run Build dialog must ask, ready to render.
+
+    Dynamic choices are resolved here rather than in the browser: the dialog
+    should not need to know that "branches" means a Bitbucket call.
+    """
+    service = catalog_service.get_service(service_id)
+    try:
+        pipeline, _ = pipelines_service.resolve_for_build(service)
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 409)
+    return success_response(
+        {
+            "pipelineId": pipeline.id,
+            "pipelineName": pipeline.name,
+            "items": pipelines_service.resolve_parameters(service, pipeline),
+        }
+    )
+
+
 @ci_bp.route("/builds/<int:build_id>/rerun-from/<int:position>", methods=["POST"])
 @require_permission("ci_builds:retry")
 def rerun_build_from(build_id: int, position: int):

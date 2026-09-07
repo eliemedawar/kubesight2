@@ -708,6 +708,11 @@ def _migrate_ci_columns() -> None:
         # Inline Dockerfile, added after the table shipped. TEXT is right here:
         # it is a document, not a JSON structure.
         _add_column_if_missing("ci_services", "dockerfile", "TEXT")
+    if "ci_pipelines" in existing:
+        # JSON, not TEXT: on PostgreSQL a db.JSON attribute over a text column
+        # reads back as the raw string and then iterates as characters.
+        _add_column_if_missing("ci_pipelines", "parameters", "JSON")
+        _retype_json_column("ci_pipelines", "parameters")
     if "ci_pipeline_stages" in existing:
         # Added after the table shipped: db.create_all() will not alter an
         # existing table, so a deployed database needs this backfilled. Existing

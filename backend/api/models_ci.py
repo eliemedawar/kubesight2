@@ -220,6 +220,11 @@ class CiPipeline(db.Model):
     is_default = db.Column(db.Boolean, nullable=False, default=True)
     enabled = db.Column(db.Boolean, nullable=False, default=True)
     version = db.Column(db.Integer, nullable=False, default=1)
+    # What a person is asked before a build starts. A list of
+    # {name, type, label, description, default, required, choices, source} —
+    # see services/ci/pipelines._parameters. Accepted values travel as the
+    # build's `variables`, which every stage already receives as environment.
+    parameters = db.Column(db.JSON, nullable=False, default=list)
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
     updated_at = db.Column(

@@ -158,11 +158,12 @@ def trigger_build(
 
     pipeline, stages = pipelines_service.resolve_for_build(service, pipeline_id)
 
-    clean_variables = {
-        str(key)[:128]: str(value)[:4000]
-        for key, value in (variables or {}).items()
-        if str(key).strip()
-    }
+    # Values are checked against the pipeline's own parameter definitions, and a
+    # bad one is refused rather than dropped: a build that quietly ignored a
+    # parameter would run differently from what was asked for and say nothing.
+    # A pipeline that declares no parameters still accepts free-form variables,
+    # which is how the deploy automation pins a tag.
+    clean_variables = pipelines_service.validate_parameter_values(pipeline, variables)
 
     # Snapshot the pipeline now. Editing it later must not rewrite the history
     # of a build that already ran, and a retry must re-run what actually ran.
@@ -171,6 +172,9 @@ def trigger_build(
         "pipelineName": pipeline.name,
         "pipelineVersion": pipeline.version,
         "variables": clean_variables,
+        # The definitions as they stood, so a build still shows what it was
+        # asked after the pipeline changes underneath it.
+        "parameters": pipelines_service.parameter_definitions(pipeline),
         "refType": ref_type if ref_type in ("branch", "tag") else "branch",
         # Present only on a rerun-from-a-stage: which build's outputs to
         # restore, and where in the pipeline to pick up.

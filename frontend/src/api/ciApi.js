@@ -86,6 +86,10 @@ export const applyCiPipelineTemplate = (serviceId, applicationType) =>
 // Builds
 // ---------------------------------------------------------------------------
 
+// What Run Build must ask for, with dynamic choices already resolved.
+export const getCiServiceParameters = (serviceId) =>
+  request(`/api/ci/services/${encodeURIComponent(serviceId)}/parameters`);
+
 // Queue a build that starts at this stage, restoring the previous build's
 // artifacts instead of re-running the stages before it.
 export const rerunCiBuildFrom = (buildId, position) =>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listCiBranches, runCiBuild } from "../../api/ciApi.js";
+import { getCiServiceParameters, listCiBranches, runCiBuild } from "../../api/ciApi.js";
 import { BranchIcon, PlayIcon, TagIcon } from "./ciShared.jsx";
 
 /**
@@ -27,6 +27,26 @@ function loadRemembered(serviceId) {
   return null;
 }
 
+const valuesKey = (serviceId) => `ks.ci.runparams.${serviceId}`;
+
+function loadRememberedValues(serviceId) {
+  try {
+    const raw = window.localStorage.getItem(valuesKey(serviceId));
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberValues(serviceId, values) {
+  try {
+    window.localStorage.setItem(valuesKey(serviceId), JSON.stringify(values));
+  } catch {
+    /* best effort */
+  }
+}
+
 function remember(serviceId, refType, value) {
   try {
     window.localStorage.setItem(remememberKey(serviceId), JSON.stringify({ refType, value }));
@@ -50,6 +70,11 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
   const [tags, setTags] = useState([]);
   const [loadingRefs, setLoadingRefs] = useState(true);
   const [refsError, setRefsError] = useState("");
+  // What this pipeline asks for, with dynamic choices already resolved by the
+  // backend — the dialog should not need to know that "branches" means a
+  // Bitbucket call.
+  const [parameters, setParameters] = useState([]);
+  const [values, setValues] = useState({});
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef(null);
@@ -71,6 +96,36 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
         }
       } finally {
         if (!cancelled) setLoadingRefs(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [service.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await getCiServiceParameters(service.id);
+        if (cancelled) return;
+        const items = data.items || [];
+        setParameters(items);
+        // Defaults, plus whatever was used last time for this service — the
+        // usual case is running the same parameters again.
+        const remembered = loadRememberedValues(service.id);
+        setValues(
+          Object.fromEntries(
+            items.map((item) => [
+              item.name,
+              remembered[item.name] ?? String(item.default ?? ""),
+            ])
+          )
+        );
+      } catch {
+        // A pipeline with no parameters, or an unreachable listing: the branch
+        // picker alone is still a usable Run Build.
+        if (!cancelled) setParameters([]);
       }
     })();
     return () => {
@@ -112,8 +167,13 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
     setStarting(true);
     setError("");
     try {
-      const build = await runCiBuild(service.id, { branch: ref, refType });
+      const build = await runCiBuild(service.id, {
+        branch: ref,
+        refType,
+        ...(parameters.length ? { variables: values } : {}),
+      });
       remember(service.id, refType, ref);
+      rememberValues(service.id, values);
       onStarted(build);
     } catch (err) {
       setError(err.message || "Could not start the build.");
@@ -221,6 +281,74 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
             ))
           )}
         </div>
+
+        {parameters.length > 0 && (
+          <div className="sg-ci-run-params">
+            {parameters.map((param) => {
+              const value = values[param.name] ?? "";
+              const set = (next) =>
+                setValues((prev) => ({ ...prev, [param.name]: next }));
+              const label = `${param.label || param.name}${param.required ? " *" : ""}`;
+              const choices = param.choices || [];
+
+              if (param.type === "boolean") {
+                return (
+                  <label key={param.name} className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={String(value) === "true"}
+                      onChange={(event) => set(event.target.checked ? "true" : "false")}
+                    />
+                    {label}
+                    {param.description && (
+                      <span className="field-hint">{param.description}</span>
+                    )}
+                  </label>
+                );
+              }
+
+              // A resolved list that came back empty still has to be usable:
+              // the ref may have been created a moment ago, or the listing may
+              // have failed. Falling back to a text field says so and moves on.
+              const asSelect =
+                (param.type === "choice" && choices.length > 0) ||
+                (param.type === "dynamic_choice" && choices.length > 0);
+
+              return (
+                <label key={param.name} className="sg-ci-run-field">
+                  {label}
+                  {asSelect ? (
+                    <select value={value} onChange={(event) => set(event.target.value)}>
+                      {!param.required && <option value="">(none)</option>}
+                      {choices.map((choice) => (
+                        <option key={choice} value={choice}>
+                          {choice}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      value={value}
+                      maxLength={4000}
+                      onChange={(event) => set(event.target.value)}
+                    />
+                  )}
+                  {(param.description || param.error) && (
+                    <span className="field-hint">
+                      {param.description}
+                      {param.error && (
+                        <>
+                          {param.description ? " · " : ""}
+                          Could not list options: {param.error}
+                        </>
+                      )}
+                    </span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        )}
 
         <div className="modal-actions">
           <button type="button" className="btn-outline" onClick={onClose} disabled={starting}>
