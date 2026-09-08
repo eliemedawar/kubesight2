@@ -1,0 +1,192 @@
+# Native CI — one hand-made build cache volume.
+#
+# For a cluster with NO StorageClass. Nothing here needs a provisioner: the
+# PersistentVolume is a directory on one node, statically bound to the claim
+# below by `claimRef` + `volumeName`.
+#
+# WHAT GETS CACHED
+#   Every stage mounts this volume at /cache, and KubeSight points each build
+#   tool it knows at a subdirectory of it — Maven, Gradle, npm, yarn, pnpm,
+#   pip, Go, Cargo, Composer, NuGet, plus XDG_CACHE_HOME as the catch-all for
+#   everything else. Nothing has to be set per pipeline; a stage that sets one
+#   of those variables itself still wins.
+#
+#   One claim holds every service, each under its own subtree:
+#       /cache/<service-slug>/maven      <- $MAVEN_OPTS -Dmaven.repo.local
+#       /cache/<service-slug>/gradle     <- $GRADLE_USER_HOME
+#       /cache/<service-slug>/npm        <- $npm_config_cache
+#       /cache/<service-slug>/...        <- and the rest
+#       $KUBESIGHT_CACHE = /cache/<service-slug>   (for anything hand-rolled)
+#   Two services never share a tool's lock files, and a service's own builds
+#   warm each other's cache. The directories are created by the tools on first
+#   use — only the volume root has to exist.
+#
+#   ONE GOTCHA: a stage that sets MAVEN_OPTS itself (for -Xmx, say) replaces
+#   the injected value and silently goes back to a cold ~/.m2 in /tmp. Keep
+#   the repository in it: MAVEN_OPTS=-Xmx2g -Dmaven.repo.local=$KUBESIGHT_CACHE/maven
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# BEFORE APPLYING — three things, in this order
+#
+# 1. Pick the node. `local` volumes live on exactly one node, and the scheduler
+#    will place every CI build pod there because of the nodeAffinity below.
+#    That pinning is the price of node-local storage with no provisioner; if it
+#    is unacceptable, use an NFS PV instead (same claim, swap the `local` +
+#    nodeAffinity block for `nfs: {server, path}` and drop the affinity).
+#
+# 2. Create the directory ON THAT NODE and give it to the build uid:
+#       sudo mkdir -p /var/lib/kubesight/ci-cache
+#       sudo chown 65532:65532 /var/lib/kubesight/ci-cache
+#       sudo chmod 2775 /var/lib/kubesight/ci-cache
+#    Stage containers run as uid 65532 with a read-only root filesystem and no
+#    capability to chown anything. The Job also sets fsGroup 65532, which fixes
+#    ownership for a `local` volume on its own — but doing it here is free, and
+#    it is REQUIRED if you switch the volume type to hostPath, where kubelet
+#    applies no ownership at all. The setgid bit keeps the group on the
+#    subdirectories the build tools create.
+#
+# 3. Size it against real free space:
+#       df -h /var/lib/kubesight
+#    `capacity` below is only matching metadata — a `local` volume does NOT
+#    enforce it, so a cache that outgrows the disk fills the node and gets
+#    every pod on it evicted for DiskPressure. Set capacity to something the
+#    node actually has spare, and keep an eye on it: `du -sh` per service tells
+#    you which one is growing.
+#
+# THEN, on the backend (k8s/ci-backend-config.yaml):
+#       CI_CACHE_CLAIM_NAME: ci-cache
+#    and restart it. Leave CI_CACHE_STORAGE_CLASS unset — it is the dynamic
+#    alternative to this file, and CI_CACHE_CLAIM_NAME wins over it anyway.
+#    KubeSight never creates, resizes or deletes the volume named here; a build
+#    fails fast with an explanation if the claim is missing.
+#
+# CLEARING A CACHE: delete the service's subtree on the node
+# (`sudo rm -rf /var/lib/kubesight/ci-cache/<service-slug>`) while no build for
+# it is running. The next build simply starts cold.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kubesight-ci-cache
+  labels:
+    kubesight.io/purpose: ci-dependency-cache
+spec:
+  # Matching metadata, not a quota. See step 3 above.
+  capacity:
+    storage: 20Gi
+  volumeMode: Filesystem
+  # ReadWriteOnce means one NODE, not one pod: since Kubernetes 1.22 several
+  # pods on that node may mount it at once, so concurrent builds of different
+  # services are fine. Two concurrent builds of the SAME service would share
+  # one Gradle/Maven directory, so keep that service's max concurrent builds
+  # at 1 unless you know its build tool tolerates it.
+  accessModes:
+    - ReadWriteOnce
+  # Retain: the whole point is that the cache outlives claims and builds.
+  persistentVolumeReclaimPolicy: Retain
+  # Empty string, not a class name: "do not involve dynamic provisioning".
+  storageClassName: ""
+  # Pre-bound to the claim below, so no other pending claim in the cluster can
+  # take this volume while it is unbound.
+  claimRef:
+    namespace: kubesight-ci
+    name: ci-cache
+  local:
+    path: /var/lib/kubesight/ci-cache
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                # REPLACE-ME with the node holding the directory above
+                # (`kubectl get nodes`). Every CI build pod will run there.
+                - REPLACE-ME
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ci-cache
+  namespace: kubesight-ci
+  labels:
+    app.kubernetes.io/name: kubesight-ci
+    kubesight.io/purpose: ci-dependency-cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: kubesight-ci-cache
+  resources:
+    requests:
+      # Must be <= the PV's capacity or the two never bind.
+      storage: 20Gi
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# OPTIONAL — the same treatment for BuildKit's layer cache.
+#
+# Everything above caches dependencies for command stages. Container image
+# stages have a second, separate cache: buildkitd's own layer store, which
+# k8s/ci-buildkitd.yaml keeps in an emptyDir that empties on every restart.
+# PVCs are namespaced, so it needs its own volume in kubesight-buildkit.
+#
+# Prepare it on the SAME node as above (buildkitd will be pinned there too):
+#       sudo mkdir -p /var/lib/kubesight/buildkit-cache
+#       sudo chown 1000:1000 /var/lib/kubesight/buildkit-cache
+# uid 1000 here, not 65532 — that is what rootless buildkitd runs as.
+#
+# Then replace the `cache` volume in k8s/ci-buildkitd.yaml with:
+#       - name: cache
+#         persistentVolumeClaim:
+#           claimName: buildkit-cache
+# and lower that container's ephemeral-storage limit, since its cache no longer
+# counts against it.
+#
+# This and CI_BUILDKIT_REGISTRY_CACHE solve the same problem differently: a
+# volume is faster and local, the registry cache survives losing the node and
+# is shared by every builder. Using both is fine and needs no coordination.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kubesight-buildkit-cache
+  labels:
+    kubesight.io/purpose: ci-layer-cache
+spec:
+  capacity:
+    storage: 20Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: kubesight-buildkit
+    name: buildkit-cache
+  local:
+    path: /var/lib/kubesight/buildkit-cache
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                # REPLACE-ME — the same node as the cache volume above.
+                - REPLACE-ME
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: buildkit-cache
+  namespace: kubesight-buildkit
+  labels:
+    kubesight.io/purpose: ci-layer-cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: kubesight-buildkit-cache
+  resources:
+    requests:
+      storage: 20Gi
