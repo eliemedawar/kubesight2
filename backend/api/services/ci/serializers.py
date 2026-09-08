@@ -295,6 +295,8 @@ def runner_to_dict(row: CiRunner) -> Dict[str, Any]:
         "currentLoad": row.current_load,
         "version": row.version,
         "isBuiltin": bool(row.is_builtin),
+        # Where an agent puts its builds. Empty means the agent's own default.
+        "workspaceRoot": (row.runner_metadata or {}).get("workspaceRoot") or "",
         "lastHeartbeatAt": _iso(row.last_heartbeat_at),
         "lastAssignedAt": _iso(row.last_assigned_at),
         "lastError": row.last_error,

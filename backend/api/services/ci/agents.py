@@ -86,6 +86,7 @@ def create_agent(payload: Dict[str, Any], *, actor=None) -> Tuple[CiRunner, str]
         capabilities=_labels(payload.get("capabilities")),
         labels=_labels(payload.get("labels")),
         max_concurrent=max(1, min(int(payload.get("maxConcurrent") or 1), 20)),
+        runner_metadata=_metadata_with_workspace({}, payload.get("workspaceRoot")),
         is_builtin=False,
         token_prefix=token[:8],
         token_hash=_hash(token),
@@ -133,6 +134,32 @@ def _labels(value: Any) -> List[str]:
         if label and label not in out:
             out.append(label)
     return out
+
+
+def _metadata_with_workspace(metadata: Dict[str, Any], value: Any) -> Dict[str, Any]:
+    """Where this agent should put its builds.
+
+    Advisory by nature: KubeSight cannot check that a path exists on a machine
+    it cannot reach, so the agent applies it and reports back if it cannot —
+    which is why an agent that rejects the path surfaces as an error on the
+    runner rather than as silence.
+    """
+    root = str(value or "").strip()[:512]
+    out = dict(metadata or {})
+    if root:
+        out["workspaceRoot"] = root
+    else:
+        out.pop("workspaceRoot", None)
+    return out
+
+
+def workspace_root(runner: CiRunner) -> str:
+    return str((runner.runner_metadata or {}).get("workspaceRoot") or "")
+
+
+def set_workspace_root(runner: CiRunner, value: Any) -> None:
+    runner.runner_metadata = _metadata_with_workspace(runner.runner_metadata, value)
+    db.session.add(runner)
 
 
 def install_hint(runner: CiRunner) -> Dict[str, str]:
@@ -195,6 +222,10 @@ def heartbeat(runner: CiRunner, payload: Dict[str, Any]) -> Dict[str, Any]:
     reported = _labels(payload.get("capabilities"))
     if reported:
         runner.capabilities = reported
+    # An agent that cannot use the configured workspace says so here. Surfacing
+    # it on the runner beats a machine that quietly builds somewhere else.
+    problem = str(payload.get("workspaceError") or "").strip()[:2000]
+    runner.last_error = problem or None
     if runner.enabled and runner.status != "draining":
         runner.status = "online"
     db.session.add(runner)
@@ -208,6 +239,9 @@ def heartbeat(runner: CiRunner, payload: Dict[str, Any]) -> Dict[str, Any]:
         # machine is taken out of service without killing a build mid-flight.
         "accepting": bool(runner.enabled) and runner.status == "online",
         "heartbeatSeconds": max(10, HEARTBEAT_GRACE_SECONDS // 3),
+        # Empty means "your own default": a path set on the command line always
+        # wins, because the person at the machine knows its disks.
+        "workspaceRoot": workspace_root(runner),
     }
 
 

@@ -95,8 +95,12 @@ BuildKit", which is the cluster's job. An agent says so rather than pretending.
 
 ## What it does on the machine
 
-- One directory per build under `--workspace` (default `~/kubesight-agent`), so
-  a build's stages share a workspace exactly as they do in a pod.
+- One directory per build under the build directory, so a build's stages share
+  a workspace exactly as they do in a pod. That path can be set from KubeSight
+  (Runners → the agent → **Build directory**) and the agent applies it on its
+  next heartbeat, reporting back if it cannot write there. A `--workspace` given
+  on the command line always wins — the person at the machine knows its disks.
+  With neither, it is `~/kubesight-agent`.
 - Commands run with `/bin/sh -e`, in the checkout, with the stage's environment
   and secrets injected. Secrets are held in memory for the length of the task
   and never written to disk.

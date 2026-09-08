@@ -329,8 +329,9 @@ def main() -> int:
     parser.add_argument("--url", required=True, help="KubeSight base URL")
     parser.add_argument("--token", default=os.getenv("KUBESIGHT_AGENT_TOKEN", ""),
                         help="Agent token (or set KUBESIGHT_AGENT_TOKEN)")
-    parser.add_argument("--workspace", default=os.path.expanduser("~/kubesight-agent"),
-                        help="Where builds are checked out")
+    parser.add_argument("--workspace", default=None,
+                        help="Where builds are checked out. Overrides the path set "
+                             "in KubeSight; without either, ~/kubesight-agent")
     parser.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS,
                         help="Seconds between claim attempts when idle")
     parser.add_argument("--insecure", action="store_true",
@@ -342,9 +343,15 @@ def main() -> int:
         return 2
 
     client = Client(args.url, args.token, verify_tls=not args.insecure)
-    os.makedirs(args.workspace, exist_ok=True)
+    # A path given here always wins: the person at the machine knows its disks,
+    # and being overruled remotely by a typo would be worse than useless.
+    pinned = bool(args.workspace)
+    workspace = args.workspace or os.path.expanduser("~/kubesight-agent")
+    workspace_error = ""
+    os.makedirs(workspace, exist_ok=True)
     capabilities = detect_capabilities()
     print("[agent] %s, capabilities: %s" % (platform.node(), ", ".join(capabilities)))
+    print("[agent] workspace: %s%s" % (workspace, " (from --workspace)" if pinned else ""))
 
     identity = {
         "hostname": platform.node(),
@@ -361,17 +368,39 @@ def main() -> int:
             now = time.time()
             accepting = True
             if now - last_heartbeat > 30:
-                state = client.post_json("/heartbeat", identity) or {}
+                state = client.post_json(
+                    "/heartbeat", {**identity, "workspaceError": workspace_error}
+                ) or {}
                 last_heartbeat = now
                 accepting = bool(state.get("accepting", True))
                 if not accepting:
                     print("[agent] not accepting work (%s)" % state.get("status"))
 
+                # Applied between tasks, never underneath one that is running.
+                wanted = str(state.get("workspaceRoot") or "").strip()
+                if wanted and not pinned and wanted != workspace:
+                    try:
+                        os.makedirs(wanted, exist_ok=True)
+                        # Prove it is usable rather than merely present: a path
+                        # that exists but cannot be written to fails every build
+                        # with a confusing error much later.
+                        probe = os.path.join(wanted, ".kubesight-write-test")
+                        with open(probe, "w") as handle:
+                            handle.write("ok")
+                        os.remove(probe)
+                        workspace, workspace_error = wanted, ""
+                        print("[agent] workspace set by KubeSight: %s" % workspace)
+                    except Exception as exc:
+                        # Keep building where we are and say why, so the runner
+                        # shows the problem instead of silently using elsewhere.
+                        workspace_error = "Cannot use %s: %s" % (wanted, exc)
+                        print("[agent] %s" % workspace_error, file=sys.stderr)
+
             task = client.post_json("/claim", {}) if accepting else None
             if task:
                 print("[agent] running build #%s stage '%s'"
                       % (task.get("buildNumber"), task.get("stageName")))
-                run_task(client, task, args.workspace)
+                run_task(client, task, workspace)
                 continue  # Ask again immediately: a pipeline's next stage may be waiting.
         except KeyboardInterrupt:
             print("[agent] stopping")

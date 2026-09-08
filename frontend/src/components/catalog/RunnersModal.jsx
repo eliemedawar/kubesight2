@@ -252,6 +252,23 @@ export default function RunnersModal({ canManage, onClose }) {
                           </button>
                         </>
                       )}
+                      {!runner.isBuiltin && (
+                        <label className="sg-ci-runner-slots sg-ci-runner-path">
+                          Build directory
+                          <input
+                            defaultValue={runner.workspaceRoot || ""}
+                            placeholder="agent default"
+                            disabled={busy}
+                            aria-label={`Build directory for ${runner.name}`}
+                            title="Applied by the agent on its next heartbeat"
+                            onBlur={(event) => {
+                              const next = event.target.value.trim();
+                              if (next === (runner.workspaceRoot || "")) return;
+                              save(runner, { workspaceRoot: next });
+                            }}
+                          />
+                        </label>
+                      )}
                       <label className="sg-ci-runner-slots">
                         Max concurrent
                         <input

@@ -2487,3 +2487,17 @@ button.sg-ci-workspace-entry:focus-visible {
   background: var(--bg-interactive);
   font-size: 0.74rem;
 }
+
+/* The agent's build directory sits beside its slot count, and needs more room
+   than a number does. */
+.sg-ci-runner-path {
+  margin-left: 0;
+  flex: 1;
+  min-width: 10rem;
+}
+
+.sg-ci-runner-path input {
+  width: 100%;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+}

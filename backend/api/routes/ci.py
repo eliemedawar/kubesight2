@@ -810,6 +810,11 @@ def update_runner(runner_id: int):
         row.enabled = bool(payload["enabled"])
     if "description" in payload:
         row.description = " ".join(str(payload.get("description") or "").split())[:2000] or None
+    if "workspaceRoot" in payload:
+        # Applied by the agent on its next heartbeat; it reports back if it
+        # cannot use the path, which shows up as the runner's last error.
+        agents_service.set_workspace_root(row, payload.get("workspaceRoot"))
+
     if "maxConcurrent" in payload:
         try:
             row.max_concurrent = max(1, min(int(payload["maxConcurrent"]), 100))

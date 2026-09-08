@@ -180,3 +180,35 @@ def test_agents_refuse_container_image_stages(app):
         assert adapter.supported_stage_types() == {"checkout", "command"}
         assert "BuildKit" in adapter.skip_reason("container_image")
         assert adapter.skip_reason("command") is None
+
+
+def test_workspace_root_travels_to_the_agent_and_failures_come_back(app):
+    """KubeSight cannot check a path on a machine it cannot reach, so the agent
+    applies it and reports back — a refusal must surface on the runner rather
+    than leaving it quietly building somewhere else."""
+    with app.app_context():
+        runner, _ = agents_service.create_agent(
+            {
+                "name": "pathy",
+                "runnerType": "agent_linux",
+                "workspaceRoot": "  /var/lib/kubesight-agent  ",
+            }
+        )
+        assert agents_service.workspace_root(runner) == "/var/lib/kubesight-agent"
+
+        state = agents_service.heartbeat(runner, {})
+        assert state["workspaceRoot"] == "/var/lib/kubesight-agent"
+        assert runner.last_error is None
+
+        # The agent cannot write there: the reason is shown on the runner.
+        agents_service.heartbeat(runner, {"workspaceError": "Cannot use /var/lib/x: denied"})
+        assert "denied" in (runner.last_error or "")
+
+        # And clears once it succeeds, rather than lingering as a stale warning.
+        agents_service.heartbeat(runner, {})
+        assert runner.last_error is None
+
+        # Clearing the field returns the agent to its own default.
+        agents_service.set_workspace_root(runner, "")
+        db.session.commit()
+        assert agents_service.heartbeat(runner, {})["workspaceRoot"] == ""

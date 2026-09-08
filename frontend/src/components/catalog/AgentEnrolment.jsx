@@ -17,6 +17,7 @@ export default function AgentEnrolment({ register, onRegistered, onCancel }) {
   const [name, setName] = useState("");
   const [runnerType, setRunnerType] = useState("agent_linux");
   const [maxConcurrent, setMaxConcurrent] = useState(1);
+  const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -26,7 +27,12 @@ export default function AgentEnrolment({ register, onRegistered, onCancel }) {
     setError("");
     try {
       onRegistered(
-        await register({ name: name.trim(), runnerType, maxConcurrent: Number(maxConcurrent) || 1 })
+        await register({
+          name: name.trim(),
+          runnerType,
+          maxConcurrent: Number(maxConcurrent) || 1,
+          workspaceRoot: workspaceRoot.trim(),
+        })
       );
     } catch (err) {
       setError(err.message || "Could not register the agent.");
@@ -63,6 +69,22 @@ export default function AgentEnrolment({ register, onRegistered, onCancel }) {
           <span className="field-hint">How many stages this machine runs at once.</span>
         </label>
       </div>
+
+      <label className="form-grid__full">
+        Build directory
+        <input
+          value={workspaceRoot}
+          placeholder={runnerType === "agent_macos" ? "/Users/builder/kubesight" : "/var/lib/kubesight-agent"}
+          maxLength={512}
+          onChange={(event) => setWorkspaceRoot(event.target.value)}
+        />
+        <span className="field-hint">
+          Where the agent checks out builds, one directory per build. Leave empty for
+          the agent's own default (<code>~/kubesight-agent</code>). KubeSight cannot
+          check this path exists — the agent applies it and reports back if it cannot
+          write there.
+        </span>
+      </label>
 
       <div className="sg-ci-agent-platforms" role="radiogroup" aria-label="Platform">
         {PLATFORMS.map(([value, label, why]) => (
