@@ -17,6 +17,8 @@ from ..db import db
 from ..response import error_response, success_response
 from ..services.ci import agents as agents_service
 from ..services.ci import artifacts as artifacts_service
+from ..services.ci import engine as engine_service
+from ..services.ci import ticker as ci_ticker
 from ..services.ci.runners.base import ArtifactRef
 
 ci_agent_bp = Blueprint("ci_agent", __name__, url_prefix="/api/ci/agent")
@@ -132,12 +134,23 @@ def task_artifact(task_id: int):
 
 @ci_agent_bp.route("/tasks/<int:task_id>/result", methods=["POST"])
 def task_result(task_id: int):
-    """The verdict. The engine turns it into the stage's status on its next tick."""
+    """The verdict. Turned into the stage's status before this call returns.
+
+    Advancing here rather than on the next tick is what makes a pipeline flow:
+    the successor stage's task is queued while the agent is still holding this
+    response, so the claim it makes immediately afterwards finds work instead of
+    a 204 and a wait.
+    """
     try:
         runner = _runner()
         payload = _payload()
         task = agents_service.authorize_task(runner, task_id, payload.get("claimToken"))
     except agents_service.AgentError as exc:
         return error_response(str(exc), 401)
+    build_id = task.build_id
     agents_service.report_result(task, payload)
+    engine_service.advance_build_now(build_id)
+    # Whatever the transition could not settle here — a build that finished, a
+    # queued build now free to start — the engine looks at straight away.
+    ci_ticker.wake()
     return success_response({"ok": True})

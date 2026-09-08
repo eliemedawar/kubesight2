@@ -5,7 +5,9 @@ import { getBaseUrl } from "../../api/client.js";
 import { ciStageLogDownloadPath } from "../../api/ciApi.js";
 import { parseApiTime } from "../../lib/apiTime.js";
 
-const POLL_MS = 2000;
+// Log output is the one thing that must feel live; the loop ends when the
+// stage does. The backend drains the runner on demand for exactly this reason.
+const POLL_MS = 1000;
 
 /**
  * Append-only log view for one build stage.

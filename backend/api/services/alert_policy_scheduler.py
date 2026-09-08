@@ -149,12 +149,16 @@ def _scheduler_loop(app: Flask) -> None:
             logger.exception("Mobile applications tick failed")
         try:
             with app.app_context():
-                from .ci.engine import advance_ci_builds
+                from .ci import ticker as ci_ticker
 
-                # Native CI: reap lost builds, honour cancellations, advance
-                # running stages, and dispatch queued builds to a compatible
-                # runner. No-ops instantly when nothing is queued or running.
-                advance_ci_builds()
+                # Native CI normally runs on its own one-second clock, because
+                # waiting up to 15s behind everything above for a stage to hand
+                # over to the next is what made builds feel slow. This stays as
+                # the fallback for a deployment with that ticker turned off.
+                if not ci_ticker.is_running():
+                    from .ci.engine import advance_ci_builds
+
+                    advance_ci_builds()
         except Exception:
             logger.exception("CI build tick failed")
         try:

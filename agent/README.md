@@ -116,6 +116,17 @@ BuildKit", which is the cluster's job. An agent says so rather than pretending.
 **It does not containerise anything.** A stage's "container image" is ignored
 here: the point of an agent is to use the machine as it is.
 
+## How quickly it picks work up
+
+- Idle, it asks for work every couple of seconds. KubeSight sets that interval
+  and hands it out on every heartbeat (`CI_AGENT_POLL_SECONDS` on the backend),
+  so the whole fleet is tuned in one place — a `--poll` given on the command
+  line pins this machine's own value instead.
+- Between a build's stages there is nothing to wait for: posting a stage's exit
+  code is what queues the next stage, so the claim the agent makes immediately
+  afterwards already has it. For a few seconds after finishing a task it asks on
+  a much faster beat for exactly that reason.
+
 ## Security
 
 - The token authenticates the machine. Treat it as a credential: it can claim

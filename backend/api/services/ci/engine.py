@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import re
 import secrets as secrets_module
@@ -66,6 +67,17 @@ logger = logging.getLogger(__name__)
 _DISPATCH_PER_TICK = int(os.getenv("CI_DISPATCH_PER_TICK", "5"))
 # A running build with no progress for this long is presumed lost.
 _STALE_BUILD_MINUTES = int(os.getenv("CI_STALE_BUILD_MINUTES", "60"))
+
+# One pass at a time in this process. The dedicated CI ticker and the shared
+# scheduler can both ask, and a pass that overlapped its own previous run would
+# poll the same stage twice and race on the transition it is in the middle of.
+_pass_lock = threading.Lock()
+
+# Runner housekeeping (derive builtin statuses, offline the silent agents,
+# rebuild leaked load counters) is self-healing rather than latency-critical, so
+# it keeps its own slower cadence instead of running on every fast pass.
+_BOOKKEEPING_SECONDS = float(os.getenv("CI_BOOKKEEPING_SECONDS", "5"))
+_last_bookkeeping = 0.0
 
 # What a runner can execute is the RUNNER's statement, not the engine's: each
 # adapter exposes ``supported_stage_types()`` (the Kubernetes adapter adds
@@ -120,6 +132,20 @@ def _seconds_between(start: Optional[datetime], end: Optional[datetime]) -> Opti
     if not start or not end:
         return None
     return max(0, int((end - start).total_seconds()))
+
+
+def _wake_engine() -> None:
+    """Ask the CI ticker for a pass now rather than at its next interval.
+
+    Imported at the call site: the ticker's loop imports this module, and the
+    dependency has to run in that direction only.
+    """
+    try:
+        from .ticker import wake
+
+        wake()
+    except Exception:  # pragma: no cover - a missed wake only costs a tick
+        logger.debug("Could not wake the CI engine", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +262,10 @@ def trigger_build(
             "retryOf": retry_of.number if retry_of else None,
         },
     )
+    # Dispatch this build now instead of at the ticker's next interval: the
+    # gap between clicking Run build and a runner picking it up is the first
+    # thing anyone judges CI on.
+    _wake_engine()
     return build_to_dict(build)
 
 
@@ -267,6 +297,8 @@ def cancel_build(build: CiBuild, *, actor=None) -> Dict[str, Any]:
             "statusAtRequest": build.status,
         },
     )
+    # A running build is stopped by the engine, not here; ask it to look now.
+    _wake_engine()
     return build_to_dict(build)
 
 
@@ -310,25 +342,47 @@ def retry_build(build: CiBuild, *, actor=None) -> Dict[str, Any]:
 # The tick
 # ---------------------------------------------------------------------------
 
-def advance_ci_builds() -> None:
-    """One scheduler pass. No-ops quickly when nothing is queued or running."""
+def advance_ci_builds() -> bool:
+    """One scheduler pass. No-ops quickly when nothing is queued or running.
+
+    Returns whether there was active work, which is how the ticker decides
+    between its fast and idle intervals.
+    """
     active = (
         CiBuild.query.filter(CiBuild.status.in_(("queued", "running"))).count()
     )
     if not active:
-        return
+        return False
 
+    # A pass already in flight is doing exactly this work; a second one would
+    # poll the same stage and race on the transition the first is committing.
+    if not _pass_lock.acquire(blocking=False):
+        return True
     try:
-        # Runners KubeSight manages in-process have nothing to heartbeat from;
-        # their status is derived (enabled + adapter registered) each pass.
-        scheduler_service.sync_builtin_runner_statuses()
-        # An agent that stops heartbeating is offline, not online-and-silent.
-        # Without this the scheduler keeps assigning work to a machine that has
-        # been switched off, and those builds queue against nothing.
-        agents_service.mark_stale_agents_offline()
-        scheduler_service.recompute_loads()
-    except Exception:
-        logger.exception("CI runner bookkeeping failed")
+        return _run_pass()
+    finally:
+        _pass_lock.release()
+
+
+def _run_pass() -> bool:
+    global _last_bookkeeping
+    now = time.monotonic()
+    # Always while something is queued: "no runner is online" must never be a
+    # stale answer for a build that is waiting on exactly that.
+    if now - _last_bookkeeping >= _BOOKKEEPING_SECONDS or queue_service.depth():
+        _last_bookkeeping = now
+        try:
+            # Runners KubeSight manages in-process have nothing to heartbeat
+            # from; their status is derived (enabled + adapter registered).
+            scheduler_service.sync_builtin_runner_statuses()
+            # An agent that stops heartbeating is offline, not
+            # online-and-silent. Without this the scheduler keeps assigning
+            # work to a machine that has been switched off, and those builds
+            # queue against nothing.
+            agents_service.mark_stale_agents_offline()
+            scheduler_service.recompute_loads()
+        except Exception:
+            logger.exception("CI runner bookkeeping failed")
 
     for step in (_reap_stale_builds, _process_cancellations, _advance_running, _dispatch_queued):
         try:
@@ -336,6 +390,33 @@ def advance_ci_builds() -> None:
         except Exception:
             logger.exception("CI engine step %s failed", step.__name__)
             db.session.rollback()
+    return True
+
+
+def advance_build_now(build_id: int) -> None:
+    """Advance one build immediately, outside the tick.
+
+    Called from the callbacks that already know a stage just ended — an agent
+    posting its exit code, above all. Doing the transition here means the
+    successor stage is queued before that request returns, so the agent's very
+    next claim picks it up instead of waiting for a tick to notice.
+
+    Deliberately forgiving: anything that goes wrong is left to the tick, which
+    has the error handling that fails a build honestly. A callback must never
+    fail because the engine could not advance yet.
+    """
+    if not _pass_lock.acquire(blocking=False):
+        return
+    try:
+        build = db.session.get(CiBuild, int(build_id))
+        if build is None or build.status != "running":
+            return
+        _advance_one(build)
+    except Exception:
+        logger.exception("Immediate advance of build %s failed", build_id)
+        db.session.rollback()
+    finally:
+        _pass_lock.release()
 
 
 def _reap_stale_builds() -> None:
@@ -496,9 +577,19 @@ def _advance_one(build: CiBuild) -> None:
                 db.session.add(pending)
     db.session.commit()
 
-    if _current_stage(build) is None:
+    following = _current_stage(build)
+    if following is None:
         _finalize(build)
         db.session.commit()
+        return
+    if following.status == "pending" and build.status == "running":
+        # Start the successor now. Leaving it to the next pass put a whole tick
+        # of dead air between every pair of stages — the single largest source
+        # of "why is CI slow" when the stages themselves take seconds. Exactly
+        # one level deep: that call takes the pending branch above, which starts
+        # the stage (walking a run of instantly-skipped ones) and returns
+        # without polling what it just started.
+        _advance_one(build)
 
 
 def _dispatch_queued() -> None:
@@ -551,6 +642,14 @@ def _dispatch_queued() -> None:
 
         _start_stage(build, stage)
         db.session.commit()
+
+        # A first stage that resolves instantly — skipped because this runner
+        # cannot execute its type, or reused by a rerun-from-a-later-stage —
+        # must not cost a tick before the stage that does the work starts.
+        current = _current_stage(build)
+        if build.status == "running" and (current is None or current.status == "pending"):
+            _advance_one(build)
+            db.session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -986,12 +1085,13 @@ def _build_plan(build: CiBuild, adapter, callback_token: str) -> List[StageExecu
 
 
 
-# A viewer polls a running stage every couple of seconds, but logs were only
+# A viewer polls a running stage about once a second, but logs were only
 # ingested on the shared scheduler tick — so output could sit unseen for a whole
 # tick even though the pod had already printed it. Draining on demand closes
 # that gap; the cooldown keeps several viewers of one build from turning into
-# several `kubectl logs` calls a second.
-_LOG_PUMP_COOLDOWN_SECONDS = float(os.getenv("CI_LOG_PUMP_COOLDOWN_SECONDS", "2"))
+# several `kubectl logs` calls a second. Matched to the viewer's own poll so a
+# tailing log is never a whole beat behind the pod.
+_LOG_PUMP_COOLDOWN_SECONDS = float(os.getenv("CI_LOG_PUMP_COOLDOWN_SECONDS", "1"))
 _last_log_pump: Dict[int, float] = {}
 
 

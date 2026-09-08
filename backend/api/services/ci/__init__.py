@@ -15,4 +15,5 @@ AI code path. It reuses two stateless helpers from that package — a Bitbucket
 metadata client and a set of URL/redaction validators — and nothing else.
 """
 
-from .engine import advance_ci_builds  # noqa: F401
+from .engine import advance_build_now, advance_ci_builds  # noqa: F401
+from .ticker import start_ci_engine  # noqa: F401

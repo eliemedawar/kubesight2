@@ -32,6 +32,23 @@ AGENT_RUNNER_TYPES = ("agent_linux", "agent_macos")
 # heartbeats far more often; this is the grace, not the interval.
 HEARTBEAT_GRACE_SECONDS = 90
 
+# How often an idle agent asks for work. Handed out on every heartbeat so the
+# fleet's pickup latency is one server-side setting rather than an argument
+# somebody has to change on every machine (an agent started with --poll keeps
+# its own value). A claim is one indexed lookup, so seconds here cost far more
+# in perceived slowness than they save in load.
+DEFAULT_AGENT_POLL_SECONDS = 2.0
+
+
+def agent_poll_seconds() -> float:
+    raw = os.getenv("CI_AGENT_POLL_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_AGENT_POLL_SECONDS
+    try:
+        return max(0.2, min(60.0, float(raw)))
+    except ValueError:
+        return DEFAULT_AGENT_POLL_SECONDS
+
 
 class AgentError(ValueError):
     """An agent request was rejected. Message is user-facing."""
@@ -239,6 +256,8 @@ def heartbeat(runner: CiRunner, payload: Dict[str, Any]) -> Dict[str, Any]:
         # machine is taken out of service without killing a build mid-flight.
         "accepting": bool(runner.enabled) and runner.status == "online",
         "heartbeatSeconds": max(10, HEARTBEAT_GRACE_SECONDS // 3),
+        # How soon to ask for work again when there is none.
+        "pollSeconds": agent_poll_seconds(),
         # Empty means "your own default": a path set on the command line always
         # wins, because the person at the machine knows its disks.
         "workspaceRoot": workspace_root(runner),

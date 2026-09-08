@@ -43,7 +43,17 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 VERSION = "1.0.0"
-DEFAULT_POLL_SECONDS = 5
+# How long an idle agent waits between claim attempts. Low because a claim is a
+# single indexed lookup and the wait is exactly what somebody watching the
+# Builds tab experiences as "the runner has not picked it up yet". KubeSight can
+# lower it further for the whole fleet (CI_AGENT_POLL_SECONDS) — see the
+# heartbeat reply — unless --poll pins it here.
+DEFAULT_POLL_SECONDS = 2.0
+# Right after finishing a task, ask again on this much shorter beat for a few
+# seconds: the stage that follows is being queued as we report, so the next task
+# is usually already there.
+EAGER_POLL_SECONDS = 0.3
+EAGER_WINDOW_SECONDS = 6.0
 
 # 3.6 is the floor deliberately: it is what RHEL/CentOS 7 ships, and those are
 # exactly the long-lived build hosts an agent exists to reach. Everything here
@@ -353,8 +363,9 @@ def main() -> int:
     parser.add_argument("--workspace", default=None,
                         help="Where builds are checked out. Overrides the path set "
                              "in KubeSight; without either, ~/kubesight-agent")
-    parser.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS,
-                        help="Seconds between claim attempts when idle")
+    parser.add_argument("--poll", type=float, default=None,
+                        help="Seconds between claim attempts when idle. Pins the "
+                             "interval; without it KubeSight sets the fleet's")
     parser.add_argument("--insecure", action="store_true",
                         help="Skip TLS verification (for a self-signed KubeSight)")
     args = parser.parse_args()
@@ -383,17 +394,35 @@ def main() -> int:
         "capabilities": capabilities,
     }
 
+    # A value on the command line wins; otherwise KubeSight tells us on each
+    # heartbeat, so the fleet's responsiveness is one setting on the server
+    # rather than an argument on every machine.
+    pinned_poll = args.poll is not None
+    poll = float(args.poll) if pinned_poll else DEFAULT_POLL_SECONDS
+    heartbeat_every = 30.0
     last_heartbeat = 0.0
+    eager_until = 0.0
     while True:
         try:
             now = time.time()
             accepting = True
-            if now - last_heartbeat > 30:
+            if now - last_heartbeat > heartbeat_every:
                 state = client.post_json(
                     "/heartbeat", {**identity, "workspaceError": workspace_error}
                 ) or {}
                 last_heartbeat = now
                 accepting = bool(state.get("accepting", True))
+                if not pinned_poll:
+                    try:
+                        wanted_poll = float(state.get("pollSeconds") or 0)
+                        if wanted_poll > 0:
+                            poll = max(0.2, min(60.0, wanted_poll))
+                    except (TypeError, ValueError):
+                        pass
+                try:
+                    heartbeat_every = max(5.0, float(state.get("heartbeatSeconds") or 30))
+                except (TypeError, ValueError):
+                    heartbeat_every = 30.0
                 if not accepting:
                     print("[agent] not accepting work (%s)" % state.get("status"))
 
@@ -422,7 +451,11 @@ def main() -> int:
                 print("[agent] running build #%s stage '%s'"
                       % (task.get("buildNumber"), task.get("stageName")))
                 run_task(client, task, workspace)
-                continue  # Ask again immediately: a pipeline's next stage may be waiting.
+                # Ask again immediately, then keep asking on a fast beat for a
+                # few seconds: reporting the result is what starts the next
+                # stage, so its task lands within milliseconds of this point.
+                eager_until = time.time() + EAGER_WINDOW_SECONDS
+                continue
         except KeyboardInterrupt:
             print("[agent] stopping")
             return 0
@@ -430,9 +463,9 @@ def main() -> int:
             # Never exit on a transient failure: an agent that dies when the
             # network blips has to be restarted by a person.
             print("[agent] %s" % exc, file=sys.stderr)
-            time.sleep(min(30, args.poll * 4))
+            time.sleep(min(30.0, max(1.0, poll * 4)))
             continue
-        time.sleep(args.poll)
+        time.sleep(EAGER_POLL_SECONDS if time.time() < eager_until else poll)
 
 
 if __name__ == "__main__":

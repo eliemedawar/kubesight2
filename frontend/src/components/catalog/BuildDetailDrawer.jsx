@@ -20,7 +20,9 @@ import {
   shortSha,
 } from "./ciShared.jsx";
 
-const REFRESH_MS = 2500;
+// The drawer is open on one build the user is watching stage by stage, and it
+// stops polling as soon as that build finishes.
+const REFRESH_MS = 1200;
 
 /**
  * One build: header, stage list, and the selected stage's logs.

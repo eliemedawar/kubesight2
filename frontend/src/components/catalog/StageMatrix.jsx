@@ -16,7 +16,9 @@ import {
   shortSha,
 } from "./ciShared.jsx";
 
-const REFRESH_MS = 4000;
+// Matched to the engine's own tick, and only while a build is live — the grid
+// is where a stage handing over to the next is most visible.
+const REFRESH_MS = 1500;
 
 /** Twelve rows fit a screen; the table view is the tool for deeper history. */
 const PAGE_SIZE = 12;

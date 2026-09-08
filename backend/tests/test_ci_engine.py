@@ -961,3 +961,109 @@ def test_rerun_from_the_first_stage_is_refused(app, admin_token):
         db.session.commit()
         with _pytest.raises(BuildError):
             engine_service.rerun_from(build, 0)
+
+
+# ---------------------------------------------------------------------------
+# Handover latency
+# ---------------------------------------------------------------------------
+
+def test_a_finished_stage_starts_its_successor_in_the_same_pass(
+    app, client, admin_token, runnable_service
+):
+    """A stage boundary must not cost a tick.
+
+    Closing a stage and starting the next used to be two separate passes, so
+    every boundary in a pipeline added a whole scheduler interval of dead air —
+    the single largest source of "why is CI slow" when the stages themselves
+    take seconds.
+    """
+    from api.services.ci import engine
+    from api.services.ci.runners import mock as mock_runner
+
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
+    ).get_json()["data"]["id"]
+
+    original = mock_runner._STAGE_SECONDS
+    mock_runner._STAGE_SECONDS = 0.0
+    try:
+        with app.app_context():
+            engine.advance_ci_builds()  # dispatch: the first stage is running
+            stages = sorted(
+                db.session.get(CiBuild, build_id).stages, key=lambda s: s.position
+            )
+            assert [s.status for s in stages] == ["running", "pending"]
+
+            engine.advance_ci_builds()  # one pass: close the first, start the second
+            stages = sorted(
+                db.session.get(CiBuild, build_id).stages, key=lambda s: s.position
+            )
+            assert [s.status for s in stages] == ["success", "running"]
+    finally:
+        mock_runner._STAGE_SECONDS = original
+
+
+def test_an_agent_reporting_a_result_can_claim_the_next_stage_at_once(
+    app, client, admin_token, runnable_service
+):
+    """The agent's own loop is the fast path: reporting a stage's exit code
+    queues the next stage's task before that request returns, so the claim the
+    agent makes immediately afterwards finds work instead of a 204 and a wait."""
+    from api.models_ci import CiRunner
+    from api.services.ci import agents as agents_service
+    from api.services.ci import engine
+
+    # An agent-only fleet, and a pipeline with nothing pinned to the mock runner.
+    pipeline_id = client.get(
+        f"/api/ci/services/{runnable_service}/pipelines", headers=auth_headers(admin_token)
+    ).get_json()["data"]["items"][0]["id"]
+    client.put(
+        f"/api/ci/pipelines/{pipeline_id}",
+        json={
+            "stages": [
+                {"name": "Checkout", "stageType": "checkout"},
+                {"name": "Build", "stageType": "command", "commands": ["mvn -B package"]},
+            ]
+        },
+        headers=auth_headers(admin_token),
+    )
+
+    with app.app_context():
+        for runner in CiRunner.query.all():
+            runner.enabled = False
+            db.session.add(runner)
+        runner, token = agents_service.create_agent(
+            {"name": "linux-fast", "runnerType": "agent_linux", "maxConcurrent": 1}
+        )
+        agents_service.heartbeat(runner, {"capabilities": ["linux", "java"]})
+        db.session.commit()
+
+    agent_headers = {"Authorization": f"Bearer {token}"}
+
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
+    ).get_json()["data"]["id"]
+    with app.app_context():
+        engine.advance_ci_builds()  # dispatch: stage 0 is offered to the agent
+
+    first = client.post("/api/ci/agent/claim", json={}, headers=agent_headers)
+    assert first.status_code == 200
+    first_task = first.get_json()["data"]
+    assert first_task["stageName"] == "Checkout"
+
+    client.post(
+        f"/api/ci/agent/tasks/{first_task['taskId']}/result",
+        json={"exitCode": 0, "claimToken": first_task["claimToken"]},
+        headers=agent_headers,
+    )
+
+    # No engine pass in between: the result callback did the handover.
+    second = client.post("/api/ci/agent/claim", json={}, headers=agent_headers)
+    assert second.status_code == 200
+    assert second.get_json()["data"]["stageName"] == "Build"
+
+    with app.app_context():
+        stages = sorted(
+            db.session.get(CiBuild, build_id).stages, key=lambda s: s.position
+        )
+        assert [s.status for s in stages] == ["success", "running"]

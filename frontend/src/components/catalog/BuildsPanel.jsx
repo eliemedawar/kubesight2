@@ -13,7 +13,12 @@ import {
   shortSha,
 } from "./ciShared.jsx";
 
-const REFRESH_MS = 4000;
+// Only a live build polls at all (the loop stops the moment nothing is
+// active), so this interval is paid exactly while somebody is watching a build
+// move. The engine hands a stage over to the next in about a second; refreshing
+// slower than that is the difference between a pipeline that flows and one that
+// looks like it stalls between stages.
+const REFRESH_MS = 1500;
 
 const STATUS_FILTERS = [
   ["all", "All"],
