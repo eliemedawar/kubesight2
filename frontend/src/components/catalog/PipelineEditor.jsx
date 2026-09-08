@@ -641,6 +641,9 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
             />
             <span className="field-hint">
               One per line. Never put a secret here — reference it below instead.
+              Commands run in the checkout; use <code>$KUBESIGHT_WORKSPACE</code> and{" "}
+              <code>$KUBESIGHT_SOURCE</code> for absolute paths, since a literal{" "}
+              <code>/workspace</code> exists only on the Kubernetes runner.
             </span>
           </label>
         )}

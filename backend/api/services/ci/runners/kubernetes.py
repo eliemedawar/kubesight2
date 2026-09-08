@@ -530,17 +530,55 @@ def _stage_resources(execution: StageExecution) -> Dict[str, Any]:
 #
 # Off unless CI_CACHE_STORAGE_CLASS names a class: nothing should start
 # demanding storage on a cluster that has none to give.
+#
+# A cluster with no provisioner has no class to name, and there the only way to
+# get a cache is a PersistentVolume made by hand. CI_CACHE_CLAIM_NAME points at
+# that volume's claim (see k8s/ci-cache-volume.yaml): one claim shared by every
+# service, each service confined to its own subtree of it.
 # ---------------------------------------------------------------------------
 
 CACHE_MOUNT_PATH = "/cache"
+
+# uid/gid the stage containers run as. The cache volume is handed to them
+# through this group — see the fsGroup note on the Job below.
+CACHE_FS_GROUP = 65532
 
 
 def cache_storage_class() -> str:
     return os.getenv("CI_CACHE_STORAGE_CLASS", "").strip()
 
 
+def cache_claim_override() -> str:
+    """A claim the operator created by hand, shared by every service.
+
+    Takes precedence over CI_CACHE_STORAGE_CLASS: naming an existing claim is
+    the more specific instruction, and KubeSight then never tries to create,
+    resize or otherwise touch the volume behind it.
+    """
+    return os.getenv("CI_CACHE_CLAIM_NAME", "").strip()
+
+
+def cache_enabled() -> bool:
+    return bool(cache_claim_override() or cache_storage_class())
+
+
 def cache_claim_name(service_slug: str) -> str:
-    return f"ci-cache-{_dns(service_slug, 50)}"
+    return cache_claim_override() or f"ci-cache-{_dns(service_slug, 50)}"
+
+
+def cache_base_path(service_slug: str) -> str:
+    """Where this service's caches live inside the mount, "" when off.
+
+    One hand-made volume holds every service, so each gets its own subtree:
+    two services sharing one Gradle or Maven directory would fight over the
+    same lock files. A per-service claim is already isolated, and keeps the
+    bare /cache paths that pipelines written before this point at.
+    """
+    if not cache_enabled():
+        return ""
+    if cache_claim_override():
+        return f"{CACHE_MOUNT_PATH}/{_dns(service_slug, 63)}"
+    return CACHE_MOUNT_PATH
 
 
 def cache_claim(service_slug: str) -> Dict[str, Any]:
@@ -570,12 +608,50 @@ def _mounts() -> List[Dict[str, str]]:
         {"name": "workspace", "mountPath": "/workspace"},
         {"name": "tmp", "mountPath": "/tmp"},
     ]
-    if cache_storage_class():
+    if cache_enabled():
         mounts.append({"name": "cache", "mountPath": CACHE_MOUNT_PATH})
     return mounts
 
 
+def _tool_cache_env(base: str) -> Dict[str, str]:
+    """Point every build tool KubeSight might meet at the cache volume.
+
+    Injected on every stage rather than left to each pipeline: a cache nobody
+    remembered to wire up is a cache that does nothing, and the correct
+    variable name differs per tool. A stage's own Environment still wins —
+    ``execution.env`` is merged after this.
+
+    Each tool creates its own directory on first use, so only ``base`` has to
+    exist and be writable. None of these are mount points; they are all plain
+    paths inside the one volume, which is what lets a single hand-made
+    PersistentVolume hold every tool's cache at once.
+    """
+    if not base:
+        return {}
+    return {
+        # -Dmaven.repo.local as a JVM property works on every Maven version;
+        # MAVEN_ARGS would only be read by 3.9+.
+        "MAVEN_OPTS": f"-Dmaven.repo.local={base}/maven",
+        "GRADLE_USER_HOME": f"{base}/gradle",
+        "npm_config_cache": f"{base}/npm",
+        "YARN_CACHE_FOLDER": f"{base}/yarn",
+        # pnpm reads npm_config_* too; this is its content-addressable store.
+        "npm_config_store_dir": f"{base}/pnpm",
+        "PIP_CACHE_DIR": f"{base}/pip",
+        "GOMODCACHE": f"{base}/go/mod",
+        "GOCACHE": f"{base}/go/build",
+        "CARGO_HOME": f"{base}/cargo",
+        "COMPOSER_CACHE_DIR": f"{base}/composer",
+        "NUGET_PACKAGES": f"{base}/nuget",
+        # Catch-all for everything that respects the XDG base directories
+        # (yarn berry, pip's http cache, Playwright, sccache...). HOME is /tmp
+        # and dies with the pod, so without this they each start cold.
+        "XDG_CACHE_HOME": f"{base}/xdg",
+    }
+
+
 def _plain_env(execution: StageExecution, extra: Dict[str, str]) -> List[Dict[str, Any]]:
+    cache_base = cache_base_path(execution.service_slug)
     env = {
         "HOME": "/tmp",
         "TMPDIR": "/tmp",
@@ -585,9 +661,16 @@ def _plain_env(execution: StageExecution, extra: Dict[str, str]) -> List[Dict[st
         "KUBESIGHT_SERVICE": execution.service_slug,
         "KUBESIGHT_BRANCH": execution.branch or "",
         "KUBESIGHT_COMMIT": execution.commit_sha or "",
+        # Where this build's files are, named rather than assumed. A pipeline
+        # that hardcodes /workspace is a pipeline that only runs on Kubernetes:
+        # an agent puts the same build under its own directory, and the same
+        # stage has to work on both.
+        "KUBESIGHT_WORKSPACE": "/workspace",
+        "KUBESIGHT_SOURCE": "/workspace/source",
         # Empty when no cache volume is configured, so a pipeline can use it
         # unconditionally and simply get a cold build where there is none.
-        "KUBESIGHT_CACHE": CACHE_MOUNT_PATH if cache_storage_class() else "",
+        "KUBESIGHT_CACHE": cache_base,
+        **_tool_cache_env(cache_base),
         **(execution.env or {}),
         **extra,
     }
@@ -789,7 +872,7 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
         {"name": "workspace", "emptyDir": {"sizeLimit": _env("CI_WORKSPACE_SIZE_LIMIT", "5Gi")}},
         {"name": "tmp", "emptyDir": {"sizeLimit": "512Mi"}},
     ]
-    if cache_storage_class():
+    if cache_enabled():
         volumes.append(
             {
                 "name": "cache",
@@ -851,6 +934,20 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                     "securityContext": {
                         "runAsNonRoot": True,
                         "seccompProfile": {"type": "RuntimeDefault"},
+                        # A volume arrives owned by root, and stage containers
+                        # run as uid 65532 with a read-only root filesystem and
+                        # no capability to chown it — so hand it over by group
+                        # instead, or every build fails writing to /cache.
+                        # OnRootMismatch keeps that to the first pod rather
+                        # than re-walking a full cache on every build.
+                        **(
+                            {
+                                "fsGroup": CACHE_FS_GROUP,
+                                "fsGroupChangePolicy": "OnRootMismatch",
+                            }
+                            if cache_enabled()
+                            else {}
+                        ),
                     },
                     "volumes": volumes,
                     "initContainers": init_containers,
@@ -1039,7 +1136,9 @@ class KubernetesJobRunnerAdapter:
         return RunnerHandle(runner_id=0, external_ref=ref)
 
     def _create_job(self, execution: StageExecution) -> None:
-        if cache_storage_class():
+        if cache_claim_override():
+            self._require_cache_claim()
+        elif cache_storage_class():
             self._ensure_cache_claim(execution.service_slug)
         resources = build_job_resources(execution)
         manifest = json.dumps({"apiVersion": "v1", "kind": "List", "items": resources})
@@ -1077,6 +1176,22 @@ class KubernetesJobRunnerAdapter:
                 "The build cache volume could not be created: "
                 + (detail[-1] if detail else "unknown error")
                 + " — clear CI_CACHE_STORAGE_CLASS to build without a cache."
+            )
+
+    def _require_cache_claim(self) -> None:
+        """Check the hand-made claim is there before a pod is told to mount it.
+
+        Same reasoning as _ensure_cache_claim: the Job mounts the claim by
+        name, and a missing one leaves the pod Pending until its deadline with
+        nothing in the build log explaining why.
+        """
+        name = cache_claim_override()
+        rc, _, _ = _kubectl(["get", "pvc", name, "-n", _namespace(), "-o", "name"], timeout=20)
+        if rc != 0:
+            raise RunnerError(
+                f"CI_CACHE_CLAIM_NAME points at a claim that does not exist in "
+                f"{_namespace()}: {name} — apply k8s/ci-cache-volume.yaml, or clear "
+                "CI_CACHE_CLAIM_NAME to build without a cache."
             )
 
     def _attach_owner_refs(self, resources: List[Dict[str, Any]]) -> None:

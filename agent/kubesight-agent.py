@@ -282,7 +282,14 @@ def run_task(client: Client, task: Dict[str, Any], root: str) -> None:
                 # the first command with a confusing "no such file".
                 shipper.add("No checkout at %s — did the checkout stage run here?" % cwd, "stderr")
                 raise RuntimeError("workspace missing")
-            env = {**os.environ, **{str(k): str(v) for k, v in (task.get("env") or {}).items()}}
+            env = {
+                **os.environ,
+                # The same names the Kubernetes runner exports, pointing at this
+                # machine's directories, so one pipeline runs on either.
+                "KUBESIGHT_WORKSPACE": workspace,
+                "KUBESIGHT_SOURCE": os.path.join(workspace, "source"),
+                **{str(k): str(v) for k, v in (task.get("env") or {}).items()},
+            }
             script = "\n".join(task.get("commands") or ["true"])
             exit_code = stream(
                 ["/bin/sh", "-e", "-c", script], cwd, env, shipper,

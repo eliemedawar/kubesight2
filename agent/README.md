@@ -105,7 +105,9 @@ BuildKit", which is the cluster's job. An agent says so rather than pretending.
   on the command line always wins — the person at the machine knows its disks.
   With neither, it is `~/kubesight-agent`.
 - Commands run with `/bin/sh -e`, in the checkout, with the stage's environment
-  and secrets injected. Secrets are held in memory for the length of the task
+  and secrets injected. `KUBESIGHT_WORKSPACE` and `KUBESIGHT_SOURCE` name this
+  build's directories — use those rather than a literal `/workspace`, which is
+  the Kubernetes runner's path and does not exist here. Secrets are held in memory for the length of the task
   and never written to disk.
 - Git credentials travel as `GIT_CONFIG_*` environment variables, never in
   argv, so they cannot be read from the process list on a shared machine.

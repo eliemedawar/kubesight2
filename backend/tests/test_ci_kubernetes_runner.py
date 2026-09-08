@@ -53,6 +53,10 @@ def _execution(position, stage_type="command", **kw):
     )
 
 
+def _env_map(container):
+    return {entry["name"]: entry.get("value") for entry in container["env"]}
+
+
 def _plan(*executions):
     first = executions[0]
     first.plan = list(executions)
@@ -698,8 +702,12 @@ def test_no_cache_volume_unless_a_storage_class_is_configured(monkeypatch):
     spec = job["spec"]["template"]["spec"]
     assert not [v for v in spec["volumes"] if v["name"] == "cache"]
     stage = spec["initContainers"][1]
-    cache_env = next(e for e in stage["env"] if e["name"] == "KUBESIGHT_CACHE")
-    assert cache_env["value"] == ""
+    env = _env_map(stage)
+    assert env["KUBESIGHT_CACHE"] == ""
+    # No tool may be pointed at /cache when there is no /cache to point at.
+    for name in ("GRADLE_USER_HOME", "MAVEN_OPTS", "npm_config_cache", "XDG_CACHE_HOME"):
+        assert name not in env
+    assert "fsGroup" not in spec["securityContext"]
 
 
 def test_cache_volume_is_per_service_and_mounted_everywhere(monkeypatch):
@@ -727,6 +735,115 @@ def test_cache_volume_is_per_service_and_mounted_everywhere(monkeypatch):
     assert claim["spec"]["storageClassName"] == "nfs-client"
     # No ownerReference: the cache must outlive the build that created it.
     assert "ownerReferences" not in claim["metadata"]
+
+
+def test_hand_made_claim_is_shared_by_every_service_under_its_own_subtree(monkeypatch):
+    """A cluster with no StorageClass has no class to name: the operator makes
+    one volume (k8s/ci-cache-volume.yaml) and KubeSight mounts that claim."""
+    monkeypatch.delenv("CI_CACHE_STORAGE_CLASS", raising=False)
+    monkeypatch.setenv("CI_CACHE_CLAIM_NAME", "ci-cache")
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, commands=["gradle build"]),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    spec = job["spec"]["template"]["spec"]
+
+    volume = next(v for v in spec["volumes"] if v["name"] == "cache")
+    assert volume["persistentVolumeClaim"]["claimName"] == "ci-cache"
+    for container in spec["initContainers"]:
+        assert {"name": "cache", "mountPath": "/cache"} in container["volumeMounts"]
+
+    # One claim for every service, so each is confined to its own subtree
+    # rather than sharing another service's lock files.
+    assert _env_map(spec["initContainers"][1])["KUBESIGHT_CACHE"] == "/cache/payment-service"
+
+    # uid 65532 cannot chown a volume that arrives owned by root, so it is
+    # handed over by group instead.
+    assert spec["securityContext"]["fsGroup"] == 65532
+    assert spec["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+
+
+def test_every_known_build_tool_is_pointed_at_the_cache(monkeypatch):
+    """The saving only happens if the tools actually look there, and each one
+    spells its cache variable differently."""
+    monkeypatch.delenv("CI_CACHE_STORAGE_CLASS", raising=False)
+    monkeypatch.setenv("CI_CACHE_CLAIM_NAME", "ci-cache")
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, commands=["mvn package"]),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    env = _env_map(job["spec"]["template"]["spec"]["initContainers"][1])
+    base = "/cache/payment-service"
+
+    assert env["MAVEN_OPTS"] == f"-Dmaven.repo.local={base}/maven"
+    assert env["GRADLE_USER_HOME"] == f"{base}/gradle"
+    assert env["npm_config_cache"] == f"{base}/npm"
+    assert env["YARN_CACHE_FOLDER"] == f"{base}/yarn"
+    assert env["npm_config_store_dir"] == f"{base}/pnpm"
+    assert env["PIP_CACHE_DIR"] == f"{base}/pip"
+    assert env["GOMODCACHE"] == f"{base}/go/mod"
+    assert env["GOCACHE"] == f"{base}/go/build"
+    assert env["CARGO_HOME"] == f"{base}/cargo"
+    assert env["COMPOSER_CACHE_DIR"] == f"{base}/composer"
+    assert env["NUGET_PACKAGES"] == f"{base}/nuget"
+    assert env["XDG_CACHE_HOME"] == f"{base}/xdg"
+
+    # A per-service dynamic claim is already isolated, so it keeps the bare
+    # /cache paths that pipelines written before this point at.
+    monkeypatch.delenv("CI_CACHE_CLAIM_NAME", raising=False)
+    monkeypatch.setenv("CI_CACHE_STORAGE_CLASS", "nfs-client")
+    _, _, job = k8s.build_job_resources(first)
+    env = _env_map(job["spec"]["template"]["spec"]["initContainers"][1])
+    assert env["GRADLE_USER_HOME"] == "/cache/gradle"
+    assert env["KUBESIGHT_CACHE"] == "/cache"
+
+
+def test_a_stage_environment_still_beats_the_injected_cache_paths(monkeypatch):
+    """These are defaults, not policy: a pipeline that needs its own layout
+    must be able to say so."""
+    monkeypatch.setenv("CI_CACHE_CLAIM_NAME", "ci-cache")
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, commands=["gradle build"],
+                   env={"GRADLE_USER_HOME": "/cache/shared-gradle"}),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    env = _env_map(job["spec"]["template"]["spec"]["initContainers"][1])
+    assert env["GRADLE_USER_HOME"] == "/cache/shared-gradle"
+
+
+def test_a_missing_hand_made_claim_fails_the_build_instead_of_hanging(monkeypatch):
+    """The pod mounts the claim by name: without this check it would sit
+    Pending until its deadline with nothing explaining why."""
+    monkeypatch.setenv("CI_CACHE_CLAIM_NAME", "ci-cache")
+    calls = []
+
+    def fake(args, input_text=None):
+        calls.append(args)
+        return (1, "", 'persistentvolumeclaims "ci-cache" not found')
+
+    k8s.set_kubectl_runner(fake)
+    first = _plan(_execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                                     "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                                     "KUBESIGHT_GIT_PRINCIPAL": ""}))
+
+    with pytest.raises(k8s.RunnerError) as excinfo:
+        k8s.KubernetesJobRunnerAdapter().start(first)
+
+    assert "ci-cache" in str(excinfo.value)
+    assert "ci-cache-volume.yaml" in str(excinfo.value)
+    # It never got as far as applying the Job.
+    assert [args[0] for args in calls] == ["get"]
+    # And it does not silently create the volume it was told the operator owns.
+    assert not [args for args in calls if args[0] == "apply"]
 
 
 def test_registry_layer_cache_is_opt_in(monkeypatch):
@@ -808,3 +925,20 @@ def test_log_reader_is_quiet_below_the_cap(monkeypatch):
     adapter = k8s.KubernetesJobRunnerAdapter()
     k8s.set_kubectl_runner(lambda args, input_text=None: (0, "one\ntwo\n", ""))
     assert adapter._container_log_lines("job", "stage-1") == ["one", "two"]
+
+
+def test_stages_are_told_where_their_workspace_is():
+    """A pipeline that hardcodes /workspace only runs on Kubernetes. Naming the
+    path lets the same stage run on an agent, which puts the build somewhere
+    else entirely."""
+    first = _plan(
+        _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
+                                           "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",
+                                           "KUBESIGHT_GIT_PRINCIPAL": ""}),
+        _execution(1, commands=["gradle -I $KUBESIGHT_WORKSPACE/init.gradle build"]),
+    )
+    _, _, job = k8s.build_job_resources(first)
+    stage = job["spec"]["template"]["spec"]["initContainers"][1]
+    env = {item["name"]: item.get("value") for item in stage["env"]}
+    assert env["KUBESIGHT_WORKSPACE"] == "/workspace"
+    assert env["KUBESIGHT_SOURCE"] == "/workspace/source"
