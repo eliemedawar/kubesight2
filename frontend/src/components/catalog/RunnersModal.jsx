@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { listCiRunners, updateCiRunner } from "../../api/ciApi.js";
+import {
+  deleteCiRunner,
+  listCiRunners,
+  registerCiAgent,
+  rotateCiAgentToken,
+  updateCiRunner,
+} from "../../api/ciApi.js";
+import AgentEnrolment from "./AgentEnrolment.jsx";
 import { RUNNER_TYPES, StatusPill } from "./ciShared.jsx";
 
 /**
@@ -47,6 +54,10 @@ export default function RunnersModal({ canManage, onClose }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState(null);
+  // The token exists in exactly one response and is never retrievable again, so
+  // it is held here until the operator dismisses it deliberately.
+  const [enrolling, setEnrolling] = useState(false);
+  const [issued, setIssued] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -97,6 +108,41 @@ export default function RunnersModal({ canManage, onClose }) {
           <h3>Build runners</h3>
           <p className="muted">{summary}</p>
         </div>
+
+        {canManage && (
+          <div className="sg-ci-runner-toolbar">
+            <button
+              type="button"
+              className="primary btn-compact"
+              onClick={() => {
+                setIssued(null);
+                setEnrolling(true);
+              }}
+            >
+              Add agent
+            </button>
+            <span className="muted">
+              An agent runs builds on a machine KubeSight cannot reach — a Mac for
+              iOS, or a host behind a firewall.
+            </span>
+          </div>
+        )}
+
+        {enrolling && (
+          <AgentEnrolment
+            onCancel={() => setEnrolling(false)}
+            onRegistered={(result) => {
+              setEnrolling(false);
+              setIssued(result);
+              load();
+            }}
+            register={registerCiAgent}
+          />
+        )}
+
+        {issued && (
+          <AgentEnrolment.Token issued={issued} onDone={() => setIssued(null)} />
+        )}
 
         {error && <p className="banner-message error">{error}</p>}
 
@@ -158,6 +204,54 @@ export default function RunnersModal({ canManage, onClose }) {
                       >
                         {busy ? "Saving…" : runner.enabled ? "Disable" : "Enable"}
                       </button>
+                      {!runner.isBuiltin && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-outline btn-compact"
+                            disabled={busy}
+                            title="Issue a new token — the old one stops working immediately"
+                            onClick={async () => {
+                              setBusyId(runner.id);
+                              try {
+                                setIssued(await rotateCiAgentToken(runner.id));
+                                await load();
+                              } catch (err) {
+                                setError(err.message || "Could not rotate the token.");
+                              } finally {
+                                setBusyId(null);
+                              }
+                            }}
+                          >
+                            New token
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-outline btn-compact danger"
+                            disabled={busy}
+                            onClick={async () => {
+                              if (
+                                !window.confirm(
+                                  `Remove "${runner.name}"? Its token stops working and ` +
+                                    "stages pinned to it will queue until another agent matches."
+                                )
+                              )
+                                return;
+                              setBusyId(runner.id);
+                              try {
+                                await deleteCiRunner(runner.id);
+                                await load();
+                              } catch (err) {
+                                setError(err.message || "Could not remove the runner.");
+                              } finally {
+                                setBusyId(null);
+                              }
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </>
+                      )}
                       <label className="sg-ci-runner-slots">
                         Max concurrent
                         <input

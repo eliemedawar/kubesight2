@@ -19,6 +19,7 @@ from ..models_application_intelligence import BitbucketCredentialProfile
 from ..models_ci import CiRunner
 from ..response import error_response, success_response
 from ..secret_encryption import encrypt_secret
+from ..services.ci import agents as agents_service
 from ..services.ci import artifacts as artifacts_service
 from ..services.ci import catalog as catalog_service
 from ..services.ci import engine as engine_service
@@ -743,6 +744,58 @@ def get_runner(runner_id: int):
     if row is None:
         return error_response("Runner not found.", 404)
     return success_response(runner_to_dict(row))
+
+
+@ci_bp.route("/runners/agents", methods=["POST"])
+@require_permission("ci_runners:manage")
+def register_agent():
+    """Register an agent and mint its token.
+
+    The plaintext token is in this response and nowhere else, ever — only its
+    hash is stored. The caller shows it once and says so.
+    """
+    try:
+        runner, token = agents_service.create_agent(_payload(), actor=_actor())
+    except agents_service.AgentError as exc:
+        return error_response(str(exc), 400)
+    return success_response(
+        {**runner_to_dict(runner), "token": token, "install": agents_service.install_hint(runner)},
+        status_code=201,
+    )
+
+
+@ci_bp.route("/runners/<int:runner_id>/token", methods=["POST"])
+@require_permission("ci_runners:manage")
+def rotate_agent_token(runner_id: int):
+    """Issue a new token. The old one stops working immediately, so the agent is
+    offline until it is reconfigured."""
+    row = db.session.get(CiRunner, runner_id)
+    if row is None:
+        return error_response("Runner not found.", 404)
+    try:
+        token = agents_service.rotate_token(row, actor=_actor())
+    except agents_service.AgentError as exc:
+        return error_response(str(exc), 400)
+    return success_response(
+        {**runner_to_dict(row), "token": token, "install": agents_service.install_hint(row)}
+    )
+
+
+@ci_bp.route("/runners/<int:runner_id>", methods=["DELETE"])
+@require_permission("ci_runners:manage")
+def delete_runner(runner_id: int):
+    """Remove an agent. Builtin runners are configuration, not registrations,
+    so they cannot be deleted — only disabled."""
+    row = db.session.get(CiRunner, runner_id)
+    if row is None:
+        return error_response("Runner not found.", 404)
+    if row.is_builtin:
+        return error_response(
+            "A built-in runner cannot be removed — disable it instead.", 409
+        )
+    db.session.delete(row)
+    db.session.commit()
+    return success_response({"deleted": True})
 
 
 @ci_bp.route("/runners/<int:runner_id>", methods=["PUT"])

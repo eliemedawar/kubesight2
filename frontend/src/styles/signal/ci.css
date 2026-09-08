@@ -2406,3 +2406,84 @@ button.sg-ci-workspace-entry:focus-visible {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Agent enrolment ────────────────────────────────────────────── */
+.sg-ci-runner-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: 0.75rem;
+}
+
+.sg-ci-agent-form,
+.sg-ci-agent-token {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sg-ci-agent-token h4 {
+  margin: 0;
+}
+
+.sg-ci-agent-platforms {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: var(--space-2);
+}
+
+.sg-ci-agent-platform {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: left;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  color: var(--text-main);
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.sg-ci-agent-platform span {
+  color: var(--text-subtle);
+}
+
+.sg-ci-agent-platform:hover,
+.sg-ci-agent-platform:focus-visible {
+  border-color: var(--border-strong);
+}
+
+.sg-ci-agent-platform.is-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.sg-ci-agent-platform.is-on strong {
+  color: var(--accent);
+}
+
+/* The token and its command: long, monospace, and meant to be copied whole. */
+.sg-ci-agent-token-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sg-ci-agent-token-row code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-interactive);
+  font-size: 0.74rem;
+}

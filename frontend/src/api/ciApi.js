@@ -186,5 +186,16 @@ export const listCiRunners = () => request("/api/ci/runners");
 
 export const getCiRunner = (id) => request(`/api/ci/runners/${encodeURIComponent(id)}`);
 
+// Register an agent. The response carries the plaintext token exactly once.
+export const registerCiAgent = (payload) =>
+  request("/api/ci/runners/agents", { method: "POST", body: payload });
+
+// Issue a new token; the old one stops working immediately.
+export const rotateCiAgentToken = (id) =>
+  request(`/api/ci/runners/${encodeURIComponent(id)}/token`, { method: "POST" });
+
+export const deleteCiRunner = (id) =>
+  request(`/api/ci/runners/${encodeURIComponent(id)}`, { method: "DELETE" });
+
 export const updateCiRunner = (id, payload) =>
   request(`/api/ci/runners/${encodeURIComponent(id)}`, { method: "PUT", body: payload });

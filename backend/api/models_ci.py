@@ -505,6 +505,58 @@ class CiRunner(db.Model):
     is_builtin = db.Column(db.Boolean, nullable=False, default=False)
 
 
+class CiAgentTask(db.Model):
+    """One stage handed to an external agent, awaiting or under execution.
+
+    Agents are PULL runners: KubeSight cannot reach into somebody's Mac, so it
+    records that a stage is available to a specific runner and waits for that
+    agent to claim it. This row is the claim ticket and nothing more.
+
+    It deliberately stores NO payload. Commands, environment and — above all —
+    decrypted secrets are rebuilt when the agent claims the task and travel
+    once, over the API. Persisting them here would put every build's secrets in
+    the database, which is exactly what the rest of CI is careful not to do.
+    """
+
+    __tablename__ = "ci_agent_tasks"
+    __table_args__ = (
+        db.Index("ix_ci_agent_task_runner_state", "runner_id", "state"),
+    )
+
+    # queued  -> the agent has not picked it up yet
+    # claimed -> an agent is running it and is expected to report back
+    # done    -> the agent reported an outcome; exit_code says which
+    STATES = ("queued", "claimed", "done")
+
+    id = db.Column(db.Integer, primary_key=True)
+    build_id = db.Column(
+        db.Integer, db.ForeignKey("ci_builds.id", ondelete="CASCADE"), nullable=False
+    )
+    build_stage_id = db.Column(
+        db.Integer, db.ForeignKey("ci_build_stages.id", ondelete="CASCADE"), nullable=False
+    )
+    runner_id = db.Column(
+        db.Integer, db.ForeignKey("ci_runners.id", ondelete="SET NULL"), nullable=True
+    )
+    state = db.Column(db.String(16), nullable=False, default="queued", index=True)
+    # Proves a result callback belongs to the agent that claimed this task, and
+    # not to a stale process that woke up after the task was reassigned.
+    claim_token_hash = db.Column(db.String(64), nullable=True)
+    exit_code = db.Column(db.Integer, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+    log_seq = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
+    claimed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # The agent's own liveness for THIS task: a claimed task whose agent goes
+    # quiet is reaped, rather than pinning a build forever.
+    last_heartbeat_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    build = db.relationship("CiBuild")
+    stage = db.relationship("CiBuildStage")
+    runner = db.relationship("CiRunner")
+
+
 class CiArtifact(db.Model):
     """Something a build produced, addressable independently of its runner.
 

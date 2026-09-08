@@ -98,6 +98,9 @@ class StageExecution:
     # and the fresh plaintext token authorizing it (its hash is on the build).
     callback_url: str = ""
     callback_token: str = ""
+    # Which runner the scheduler assigned. A pull runner needs it to record
+    # whose queue the work belongs in; a push runner ignores it.
+    runner_id: Optional[int] = None
     # Rerun-from-a-stage: the checkout also restores the artifacts of the
     # build this one continues from, so skipped stages need not run again.
     restore_artifacts: bool = False

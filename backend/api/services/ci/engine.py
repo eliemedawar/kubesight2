@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ...audit import log_audit
 from ...db import db
 from ...models_ci import CiBuild, CiBuildStage, CiService
+from . import agents as agents_service
 from . import artifacts as artifacts_service
 from . import logs as logs_service
 from . import pipelines as pipelines_service
@@ -321,6 +322,10 @@ def advance_ci_builds() -> None:
         # Runners KubeSight manages in-process have nothing to heartbeat from;
         # their status is derived (enabled + adapter registered) each pass.
         scheduler_service.sync_builtin_runner_statuses()
+        # An agent that stops heartbeating is offline, not online-and-silent.
+        # Without this the scheduler keeps assigning work to a machine that has
+        # been switched off, and those builds queue against nothing.
+        agents_service.mark_stale_agents_offline()
         scheduler_service.recompute_loads()
     except Exception:
         logger.exception("CI runner bookkeeping failed")
@@ -954,6 +959,7 @@ def _build_execution(
         registry=registry,
         callback_url=_callback_url(),
         callback_token=callback_token,
+        runner_id=build.runner_id,
         restore_artifacts=bool(
             (build.pipeline_snapshot or {}).get("restore")
             and stage_type == "checkout"

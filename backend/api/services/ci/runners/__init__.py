@@ -26,10 +26,14 @@ from .base import (  # noqa: F401
     get_adapter,
     register_adapter,
 )
+from .agent import ExternalAgentRunnerAdapter
 from .kubernetes import KubernetesJobRunnerAdapter
 from .mock import MockRunnerAdapter
 
 register_adapter(MockRunnerAdapter())
 register_adapter(KubernetesJobRunnerAdapter())
+# One adapter per agent platform: identical behaviour, but the type is what a
+# stage pins, so an iOS build cannot land on a Linux box.
+register_adapter(ExternalAgentRunnerAdapter("agent_linux"))
+register_adapter(ExternalAgentRunnerAdapter("agent_macos"))
 
-# Phase 5: register_adapter(ExternalAgentRunnerAdapter())
