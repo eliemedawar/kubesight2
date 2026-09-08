@@ -1304,34 +1304,6 @@ button.sg-ci-workspace-entry:focus-visible {
   gap: var(--space-3);
 }
 
-/* One sentence naming the stage that ends builds early most often. It is the
-   reason anyone opens a stage view, so it sits above the grid, not under it. */
-.sg-mx-verdict {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 0.6rem 0.9rem;
-  background: var(--danger-soft);
-  border: 1px solid var(--danger-border);
-  border-radius: var(--radius-lg);
-  font-size: 0.82rem;
-}
-
-.sg-mx-verdict p {
-  margin: 0;
-}
-
-.sg-mx-verdict button {
-  margin-left: auto;
-  flex: none;
-}
-
-.sg-mx-verdict-mark {
-  font-weight: 800;
-  color: var(--danger);
-  line-height: 1;
-}
-
 .sg-mx-scroll {
   width: 100%;
   overflow-x: auto;
@@ -1489,14 +1461,6 @@ button.sg-ci-workspace-entry:focus-visible {
   height: 100%;
   border-radius: var(--radius-full);
   background: var(--border-strong);
-}
-
-.sg-mx-col.is-hot .sg-mx-col-name {
-  color: var(--danger);
-}
-
-.sg-mx-col.is-hot .sg-mx-col-bar > i {
-  background: var(--danger-border);
 }
 
 .sg-mx-hdr-label {
@@ -2776,5 +2740,108 @@ button.sg-ci-workspace-entry:focus-visible {
    explanation. */
 .sg-ci-cache-backing label > span {
   white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   Artifact retention line (ArtifactsPanel)
+
+   States the rule and what it currently applies to, above the list it governs.
+   --------------------------------------------------------------------------- */
+
+.sg-ci-retention {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-interactive);
+}
+
+.sg-ci-retention-rule {
+  margin: 0;
+  flex: 1 1 22rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.sg-ci-retention-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+/* ---------------------------------------------------------------------------
+   Runner portability findings (PipelineEditor)
+
+   Amber by default and red once something would actually fail, so the strip
+   reads as advice or as a problem without anybody parsing it.
+   --------------------------------------------------------------------------- */
+
+.sg-ci-lint {
+  border: 1px solid var(--warn-border);
+  background: var(--warn-soft);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.75rem;
+  font-size: 0.8rem;
+}
+
+.sg-ci-lint.is-error {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.sg-ci-lint-summary {
+  margin: 0 0 0.35rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.sg-ci-lint ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.sg-ci-lint li {
+  line-height: 1.45;
+}
+
+/* The stage name is the way into the thing that needs changing. */
+.sg-ci-lint-stage {
+  border: 0;
+  background: none;
+  padding: 0;
+  margin-right: 0.35rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.sg-ci-lint-level {
+  margin-right: 0.35rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sg-ci-lint-level.is-error {
+  color: var(--danger);
+}
+
+.sg-ci-lint-level.is-warning {
+  color: var(--warn);
+}
+
+.sg-ci-lint em {
+  font-style: normal;
 }
 

@@ -149,6 +149,16 @@ def _scheduler_loop(app: Flask) -> None:
             logger.exception("Mobile applications tick failed")
         try:
             with app.app_context():
+                from .ci import artifacts as ci_artifacts
+
+                # Artifact expiry. Cheap to ask: it reads one marker file and
+                # returns immediately unless a day has passed since the last
+                # sweep, so this costs nothing on all but one tick a day.
+                ci_artifacts.run_due_purge()
+        except Exception:
+            logger.exception("CI artifact retention tick failed")
+        try:
+            with app.app_context():
                 from .ci import ticker as ci_ticker
 
                 # Native CI normally runs on its own one-second clock, because

@@ -43,6 +43,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
     retry: hasPermission("ci_builds:retry"),
     viewSecrets: hasPermission("ci_secrets:view"),
     manageSecrets: hasPermission("ci_secrets:manage"),
+    manageArtifacts: hasPermission("ci_artifacts:manage"),
     deploy: hasPermission("apps:deploy"),
   };
 
@@ -234,6 +235,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
           <ArtifactsPanel
             service={service}
             canDeploy={can.deploy}
+            canManage={can.manageArtifacts}
             onDeploy={deployArtifact}
             refreshToken={refreshToken}
           />

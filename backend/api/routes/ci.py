@@ -26,6 +26,7 @@ from ..services.ci import catalog as catalog_service
 from ..services.ci import engine as engine_service
 from ..services.ci import logs as logs_service
 from ..services.ci import pipelines as pipelines_service
+from ..services.ci import portability as portability_service
 from ..services.ci import queue as queue_service
 from ..services.ci import scheduler as scheduler_service
 from ..services.ci import secrets as secrets_service
@@ -37,6 +38,7 @@ from ..services.ci.serializers import (
     build_summary,
     build_to_dict,
     credential_profile_to_dict,
+    pipeline_stage_to_dict,
     pipeline_to_dict,
     runner_to_dict,
 )
@@ -341,6 +343,27 @@ def create_pipeline_from_template(service_id: int):
 def get_pipeline(pipeline_id: int):
     row = pipelines_service.get_pipeline(pipeline_id)
     return success_response(pipeline_to_dict(row))
+
+
+@ci_bp.route("/pipelines/<int:pipeline_id>/portability", methods=["GET"])
+@require_permission("ci_pipelines:view")
+def get_pipeline_portability(pipeline_id: int):
+    """What this saved pipeline assumes about the runner it lands on."""
+    row = pipelines_service.get_pipeline(pipeline_id)
+    stages = [pipeline_stage_to_dict(stage) for stage in row.stages]
+    return success_response(portability_service.analyze(stages))
+
+
+@ci_bp.route("/pipelines/lint", methods=["POST"])
+@require_permission("ci_pipelines:view")
+def lint_pipeline():
+    """The same check against an unsaved edit, so the editor can warn before a
+    build burns. Pure text analysis — no database, no cluster."""
+    payload = _payload()
+    stages = payload.get("stages")
+    if not isinstance(stages, list):
+        return error_response("Send stages: [...] to check.")
+    return success_response(portability_service.analyze(stages[:200]))
 
 
 @ci_bp.route("/pipelines/<int:pipeline_id>", methods=["PUT"])
@@ -659,6 +682,85 @@ def download_artifact(artifact_id: int):
         as_attachment=True,
         download_name=artifacts_service.safe_filename(row.name),
     )
+
+
+# ---------------------------------------------------------------------------
+# Artifact retention
+#
+# Artifacts are the one part of CI that grows without bound. They expire on
+# their own (CI_ARTIFACT_RETENTION_DAYS, swept once a day) and can be cleaned
+# on demand here. Container images are never touched: their row points at a
+# registry, so deleting it frees nothing and loses the record.
+# ---------------------------------------------------------------------------
+
+@ci_bp.route("/artifacts/policy", methods=["GET"])
+@require_permission("ci_artifacts:view")
+def get_artifact_policy():
+    """The retention rules in force, plus what the store is holding."""
+    service_id = request.args.get("serviceId", type=int)
+    return success_response(artifacts_service.policy(service_id))
+
+
+@ci_bp.route("/artifacts/purge", methods=["POST"])
+@require_permission("ci_artifacts:manage")
+def purge_artifacts():
+    """Clean now. Body: {serviceId?, olderThanDays?, keepLast?}.
+
+    ``olderThanDays: 0`` means everything in scope — the explicit clean rather
+    than the expiry. ``keepLast`` defaults to the configured guard, so a
+    routine cleanup cannot leave a service with nothing to rerun; the UI passes
+    0 with it only for "delete everything".
+    """
+    payload = _payload()
+    service_id = payload.get("serviceId")
+    try:
+        result = artifacts_service.purge(
+            service_id=int(service_id) if service_id else None,
+            older_than_days=(
+                int(payload["olderThanDays"]) if "olderThanDays" in payload else None
+            ),
+            keep_last=int(payload["keepLast"]) if "keepLast" in payload else None,
+        )
+    except (TypeError, ValueError):
+        return error_response("serviceId, olderThanDays and keepLast must be numbers.")
+    log_audit(
+        "ci_artifacts_purged",
+        actor=_actor(),
+        target_type="ci_service" if service_id else "ci_artifacts",
+        target_id=str(service_id or "all"),
+        details={
+            "deleted": result["deleted"],
+            "freedBytes": result["freedBytes"],
+            "olderThanDays": result["retentionDays"],
+            "keepLastBuilds": result["keepLastBuilds"],
+        },
+    )
+    return success_response(result)
+
+
+@ci_bp.route("/artifacts/<int:artifact_id>", methods=["DELETE"])
+@require_permission("ci_artifacts:manage")
+def delete_artifact(artifact_id: int):
+    from ..models_ci import CiArtifact
+
+    row = db.session.get(CiArtifact, artifact_id)
+    if row is None:
+        return error_response("Artifact not found.", 404)
+    details = {
+        "name": row.name,
+        "serviceId": row.service_id,
+        "buildId": row.build_id,
+        "type": row.artifact_type,
+    }
+    freed = artifacts_service.delete_artifact(row)
+    log_audit(
+        "ci_artifact_deleted",
+        actor=_actor(),
+        target_type="ci_artifact",
+        target_id=str(artifact_id),
+        details={**details, "freedBytes": freed},
+    )
+    return success_response({"deleted": True, "freedBytes": freed})
 
 
 # ---------------------------------------------------------------------------

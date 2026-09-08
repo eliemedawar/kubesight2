@@ -107,6 +107,7 @@ PERMISSIONS = [
     ("ci_builds:cancel", "Cancel running or queued CI builds"),
     ("ci_builds:retry", "Retry CI builds"),
     ("ci_artifacts:view", "View and download CI build artifacts"),
+    ("ci_artifacts:manage", "Delete CI build artifacts and run artifact cleanups"),
     ("ci_runners:view", "View CI runners and their capacity"),
     ("ci_runners:manage", "Enable, label, and configure CI runners"),
     ("ci_secrets:view", "View the names of CI secrets (never their values)"),
@@ -220,7 +221,7 @@ PERMISSION_GROUPS = [
             "ci_services:view", "ci_services:create", "ci_services:edit", "ci_services:delete",
             "ci_pipelines:view", "ci_pipelines:edit",
             "ci_builds:view", "ci_builds:run", "ci_builds:cancel", "ci_builds:retry",
-            "ci_artifacts:view",
+            "ci_artifacts:view", "ci_artifacts:manage",
             "ci_runners:view", "ci_runners:manage",
             "ci_secrets:view", "ci_secrets:manage",
         ],
@@ -259,6 +260,9 @@ DANGEROUS_PERMISSION_KEYS = {
     # editing a pipeline decides which commands those are.
     "ci_services:delete", "ci_pipelines:edit", "ci_builds:run", "ci_secrets:manage",
     "ci_runners:manage",
+    # Deleting artifacts destroys the only copy of a build's output, and what
+    # "Rerun from here" restores from.
+    "ci_artifacts:manage",
 }
 
 
@@ -440,6 +444,7 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "ci_builds:cancel",
     "ci_builds:retry",
     "ci_artifacts:view",
+    "ci_artifacts:manage",
     "ci_runners:view",
     "ci_secrets:view",
     "ci_secrets:manage",

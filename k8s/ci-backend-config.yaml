@@ -117,3 +117,17 @@ data:
   # --- Housekeeping ---------------------------------------------------------
   CI_JOB_TTL_SECONDS: "900"
   CI_STALE_BUILD_MINUTES: "120"
+
+  # Artifacts are the one part of CI that grows without bound, so they expire.
+  # Defaults: removed a day after they are written, swept once a day, and the
+  # newest build's artifacts kept whatever their age — "Rerun from here"
+  # restores from exactly those files. Container images are never touched: the
+  # row points at a registry, so deleting it frees nothing and loses the record.
+  #
+  # 0 days = keep forever (and no sweep). CI_ARTIFACT_KEEP_LAST=0 gives up the
+  # rerun guard in exchange for the disk. The Artifacts tab states whatever is
+  # set here, and offers the same cleanup by hand.
+  CI_ARTIFACT_RETENTION_DAYS: "1"
+  CI_ARTIFACT_KEEP_LAST: "1"
+  CI_ARTIFACT_AUTOCLEAN: "true"
+  #   CI_ARTIFACT_PURGE_INTERVAL_HOURS: "24"

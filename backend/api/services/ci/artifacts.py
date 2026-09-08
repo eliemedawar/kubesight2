@@ -16,15 +16,19 @@ is the only place ``ci_artifacts`` rows are created.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import shutil
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
-from typing import IO, Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import IO, Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from ...db import db
 from ...models_ci import ARTIFACT_TYPES, CiArtifact
 from .runners.base import ArtifactRef
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -252,3 +256,278 @@ def latest_for_service(service_id: int) -> Optional[CiArtifact]:
         .order_by(CiArtifact.created_at.desc(), CiArtifact.id.desc())
         .first()
     )
+
+
+# ---------------------------------------------------------------------------
+# Retention
+#
+# Artifacts are the one part of CI that grows without bound: every build writes
+# files and nothing ever removed them. So they expire — by default a day after
+# they were written, swept once a day.
+#
+# Two things are deliberately never swept:
+#
+# * The newest build's artifacts, whatever their age. "Rerun from here"
+#   restores from exactly these files, and a service that builds once a week
+#   would otherwise never have a rerunnable build. CI_ARTIFACT_KEEP_LAST=0
+#   turns that off for anyone who wants the disk back more than the rerun.
+# * Container images. Their row is metadata pointing at the registry: deleting
+#   it frees no disk and loses the record of what was built. Only artifacts
+#   this store actually holds bytes for are candidates.
+# ---------------------------------------------------------------------------
+
+DEFAULT_RETENTION_DAYS = 1
+DEFAULT_KEEP_LAST_BUILDS = 1
+DEFAULT_PURGE_INTERVAL_HOURS = 24.0
+# Written in the artifact root itself: the timestamp belongs with the data it
+# describes, survives a restart, and needs no schema of its own. Losing it (a
+# fresh container, no volume) costs one extra sweep, which is harmless.
+PURGE_MARKER = ".last-purge"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return default
+
+
+def retention_days() -> int:
+    """Days an artifact is kept. 0 means keep forever."""
+    return _env_int("CI_ARTIFACT_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
+
+
+def keep_last_builds() -> int:
+    """How many recent builds per service are exempt from expiry."""
+    return _env_int("CI_ARTIFACT_KEEP_LAST", DEFAULT_KEEP_LAST_BUILDS)
+
+
+def purge_interval_hours() -> float:
+    raw = os.getenv("CI_ARTIFACT_PURGE_INTERVAL_HOURS", "").strip()
+    if not raw:
+        return DEFAULT_PURGE_INTERVAL_HOURS
+    try:
+        return max(0.25, float(raw))
+    except ValueError:
+        return DEFAULT_PURGE_INTERVAL_HOURS
+
+
+def autoclean_enabled() -> bool:
+    return os.getenv("CI_ARTIFACT_AUTOCLEAN", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _aware(value: Optional[datetime]) -> Optional[datetime]:
+    # Rows come back naive from SQLite and aware from PostgreSQL; the age
+    # comparison happens in Python for exactly that reason.
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _marker_path() -> str:
+    return os.path.join(artifact_root(), PURGE_MARKER)
+
+
+def last_purge_at() -> Optional[datetime]:
+    try:
+        stamp = os.path.getmtime(_marker_path())
+    except OSError:
+        return None
+    return datetime.fromtimestamp(stamp, tz=timezone.utc)
+
+
+def _mark_purged() -> None:
+    try:
+        os.makedirs(artifact_root(), exist_ok=True)
+        with open(_marker_path(), "w", encoding="utf-8") as handle:
+            handle.write(datetime.now(timezone.utc).isoformat())
+    except OSError as exc:  # A sweep that ran is still a sweep that ran.
+        logger.warning("Could not record the artifact purge time: %s", exc)
+
+
+def usage(service_id: Optional[int] = None) -> Dict[str, int]:
+    """What the local store is holding — the number the cleanup is about."""
+    query = CiArtifact.query.filter(
+        CiArtifact.storage_backend == "local", CiArtifact.storage_ref.isnot(None)
+    )
+    if service_id is not None:
+        query = query.filter(CiArtifact.service_id == int(service_id))
+    rows = query.with_entities(CiArtifact.size_bytes).all()
+    return {"count": len(rows), "bytes": sum(int(row[0] or 0) for row in rows)}
+
+
+def policy(service_id: Optional[int] = None) -> Dict[str, Any]:
+    """The rules in force plus what they currently apply to, for the UI."""
+    days = retention_days()
+    last = last_purge_at()
+    return {
+        "retentionDays": days,
+        "keepLastBuilds": keep_last_builds(),
+        "autoclean": autoclean_enabled() and days > 0,
+        "intervalHours": purge_interval_hours(),
+        "lastPurgeAt": last.isoformat() if last else None,
+        "root": artifact_root(),
+        "usage": usage(service_id),
+        # Container images are counted separately so nobody expects cleaning to
+        # reclaim them: the bytes are in the registry, not here.
+        "registryOnly": CiArtifact.query.filter(
+            CiArtifact.storage_backend == "registry",
+            *([CiArtifact.service_id == int(service_id)] if service_id is not None else []),
+        ).count(),
+    }
+
+
+def _protected_build_ids(service_ids: List[int], keep_last: int) -> set:
+    """The most recent ``keep_last`` builds per service that produced files."""
+    if keep_last <= 0 or not service_ids:
+        return set()
+    protected = set()
+    for service_id in service_ids:
+        rows = (
+            CiArtifact.query.filter(
+                CiArtifact.service_id == service_id,
+                CiArtifact.storage_backend == "local",
+                CiArtifact.storage_ref.isnot(None),
+                CiArtifact.build_id.isnot(None),
+            )
+            .with_entities(CiArtifact.build_id)
+            .distinct()
+            .order_by(CiArtifact.build_id.desc())
+            .limit(keep_last)
+            .all()
+        )
+        protected.update(int(row[0]) for row in rows)
+    return protected
+
+
+def delete_artifact(row: CiArtifact, *, commit: bool = True) -> int:
+    """Remove one artifact's bytes and its record. Returns bytes freed."""
+    freed = int(row.size_bytes or 0)
+    if row.storage_ref and (row.storage_backend or "local") == "local":
+        try:
+            get_store("local").delete(row)
+        except ValueError:  # A ref that escapes the root: never follow it.
+            logger.warning("Refusing to delete artifact %s outside the store", row.id)
+            freed = 0
+    else:
+        # Nothing of ours to remove — the bytes live in a registry.
+        freed = 0
+    db.session.delete(row)
+    if commit:
+        db.session.commit()
+    return freed
+
+
+def purge(
+    *,
+    service_id: Optional[int] = None,
+    older_than_days: Optional[int] = None,
+    keep_last: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Delete stored artifacts, oldest first.
+
+    ``older_than_days=0`` means "everything in scope" — that is the explicit
+    clean, not the expiry. ``keep_last`` still applies unless it is passed as 0,
+    so a routine sweep cannot leave a service with nothing to rerun.
+    """
+    days = retention_days() if older_than_days is None else max(0, int(older_than_days))
+    keep = keep_last_builds() if keep_last is None else max(0, int(keep_last))
+
+    query = CiArtifact.query.filter(
+        CiArtifact.storage_backend == "local", CiArtifact.storage_ref.isnot(None)
+    )
+    if service_id is not None:
+        query = query.filter(CiArtifact.service_id == int(service_id))
+    candidates = query.order_by(CiArtifact.id.asc()).all()
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days) if days > 0 else None
+    service_ids = sorted({int(row.service_id) for row in candidates})
+    protected = _protected_build_ids(service_ids, keep)
+
+    deleted = 0
+    freed = 0
+    kept_recent = 0
+    for row in candidates:
+        if cutoff is not None:
+            created = _aware(row.created_at)
+            if created is None or created >= cutoff:
+                continue
+        if row.build_id is not None and int(row.build_id) in protected:
+            kept_recent += 1
+            continue
+        freed += delete_artifact(row, commit=False)
+        deleted += 1
+
+    if deleted:
+        db.session.commit()
+    # One walk, whether or not this sweep removed anything: directories left
+    # behind by an earlier single delete are exactly what makes a cleaned store
+    # look uncleaned.
+    _prune_empty_dirs()
+    return {
+        "deleted": deleted,
+        "freedBytes": freed,
+        "keptRecent": kept_recent,
+        "retentionDays": days,
+        "keepLastBuilds": keep,
+        "usage": usage(service_id),
+    }
+
+
+def _prune_empty_dirs() -> None:
+    """Remove the ``<serviceId>/<buildId>`` directories nothing is left in.
+
+    Cosmetic but worth it: without this the store fills with empty directories
+    that make it look like the cleanup did nothing.
+    """
+    root = artifact_root()
+    if not os.path.isdir(root):
+        return
+    for current, directories, files in os.walk(root, topdown=False):
+        if current == root or files or directories:
+            continue
+        try:
+            os.rmdir(current)
+        except OSError:
+            pass
+
+
+def purge_due() -> bool:
+    """Whether the automatic sweep should run now."""
+    if not autoclean_enabled() or retention_days() <= 0:
+        return False
+    last = last_purge_at()
+    if last is None:
+        return True
+    elapsed_hours = (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
+    return elapsed_hours >= purge_interval_hours()
+
+
+def run_due_purge() -> bool:
+    """Scheduler hook: expire artifacts once per interval. True if it ran.
+
+    The marker is written whether or not anything was deleted — a sweep that
+    found nothing has still done its job, and re-running it every tick would
+    walk the whole table for no reason.
+    """
+    if not purge_due():
+        return False
+    result = purge()
+    _mark_purged()
+    if result["deleted"]:
+        logger.info(
+            "Artifact retention: removed %d artifacts older than %d day(s), freeing %d bytes",
+            result["deleted"],
+            result["retentionDays"],
+            result["freedBytes"],
+        )
+    return True
+

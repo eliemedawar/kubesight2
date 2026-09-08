@@ -182,7 +182,6 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
           canRetry={canRetry}
           refreshToken={refreshToken}
           onOpenStage={(buildId, stageId) => setOpenBuild({ buildId, stageId })}
-          onStatusChange={setStatus}
         />
         {drawer}
       </div>

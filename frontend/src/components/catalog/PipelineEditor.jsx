@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import BuildParameters from "./BuildParameters.jsx";
 import {
   applyCiPipelineTemplate,
+  lintCiPipeline,
   listCiPipelines,
   listCiSecrets,
   updateCiPipeline,
@@ -156,6 +157,10 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
+  // What these stages assume about the runner they land on. Checked as they are
+  // edited, because the failure it catches — an absolute /workspace path on an
+  // agent — is only visible when a build has already burned.
+  const [lint, setLint] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -228,6 +233,22 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
     setDirty(true);
   };
 
+  // Debounced: this runs while somebody types a command, and the answer is
+  // only interesting once they stop. A failed check is silent — a linter that
+  // shouts about its own outage is worse than no linter.
+  useEffect(() => {
+    if (!stages.length) {
+      setLint(null);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      lintCiPipeline(stages)
+        .then(setLint)
+        .catch(() => setLint(null));
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [stages]);
+
   const save = async () => {
     if (!pipeline) return;
     setSaving(true);
@@ -285,6 +306,49 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
   return (
     <div className="sg-ci-panel">
       {error && <p className="banner-message error">{error}</p>}
+
+      {lint && lint.counts.error + lint.counts.warning > 0 && (
+        <div
+          className={`sg-ci-lint${lint.counts.error ? " is-error" : ""}`}
+          aria-live="polite"
+        >
+          <p className="sg-ci-lint-summary">{lint.summary}</p>
+          <ul>
+            {lint.findings
+              .filter((finding) => finding.level !== "info")
+              .map((finding) => (
+                <li key={`${finding.stagePosition}-${finding.code}`}>
+                  <button
+                    type="button"
+                    className="sg-ci-lint-stage"
+                    onClick={() => {
+                      const index = stages.findIndex(
+                        (stage, position) =>
+                          (stage.position ?? position + 1) === finding.stagePosition
+                      );
+                      if (index >= 0) {
+                        setSelectedIndex(index);
+                        setActivePanel("stage");
+                      }
+                    }}
+                  >
+                    {finding.stageName}
+                  </button>
+                  <span className={`sg-ci-lint-level is-${finding.level}`}>
+                    {finding.level === "error" ? "fails" : "differs"}
+                    {finding.breaksOn === "agent"
+                      ? " on an agent"
+                      : finding.breaksOn === "kubernetes"
+                        ? " on Kubernetes"
+                        : ""}
+                  </span>
+                  <span>{finding.message}</span>
+                  {finding.fix && <em className="muted"> {finding.fix}</em>}
+                </li>
+              ))}
+          </ul>
+        </div>
+      )}
 
       <div className="sg-ci-pipeline-bar">
         {pipeline && (

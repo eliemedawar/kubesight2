@@ -91,7 +91,6 @@ export default function StageMatrix({
   canRetry,
   refreshToken,
   onOpenStage,
-  onStatusChange,
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -186,36 +185,6 @@ export default function StageMatrix({
     () => Object.fromEntries(columns.map((column) => [column.key, column])),
     [columns]
   );
-
-  /** The stage that ends builds early most often — the reason to open a grid. */
-  const verdict = useMemo(() => {
-    if (rows.length < 2) return null;
-    const ranked = columns
-      .map((column) => ({ column, score: column.failures + column.skips }))
-      .filter((entry) => entry.score > 0)
-      .sort((a, b) => b.score - a.score);
-    if (!ranked.length) return null;
-    const [{ column, score }] = ranked;
-    const runnerUp = ranked[1]?.score || 0;
-    const worst = score > runnerUp;
-    const of = `${score} of the last ${rows.length} builds`;
-    if (column.failures && column.skips) {
-      return {
-        column,
-        text: `${column.name} ended ${of} early — ${column.failures} failed and ${column.skips} could not be run at all.`,
-      };
-    }
-    if (column.failures) {
-      return {
-        column,
-        text: `${column.name} failed in ${of}${worst ? " — more than any other stage" : ""}.`,
-      };
-    }
-    return {
-      column,
-      text: `${column.name} was skipped in ${of} — those builds produced nothing from it.`,
-    };
-  }, [columns, rows.length]);
 
   const elapsed = (cell) => {
     if (cell.durationSeconds != null) return cell.durationSeconds;
@@ -326,24 +295,6 @@ export default function StageMatrix({
     <div className="sg-mx">
       {error && <p className="banner-message error">{error}</p>}
 
-      {verdict && (
-        <div className="sg-mx-verdict">
-          <span aria-hidden="true" className="sg-mx-verdict-mark">
-            !
-          </span>
-          <p>{verdict.text}</p>
-          {onStatusChange && status === "all" && verdict.column.failures > 0 && (
-            <button
-              type="button"
-              className="btn-outline btn-compact"
-              onClick={() => onStatusChange("failed")}
-            >
-              Show failed builds
-            </button>
-          )}
-        </div>
-      )}
-
       <p className="sg-mx-sr" aria-live="polite">
         {runningStage
           ? `Build ${runningRow.number}: ${runningStage.name} is running.`
@@ -365,9 +316,7 @@ export default function StageMatrix({
                 <th
                   key={column.key}
                   scope="col"
-                  className={`sg-mx-col${
-                    verdict?.column.key === column.key ? " is-hot" : ""
-                  }`}
+                  className="sg-mx-col"
                 >
                   <span className="sg-mx-col-name" title={`${column.name} · ${column.stageType}`}>
                     {column.name}

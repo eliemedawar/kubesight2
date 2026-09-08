@@ -222,3 +222,31 @@ export const measureCiCache = () => request("/api/ci/cache/measure", { method: "
 
 export const cleanCiCache = (payload) =>
   request("/api/ci/cache/clean", { method: "POST", body: payload });
+
+// ---------------------------------------------------------------------------
+// Artifact retention — artifacts expire on their own; these are the manual
+// controls. Container images are never affected: their bytes are in a registry.
+// ---------------------------------------------------------------------------
+
+export const getCiArtifactPolicy = (serviceId) =>
+  request("/api/ci/artifacts/policy", { query: serviceId ? { serviceId } : {} });
+
+// Omit olderThanDays for the configured expiry; pass 0 with keepLast 0 to mean
+// "everything in scope".
+export const purgeCiArtifacts = (payload) =>
+  request("/api/ci/artifacts/purge", { method: "POST", body: payload });
+
+export const deleteCiArtifact = (id) =>
+  request(`/api/ci/artifacts/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+// ---------------------------------------------------------------------------
+// Runner portability — what a pipeline assumes about where it runs. Pure text
+// analysis on the server, so it is cheap to call on every edit.
+// ---------------------------------------------------------------------------
+
+export const lintCiPipeline = (stages) =>
+  request("/api/ci/pipelines/lint", { method: "POST", body: { stages } });
+
+export const getCiPipelinePortability = (pipelineId) =>
+  request(`/api/ci/pipelines/${encodeURIComponent(pipelineId)}/portability`);
+
