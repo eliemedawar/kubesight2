@@ -72,11 +72,18 @@ data:
   # every build starts cold.
   #
   # (a) A volume you made by hand — the only option on a cluster with no
-  # StorageClass. Apply k8s/ci-cache-volume.yaml (read its header first: it
-  # needs a node, a directory and a chown), then name its claim here. One claim
-  # serves every service, each under /cache/<service-slug>/. KubeSight never
-  # creates, resizes or deletes this volume, and a build fails fast with an
-  # explanation if the claim is missing.
+  # StorageClass. k8s/ci-cache-volume.yaml is an NFS export (this cluster's
+  # usual shape), and k8s/ci-cache.sh applies it plus the export-side chown
+  # that decides whether builds can write at all:
+  #     sh k8s/ci-cache.sh create      make the PV + PVC
+  #     sh k8s/ci-cache.sh verify      prove a build pod can write to it
+  #     sh k8s/ci-cache.sh enable      set the key below and restart the backend
+  #     sh k8s/ci-cache.sh disable     stop caching, keep the volume
+  #     sh k8s/ci-cache.sh status      what is on, bound, and how big
+  #     sh k8s/ci-cache.sh clean <svc> empty one service's cache (or --all)
+  # One claim serves every service, each under /cache/<service-slug>/. KubeSight
+  # never creates, resizes or deletes this volume, and a build fails fast with
+  # an explanation if the claim is missing.
   CI_CACHE_CLAIM_NAME: ci-cache
   #
   # (b) Dynamic, when the cluster HAS a provisioner: name a StorageClass that
@@ -85,10 +92,11 @@ data:
   #   CI_CACHE_STORAGE_CLASS: "your-storage-class"
   #   CI_CACHE_SIZE: 10Gi
   #
-  # Either way the volume is ReadWriteOnce — one node, but several pods on it —
-  # so builds of different services run concurrently, while two concurrent
-  # builds of the SAME service would share one Gradle/Maven directory. Keep a
-  # service's max concurrent builds at 1 unless its build tool tolerates that.
+  # Either way, builds of different services can run concurrently (the NFS
+  # volume is ReadWriteMany; a ReadWriteOnce one still allows several pods on
+  # one node), while two concurrent builds of the SAME service would share one
+  # Gradle/Maven directory. Keep a service's max concurrent builds at 1 unless
+  # its build tool tolerates that.
 
   # Keep BuildKit's layer cache in the registry beside the image, so it
   # survives a buildkitd restart instead of living in that pod's emptyDir.
