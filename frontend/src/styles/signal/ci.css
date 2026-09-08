@@ -1080,24 +1080,48 @@ button.sg-ci-strip-node:hover {
   gap: 0.3rem;
 }
 
+/* Buttons on their own line: a runner has up to three of them, and sharing a
+   row with labelled inputs pushed the whole card into a horizontal scroll. */
 .sg-ci-runner-actions {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  margin-top: 0.25rem;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: var(--space-2);
 }
 
-.sg-ci-runner-slots {
-  margin-left: auto;
+/* Settings below them, each label above its input so a long path stays
+   readable. Flex rather than a fixed grid: a built-in runner has only its slot
+   count, and an empty grid column beside it read as a layout fault. */
+.sg-ci-runner-fields {
   display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.75rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.sg-ci-runner-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  font-size: 0.72rem;
   color: var(--text-subtle);
 }
 
-.sg-ci-runner-slots input {
-  width: 4rem;
+.sg-ci-runner-field input {
+  width: 100%;
+  min-width: 0;
+}
+
+/* The path takes the slack; a number needs only its own width. */
+.sg-ci-runner-field--path {
+  flex: 1 1 14rem;
+}
+
+.sg-ci-runner-field--slots {
+  flex: 0 0 7rem;
 }
 
 /* Footnote under a truncated build list. */
@@ -2490,14 +2514,7 @@ button.sg-ci-workspace-entry:focus-visible {
 
 /* The agent's build directory sits beside its slot count, and needs more room
    than a number does. */
-.sg-ci-runner-path {
-  margin-left: 0;
-  flex: 1;
-  min-width: 10rem;
-}
-
-.sg-ci-runner-path input {
-  width: 100%;
+.sg-ci-runner-field input[aria-label^="Build directory"] {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.72rem;
 }

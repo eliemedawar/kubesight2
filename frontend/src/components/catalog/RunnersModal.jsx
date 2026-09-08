@@ -279,8 +279,13 @@ export default function RunnersModal({ canManage, onClose }) {
                           </button>
                         </>
                       )}
+                    </div>
+                  )}
+
+                  {canManage && (
+                    <div className="sg-ci-runner-fields">
                       {!runner.isBuiltin && (
-                        <label className="sg-ci-runner-slots sg-ci-runner-path">
+                        <label className="sg-ci-runner-field sg-ci-runner-field--path">
                           Build directory
                           <input
                             defaultValue={runner.workspaceRoot || ""}
@@ -296,7 +301,7 @@ export default function RunnersModal({ canManage, onClose }) {
                           />
                         </label>
                       )}
-                      <label className="sg-ci-runner-slots">
+                      <label className="sg-ci-runner-field sg-ci-runner-field--slots">
                         Max concurrent
                         <input
                           type="number"
