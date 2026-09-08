@@ -9,3 +9,6 @@ backend/data/
 
 # Throwaway browser profile from concept previews — 167MB of cache.
 concept/.runtime-preview-profile/
+
+__pycache__/
+*.pyc
