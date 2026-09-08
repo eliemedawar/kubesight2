@@ -83,6 +83,11 @@ def _worker_image() -> str:
     return _env("CI_WORKER_IMAGE", os.getenv("APPLICATION_ANALYSIS_WORKER_IMAGE", "kubesight-backend:latest"))
 
 
+def worker_image() -> str:
+    """Exposed for the cache maintenance jobs, which run the same image."""
+    return _worker_image()
+
+
 def buildkit_addr() -> str:
     """Where the shared rootless buildkitd listens. Empty = image builds off."""
     return os.getenv("CI_BUILDKIT_ADDR", "").strip()
@@ -99,6 +104,16 @@ def set_kubectl_runner(fn) -> None:
     """Test hook: ``fn(args: list[str], input_text: str|None) -> (rc, stdout, stderr)``."""
     global _kubectl_runner
     _kubectl_runner = fn
+
+
+def kubectl(args: List[str], input_text: Optional[str] = None, timeout: int = 30):
+    """The runner's own kubectl, for the cache operations in services/ci/cache.py.
+
+    Public on purpose: those operations must go through the same transport a
+    build does, so they honour K8S_KUBECONFIG and the test hook above rather
+    than opening a second, differently-configured path to the cluster.
+    """
+    return _kubectl(args, input_text=input_text, timeout=timeout)
 
 
 def _kubectl(args: List[str], input_text: Optional[str] = None, timeout: int = 30) -> Tuple[int, str, str]:
@@ -544,18 +559,41 @@ CACHE_MOUNT_PATH = "/cache"
 CACHE_FS_GROUP = 65532
 
 
+def _cache_runtime() -> Dict[str, str]:
+    """What to cache into: what an operator saved in the UI, or the
+    environment when nothing has been saved.
+
+    Imported inside the function rather than at module scope because
+    services/ci/cache.py reads THIS module for its kubectl transport; a
+    top-level import either way closes the loop. A manifest must still be
+    buildable when the database is unreachable, so any failure falls back to
+    the variables.
+    """
+    try:
+        from .. import cache as cache_settings
+
+        return cache_settings.runtime_config()
+    except Exception:  # pragma: no cover - depends on app/db state
+        logger.debug("cache settings unavailable; using the environment")
+        return {
+            "claimName": os.getenv("CI_CACHE_CLAIM_NAME", "").strip(),
+            "storageClass": os.getenv("CI_CACHE_STORAGE_CLASS", "").strip(),
+        }
+
+
 def cache_storage_class() -> str:
-    return os.getenv("CI_CACHE_STORAGE_CLASS", "").strip()
+    return _cache_runtime()["storageClass"]
 
 
 def cache_claim_override() -> str:
-    """A claim the operator created by hand, shared by every service.
+    """A claim the operator created by hand (or from the UI), shared by every
+    service.
 
-    Takes precedence over CI_CACHE_STORAGE_CLASS: naming an existing claim is
-    the more specific instruction, and KubeSight then never tries to create,
-    resize or otherwise touch the volume behind it.
+    Takes precedence over a storage class: naming an existing claim is the more
+    specific instruction, and KubeSight then never tries to create, resize or
+    otherwise touch the volume behind it.
     """
-    return os.getenv("CI_CACHE_CLAIM_NAME", "").strip()
+    return _cache_runtime()["claimName"]
 
 
 def cache_enabled() -> bool:

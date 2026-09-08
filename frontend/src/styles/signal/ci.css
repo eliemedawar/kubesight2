@@ -2588,3 +2588,193 @@ button.sg-ci-workspace-entry:focus-visible {
   line-height: 1.5;
   white-space: pre;
 }
+
+/* ---------------------------------------------------------------------------
+   Build cache (RunnersModal → BuildCachePanel)
+
+   Sits under the runner list inside the same modal, so it is separated by a
+   rule rather than a card border — one more bordered box inside a bordered
+   list reads as a runner, which it is not.
+   --------------------------------------------------------------------------- */
+
+.sg-ci-cache {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sg-ci-cache-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.sg-ci-cache-title {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text-strong);
+}
+
+/* Which configuration path is in charge. Deliberately quiet: it matters only
+   when the switch appears not to work. */
+.sg-ci-cache-source {
+  margin-left: auto;
+  font-size: 0.75rem;
+}
+
+.sg-ci-cache-lead,
+.sg-ci-cache-note {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.sg-ci-cache-lead code {
+  font-size: 0.75rem;
+}
+
+.sg-ci-cache-empty {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.sg-ci-cache-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.5rem var(--space-2);
+}
+
+.sg-ci-cache-facts dt {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-subtle);
+}
+
+.sg-ci-cache-facts dd {
+  margin: 0.1rem 0 0;
+  font-size: 0.85rem;
+  color: var(--text-main);
+  word-break: break-word;
+}
+
+.sg-ci-cache-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.sg-ci-cache-form {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  background: var(--bg-interactive);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.sg-ci-cache-backing {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.sg-ci-cache-backing legend {
+  padding: 0;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-subtle);
+}
+
+.sg-ci-cache-backing label {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+/* The trade-off belongs beside the choice, not in a tooltip: picking a node
+   directory pins every build to that node. */
+.sg-ci-cache-backing em {
+  font-size: 0.75rem;
+  font-style: normal;
+}
+
+.sg-ci-cache-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: var(--space-2);
+}
+
+.sg-ci-cache-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--text-subtle);
+}
+
+.sg-ci-cache-fields input {
+  font-size: 0.85rem;
+}
+
+.sg-ci-cache-usage {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+/* The bare `th` rule in index.css uppercases and re-borders anything inside a
+   header cell; reset it here the way the stage matrix does. */
+.sg-ci-cache-usage th,
+.sg-ci-cache-usage td {
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 0.8rem;
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-main);
+}
+
+.sg-ci-cache-usage th {
+  color: var(--text-subtle);
+  font-weight: 600;
+}
+
+.sg-ci-cache-usage tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* .chip carries no tone of its own, and the cache's state chip is the one
+   thing in the card that must be readable at a glance. */
+.sg-ci-cache .chip.is-ok {
+  border-color: var(--ok-border, var(--border));
+  background: var(--ok-soft, transparent);
+  color: var(--ok, var(--text-main));
+}
+
+.sg-ci-cache .chip.is-warn {
+  border-color: var(--warn-border, var(--border));
+  background: var(--warn-soft, transparent);
+  color: var(--warn, var(--text-main));
+}
+
+/* Keep the option's name on one line so it does not wrap around its own
+   explanation. */
+.sg-ci-cache-backing label > span {
+  white-space: nowrap;
+}
+

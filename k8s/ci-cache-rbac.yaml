@@ -1,0 +1,49 @@
+# Native CI — let KubeSight create the build cache volume from the UI.
+#
+# Needed only for the "Create volume" button on the Runners page. Everything
+# else about the cache (the on/off switch, measuring it, emptying it) works
+# with the namespaced permissions k8s/ci-runner.yaml already grants, because
+# claims, Jobs and pod logs all live inside kubesight-ci.
+#
+# WHY THIS IS A ClusterRole, unavoidably
+#   A PersistentVolume is cluster-scoped: it has no namespace, so no Role in
+#   any namespace can permit creating one. Either the backend holds this
+#   ClusterRole, or a human creates the volume instead — which is exactly what
+#   `sh k8s/ci-cache.sh create` is for. If cluster-scoped grants to the backend
+#   are against policy here, do NOT apply this: create the volume with that
+#   script (or kubectl) and use the UI only for the switch, measuring and
+#   cleaning. The button reports the refusal and says the same thing.
+#
+# WHAT IT DOES NOT GRANT
+#   No delete and no update. The volume is create-once by design: resizing or
+#   re-pathing a bound volume is not something Kubernetes does in place, and
+#   deleting storage is not a button a web page should carry. Removing a cache
+#   volume stays a deliberate act with kubectl.
+#
+#   It also cannot read or write the *contents* of any volume — this is
+#   permission over the PersistentVolume objects only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesight-ci-cache-volumes
+  labels:
+    kubesight.io/purpose: ci-dependency-cache
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    # get/list so the UI can show what a claim is bound to; create for the
+    # button. Deliberately no update, patch or delete.
+    verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubesight-ci-cache-volumes
+subjects:
+  - kind: ServiceAccount
+    name: kubesight-backend
+    namespace: kubesight
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubesight-ci-cache-volumes

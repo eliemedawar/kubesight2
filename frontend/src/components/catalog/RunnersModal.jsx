@@ -8,6 +8,7 @@ import {
 } from "../../api/ciApi.js";
 import AgentEnrolment from "./AgentEnrolment.jsx";
 import AgentInstallHelp from "./AgentInstallHelp.jsx";
+import BuildCachePanel from "./BuildCachePanel.jsx";
 import { RUNNER_TYPES, StatusPill } from "./ciShared.jsx";
 
 /**
@@ -324,6 +325,12 @@ export default function RunnersModal({ canManage, onClose }) {
             })}
           </ul>
         )}
+
+        {/* Below the fleet, because it answers a different question: not
+            "where will my build run" but "how much of it has to run at all".
+            It belongs with the runners all the same — the cache is part of the
+            Kubernetes runner's configuration. */}
+        <BuildCachePanel canManage={canManage} />
 
         <div className="modal-actions">
           <button type="button" className="btn-outline" onClick={onClose}>

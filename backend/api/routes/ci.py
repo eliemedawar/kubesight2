@@ -21,6 +21,7 @@ from ..response import error_response, success_response
 from ..secret_encryption import encrypt_secret
 from ..services.ci import agents as agents_service
 from ..services.ci import artifacts as artifacts_service
+from ..services.ci import cache as cache_service
 from ..services.ci import catalog as catalog_service
 from ..services.ci import engine as engine_service
 from ..services.ci import logs as logs_service
@@ -45,6 +46,7 @@ ci_bp = Blueprint("ci", __name__, url_prefix="/api/ci")
 
 # Errors these services raise deliberately, with user-facing messages.
 _USER_ERRORS = (
+    cache_service.CacheError,
     catalog_service.CatalogError,
     pipelines_service.PipelineError,
     secrets_service.SecretError,
@@ -852,3 +854,102 @@ def update_runner(runner_id: int):
         },
     )
     return success_response(runner_to_dict(row))
+
+
+# ---------------------------------------------------------------------------
+# Build cache
+#
+# One shared volume mounted at /cache by every stage, with each build tool
+# pointed into it. These routes are the operator's side of it: what the state
+# is, creating the volume, the on/off switch, and emptying it. The runner side
+# is services/ci/runners/kubernetes.py.
+# ---------------------------------------------------------------------------
+
+@ci_bp.route("/cache", methods=["GET"])
+@require_permission("ci_runners:view")
+def get_build_cache():
+    return success_response(cache_service.status())
+
+
+@ci_bp.route("/cache", methods=["PUT"])
+@require_permission("ci_runners:manage")
+def update_build_cache():
+    payload = _payload()
+    if "enabled" not in payload:
+        return error_response("Send enabled: true or false.")
+    enabled = bool(payload["enabled"])
+    try:
+        state = cache_service.set_enabled(enabled)
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "ci_cache_enabled" if enabled else "ci_cache_disabled",
+        actor=_actor(),
+        target_type="ci_cache",
+        target_id=state.get("claimName") or "",
+        details={"namespace": state.get("namespace"), "claimName": state.get("claimName")},
+    )
+    return success_response(state)
+
+
+@ci_bp.route("/cache/volume", methods=["POST"])
+@require_permission("ci_runners:manage")
+def create_build_cache_volume():
+    """Create the PersistentVolume and claim. Create-only: resizing a bound
+    volume is not something Kubernetes does in place, and deleting one is not a
+    button a web page should have."""
+    payload = _payload()
+    try:
+        state = cache_service.create_volume(payload)
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "ci_cache_volume_created",
+        actor=_actor(),
+        target_type="ci_cache",
+        target_id=state.get("claimName") or "",
+        details={
+            "namespace": state.get("namespace"),
+            "size": state.get("size"),
+            "backing": (state.get("volume") or {}).get("backing"),
+        },
+    )
+    return success_response(state, status_code=201)
+
+
+@ci_bp.route("/cache/measure", methods=["POST"])
+@require_permission("ci_runners:manage")
+def measure_build_cache():
+    """Start the read-only du job. It creates a Job in the cluster, hence
+    manage rather than view; the result arrives through GET /cache."""
+    try:
+        return success_response(cache_service.measure())
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+
+
+@ci_bp.route("/cache/clean", methods=["POST"])
+@require_permission("ci_runners:manage")
+def clean_build_cache():
+    payload = _payload()
+    all_services = bool(payload.get("all"))
+    service_id = payload.get("serviceId")
+    if not all_services and not service_id:
+        return error_response("Name a service to clean, or send all: true.")
+    try:
+        result = cache_service.clean(
+            service_id=None if all_services else int(service_id),
+            all_services=all_services,
+        )
+    except (TypeError, ValueError):
+        return error_response("That service id is not a number.")
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "ci_cache_cleaned",
+        actor=_actor(),
+        target_type="ci_cache",
+        target_id=str(service_id or "all"),
+        details={"target": result.get("target"), "job": result.get("job")},
+    )
+    return success_response(result)

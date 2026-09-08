@@ -199,3 +199,26 @@ export const deleteCiRunner = (id) =>
 
 export const updateCiRunner = (id, payload) =>
   request(`/api/ci/runners/${encodeURIComponent(id)}`, { method: "PUT", body: payload });
+
+// ---------------------------------------------------------------------------
+// Build cache — one shared volume every stage mounts at /cache.
+// ---------------------------------------------------------------------------
+
+export const getCiCache = () => request("/api/ci/cache");
+
+// Turning it on requires a bound claim; the API refuses otherwise rather than
+// letting every build fail at its first stage.
+export const setCiCacheEnabled = (enabled) =>
+  request("/api/ci/cache", { method: "PUT", body: { enabled } });
+
+// Create-only. Needs the cluster-scoped grant in k8s/ci-cache-rbac.yaml,
+// and says so if it is missing.
+export const createCiCacheVolume = (payload) =>
+  request("/api/ci/cache/volume", { method: "POST", body: payload });
+
+// Both of these start a Job and return immediately; the outcome arrives in the
+// `maintenance` block of the next getCiCache().
+export const measureCiCache = () => request("/api/ci/cache/measure", { method: "POST" });
+
+export const cleanCiCache = (payload) =>
+  request("/api/ci/cache/clean", { method: "POST", body: payload });
