@@ -89,8 +89,9 @@ WantedBy=multi-user.target`;
         <li>
           <strong>Copy the agent onto the machine.</strong> It is{" "}
           <code>agent/kubesight-agent.py</code> in the KubeSight repository — one file,
-          no dependencies beyond Python 3.8+, which {isMac ? "macOS" : "every current Linux"}{" "}
-          already has. Put it at <code>{home}/kubesight-agent.py</code>.
+          no dependencies, and it runs on Python 3.6+, which{" "}
+          {isMac ? "macOS" : "even a RHEL 7 build host"} already has. Put it at{" "}
+          <code>{home}/kubesight-agent.py</code>.
         </li>
 
         <li>

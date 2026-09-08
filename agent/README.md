@@ -13,8 +13,11 @@ configuration, so an agent is not a convenience there — it is the only route.
 
 ## Requirements
 
-- Python 3.8+ — ships with macOS and every current Linux, and the agent uses
-  only the standard library. There is nothing to `pip install`.
+- Python 3.6 or newer — the agent uses only the standard library, so there is
+  nothing to `pip install`. 3.6 is the floor on purpose: it is what RHEL and
+  CentOS 7 ship, and those are exactly the long-lived build hosts an agent
+  exists to reach. If `python3 --version` is older than that, run it with an
+  explicit interpreter (`python3.8 kubesight-agent.py …`).
 - Whatever the builds need: git, a JDK, Gradle, Xcode. The agent reports what it
   finds on every heartbeat, so stages are only routed to machines that have the
   tools they ask for.

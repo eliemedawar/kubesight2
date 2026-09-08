@@ -7,10 +7,11 @@ rather than waiting to be pushed to.
 
     python3 kubesight-agent.py --url https://kubesight.example.com --token <TOKEN>
 
-Deliberately one file with no dependencies beyond the Python standard library.
-The machines this runs on are somebody's laptop or a locked-down build host, and
-"pip install" is often the step that does not happen. Python 3.8+ (ships with
-macOS and every current Linux).
+Deliberately one file with no dependencies beyond the Python standard library,
+and written to Python 3.6 — the machines this runs on are somebody's laptop or a
+long-lived build host, where "pip install" is often the step that does not
+happen and the system python3 can be years old. 3.6 is what RHEL/CentOS 7
+ships, and those are exactly the hosts an agent exists to reach.
 
 What it does, in a loop:
     heartbeat  say it is alive and what it has installed
@@ -23,8 +24,6 @@ What it does NOT do: containerise anything. A stage's "container image" is
 ignored here — the point of an agent is to use the machine as it is, which is
 the only way an iOS build can work at all.
 """
-
-from __future__ import annotations
 
 import argparse
 import base64
@@ -45,6 +44,18 @@ from typing import Any, Dict, List, Optional
 
 VERSION = "1.0.0"
 DEFAULT_POLL_SECONDS = 5
+
+# 3.6 is the floor deliberately: it is what RHEL/CentOS 7 ships, and those are
+# exactly the long-lived build hosts an agent exists to reach. Everything here
+# stays inside 3.6 — no f-strings, no subprocess.run(capture_output=...), no
+# `from __future__ import annotations`.
+if sys.version_info < (3, 6):
+    sys.stderr.write(
+        "The KubeSight agent needs Python 3.6 or newer; this is %d.%d.\n"
+        "Try an explicit interpreter (python3.6, python3.8) if one is installed.\n"
+        % (sys.version_info[0], sys.version_info[1])
+    )
+    raise SystemExit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +147,10 @@ def detect_capabilities() -> List[str]:
         if shutil.which(command[0]) is None:
             continue
         try:
-            subprocess.run(command, capture_output=True, timeout=20, check=False)
+            subprocess.run(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=20, check=False,
+            )
             found.append(name)
         except Exception:
             pass
@@ -237,7 +251,7 @@ def stream(command: List[str], cwd: str, env: Dict[str, str], shipper: LogShippe
     try:
         process = subprocess.Popen(
             command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, bufsize=1,
+            stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1,
         )
     except FileNotFoundError:
         if not quiet_fail:
