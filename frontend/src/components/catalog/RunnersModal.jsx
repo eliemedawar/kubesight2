@@ -7,6 +7,7 @@ import {
   updateCiRunner,
 } from "../../api/ciApi.js";
 import AgentEnrolment from "./AgentEnrolment.jsx";
+import AgentInstallHelp from "./AgentInstallHelp.jsx";
 import { RUNNER_TYPES, StatusPill } from "./ciShared.jsx";
 
 /**
@@ -58,6 +59,9 @@ export default function RunnersModal({ canManage, onClose }) {
   // it is held here until the operator dismisses it deliberately.
   const [enrolling, setEnrolling] = useState(false);
   const [issued, setIssued] = useState(null);
+  // Which agent has its install steps open. One at a time: the panel is
+  // long, and two of them side by side would bury the list.
+  const [helpFor, setHelpFor] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -181,6 +185,29 @@ export default function RunnersModal({ canManage, onClose }) {
 
                   {runner.lastError && (
                     <p className="sg-ci-runner-why">Last error: {runner.lastError}</p>
+                  )}
+
+                  {!runner.isBuiltin && (
+                    <>
+                      <button
+                        type="button"
+                        className="sg-ci-help-toggle"
+                        aria-expanded={helpFor === runner.id}
+                        onClick={() =>
+                          setHelpFor((current) => (current === runner.id ? null : runner.id))
+                        }
+                      >
+                        {helpFor === runner.id ? "Hide install steps" : "Install steps"}
+                      </button>
+                      {helpFor === runner.id && (
+                        // No token here: it exists once, at registration. The
+                        // steps show a placeholder and point at New token.
+                        <AgentInstallHelp
+                          runnerType={runner.runnerType}
+                          workspaceRoot={runner.workspaceRoot}
+                        />
+                      )}
+                    </>
                   )}
 
                   {runner.capabilities?.length > 0 && (

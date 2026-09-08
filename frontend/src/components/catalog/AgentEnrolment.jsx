@@ -1,4 +1,5 @@
 import { useState } from "react";
+import AgentInstallHelp from "./AgentInstallHelp.jsx";
 
 const PLATFORMS = [
   ["agent_linux", "Linux", "A build VM or host — licensed tools, Docker, anything a pod cannot give."],
@@ -20,6 +21,7 @@ export default function AgentEnrolment({ register, onRegistered, onCancel }) {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
 
   const submit = async () => {
     if (!name.trim() || saving) return;
@@ -68,23 +70,25 @@ export default function AgentEnrolment({ register, onRegistered, onCancel }) {
           />
           <span className="field-hint">How many stages this machine runs at once.</span>
         </label>
-      </div>
 
-      <label className="form-grid__full">
-        Build directory
-        <input
-          value={workspaceRoot}
-          placeholder={runnerType === "agent_macos" ? "/Users/builder/kubesight" : "/var/lib/kubesight-agent"}
-          maxLength={512}
-          onChange={(event) => setWorkspaceRoot(event.target.value)}
-        />
-        <span className="field-hint">
-          Where the agent checks out builds, one directory per build. Leave empty for
-          the agent's own default (<code>~/kubesight-agent</code>). KubeSight cannot
-          check this path exists — the agent applies it and reports back if it cannot
-          write there.
-        </span>
-      </label>
+        <label className="form-grid__full">
+          Build directory
+          <input
+            value={workspaceRoot}
+            placeholder={
+              runnerType === "agent_macos" ? "/Users/builder/kubesight" : "/var/lib/kubesight-agent"
+            }
+            maxLength={512}
+            onChange={(event) => setWorkspaceRoot(event.target.value)}
+          />
+          <span className="field-hint">
+            Where the agent checks out builds, one directory per build. Leave empty for
+            the agent's own default (<code>~/kubesight-agent</code>). KubeSight cannot
+            check this path exists — the agent applies it and reports back if it cannot
+            write there.
+          </span>
+        </label>
+      </div>
 
       <div className="sg-ci-agent-platforms" role="radiogroup" aria-label="Platform">
         {PLATFORMS.map(([value, label, why]) => (
@@ -106,6 +110,22 @@ export default function AgentEnrolment({ register, onRegistered, onCancel }) {
         What the machine can do is reported by the agent itself, so there is nothing
         to list here.
       </p>
+
+      <button
+        type="button"
+        className="sg-ci-help-toggle"
+        aria-expanded={showHelp}
+        onClick={() => setShowHelp((prev) => !prev)}
+      >
+        {showHelp
+          ? "Hide install steps"
+          : `How do I install this on ${runnerType === "agent_macos" ? "a Mac" : "Linux"}?`}
+      </button>
+      {showHelp && (
+        // Readable before registering too: seeing what the work involves is
+        // part of deciding to do it.
+        <AgentInstallHelp runnerType={runnerType} workspaceRoot={workspaceRoot.trim()} />
+      )}
 
       <div className="modal-actions">
         <button type="button" className="btn-outline btn-compact" onClick={onCancel} disabled={saving}>
@@ -134,6 +154,9 @@ export default function AgentEnrolment({ register, onRegistered, onCancel }) {
  */
 function Token({ issued, onDone }) {
   const [copied, setCopied] = useState("");
+  // Open by default here: the token is on screen once, and the unit file
+  // below already has it filled in — this is the moment to copy both.
+  const [showHelp, setShowHelp] = useState(true);
   const install = issued.install || {};
   const command = `python3 kubesight-agent.py --url ${install.url || ""} --token ${issued.token}`;
 
@@ -170,12 +193,23 @@ function Token({ issued, onDone }) {
         </button>
       </div>
 
-      <p className="muted sg-ci-run-note">
-        The agent is <code>agent/kubesight-agent.py</code> in the KubeSight repository —
-        one file, no dependencies beyond Python 3. It appears here as online within a
-        few seconds of starting. Keep it running with {install.keepAliveWith || "a service manager"};
-        the README beside it has a ready-made unit file.
-      </p>
+      <button
+        type="button"
+        className="sg-ci-help-toggle"
+        aria-expanded={showHelp}
+        onClick={() => setShowHelp((prev) => !prev)}
+      >
+        {showHelp ? "Hide install steps" : "Show install steps"}
+      </button>
+
+      {showHelp && (
+        <AgentInstallHelp
+          runnerType={issued.runnerType}
+          url={install.url}
+          token={issued.token}
+          workspaceRoot={issued.workspaceRoot}
+        />
+      )}
 
       <div className="modal-actions">
         <button type="button" className="primary btn-compact" onClick={onDone}>

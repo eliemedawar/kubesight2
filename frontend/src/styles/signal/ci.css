@@ -2501,3 +2501,73 @@ button.sg-ci-workspace-entry:focus-visible {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.72rem;
 }
+
+/* ── Agent install help ─────────────────────────────────────────── */
+.sg-ci-help-toggle {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.15rem;
+}
+
+.sg-ci-help {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  background: var(--bg-interactive);
+}
+
+.sg-ci-help-steps {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+.sg-ci-help-steps > li > strong {
+  display: block;
+  margin-bottom: 0.2rem;
+}
+
+.sg-ci-help-block {
+  margin: var(--space-2) 0 0;
+}
+
+.sg-ci-help-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+  margin-bottom: 0.25rem;
+}
+
+/* A unit file is long and must be copied verbatim — scroll it rather than
+   wrapping lines that a service manager would then reject. */
+.sg-ci-help-block pre {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  max-height: 16rem;
+  overflow: auto;
+  background: var(--bg-code, #0d1117);
+  color: var(--text-code, #d5dbe4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: pre;
+}
