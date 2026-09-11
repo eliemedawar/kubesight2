@@ -521,6 +521,60 @@ def test_pod_spec_omits_host_aliases_when_none_configured():
     assert "hostAliases" not in job["spec"]["template"]["spec"]
 
 
+def _stage_containers(job):
+    spec = job["spec"]["template"]["spec"]
+    return spec["initContainers"] + [spec["containers"][0]]
+
+
+def test_ephemeral_storage_is_accounted_for_by_default():
+    """The default shape: a modest request so the scheduler sees the build, and
+    a cap so one runaway stage cannot fill the node."""
+    first = _plan(_execution(0, commands=["mvn package"]))
+    _, _, job = k8s.build_job_resources(first)
+
+    stage = _stage_containers(job)[0]
+    assert stage["resources"]["requests"]["ephemeral-storage"] == "256Mi"
+    assert stage["resources"]["limits"]["ephemeral-storage"] == "2Gi"
+
+
+def test_ephemeral_storage_can_be_switched_off_entirely(monkeypatch):
+    """"off" has to drop the keys, not write the word into the manifest — the
+    API server rejects a quantity it cannot parse, so a passthrough would break
+    every build rather than uncapping it."""
+    monkeypatch.setenv("CI_STAGE_EPHEMERAL_REQUEST", "off")
+    monkeypatch.setenv("CI_STAGE_EPHEMERAL_LIMIT", "off")
+
+    first = _plan(_execution(0, commands=["mvn package"]))
+    _, _, job = k8s.build_job_resources(first)
+
+    # No container in the pod accounts for disk any more.
+    for container in _stage_containers(job):
+        resources = container["resources"]
+        assert "ephemeral-storage" not in resources["requests"]
+        assert "ephemeral-storage" not in resources["limits"]
+
+    # Switching disk accounting off must not disturb cpu/memory on the stages.
+    # (The trailing collector container carries its own fixed 1Gi and is not a
+    # stage, so it is checked only for the absence above.)
+    for container in job["spec"]["template"]["spec"]["initContainers"]:
+        assert container["resources"]["requests"]["memory"] == "256Mi"
+        assert container["resources"]["limits"]["memory"] == "4Gi"
+
+
+def test_workspace_size_limit_can_be_switched_off(monkeypatch):
+    """The emptyDir ceiling is enforced separately from the container limit, so
+    it needs its own "off" or a build stays capped after the limits are gone."""
+    monkeypatch.setenv("CI_WORKSPACE_SIZE_LIMIT", "off")
+
+    first = _plan(_execution(0, commands=["mvn package"]))
+    _, _, job = k8s.build_job_resources(first)
+
+    volumes = {v["name"]: v for v in job["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["workspace"]["emptyDir"] == {}
+    # /tmp keeps its own small cap regardless.
+    assert volumes["tmp"]["emptyDir"]["sizeLimit"] == "512Mi"
+
+
 def test_workspace_listing_parses_entries_and_confines_paths():
     """The path is interpolated into a shell command, so escaping it is a
     security boundary, not tidying."""

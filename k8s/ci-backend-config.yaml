@@ -104,12 +104,15 @@ data:
   #   CI_BUILDKIT_REGISTRY_CACHE: "1"
 
   # --- Per-stage resources --------------------------------------------------
-  # Sized for nodes with ~4.5Gi allocatable ephemeral-storage. The request is
-  # what the scheduler matches; the limit only caps. Raise both on bigger nodes.
+  # CPU and memory are sized for nodes with ~4.5Gi allocatable ephemeral-storage.
+  # The request is what the scheduler matches; the limit only caps.
   CI_STAGE_CPU_LIMIT: "2"
   CI_STAGE_MEMORY_LIMIT: 4Gi
-  CI_STAGE_EPHEMERAL_REQUEST: 256Mi
-  CI_STAGE_EPHEMERAL_LIMIT: 1Gi
+  # "off" leaves ephemeral-storage off the manifest entirely: no cap on what a
+  # build writes, and nothing reserved from the scheduler. Note the trade — a
+  # pod with no request is the first thing kubelet evicts under disk pressure.
+  CI_STAGE_EPHEMERAL_REQUEST: "off"
+  CI_STAGE_EPHEMERAL_LIMIT: "off"
   # The /workspace emptyDir shared by every stage of a build. Must fit on the
   # node's ephemeral storage next to buildkitd's layer cache.
   CI_WORKSPACE_SIZE_LIMIT: 2Gi

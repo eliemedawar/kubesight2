@@ -74,6 +74,16 @@ def _env(name: str, default: str) -> str:
     return os.getenv(name, default).strip() or default
 
 
+# Blanking one of these variables cannot mean "no value": _env falls back to the
+# default the moment it sees an empty string. A resource that should be left off
+# the manifest entirely therefore needs a word for it.
+_OFF = {"off", "none", "no", "0", "false", "unlimited"}
+
+
+def _is_off(value: str) -> bool:
+    return value.strip().lower() in _OFF
+
+
 def _namespace() -> str:
     return _env("CI_KUBERNETES_NAMESPACE", "kubesight-ci")
 
@@ -563,17 +573,41 @@ def _stage_resources(execution: StageExecution) -> Dict[str, Any]:
     limits = {
         "cpu": (execution.resources or {}).get("cpu") or _env("CI_STAGE_CPU_LIMIT", "2"),
         "memory": (execution.resources or {}).get("memory") or _env("CI_STAGE_MEMORY_LIMIT", "4Gi"),
-        "ephemeral-storage": (execution.resources or {}).get("ephemeralStorage")
-        or _env("CI_STAGE_EPHEMERAL_LIMIT", "2Gi"),
     }
+    requests = dict(_DEFAULT_REQUESTS)
+
     # The scheduler matches REQUESTS. A limit with no request makes Kubernetes
-    # default the request to the limit, so the ephemeral-storage cap above would
+    # default the request to the limit, so the ephemeral-storage cap below would
     # silently demand its full size on every node — unschedulable on hosts with
     # small root disks. Request a modest floor explicitly and let the limit cap.
-    requests = dict(_DEFAULT_REQUESTS)
-    requests["ephemeral-storage"] = _env("CI_STAGE_EPHEMERAL_REQUEST", "256Mi")
+    #
+    # Either half can be set to "off" for a cluster that would rather not account
+    # for build disk at all. Dropping the limit lets a runaway build fill the
+    # node; dropping the request makes this pod the first thing kubelet evicts
+    # when some other tenant fills it, because eviction ranks by usage above
+    # request. Off on both is a deliberate "the node has disk to spare", not a
+    # fix for a node that is already tight.
+    ephemeral_limit = (execution.resources or {}).get("ephemeralStorage") or _env(
+        "CI_STAGE_EPHEMERAL_LIMIT", "2Gi"
+    )
+    if not _is_off(ephemeral_limit):
+        limits["ephemeral-storage"] = ephemeral_limit
+
+    ephemeral_request = _env("CI_STAGE_EPHEMERAL_REQUEST", "256Mi")
+    if not _is_off(ephemeral_request):
+        requests["ephemeral-storage"] = ephemeral_request
+
     return {"requests": requests, "limits": limits}
 
+
+
+def _workspace_medium() -> Dict[str, Any]:
+    """The /workspace emptyDir. Its sizeLimit is a ceiling kubelet enforces by
+    evicting the pod, independent of the per-container ephemeral-storage limit —
+    so "off" has to be honoured here too, or removing the limits above still
+    leaves a cap in place."""
+    size = _env("CI_WORKSPACE_SIZE_LIMIT", "5Gi")
+    return {} if _is_off(size) else {"sizeLimit": size}
 
 
 # ---------------------------------------------------------------------------
@@ -953,7 +987,7 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
     }
 
     volumes = [
-        {"name": "workspace", "emptyDir": {"sizeLimit": _env("CI_WORKSPACE_SIZE_LIMIT", "5Gi")}},
+        {"name": "workspace", "emptyDir": _workspace_medium()},
         {"name": "tmp", "emptyDir": {"sizeLimit": "512Mi"}},
     ]
     if cache_enabled():
