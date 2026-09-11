@@ -156,13 +156,16 @@ class Client:
 
 _runtime_cache = None          # type: Optional[str]
 _containers_disabled = False   # --no-container
+_runtime_pinned = ""           # --runtime docker|podman
 
 
 def container_runtime() -> str:
-    """"docker", "podman", or "" when this machine has neither.
+    """"docker", "podman", or "" when this machine has neither usable.
 
     Probed once: the answer cannot change without the agent being restarted,
-    and every stage would otherwise pay for the lookup.
+    and every stage would otherwise pay for the lookup. ``--runtime`` pins the
+    choice, so a machine that gets podman installed later does not quietly
+    change how its builds run.
     """
     global _runtime_cache
     if _containers_disabled:
@@ -173,7 +176,8 @@ def container_runtime() -> str:
         # what an iOS build cannot use, and silently running a mac stage in
         # Linux would be worse than not containerising at all.
         if platform.system().lower() == "linux":
-            for name in CONTAINER_RUNTIMES:
+            candidates = (_runtime_pinned,) if _runtime_pinned else CONTAINER_RUNTIMES
+            for name in candidates:
                 if shutil.which(name) is None:
                     continue
                 try:
@@ -631,6 +635,9 @@ def main() -> int:
     parser.add_argument("--no-container", action="store_true",
                         help="Never run a stage in a container, even when it declares an "
                              "image and this machine has docker or podman")
+    parser.add_argument("--runtime", choices=CONTAINER_RUNTIMES, default=None,
+                        help="Use this container runtime and no other. Without it, docker "
+                             "is preferred and podman is the fallback")
     args = parser.parse_args()
 
     if not args.token:
@@ -644,17 +651,23 @@ def main() -> int:
     workspace = args.workspace or os.path.expanduser("~/kubesight-agent")
     workspace_error = ""
     os.makedirs(workspace, exist_ok=True)
-    global _containers_disabled
+    global _containers_disabled, _runtime_pinned
     _containers_disabled = bool(args.no_container)
+    _runtime_pinned = args.runtime or ""
     capabilities = detect_capabilities()
     print("[agent] %s, capabilities: %s" % (platform.node(), ", ".join(capabilities)))
     runtime = container_runtime()
     if runtime:
-        print("[agent] stages that declare an image will run in %s" % runtime)
+        print("[agent] stages that declare an image will run in %s%s"
+              % (runtime, " (pinned)" if _runtime_pinned else ""))
         # Anything left from a previous life is this agent's to clean up.
         prune_containers()
     elif args.no_container:
         print("[agent] containers disabled (--no-container)")
+    elif _runtime_pinned:
+        print("[agent] %s was pinned with --runtime but cannot be used here (is the daemon "
+              "running, and is this user allowed to reach it?): stages run with this "
+              "machine's own tools" % _runtime_pinned, file=sys.stderr)
     else:
         print("[agent] no container runtime: stages run with this machine's own tools")
     print("[agent] workspace: %s%s" % (workspace, " (from --workspace)" if pinned else ""))

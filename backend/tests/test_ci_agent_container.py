@@ -314,3 +314,22 @@ def test_rootless_podman_is_left_to_map_the_user_itself(agent, monkeypatch):
     monkeypatch.setattr(agent.os, "getgid", lambda: 0, raising=False)
     assert agent.container_user("podman") == "0:0"
 
+
+def test_a_pinned_runtime_is_the_only_one_tried(agent, monkeypatch):
+    """--runtime docker means docker: a podman installed on the machine later
+    must not quietly change how these builds run."""
+    tried = []
+    monkeypatch.setattr(agent, "_runtime_cache", None)
+    monkeypatch.setattr(agent, "_containers_disabled", False)
+    monkeypatch.setattr(agent, "_runtime_pinned", "docker")
+    monkeypatch.setattr(agent.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(agent.shutil, "which", lambda name: "/usr/bin/" + name)
+
+    def fake_run(argv, **kw):
+        tried.append(argv[0])
+        return type("R", (), {"returncode": 1})()
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+    assert agent.container_runtime() == ""
+    assert tried == ["docker"]  # podman never consulted
+

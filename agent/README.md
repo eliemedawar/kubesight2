@@ -146,7 +146,10 @@ A stage can decide for itself with `KUBESIGHT_CONTAINER` in its environment:
 | `always` | refuse to run the stage outside a container |
 | `never` | always run on the machine itself |
 
-`--no-container` turns it off for the whole machine. An agent that can
+`--no-container` turns it off for the whole machine, and `--runtime docker`
+(or `podman`) pins which runtime is used, so a machine that gets the other one
+installed later does not quietly change how its builds run. Without it, docker
+is preferred and podman is the fallback. An agent that can
 containerise reports a `container` capability, so a stage that must be
 containerised can require it as a runner label rather than discovering the
 machine's toolchain the hard way.
