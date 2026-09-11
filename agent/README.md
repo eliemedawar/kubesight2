@@ -113,8 +113,52 @@ BuildKit", which is the cluster's job. An agent says so rather than pretending.
   argv, so they cannot be read from the process list on a shared machine.
 - Declared artifacts are uploaded when the stage succeeds.
 
-**It does not containerise anything.** A stage's "container image" is ignored
-here: the point of an agent is to use the machine as it is.
+## Stages in containers (Linux)
+
+On Linux, a stage that declares a container image runs **inside that image**
+when the machine has `docker` or `podman`. The machine then needs no JDK, no
+Gradle and no Node of its own, and the stage produces the same build the
+cluster would: same image, same tool versions.
+
+    [agent] running in gradle:9.1.0-jdk17 (docker)
+
+What the container gets:
+
+- the build's workspace at `/workspace`, its checkout at `/workspace/source`
+  — **the same paths the Kubernetes runner uses**, so one pipeline's commands
+  are correct on either runner;
+- a cache directory at `/cache`, shared by every build on this machine, with
+  Maven, Gradle, npm, yarn, pip and Go pointed into it, so a containerised
+  stage is not slower than a host one;
+- the stage's environment and secrets, passed by name so their values never
+  appear in `docker run`'s arguments, where any user on the machine could read
+  them from the process list;
+- the stage's host aliases as `--add-host`, which an agent cannot otherwise
+  honour (it cannot write `/etc/hosts`);
+- `--user` set to the agent's own uid, so files come back owned by the agent
+  and not by root; on SELinux hosts the mounts are `:z` labelled.
+
+A stage can decide for itself with `KUBESIGHT_CONTAINER` in its environment:
+
+| value | behaviour |
+| --- | --- |
+| `auto` (default) | in a container when this machine can, otherwise on the machine |
+| `always` | refuse to run the stage outside a container |
+| `never` | always run on the machine itself |
+
+`--no-container` turns it off for the whole machine. An agent that can
+containerise reports a `container` capability, so a stage that must be
+containerised can require it as a runner label rather than discovering the
+machine's toolchain the hard way.
+
+**Where it does not apply:** macOS and Windows agents never containerise — a
+container there is a Linux VM, which is exactly what an iOS build cannot use.
+Checkout always runs on the machine (it needs only git). Container *image*
+stages are still built by BuildKit in the cluster, never by an agent.
+
+When there is no runtime and a stage declares an image, the agent says so in
+the log and runs with the machine's own tools — the build that ran is not the
+build the image would have produced, so it is never silent about it.
 
 ## How quickly it picks work up
 
@@ -135,6 +179,14 @@ here: the point of an agent is to use the machine as it is.
   token stops working immediately.
 - The agent runs build commands from your repositories with the privileges of
   the user it runs as. Give it its own unprivileged account, not yours.
+- With container mode, those commands run as the agent's uid inside the image
+  rather than on the machine — narrower, but the container still has the
+  workspace and the stage's secrets. Rootless `podman` is the stronger choice
+  here: with Docker, membership of the `docker` group is equivalent to root on
+  that host, so a machine where builds must not reach root should use podman.
+- Containers this agent starts are labelled `kubesight.agent=1` and removed
+  when the stage ends; leftovers from a killed agent are pruned at startup.
+  Nothing else on the machine is touched.
 - All traffic is outbound HTTPS to KubeSight.
 
 ## Taking a machine out of service

@@ -101,7 +101,9 @@ def analyze_stage(stage: Dict[str, Any]) -> List[Dict[str, Any]]:
     text = _stage_text(stage)
     stage_type = str(stage.get("stageType") or "command")
 
-    if stage_type == "container_image":
+    # Only worth saying while the stage could actually land on an agent: once
+    # it is pinned to Kubernetes, this is settled and repeating it is noise.
+    if stage_type == "container_image" and _targets_agent(stage):
         # Not a mistake — a fact about where it can run. Said plainly because
         # the stage silently skips rather than failing, and a skipped image
         # stage is how a green build produces nothing.
@@ -194,10 +196,12 @@ def analyze_stage(stage: Dict[str, Any]) -> List[Dict[str, Any]]:
                 level=INFO,
                 code="image_ignored_on_agent",
                 breaks_on=AGENT,
-                message=f"The stage image ({stage['image']}) is ignored on an agent — it runs "
-                "with whatever the machine has installed.",
-                fix="Make sure the agents this can land on have the tool, or pin the stage to "
-                "the Kubernetes runner.",
+                message=f"The stage image ({stage['image']}) is used on an agent only when "
+                "that machine has docker or podman; otherwise the stage runs with whatever is "
+                "installed there.",
+                fix="Add the `container` runner label to require a machine that can run the "
+                "image, or set KUBESIGHT_CONTAINER=always in the stage environment to refuse "
+                "to run outside one.",
             )
         )
 

@@ -346,6 +346,14 @@ def _task_payload(build: CiBuild, stage: CiBuildStage, task: CiAgentTask) -> Dic
         # share a workspace exactly as they do in a pod.
         "workspace": execution.workspace_ref or f"build-{build.id}",
         "workingDirectory": execution.working_directory or "",
+        # The stage's container image. On Linux, an agent with docker or podman
+        # runs the stage inside it — same image, same build as the cluster
+        # produces. Without a runtime the agent says so and uses the machine's
+        # own tools, so this is additive for every existing agent.
+        "image": execution.image or "",
+        # Only honoured in container mode (--memory/--cpus); a stage running
+        # directly on a machine gets the machine.
+        "resources": dict(execution.resources or {}),
         "commands": list(execution.commands or []),
         # Secrets are merged into the environment here, once, in flight.
         "env": {**(execution.env or {}), **(execution.secrets or {})},

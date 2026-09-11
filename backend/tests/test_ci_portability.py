@@ -97,6 +97,14 @@ def test_an_image_stage_says_where_it_can_run(app):
     assert result["portable"] is True
 
 
+def test_an_image_stage_pinned_to_kubernetes_says_nothing(app):
+    """Pinning it settles the question; repeating the answer is noise."""
+    result = portability.analyze(
+        [_stage(stageType="container_image", runnerType="kubernetes")]
+    )
+    assert result["findings"] == []
+
+
 def test_the_cache_path_is_a_warning_not_an_error(app):
     """It works when caching is on and silently does not when it is off."""
     result = portability.analyze([_stage(commands=["ls /cache/maven"])])
