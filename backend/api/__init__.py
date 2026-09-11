@@ -1,6 +1,7 @@
 import gzip
 import logging
 import os
+import sys
 import time
 import traceback
 
@@ -39,7 +40,10 @@ def _is_logs_fetch_path(path: str) -> bool:
         return True
     parts = normalized.split("/")
     return (
-        len(parts) >= 10
+        # 11, not 10: the "logs" segment this checks for IS parts[10], and one
+        # segment short of it the index itself raises -- inside after_request,
+        # which turns a stray 404 into a 500.
+        len(parts) >= 11
         and parts[1:3] == ["api", "clusters"]
         and parts[4] == "namespaces"
         and parts[6] == "pods"
@@ -64,6 +68,54 @@ class _SkipNoiseAccessLogFilter(logging.Filter):
 
 def _configure_access_log_filters() -> None:
     logging.getLogger("werkzeug").addFilter(_SkipNoiseAccessLogFilter())
+
+
+# Third-party loggers that are chatty at INFO and say nothing about KubeSight:
+# paramiko narrates every SSH handshake the cluster builder makes.
+_QUIET_LOGGERS = ("paramiko", "paramiko.transport", "urllib3")
+_logging_configured = False
+
+
+def _configure_logging() -> None:
+    """Give the root logger a handler and a level, once per process.
+
+    Without this every ``logger.info`` in the backend is dropped on the floor:
+    the root logger defaults to WARNING with no handlers at all, so under
+    gunicorn -- which configures only its own ``gunicorn.error`` logger -- the
+    pod log holds the three boot lines and then nothing, however busy the API
+    is. WARNING and above did reach stderr, but through ``logging.lastResort``,
+    which prints a bare message with no timestamp, level or module.
+
+    Left strictly alone when something else already owns the root logger
+    (pytest's capture, a WSGI host with its own dictConfig): taking the handler
+    away from those would trade one silence for another.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    _logging_configured = True
+    if logging.getLogger().handlers:
+        return
+
+    name = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+    level = getattr(logging, name, None)
+    if not isinstance(level, int):
+        name, level = "INFO", logging.INFO
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(level)
+    for quiet in _QUIET_LOGGERS:
+        logging.getLogger(quiet).setLevel(max(level, logging.WARNING))
+    # A visible first line, so a silent log means idle rather than unwired.
+    logging.getLogger("kubesight").info("Logging at %s (LOG_LEVEL to change)", name)
 
 
 def _configure_api_request_logging(app: Flask) -> None:
@@ -181,6 +233,8 @@ def _configure_cors(app: Flask) -> None:
 
 
 def create_app(config_object=None) -> Flask:
+    # First, so migrations, seeding and startup warnings are logged too.
+    _configure_logging()
     app = Flask(__name__)
     is_testing = False
 
