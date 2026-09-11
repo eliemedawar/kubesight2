@@ -356,6 +356,22 @@ print("[kubesight] artifact collection complete")
 
 _FAIL_FLAG = "/workspace/.kubesight/failed"
 
+# Values one stage hands the next. A stage appends ``NAME=value`` lines to
+# $KUBESIGHT_ENV; every later stage sources the file before running, so a
+# version read out of package.json in stage 3 is an ordinary variable in stage
+# 7. This is what replaces a Jenkins ``script { version = sh(...) }`` binding,
+# which only worked because every stage shared one Groovy interpreter.
+_BUILD_ENV_FILE = "/workspace/.kubesight/build.env"
+
+# Sourced by every stage, written by any. Guarded with [ -s ] rather than
+# [ -f ] so an empty file left by a stage that exported nothing does not fail
+# under `set -e`, and sourced BEFORE the stage's own commands so a stage can
+# override an inherited value simply by assigning it.
+_LOAD_BUILD_ENV = (
+    f'export KUBESIGHT_ENV={_BUILD_ENV_FILE}\n'
+    f'if [ -s "$KUBESIGHT_ENV" ]; then . "$KUBESIGHT_ENV"; fi\n'
+)
+
 
 def _wrap_stage_script(body: str, *, continue_on_failure: bool) -> str:
     """Every stage exits 0 and reports its real code as a log marker.
@@ -385,7 +401,7 @@ def _wrap_stage_script(body: str, *, continue_on_failure: bool) -> str:
     return (
         "set -u\nexport HOME=/tmp TMPDIR=/tmp\n"
         + guard
-        + f"(\nset -e\n{body}\n)\nEC=$?\n"
+        + f"(\nset -e\n{_LOAD_BUILD_ENV}{body}\n)\nEC=$?\n"
         + record
         + f'echo "{_EXIT_MARKER} $EC"\nexit 0\n'
     )
@@ -461,9 +477,39 @@ def _buildctl_cache(registry: Dict[str, Any]) -> str:
     )
 
 
+# Resolves a templated tag inside the build pod, after $KUBESIGHT_ENV has been
+# sourced. tr rather than sed: it is in the buildkit client image, and a
+# character class is exactly the rule being applied. The empty check matters
+# because an unset variable expands to nothing under `set -u`-free expansion,
+# and pushing ``repo:V-7`` instead of ``repo:V1.2.3-7`` is silent corruption.
+_TAG_RESOLVE_TEMPLATE = """KS_TAG="{template}"
+KS_TAG=$(printf '%s' "$KS_TAG" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-100)
+if [ -z "$KS_TAG" ]; then
+  echo "[kubesight] The image tag template resolved to nothing. Did the stage that exports it run?" >&2
+  exit 1
+fi
+echo "[kubesight] Image tag resolved to $KS_TAG"
+"""
+
+
+def _image_ref_prelude(registry: Dict[str, Any]) -> str:
+    """Shell that finishes a templated tag, or nothing when the tag is literal.
+
+    ``IMAGE_TAG=V${APP_VERSION}-${KUBESIGHT_BUILD_NUMBER}`` cannot be resolved
+    when the Job is created: APP_VERSION does not exist until a stage reads it
+    out of package.json and writes it to $KUBESIGHT_ENV. So the tag travels to
+    the pod as a template and the pod's own shell finishes it.
+    """
+    if not registry.get("tagIsTemplate"):
+        return ""
+    return _TAG_RESOLVE_TEMPLATE.format(template=registry["tag"])
+
+
 def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
     registry = execution.registry or {}
-    image_ref = f"{registry['host']}/{registry['repository']}:{registry['tag']}"
+    prelude = _image_ref_prelude(registry)
+    tag = '$KS_TAG' if registry.get("tagIsTemplate") else registry["tag"]
+    image_ref = f"{registry['host']}/{registry['repository']}:{tag}"
     context = "/workspace/source"
     if execution.working_directory:
         context = f"/workspace/source/{execution.working_directory}"
@@ -473,7 +519,7 @@ def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
         # buildctl takes the context and the Dockerfile as SEPARATE locals, so
         # an inline Dockerfile needs no copy into the context: point the
         # dockerfile local at the mounted file and leave the context alone.
-        return (
+        return prelude + (
             f"buildctl --addr {buildkit_addr()} build "
             f"--frontend dockerfile.v0 "
             f"--local context={context} "
@@ -484,7 +530,7 @@ def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
             f"--output {_buildctl_output(registry, image_ref)} "
             f"--metadata-file {meta_file}"
         )
-    return (
+    return prelude + (
         f"buildctl --addr {buildkit_addr()} build "
         f"--frontend dockerfile.v0 "
         f"--local context={context} "

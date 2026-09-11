@@ -60,13 +60,19 @@ def _string_list(value: Any, *, limit: int, item_limit: int) -> List[str]:
     return out
 
 
-PARAMETER_TYPES = ("text", "choice", "boolean", "dynamic_choice")
+PARAMETER_TYPES = ("text", "multiline", "choice", "boolean", "dynamic_choice")
 # What a dynamic_choice can be filled from. Resolved server-side at run time so
 # the Run Build dialog receives a ready list rather than discovering how to
 # build one.
 PARAMETER_SOURCES = ("branches", "tags", "branches_and_tags")
 MAX_PARAMETERS = 25
 MAX_CHOICES = 100
+# A single-line value is a branch name or a flag; a multiline one is a whole
+# file — a Dockerfile, an nginx server block, a 40-line .env. The cap is on the
+# document, not on the field, which is why the two differ by an order of
+# magnitude.
+MAX_TEXT_CHARS = 4000
+MAX_MULTILINE_CHARS = 64000
 # Values become environment variables for every stage, so a name has to be one.
 _PARAM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -158,8 +164,12 @@ def _parameters(value: Any) -> List[Dict[str, Any]]:
             # a repository that is briefly unreachable must not invalidate a
             # saved pipeline.
             param["default"] = _clean(entry.get("default"), 255)
+        elif param_type == "multiline":
+            # Newlines are the point: this is a file the build writes out, so
+            # it is never collapsed or stripped the way _clean() would.
+            param["default"] = str(entry.get("default") or "")[:MAX_MULTILINE_CHARS]
         else:
-            param["default"] = str(entry.get("default") or "")[:4000]
+            param["default"] = str(entry.get("default") or "")[:MAX_TEXT_CHARS]
 
         out.append(param)
     return out
@@ -358,6 +368,77 @@ def _host_aliases(value: Any, stage_name: str) -> List[Dict[str, Any]]:
     return merged
 
 
+CONDITION_OPERATORS = ("equals", "not_equals")
+
+
+def _run_condition(value: Any, stage_name: str) -> Optional[Dict[str, str]]:
+    """When this stage runs, or None for always.
+
+    ``{"variable": "DEPLOY_UAT", "operator": "equals", "value": "true"}`` — the
+    Jenkins ``when { equals expected: 'true', actual: DEPLOY_UAT }`` clause with
+    the Groovy removed. Only build variables are readable, which is the whole
+    point: a condition over an arbitrary expression would need an evaluator, and
+    an evaluator over pipeline text is a shell of its own.
+
+    Comparison is against the *string* the variable holds, because that is what
+    a stage receives as environment. A boolean parameter is therefore matched
+    with the value "true", not True.
+    """
+    if value in (None, "", {}, []):
+        return None
+    if not isinstance(value, dict):
+        raise PipelineError(f"Stage '{stage_name}' has a malformed run condition.")
+
+    variable = _clean(value.get("variable"), 128)
+    if not variable:
+        # An operator with nothing to compare is an editor half-filled, not a
+        # condition — treated as "always", so an abandoned row saves cleanly.
+        return None
+    if not _PARAM_NAME_RE.match(variable):
+        raise PipelineError(
+            f"Stage '{stage_name}' has a run condition on '{variable}', which is not "
+            "a usable variable name — letters, digits and underscores only."
+        )
+
+    operator = _clean(value.get("operator"), 24).lower() or "equals"
+    if operator not in CONDITION_OPERATORS:
+        raise PipelineError(
+            f"Stage '{stage_name}' has an unknown run condition operator "
+            f"'{operator}'. Use one of: {', '.join(CONDITION_OPERATORS)}."
+        )
+
+    return {
+        "variable": variable,
+        "operator": operator,
+        "value": str(value.get("value") or "")[:255].strip(),
+    }
+
+
+# What may appear in a templated IMAGE_TAG. The template is expanded by the
+# build's own shell, so it has to be safe there: no quotes, no $( ), no
+# backticks, no semicolons. Everything a version string needs survives.
+_IMAGE_TAG_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9._${}-]{1,255}$")
+
+
+def _check_image_tag_template(env: Dict[str, str], stage_name: str) -> None:
+    """Reject an IMAGE_TAG whose ``${...}`` expansion could run a command.
+
+    A tag containing ``$`` is resolved at build time against the variables an
+    earlier stage exported (see KUBESIGHT_ENV), which means the string reaches a
+    shell. Pipeline authors already run arbitrary commands in stages, so this is
+    not a privilege boundary — it is a guard against a tag that silently becomes
+    something other than a tag.
+    """
+    tag = env.get("IMAGE_TAG") or ""
+    if "$" not in tag:
+        return
+    if not _IMAGE_TAG_TEMPLATE_RE.match(tag):
+        raise PipelineError(
+            f"Stage '{stage_name}' has an image tag template that is not a tag: "
+            f"'{tag}'. Use letters, digits, dot, dash, underscore and ${{VARIABLE}}."
+        )
+
+
 def _resources(value: Any) -> Optional[Dict[str, str]]:
     if not isinstance(value, dict):
         return None
@@ -410,6 +491,9 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
             f"and {MAX_TIMEOUT_SECONDS // 3600} hours."
         )
 
+    env = _env_map(payload.get("env"))
+    _check_image_tag_template(env, name)
+
     return {
         "position": position,
         "name": name,
@@ -419,11 +503,12 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         "image": _clean(payload.get("image"), 512) or None,
         "working_directory": _clean(payload.get("workingDirectory"), 512) or None,
         "commands": commands,
-        "env": _env_map(payload.get("env")),
+        "env": env,
         "secret_refs": _secret_refs(payload.get("secretRefs"), known_keys),
         "artifacts": _artifact_specs(payload.get("artifacts")),
         "resources": _resources(payload.get("resources")),
         "host_aliases": _host_aliases(payload.get("hostAliases"), name),
+        "run_condition": _run_condition(payload.get("runCondition"), name),
         "timeout_seconds": timeout,
         "continue_on_failure": bool(payload.get("continueOnFailure")),
         "parallel_group": _clean(payload.get("parallelGroup"), 64) or None,
@@ -490,6 +575,10 @@ def create_pipeline(
         # service can never end up with pipelines and no default.
         is_default=bool(is_default) or not service.pipelines,
         enabled=payload.get("enabled") is not False,
+        # Validated here rather than defaulted to []: a create that silently
+        # dropped its build inputs produced a pipeline whose Run Build dialog
+        # asked for nothing and whose conditional stages could never fire.
+        parameters=_parameters(payload.get("parameters")),
         created_by_user_id=getattr(actor, "id", None),
     )
     db.session.add(pipeline)
@@ -715,6 +804,18 @@ def validate_parameter_values(
             accepted[name] = ""
             continue
 
+        if param_type == "multiline":
+            # A whole file, kept as typed apart from surrounding blank lines.
+            # Truncating it silently would hand the build a Dockerfile missing
+            # its last instruction, so an oversized value is refused instead.
+            if len(value) > MAX_MULTILINE_CHARS:
+                raise PipelineError(
+                    f"'{param.get('label') or name}' is {len(value)} characters; "
+                    f"the limit is {MAX_MULTILINE_CHARS}."
+                )
+            accepted[name] = value
+            continue
+
         if param_type == "choice":
             choices = [str(c) for c in (param.get("choices") or [])]
             if value not in choices:
@@ -723,11 +824,11 @@ def validate_parameter_values(
                 )
         # dynamic_choice is deliberately not checked against the live list: it
         # is a convenience, and a ref created seconds ago must still be usable.
-        accepted[name] = value[:4000]
+        accepted[name] = value[:MAX_TEXT_CHARS]
 
     # Values a pipeline without parameters was given still travel through.
     if not definitions:
-        return {str(k): str(v)[:4000] for k, v in submitted.items()}
+        return {str(k): str(v)[:MAX_MULTILINE_CHARS] for k, v in submitted.items()}
     return accepted
 
 

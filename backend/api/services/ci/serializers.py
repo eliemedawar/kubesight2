@@ -125,6 +125,8 @@ def pipeline_stage_to_dict(row: CiPipelineStage) -> Dict[str, Any]:
         "resources": row.resources or {},
         # NULL on stages saved before host aliases existed — read as none set.
         "hostAliases": _json_list(row.host_aliases),
+        # NULL means "always runs"; the editor renders that as no condition.
+        "runCondition": row.run_condition if isinstance(row.run_condition, dict) else None,
         "timeoutSeconds": row.timeout_seconds,
         "continueOnFailure": bool(row.continue_on_failure),
         "parallelGroup": row.parallel_group,

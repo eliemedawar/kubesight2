@@ -724,6 +724,11 @@ def _migrate_ci_columns() -> None:
         # as the raw JSON string, which then iterates as characters.
         _add_column_if_missing("ci_pipeline_stages", "host_aliases", "JSON")
         _retype_json_column("ci_pipeline_stages", "host_aliases")
+        # Conditional stages. Named run_condition rather than condition because
+        # CONDITION is a reserved word on MySQL, and an unquoted ALTER TABLE
+        # against it is a syntax error there.
+        _add_column_if_missing("ci_pipeline_stages", "run_condition", "JSON")
+        _retype_json_column("ci_pipeline_stages", "run_condition")
 
 
 def _migrate_registry_connection_columns() -> None:

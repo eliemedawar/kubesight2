@@ -63,6 +63,8 @@ CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_SOURCE = "/workspace/source"
 CONTAINER_CACHE = "/cache"
 CONTAINER_HOME = "/workspace/.home"
+# Where a stage leaves values for the stages after it (see build_env_prelude).
+CONTAINER_BUILD_ENV = "/workspace/.kubesight/build.env"
 # Every container this agent starts carries this label, so it can clean up
 # after a crash without touching anything else on the machine.
 CONTAINER_LABEL = "kubesight.agent=1"
@@ -401,6 +403,21 @@ def container_tool_env(cache: str) -> Dict[str, str]:
     }
 
 
+def build_env_prelude(path):
+    """Shell that makes an earlier stage's exports available to this one.
+
+    A stage appends ``NAME=value`` lines to $KUBESIGHT_ENV; every later stage
+    sources the file first. The Kubernetes runner does exactly the same thing at
+    /workspace/.kubesight/build.env, which is what lets one pipeline compute a
+    version once and use it in five stages on either runner.
+    """
+    return (
+        'export KUBESIGHT_ENV="%s"\n'
+        'mkdir -p "$(dirname "$KUBESIGHT_ENV")" 2>/dev/null || true\n'
+        'if [ -s "$KUBESIGHT_ENV" ]; then . "$KUBESIGHT_ENV"; fi\n'
+    ) % path
+
+
 def container_command(runtime, task, workspace, cache, script, uid_gid=None,
                       selinux=True):
     """The argv for running one stage inside its image.
@@ -440,6 +457,7 @@ def container_command(runtime, task, workspace, cache, script, uid_gid=None,
         "KUBESIGHT_WORKSPACE": CONTAINER_WORKSPACE,
         "KUBESIGHT_SOURCE": CONTAINER_SOURCE,
         "KUBESIGHT_CACHE": CONTAINER_CACHE,
+        "KUBESIGHT_ENV": CONTAINER_BUILD_ENV,
     }
     fixed.update(container_tool_env(CONTAINER_CACHE))
     stage_env = {str(k): str(v) for k, v in (task.get("env") or {}).items()}
@@ -527,7 +545,13 @@ def run_task(client: Client, task: Dict[str, Any], root: str) -> None:
                 "KUBESIGHT_SOURCE": os.path.join(workspace, "source"),
                 **{str(k): str(v) for k, v in (task.get("env") or {}).items()},
             }
-            script = "\n".join(task.get("commands") or ["true"])
+            build_env = os.path.join(workspace, ".kubesight", "build.env")
+            env["KUBESIGHT_ENV"] = build_env
+            # Prefixed rather than appended: a stage overrides an inherited
+            # value by assigning it, which only works if the file is read first.
+            script = build_env_prelude(
+                CONTAINER_BUILD_ENV if str(task.get("image") or "").strip() else build_env
+            ) + "\n".join(task.get("commands") or ["true"])
             timeout = int(task.get("timeoutSeconds") or 1800)
             image = str(task.get("image") or "").strip()
             mode = container_mode(task)

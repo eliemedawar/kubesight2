@@ -284,6 +284,14 @@ class CiPipelineStage(db.Model):
     # stage sees all of them. Empty list on stages saved before this existed.
     host_aliases = db.Column(db.JSON, nullable=False, default=list)
 
+    # WHETHER it runs. Null means always. Otherwise
+    # ``{"variable": "DEPLOY_UAT", "operator": "equals", "value": "true"}``
+    # evaluated against the build's variables — the Jenkins ``when`` clause,
+    # reduced to the one form pipelines actually use. A stage whose condition is
+    # false is closed as ``skipped`` with the reason in its log; it is never
+    # dispatched, so a whole-build runner does not even create its container.
+    run_condition = db.Column(db.JSON, nullable=True)
+
     # HOW it behaves.
     timeout_seconds = db.Column(db.Integer, nullable=False, default=1800)
     continue_on_failure = db.Column(db.Boolean, nullable=False, default=False)

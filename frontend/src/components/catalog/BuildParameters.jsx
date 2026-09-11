@@ -2,6 +2,7 @@ import { DownIcon, PlusIcon, TrashIcon, UpIcon } from "./ciShared.jsx";
 
 const TYPES = [
   ["text", "Text"],
+  ["multiline", "Text block (a file)"],
   ["choice", "Choice"],
   ["boolean", "Yes / no"],
   ["dynamic_choice", "Choice from the repository"],
@@ -206,7 +207,25 @@ export default function BuildParameters({ parameters, canEdit, onChange }) {
                   </label>
                 )}
 
-                {param.type === "boolean" ? (
+                {param.type === "multiline" ? (
+                  <label className="form-grid__full">
+                    Default
+                    <textarea
+                      rows={8}
+                      spellCheck={false}
+                      style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
+                      value={param.default || ""}
+                      placeholder={"FROM registry.example.com/nginx\nCOPY ./dist/ /usr/share/nginx/html/"}
+                      disabled={!canEdit}
+                      onChange={(event) => mutate(index, { default: event.target.value })}
+                    />
+                    <span className="field-hint">
+                      Written out whole, newlines and indentation intact — a Dockerfile, an
+                      nginx server block, a .env. The build writes it to a file with a
+                      command like <code>printf '%s' "$Dockerfile" &gt; Dockerfile</code>.
+                    </span>
+                  </label>
+                ) : param.type === "boolean" ? (
                   <label className="checkbox-row">
                     <input
                       type="checkbox"

@@ -326,6 +326,18 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
                         </option>
                       ))}
                     </select>
+                  ) : param.type === "multiline" ? (
+                    // A whole file: a Dockerfile, an nginx block, forty .env
+                    // lines. Monospaced and resizable because it is read as
+                    // often as it is typed, and re-typed almost never — the
+                    // remembered value from the last run is usually right.
+                    <textarea
+                      rows={10}
+                      spellCheck={false}
+                      style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
+                      value={value}
+                      onChange={(event) => set(event.target.value)}
+                    />
                   ) : (
                     <input
                       value={value}

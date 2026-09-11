@@ -254,7 +254,13 @@ def test_run_task_runs_the_stage_in_the_image_and_cleans_up(agent, tmp_path, mon
     agent.run_task(client, task, root)
 
     assert ran["argv"][:2] == ["docker", "run"]
-    assert ran["argv"][-5:] == ["gradle:9.1.0-jdk17", "/bin/sh", "-e", "-c", "gradle build"]
+    assert ran["argv"][-5:-1] == ["gradle:9.1.0-jdk17", "/bin/sh", "-e", "-c"]
+    # The stage's own commands are the tail of the script; ahead of them sits
+    # the prelude that makes an earlier stage's exports available, pointing at
+    # the container's workspace path rather than this machine's.
+    script = ran["argv"][-1]
+    assert script.endswith("gradle build")
+    assert 'export KUBESIGHT_ENV="/workspace/.kubesight/build.env"' in script
     # The container is removed by name whatever happened, because it outlives a
     # killed client.
     assert removed and removed[0][:3] == ["docker", "rm", "-f"]

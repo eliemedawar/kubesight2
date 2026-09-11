@@ -113,6 +113,17 @@ def _sanitize_tag(value: str) -> str:
     return cleaned[:100] or "build"
 
 
+# A tag the build's own shell finishes, e.g. ``V${VERSION}-${KUBESIGHT_BUILD_NUMBER}``
+# where VERSION was exported by an earlier stage into $KUBESIGHT_ENV. Validated
+# on save (pipelines._check_image_tag_template) and re-checked here, because a
+# snapshot can outlive the validation that produced it.
+_TAG_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9._${}-]{1,255}$")
+
+
+def _is_tag_template(value: str) -> bool:
+    return "$" in str(value or "") and bool(_TAG_TEMPLATE_RE.match(str(value)))
+
+
 class BuildError(ValueError):
     """A build could not be triggered. Message is user-facing."""
 
@@ -695,7 +706,40 @@ def _skip_reason(build: CiBuild, adapter, definition: Dict[str, Any]) -> Optiona
         _, reason = _registry_for(build, definition)
         if reason:
             return reason
-    return None
+    return _condition_reason(build, definition)
+
+
+def _condition_reason(build: CiBuild, definition: Dict[str, Any]) -> Optional[str]:
+    """Why this stage's own ``when`` clause says not to run — or None.
+
+    Evaluated against the build's variables, which are exactly what the stage
+    would have received as environment, so what the condition reads and what the
+    commands would have read cannot diverge. A condition naming a variable the
+    pipeline does not define compares against the empty string rather than
+    erroring: deleting a parameter should stop the stages that depended on it,
+    not break the build.
+    """
+    condition = definition.get("runCondition")
+    if not isinstance(condition, dict):
+        return None
+    variable = str(condition.get("variable") or "")
+    if not variable:
+        return None
+
+    variables = (build.pipeline_snapshot or {}).get("variables") or {}
+    actual = str(variables.get(variable, ""))
+    expected = str(condition.get("value") or "")
+    operator = condition.get("operator") or "equals"
+
+    matched = actual != expected if operator == "not_equals" else actual == expected
+    if matched:
+        return None
+    shown = actual or "(empty)"
+    comparison = "is not" if operator == "not_equals" else "is"
+    return (
+        f"This stage runs only when {variable} {comparison} '{expected}'. "
+        f"It was '{shown}' for this build."
+    )
 
 
 def _start_stage(build: CiBuild, stage: CiBuildStage) -> None:
@@ -714,11 +758,18 @@ def _start_stage(build: CiBuild, stage: CiBuildStage) -> None:
         # unexecuted stage reporting success is worse than an honest skip.
         stage.started_at = _now()
         _close_stage(stage, "skipped", None)
-        logs_service.append_system(
-            stage,
-            f"[kubesight] Skipped: this stage is a '{stage_type}' stage. {skip} "
-            "Nothing was built, and no artifact was recorded.",
+        # A stage skipped by its own condition was configured to behave this
+        # way; one skipped because nothing can execute it was not. Saying "this
+        # stage is a 'command' stage" about the first would read as a fault.
+        message = (
+            f"[kubesight] Skipped: {skip}"
+            if _condition_reason(build, definition)
+            else (
+                f"[kubesight] Skipped: this stage is a '{stage_type}' stage. {skip} "
+                "Nothing was built, and no artifact was recorded."
+            )
         )
+        logs_service.append_system(stage, message)
         return
 
     # The first stage that actually starts carries the whole resolved plan and
@@ -955,12 +1006,22 @@ def _registry_for(
         if snapshot.get("refType") == "tag"
         else f"{_sanitize_tag(build.branch)}-{build.number}"
     )
+    requested_tag = str(env.get("IMAGE_TAG") or "")
     return (
         {
             "host": host,
             "port": urlsplit(row.base_url).port,
             "repository": _sanitize_tag(env.get("IMAGE_NAME") or service.slug).lower(),
-            "tag": _sanitize_tag(env.get("IMAGE_TAG") or default_tag),
+            # A tag holding ${...} is passed through whole for the runner to
+            # expand; sanitizing it here would turn the expansion into dashes.
+            # The runner sanitizes the RESOLVED value, which is the string that
+            # actually has to be a valid tag.
+            "tag": (
+                requested_tag
+                if _is_tag_template(requested_tag)
+                else _sanitize_tag(requested_tag or default_tag)
+            ),
+            "tagIsTemplate": _is_tag_template(requested_tag),
             "dockerfile": env.get("DOCKERFILE_PATH") or "Dockerfile",
             # An inline Dockerfile replaces the one in the checkout. The runner
             # mounts it beside the context rather than writing into the

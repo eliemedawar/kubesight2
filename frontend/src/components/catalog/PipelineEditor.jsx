@@ -32,6 +32,7 @@ const blankStage = () => ({
   secretRefs: [],
   artifacts: [],
   hostAliases: [],
+  runCondition: null,
   timeoutSeconds: 1800,
   continueOnFailure: false,
   enabled: true,
@@ -78,6 +79,15 @@ const envFromText = (text) => {
     if (index > 0) out[line.slice(0, index).trim()] = line.slice(index + 1);
   });
   return out;
+};
+
+// A stage with no condition always runs; the summary says so rather than
+// leaving the row blank, because "no condition" and "condition not yet filled
+// in" look identical otherwise.
+const conditionSummary = (condition) => {
+  if (!condition?.variable) return "Always";
+  const verb = condition.operator === "not_equals" ? "is not" : "is";
+  return `${condition.variable} ${verb} "${condition.value ?? ""}"`;
 };
 
 const stageTypeLabel = (stageType) =>
@@ -511,6 +521,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
               <StageFields
                 stage={stages[selectedIndex]}
                 secretKeys={secretKeys}
+                parameters={parameters}
                 canEdit={canEdit}
                 onChange={(patch) => mutate(selectedIndex, patch)}
               />
@@ -569,10 +580,18 @@ const CLEARED_BY_FIELD = {
   artifacts: { artifacts: [] },
 };
 
-function StageFields({ stage, secretKeys, canEdit, onChange }) {
+function StageFields({ stage, secretKeys, parameters, canEdit, onChange }) {
   const unimplemented = UNIMPLEMENTED_STAGE_TYPES.has(stage.stageType);
   const fields = STAGE_FIELDS[stage.stageType] || STAGE_FIELDS.command;
   const shows = (field) => fields.has(field);
+
+  const condition = stage.runCondition || { variable: "", operator: "equals", value: "" };
+  // A condition saved against a parameter that was later renamed still has to
+  // be selectable, or opening the editor would silently drop it on save.
+  const declared = (parameters || []).map((item) => item.name).filter(Boolean);
+  const conditionChoices = condition.variable && !declared.includes(condition.variable)
+    ? [...declared, condition.variable]
+    : declared;
 
   const changeType = (stageType) => {
     const next = STAGE_FIELDS[stageType] || STAGE_FIELDS.command;
@@ -894,6 +913,71 @@ function StageFields({ stage, secretKeys, canEdit, onChange }) {
             </div>
           </details>
         )}
+
+        <details className="sg-ci-stage-options form-grid__full">
+          <summary>
+            <span>
+              <strong>Runs when</strong>
+              <small>Skip this stage unless a build input says otherwise</small>
+            </span>
+            <span className="sg-ci-option-value">{conditionSummary(stage.runCondition)}</span>
+          </summary>
+          <div className="sg-ci-stage-options-body form-grid">
+            <label>
+              Build input
+              <select
+                value={condition.variable}
+                disabled={!canEdit}
+                onChange={(event) =>
+                  onChange({
+                    runCondition: event.target.value
+                      ? { ...condition, variable: event.target.value }
+                      : null,
+                  })
+                }
+              >
+                <option value="">Always runs</option>
+                {conditionChoices.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">
+                {(parameters || []).length
+                  ? "One of this pipeline's build inputs."
+                  : "This pipeline has no build inputs yet — add one under Build inputs first."}
+              </span>
+            </label>
+            <label>
+              Comparison
+              <select
+                value={condition.operator}
+                disabled={!canEdit || !condition.variable}
+                onChange={(event) =>
+                  onChange({ runCondition: { ...condition, operator: event.target.value } })
+                }
+              >
+                <option value="equals">is</option>
+                <option value="not_equals">is not</option>
+              </select>
+            </label>
+            <label>
+              Value
+              <input
+                value={condition.value}
+                placeholder="true"
+                disabled={!canEdit || !condition.variable}
+                onChange={(event) =>
+                  onChange({ runCondition: { ...condition, value: event.target.value } })
+                }
+              />
+              <span className="field-hint">
+                Compared as text. A yes/no input holds <code>true</code> or <code>false</code>.
+              </span>
+            </label>
+          </div>
+        </details>
 
         <details className="sg-ci-stage-options form-grid__full">
           <summary>
