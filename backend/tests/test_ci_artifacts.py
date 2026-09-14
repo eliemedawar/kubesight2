@@ -97,6 +97,37 @@ def test_the_newest_builds_artifacts_survive_however_old_they_are(app, store):
         assert db.session.get(CiArtifact, newest.id) is not None
 
 
+def test_a_store_that_is_all_one_build_reports_why_it_cleaned_nothing(app, store):
+    """The reported case: every file belongs to the newest build, so an
+    expiry sweep deletes nothing however old they are. It has to say that it
+    protected them rather than that they were too young, or the cleanup looks
+    broken to anyone reading the message."""
+    with app.app_context():
+        service = _service()
+        _artifact(service, build_id=20, name="a.jar", age_days=3)
+        _artifact(service, build_id=20, name="b.jar", age_days=3)
+
+        result = artifacts_service.purge()
+
+        assert result["deleted"] == 0
+        assert result["keptRecent"] == 2
+        assert result["keptYoung"] == 0
+
+
+def test_artifacts_inside_the_retention_window_are_counted_as_young(app, store):
+    with app.app_context():
+        service = _service()
+        _artifact(service, build_id=1, name="a.jar", age_days=0)
+        _artifact(service, build_id=2, name="b.jar", age_days=0)
+
+        result = artifacts_service.purge()
+
+        assert result["deleted"] == 0
+        # Age is checked first, so both count as young rather than protected.
+        assert result["keptYoung"] == 2
+        assert result["keptRecent"] == 0
+
+
 def test_the_guard_can_be_turned_off(app, store, monkeypatch):
     monkeypatch.setenv("CI_ARTIFACT_KEEP_LAST", "0")
     with app.app_context():

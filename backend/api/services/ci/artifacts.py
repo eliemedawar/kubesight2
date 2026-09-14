@@ -468,10 +468,12 @@ def purge(
     deleted = 0
     freed = 0
     kept_recent = 0
+    kept_young = 0
     for row in candidates:
         if cutoff is not None:
             created = _aware(row.created_at)
             if created is None or created >= cutoff:
+                kept_young += 1
                 continue
         if row.build_id is not None and int(row.build_id) in protected:
             kept_recent += 1
@@ -488,7 +490,12 @@ def purge(
     return {
         "deleted": deleted,
         "freedBytes": freed,
+        # The two reasons an artifact survived a sweep, kept apart so the caller
+        # can say which one happened. A store where everything belongs to the
+        # newest build deletes nothing no matter how old it is, and reporting
+        # that as "nothing was old enough" is how it looks broken.
         "keptRecent": kept_recent,
+        "keptYoung": kept_young,
         "retentionDays": days,
         "keepLastBuilds": keep,
         "usage": usage(service_id),

@@ -79,12 +79,33 @@ export default function ArtifactsPanel({
     }
   };
 
-  const cleaned = (result) =>
-    result.deleted === 0
-      ? "Nothing to clean — no artifact was old enough."
-      : `Removed ${result.deleted} artifact${result.deleted === 1 ? "" : "s"}, freeing ${formatBytes(
-          result.freedBytes
-        )}${result.keptRecent ? ` (kept ${result.keptRecent} from the newest build)` : ""}.`;
+  // A sweep that deleted nothing has two very different reasons, and saying the
+  // wrong one is how the cleanup looks broken: a store whose files all belong to
+  // the newest build is protected outright, however old it is.
+  const files = (n) => `${n} file${n === 1 ? "" : "s"}`;
+
+  const cleaned = (result) => {
+    const recent = result.keptRecent || 0;
+    const young = result.keptYoung || 0;
+    if (result.deleted > 0) {
+      return `Removed ${result.deleted} artifact${
+        result.deleted === 1 ? "" : "s"
+      }, freeing ${formatBytes(result.freedBytes)}${
+        recent ? ` (kept ${files(recent)} from the newest build)` : ""
+      }.`;
+    }
+    if (recent > 0) {
+      return `Nothing to clean — ${
+        young
+          ? `${files(recent)} belong to the newest build, which is always kept, and ${files(
+              young
+            )} are not old enough yet`
+          : `all ${files(recent)} belong to the newest build, which is always kept`
+      }. Use “Delete all” to remove them anyway.`;
+    }
+    if (young > 0) return "Nothing to clean — no artifact was old enough.";
+    return "Nothing to clean — the store is already empty.";
+  };
 
   if (loading) return <LoadingState label="Loading artifacts…" />;
 
