@@ -108,7 +108,7 @@ export default function ArtifactsPanel({
                 {policy.keepLastBuilds > 0 &&
                   ` The newest ${
                     policy.keepLastBuilds === 1 ? "build's" : `${policy.keepLastBuilds} builds'`
-                  } artifacts are always kept, because "Rerun from here" restores from them.`}
+                  } artifacts are always kept, so there is always something to download.`}
               </>
             ) : (
               <>Artifacts are kept indefinitely — nothing expires on its own.</>
@@ -146,9 +146,9 @@ export default function ArtifactsPanel({
                 onClick={() => {
                   if (
                     !window.confirm(
-                      `Delete every stored artifact for ${service.name}? Downloads and ` +
-                        '"Rerun from here" stop working for those builds. Container images ' +
-                        "in the registry are not affected."
+                      `Delete every stored artifact for ${service.name}? Downloads stop ` +
+                        "working for those builds. Container images in the registry are " +
+                        "not affected."
                     )
                   )
                     return;

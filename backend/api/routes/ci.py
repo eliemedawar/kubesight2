@@ -549,23 +549,6 @@ def get_service_parameters(service_id: int):
     )
 
 
-@ci_bp.route("/builds/<int:build_id>/rerun-from/<int:position>", methods=["POST"])
-@require_permission("ci_builds:retry")
-def rerun_build_from(build_id: int, position: int):
-    """Queue a build that starts at ``position``, reusing this build's outputs.
-
-    For retrying one stage after changing its settings without paying for the
-    stages before it again. The pipeline is re-read, so the edits apply.
-    """
-    row = engine_service.get_build(build_id)
-    try:
-        return success_response(
-            engine_service.rerun_from(row, position, actor=_actor()), status_code=201
-        )
-    except _USER_ERRORS as exc:
-        return error_response(str(exc), 409)
-
-
 @ci_bp.route("/builds/<int:build_id>/workspace", methods=["GET"])
 @require_permission("ci_builds:view")
 def get_build_workspace(build_id: int):
@@ -635,9 +618,16 @@ def list_service_artifacts(service_id: int):
 @require_permission("ci_artifacts:view")
 def list_build_artifacts(build_id: int):
     engine_service.get_build(build_id)
-    rows = artifacts_service.list_for_build(build_id)
+    rows = artifacts_service.list_for_build(build_id, limit=_int_arg("limit", 200))
+    # `count` is how many came back, `total` how many exist — the drawer says so
+    # when a glob-heavy build produced more than one page.
+    total = artifacts_service.count_for_build(build_id)
     return success_response(
-        {"items": [artifact_to_dict(row) for row in rows], "count": len(rows)}
+        {
+            "items": [artifact_to_dict(row) for row in rows],
+            "count": len(rows),
+            "total": total,
+        }
     )
 
 
@@ -708,7 +698,7 @@ def purge_artifacts():
 
     ``olderThanDays: 0`` means everything in scope — the explicit clean rather
     than the expiry. ``keepLast`` defaults to the configured guard, so a
-    routine cleanup cannot leave a service with nothing to rerun; the UI passes
+    routine cleanup cannot leave a service with nothing to download; the UI passes
     0 with it only for "delete everything".
     """
     payload = _payload()

@@ -8,8 +8,10 @@
 #     - configMapRef:
 #         name: kubesight-ci-integration
 #
-# Then restart the backend. Values below are cluster-specific; the two marked
-# REPLACE-ME will not work as shipped.
+# Then restart the backend. Values below are cluster-specific: they are filled
+# in for the areeba cluster, so re-applying this file overwrites whatever the
+# live ConfigMap holds. Check CI_WORKER_IMAGE's tag against the deployed
+# backend before applying.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -20,11 +22,11 @@ data:
   CI_KUBERNETES_NAMESPACE: kubesight-ci
   CI_SERVICE_ACCOUNT: kubesight-ci-build
 
-  # REPLACE-ME. The build pod's checkout/collector containers run the backend
-  # image (it carries git + python3). The default is `kubesight-backend:latest`,
-  # a bare tag no node can pull — every build fails at checkout until this is a
-  # real registry path.
-  CI_WORKER_IMAGE: registry.example.com/kubesight/kubesight-backend:replace-me
+  # The build pod's checkout/collector containers run the backend image (it
+  # carries git + python3). The code default is `kubesight-backend:latest`, a
+  # bare tag no node can pull — every build fails at checkout unless this is a
+  # real registry path. Keep the tag in step with the deployed backend.
+  CI_WORKER_IMAGE: registry.areeba.com/kubesight-backend:v1.1.54
   CI_IMAGE_PULL_POLICY: IfNotPresent
 
   # Where the collector posts logs, status and artifacts back to. The code

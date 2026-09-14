@@ -101,9 +101,6 @@ class StageExecution:
     # Which runner the scheduler assigned. A pull runner needs it to record
     # whose queue the work belongs in; a push runner ignores it.
     runner_id: Optional[int] = None
-    # Rerun-from-a-stage: the checkout also restores the artifacts of the
-    # build this one continues from, so skipped stages need not run again.
-    restore_artifacts: bool = False
     # Set on the FIRST stage only: the full resolved stage list for the build.
     # Whole-build runners (one Kubernetes Job per build) construct everything
     # from this; per-stage runners ignore it.

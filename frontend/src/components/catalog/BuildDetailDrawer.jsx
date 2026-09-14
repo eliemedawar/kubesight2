@@ -4,7 +4,6 @@ import {
   cancelCiBuild,
   getCiBuild,
   listCiBuildArtifacts,
-  rerunCiBuildFrom,
   retryCiBuild,
 } from "../../api/ciApi.js";
 import PipelineStrip from "./PipelineStrip.jsx";
@@ -40,6 +39,9 @@ export default function BuildDetailDrawer({
 }) {
   const [build, setBuild] = useState(null);
   const [artifacts, setArtifacts] = useState([]);
+  // How many the build actually owns. A glob-heavy stage declares one artifact
+  // per matched file, so this can run far ahead of what the API returns.
+  const [artifactTotal, setArtifactTotal] = useState(0);
   const [selectedStageId, setSelectedStageId] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -85,7 +87,11 @@ export default function BuildDetailDrawer({
 
         if (!isBuildActive(data.status)) {
           const list = await listCiBuildArtifacts(buildId);
-          if (!cancelled) setArtifacts(list.items || []);
+          if (!cancelled) {
+            const items = list.items || [];
+            setArtifacts(items);
+            setArtifactTotal(list.total ?? items.length);
+          }
           return;
         }
         timerRef.current = window.setTimeout(load, REFRESH_MS);
@@ -265,20 +271,6 @@ export default function BuildDetailDrawer({
                       <span className="sg-ci-stage-name">{stage.name}</span>
                       <span className="sg-ci-stage-time">{stageDuration(stage)}</span>
                     </button>
-                    {/* Retrying one stage after changing its settings, without
-                        paying for the stages before it again. Position 0 is the
-                        checkout, which always runs, so it has no button. */}
-                    {!active && canRetry && stage.position > 0 && (
-                      <button
-                        type="button"
-                        className="btn-outline btn-compact sg-ci-stage-rerun"
-                        disabled={busy}
-                        title={`Start a new build at "${stage.name}", restoring this build's artifacts`}
-                        onClick={() => act(() => rerunCiBuildFrom(build.id, stage.position))}
-                      >
-                        Rerun from here
-                      </button>
-                    )}
                   </li>
                 ))}
               </ul>
@@ -296,18 +288,28 @@ export default function BuildDetailDrawer({
 
             {artifacts.length > 0 && (
               <section className="sg-ci-drawer-artifacts">
-                <p className="form-label">Artifacts ({artifacts.length})</p>
+                <p className="form-label">Artifacts ({artifactTotal})</p>
                 <ul>
                   {artifacts.map((artifact) => (
                     <li key={artifact.id}>
                       <span className="chip">{artifact.artifactType}</span>
-                      <code>{artifact.uri || artifact.name}</code>
+                      {/* The full path only fits in the tooltip once a build
+                          starts producing deeply nested output. */}
+                      <code title={artifact.uri || artifact.name}>
+                        {artifact.uri || artifact.name}
+                      </code>
                       {artifact.digest && (
                         <span className="muted"> {artifact.digest.slice(0, 19)}…</span>
                       )}
                     </li>
                   ))}
                 </ul>
+                {artifactTotal > artifacts.length && (
+                  <p className="field-hint">
+                    Showing the first {artifacts.length}. Every artifact is listed on the
+                    service's Artifacts tab.
+                  </p>
+                )}
               </section>
             )}
 

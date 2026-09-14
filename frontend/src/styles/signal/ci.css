@@ -820,13 +820,30 @@ button.sg-ci-strip-node:hover {
   flex-direction: column;
   gap: 0.3rem;
   font-size: 0.8rem;
+  /* A build that collects a whole dist/ tree owns hundreds of these. Without a
+     ceiling the list becomes the drawer: the log pane scrolls away above it and
+     the queued/runner footer is pushed somewhere nobody scrolls to. */
+  max-height: 14rem;
+  overflow-y: auto;
 }
 
 .sg-ci-drawer-artifacts li {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  flex-wrap: wrap;
+  /* One row per artifact. Wrapping turned a long nested path into four lines,
+     which is what made a few dozen artifacts feel like a thousand. */
+  min-width: 0;
+}
+
+.sg-ci-drawer-artifacts li code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-drawer-artifacts li .chip {
+  flex: none;
 }
 
 /* ── Log viewer ─────────────────────────────────────────────────── */
@@ -1285,12 +1302,6 @@ button.sg-ci-workspace-entry:focus-visible {
 .sg-ci-dockerfile-note {
   margin: 0 0 var(--space-2);
   font-size: 0.78rem;
-}
-
-/* "Rerun from here" sits under its stage row, out of the way until wanted. */
-.sg-ci-stage-rerun {
-  margin: 0.15rem 0 0.4rem 1.9rem;
-  font-size: 0.7rem;
 }
 
 /* ══ Builds → Stages: the stage matrix ═══════════════════════════════════

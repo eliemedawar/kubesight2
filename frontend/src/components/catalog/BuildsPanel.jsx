@@ -179,7 +179,6 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
         <StageMatrix
           service={service}
           status={status}
-          canRetry={canRetry}
           refreshToken={refreshToken}
           onOpenStage={(buildId, stageId) => setOpenBuild({ buildId, stageId })}
         />

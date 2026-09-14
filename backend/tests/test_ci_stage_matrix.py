@@ -382,9 +382,12 @@ def test_a_skip_that_never_started_is_not_reached_even_with_nothing_before_it(
     assert cells["build"]["skipKind"] == matrix_service.SKIP_NOT_REACHED
 
 
-def test_a_rerun_reusing_earlier_stages_says_so_instead_of_warning(
+def test_a_pre_removal_rerun_still_reads_as_reused_not_as_a_warning(
     app, client, admin_token, service_id
 ):
+    """Rerun-from-a-stage is gone, but builds it queued are still in the
+    database. Their skipped stages must keep reading as deliberate reuse rather
+    than turning into "the runner could not run this" after the removal."""
     with app.app_context():
         build = CiBuild(
             service_id=service_id,

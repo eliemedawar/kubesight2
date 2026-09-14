@@ -56,7 +56,9 @@ PREEMPTING_STATUSES = FAILURE_STATUSES + ("cancelled",)
 #   not_reached  an earlier stage failed, so this one never came up. Nothing is
 #                wrong with it, so it stays quiet.
 #   reused       a rerun-from-a-later-stage restored this stage's output instead
-#                of repeating the work. Neutral, and worth naming.
+#                of repeating the work. That feature is gone, so only builds
+#                queued before its removal carry this — kept so their history
+#                still reads, never produced for a new build.
 #   unavailable  the runner could not honestly run it (no executor for the stage
 #                type, no registry, BuildKit not configured). This is the one
 #                that matters: the build can be green and still have produced
@@ -173,6 +175,7 @@ def _skip_kind(
         return None
     if any(position < stage.position for position in preempted_positions):
         return SKIP_NOT_REACHED
+    # Only a pre-removal snapshot has this; see SKIP_REUSED above.
     restore = (build.pipeline_snapshot or {}).get("restore") or {}
     start_from = restore.get("startFromPosition")
     definition = _snapshot_definition(build, stage)

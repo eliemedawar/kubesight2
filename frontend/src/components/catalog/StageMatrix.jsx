@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { getCiStageMatrix, rerunCiBuildFrom } from "../../api/ciApi.js";
+import { getCiStageMatrix } from "../../api/ciApi.js";
 import { parseApiTime } from "../../lib/apiTime.js";
 import EmptyState from "../common/EmptyState.jsx";
 import LoadingState from "../common/LoadingState.jsx";
@@ -88,7 +88,6 @@ function StateIcon({ state }) {
 export default function StageMatrix({
   service,
   status = "all",
-  canRetry,
   refreshToken,
   onOpenStage,
 }) {
@@ -97,8 +96,6 @@ export default function StageMatrix({
   const [error, setError] = useState("");
   // An action's failure belongs in the card the action was taken from: the
   // card covers the panel, so a banner behind it would never be read.
-  const [actionError, setActionError] = useState("");
-  const [busy, setBusy] = useState(false);
   // Which cell's card is pinned: {rowId, key, rect}.
   const [pinned, setPinned] = useState(null);
   // Ticks while a build is live so a running cell's elapsed time moves. A
@@ -238,31 +235,15 @@ export default function StageMatrix({
     if (event.key === "Escape" && pinned) {
       event.preventDefault();
       setPinned(null);
-      setActionError("");
     }
   };
 
   const pinCell = (event, row, key) => {
-    setActionError("");
     if (pinned && pinned.rowId === row.id && pinned.key === key) {
       setPinned(null);
       return;
     }
     setPinned({ rowId: row.id, key, rect: event.currentTarget.getBoundingClientRect() });
-  };
-
-  const rerun = async (row, cell) => {
-    setBusy(true);
-    setActionError("");
-    try {
-      await rerunCiBuildFrom(row.id, cell.position);
-      setPinned(null);
-      await load();
-    } catch (err) {
-      setActionError(err.message || "That rerun could not be started.");
-    } finally {
-      setBusy(false);
-    }
   };
 
   if (loading) return <LoadingState label="Loading the stage history…" />;
@@ -481,10 +462,7 @@ export default function StageMatrix({
           <div
             className="sg-mx-card-scrim"
             role="presentation"
-            onClick={() => {
-              setPinned(null);
-              setActionError("");
-            }}
+            onClick={() => setPinned(null)}
           />
           <div
             className="sg-mx-card"
@@ -542,10 +520,12 @@ export default function StageMatrix({
                 An earlier stage failed, so this stage never ran.
               </p>
             )}
+            {/* Only older builds can carry this: the rerun-from-a-stage feature
+                that produced it is gone, but its history still has to read. */}
             {cellState(pinnedCell) === "reused" && (
               <p className="sg-mx-card-why">
-                Restored from build #{pinnedCell.reusedFromBuildNumber} — this rerun started
-                later in the pipeline.
+                Restored from build #{pinnedCell.reusedFromBuildNumber} — this build
+                started later in the pipeline.
               </p>
             )}
             {pinnedCell.continueOnFailure &&
@@ -561,8 +541,6 @@ export default function StageMatrix({
               </pre>
             )}
 
-            {actionError && <p className="sg-mx-card-error">{actionError}</p>}
-
             <div className="sg-mx-card-actions">
               <button
                 type="button"
@@ -574,19 +552,6 @@ export default function StageMatrix({
               >
                 Open logs
               </button>
-              {/* Position 0 is the checkout, which always runs, so it has no
-                  rerun of its own — same rule as the build drawer. */}
-              {canRetry && !isBuildActive(pinnedRow.status) && pinnedCell.position > 0 && (
-                <button
-                  type="button"
-                  className="btn-outline btn-compact"
-                  disabled={busy}
-                  title={`Start a new build at “${pinnedCell.name}”, restoring this build's artifacts`}
-                  onClick={() => rerun(pinnedRow, pinnedCell)}
-                >
-                  Rerun from here
-                </button>
-              )}
             </div>
           </div>
         </>

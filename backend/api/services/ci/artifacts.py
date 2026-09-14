@@ -242,12 +242,25 @@ def list_for_service(service_id: int, limit: int = 100) -> List[CiArtifact]:
     )
 
 
-def list_for_build(build_id: int) -> List[CiArtifact]:
+def list_for_build(build_id: int, limit: int = 200) -> List[CiArtifact]:
+    """One page of a build's artifacts, oldest first.
+
+    Bounded for the same reason list_for_service is: a stage that collects
+    `dist/**` or `target/**/*.jar` declares one artifact per matched file, so a
+    single build can own thousands of rows. Serialising all of them lands the
+    whole set in one response and one unbroken list in the drawer. Pair with
+    count_for_build when the caller needs to say how many were left out.
+    """
     return (
         CiArtifact.query.filter_by(build_id=build_id)
         .order_by(CiArtifact.id.asc())
+        .limit(max(1, min(int(limit), 1000)))
         .all()
     )
+
+
+def count_for_build(build_id: int) -> int:
+    return CiArtifact.query.filter_by(build_id=build_id).count()
 
 
 def latest_for_service(service_id: int) -> Optional[CiArtifact]:
@@ -267,10 +280,10 @@ def latest_for_service(service_id: int) -> Optional[CiArtifact]:
 #
 # Two things are deliberately never swept:
 #
-# * The newest build's artifacts, whatever their age. "Rerun from here"
-#   restores from exactly these files, and a service that builds once a week
-#   would otherwise never have a rerunnable build. CI_ARTIFACT_KEEP_LAST=0
-#   turns that off for anyone who wants the disk back more than the rerun.
+# * The newest build's artifacts, whatever their age. A service that builds
+#   once a week would otherwise spend most of its time with nothing to
+#   download. CI_ARTIFACT_KEEP_LAST=0 turns that off for anyone who wants the
+#   disk back more than the last good output.
 # * Container images. Their row is metadata pointing at the registry: deleting
 #   it frees no disk and loses the record of what was built. Only artifacts
 #   this store actually holds bytes for are candidates.
@@ -436,7 +449,7 @@ def purge(
 
     ``older_than_days=0`` means "everything in scope" — that is the explicit
     clean, not the expiry. ``keep_last`` still applies unless it is passed as 0,
-    so a routine sweep cannot leave a service with nothing to rerun.
+    so a routine sweep cannot leave a service with nothing to download.
     """
     days = retention_days() if older_than_days is None else max(0, int(older_than_days))
     keep = keep_last_builds() if keep_last is None else max(0, int(keep_last))

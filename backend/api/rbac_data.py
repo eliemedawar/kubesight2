@@ -260,8 +260,7 @@ DANGEROUS_PERMISSION_KEYS = {
     # editing a pipeline decides which commands those are.
     "ci_services:delete", "ci_pipelines:edit", "ci_builds:run", "ci_secrets:manage",
     "ci_runners:manage",
-    # Deleting artifacts destroys the only copy of a build's output, and what
-    # "Rerun from here" restores from.
+    # Deleting artifacts destroys the only copy of a build's output.
     "ci_artifacts:manage",
 }
 
