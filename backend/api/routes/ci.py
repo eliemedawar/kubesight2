@@ -198,17 +198,18 @@ def read_source_file(service_id: int):
     return success_response(data)
 
 
-@ci_bp.route("/source/branches", methods=["POST"])
+@ci_bp.route("/source/revisions", methods=["POST"])
 @require_permission("ci_services:view")
-def preview_source_branches():
-    """Branches and tags for a repository that has no service row yet.
+def preview_source_revisions():
+    """Revisions for a repository that has no service row yet.
 
-    The registration wizard asks for a branch before the service exists, so it
-    cannot use the per-service listing. Reads only — nothing is created by
-    asking what branches a repository has.
+    The registration wizard asks for a starting revision before the service
+    exists, so it cannot use the per-service listing. ``kinds`` says which to
+    fetch — a branch picker should not pay for a repository's 450 tags. Reads
+    only: nothing is created by asking what a repository contains.
     """
     try:
-        data = catalog_service.preview_branches(_payload())
+        data = catalog_service.preview_revisions(_payload())
     except _USER_ERRORS as exc:
         return error_response(str(exc), 400)
     return success_response(data)

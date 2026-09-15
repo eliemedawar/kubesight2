@@ -2,13 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import {
   createCiService,
   listCiSourceCredentials,
-  previewCiBranches,
+  previewCiRevisions,
   updateCiSource,
 } from "../../api/ciApi.js";
 import { getCiAssistAvailability } from "../../api/ciAssistApi.js";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import HermesAnalysisPanel from "./HermesAnalysisPanel.jsx";
-import { APPLICATION_TYPES, CRITICALITIES } from "./ciShared.jsx";
+import { APPLICATION_TYPES, BranchIcon, CRITICALITIES, TagIcon } from "./ciShared.jsx";
 
 /**
  * Register a service in one flow instead of three tabs.
@@ -37,6 +37,9 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
     criticality: "medium",
     repositoryUrl: "",
     credentialProfileId: "",
+    // Build from a branch or from a release tag. The choice decides what is
+    // fetched, so picking "Tag" never costs a page of branches and vice versa.
+    refType: "branch",
     defaultBranch: "main",
     workingDirectory: "",
     // The one choice that matters on this screen.
@@ -45,12 +48,12 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
     applicationType: "java_gradle",
   });
   const [credentials, setCredentials] = useState([]);
-  // Branches read from the live repository as soon as there is a URL and a
-  // credential to read them with. A typed branch that does not exist fails
-  // much later, inside a checkout, which is a bad place to learn it.
-  const [branches, setBranches] = useState([]);
-  const [branchError, setBranchError] = useState("");
-  const [loadingBranches, setLoadingBranches] = useState(false);
+  // Revisions read from the live repository as soon as there is a URL and a
+  // credential to read them with. A typed ref that does not exist fails much
+  // later, inside a checkout, which is a bad place to learn it.
+  const [revisions, setRevisions] = useState([]);
+  const [revisionError, setRevisionError] = useState("");
+  const [loadingRevisions, setLoadingRevisions] = useState(false);
   const [availability, setAvailability] = useState(null);
   const [service, setService] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -78,47 +81,53 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
   }, [availability]);
 
   // Debounced: this runs while somebody types or pastes a URL, and the answer
-  // is only interesting once they stop.
+  // is only interesting once they stop. Re-runs when the kind changes, because
+  // only the chosen kind is ever fetched.
   useEffect(() => {
     const url = form.repositoryUrl.trim();
     if (!url || !form.credentialProfileId) {
-      setBranches([]);
-      setBranchError("");
+      setRevisions([]);
+      setRevisionError("");
       return undefined;
     }
     let live = true;
-    setLoadingBranches(true);
+    setLoadingRevisions(true);
     const timer = window.setTimeout(() => {
-      previewCiBranches({
+      previewCiRevisions({
         repositoryUrl: url,
         credentialProfileId: form.credentialProfileId,
+        kinds: [form.refType],
       })
         .then((data) => {
           if (!live) return;
           const items = data.items || [];
-          setBranches(items);
-          setBranchError("");
-          // "main" is a guess, not an answer. If the repository has one of the
-          // conventional defaults, take it; if it has none, clear the field and
-          // let the user choose rather than landing on whichever branch happens
-          // to sort first — picking "1.1.0" for them is worse than asking.
-          const names = items.filter((i) => i.type === "branch").map((i) => i.value);
-          if (names.length && !names.includes(form.defaultBranch)) {
+          setRevisions(items);
+          setRevisionError("");
+          const names = items.map((item) => item.value);
+          if (!names.length || names.includes(form.defaultBranch)) return;
+          if (form.refType === "branch") {
+            // "main" is a guess, not an answer. Take a conventional default if
+            // the repository has one; otherwise ask, rather than landing on
+            // whichever branch happens to sort first.
             const preferred = ["main", "master", "develop", "trunk"].find((n) =>
               names.includes(n)
             );
             set("defaultBranch", preferred || "");
+          } else {
+            // Tags come back newest-first, and the newest release is the one
+            // somebody building from a tag almost always means.
+            set("defaultBranch", names[0]);
           }
         })
         .catch((err) => {
           if (!live) return;
-          setBranches([]);
+          setRevisions([]);
           // Non-fatal: the field stays typeable, because a listing outage must
           // not stop somebody registering a service.
-          setBranchError(err.message || "Branches could not be listed.");
+          setRevisionError(err.message || "Revisions could not be listed.");
         })
         .finally(() => {
-          if (live) setLoadingBranches(false);
+          if (live) setLoadingRevisions(false);
         });
     }, 500);
     return () => {
@@ -126,9 +135,17 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.repositoryUrl, form.credentialProfileId]);
+  }, [form.repositoryUrl, form.credentialProfileId, form.refType]);
 
-  const branchOptions = branches.filter((item) => item.type === "branch");
+  const chooseRefType = (next) => {
+    if (next === form.refType) return;
+    // Clear the value with the kind: a branch name is not a tag, and carrying
+    // it across would show a ref that does not exist in the new list.
+    setForm((prev) => ({ ...prev, refType: next, defaultBranch: "" }));
+    setRevisions([]);
+  };
+
+  const revisionOptions = revisions;
 
   const derivedSlug = useMemo(
     () =>
@@ -309,23 +326,51 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
                   )}
                 </label>
                 <label>
-                  Branch
-                  {branchOptions.length > 0 ? (
+                  <span className="sg-ci-wizard-reflabel">
+                    {form.refType === "tag" ? "Tag" : "Branch"}
+                    {/* The choice decides what gets fetched, so picking Tag
+                        never costs a page of branches and vice versa. */}
+                    <span
+                      className="sg-cat-tabs sg-ci-wizard-refkind"
+                      role="group"
+                      aria-label="Build from a branch or a tag"
+                    >
+                      <button
+                        type="button"
+                        className={`sg-cat-tab${form.refType === "branch" ? " is-on" : ""}`}
+                        aria-pressed={form.refType === "branch"}
+                        onClick={() => chooseRefType("branch")}
+                      >
+                        <BranchIcon /> Branch
+                      </button>
+                      <button
+                        type="button"
+                        className={`sg-cat-tab${form.refType === "tag" ? " is-on" : ""}`}
+                        aria-pressed={form.refType === "tag"}
+                        onClick={() => chooseRefType("tag")}
+                      >
+                        <TagIcon /> Tag
+                      </button>
+                    </span>
+                  </span>
+                  {revisionOptions.length > 0 ? (
                     /* Searchable, because a repository with two hundred
                        branches turns a plain select into a scroll hunt. Same
                        control every other picker in KubeSight uses. */
                     <SearchableSelect
                       value={form.defaultBranch}
                       onChange={(event) => set("defaultBranch", event.target.value)}
-                      placeholder="Select a branch…"
+                      placeholder={
+                        form.refType === "tag" ? "Select a tag…" : "Select a branch…"
+                      }
                       options={[
                         // A value that is not in the list is still offered, so
-                        // a branch created seconds ago is never silently lost.
+                        // a ref created seconds ago is never silently lost.
                         ...(form.defaultBranch &&
-                        !branchOptions.some((item) => item.value === form.defaultBranch)
+                        !revisionOptions.some((item) => item.value === form.defaultBranch)
                           ? [{ value: form.defaultBranch, label: form.defaultBranch }]
                           : []),
-                        ...branchOptions.map((item) => ({
+                        ...revisionOptions.map((item) => ({
                           value: item.value,
                           label: item.value,
                         })),
@@ -334,16 +379,19 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
                   ) : (
                     <input
                       value={form.defaultBranch}
+                      placeholder={form.refType === "tag" ? "e.g. v1.72.1" : "e.g. main"}
                       onChange={(event) => set("defaultBranch", event.target.value)}
                     />
                   )}
                   <span className="field-hint">
-                    {loadingBranches
-                      ? "Reading branches from the repository…"
-                      : branchError
-                        ? `${branchError} Type the branch name instead.`
-                        : branchOptions.length > 0
-                          ? `${branchOptions.length} branches found.`
+                    {loadingRevisions
+                      ? `Reading ${form.refType === "tag" ? "tags" : "branches"} from the repository…`
+                      : revisionError
+                        ? `${revisionError} Type the ${form.refType} name instead.`
+                        : revisionOptions.length > 0
+                          ? `${revisionOptions.length} ${
+                              form.refType === "tag" ? "tags" : "branches"
+                            } found.`
                           : "Listed once a repository and credential are set."}
                   </span>
                 </label>

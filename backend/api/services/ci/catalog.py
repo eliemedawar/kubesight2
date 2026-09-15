@@ -654,12 +654,19 @@ def read_source_file(row: CiService, path: str, revision: str = "") -> Dict[str,
     return {"path": clean, "revision": chosen, "content": content}
 
 
-def preview_branches(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Branches and tags for a repository that has no service row yet.
+REVISION_KINDS = ("branch", "tag", "commit")
 
-    The registration wizard needs this: it asks for a branch before the service
-    exists, so it cannot use the per-service listing. Same provider, same
-    credential store, same validation — only the lookup differs.
+
+def preview_revisions(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Revisions for a repository that has no service row yet.
+
+    The registration wizard needs this: it asks for a starting revision before
+    the service exists, so it cannot use the per-service listing. Same provider,
+    same credential store, same validation — only the lookup differs.
+
+    ``kinds`` is how the caller says what it will actually show. A branch picker
+    that also pulled five pages of tags would spend several seconds of somebody's
+    time on a list that control never opens.
     """
     provider = _clean(payload.get("repositoryProvider"), 32).lower() or "bitbucket"
     if provider not in source_port.supported_providers():
@@ -678,10 +685,20 @@ def preview_branches(payload: Dict[str, Any]) -> Dict[str, Any]:
     if credential is None:
         raise CatalogError("Select a source credential profile.")
 
-    # Branches only: this fills a branch picker, and a repository with 450 tags
-    # would otherwise spend five more pages of somebody's time on a list this
-    # control never shows.
-    revisions = handler.list_revisions(ref, credential, kinds=("branch",))
+    requested = payload.get("kinds")
+    if isinstance(requested, str):
+        requested = [requested]
+    kinds = tuple(
+        kind
+        for kind in (requested or ["branch"])
+        if str(kind).strip().lower() in REVISION_KINDS
+    )
+    if not kinds:
+        raise CatalogError(
+            f"Revision kinds must be any of: {', '.join(REVISION_KINDS)}."
+        )
+
+    revisions = handler.list_revisions(ref, credential, kinds=kinds)
     return {
         "items": [
             {
@@ -693,6 +710,7 @@ def preview_branches(payload: Dict[str, Any]) -> Dict[str, Any]:
             for item in revisions
         ],
         "count": len(revisions),
+        "kinds": list(kinds),
         "repository": ref.full_name,
     }
 

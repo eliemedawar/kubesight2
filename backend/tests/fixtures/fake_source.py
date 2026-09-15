@@ -32,12 +32,16 @@ class FakeSourceProvider:
         self.truncated = False
         self.fail_with: Optional[str] = None
         self.reads: List[str] = []
+        # What kinds each caller asked for, so a test can assert that a branch
+        # picker did not quietly fetch tags as well.
+        self.revision_asks: List[tuple] = []
 
     def load(self, files: Dict[str, str], *, truncated: bool = False) -> None:
         self.files = dict(files)
         self.truncated = truncated
         self.fail_with = None
         self.reads = []
+        self.revision_asks = []
 
     def parse_repository_url(self, url: str) -> RepositoryRef:
         cleaned = str(url or "").rstrip("/")
@@ -47,8 +51,32 @@ class FakeSourceProvider:
         name = parts[1][:-4] if parts[1].endswith(".git") else parts[1]
         return RepositoryRef(provider=PROVIDER, url=cleaned, workspace=parts[0], name=name)
 
-    def list_revisions(self, ref, credential) -> List[RevisionOption]:
-        return [RevisionOption(value="main", label="Branch — main", kind="branch")]
+    # Enough of a ref list to tell the kinds apart, so a caller that asks for
+    # one and receives the other fails a test rather than a user.
+    BRANCHES = ("main", "develop", "feature/checkout")
+    TAGS = ("v1.0.0", "v1.1.0", "v2.0.0")
+
+    def list_revisions(self, ref, credential, kinds: tuple = ()) -> List[RevisionOption]:
+        if self.fail_with:
+            raise SourceError(self.fail_with)
+        wanted = tuple(kinds) or ("branch", "tag", "commit")
+        self.revision_asks.append(wanted)
+        out: List[RevisionOption] = []
+        if "branch" in wanted:
+            out += [
+                RevisionOption(value=name, label=f"Branch — {name}", kind="branch")
+                for name in self.BRANCHES
+            ]
+        if "tag" in wanted:
+            out += [
+                RevisionOption(value=name, label=f"Tag — {name}", kind="tag")
+                for name in self.TAGS
+            ]
+        if "commit" in wanted:
+            out.append(
+                RevisionOption(value="a" * 40, label="Commit — aaaaaaaa", kind="commit")
+            )
+        return out
 
     def list_tree(self, ref, credential, revision: str) -> TreeListing:
         if self.fail_with:

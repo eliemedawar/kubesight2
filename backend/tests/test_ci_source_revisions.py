@@ -270,3 +270,116 @@ def test_a_timeout_is_not_retried_either(monkeypatch):
     with pytest.raises(bb.BitbucketMetadataError):
         bb.list_revisions("acme/profile", "token", kinds=("branch",))
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# The registration wizard's preview
+# ---------------------------------------------------------------------------
+
+def _wizard_service(app, monkeypatch, **kinds_seen):
+    """A credential the preview can use, and a provider that records the ask."""
+    from api.db import db
+    from api.models_application_intelligence import BitbucketCredentialProfile
+    from api.secret_encryption import encrypt_secret
+    from tests.fixtures import fake_source
+
+    credential = BitbucketCredentialProfile(
+        name="wizard-cred",
+        provider=fake_source.PROVIDER,
+        credential_type="repository_access_token",
+        secret_cipher=encrypt_secret("token"),
+        enabled=True,
+    )
+    db.session.add(credential)
+    db.session.commit()
+    return credential.id
+
+
+def test_the_preview_asks_only_for_the_kind_it_will_show(app, monkeypatch):
+    """The wizard offers Branch or Tag, and the choice IS the request. Fetching
+    the other kind would be several seconds spent on a list that control never
+    opens."""
+    from api.services.ci import catalog
+    from tests.fixtures import fake_source
+
+    credential_id = _wizard_service(app, monkeypatch)
+    fake_source.FAKE.load(fake_source.JAVA_GRADLE)
+
+    base = {
+        "repositoryUrl": "https://fake.test/acme/app",
+        "credentialProfileId": credential_id,
+        "repositoryProvider": fake_source.PROVIDER,
+    }
+    branches = catalog.preview_revisions({**base, "kinds": ["branch"]})
+    tags = catalog.preview_revisions({**base, "kinds": ["tag"]})
+
+    assert fake_source.FAKE.revision_asks == [("branch",), ("tag",)]
+    assert {item["type"] for item in branches["items"]} == {"branch"}
+    assert {item["type"] for item in tags["items"]} == {"tag"}
+    # And the two lists are genuinely different, so a picker showing one
+    # cannot be silently showing the other.
+    assert not set(i["value"] for i in branches["items"]) & set(
+        i["value"] for i in tags["items"]
+    )
+
+
+def test_the_preview_defaults_to_branches(app, monkeypatch):
+    from api.services.ci import catalog
+    from tests.fixtures import fake_source
+
+    credential_id = _wizard_service(app, monkeypatch)
+    fake_source.FAKE.load(fake_source.JAVA_GRADLE)
+
+    payload = catalog.preview_revisions(
+        {
+            "repositoryUrl": "https://fake.test/acme/app",
+            "credentialProfileId": credential_id,
+            "repositoryProvider": fake_source.PROVIDER,
+        }
+    )
+    assert fake_source.FAKE.revision_asks == [("branch",)]
+    assert payload["kinds"] == ["branch"]
+
+
+def test_a_nonsense_kind_is_refused_rather_than_silently_ignored(app, monkeypatch):
+    """Quietly falling back to branches when asked for something else would
+    show a branch list under a heading that says Tag."""
+    from api.services.ci import catalog
+    from tests.fixtures import fake_source
+
+    credential_id = _wizard_service(app, monkeypatch)
+    with pytest.raises(catalog.CatalogError) as exc:
+        catalog.preview_revisions(
+            {
+                "repositoryUrl": "https://fake.test/acme/app",
+                "credentialProfileId": credential_id,
+                "repositoryProvider": fake_source.PROVIDER,
+                "kinds": ["everything"],
+            }
+        )
+    assert "branch" in str(exc.value)
+
+
+def test_the_preview_route_is_read_only_and_creates_nothing(client, admin_token, app):
+    """Asking what a repository contains must not register anything."""
+    from api.models_ci import CiService
+    from tests.conftest import auth_headers
+    from tests.fixtures import fake_source
+
+    credential_id = _wizard_service(app, None)
+    fake_source.FAKE.load(fake_source.JAVA_GRADLE)
+    before = CiService.query.count()
+
+    response = client.post(
+        "/api/ci/source/revisions",
+        json={
+            "repositoryUrl": "https://fake.test/acme/app",
+            "credentialProfileId": credential_id,
+            "repositoryProvider": fake_source.PROVIDER,
+            "kinds": ["branch"],
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    assert response.get_json()["data"]["kinds"] == ["branch"]
+    assert CiService.query.count() == before

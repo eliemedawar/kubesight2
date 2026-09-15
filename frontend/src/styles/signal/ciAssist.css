@@ -641,3 +641,29 @@
     flex-wrap: wrap;
   }
 }
+
+/* Branch-or-tag choice, inline with the field label. Only the chosen kind is
+   ever fetched, so the control is the request as much as it is a filter. */
+.sg-ci-wizard-reflabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.sg-ci-wizard-refkind {
+  display: inline-flex;
+  gap: 0.15rem;
+}
+
+.sg-ci-wizard-refkind .sg-cat-tab {
+  padding: 0.12rem 0.45rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.sg-ci-wizard-refkind .sg-cat-tab svg {
+  width: 0.72rem;
+  height: 0.72rem;
+}
