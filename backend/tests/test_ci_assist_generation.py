@@ -78,10 +78,15 @@ class FakeHermes:
             raise response
         return schema.validate_response(copy.deepcopy(response)), "fake-model", "fake-v1"
 
-    def _propose(self, *, evidence, capabilities, profile_hint=None):
+    def _propose(self, *, evidence, capabilities, profile_hint=None, feedback=None):
         return self._next(
             "propose",
-            {"evidence": evidence, "capabilities": capabilities, "hint": profile_hint},
+            {
+                "evidence": evidence,
+                "capabilities": capabilities,
+                "hint": profile_hint,
+                "feedback": feedback,
+            },
         )
 
     def _repair(self, *, evidence, capabilities, previous, errors, profile_hint=None):
@@ -957,3 +962,90 @@ def test_one_analysis_at_a_time_per_service(service, monkeypatch):
     with pytest.raises(analyses_service.AnalysisError) as exc:
         analyses_service.request_analysis(service, {})
     assert "already running" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# A malformed answer
+# ---------------------------------------------------------------------------
+
+class RawHermes:
+    """Returns responses that have NOT been through the contract validator.
+
+    FakeHermes validates on the way out, which is right for testing the
+    pipeline logic but hides the case where the model writes something the
+    contract rejects outright. This one lets that through.
+    """
+
+    def __init__(self, *payloads):
+        self.payloads = list(payloads)
+        self.calls = []
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(hermes, "propose", self._propose)
+        return self
+
+    def _propose(self, *, evidence, capabilities, profile_hint=None, feedback=None):
+        self.calls.append({"kind": "propose", "feedback": feedback})
+        payload = self.payloads.pop(0)
+        try:
+            return schema.validate_response(copy.deepcopy(payload)), "fake-model", "fake-v1"
+        except schema.ContractError as exc:
+            raise hermes.ContractFailure(str(exc)) from exc
+
+
+def nameless_stage_response():
+    """What a real Hermes returned: a stage with no name."""
+    return response(
+        {"language": "java", "buildSystem": "gradle", "packaging": "jar"},
+        [{"stageType": "checkout", "runnerLabels": ["linux"], "commands": []}],
+    )
+
+
+def good_response_for_contract():
+    return response(
+        {"language": "java", "buildSystem": "gradle", "packaging": "jar"},
+        [
+            checkout(),
+            {"name": "Build", "stageType": "command", "buildEnvironment": "java-jdk11",
+             "runnerLabels": ["linux", "java"], "commands": ["./gradlew build"]},
+        ],
+    )
+
+
+def test_a_malformed_response_is_asked_about_rather_than_given_up_on(service, monkeypatch):
+    """A whole repository analysis must not be lost because one stage came back
+    without a name. The contract stays strict — nothing unreadable is accepted —
+    but the objection is a sentence a model acts on, so it is put to it."""
+    fake = RawHermes(nameless_stage_response(), good_response_for_contract()).install(monkeypatch)
+    fake_source.FAKE.load(fake_source.JAVA_GRADLE)
+    started = analyses_service.request_analysis(service, {})
+    generator.run(started["id"])
+    row = db.session.get(CiRepositoryAnalysis, started["id"])
+    db.session.refresh(row)
+
+    assert row.state == "analyzed"
+    assert len(fake.calls) == 2
+    # The second ask carried the objection, rather than being the same request
+    # sent again in the hope of a different answer.
+    assert fake.calls[0]["feedback"] is None
+    assert "no name" in fake.calls[1]["feedback"][0]["message"]
+    assert row.attempts[0]["note"] == "malformed response"
+
+
+def test_a_model_that_keeps_answering_malformed_fails_with_the_reason(service, monkeypatch):
+    """Bounded, like every other loop here — and the message says both what was
+    wrong and that asking again did not help."""
+    monkeypatch.setenv("CI_ASSIST_REPAIR_ATTEMPTS", "1")
+    fake = RawHermes(nameless_stage_response(), nameless_stage_response()).install(monkeypatch)
+    fake_source.FAKE.load(fake_source.JAVA_GRADLE)
+    started = analyses_service.request_analysis(service, {})
+    generator.run(started["id"])
+    row = db.session.get(CiRepositoryAnalysis, started["id"])
+    db.session.refresh(row)
+
+    assert row.state == "failed"
+    assert len(fake.calls) == 2
+    assert "no name" in row.safe_error_message
+    assert "asked again" in row.safe_error_message
+    # And the service is left usable, as every failure path must.
+    assert db.session.get(CiService, service.id).analysis_state == "failed"

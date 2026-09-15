@@ -15,6 +15,13 @@ The one addition on top of the shared transport is the repair turn. A rejected
 pipeline goes back with the validator's errors and nothing else — no file
 contents re-derived, no secret, nothing that was not already shown to the user.
 A repair prompt must not become a second, quieter channel out of KubeSight.
+
+A contract violation is never retried SILENTLY — reissuing the same request
+until a malformed response happens to come back well-formed is how a schema
+stops meaning anything. It is fed back instead: :class:`ContractFailure`
+carries the objection out to the generator, which asks again with the problem
+stated. "Proposed stage 1 has no name" is precisely the kind of thing a model
+fixes when told, and precisely the wrong thing to lose a whole analysis over.
 """
 
 from __future__ import annotations
@@ -38,6 +45,19 @@ from ..application_intelligence_hermes import (  # noqa: F401
 )
 from ..application_intelligence_security import bounded_json_bytes, redact_structure
 from . import schema
+
+
+class ContractFailure(HermesError):
+    """The response did not match the contract, and the reason is actionable.
+
+    Distinct from HermesError so the generator can tell "the model wrote
+    something malformed" (worth stating and asking again) from "the gateway is
+    unreachable" (nothing to say to it).
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.detail = message
 
 SYSTEM_PROMPT = """You are KubeSight's non-interactive CI pipeline planner.
 Return exactly one JSON object matching the supplied template. No prose, no Markdown.
@@ -215,7 +235,9 @@ def _attempt(message: Dict[str, Any], *, repair: bool) -> Dict[str, Any]:
             if index + 1 >= attempts:
                 raise
         except schema.ContractError as exc:
-            raise HermesError(str(exc)) from exc
+            # Actionable, so it leaves here as something the caller can put in
+            # front of the model — not as the end of the analysis.
+            raise ContractFailure(str(exc)) from exc
     raise last or HermesError("Hermes pipeline generation failed.")
 
 
@@ -224,6 +246,7 @@ def propose(
     evidence: Dict[str, Any],
     capabilities: Dict[str, Any],
     profile_hint: Optional[Dict[str, Any]] = None,
+    feedback: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[Dict[str, Any], str, str]:
     """Ask for an application profile and a pipeline. Returns (result, model, prompt).
 
@@ -252,6 +275,16 @@ def propose(
                 "contradict or re-detect them; build the pipeline around them."
             ),
             "profile": profile_hint,
+        }
+    if feedback:
+        # A previous answer did not match the contract. Saying what was wrong
+        # is the difference between asking again and asking again usefully.
+        message["previousAttemptRejected"] = {
+            "instruction": (
+                "Your previous response was rejected before it could be read. "
+                "Fix exactly this and return the full object again."
+            ),
+            "errors": feedback,
         }
     return _attempt(message, repair=False), _model(), schema.PROMPT_VERSION
 

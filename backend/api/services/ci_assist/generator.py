@@ -58,6 +58,12 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _model_name() -> str:
+    from . import hermes as hermes_module
+
+    return hermes_module._model()
+
+
 def repair_attempts() -> int:
     try:
         value = int(os.getenv("CI_ASSIST_REPAIR_ATTEMPTS", "").strip() or DEFAULT_REPAIR_ATTEMPTS)
@@ -323,20 +329,58 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
     capabilities = capabilities_payload()
 
     # --- Propose ----------------------------------------------------------
+    #
+    # A malformed answer is asked about, not given up on. The contract is still
+    # strict — nothing unreadable is ever accepted — but "stage 1 has no name"
+    # is a sentence a model acts on, and losing a whole repository analysis to
+    # it would make the feature feel arbitrary.
     _step(row, "generating")
-    try:
-        result, model, prompt_version = hermes.propose(
-            evidence=payload, capabilities=capabilities, profile_hint=hint
-        )
-    except HermesError as exc:
-        _record_attempt(row, kind="propose", model="", errors=[], note="failed")
-        _finish(
-            row,
-            "failed",
-            failure_stage="Generating pipeline",
-            message=safe_error(exc, "Hermes could not complete the analysis."),
-        )
-        return
+    feedback: List[Dict[str, str]] = []
+    result = model = prompt_version = None
+    for remaining in range(repair_attempts(), -1, -1):
+        try:
+            result, model, prompt_version = hermes.propose(
+                evidence=payload,
+                capabilities=capabilities,
+                profile_hint=hint,
+                feedback=feedback or None,
+            )
+            break
+        except hermes.ContractFailure as exc:
+            objection = {"code": "contract", "stage": "", "field": "", "message": str(exc)}
+            _record_attempt(
+                row,
+                kind="propose",
+                model=_model_name(),
+                errors=[objection],
+                note="malformed response",
+            )
+            if not remaining:
+                _finish(
+                    row,
+                    "failed",
+                    failure_stage="Generating pipeline",
+                    message=(
+                        f"{exc} Hermes was asked again with the problem stated and "
+                        "still did not return a usable pipeline. Configure the "
+                        "service manually, or retry."
+                    ),
+                )
+                return
+            feedback = [objection]
+            if _cancelled(row):
+                _finish(row, "cancelled", failure_stage="Generating pipeline")
+                return
+        except HermesError as exc:
+            # Nothing to say to an unreachable gateway.
+            _record_attempt(row, kind="propose", model="", errors=[], note="failed")
+            _finish(
+                row,
+                "failed",
+                failure_stage="Generating pipeline",
+                message=safe_error(exc, "Hermes could not complete the analysis."),
+            )
+            return
 
     row.hermes_model = model
     row.hermes_prompt_version = prompt_version
@@ -395,6 +439,9 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
                 profile_hint=hint or detected,
             )
         except HermesError as exc:
+            # Including a malformed correction: the proposal that already
+            # passed the contract stays on the row as a `partial`, which is
+            # more useful than discarding it because round two was unreadable.
             _record_attempt(row, kind="repair", model=model, errors=[], note=safe_error(exc))
             break
 

@@ -678,7 +678,10 @@ def preview_branches(payload: Dict[str, Any]) -> Dict[str, Any]:
     if credential is None:
         raise CatalogError("Select a source credential profile.")
 
-    revisions = handler.list_revisions(ref, credential)
+    # Branches only: this fills a branch picker, and a repository with 450 tags
+    # would otherwise spend five more pages of somebody's time on a list this
+    # control never shows.
+    revisions = handler.list_revisions(ref, credential, kinds=("branch",))
     return {
         "items": [
             {

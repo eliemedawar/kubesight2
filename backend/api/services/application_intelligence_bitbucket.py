@@ -18,7 +18,7 @@ MAX_REF_ITEMS = 200
 # branches spent 176 of its 200 slots on tags and showed 24 branches. The
 # branch a person wanted was usually not in the list, and nothing said so.
 MAX_BRANCH_ITEMS = 500
-MAX_TAG_ITEMS = 300
+MAX_TAG_ITEMS = 500
 MAX_REF_PAGES = 12
 MAX_COMMIT_ITEMS = 25
 MAX_TREE_ITEMS = 5_000
@@ -31,7 +31,13 @@ _REF_SORT = "-target.date"
 
 
 class BitbucketMetadataError(RuntimeError):
-    pass
+    """Bitbucket could not answer. ``status`` is the HTTP code where there was
+    one, and None for a timeout or a connection failure — the difference decides
+    whether retrying a variant of the request is sensible or just rude."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -111,7 +117,7 @@ def _request_json(
             message = "Bitbucket rate-limited the metadata request. Try again shortly."
         else:
             message = "Bitbucket metadata could not be loaded."
-        raise BitbucketMetadataError(message) from exc
+        raise BitbucketMetadataError(message, status=exc.code) from exc
     except (URLError, TimeoutError) as exc:
         raise BitbucketMetadataError(
             "Bitbucket metadata is temporarily unavailable."
@@ -190,7 +196,13 @@ def _collect_refs(
             credential_type=credential_type,
             principal=principal,
         )
-    except BitbucketMetadataError:
+    except BitbucketMetadataError as exc:
+        # Only retry when Bitbucket REJECTED the request — a 4xx that is not
+        # about the credential is what an unsupported sort field looks like.
+        # A timeout, a 5xx or a rate limit means the endpoint is struggling,
+        # and immediately asking it the same thing again makes that worse.
+        if exc.status is None or exc.status in (401, 403, 404, 429) or exc.status >= 500:
+            raise
         return _collect(
             f"{base}/refs/{kind}?{urlencode({'pagelen': 100})}",
             token,
@@ -207,25 +219,41 @@ def list_revisions(
     token: str,
     credential_type: str = "oauth",
     principal: str = "",
+    kinds: tuple = ("branch", "tag", "commit"),
 ) -> dict:
+    """Branches, tags and recent commits — or only the kinds asked for.
+
+    ``kinds`` exists because the callers genuinely differ: Run Build offers all
+    three, while a branch picker wants branches. Fetching five pages of tags to
+    fill a branch dropdown is several seconds of somebody's time spent on a list
+    they will not open.
+    """
     base = f"{API_ORIGIN}/2.0/repositories/{repository_ref}"
-    branch_rows = _collect_refs(
-        base,
-        "branches",
-        token,
-        repository_ref,
-        limit=MAX_BRANCH_ITEMS,
-        credential_type=credential_type,
-        principal=principal,
+    branch_rows = (
+        _collect_refs(
+            base,
+            "branches",
+            token,
+            repository_ref,
+            limit=MAX_BRANCH_ITEMS,
+            credential_type=credential_type,
+            principal=principal,
+        )
+        if "branch" in kinds
+        else []
     )
-    tag_rows = _collect_refs(
-        base,
-        "tags",
-        token,
-        repository_ref,
-        limit=MAX_TAG_ITEMS,
-        credential_type=credential_type,
-        principal=principal,
+    tag_rows = (
+        _collect_refs(
+            base,
+            "tags",
+            token,
+            repository_ref,
+            limit=MAX_TAG_ITEMS,
+            credential_type=credential_type,
+            principal=principal,
+        )
+        if "tag" in kinds
+        else []
     )
     # Each row already knows which endpoint it came from; the /refs payload's
     # own `type` field is not relied on, so a provider that stops setting it
@@ -233,14 +261,18 @@ def list_revisions(
     refs = [{**row, "type": "branch"} for row in branch_rows]
     refs += [{**row, "type": "tag"} for row in tag_rows]
 
-    commits = _collect(
-        f"{base}/commits?{urlencode({'pagelen': MAX_COMMIT_ITEMS})}",
-        token,
-        repository_ref,
-        limit=MAX_COMMIT_ITEMS,
-        max_pages=1,
-        credential_type=credential_type,
-        principal=principal,
+    commits = (
+        _collect(
+            f"{base}/commits?{urlencode({'pagelen': MAX_COMMIT_ITEMS})}",
+            token,
+            repository_ref,
+            limit=MAX_COMMIT_ITEMS,
+            max_pages=1,
+            credential_type=credential_type,
+            principal=principal,
+        )
+        if "commit" in kinds
+        else []
     )
 
     options = []
@@ -275,7 +307,16 @@ def list_revisions(
                 "commit": commit_hash,
             }
         )
-    return {"items": options, "count": len(options)}
+    return {
+        "items": options,
+        "count": len(options),
+        # A budget that bit is worth saying: the list is the newest N, and
+        # anything older is reachable by typing it rather than picking it.
+        "truncated": {
+            "branches": len(branch_rows) >= MAX_BRANCH_ITEMS,
+            "tags": len(tag_rows) >= MAX_TAG_ITEMS,
+        },
+    }
 
 
 def list_tree(

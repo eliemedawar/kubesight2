@@ -51,11 +51,17 @@ class BitbucketSourceProvider:
             )
         return token, credential.credential_type, (credential.principal or "")
 
-    def list_revisions(self, ref: RepositoryRef, credential) -> List[RevisionOption]:
+    def list_revisions(
+        self, ref: RepositoryRef, credential, kinds: tuple = ()
+    ) -> List[RevisionOption]:
         token, credential_type, principal = self._credential_parts(credential)
         try:
             payload = list_revisions(
-                ref.full_name, token, credential_type, principal
+                ref.full_name,
+                token,
+                credential_type,
+                principal,
+                kinds=tuple(kinds) or ("branch", "tag", "commit"),
             )
         except BitbucketMetadataError as exc:
             raise SourceError(str(exc)) from exc

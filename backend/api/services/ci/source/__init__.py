@@ -85,8 +85,14 @@ class SourceProvider(Protocol):
     def parse_repository_url(self, url: str) -> RepositoryRef:
         """Normalize and validate a repository URL. Raises ValueError."""
 
-    def list_revisions(self, ref: RepositoryRef, credential) -> List[RevisionOption]:
-        """Branches, tags, and recent commits. Raises :class:`SourceError`."""
+    def list_revisions(
+        self, ref: RepositoryRef, credential, kinds: tuple = ()
+    ) -> List[RevisionOption]:
+        """Branches, tags, and recent commits. Raises :class:`SourceError`.
+
+        ``kinds`` narrows the fetch for callers that only need one — a branch
+        picker should not pay for five pages of tags.
+        """
 
     def verify_access(self, ref: RepositoryRef, credential) -> Dict[str, Any]:
         """Confirm the credential can read the repository."""

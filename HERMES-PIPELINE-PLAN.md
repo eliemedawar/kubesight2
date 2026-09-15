@@ -807,6 +807,17 @@ be generated until the fleet was fully set up — exactly backwards. The error n
 means "nothing in the fleet has ever heard of this capability"; *disabled* and
 *offline* are warnings that say what to do.
 
+**Unknown fields split into two cases.** The design made every unknown stage
+field a hard error, on the argument that silently dropping `privileged: true`
+lets somebody approve a pipeline whose review screen never showed it. That
+argument holds for privilege and nothing else — in practice the rule refused a
+perfectly good pipeline because Hermes wrote `type` instead of `stageType`.
+Synonyms are now normalized (`type`, `script`, `timeout`, snake_case), genuinely
+unsupported cosmetic fields are dropped with a visible warning, and a denylist
+of ~25 privilege-bearing names (`privileged`, `hostPath`, `securityContext`,
+`serviceAccount`, `volumes`, `nodeSelector`, …) stays a hard error. The prompt
+now also states the exact camelCase field names.
+
 **Command credential detection needed its own pattern.** The shared redaction
 patterns are tuned for configuration files — an uppercase assignment at the
 start of a line, or a quoted value. A build command is neither, and
@@ -826,6 +837,36 @@ It runs when somebody asks for an analysis, which is also the only moment anyone
 cares whether it is alive, plus once at worker-pool startup.
 
 ## Bugs found and fixed along the way
+
+* **Most branches were missing from every branch picker (pre-existing, live).**
+  `list_revisions` made ONE `/refs` call capped at 200 items sorted by name, so
+  branches and tags competed for the same budget. A repository with 291 tags and
+  216 branches showed **24 branches** — in the Source tab, in Run Build, in
+  `dynamic_choice` parameters, everywhere. The branch somebody wanted was usually
+  absent and nothing said so. Branches and tags now come from `/refs/branches`
+  and `/refs/tags` with a budget each (500/500), sorted newest-first so any
+  future truncation drops stale refs rather than everything after "f" in the
+  alphabet, and the payload reports `truncated` per kind.
+* **The branch picker paid for tags it never showed.** `list_revisions` now
+  takes `kinds`, and the wizard's preview asks for branches only — 2.5s instead
+  of ~10s on a repository with 450 tags.
+* **A malformed Hermes response ended the whole analysis.** A contract violation
+  ("Proposed stage 1 has no name") was deliberately non-retryable, which was
+  right about not *silently* re-issuing the same request and wrong about giving
+  up. It is now fed back — `hermes.ContractFailure` carries the objection to the
+  generator, which asks again with the problem stated, bounded by the same
+  attempt budget.
+* **The sort fallback retried rate limits.** An unsupported `sort` field falls
+  back to the unsorted endpoint, but the original `except` caught every error —
+  so a 429 or a timeout was immediately retried, making a struggling endpoint
+  worse. `BitbucketMetadataError` now carries the HTTP status and only an
+  outright rejection triggers the fallback.
+* **`analysis_state` on the service could disagree with the analysis row.** It
+  was set to `analyzing` at the start and never reset on failure, so the catalog
+  showed a spinner beside a row that had finished.
+* **A refusal still said "before KubeSight accepted it."** The provenance line
+  contradicted the verdict directly above it.
+
 
 * **`java11` labels (pre-existing).** `templates.py` labelled every Java
   starter-kit stage `["linux", "java11"]`, which no runner advertises — applying

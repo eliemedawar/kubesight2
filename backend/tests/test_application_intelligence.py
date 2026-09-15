@@ -445,21 +445,13 @@ def test_bitbucket_metadata_normalizes_bounded_options(monkeypatch):
     ):
         assert token == "read-token"
         assert repository_ref == "workspace/repository"
-        if "/refs?" in url:
-            return {
-                "values": [
-                    {
-                        "type": "branch",
-                        "name": "main",
-                        "target": {"hash": "a" * 40},
-                    },
-                    {
-                        "type": "tag",
-                        "name": "v1.2.3",
-                        "target": {"hash": "b" * 40},
-                    },
-                ]
-            }
+        # Branches and tags come from their own endpoints, each with its own
+        # budget, so a repository with hundreds of tags cannot crowd out the
+        # branches — see test_ci_source_revisions.
+        if "/refs/branches" in url:
+            return {"values": [{"name": "main", "target": {"hash": "a" * 40}}]}
+        if "/refs/tags" in url:
+            return {"values": [{"name": "v1.2.3", "target": {"hash": "b" * 40}}]}
         if "/commits?" in url:
             return {
                 "values": [
