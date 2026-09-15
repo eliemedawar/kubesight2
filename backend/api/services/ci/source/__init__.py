@@ -49,6 +49,24 @@ class RevisionOption:
 
 
 @dataclass
+class TreeListing:
+    """Every file path in a repository at one revision.
+
+    ``truncated`` says the walk hit its own ceiling rather than the end of the
+    tree. Anything reasoning about "this repository has no X" must check it
+    first — on a truncated listing an absent path means "not seen", not
+    "not there".
+    """
+
+    revision: str
+    paths: List[str] = field(default_factory=list)
+    truncated: bool = False
+
+    def has(self, path: str) -> bool:
+        return path in set(self.paths)
+
+
+@dataclass
 class CheckoutSpec:
     """What a runner needs to clone. Assembled at dispatch, never persisted."""
 
@@ -75,6 +93,9 @@ class SourceProvider(Protocol):
 
     def read_file(self, ref: RepositoryRef, credential, revision: str, path: str) -> str:
         """One file's text at one revision. Raises :class:`SourceError`."""
+
+    def list_tree(self, ref: RepositoryRef, credential, revision: str) -> "TreeListing":
+        """Every file path at one revision, without cloning."""
 
     def checkout_spec(
         self, ref: RepositoryRef, credential, revision: str, working_directory=None

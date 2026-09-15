@@ -353,6 +353,11 @@ def _apply_identity(row: CiService, payload: Dict[str, Any], *, creating: bool) 
         row.criticality = criticality
 
     if creating or "applicationType" in payload:
+        # Editable after registration since assisted configuration landed: an
+        # analysis that establishes this is Gradle rather than Maven has to be
+        # able to say so, and a user correcting it has to be able to as well.
+        # Changing it only changes what the STARTER kit and the unsaved fallback
+        # would produce — a pipeline already saved is never rewritten by it.
         app_type = _clean(payload.get("applicationType"), 32).lower() or "generic"
         if app_type not in APPLICATION_TYPES:
             raise CatalogError(
@@ -515,6 +520,44 @@ def update_service(row: CiService, payload: Dict[str, Any], *, actor=None) -> Di
         target_type="ci_service",
         target_id=str(row.id),
         details={"name": row.name, "slug": row.slug, "status": row.status},
+    )
+    return service_detail(row)
+
+
+def update_application_profile(
+    row: CiService, resolved_profile: Dict[str, Any], *, actor=None
+) -> Dict[str, Any]:
+    """Record what this application is, and re-derive the type from it.
+
+    The profile is validated by its own module before it arrives here — this
+    only stores it and keeps ``application_type`` consistent with it, because
+    every existing reader (templates, fallback pipelines, icons, readiness)
+    still asks that field and must not start disagreeing with the detail.
+    """
+    if not isinstance(resolved_profile, dict) or not resolved_profile:
+        raise CatalogError("An application profile is required.")
+
+    row.application_profile = resolved_profile
+    row.profile_source = resolved_profile.get("source") or "manual"
+    derived = _clean(resolved_profile.get("derivedApplicationType"), 32).lower()
+    if derived and derived in APPLICATION_TYPES:
+        row.application_type = derived
+    if not row.analysis_state:
+        row.analysis_state = "analyzed"
+    row.updated_at = datetime.now(timezone.utc)
+    db.session.add(row)
+    db.session.commit()
+    log_audit(
+        "ci_application_profile_updated",
+        actor=actor,
+        target_type="ci_service",
+        target_id=str(row.id),
+        details={
+            "service": row.slug,
+            "source": row.profile_source,
+            "applicationType": row.application_type,
+            "overridden": sorted((resolved_profile.get("overrides") or {}).keys()),
+        },
     )
     return service_detail(row)
 

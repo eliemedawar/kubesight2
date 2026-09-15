@@ -116,7 +116,6 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
             <select
               value={form.applicationType}
               onChange={(event) => set("applicationType", event.target.value)}
-              disabled={isEdit}
             >
               {/* Legacy types stay selectable only for a service that already
                   carries one, so editing it does not silently retype it. */}
@@ -136,8 +135,8 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
             )}
             {isEdit && (
               <span className="field-hint">
-                Fixed after registration — it decided the starter pipeline and
-                Dockerfile.
+                Changing this changes the starter kit and the fallback pipeline.
+                A pipeline you have already saved is never rewritten by it.
               </span>
             )}
           </label>

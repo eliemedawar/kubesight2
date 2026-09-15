@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getCiServiceSummary, listCiPipelines, updateCiService } from "../api/ciApi.js";
+import { getCiAssistAvailability } from "../api/ciAssistApi.js";
 import { useAuth } from "../context/AuthContext";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
@@ -7,6 +8,7 @@ import ArtifactsPanel from "../components/catalog/ArtifactsPanel.jsx";
 import BuildDetailDrawer from "../components/catalog/BuildDetailDrawer.jsx";
 import BuildsPanel from "../components/catalog/BuildsPanel.jsx";
 import DockerfilePanel from "../components/catalog/DockerfilePanel.jsx";
+import HermesAnalysisPanel from "../components/catalog/HermesAnalysisPanel.jsx";
 import PipelineEditor from "../components/catalog/PipelineEditor.jsx";
 import RunBuildModal from "../components/catalog/RunBuildModal.jsx";
 import ServiceFormModal from "../components/catalog/ServiceFormModal.jsx";
@@ -18,6 +20,9 @@ import { PlayIcon, StatusPill } from "../components/catalog/ciShared.jsx";
 const TABS = [
   ["overview", "Overview"],
   ["source", "Source"],
+  // Between Source and Pipeline because that is the order the questions come
+  // in: where the code is, what it is, then how to build it.
+  ["application", "Application"],
   ["pipeline", "Pipeline"],
   ["dockerfile", "Dockerfile"],
   ["builds", "Builds"],
@@ -49,6 +54,9 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
 
   const [summary, setSummary] = useState(null);
   const [stages, setStages] = useState([]);
+  // Whether the assisted path may be offered at all. Asked once, here, so the
+  // Application tab can show a reason instead of a control that fails.
+  const [assist, setAssist] = useState(null);
   const [tab, setTab] = useState(initialTab || "overview");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -77,6 +85,14 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    getCiAssistAvailability()
+      .then(setAssist)
+      .catch(() =>
+        setAssist({ available: false, reason: "Hermes could not be reached." })
+      );
+  }, []);
 
   const service = summary?.service;
 
@@ -211,6 +227,20 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             canEdit={can.edit}
             canManageSecrets={can.manageSecrets}
             onSaved={() => load()}
+          />
+        )}
+        {tab === "application" && (
+          <HermesAnalysisPanel
+            service={service}
+            availability={assist}
+            canEdit={can.editPipeline}
+            onAccepted={() => {
+              // The proposal is now an ordinary pipeline. Land on it, so what
+              // was approved is the first thing seen afterwards.
+              setTab("pipeline");
+              load();
+            }}
+            onConfigureManually={() => setTab("pipeline")}
           />
         )}
         {tab === "pipeline" && (

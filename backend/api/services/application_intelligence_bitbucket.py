@@ -207,21 +207,35 @@ def list_revisions(
     return {"items": options, "count": len(options)}
 
 
-def list_dockerfiles(
+def list_tree(
     repository_ref: str,
     token: str,
     revision: str,
     credential_type: str = "oauth",
     principal: str = "",
+    *,
+    max_depth: int = 8,
 ) -> dict:
+    """Every file path in the repository at one revision.
+
+    One paginated walk of ``/src/<rev>/`` — the same call Dockerfile discovery
+    has always made, lifted out so anything that needs to know the SHAPE of a
+    repository (which build files exist, whether there is a wrapper, how many
+    modules) can have it without a clone.
+
+    ``truncated`` is true when the walk hit its own ceiling rather than the end
+    of the tree. A caller must treat an absent path as "not seen", never as
+    "not there", when it is set.
+    """
     clean_revision = _clean_text(revision, 256)
     if not clean_revision or any(ord(char) < 32 for char in clean_revision):
         raise ValueError("A valid branch, tag, or commit is required.")
+    depth = max(1, min(int(max_depth or 8), 20))
     encoded_revision = quote(clean_revision, safe="")
     base = f"{API_ORIGIN}/2.0/repositories/{repository_ref}"
     tree = _collect(
         f"{base}/src/{encoded_revision}/?"
-        f"{urlencode({'pagelen': 100, 'max_depth': 8})}",
+        f"{urlencode({'pagelen': 100, 'max_depth': depth})}",
         token,
         repository_ref,
         limit=MAX_TREE_ITEMS,
@@ -234,18 +248,41 @@ def list_dockerfiles(
         if item.get("type") != "commit_file":
             continue
         path = _clean_text(item.get("path"), 1024).replace("\\", "/").strip("/")
-        filename = path.rsplit("/", 1)[-1].lower()
-        if (
-            path
-            and (
-                filename == "dockerfile"
-                or filename.startswith("dockerfile.")
-                or filename.endswith(".dockerfile")
-            )
-        ):
+        if path:
             paths.add(path)
-    items = [{"value": path, "label": path} for path in sorted(paths)]
-    return {"items": items, "count": len(items), "revision": clean_revision}
+    return {
+        "paths": sorted(paths),
+        "count": len(paths),
+        "revision": clean_revision,
+        "truncated": len(tree) >= MAX_TREE_ITEMS,
+    }
+
+
+def _is_dockerfile(path: str) -> bool:
+    filename = path.rsplit("/", 1)[-1].lower()
+    return (
+        filename == "dockerfile"
+        or filename.startswith("dockerfile.")
+        or filename.endswith(".dockerfile")
+    )
+
+
+def list_dockerfiles(
+    repository_ref: str,
+    token: str,
+    revision: str,
+    credential_type: str = "oauth",
+    principal: str = "",
+) -> dict:
+    tree = list_tree(
+        repository_ref, token, revision, credential_type, principal
+    )
+    items = [
+        {"value": path, "label": path}
+        for path in tree["paths"]
+        if _is_dockerfile(path)
+    ]
+    return {"items": items, "count": len(items), "revision": tree["revision"]}
 
 
 # A source file read whole, rather than metadata about it. Capped well below

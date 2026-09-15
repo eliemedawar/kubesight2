@@ -321,6 +321,12 @@ def create_app(config_object=None) -> Flask:
         from .services.ci.ticker import start_ci_engine
 
         start_ci_engine(app)
+        # Repository analysis runs off the request thread: reading a repository
+        # and asking Hermes takes tens of seconds, and a held-open HTTP request
+        # loses that work to any proxy timeout or page refresh.
+        from .services.ci_assist.jobs import start as start_ci_assist
+
+        start_ci_assist(app)
         # Pre-populate kubectl-backed caches so the first tab clicks after
         # startup hit warm data instead of paying multi-second cold loads.
         from .cache_warmer import warm_caches_async

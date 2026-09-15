@@ -60,7 +60,15 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
+
+# Keep agent data off root's small filesystem by default. The directory remains
+# configurable from KubeSight, --workspace, or KUBESIGHT_AGENT_WORKSPACE.
+DEFAULT_WORKSPACE = os.getenv(
+    "KUBESIGHT_AGENT_WORKSPACE", "/data/kubesight-agent"
+).strip() or "/data/kubesight-agent"
+WORKSPACE_MARKER = ".kubesight-agent-workspace"
+DEFAULT_WORKSPACE_RETENTION_HOURS = 24.0
 
 # Runtimes to look for, in order. Podman's CLI is compatible with the subset
 # used here, and rootless podman maps the container user to the invoking user,
@@ -254,6 +262,85 @@ def prune_containers(shipper=None) -> None:
             shipper.add(message)
     except Exception as exc:
         print("[agent] container cleanup failed: %s" % exc, file=sys.stderr)
+
+
+def build_workspace(root: str, workspace_ref: Any) -> str:
+    """Return one direct child of ``root``, refusing path traversal.
+
+    Workspace names normally come from KubeSight as ``service-buildNumber``.
+    Treating that value as an arbitrary path would let a malformed task make
+    cleanup remove something outside the agent's data directory.
+    """
+    root_path = os.path.realpath(os.path.abspath(root))
+    name = str(workspace_ref or "build").strip()
+    if not name or os.path.isabs(name):
+        raise RuntimeError("Invalid build workspace name: %s" % name)
+    candidate = os.path.realpath(os.path.join(root_path, name))
+    if os.path.dirname(candidate) != root_path:
+        raise RuntimeError("Build workspace must be directly under %s" % root_path)
+    return candidate
+
+
+def mark_workspace(workspace: str) -> None:
+    """Mark/touch an agent-owned build directory for crash cleanup."""
+    marker = os.path.join(workspace, WORKSPACE_MARKER)
+    with open(marker, "a"):
+        os.utime(marker, None)
+
+
+def remove_build_workspace(root: str, workspace_ref: Any, shipper=None) -> bool:
+    """Remove exactly one completed build workspace, never the root/cache."""
+    try:
+        workspace = build_workspace(root, workspace_ref)
+        if not os.path.lexists(workspace):
+            return False
+        if os.path.islink(workspace):
+            raise RuntimeError("refusing to clean a symlink")
+        shutil.rmtree(workspace)
+        message = "[agent] cleaned completed workspace %s" % workspace
+        print(message)
+        if shipper is not None:
+            shipper.add(message)
+        return True
+    except Exception as exc:
+        print("[agent] workspace cleanup failed for %s: %s" % (workspace_ref, exc),
+              file=sys.stderr)
+        return False
+
+
+def cleanup_stale_workspaces(root: str, max_age_hours: float = 24.0) -> int:
+    """Remove marked workspaces left by a crash or lost final response.
+
+    Only direct children carrying this agent's marker are eligible. The shared
+    ``.cache`` and any unrelated directory under /data are never considered.
+    Markers are touched at both ends of every stage, so a long build is not
+    mistaken for an abandoned one between stages.
+    """
+    if max_age_hours <= 0:
+        return 0
+    cutoff = time.time() - max_age_hours * 3600.0
+    removed = 0
+    try:
+        names = os.listdir(root)
+    except OSError as exc:
+        print("[agent] cannot scan workspaces in %s: %s" % (root, exc), file=sys.stderr)
+        return 0
+    for name in names:
+        try:
+            workspace = build_workspace(root, name)
+            marker = os.path.join(workspace, WORKSPACE_MARKER)
+            if (
+                name == ".cache"
+                or os.path.islink(workspace)
+                or not os.path.isfile(marker)
+                or os.path.getmtime(marker) > cutoff
+            ):
+                continue
+            if remove_build_workspace(root, name):
+                removed += 1
+        except (OSError, RuntimeError):
+            continue
+    return removed
 
 
 def detect_capabilities() -> List[str]:
@@ -564,11 +651,14 @@ def pull_image(runtime: str, image: str, shipper: LogShipper) -> None:
 
 def run_task(client: Client, task: Dict[str, Any], root: str) -> int:
     task_id, claim = task["taskId"], task["claimToken"]
-    workspace = os.path.join(root, str(task.get("workspace") or "build"))
+    workspace_ref = str(task.get("workspace") or "build")
+    workspace = build_workspace(root, workspace_ref)
     os.makedirs(workspace, exist_ok=True)
+    mark_workspace(workspace)
     shipper = LogShipper(client, task_id, claim)
     exit_code, error = 1, None
     started = time.time()
+    cleanup_workspace = False
 
     try:
         if task.get("stageType") == "checkout":
@@ -647,12 +737,19 @@ def run_task(client: Client, task: Dict[str, Any], root: str) -> int:
         exit_code, error = 1, str(exc)
         shipper.add("[agent] %s" % exc, "stderr")
     finally:
+        # A fresh timestamp keeps a multi-stage build safe from the stale sweep
+        # while the server queues its next stage.
+        try:
+            mark_workspace(workspace)
+        except OSError as exc:
+            print("[agent] could not update workspace marker: %s" % exc, file=sys.stderr)
         shipper.close()
         try:
-            client.post_json(
+            response = client.post_json(
                 "/tasks/%d/result" % task_id,
                 {"claimToken": claim, "exitCode": exit_code, "error": error},
             )
+            cleanup_workspace = bool((response or {}).get("cleanupWorkspace"))
         except Exception as exc:
             print("[agent] result post failed: %s" % exc, file=sys.stderr)
         # Printed even under --quiet: the outcome of a stage is the one line
@@ -667,6 +764,10 @@ def run_task(client: Client, task: Dict[str, Any], root: str) -> int:
             ),
             "stdout" if exit_code == 0 else "stderr",
         )
+        # The server only says yes once every stage is terminal. Artifacts and
+        # the result are already safely uploaded before anything is removed.
+        if cleanup_workspace:
+            remove_build_workspace(root, workspace_ref)
     return exit_code
 
 
@@ -730,7 +831,14 @@ def main() -> int:
                         help="Agent token (or set KUBESIGHT_AGENT_TOKEN)")
     parser.add_argument("--workspace", default=None,
                         help="Where builds are checked out. Overrides the path set "
-                             "in KubeSight; without either, ~/kubesight-agent")
+                             "in KubeSight; without either, /data/kubesight-agent")
+    parser.add_argument(
+        "--workspace-retention-hours",
+        type=float,
+        default=os.getenv("KUBESIGHT_AGENT_WORKSPACE_RETENTION_HOURS", "24"),
+        help="Delete marked workspaces left by crashes after this many hours; "
+             "0 disables the stale-workspace sweep (default: 24)",
+    )
     parser.add_argument("--poll", type=float, default=None,
                         help="Seconds between claim attempts when idle. Pins the "
                              "interval; without it KubeSight sets the fleet's")
@@ -755,9 +863,10 @@ def main() -> int:
     # A path given here always wins: the person at the machine knows its disks,
     # and being overruled remotely by a typo would be worse than useless.
     pinned = bool(args.workspace)
-    workspace = args.workspace or os.path.expanduser("~/kubesight-agent")
+    workspace = args.workspace or DEFAULT_WORKSPACE
     workspace_error = ""
     os.makedirs(workspace, exist_ok=True)
+    cleanup_stale_workspaces(workspace, max(0.0, args.workspace_retention_hours))
     global _containers_disabled, _runtime_pinned, _echo_output
     _containers_disabled = bool(args.no_container)
     _runtime_pinned = args.runtime or ""
@@ -823,6 +932,12 @@ def main() -> int:
                 if not accepting:
                     print("[agent] not accepting work (%s)" % state.get("status"))
 
+                # Normal completions clean immediately. This bounded sweep is
+                # the recovery path for a killed agent or lost result response.
+                cleanup_stale_workspaces(
+                    workspace, max(0.0, args.workspace_retention_hours)
+                )
+
                 # Applied between tasks, never underneath one that is running.
                 wanted = str(state.get("workspaceRoot") or "").strip()
                 if wanted and not pinned and wanted != workspace:
@@ -837,6 +952,9 @@ def main() -> int:
                         os.remove(probe)
                         workspace, workspace_error = wanted, ""
                         print("[agent] workspace set by KubeSight: %s" % workspace)
+                        cleanup_stale_workspaces(
+                            workspace, max(0.0, args.workspace_retention_hours)
+                        )
                     except Exception as exc:
                         # Keep building where we are and say why, so the runner
                         # shows the problem instead of silently using elsewhere.

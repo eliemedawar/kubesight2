@@ -1,0 +1,643 @@
+/* Signal page-specific styles — assisted CI configuration.
+
+   The registration wizard, the analysis panel, the application profile, the
+   generated-pipeline review and the required-configuration form. Deliberately
+   shares the panel/card vocabulary from ci.css: a proposed pipeline has to read
+   as the same object the editor shows, not as a separate feature bolted on. */
+
+/* ── Registration wizard ─────────────────────────────────────────── */
+.sg-ci-wizard {
+  max-width: 54rem;
+  width: min(54rem, 94vw);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 90vh;
+}
+
+.sg-ci-wizard-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow: auto;
+  min-height: 0;
+  padding-right: 0.25rem;
+}
+
+.sg-ci-wizard-steps {
+  display: flex;
+  gap: 0.4rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+}
+
+.sg-ci-wizard-steps li {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.sg-ci-wizard-steps li + li::before {
+  content: "\2192";
+  color: var(--border-strong);
+}
+
+.sg-ci-wizard-steps li.is-current {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.sg-ci-wizard-steps li.is-done {
+  color: var(--ok);
+}
+
+/* The one decision on the first screen, so it is a choice between two
+   described things rather than a checkbox somebody skims past. */
+.sg-ci-wizard-method {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: var(--space-2);
+}
+
+.sg-ci-wizard-method > label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.6rem;
+  align-items: start;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  background: var(--bg-panel);
+}
+
+.sg-ci-wizard-method > label.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.sg-ci-wizard-method input[type="radio"] {
+  margin-top: 0.2rem;
+}
+
+.sg-ci-wizard-method strong {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-strong);
+}
+
+.sg-ci-wizard-method em {
+  display: block;
+  margin-top: 0.2rem;
+  font-style: normal;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-subtle);
+}
+
+.sg-ci-wizard-method .sg-ci-wizard-unavailable {
+  color: var(--warn);
+}
+
+.sg-ci-wizard-created {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  background: var(--ok-soft);
+  border: 1px solid var(--ok-border, var(--ok));
+  border-radius: var(--radius-md);
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+/* ── Analysis panel ─────────────────────────────────────────────── */
+.sg-ci-assist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.sg-ci-assist h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.sg-ci-assist-start,
+.sg-ci-assist-failed,
+.sg-ci-assist--off {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+}
+
+.sg-ci-assist-start p,
+.sg-ci-assist-failed p,
+.sg-ci-assist--off p {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  max-width: 44rem;
+}
+
+.sg-ci-assist-start > button + button {
+  margin-top: 0.1rem;
+}
+
+.sg-ci-assist-failed {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.sg-ci-assist-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+/* Progress. The bar tracks the step the worker announced and never animates
+   ahead of one — a bar that moves on its own is a claim nobody checked. */
+.sg-ci-assist-progress {
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+}
+
+.sg-ci-assist-progress p {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+}
+
+.sg-ci-assist-bar {
+  height: 0.35rem;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  overflow: hidden;
+}
+
+.sg-ci-assist-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-full);
+  transition: width 0.4s ease;
+}
+
+.sg-ci-assist-progress button {
+  margin-top: 0.7rem;
+}
+
+.sg-ci-assist-warnings {
+  margin: 0;
+  padding: 0.6rem 0.75rem 0.6rem 1.6rem;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border, var(--warn));
+  border-radius: var(--radius-md);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--text-main);
+}
+
+.sg-ci-assist-provenance {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+}
+
+/* ── Application profile ────────────────────────────────────────── */
+.sg-ci-profile {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+}
+
+.sg-ci-profile-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.sg-ci-profile-head h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.sg-ci-profile-source {
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+}
+
+.sg-ci-profile-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.sg-ci-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.55rem 1.2rem;
+  margin: 0.8rem 0 0;
+}
+
+.sg-ci-profile-grid dt {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.sg-ci-profile-grid dd {
+  margin: 0.15rem 0 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  font-size: 0.84rem;
+  color: var(--text-main);
+}
+
+.sg-ci-profile-ver {
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-main);
+}
+
+/* Where the value was read. The entire argument for trusting a detected
+   profile is that this is checkable, so it is never behind a toggle. */
+.sg-ci-profile-evidence {
+  font-size: 0.68rem;
+  color: var(--text-subtle);
+}
+
+.sg-ci-profile-evidence code {
+  font-size: 0.68rem;
+}
+
+.sg-ci-profile-badge {
+  padding: 0.02rem 0.35rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--accent-border, var(--accent));
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.63rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.sg-ci-profile-signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  margin: 0.85rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.76rem;
+}
+
+.sg-ci-profile-signals li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--text-subtle);
+}
+
+.sg-ci-profile-signals li.is-ok {
+  color: var(--ok);
+}
+
+.sg-ci-profile-unknown {
+  margin: 0.8rem 0 0;
+  padding: 0.45rem 0.6rem;
+  background: var(--warn-soft);
+  border-radius: var(--radius-md);
+  font-size: 0.74rem;
+  color: var(--text-main);
+}
+
+.sg-ci-profile-edit {
+  margin-top: 0.8rem;
+}
+
+.sg-ci-profile-version {
+  margin-top: 0.3rem;
+}
+
+.sg-ci-profile-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.sg-ci-profile-check input {
+  width: auto;
+}
+
+.sg-ci-profile-editactions {
+  display: flex;
+  gap: 0.45rem;
+  justify-content: flex-end;
+}
+
+/* ── Generated pipeline review ──────────────────────────────────── */
+.sg-ci-gen {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.sg-ci-gen-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.sg-ci-gen-head h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.sg-ci-gen-head p {
+  margin: 0.1rem 0 0;
+  font-size: 0.76rem;
+}
+
+.sg-ci-gen-verdict {
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius-md);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+}
+
+.sg-ci-gen-verdict.is-valid {
+  background: var(--ok-soft);
+  border-color: var(--ok-border, var(--ok));
+}
+
+.sg-ci-gen-verdict.is-invalid {
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+
+.sg-ci-gen-findings {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.sg-ci-gen-findings.is-error {
+  color: var(--danger);
+}
+
+.sg-ci-gen-findings.is-warn {
+  color: var(--warn);
+}
+
+.sg-ci-gen-stages {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.sg-ci-gen-stages > li {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.sg-ci-gen-stages > li.has-error {
+  border-color: var(--danger-border);
+}
+
+.sg-ci-gen-stage {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.sg-ci-gen-stage:hover {
+  background: var(--accent-soft);
+}
+
+.sg-ci-gen-num {
+  flex: 0 0 auto;
+  width: 1.4rem;
+  height: 1.4rem;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.sg-ci-gen-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.sg-ci-gen-name em {
+  margin-left: 0.4rem;
+  font-style: normal;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+
+.sg-ci-gen-where {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  font-size: 0.68rem;
+  color: var(--text-subtle);
+}
+
+.sg-ci-gen-where code {
+  font-size: 0.68rem;
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-gen-label {
+  padding: 0.02rem 0.35rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  font-size: 0.63rem;
+}
+
+.sg-ci-gen-timeout {
+  font-variant-numeric: tabular-nums;
+}
+
+.sg-ci-gen-detail {
+  padding: 0 0.7rem 0.7rem;
+  border-top: 1px solid var(--border);
+}
+
+/* Approving a pipeline is approving these lines, so they are shown whole and
+   never summarised behind a details toggle. */
+.sg-ci-gen-commands {
+  margin: 0.55rem 0 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg-code, #0d1117);
+  color: var(--text-code, #d5dbe4);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.7rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+
+.sg-ci-gen-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.7rem;
+  margin: 0.55rem 0 0;
+  font-size: 0.74rem;
+}
+
+.sg-ci-gen-facts dt {
+  color: var(--text-muted);
+}
+
+.sg-ci-gen-facts dd {
+  margin: 0;
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.sg-ci-gen-facts code {
+  font-size: 0.7rem;
+}
+
+/* ── Required configuration ─────────────────────────────────────── */
+.sg-ci-required {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+}
+
+.sg-ci-required > header {
+  margin-bottom: 0.7rem;
+}
+
+.sg-ci-required h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.sg-ci-required > header p {
+  margin: 0.15rem 0 0;
+  font-size: 0.76rem;
+}
+
+.sg-ci-required-none {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--ok-soft);
+  border: 1px solid var(--ok-border, var(--ok));
+  border-radius: var(--radius-md);
+  font-size: 0.78rem;
+}
+
+.sg-ci-required-label {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.sg-ci-required-label em {
+  font-style: normal;
+  color: var(--danger);
+}
+
+.sg-ci-required-label code {
+  font-size: 0.68rem;
+  color: var(--text-subtle);
+}
+
+.sg-ci-required-secret {
+  display: flex;
+  gap: 0.35rem;
+  align-items: stretch;
+}
+
+.sg-ci-required-secret input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sg-ci-required-reason {
+  font-style: italic;
+}
+
+.sg-ci-required-usedby {
+  color: var(--text-subtle);
+}
+
+.sg-ci-required-missing {
+  display: inline-block;
+  margin-top: 0.2rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+@media (max-width: 48rem) {
+  .sg-ci-gen-where {
+    justify-content: flex-start;
+  }
+
+  .sg-ci-gen-stage {
+    flex-wrap: wrap;
+  }
+}

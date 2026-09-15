@@ -32,9 +32,10 @@ for and says so in the stage log rather than failing the build.
 
 from __future__ import annotations
 
-import os
 from copy import deepcopy
 from typing import Any, Dict, List
+
+from . import build_environments
 
 _CHECKOUT = {
     "name": "Checkout",
@@ -107,29 +108,29 @@ def _stage(
 # ---------------------------------------------------------------------------
 # Images
 #
-# Defaults are this installation's own, taken from its repositories rather than
-# guessed: every analysed Java project targets Java 11 and its Dockerfiles run
-# on this exact base, and the cluster pulls from the internal registry because
-# it has no route to Docker Hub. Each is overridable by environment so another
-# installation changes one setting instead of editing every template.
+# Resolved through the build environment catalog rather than held here, so one
+# module decides what a stage is allowed to run on and a generated pipeline
+# cannot name an image of its own. The VALUES are unchanged — the catalog's
+# defaults are exactly the constants this file used to carry, each still
+# overridable by the same environment variable.
+#
+# Read at import so a test that reloads this module with different environment
+# sees the difference; the catalog resolves at call time for that reason.
 # ---------------------------------------------------------------------------
 
-_REGISTRY = os.getenv("CI_TEMPLATE_IMAGE_REGISTRY", "registry.areeba.com").rstrip("/")
+_REGISTRY = build_environments.registry()
 
 # JDK 11, and a JDK rather than a JRE so it also compiles: both Java kits build
 # with the project's own wrapper, so this one image serves Maven and Gradle and
 # the BUILD TOOL VERSION comes from the repository that is being built. That is
 # what already pins Gradle 7.3.2 here, and it stays right when a project moves.
-_JDK_IMAGE = os.getenv(
-    "CI_TEMPLATE_JDK_IMAGE",
-    f"{_REGISTRY}/adoptopenjdk/openjdk11:jdk-11.0.11_9-alpine-slim",
-)
+_JDK_IMAGE = build_environments.image("java-jdk11")
 
 # No Node or Python image is mirrored under a name this installation's
 # repositories reveal, so these keep their public names. Point them at a mirror
 # with the environment variable rather than by editing a template.
-_NODE_IMAGE = os.getenv("CI_TEMPLATE_NODE_IMAGE", "node:22-alpine")
-_PYTHON_IMAGE = os.getenv("CI_TEMPLATE_PYTHON_IMAGE", "python:3.12-slim")
+_NODE_IMAGE = build_environments.image("node-22")
+_PYTHON_IMAGE = build_environments.image("python-3.12")
 
 
 def _require_wrapper(wrapper: str, tool: str) -> str:
@@ -269,13 +270,13 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
             _stage("Build",
                    [_require_wrapper("./mvnw", "Maven"),
                     "./mvnw -B -DskipTests clean package"],
-                   image=_JDK_IMAGE, labels=["linux", "java11"], timeout=2400),
+                   image=_JDK_IMAGE, labels=["linux", "java"], timeout=2400),
             _stage("Unit Tests", ["./mvnw -B test"],
-                   image=_JDK_IMAGE, labels=["linux", "java11"], timeout=2400,
+                   image=_JDK_IMAGE, labels=["linux", "java"], timeout=2400,
                    artifacts=[{"path": "target/surefire-reports/*.xml", "type": "test-report"}],
                    run_condition=_UNLESS_SKIP_TESTS),
             _stage("Package", list(_NORMALISE_JAR["maven"]),
-                   image=_JDK_IMAGE, labels=["linux", "java11"],
+                   image=_JDK_IMAGE, labels=["linux", "java"],
                    artifacts=[{"path": "app.jar", "type": "jar"}]),
             _stage("Build Image", [], stage_type="container_image", labels=["linux"]),
         ],
@@ -311,13 +312,13 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
             _stage("Build",
                    [_require_wrapper("./gradlew", "Gradle"),
                     "./gradlew --no-daemon clean build -x test"],
-                   image=_JDK_IMAGE, labels=["linux", "java11"], timeout=2400),
+                   image=_JDK_IMAGE, labels=["linux", "java"], timeout=2400),
             _stage("Unit Tests", ["./gradlew --no-daemon test"],
-                   image=_JDK_IMAGE, labels=["linux", "java11"], timeout=2400,
+                   image=_JDK_IMAGE, labels=["linux", "java"], timeout=2400,
                    artifacts=[{"path": "build/test-results/test/*.xml", "type": "test-report"}],
                    run_condition=_UNLESS_SKIP_TESTS),
             _stage("Package", list(_NORMALISE_JAR["gradle"]),
-                   image=_JDK_IMAGE, labels=["linux", "java11"],
+                   image=_JDK_IMAGE, labels=["linux", "java"],
                    artifacts=[{"path": "app.jar", "type": "jar"}]),
             _stage("Build Image", [], stage_type="container_image", labels=["linux"]),
         ],

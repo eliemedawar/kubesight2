@@ -76,14 +76,14 @@ export default function AgentEnrolment({ register, onRegistered, onCancel }) {
           <input
             value={workspaceRoot}
             placeholder={
-              runnerType === "agent_macos" ? "/Users/builder/kubesight" : "/var/lib/kubesight-agent"
+              runnerType === "agent_macos" ? "/Users/builder/kubesight" : "/data/kubesight-agent"
             }
             maxLength={512}
             onChange={(event) => setWorkspaceRoot(event.target.value)}
           />
           <span className="field-hint">
             Where the agent checks out builds, one directory per build. Leave empty for
-            the agent's own default (<code>~/kubesight-agent</code>). KubeSight cannot
+            the agent's own default (<code>/data/kubesight-agent</code>). KubeSight cannot
             check this path exists — the agent applies it and reports back if it cannot
             write there.
           </span>

@@ -15,22 +15,22 @@ make the fallback choose the wrong tool.
 from __future__ import annotations
 
 import json
-import os
 import posixpath
 from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional
 
+from . import build_environments
 from . import source as source_port
 from . import templates
 
 
-_REGISTRY = os.getenv("CI_TEMPLATE_IMAGE_REGISTRY", "registry.areeba.com").rstrip("/")
-_GRADLE_IMAGE = os.getenv("CI_TEMPLATE_GRADLE_IMAGE", f"{_REGISTRY}/gradle:8-jdk11")
-_MAVEN_IMAGE = os.getenv(
-    "CI_TEMPLATE_MAVEN_IMAGE", f"{_REGISTRY}/maven:3.9-eclipse-temurin-21"
-)
-_ANDROID_IMAGE = os.getenv("CI_TEMPLATE_ANDROID_IMAGE", "").strip()
-_FLUTTER_IMAGE = os.getenv("CI_TEMPLATE_FLUTTER_IMAGE", "").strip()
+# Resolved through the build environment catalog — same values, one owner. See
+# build_environments for why an image is never named outside that module.
+_REGISTRY = build_environments.registry()
+_GRADLE_IMAGE = build_environments.image("gradle-8-jdk11")
+_MAVEN_IMAGE = build_environments.image("maven-3.9-jdk21")
+_ANDROID_IMAGE = build_environments.image("android")
+_FLUTTER_IMAGE = build_environments.image("flutter")
 
 
 _PROBES = {

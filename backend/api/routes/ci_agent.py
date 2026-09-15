@@ -14,6 +14,7 @@ import tempfile
 from flask import Blueprint, request
 
 from ..db import db
+from ..models_ci import TERMINAL_BUILD_STATUSES, CiBuild
 from ..response import error_response, success_response
 from ..services.ci import agents as agents_service
 from ..services.ci import artifacts as artifacts_service
@@ -150,7 +151,9 @@ def task_result(task_id: int):
     build_id = task.build_id
     agents_service.report_result(task, payload)
     engine_service.advance_build_now(build_id)
+    build = db.session.get(CiBuild, build_id)
+    cleanup_workspace = build is None or build.status in TERMINAL_BUILD_STATUSES
     # Whatever the transition could not settle here — a build that finished, a
     # queued build now free to start — the engine looks at straight away.
     ci_ticker.wake()
-    return success_response({"ok": True})
+    return success_response({"ok": True, "cleanupWorkspace": cleanup_workspace})

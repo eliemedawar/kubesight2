@@ -91,6 +91,30 @@ ARTIFACT_TYPES = (
 
 ARTIFACT_BACKENDS = ("local", "registry", "s3", "nexus_raw")
 
+# --- Assisted configuration -------------------------------------------------
+# Where a service's application profile came from. NULL means "nobody has said"
+# — every service registered before this existed, and the reason every one of
+# these columns is nullable.
+PROFILE_SOURCES = ("hermes", "manual", "derived")
+
+# How much KubeSight knows about what this repository IS.
+ANALYSIS_STATES = ("not_analyzed", "analyzing", "analyzed", "partial", "failed", "cancelled")
+# ... and how far the pipeline proposal for it got. Tracked separately because
+# the two genuinely diverge: a repository can be understood perfectly and still
+# produce a pipeline that fails validation.
+PIPELINE_PROPOSAL_STATES = (
+    "not_generated",
+    "generating",
+    "valid",
+    "invalid",
+    "accepted",
+    "user_modified",
+)
+# What a proposal asks the user for. `registry` is not a secret: KubeSight keeps
+# registry credentials on a RegistryConnection, so the answer to "what registry"
+# is a link to one, not two strings a stage would never read.
+REQUIRED_INPUT_KINDS = ("parameter", "secret", "registry")
+
 
 class CiService(db.Model):
     """One buildable application in the Service Catalog.
@@ -136,6 +160,22 @@ class CiService(db.Model):
     # checkout is used, as before. Kept on the service rather than a stage
     # because it describes the application, not one step of one pipeline.
     dockerfile = db.Column(db.Text, nullable=True)
+
+    # --- What this application IS, in detail --------------------------------
+    # ``application_type`` above stays the discriminator everything already
+    # reads (templates, fallback pipelines, icons, readiness). This is the
+    # structured truth it is DERIVED from: language and version, framework and
+    # version, build system, packaging, and the evidence for each. Null on every
+    # service registered before assisted configuration existed, which is exactly
+    # what "not analyzed" looks like — nothing changes for those.
+    #
+    # One JSON document rather than a column per field: it is written whole,
+    # read whole, owned by one row, and ``CiPipeline.parameters`` already
+    # established the pattern. A column per detected attribute would be a
+    # migration every time a language gains one.
+    application_profile = db.Column(db.JSON, nullable=True)
+    profile_source = db.Column(db.String(16), nullable=True)
+    analysis_state = db.Column(db.String(16), nullable=True)
 
     # --- Optional links. All nullable; none is read on the build path. -------
     registry_connection_id = db.Column(
@@ -184,6 +224,12 @@ class CiService(db.Model):
     )
     secrets = db.relationship(
         "CiSecret",
+        back_populates="service",
+        cascade="all, delete-orphan",
+        lazy="dynamic",
+    )
+    analyses = db.relationship(
+        "CiRepositoryAnalysis",
         back_populates="service",
         cascade="all, delete-orphan",
         lazy="dynamic",
@@ -623,6 +669,81 @@ class CiArtifact(db.Model):
 
     service = db.relationship("CiService", back_populates="artifacts")
     build = db.relationship("CiBuild", back_populates="artifacts")
+
+
+class CiRepositoryAnalysis(db.Model):
+    """One attempt to work out what a repository is and how to build it.
+
+    A record of a *proposal*, not of a configuration. Nothing here is on the
+    build path: accepting an analysis copies its result into an ordinary
+    :class:`CiPipeline` and an ``application_profile``, after which this row is
+    history and a build never reads it again. That is the whole point — a build
+    must not depend on a model call, and structurally it cannot.
+
+    The row exists before the work does, so an analysis that dies mid-flight is
+    a visible failed row rather than a request that vanished. It carries its own
+    heartbeat for the same reason a build does: the worker runs in this process,
+    and a process that goes away must leave something the next one can reap.
+    """
+
+    __tablename__ = "ci_repository_analyses"
+    __table_args__ = (
+        db.Index("ix_ci_analysis_service_created", "service_id", "created_at"),
+        db.Index("ix_ci_analysis_state", "state"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(
+        db.Integer,
+        db.ForeignKey("ci_services.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    state = db.Column(db.String(16), nullable=False, default="queued", index=True)
+    pipeline_state = db.Column(db.String(16), nullable=False, default="not_generated")
+    progress_percent = db.Column(db.Integer, nullable=False, default=0)
+    # Shown verbatim in the UI — "Reading build configuration…", not a percentage
+    # invented to look like progress.
+    current_stage = db.Column(db.String(64), nullable=True)
+
+    # `repository` analyses read the source; `profile` analyses generate from an
+    # application profile the user typed, with no repository access at all.
+    mode = db.Column(db.String(16), nullable=False, default="repository")
+    revision = db.Column(db.String(255), nullable=True)
+    commit_sha = db.Column(db.String(64), nullable=True)
+
+    requested_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    # Mirrors Application Intelligence: an audit label for the account KubeSight
+    # acts as, never a credential and never a Bitbucket identity.
+    executed_by_account = db.Column(db.String(120), nullable=False, default="hermes-agent")
+
+    schema_version = db.Column(db.String(16), nullable=True)
+    hermes_model = db.Column(db.String(120), nullable=True)
+    hermes_prompt_version = db.Column(db.String(64), nullable=True)
+
+    application_profile = db.Column(db.JSON, nullable=True)
+    generated_pipeline = db.Column(db.JSON, nullable=True)
+    required_inputs = db.Column(db.JSON, nullable=False, default=list)
+    # {"valid": bool, "errors": [...], "warnings": [...]} from services/ci/generated.
+    validation = db.Column(db.JSON, nullable=True)
+    # One entry per generate/repair round: error codes, model, duration. Enough
+    # to debug a bad proposal without running it again; never any file content.
+    attempts = db.Column(db.JSON, nullable=False, default=list)
+    warnings = db.Column(db.JSON, nullable=False, default=list)
+    # How much of the repository was actually read. A profile can only describe
+    # the slice the analysis saw, and a truncated tree has to say so.
+    evidence_coverage = db.Column(db.JSON, nullable=True)
+
+    failure_stage = db.Column(db.String(64), nullable=True)
+    safe_error_message = db.Column(db.Text, nullable=True)
+    cancel_requested = db.Column(db.Boolean, nullable=False, default=False)
+
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
+    started_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_heartbeat_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    service = db.relationship("CiService", back_populates="analyses")
+    requested_by = db.relationship("User", foreign_keys=[requested_by_user_id])
 
 
 class CiSecret(db.Model):

@@ -22,9 +22,10 @@ from ...application_intelligence_bitbucket import (
     BitbucketMetadataError,
     fetch_file,
     list_revisions,
+    list_tree,
 )
 from ...application_intelligence_security import validate_relative_path, validate_repository_url
-from . import CheckoutSpec, RepositoryRef, RevisionOption, SourceError
+from . import CheckoutSpec, RepositoryRef, RevisionOption, SourceError, TreeListing
 
 
 class BitbucketSourceProvider:
@@ -83,6 +84,28 @@ class BitbucketSourceProvider:
             raise SourceError(str(exc)) from exc
         except ValueError as exc:
             raise SourceError(str(exc)) from exc
+
+    def list_tree(self, ref: RepositoryRef, credential, revision: str) -> TreeListing:
+        """Every file path at one revision, in one paginated API walk.
+
+        This is what lets repository analysis see the SHAPE of a project — a
+        Gradle wrapper, an ``app/`` module, three ``pom.xml`` files — without a
+        clone, a workspace, or a Kubernetes Job.
+        """
+        token, credential_type, principal = self._credential_parts(credential)
+        try:
+            payload = list_tree(
+                ref.full_name, token, revision, credential_type, principal
+            )
+        except BitbucketMetadataError as exc:
+            raise SourceError(str(exc)) from exc
+        except ValueError as exc:
+            raise SourceError(str(exc)) from exc
+        return TreeListing(
+            revision=payload.get("revision", revision),
+            paths=list(payload.get("paths") or []),
+            truncated=bool(payload.get("truncated")),
+        )
 
     def verify_access(self, ref: RepositoryRef, credential) -> Dict[str, Any]:
         """Read the ref list as a liveness + authorization probe.

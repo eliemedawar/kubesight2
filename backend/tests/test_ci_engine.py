@@ -1021,11 +1021,12 @@ def test_an_agent_reporting_a_result_can_claim_the_next_stage_at_once(
     first_task = first.get_json()["data"]
     assert first_task["stageName"] == "Checkout"
 
-    client.post(
+    first_result = client.post(
         f"/api/ci/agent/tasks/{first_task['taskId']}/result",
         json={"exitCode": 0, "claimToken": first_task["claimToken"]},
         headers=agent_headers,
     )
+    assert first_result.get_json()["data"]["cleanupWorkspace"] is False
 
     # No engine pass in between: the result callback did the handover.
     second = client.post("/api/ci/agent/claim", json={}, headers=agent_headers)
@@ -1037,3 +1038,11 @@ def test_an_agent_reporting_a_result_can_claim_the_next_stage_at_once(
             db.session.get(CiBuild, build_id).stages, key=lambda s: s.position
         )
         assert [s.status for s in stages] == ["success", "running"]
+
+    second_task = second.get_json()["data"]
+    final_result = client.post(
+        f"/api/ci/agent/tasks/{second_task['taskId']}/result",
+        json={"exitCode": 0, "claimToken": second_task["claimToken"]},
+        headers=agent_headers,
+    )
+    assert final_result.get_json()["data"]["cleanupWorkspace"] is True

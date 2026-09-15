@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createCiService, listCiServices } from "../api/ciApi.js";
+import { listCiServices } from "../api/ciApi.js";
 import { useAuth } from "../context/AuthContext";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
@@ -8,7 +8,7 @@ import LoadingState from "../components/common/LoadingState.jsx";
 import RunBuildModal from "../components/catalog/RunBuildModal.jsx";
 import RunnersModal from "../components/catalog/RunnersModal.jsx";
 import ServiceCard from "../components/catalog/ServiceCard.jsx";
-import ServiceFormModal from "../components/catalog/ServiceFormModal.jsx";
+import RegisterServiceWizard from "../components/catalog/RegisterServiceWizard.jsx";
 import ServiceDetailPage from "./ServiceDetailPage.jsx";
 import {
   APPLICATION_TYPES,
@@ -63,8 +63,6 @@ export default function ServiceCatalogPage({ clusters = [] }) {
   // {serviceId, tab?, buildId?} — deep links from cards land on the right tab.
   const [opened, setOpened] = useState(null);
   const [creating, setCreating] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState("");
   const timerRef = useRef(null);
 
   const load = useCallback(async ({ background = false } = {}) => {
@@ -101,19 +99,18 @@ export default function ServiceCatalogPage({ clusters = [] }) {
     };
   }, [canView, opened, load]);
 
-  const handleCreate = async (payload) => {
-    setSaving(true);
-    setSaveError("");
-    try {
-      const created = await createCiService(payload);
-      setCreating(false);
-      // Straight into the new service: the next step is connecting its source.
-      setOpened({ serviceId: created.id, tab: "source" });
-    } catch (err) {
-      setSaveError(err.message || "Could not register the service.");
-    } finally {
-      setSaving(false);
-    }
+  // Registration is a flow now, and the wizard owns it: identity, repository,
+  // and the choice between letting Hermes work the rest out or doing it by
+  // hand. It creates the service itself so that a failed analysis still leaves
+  // a real, usable service behind — the catalog only has to refresh and, when
+  // the wizard says so, land on it.
+  const handleRegistered = () => {
+    load({ background: true });
+  };
+
+  const handleWizardDone = (service, tab) => {
+    setCreating(false);
+    setOpened({ serviceId: service.id, tab: tab || "pipeline" });
   };
 
   // Run from a card opens the ref picker in place; only after the build has
@@ -178,10 +175,7 @@ export default function ServiceCatalogPage({ clusters = [] }) {
             <button
               type="button"
               className="primary sg-cat-new"
-              onClick={() => {
-                setSaveError("");
-                setCreating(true);
-              }}
+              onClick={() => setCreating(true)}
             >
               <PlusIcon />
               Register service
@@ -277,11 +271,13 @@ export default function ServiceCatalogPage({ clusters = [] }) {
       )}
 
       {creating && (
-        <ServiceFormModal
-          onClose={() => setCreating(false)}
-          onSave={handleCreate}
-          saving={saving}
-          error={saveError}
+        <RegisterServiceWizard
+          onClose={() => {
+            setCreating(false);
+            load({ background: true });
+          }}
+          onCreated={handleRegistered}
+          onOpenService={handleWizardDone}
         />
       )}
 

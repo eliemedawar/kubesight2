@@ -94,6 +94,12 @@ def service_to_dict(
         "intelligenceApplicationId": row.intelligence_application_id,
         "catalogEntryId": row.catalog_entry_id,
         "maxConcurrentBuilds": row.max_concurrent_builds,
+        # Assisted configuration. Null on every service registered before it
+        # existed, which the UI renders as "not analyzed" — the same thing it
+        # showed before there was anything to say.
+        "applicationProfile": row.application_profile or None,
+        "profileSource": row.profile_source,
+        "analysisState": row.analysis_state or "not_analyzed",
         "sourceConfigured": row.source_ready(),
         "pipelineConfigured": bool(saved_stage_count or uses_generated_default),
         "usingDefaultPipeline": uses_generated_default,

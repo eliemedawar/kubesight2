@@ -708,6 +708,13 @@ def _migrate_ci_columns() -> None:
         # Inline Dockerfile, added after the table shipped. TEXT is right here:
         # it is a document, not a JSON structure.
         _add_column_if_missing("ci_services", "dockerfile", "TEXT")
+        # Assisted configuration. All three stay NULL on every service that
+        # existed before it, which is what "not analyzed" means — no backfill,
+        # and nothing about those services behaves differently.
+        _add_column_if_missing("ci_services", "application_profile", "JSON")
+        _retype_json_column("ci_services", "application_profile")
+        _add_column_if_missing("ci_services", "profile_source", "VARCHAR(16)")
+        _add_column_if_missing("ci_services", "analysis_state", "VARCHAR(16)")
     if "ci_pipelines" in existing:
         # JSON, not TEXT: on PostgreSQL a db.JSON attribute over a text column
         # reads back as the raw string and then iterates as characters.

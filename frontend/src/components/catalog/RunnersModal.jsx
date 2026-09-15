@@ -290,7 +290,7 @@ export default function RunnersModal({ canManage, onClose }) {
                           Build directory
                           <input
                             defaultValue={runner.workspaceRoot || ""}
-                            placeholder="agent default"
+                            placeholder="/data/kubesight-agent"
                             disabled={busy}
                             aria-label={`Build directory for ${runner.name}`}
                             title="Applied by the agent on its next heartbeat"

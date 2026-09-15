@@ -151,6 +151,38 @@ def test_every_container_is_labelled_for_cleanup(agent):
     assert "--label kubesight.build=7" in joined
 
 
+def test_default_workspace_is_on_the_data_volume(agent):
+    assert agent.DEFAULT_WORKSPACE == "/data/kubesight-agent"
+
+
+def test_workspace_paths_cannot_escape_the_agent_root(agent, tmp_path):
+    root = str(tmp_path / "agent")
+    assert agent.build_workspace(root, "service-12") == str(
+        (tmp_path / "agent" / "service-12").resolve()
+    )
+    with pytest.raises(RuntimeError):
+        agent.build_workspace(root, "../outside")
+
+
+def test_stale_cleanup_only_removes_marked_build_directories(agent, tmp_path):
+    root = tmp_path / "agent"
+    old = root / "old-build"
+    fresh = root / "fresh-build"
+    unrelated = root / "do-not-touch"
+    cache = root / ".cache"
+    for path in (old, fresh, unrelated, cache):
+        path.mkdir(parents=True)
+    agent.mark_workspace(str(old))
+    agent.mark_workspace(str(fresh))
+    os.utime(old / agent.WORKSPACE_MARKER, (1, 1))
+
+    assert agent.cleanup_stale_workspaces(str(root), 1) == 1
+    assert not old.exists()
+    assert fresh.exists()
+    assert unrelated.exists()
+    assert cache.exists()
+
+
 # ---------------------------------------------------------------------------
 # The mode
 # ---------------------------------------------------------------------------
@@ -214,6 +246,12 @@ class _Client:
 
     def result(self):
         return next(body for path, body in self.posts if path.endswith("/result"))
+
+
+class _CleanupClient(_Client):
+    def post_json(self, path, payload, timeout=60):
+        super().post_json(path, payload, timeout)
+        return {"cleanupWorkspace": True} if path.endswith("/result") else None
 
 
 def _prepared(tmp_path, **kw):
@@ -301,6 +339,17 @@ def test_no_runtime_falls_back_to_the_machine_and_says_so(agent, tmp_path, monke
         for line in body["lines"]
     )
     assert "ignored" in logged and "gradle:9.1.0-jdk17" in logged
+
+
+def test_final_build_acknowledgement_removes_the_workspace(agent, tmp_path, monkeypatch):
+    root, task = _prepared(tmp_path, image="")
+    monkeypatch.setattr(agent, "container_runtime", lambda: "")
+    monkeypatch.setattr(agent, "stream", lambda *args, **kwargs: 0)
+
+    workspace = os.path.join(root, task["workspace"])
+    agent.run_task(_CleanupClient(), task, root)
+
+    assert not os.path.exists(workspace)
 
 
 def test_docker_runs_as_the_agents_own_uid(agent, monkeypatch):

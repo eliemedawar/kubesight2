@@ -33,6 +33,13 @@ configuration, so an agent is not a convenience there — it is the only route.
 python3 kubesight-agent.py --url https://kubesight.example.com --token <TOKEN>
 ```
 
+By default, build data is written under `/data/kubesight-agent`, not under
+root's home directory. Create it once for the account that runs the agent:
+
+```bash
+sudo install -d -o builder -g builder /data/kubesight-agent
+```
+
 Within a few seconds the runner shows **online** in KubeSight, listing the
 capabilities it detected. Add `--insecure` if KubeSight uses a self-signed
 certificate.
@@ -103,7 +110,13 @@ BuildKit", which is the cluster's job. An agent says so rather than pretending.
   (Runners → the agent → **Build directory**) and the agent applies it on its
   next heartbeat, reporting back if it cannot write there. A `--workspace` given
   on the command line always wins — the person at the machine knows its disks.
-  With neither, it is `~/kubesight-agent`.
+  With neither, it is `/data/kubesight-agent`. You may also set
+  `KUBESIGHT_AGENT_WORKSPACE` locally.
+- A workspace is removed automatically after KubeSight confirms the entire
+  build is finished. A 24-hour stale sweep removes marked directories left by
+  a crash or a lost response. Set `--workspace-retention-hours` (or
+  `KUBESIGHT_AGENT_WORKSPACE_RETENTION_HOURS`) to change that recovery window;
+  `0` disables only the stale sweep. The shared `.cache` is preserved.
 - Commands run with `/bin/sh -e`, in the checkout, with the stage's environment
   and secrets injected. `KUBESIGHT_WORKSPACE` and `KUBESIGHT_SOURCE` name this
   build's directories — use those rather than a literal `/workspace`, which is
