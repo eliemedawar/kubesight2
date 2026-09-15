@@ -76,9 +76,8 @@ export const deleteCiPipeline = (id) =>
 
 export const listCiPipelineTemplates = () => request("/api/ci/pipeline-templates");
 
-// One file out of the service's repository. Used by the Dockerfile tab to
-// answer "does the repository already carry one?" without anyone opening
-// Bitbucket; a missing file arrives as a 400 with a readable message.
+// One file out of the service's repository, read without opening Bitbucket. A
+// missing file arrives as a 400 with a readable message.
 export const readCiSourceFile = (serviceId, path, revision = "") =>
   request(`/api/ci/services/${encodeURIComponent(serviceId)}/source/file`, {
     method: "POST",

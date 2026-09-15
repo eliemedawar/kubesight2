@@ -1299,33 +1299,38 @@ button.sg-ci-workspace-entry:focus-visible {
   tab-size: 4;
 }
 
-.sg-ci-dockerfile-note {
-  margin: 0 0 var(--space-2);
-  font-size: 0.78rem;
+/* What a chosen application type will actually produce, shown in the register
+   dialog. Quiet: it is a preview of a decision already made by the select above
+   it, not a second thing to read. */
+.sg-ci-kit {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-3);
+  background: var(--surface-subtle, transparent);
 }
 
-/* Template picker above the editor. One row so the select, the button and the
-   reason a type has no template read as a single sentence rather than three
-   stacked controls. */
-.sg-ci-dockerfile-tools {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: var(--space-3);
-  margin-bottom: var(--space-3);
+.sg-ci-kit p {
+  margin: 0;
+  font-size: 0.8rem;
 }
 
-.sg-ci-dockerfile-tools label {
+.sg-ci-kit ul {
+  margin: var(--space-2) 0 0;
+  padding-left: 1.1rem;
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
   font-size: 0.78rem;
-  min-width: 13rem;
+  color: var(--text-muted, inherit);
 }
 
-.sg-ci-dockerfile-tools .field-hint {
-  flex: 1 1 14rem;
-  margin: 0;
+.sg-ci-kit code {
+  word-break: break-all;
+}
+
+.sg-ci-dockerfile-note {
+  margin: 0 0 var(--space-2);
+  font-size: 0.78rem;
 }
 
 /* ══ Builds → Stages: the stage matrix ═══════════════════════════════════

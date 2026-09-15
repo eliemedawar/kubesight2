@@ -32,6 +32,7 @@ for and says so in the stage log rather than failing the build.
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from typing import Any, Dict, List
 
@@ -104,6 +105,66 @@ def _stage(
 
 
 # ---------------------------------------------------------------------------
+# Images
+#
+# Defaults are this installation's own, taken from its repositories rather than
+# guessed: every analysed Java project targets Java 11 and its Dockerfiles run
+# on this exact base, and the cluster pulls from the internal registry because
+# it has no route to Docker Hub. Each is overridable by environment so another
+# installation changes one setting instead of editing every template.
+# ---------------------------------------------------------------------------
+
+_REGISTRY = os.getenv("CI_TEMPLATE_IMAGE_REGISTRY", "registry.areeba.com").rstrip("/")
+
+# JDK 11, and a JDK rather than a JRE so it also compiles: both Java kits build
+# with the project's own wrapper, so this one image serves Maven and Gradle and
+# the BUILD TOOL VERSION comes from the repository that is being built. That is
+# what already pins Gradle 7.3.2 here, and it stays right when a project moves.
+_JDK_IMAGE = os.getenv(
+    "CI_TEMPLATE_JDK_IMAGE",
+    f"{_REGISTRY}/adoptopenjdk/openjdk11:jdk-11.0.11_9-alpine-slim",
+)
+
+# No Node or Python image is mirrored under a name this installation's
+# repositories reveal, so these keep their public names. Point them at a mirror
+# with the environment variable rather than by editing a template.
+_NODE_IMAGE = os.getenv("CI_TEMPLATE_NODE_IMAGE", "node:22-alpine")
+_PYTHON_IMAGE = os.getenv("CI_TEMPLATE_PYTHON_IMAGE", "python:3.12-slim")
+
+
+def _require_wrapper(wrapper: str, tool: str) -> str:
+    """Fail with the fix rather than with "not found".
+
+    The JDK image carries no Maven or Gradle of its own — the wrapper is what
+    supplies them, at the version the project pins. A project without one needs
+    a different image on the stage, and saying so beats a bare 127.
+    """
+    return (
+        f'test -x {wrapper} || {{ echo "This project has no {tool} wrapper '
+        f'({wrapper}). Add one, or set a {tool} image on this stage."; exit 1; }}'
+    )
+
+
+# Both Java kits end with one canonical app.jar in the workspace root, which is
+# what the shared Dockerfile copies. Without it the image recipe would have to
+# know the project's version, and a bare glob would break on the second JAR each
+# tool emits by default (Maven's -sources/-javadoc, Gradle's -plain).
+_NORMALISE_JAR = {
+    "maven": [
+        "jar=$(ls -1 target/*.jar | grep -Ev '(sources|javadoc)[.]jar$' | head -1)",
+        'test -n "$jar" || { echo "no JAR under target/ - did Build run?"; exit 1; }',
+        'cp "$jar" app.jar',
+        "ls -l app.jar",
+    ],
+    "gradle": [
+        "jar=$(ls -1 build/libs/*.jar | grep -v -- '-plain[.]jar$' | head -1)",
+        'test -n "$jar" || { echo "no JAR under build/libs/ - did Build run?"; exit 1; }',
+        'cp "$jar" app.jar',
+        "ls -l app.jar",
+    ],
+}
+
+# ---------------------------------------------------------------------------
 # Dockerfiles
 #
 # Every one of these is a RUNTIME image, not a rebuild. The build context is the
@@ -116,16 +177,17 @@ def _stage(
 # after the build went green.
 # ---------------------------------------------------------------------------
 
-_JAVA_DOCKERFILE = """\
-# Runtime image for the JAR the Package stage produced.
-# The build context is the checkout, so target/ is already populated.
-FROM eclipse-temurin:21-jre-alpine
+_JAVA_DOCKERFILE = f"""\
+# Runtime image for the app.jar the Package stage produced in the checkout,
+# which is also the build context.
+FROM {_JDK_IMAGE}
 
 WORKDIR /app
 
-# Assumes the build produces exactly one JAR under target/. If yours also
-# produces a sources or javadoc JAR, name the one you want instead of the glob.
-COPY target/*.jar /app/app.jar
+# Owned by the runtime user: a root-owned directory is read-only to it.
+RUN mkdir -p logs && chown -R 65532:65532 /app
+
+COPY --chown=65532:65532 app.jar /app/app.jar
 
 # Restricted Pod Security rejects containers that need root.
 USER 65532:65532
@@ -181,30 +243,82 @@ CMD ["python", "-m", "app"]
 
 
 TEMPLATES: Dict[str, Dict[str, Any]] = {
-    "java": {
+    "java_maven": {
         "label": "Java / Maven",
-        "description": "Compile, test, package a JAR, then build a container image.",
+        "description": (
+            "Compile, test and package a JAR with the project's Maven wrapper, "
+            "then build a container image."
+        ),
         "dockerfile": _JAVA_DOCKERFILE,
         "parameters": [_SKIP_TESTS],
         "expectedSecrets": [
             _secret(
                 "NEXUS_USERNAME",
-                "Reader account for the Maven mirror, when the build resolves "
-                "dependencies through Nexus rather than Maven Central.",
+                "Reader account for the Maven mirror, when dependencies resolve "
+                "through Nexus rather than Maven Central.",
             ),
             _secret("NEXUS_PASSWORD", "Password or token for NEXUS_USERNAME."),
+            _secret(
+                "MAVEN_SETTINGS_XML",
+                "The settings.xml body, when the mirror needs one. Write it out "
+                "to ~/.m2/settings.xml in a stage before Build.",
+            ),
         ],
         "stages": [
             _CHECKOUT,
-            _stage("Build", ["mvn -B -DskipTests clean package"],
-                   image="maven:3.9-eclipse-temurin-21", labels=["linux", "java21"]),
-            _stage("Unit Tests", ["mvn -B test"],
-                   image="maven:3.9-eclipse-temurin-21", labels=["linux", "java21"],
+            _stage("Build",
+                   [_require_wrapper("./mvnw", "Maven"),
+                    "./mvnw -B -DskipTests clean package"],
+                   image=_JDK_IMAGE, labels=["linux", "java11"], timeout=2400),
+            _stage("Unit Tests", ["./mvnw -B test"],
+                   image=_JDK_IMAGE, labels=["linux", "java11"], timeout=2400,
                    artifacts=[{"path": "target/surefire-reports/*.xml", "type": "test-report"}],
                    run_condition=_UNLESS_SKIP_TESTS),
-            _stage("Package", ["ls -1 target/*.jar"],
-                   image="maven:3.9-eclipse-temurin-21", labels=["linux", "java21"],
-                   artifacts=[{"path": "target/*.jar", "type": "jar"}]),
+            _stage("Package", list(_NORMALISE_JAR["maven"]),
+                   image=_JDK_IMAGE, labels=["linux", "java11"],
+                   artifacts=[{"path": "app.jar", "type": "jar"}]),
+            _stage("Build Image", [], stage_type="container_image", labels=["linux"]),
+        ],
+    },
+    "java_gradle": {
+        "label": "Java / Gradle",
+        "description": (
+            "Compile, test and package a JAR with the project's Gradle wrapper, "
+            "then build a container image."
+        ),
+        "dockerfile": _JAVA_DOCKERFILE,
+        "parameters": [_SKIP_TESTS],
+        "expectedSecrets": [
+            _secret(
+                "NEXUS_USERNAME",
+                "Reader account for the Gradle repository, when dependencies "
+                "resolve through Nexus rather than Maven Central.",
+            ),
+            _secret("NEXUS_PASSWORD", "Password or token for NEXUS_USERNAME."),
+            _secret(
+                "NEXUS_INIT_GRADLE",
+                "The nexus-init.gradle body, when Gradle needs an init script to "
+                "reach the mirror. Write it out in a stage before Build and pass "
+                "it with --init-script.",
+            ),
+        ],
+        "stages": [
+            _CHECKOUT,
+            # The JDK image carries no Gradle; the wrapper supplies it at the
+            # version the project pins (7.3.2 across this installation today).
+            # Its distribution downloads once into GRADLE_USER_HOME, which the
+            # build cache volume backs, so later builds do not re-fetch it.
+            _stage("Build",
+                   [_require_wrapper("./gradlew", "Gradle"),
+                    "./gradlew --no-daemon clean build -x test"],
+                   image=_JDK_IMAGE, labels=["linux", "java11"], timeout=2400),
+            _stage("Unit Tests", ["./gradlew --no-daemon test"],
+                   image=_JDK_IMAGE, labels=["linux", "java11"], timeout=2400,
+                   artifacts=[{"path": "build/test-results/test/*.xml", "type": "test-report"}],
+                   run_condition=_UNLESS_SKIP_TESTS),
+            _stage("Package", list(_NORMALISE_JAR["gradle"]),
+                   image=_JDK_IMAGE, labels=["linux", "java11"],
+                   artifacts=[{"path": "app.jar", "type": "jar"}]),
             _stage("Build Image", [], stage_type="container_image", labels=["linux"]),
         ],
     },
@@ -222,12 +336,12 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
         ],
         "stages": [
             _CHECKOUT,
-            _stage("Install", ["npm ci"], image="node:22-alpine", labels=["linux", "node"]),
+            _stage("Install", ["npm ci"], image=_NODE_IMAGE, labels=["linux", "node"]),
             _stage("Unit Tests", ["npm test --if-present"],
-                   image="node:22-alpine", labels=["linux", "node"],
+                   image=_NODE_IMAGE, labels=["linux", "node"],
                    run_condition=_UNLESS_SKIP_TESTS),
             _stage("Build", ["npm run build --if-present"],
-                   image="node:22-alpine", labels=["linux", "node"],
+                   image=_NODE_IMAGE, labels=["linux", "node"],
                    artifacts=[{"path": "dist/**", "type": "zip"}]),
             _stage("Build Image", [], stage_type="container_image", labels=["linux"]),
         ],
@@ -247,9 +361,9 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
         "stages": [
             _CHECKOUT,
             _stage("Install", ["pip install --no-cache-dir -r requirements.txt"],
-                   image="python:3.12-slim", labels=["linux", "python"]),
+                   image=_PYTHON_IMAGE, labels=["linux", "python"]),
             _stage("Unit Tests", ["pytest -q"],
-                   image="python:3.12-slim", labels=["linux", "python"],
+                   image=_PYTHON_IMAGE, labels=["linux", "python"],
                    artifacts=[{"path": "junit.xml", "type": "test-report"}],
                    run_condition=_UNLESS_SKIP_TESTS),
             _stage("Build Image", [], stage_type="container_image", labels=["linux"]),
@@ -373,6 +487,15 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
 }
 
 
+# Services registered before Java was split by build tool carry "java". It
+# resolves to the Maven kit rather than falling through to generic, which would
+# quietly replace a real pipeline's starting point with "run ./build.sh".
+TEMPLATES["java"] = TEMPLATES["java_maven"]
+
+# Valid and resolvable, but never offered for something new.
+LEGACY_TYPES = frozenset({"java"})
+
+
 def list_templates() -> List[Dict[str, Any]]:
     """Template summaries for the picker.
 
@@ -384,9 +507,16 @@ def list_templates() -> List[Dict[str, Any]]:
         {
             "applicationType": key,
             "label": value["label"],
+            "legacy": key in LEGACY_TYPES,
             "description": value["description"],
             "stageNames": [stage["name"] for stage in value["stages"]],
             "dockerfile": value.get("dockerfile", ""),
+            # What the stages actually run on, so a picker can show the real
+            # image (and therefore the real version) instead of a label that
+            # goes stale the moment the image is repointed.
+            "buildImages": sorted(
+                {stage["image"] for stage in value["stages"] if stage.get("image")}
+            ),
             "parameters": deepcopy(value.get("parameters") or []),
             "expectedSecrets": deepcopy(value.get("expectedSecrets") or []),
         }

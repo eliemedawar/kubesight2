@@ -29,6 +29,11 @@ def _now():
 # and the card icon; never gates execution.
 APPLICATION_TYPES = (
     "container",
+    "java_maven",
+    "java_gradle",
+    # Legacy. Services registered before Java was split by build tool carry
+    # this; it resolves to the Maven kit. Kept valid so those rows keep working
+    # and are not silently downgraded to the generic template.
     "java",
     "node",
     "python",

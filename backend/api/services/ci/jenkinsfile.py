@@ -195,7 +195,11 @@ def _statements(mask: str, start: int, limit: int) -> List[_Stmt]:
     out: List[_Stmt] = []
     i = start
     while i < limit:
-        if mask[i] in " \t\r\n;" or mask[i] in "})]":
+        # A comma never starts a statement, and skipping it is what lets this
+        # walker read a comma-separated list of calls — which is how the older
+        # `properties([parameters([booleanParam(...), string(...)])])` form
+        # declares build inputs.
+        if mask[i] in " \t\r\n;," or mask[i] in "})]":
             i += 1
             continue
         match = _IDENT.match(mask, i)
@@ -653,6 +657,44 @@ def _read_parameters(draft: _Draft, start: int, end: int) -> None:
             param["default"] = _str(default, MAX_TEXT_CHARS)
 
         draft.parameters.append(param)
+
+
+_PROPERTIES_CALL = re.compile(r"(?<![\w.])properties\s*\(")
+_PARAMETERS_CALL = re.compile(r"(?<![\w.])parameters\s*\(")
+
+
+def _read_properties_parameters(draft: _Draft, start: int, end: int) -> bool:
+    """The other place build inputs live: ``properties([parameters([...])])``.
+
+    Jobs that predate declarative syntax — and any job that must also be
+    launchable from the Jenkins UI — declare their inputs this way, as a call
+    rather than a block. The parameter definitions inside are identical, so only
+    the wrapper has to be unwrapped.
+
+    Returns whether anything was found, so the caller knows not to look further.
+    """
+    found = False
+    for outer in _PROPERTIES_CALL.finditer(draft.mask, start, end):
+        open_paren = outer.end() - 1
+        close = _match(draft.mask, open_paren, "(", ")", end)
+        if close < 0:
+            continue
+        for inner in _PARAMETERS_CALL.finditer(draft.mask, open_paren, close):
+            params_open = inner.end() - 1
+            params_close = _match(draft.mask, params_open, "(", ")", close)
+            if params_close < 0:
+                continue
+            # parameters([...]) — the list is what holds the definitions.
+            bracket = draft.mask.find("[", params_open, params_close)
+            if bracket < 0:
+                continue
+            bracket_close = _match(draft.mask, bracket, "[", "]", params_close)
+            if bracket_close < 0:
+                continue
+            before = len(draft.parameters)
+            _read_parameters(draft, bracket + 1, bracket_close)
+            found = found or len(draft.parameters) > before
+    return found
 
 
 def _choices(literal: Optional[_Literal]) -> List[str]:
@@ -1566,6 +1608,62 @@ def _suggest_container_image(draft: _Draft, stage: Dict[str, Any]) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _infer_missing_parameters(draft: _Draft) -> None:
+    """Declare the inputs the stages gate on but nothing in the file defines.
+
+    A Jenkins job can be parameterised in the job configuration rather than in
+    the Jenkinsfile — the "This project is parameterized" checkboxes — and then
+    the only trace in the file is the ``when`` clause that reads them. Importing
+    those stages without their inputs produces a pipeline whose deploy stages
+    can never fire and whose Run Build dialog asks nothing, which reads as the
+    import having silently dropped something.
+
+    So each gating variable with no definition gets one, typed from what the
+    condition compares it to. Defaults are chosen so nothing fires by accident:
+    a checkbox arrives unticked.
+    """
+    declared = {param["name"] for param in draft.parameters}
+    for stage in draft.stages:
+        condition = stage.get("runCondition") or {}
+        name = condition.get("variable") or ""
+        # KUBESIGHT_* are exported by the build itself, not asked for.
+        if not name or name in declared or name.startswith("KUBESIGHT_"):
+            continue
+        if len(draft.parameters) >= MAX_PARAMETERS:
+            break
+        declared.add(name)
+        value = (condition.get("value") or "").strip()
+        if value.lower() in ("true", "false"):
+            draft.parameters.append(
+                {
+                    "name": name,
+                    "type": "boolean",
+                    "label": name,
+                    "description": f"Gates the '{stage['name']}' stage.",
+                    "required": False,
+                    "default": "false",
+                }
+            )
+        else:
+            draft.parameters.append(
+                {
+                    "name": name,
+                    "type": "text",
+                    "label": name,
+                    "description": f"Gates the '{stage['name']}' stage (runs when this is \"{value}\").",
+                    "required": False,
+                    "default": "",
+                }
+            )
+        draft.note(
+            WARNING,
+            f"'{name}' gates this stage but nothing in the Jenkinsfile declares "
+            "it — it was a parameter on the Jenkins job itself. One was added so "
+            "the stage can run; check its type and default.",
+            stage=stage["name"],
+        )
+
+
 _LEVEL_ORDER = {ERROR: 0, WARNING: 1, INFO: 2}
 
 
@@ -1606,6 +1704,11 @@ def parse(content: str) -> Dict[str, Any]:
     params_stmt = _named(body, "parameters")
     if params_stmt is not None and params_stmt.has_body:
         _read_parameters(draft, params_stmt.body[0], params_stmt.body[1])
+    else:
+        # No declarative block. The inputs may still be declared as a call —
+        # anywhere in the file, since `properties(...)` is as often written
+        # above `pipeline {` as inside it.
+        _read_properties_parameters(draft, 0, len(mask))
 
     env_stmt = _named(body, "environment")
     global_secret_refs: List[Dict[str, str]] = []
@@ -1717,6 +1820,17 @@ def parse(content: str) -> Dict[str, Any]:
             INFO,
             "The job's overall timeout became a per-stage timeout. A build has no "
             "single clock; each stage has its own.",
+        )
+
+    # Last, so it sees every condition the stages ended up with.
+    _infer_missing_parameters(draft)
+
+    if not draft.parameters:
+        draft.note(
+            INFO,
+            "This job asks for nothing before a build. If it should, its inputs "
+            "were configured on the Jenkins job rather than in the Jenkinsfile — "
+            "add them under Build inputs.",
         )
 
     draft.notes.sort(key=lambda note: (_LEVEL_ORDER.get(note["level"], 3), note["stage"]))

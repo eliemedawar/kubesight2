@@ -6,9 +6,15 @@ import { parseApiTime } from "../../lib/apiTime.js";
  * identical on a card, in a table, and in the build drawer.
  */
 
+// The type decides the whole starter kit — stages, build parameters, the
+// Dockerfile — so it is split by build tool wherever the tool changes the
+// commands and the paths they produce. `legacy` entries still resolve (older
+// services carry them) but are never offered for a new service.
 export const APPLICATION_TYPES = [
   { value: "container", label: "Container application" },
-  { value: "java", label: "Java / JAR" },
+  { value: "java_maven", label: "Java / Maven" },
+  { value: "java_gradle", label: "Java / Gradle" },
+  { value: "java", label: "Java / JAR", legacy: true },
   { value: "node", label: "Node.js" },
   { value: "python", label: "Python" },
   { value: "android", label: "Android" },

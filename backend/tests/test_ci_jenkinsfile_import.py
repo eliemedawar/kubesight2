@@ -526,6 +526,133 @@ def test_a_stage_timeout_wrapper_lands_on_the_stage():
 
 
 # ---------------------------------------------------------------------------
+# Where build inputs hide
+#
+# A declarative `parameters { }` block is only one of the three places a Jenkins
+# job's inputs can live, and the other two are common in jobs old enough to be
+# worth porting. Importing nine stages and no inputs reads as the translation
+# having dropped something, so both other forms are covered here.
+# ---------------------------------------------------------------------------
+
+PROPERTIES_FORM = """
+properties([
+    parameters([
+        booleanParam(name: 'Lebanonuat', defaultValue: false, description: 'Deploy to UAT'),
+        booleanParam(name: 'Lebanonsit', defaultValue: false, description: 'Deploy to SIT'),
+        string(name: 'msName', defaultValue: 'issuing', description: 'Microservice name'),
+        choice(name: 'GradleVersion', choices: ['7.6', '8.5'], description: 'Gradle version')
+    ])
+])
+
+pipeline {
+    agent any
+    stages {
+        stage('Deploy uat Lebanon') {
+            when { equals expected: 'true', actual: Lebanonuat }
+            steps { sh 'echo deploying' }
+        }
+    }
+}
+"""
+
+
+def test_parameters_declared_as_properties_rather_than_a_block():
+    """The pre-declarative idiom, still used by any job that must also be
+    launchable from the Jenkins UI."""
+    draft = jenkinsfile.parse(PROPERTIES_FORM)
+    by_name = {param["name"]: param for param in draft["parameters"]}
+
+    assert set(by_name) == {"Lebanonuat", "Lebanonsit", "msName", "GradleVersion"}
+    assert by_name["Lebanonuat"]["type"] == "boolean"
+    assert by_name["Lebanonuat"]["default"] == "false"
+    assert by_name["Lebanonuat"]["description"] == "Deploy to UAT"
+    assert by_name["msName"]["type"] == "text"
+    assert by_name["msName"]["default"] == "issuing"
+    assert by_name["GradleVersion"]["choices"] == ["7.6", "8.5"]
+
+
+def test_a_gating_input_the_file_never_declares_is_created():
+    """Parameterised on the Jenkins job, not in the Jenkinsfile.
+
+    Without this the deploy stages import with a condition nothing can ever
+    satisfy, and the Run Build dialog asks for nothing — which looks exactly
+    like the import having lost them.
+    """
+    draft = jenkinsfile.parse(
+        """
+        pipeline {
+            agent any
+            stages {
+                stage('Deploy uat Lebanon') {
+                    when { equals expected: 'true', actual: Lebanonuat }
+                    steps { sh 'echo uat' }
+                }
+                stage('Prod only') {
+                    when { expression { params.ENVIRONMENT == 'prod' } }
+                    steps { sh 'echo prod' }
+                }
+            }
+        }
+        """
+    )
+    by_name = {param["name"]: param for param in draft["parameters"]}
+
+    # Typed from what the condition compares against.
+    assert by_name["Lebanonuat"]["type"] == "boolean"
+    # Unticked, so importing a pipeline never arms a deploy by accident.
+    assert by_name["Lebanonuat"]["default"] == "false"
+    assert by_name["ENVIRONMENT"]["type"] == "text"
+    assert by_name["ENVIRONMENT"]["default"] == ""
+
+    # Invented, so it has to be said out loud.
+    assert any(
+        "nothing in the Jenkinsfile declares it" in message
+        for message in _messages(draft, jenkinsfile.WARNING)
+    )
+
+
+def test_an_inferred_parameter_never_shadows_a_declared_one():
+    draft = jenkinsfile.parse(PROPERTIES_FORM)
+    names = [param["name"] for param in draft["parameters"]]
+    assert names.count("Lebanonuat") == 1
+    # The declared description survives rather than being replaced by the
+    # generated "Gates the ... stage" one.
+    assert draft["parameters"][0]["description"] == "Deploy to UAT"
+
+
+def test_the_build_variables_a_stage_already_has_are_not_asked_for():
+    """`when { branch 'main' }` gates on KUBESIGHT_BRANCH, which the build
+    exports — asking a person for it would be asking twice."""
+    draft = jenkinsfile.parse(
+        """
+        pipeline {
+            agent any
+            stages {
+                stage('Main only') {
+                    when { branch 'main' }
+                    steps { sh 'echo on main' }
+                }
+            }
+        }
+        """
+    )
+    assert draft["parameters"] == []
+
+
+def test_a_job_that_asks_for_nothing_says_so():
+    draft = jenkinsfile.parse(
+        """
+        pipeline {
+            agent any
+            stages { stage('Build') { steps { sh 'make' } } }
+        }
+        """
+    )
+    assert draft["parameters"] == []
+    assert any("asks for nothing" in message for message in _messages(draft))
+
+
+# ---------------------------------------------------------------------------
 # What it refuses
 # ---------------------------------------------------------------------------
 

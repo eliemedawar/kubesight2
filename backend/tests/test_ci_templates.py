@@ -110,22 +110,56 @@ def test_android_can_build_one_half_without_the_other():
     assert stages["Assemble AAB"]["artifacts"][0]["type"] == "aab"
 
 
-def test_the_java_dockerfile_copies_what_the_package_stage_produced():
-    """The Dockerfile and the artifact glob have to agree, or the image build
-    copies a path the pipeline never filled."""
+@pytest.mark.parametrize("app_type", ["java_maven", "java_gradle"])
+def test_the_java_dockerfile_copies_what_the_package_stage_produced(app_type):
+    """The Dockerfile and the artifact path have to agree, or the image build
+    copies a file the pipeline never produced.
+
+    Both build tools converge on one app.jar, which is what lets a single recipe
+    serve both — and what keeps it from having to know a version number.
+    """
     package = next(
-        stage for stage in templates.TEMPLATES["java"]["stages"] if stage["name"] == "Package"
+        stage
+        for stage in templates.TEMPLATES[app_type]["stages"]
+        if stage["name"] == "Package"
     )
-    assert package["artifacts"][0]["path"] == "target/*.jar"
-    assert "COPY target/*.jar" in templates.TEMPLATES["java"]["dockerfile"]
+    assert package["artifacts"][0]["path"] == "app.jar"
+    assert "cp \"$jar\" app.jar" in package["commands"]
+    assert "app.jar /app/app.jar" in templates.TEMPLATES[app_type]["dockerfile"]
+
+
+def test_each_java_tool_looks_where_its_own_build_puts_the_jar():
+    maven = next(
+        s for s in templates.TEMPLATES["java_maven"]["stages"] if s["name"] == "Package"
+    )["commands"][0]
+    gradle = next(
+        s for s in templates.TEMPLATES["java_gradle"]["stages"] if s["name"] == "Package"
+    )["commands"][0]
+    assert "target/*.jar" in maven and "sources|javadoc" in maven
+    assert "build/libs/*.jar" in gradle and "-plain" in gradle
+
+
+def test_the_legacy_java_type_still_resolves_to_a_real_kit():
+    """Services registered before Java was split by build tool carry "java".
+    Falling through to generic would swap a real starting point for
+    "run ./build.sh" the next time anything read the template."""
+    assert templates.template_for("java") is templates.TEMPLATES["java_maven"]
+    assert templates.dockerfile_for("java") == templates.dockerfile_for("java_maven")
+    assert "java" in templates.LEGACY_TYPES
+
+
+def test_legacy_types_are_marked_so_the_picker_can_hide_them():
+    by_type = {item["applicationType"]: item for item in templates.list_templates()}
+    assert by_type["java"]["legacy"] is True
+    assert by_type["java_maven"]["legacy"] is False
 
 
 def test_accessors_hand_back_copies_not_the_registry():
     """Callers mutate what they get; the module-level template every future
     service is built from must not change with them."""
-    first = templates.parameters_for("java")
+    first = templates.parameters_for("java_maven")
     first.append({"name": "SMUGGLED"})
-    assert len(templates.parameters_for("java")) == 1
+    assert len(templates.parameters_for("java_maven")) == 1
 
     secrets = templates.expected_secrets_for("android")
     secrets[0]["key"] = "CHANGED"
@@ -141,8 +175,8 @@ def test_unknown_application_type_falls_back_to_generic():
 def test_list_templates_carries_the_whole_kit():
     by_type = {item["applicationType"]: item for item in templates.list_templates()}
     assert set(by_type) == set(templates.TEMPLATES)
-    assert "FROM eclipse-temurin" in by_type["java"]["dockerfile"]
-    assert by_type["java"]["parameters"][0]["name"] == "SKIP_TESTS"
+    assert templates._JDK_IMAGE in by_type["java_maven"]["dockerfile"]
+    assert by_type["java_maven"]["parameters"][0]["name"] == "SKIP_TESTS"
     assert by_type["container"]["dockerfile"] == ""
     assert {s["key"] for s in by_type["ios"]["expectedSecrets"]} == {
         "IOS_P12_B64",
@@ -156,7 +190,7 @@ def test_list_templates_carries_the_whole_kit():
 # ---------------------------------------------------------------------------
 
 def _register(client, token, **overrides):
-    payload = {"name": "Kit Service", "applicationType": "java", **overrides}
+    payload = {"name": "Kit Service", "applicationType": "java_maven", **overrides}
     return client.post("/api/ci/services", json=payload, headers=auth_headers(token))
 
 
@@ -165,7 +199,7 @@ def test_registering_a_java_service_seeds_its_dockerfile(client, admin_token):
     assert response.status_code == 201
     data = response.get_json()["data"]
     assert data["hasInlineDockerfile"] is True
-    assert "eclipse-temurin" in data["dockerfile"]
+    assert templates._JDK_IMAGE in data["dockerfile"]
 
 
 def test_registering_a_container_service_leaves_the_repository_in_charge(client, admin_token):
@@ -298,3 +332,76 @@ def db_get(model, row_id):
     from api.db import db
 
     return db.session.get(model, row_id)
+
+def test_java_builds_on_the_installations_own_jdk_image():
+    """The build cluster has no route to Docker Hub, and every analysed Java
+    repository here targets Java 11 — so a template pointing at a public JDK 21
+    image is one that cannot pull, not merely one that is out of date."""
+    for app_type in ("java_maven", "java_gradle"):
+        images = {
+            stage.get("image")
+            for stage in templates.TEMPLATES[app_type]["stages"]
+            if stage.get("image")
+        }
+        assert images == {templates._JDK_IMAGE}
+        assert "openjdk11" in templates._JDK_IMAGE
+        assert templates._JDK_IMAGE in templates.TEMPLATES[app_type]["dockerfile"]
+
+
+def test_the_build_tool_version_comes_from_the_project_not_the_image():
+    """The JDK image carries neither Maven nor Gradle. Using the repository's
+    own wrapper is what keeps the tool at the version that project pins —
+    Gradle 7.3.2 across this installation today — without a template ever
+    naming a version it would then have to chase."""
+    for app_type, wrapper in (("java_maven", "./mvnw"), ("java_gradle", "./gradlew")):
+        build = next(
+            stage
+            for stage in templates.TEMPLATES[app_type]["stages"]
+            if stage["name"] == "Build"
+        )
+        assert any(wrapper in command for command in build["commands"])
+        # A missing wrapper has to say what to do about it, not exit 127.
+        assert any("has no" in command and "wrapper" in command for command in build["commands"])
+
+
+def test_images_can_be_repointed_without_editing_a_template(monkeypatch):
+    """Another installation mirrors under different names; it should change a
+    setting rather than fork this file."""
+    import importlib
+
+    monkeypatch.setenv("CI_TEMPLATE_IMAGE_REGISTRY", "nexus.example.test")
+    monkeypatch.setenv("CI_TEMPLATE_NODE_IMAGE", "nexus.example.test/node:20")
+    reloaded = importlib.reload(templates)
+    try:
+        assert reloaded._JDK_IMAGE.startswith("nexus.example.test/")
+        assert reloaded._JDK_IMAGE in reloaded.dockerfile_for("java_gradle")
+        node_images = {
+            stage.get("image")
+            for stage in reloaded.TEMPLATES["node"]["stages"]
+            if stage.get("image")
+        }
+        assert node_images == {"nexus.example.test/node:20"}
+    finally:
+        # Every other test reads this module-level registry.
+        monkeypatch.undo()
+        importlib.reload(templates)
+
+
+def test_list_templates_reports_the_real_build_images():
+    """The registration form shows these instead of a version in a label, so a
+    repointed image tells the truth there without anyone editing a string."""
+    by_type = {item["applicationType"]: item for item in templates.list_templates()}
+    assert by_type["java_gradle"]["buildImages"] == [templates._JDK_IMAGE]
+    # Types that build nothing of their own advertise no image rather than a
+    # misleading default.
+    assert by_type["container"]["buildImages"] == []
+    assert by_type["android"]["buildImages"] == []
+
+
+def test_no_template_label_hardcodes_a_version():
+    """A version in a label cannot follow CI_TEMPLATE_JDK_IMAGE, so it would
+    start lying the first time an installation repointed its images."""
+    import re
+
+    for key, value in templates.TEMPLATES.items():
+        assert not re.search(r"\d+\.\d+|JDK\s*\d|Java\s*\d", value["label"]), key

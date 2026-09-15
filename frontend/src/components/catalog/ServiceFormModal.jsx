@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { APPLICATION_TYPES, CRITICALITIES } from "./ciShared.jsx";
+import { useEffect, useState } from "react";
+import { listCiPipelineTemplates } from "../../api/ciApi.js";
+import { APPLICATION_TYPES, CRITICALITIES, applicationTypeLabel } from "./ciShared.jsx";
 
 /**
  * Register or rename a service.
@@ -16,10 +17,34 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
     description: service?.description || "",
     ownerTeam: service?.ownerTeam || "",
     criticality: service?.criticality || "medium",
-    applicationType: service?.applicationType || "java",
+    applicationType: service?.applicationType || "java_maven",
   });
 
   const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  // What the chosen type will actually produce. Shown rather than described,
+  // because the build image carries the versions and a label claiming "JDK 11"
+  // would go stale the moment the image is repointed.
+  const [kits, setKits] = useState({});
+  useEffect(() => {
+    if (isEdit) return undefined;
+    let live = true;
+    listCiPipelineTemplates()
+      .then((data) => {
+        if (!live) return;
+        const byType = {};
+        (data.items || []).forEach((item) => {
+          byType[item.applicationType] = item;
+        });
+        setKits(byType);
+      })
+      // The preview is a courtesy; registering works without it.
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [isEdit]);
+  const kit = kits[form.applicationType];
 
   // Mirrors the backend's _slug() so the placeholder shows what an empty
   // field will produce.
@@ -93,13 +118,17 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
               onChange={(event) => set("applicationType", event.target.value)}
               disabled={isEdit}
             >
-              {APPLICATION_TYPES.map((type) => (
+              {/* Legacy types stay selectable only for a service that already
+                  carries one, so editing it does not silently retype it. */}
+              {APPLICATION_TYPES.filter(
+                (type) => !type.legacy || type.value === service?.applicationType
+              ).map((type) => (
                 <option key={type.value} value={type.value}>
                   {type.label}
                 </option>
               ))}
             </select>
-            {!isEdit && (
+            {!isEdit && !kit && (
               <span className="field-hint">
                 Sets the starter pipeline, its build parameters, and the
                 Dockerfile — all editable afterwards.
@@ -125,6 +154,35 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
               ))}
             </select>
           </label>
+          {!isEdit && kit && (
+            <div className="form-grid__full sg-ci-kit">
+              <p className="muted">
+                <strong>{applicationTypeLabel(form.applicationType)}</strong> starts with{" "}
+                {kit.stageNames.join(" → ")}
+                {kit.dockerfile ? ", and a Dockerfile" : ""}. All editable afterwards.
+              </p>
+              <ul>
+                {kit.buildImages.length > 0 && (
+                  <li>
+                    Builds on <code>{kit.buildImages.join(", ")}</code>
+                  </li>
+                )}
+                {kit.parameters.length > 0 && (
+                  <li>
+                    Asks before each build:{" "}
+                    {kit.parameters.map((param) => param.label).join(", ")}
+                  </li>
+                )}
+                {kit.expectedSecrets.length > 0 && (
+                  <li>
+                    Usually needs the secrets{" "}
+                    {kit.expectedSecrets.map((item) => item.key).join(", ")}
+                  </li>
+                )}
+              </ul>
+            </div>
+          )}
+
           <label className="form-grid__full">
             Owner / team
             <input
