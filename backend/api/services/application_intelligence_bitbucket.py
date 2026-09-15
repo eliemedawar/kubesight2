@@ -11,8 +11,23 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 API_ORIGIN = "https://api.bitbucket.org"
 MAX_RESPONSE_BYTES = 2_000_000
 MAX_REF_ITEMS = 200
+# Branches and tags are collected SEPARATELY, with a budget each.
+#
+# They used to share one `/refs` call capped at MAX_REF_ITEMS and sorted by
+# name, which meant the two competed: a repository with 291 tags and 216
+# branches spent 176 of its 200 slots on tags and showed 24 branches. The
+# branch a person wanted was usually not in the list, and nothing said so.
+MAX_BRANCH_ITEMS = 500
+MAX_TAG_ITEMS = 300
+MAX_REF_PAGES = 12
 MAX_COMMIT_ITEMS = 25
 MAX_TREE_ITEMS = 5_000
+
+# Most recently updated first. A repository with hundreds of branches has a
+# handful anybody is actually going to build, and they are the ones that moved
+# recently — so if a budget has to bite, it should bite the stale end rather
+# than everything after "f" in the alphabet.
+_REF_SORT = "-target.date"
 
 
 class BitbucketMetadataError(RuntimeError):
@@ -147,6 +162,46 @@ def _clean_text(value: object, max_chars: int) -> str:
     return " ".join(str(value or "").split())[:max_chars]
 
 
+def _collect_refs(
+    base: str,
+    kind: str,
+    token: str,
+    repository_ref: str,
+    *,
+    limit: int,
+    credential_type: str,
+    principal: str,
+) -> list[dict]:
+    """One kind of ref — branches or tags — with a budget of its own.
+
+    Sorting by target date is an optimisation, not a requirement: a repository
+    or a Bitbucket change that refuses the sort must still produce a list, so a
+    rejected sort falls back to the unsorted endpoint rather than failing the
+    whole listing.
+    """
+    url = f"{base}/refs/{kind}?{urlencode({'pagelen': 100, 'sort': _REF_SORT})}"
+    try:
+        return _collect(
+            url,
+            token,
+            repository_ref,
+            limit=limit,
+            max_pages=MAX_REF_PAGES,
+            credential_type=credential_type,
+            principal=principal,
+        )
+    except BitbucketMetadataError:
+        return _collect(
+            f"{base}/refs/{kind}?{urlencode({'pagelen': 100})}",
+            token,
+            repository_ref,
+            limit=limit,
+            max_pages=MAX_REF_PAGES,
+            credential_type=credential_type,
+            principal=principal,
+        )
+
+
 def list_revisions(
     repository_ref: str,
     token: str,
@@ -154,14 +209,30 @@ def list_revisions(
     principal: str = "",
 ) -> dict:
     base = f"{API_ORIGIN}/2.0/repositories/{repository_ref}"
-    refs = _collect(
-        f"{base}/refs?{urlencode({'pagelen': 100, 'sort': 'name'})}",
+    branch_rows = _collect_refs(
+        base,
+        "branches",
         token,
         repository_ref,
-        limit=MAX_REF_ITEMS,
+        limit=MAX_BRANCH_ITEMS,
         credential_type=credential_type,
         principal=principal,
     )
+    tag_rows = _collect_refs(
+        base,
+        "tags",
+        token,
+        repository_ref,
+        limit=MAX_TAG_ITEMS,
+        credential_type=credential_type,
+        principal=principal,
+    )
+    # Each row already knows which endpoint it came from; the /refs payload's
+    # own `type` field is not relied on, so a provider that stops setting it
+    # cannot silently turn every branch into an unknown kind.
+    refs = [{**row, "type": "branch"} for row in branch_rows]
+    refs += [{**row, "type": "tag"} for row in tag_rows]
+
     commits = _collect(
         f"{base}/commits?{urlencode({'pagelen': MAX_COMMIT_ITEMS})}",
         token,

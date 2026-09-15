@@ -6,6 +6,7 @@ import {
   updateCiSource,
 } from "../../api/ciApi.js";
 import { getCiAssistAvailability } from "../../api/ciAssistApi.js";
+import SearchableSelect from "../common/SearchableSelect.jsx";
 import HermesAnalysisPanel from "./HermesAnalysisPanel.jsx";
 import { APPLICATION_TYPES, CRITICALITIES } from "./ciShared.jsx";
 
@@ -97,12 +98,16 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
           const items = data.items || [];
           setBranches(items);
           setBranchError("");
-          // Land on the repository's own default when the current value is not
-          // one of its branches — "main" is a guess, not an answer.
+          // "main" is a guess, not an answer. If the repository has one of the
+          // conventional defaults, take it; if it has none, clear the field and
+          // let the user choose rather than landing on whichever branch happens
+          // to sort first — picking "1.1.0" for them is worse than asking.
           const names = items.filter((i) => i.type === "branch").map((i) => i.value);
           if (names.length && !names.includes(form.defaultBranch)) {
-            const preferred = ["main", "master", "develop"].find((n) => names.includes(n));
-            set("defaultBranch", preferred || names[0]);
+            const preferred = ["main", "master", "develop", "trunk"].find((n) =>
+              names.includes(n)
+            );
+            set("defaultBranch", preferred || "");
           }
         })
         .catch((err) => {
@@ -132,9 +137,14 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
   );
 
   const wantsRepository = form.method === "hermes";
+  // A branch is required once a repository is being connected. Falling back to
+  // "main" for a repository that has no main produces a checkout failure at
+  // build time, which is a long way from the field that caused it.
+  const connectingSource = Boolean(form.repositoryUrl.trim() && form.credentialProfileId);
   const canContinue =
     form.name.trim() &&
-    (!wantsRepository || (form.repositoryUrl.trim() && form.credentialProfileId));
+    (!wantsRepository || connectingSource) &&
+    (!connectingSource || Boolean(form.defaultBranch.trim()));
 
   const createService = async () => {
     setSaving(true);
@@ -283,17 +293,15 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
                 </label>
                 <label>
                   Credential profile {wantsRepository && "*"}
-                  <select
+                  <SearchableSelect
                     value={form.credentialProfileId}
                     onChange={(event) => set("credentialProfileId", event.target.value)}
-                  >
-                    <option value="">Select a credential…</option>
-                    {credentials.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </select>
+                    placeholder="Select a credential…"
+                    options={credentials.map((item) => ({
+                      value: String(item.id),
+                      label: item.name,
+                    }))}
+                  />
                   {credentials.length === 0 && (
                     <span className="field-hint">
                       None yet — add one under a service's Source tab, then come back.
@@ -303,22 +311,26 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
                 <label>
                   Branch
                   {branchOptions.length > 0 ? (
-                    <select
+                    /* Searchable, because a repository with two hundred
+                       branches turns a plain select into a scroll hunt. Same
+                       control every other picker in KubeSight uses. */
+                    <SearchableSelect
                       value={form.defaultBranch}
                       onChange={(event) => set("defaultBranch", event.target.value)}
-                    >
-                      {/* A value that is not in the list is still shown, so a
-                          branch created seconds ago is never silently dropped. */}
-                      {!branchOptions.some((item) => item.value === form.defaultBranch) &&
-                        form.defaultBranch && (
-                          <option value={form.defaultBranch}>{form.defaultBranch}</option>
-                        )}
-                      {branchOptions.map((item) => (
-                        <option key={item.value} value={item.value}>
-                          {item.value}
-                        </option>
-                      ))}
-                    </select>
+                      placeholder="Select a branch…"
+                      options={[
+                        // A value that is not in the list is still offered, so
+                        // a branch created seconds ago is never silently lost.
+                        ...(form.defaultBranch &&
+                        !branchOptions.some((item) => item.value === form.defaultBranch)
+                          ? [{ value: form.defaultBranch, label: form.defaultBranch }]
+                          : []),
+                        ...branchOptions.map((item) => ({
+                          value: item.value,
+                          label: item.value,
+                        })),
+                      ]}
+                    />
                   ) : (
                     <input
                       value={form.defaultBranch}
