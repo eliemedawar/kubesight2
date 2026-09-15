@@ -19,6 +19,7 @@ and must not be able to break each other.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
 
 from ...models_ci import REQUIRED_INPUT_KINDS
@@ -42,8 +43,6 @@ MAX_LIST_TEXT = 40
 # What a name has to be to become an environment variable or a secret key.
 # Mirrors pipelines._PARAM_NAME_RE — a required input whose name a stage cannot
 # reference is a question with no answer.
-import re  # noqa: E402  (kept beside the constant it defines)
-
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 

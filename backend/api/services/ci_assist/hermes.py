@@ -61,6 +61,10 @@ Rules you must not break:
   brew). Build containers run non-root with a read-only root filesystem and no Docker socket.
 - Use only the stage types, runner types, runner labels, parameter types and artifact types
   the capabilities block lists.
+- Name stage fields EXACTLY as the template does, in camelCase: stageType (not "type"),
+  runnerType, runnerLabels, buildEnvironment, workingDirectory, commands, env, secretRefs,
+  artifacts, hostAliases, runCondition, timeoutSeconds, continueOnFailure. A stage may
+  contain no other field.
 
 Propose the MINIMUM pipeline that produces this project's artifact: fetch, build, test if
 tests exist, package, and a container image only where the repository is containerised. Do

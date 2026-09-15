@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   createCiService,
   listCiSourceCredentials,
+  previewCiBranches,
   updateCiSource,
 } from "../../api/ciApi.js";
 import { getCiAssistAvailability } from "../../api/ciAssistApi.js";
@@ -43,6 +44,12 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
     applicationType: "java_gradle",
   });
   const [credentials, setCredentials] = useState([]);
+  // Branches read from the live repository as soon as there is a URL and a
+  // credential to read them with. A typed branch that does not exist fails
+  // much later, inside a checkout, which is a bad place to learn it.
+  const [branches, setBranches] = useState([]);
+  const [branchError, setBranchError] = useState("");
+  const [loadingBranches, setLoadingBranches] = useState(false);
   const [availability, setAvailability] = useState(null);
   const [service, setService] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -68,6 +75,55 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [availability]);
+
+  // Debounced: this runs while somebody types or pastes a URL, and the answer
+  // is only interesting once they stop.
+  useEffect(() => {
+    const url = form.repositoryUrl.trim();
+    if (!url || !form.credentialProfileId) {
+      setBranches([]);
+      setBranchError("");
+      return undefined;
+    }
+    let live = true;
+    setLoadingBranches(true);
+    const timer = window.setTimeout(() => {
+      previewCiBranches({
+        repositoryUrl: url,
+        credentialProfileId: form.credentialProfileId,
+      })
+        .then((data) => {
+          if (!live) return;
+          const items = data.items || [];
+          setBranches(items);
+          setBranchError("");
+          // Land on the repository's own default when the current value is not
+          // one of its branches — "main" is a guess, not an answer.
+          const names = items.filter((i) => i.type === "branch").map((i) => i.value);
+          if (names.length && !names.includes(form.defaultBranch)) {
+            const preferred = ["main", "master", "develop"].find((n) => names.includes(n));
+            set("defaultBranch", preferred || names[0]);
+          }
+        })
+        .catch((err) => {
+          if (!live) return;
+          setBranches([]);
+          // Non-fatal: the field stays typeable, because a listing outage must
+          // not stop somebody registering a service.
+          setBranchError(err.message || "Branches could not be listed.");
+        })
+        .finally(() => {
+          if (live) setLoadingBranches(false);
+        });
+    }, 500);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.repositoryUrl, form.credentialProfileId]);
+
+  const branchOptions = branches.filter((item) => item.type === "branch");
 
   const derivedSlug = useMemo(
     () =>
@@ -246,10 +302,38 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
                 </label>
                 <label>
                   Branch
-                  <input
-                    value={form.defaultBranch}
-                    onChange={(event) => set("defaultBranch", event.target.value)}
-                  />
+                  {branchOptions.length > 0 ? (
+                    <select
+                      value={form.defaultBranch}
+                      onChange={(event) => set("defaultBranch", event.target.value)}
+                    >
+                      {/* A value that is not in the list is still shown, so a
+                          branch created seconds ago is never silently dropped. */}
+                      {!branchOptions.some((item) => item.value === form.defaultBranch) &&
+                        form.defaultBranch && (
+                          <option value={form.defaultBranch}>{form.defaultBranch}</option>
+                        )}
+                      {branchOptions.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.value}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      value={form.defaultBranch}
+                      onChange={(event) => set("defaultBranch", event.target.value)}
+                    />
+                  )}
+                  <span className="field-hint">
+                    {loadingBranches
+                      ? "Reading branches from the repository…"
+                      : branchError
+                        ? `${branchError} Type the branch name instead.`
+                        : branchOptions.length > 0
+                          ? `${branchOptions.length} branches found.`
+                          : "Listed once a repository and credential are set."}
+                  </span>
                 </label>
                 <label className="form-grid__full">
                   Working directory

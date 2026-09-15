@@ -198,6 +198,22 @@ def read_source_file(service_id: int):
     return success_response(data)
 
 
+@ci_bp.route("/source/branches", methods=["POST"])
+@require_permission("ci_services:view")
+def preview_source_branches():
+    """Branches and tags for a repository that has no service row yet.
+
+    The registration wizard asks for a branch before the service exists, so it
+    cannot use the per-service listing. Reads only — nothing is created by
+    asking what branches a repository has.
+    """
+    try:
+        data = catalog_service.preview_branches(_payload())
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
+
+
 @ci_bp.route("/source/credentials", methods=["GET"])
 @require_permission("ci_services:view")
 def list_source_credentials():

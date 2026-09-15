@@ -654,6 +654,46 @@ def read_source_file(row: CiService, path: str, revision: str = "") -> Dict[str,
     return {"path": clean, "revision": chosen, "content": content}
 
 
+def preview_branches(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Branches and tags for a repository that has no service row yet.
+
+    The registration wizard needs this: it asks for a branch before the service
+    exists, so it cannot use the per-service listing. Same provider, same
+    credential store, same validation — only the lookup differs.
+    """
+    provider = _clean(payload.get("repositoryProvider"), 32).lower() or "bitbucket"
+    if provider not in source_port.supported_providers():
+        raise CatalogError(f"Source provider '{provider}' is not supported yet.")
+    handler = source_port.get_provider(provider)
+
+    url = _clean(payload.get("repositoryUrl"), 1024)
+    if not url:
+        raise CatalogError("A repository URL is required.")
+    try:
+        ref = handler.parse_repository_url(url)
+    except ValueError as exc:
+        raise CatalogError(str(exc)) from exc
+
+    credential = _credential_or_error(payload.get("credentialProfileId"))
+    if credential is None:
+        raise CatalogError("Select a source credential profile.")
+
+    revisions = handler.list_revisions(ref, credential)
+    return {
+        "items": [
+            {
+                "value": item.value,
+                "label": item.label,
+                "type": item.kind,
+                "commit": item.commit,
+            }
+            for item in revisions
+        ],
+        "count": len(revisions),
+        "repository": ref.full_name,
+    }
+
+
 def list_credential_profiles() -> List[Dict[str, Any]]:
     """Enabled source credentials, without their secrets."""
     from .serializers import credential_profile_to_dict

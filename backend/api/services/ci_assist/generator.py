@@ -175,6 +175,22 @@ def _finish(
     if message:
         row.safe_error_message = message
     db.session.add(row)
+
+    # The service carries its own copy of this, because the catalog and the
+    # service header read it without loading an analysis. Leaving it at
+    # "analyzing" after the analysis ended would show a spinner next to a row
+    # that finished — the two must not be able to disagree.
+    service = row.service
+    if service is not None:
+        if state == "cancelled":
+            # A cancelled attempt establishes nothing. Fall back to whatever was
+            # already known rather than recording a state that never happened.
+            service.analysis_state = (
+                "analyzed" if service.application_profile else "not_analyzed"
+            )
+        else:
+            service.analysis_state = state
+        db.session.add(service)
     db.session.commit()
 
 

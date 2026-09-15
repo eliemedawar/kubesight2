@@ -99,25 +99,92 @@ def test_a_pipeline_with_no_stages_would_build_nothing(service):
     [
         {"privileged": True},
         {"hostPath": "/"},
+        {"hostNetwork": True},
         {"securityContext": {"runAsUser": 0}},
         {"serviceAccount": "cluster-admin"},
         {"nodeSelector": {"kubernetes.io/hostname": "node-1"}},
         {"volumes": [{"hostPath": {"path": "/var/run/docker.sock"}}]},
+        {"runAsUser": 0},
+        {"capabilities": {"add": ["SYS_ADMIN"]}},
+        # snake_case is the same request wearing a different hat.
+        {"host_path": "/"},
+        {"service_account": "cluster-admin"},
     ],
 )
-def test_a_field_kubesight_has_no_place_for_is_refused_not_dropped(service, smuggled):
-    """The stage model has no field for any of these, so silently ignoring them
-    would work — and would mean a proposal asking for root could be approved by
-    somebody reading a diff that did not show it. Refusing says it out loud."""
+def test_a_request_for_privilege_is_refused_not_dropped(service, smuggled):
+    """These are the fields that would matter if they worked. The stage model
+    has no place for any of them, so silently ignoring them would work — and
+    would mean a proposal asking for root could be approved by somebody reading
+    a review screen that never showed it. Refusing says it out loud."""
     verdict = generated.validate(service, pipeline(stage(**smuggled)))
     assert not verdict["valid"]
     assert "unknown_field" in codes(verdict)
 
 
-def test_a_dependency_graph_is_refused_because_there_is_no_executor_for_one(service):
-    """KubeSight runs stages in order. Accepting dependsOn would produce a
-    pipeline whose author believed in a guarantee nothing provides."""
+def test_a_cosmetic_unknown_field_is_ignored_with_a_warning_not_refused(service):
+    """A correct pipeline must not be thrown away over a field KubeSight simply
+    does not have. The reviewer is told it was ignored, because "it did not do
+    the thing I asked for" is the failure that follows silence here."""
+    verdict = generated.validate(
+        service, pipeline(stage(retryCount=3, description="builds the jar"))
+    )
+    assert verdict["valid"], verdict["errors"]
+    assert "unsupported_field" in warning_codes(verdict)
+    assert "retryCount" in " ".join(w["message"] for w in verdict["warnings"])
+
+
+def test_a_dependency_graph_is_ignored_because_there_is_no_executor_for_one(service):
+    """KubeSight runs stages in order. dependsOn cannot be honoured, so it is
+    dropped and said — not silently obeyed, and not fatal."""
     verdict = generated.validate(service, pipeline(stage(dependsOn=["Checkout"])))
+    assert verdict["valid"], verdict["errors"]
+    assert "unsupported_field" in warning_codes(verdict)
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary — a synonym is not a security boundary
+# ---------------------------------------------------------------------------
+
+def test_a_stage_typed_as_type_rather_than_stagetype_is_understood(service):
+    """Refusing a correct pipeline because a field is called `type` instead of
+    `stageType` blocks real work over a naming nit. The synonym grants nothing
+    `stageType` did not, so it is read as what it means."""
+    verdict = generated.validate(
+        service,
+        pipeline(
+            {"name": "checkout", "type": "checkout", "runnerLabels": ["linux"],
+             "commands": [], "timeout": 300},
+            {"name": "build", "type": "command", "build_environment": "java-jdk11",
+             "runner_labels": ["linux", "java"], "script": ["./gradlew bootJar"],
+             "timeout": 1800},
+        ),
+    )
+    assert verdict["valid"], verdict["errors"]
+    stages = verdict["pipeline"]["stages"]
+    assert stages[0]["stageType"] == "checkout"
+    assert stages[1]["stageType"] == "command"
+    assert stages[1]["commands"] == ["./gradlew bootJar"]
+    assert stages[1]["timeoutSeconds"] == 1800
+    assert "field_renamed" in warning_codes(verdict)
+
+
+def test_an_explicit_field_always_beats_its_alias(service):
+    """`{"stageType": "command", "type": "scan"}` must stay a command stage —
+    an alias that could overwrite a real value would be a way to say one thing
+    in the review screen and another to the executor."""
+    verdict = generated.validate(
+        service, pipeline(stage(stageType="command", type="scan"))
+    )
+    assert verdict["valid"], verdict["errors"]
+    assert verdict["pipeline"]["stages"][0]["stageType"] == "command"
+
+
+def test_an_alias_cannot_smuggle_privilege(service):
+    """There is no alias for any of the privilege fields, and adding one to the
+    map would be the mistake this test exists to catch."""
+    assert not set(generated.FIELD_ALIASES) & generated.PRIVILEGE_FIELDS
+    verdict = generated.validate(service, pipeline(stage(security_context={"runAsUser": 0})))
+    assert not verdict["valid"]
     assert "unknown_field" in codes(verdict)
 
 

@@ -355,8 +355,13 @@ export default function HermesAnalysisPanel({
               {analysis.attempts?.length > 1 && (
                 <>
                   Corrected {analysis.attempts.length - 1}{" "}
-                  {analysis.attempts.length === 2 ? "time" : "times"} before KubeSight
-                  accepted it.{" "}
+                  {analysis.attempts.length === 2 ? "time" : "times"}
+                  {/* The outcome decides the verb. Saying "before KubeSight
+                      accepted it" under a refusal is the sentence contradicting
+                      the verdict directly above it. */}
+                  {analysis.state === "analyzed"
+                    ? " before KubeSight accepted it."
+                    : ", and KubeSight still could not accept it."}{" "}
                 </>
               )}
               {analysis.evidenceCoverage?.treeTruncated && (

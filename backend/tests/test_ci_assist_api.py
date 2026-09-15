@@ -292,6 +292,10 @@ def test_a_failed_analysis_reports_what_happened_and_leaves_the_service_usable(
         f"/api/ci/services/{service_id}", headers=auth_headers(admin_token)
     ).get_json()["data"]
     assert service["status"] == "active"
+    # The service's own copy of the state must not be left mid-flight: the
+    # catalog reads it without loading an analysis, and a spinner next to a
+    # row that finished is worse than no indicator at all.
+    assert service["analysisState"] == "failed"
     # And the manual route is untouched.
     saved = client.post(
         f"/api/ci/services/{service_id}/pipelines",

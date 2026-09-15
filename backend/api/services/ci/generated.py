@@ -77,6 +77,56 @@ PIPELINE_KEYS = frozenset(
 )
 IGNORED_STAGE_KEYS = frozenset({"id", "position"})
 
+# Other spellings of fields KubeSight already has.
+#
+# Refusing `type` because the field is called `stageType` blocks a pipeline that
+# was entirely correct over a synonym, which is not a security boundary — it is
+# a vocabulary mismatch. Accepting the synonym grants no capability that
+# `stageType` did not already grant, so it is normalized rather than rejected.
+# snake_case appears for the same reason: the model sees the field names in a
+# Python-shaped world and reaches for them.
+FIELD_ALIASES = {
+    "type": "stageType",
+    "stage_type": "stageType",
+    "runner_type": "runnerType",
+    "runner_labels": "runnerLabels",
+    "labels": "runnerLabels",
+    "build_environment": "buildEnvironment",
+    "environment": "buildEnvironment",
+    "working_directory": "workingDirectory",
+    "workdir": "workingDirectory",
+    "script": "commands",
+    "secret_refs": "secretRefs",
+    "secrets": "secretRefs",
+    "host_aliases": "hostAliases",
+    "run_condition": "runCondition",
+    "timeout_seconds": "timeoutSeconds",
+    "timeout": "timeoutSeconds",
+    "continue_on_failure": "continueOnFailure",
+    "parallel_group": "parallelGroup",
+}
+
+# Fields that are NOT a vocabulary mismatch.
+#
+# Every one of these names something a build stage in KubeSight cannot have and
+# must not be able to acquire: a privilege, a host mount, an identity, a
+# placement. There is no field to put them in, so dropping them would work —
+# and that is exactly the problem. A proposal asking for root could then be
+# approved by somebody reading a review screen that never showed it. These stay
+# hard errors so the request is said out loud.
+PRIVILEGE_FIELDS = frozenset(
+    {
+        "privileged", "privilegeescalation", "allowprivilegeescalation",
+        "hostpath", "hostnetwork", "hostpid", "hostipc", "hostports",
+        "securitycontext", "podsecuritycontext", "capabilities", "seccompprofile",
+        "serviceaccount", "serviceaccountname", "automountserviceaccounttoken",
+        "nodeselector", "nodename", "tolerations", "affinity",
+        "volumes", "volumemounts", "mounts", "devices",
+        "runasuser", "runasgroup", "fsgroup", "sysctls",
+        "imagepullsecrets", "dockersocket", "namespace", "rbac",
+    }
+)
+
 # Stage types that validate today but have no executor yet. A pipeline may
 # contain them — the engine skips them with an explanation, which is a
 # deliberate product decision — so this is a warning, never an error.
@@ -87,6 +137,25 @@ MAX_STAGES = pipelines.MAX_STAGES
 
 def _issue(code: str, message: str, *, stage: str = "", field: str = "") -> Dict[str, str]:
     return {"code": code, "stage": stage, "field": field, "message": message}
+
+
+def _apply_aliases(raw: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """Rewrite known synonyms onto the field they mean.
+
+    A key the stage model already defines always wins, so an alias can never
+    overwrite an explicit value — ``{"stageType": "command", "type": "scan"}``
+    stays a command stage and reports the ignored ``type``.
+    """
+    out: Dict[str, Any] = {}
+    renamed: List[str] = []
+    for key, value in raw.items():
+        target = FIELD_ALIASES.get(key)
+        if target and target not in raw:
+            out[target] = value
+            renamed.append(f"{key} -> {target}")
+        else:
+            out[key] = value
+    return out, renamed
 
 
 # ---------------------------------------------------------------------------
@@ -499,20 +568,55 @@ def validate(
             continue
         name = " ".join(str(raw.get("name") or "").split())[:120] or f"Stage {index + 1}"
 
+        raw, renamed = _apply_aliases(raw)
+        if renamed:
+            warnings.append(
+                _issue(
+                    "field_renamed",
+                    f"Stage '{name}' used other names for fields KubeSight already "
+                    f"has ({', '.join(renamed)}); they were read as the fields they "
+                    "mean.",
+                    stage=name,
+                )
+            )
+
         unknown = sorted(set(raw) - STAGE_KEYS)
-        if unknown:
+        privileged = [
+            key for key in unknown if key.replace("_", "").lower() in PRIVILEGE_FIELDS
+        ]
+        if privileged:
             errors.append(
                 _issue(
                     "unknown_field",
-                    f"Stage '{name}' carries fields KubeSight has no place for: "
-                    f"{', '.join(unknown)}. Anything not in the stage model is refused "
-                    "rather than ignored.",
+                    f"Stage '{name}' asks for {', '.join(privileged)}, which a "
+                    "KubeSight build stage cannot have. Build containers run as a "
+                    "non-root user with a read-only root filesystem and no host "
+                    "access, and that is not configurable from a pipeline.",
                     stage=name,
                 )
             )
             continue
 
-        stage = {k: v for k, v in raw.items() if k not in IGNORED_STAGE_KEYS}
+        dropped = [key for key in unknown if key not in privileged]
+        if dropped:
+            # Not refused. A pipeline that is otherwise correct must not be
+            # thrown away over a field KubeSight simply does not have — but the
+            # reviewer is told what was ignored, because "it did not do the
+            # thing I asked for" is the failure that follows silence here.
+            warnings.append(
+                _issue(
+                    "unsupported_field",
+                    f"Stage '{name}' set {', '.join(dropped)}, which KubeSight has no "
+                    "equivalent for. It was ignored — the stage will run without it.",
+                    stage=name,
+                )
+            )
+
+        stage = {
+            k: v
+            for k, v in raw.items()
+            if k in STAGE_KEYS and k not in IGNORED_STAGE_KEYS
+        }
         stage = _resolve_build_environment(stage, name, errors, warnings)
 
         # Structural validation is the SAME function that guards a hand-written

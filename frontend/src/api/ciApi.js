@@ -38,6 +38,10 @@ export const testCiSource = (id) =>
 export const listCiBranches = (id) =>
   request(`/api/ci/services/${encodeURIComponent(id)}/source/branches`);
 
+/** Branches and tags for a repository the catalog has no service row for yet. */
+export const previewCiBranches = (payload) =>
+  request("/api/ci/source/branches", { method: "POST", body: payload });
+
 export const listCiSourceCredentials = () => request("/api/ci/source/credentials");
 
 export const createCiSourceCredential = (payload) =>
