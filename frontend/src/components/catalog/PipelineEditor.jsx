@@ -3,6 +3,7 @@ import BuildParameters from "./BuildParameters.jsx";
 import JenkinsfileImportModal from "./JenkinsfileImportModal.jsx";
 import {
   applyCiPipelineTemplate,
+  createCiPipeline,
   lintCiPipeline,
   listCiPipelines,
   listCiSecrets,
@@ -19,6 +20,7 @@ import {
   TrashIcon,
   UNIMPLEMENTED_STAGE_TYPES,
   UpIcon,
+  applicationTypeLabel,
 } from "./ciShared.jsx";
 
 const blankStage = () => ({
@@ -177,6 +179,8 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
   // the list is the to-do for finishing the port, and it is only actionable
   // next to the stages it is about.
   const [importNotes, setImportNotes] = useState(null);
+  const generated = Boolean(pipeline?.isGeneratedDefault);
+  const editable = canEdit && !generated;
 
   const load = async () => {
     setLoading(true);
@@ -270,14 +274,18 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
     setSaving(true);
     setError("");
     try {
-      const saved = await updateCiPipeline(pipeline.id, {
+      const payload = {
         name: pipeline.name,
+        isDefault: true,
         parameters,
         stages: stages.map((stage) => ({
           ...stage,
           timeoutSeconds: Number(stage.timeoutSeconds) || 1800,
         })),
-      });
+      };
+      const saved = pipeline.id
+        ? await updateCiPipeline(pipeline.id, payload)
+        : await createCiPipeline(service.id, payload);
       setPipeline(saved);
       setStages(saved.stages.map((stage) => ({ ...stage })));
       setParameters((saved.parameters || []).map((item) => ({ ...item })));
@@ -290,6 +298,20 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
       setError(err.message || "Could not save the pipeline.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const customizeDefault = () => {
+    setPipeline((current) => ({
+      ...current,
+      isGeneratedDefault: false,
+      version: current?.version || 1,
+    }));
+    setDirty(true);
+    if (!stages.length) {
+      setStages([blankStage()]);
+      setSelectedIndex(0);
+      setActivePanel("stage");
     }
   };
 
@@ -325,6 +347,10 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
    * pipeline is never replaced by a translation nobody read.
    */
   const applyDraft = (draft) => {
+    setPipeline((current) => ({
+      ...(current || { name: "default", id: null }),
+      isGeneratedDefault: false,
+    }));
     setStages(draft.stages.map((stage) => ({ ...stage })));
     setParameters(draft.parameters.map((item) => ({ ...item })));
     setImportNotes(draft.notes?.length || draft.blocking?.length ? draft : null);
@@ -346,6 +372,31 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
           onApply={applyDraft}
           onClose={() => setImporting(false)}
         />
+      )}
+
+      {generated && (
+        <section className="sg-ci-default-pipeline" aria-label="KubeSight default pipeline">
+          <div>
+            <strong>Using KubeSight default pipeline</strong>
+            <span>
+              Application type: {pipeline.defaultMetadata?.applicationTypeLabel ||
+                applicationTypeLabel(service.applicationType)}
+            </span>
+            <span>
+              Detected command: <code>{pipeline.defaultMetadata?.detectedCommand}</code>
+            </span>
+            {pipeline.defaultMetadata?.detectedFiles?.length > 0 && (
+              <small>
+                Detected: {pipeline.defaultMetadata.detectedFiles.join(", ")}
+              </small>
+            )}
+          </div>
+          {canEdit && (
+            <button type="button" className="primary btn-compact" onClick={customizeDefault}>
+              Customize Pipeline
+            </button>
+          )}
+        </section>
       )}
 
       {/* Survives the dialog: what a Jenkinsfile could not carry is work to do
@@ -448,7 +499,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
         {pipeline && (
           <div className="sg-ci-pipeline-identity">
             <strong>{pipeline.name}</strong>
-            <span>Revision {pipeline.version}</span>
+            <span>{generated ? "Generated for each build" : `Revision ${pipeline.version}`}</span>
           </div>
         )}
         <span className={`status-pill ${stages.length ? "ok" : "warn"} sg-ci-pipeline-ready`}>
@@ -458,7 +509,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
             : "No stages configured"}
         </span>
         <span className={`sg-ci-save-state${dirty ? " is-dirty" : ""}`} aria-live="polite">
-          {dirty ? "Unsaved changes" : "All changes saved"}
+          {generated ? "Managed by KubeSight" : dirty ? "Unsaved changes" : "All changes saved"}
         </span>
         {canEdit && (
           <div className="sg-ci-pipeline-actions">
@@ -471,21 +522,23 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
             >
               Import Jenkinsfile
             </button>
-            <button
-              type="button"
-              className="btn-outline btn-compact"
-              onClick={resetToTemplate}
-              disabled={saving}
-            >
-              Reset to template
-            </button>
+            {!generated && (
+              <button
+                type="button"
+                className="btn-outline btn-compact"
+                onClick={resetToTemplate}
+                disabled={saving}
+              >
+                Reset to template
+              </button>
+            )}
             {/* Quiet when there is nothing to save — a disabled primary reads
                 as a broken button, not as a state. */}
             <button
               type="button"
               className={dirty ? "primary btn-compact" : "btn-outline btn-compact"}
               onClick={save}
-              disabled={saving || !dirty}
+              disabled={saving || !dirty || generated}
             >
               {saving ? "Saving…" : dirty ? "Save pipeline" : "Saved ✓"}
             </button>
@@ -537,7 +590,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
             </div>
           )}
 
-          {canEdit && (
+          {editable && (
             <button type="button" className="btn-outline btn-compact sg-ci-add-stage" onClick={add}>
               <PlusIcon /> Add stage
             </button>
@@ -560,7 +613,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
           {activePanel === "parameters" ? (
             <BuildParameters
               parameters={parameters}
-              canEdit={canEdit}
+              canEdit={editable}
               onChange={(next) => {
                 setParameters(next);
                 setDirty(true);
@@ -577,7 +630,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
                   <h3>{stages[selectedIndex].name || "Unnamed stage"}</h3>
                   <p>{stageSummary(stages[selectedIndex])}</p>
                 </div>
-                {canEdit && (
+                {editable && (
                   <div className="sg-ci-inspector-actions">
                     <button
                       type="button"
@@ -615,7 +668,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
                 stage={stages[selectedIndex]}
                 secretKeys={secretKeys}
                 parameters={parameters}
-                canEdit={canEdit}
+                canEdit={editable}
                 onChange={(patch) => mutate(selectedIndex, patch)}
               />
             </>
@@ -623,7 +676,7 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
             <div className="sg-ci-pipeline-empty">
               <strong>This pipeline has no stages yet.</strong>
               <p>
-                {canEdit
+                {editable
                   ? "Add one, or reset to the starter template."
                   : "There is nothing to configure."}
               </p>

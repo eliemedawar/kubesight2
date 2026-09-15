@@ -17,6 +17,27 @@ from api.secret_encryption import encrypt_secret
 from tests.conftest import auth_headers
 
 
+def test_stage_image_resolves_run_build_variables_without_a_shell():
+    from api.services.ci import engine
+
+    assert engine._resolve_stage_image(
+        "registry.areeba.com/gradle:${GradleVersion}-jdk11",
+        {"GradleVersion": "8.10"},
+        "build jar file",
+    ) == "registry.areeba.com/gradle:8.10-jdk11"
+
+
+def test_stage_image_reports_a_missing_run_build_variable():
+    from api.services.ci import engine
+
+    with pytest.raises(engine.BuildError, match="GradleVersion.*empty or missing"):
+        engine._resolve_stage_image(
+            "registry.areeba.com/gradle:${GradleVersion}-jdk11",
+            {},
+            "build jar file",
+        )
+
+
 @pytest.fixture()
 def runnable_service(app, client, admin_token):
     """A service with source connected and a two-stage pipeline."""

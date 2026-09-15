@@ -15,6 +15,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...audit import log_audit
@@ -27,7 +28,7 @@ from ...models_ci import (
     CiSecret,
     CiService,
 )
-from . import jenkinsfile, templates
+from . import default_pipelines, jenkinsfile, templates
 from .serializers import pipeline_to_dict
 
 MAX_STAGES = 40
@@ -559,13 +560,92 @@ def _apply_stages(pipeline: CiPipeline, stage_payloads: List[Dict[str, Any]]) ->
 # Public API
 # ---------------------------------------------------------------------------
 
-def list_pipelines(service_id: int) -> List[Dict[str, Any]]:
+def _generated_pipeline(service: CiService, base=None, revision: str = ""):
+    """Build an unsaved native pipeline from the application-type fallback."""
+    payload = default_pipelines.for_service(service, revision)
+    metadata = payload["metadata"]
+    if metadata.get("requiresCustomization"):
+        raise PipelineError(
+            "Custom services need at least one command stage before they can run. "
+            "Choose Customize Pipeline and provide the command."
+        )
+
+    known_keys = _known_secret_keys(service.id)
+    stages = []
+    for index, stage_payload in enumerate(payload.get("stages") or []):
+        normalized = normalize_stage(stage_payload, index, known_keys)
+        stages.append(SimpleNamespace(id=None, **normalized))
+
+    return SimpleNamespace(
+        id=getattr(base, "id", None),
+        service_id=service.id,
+        name=getattr(base, "name", None) or payload["name"],
+        description=payload["description"],
+        is_default=True,
+        enabled=True,
+        version=getattr(base, "version", None) or 0,
+        parameters=_parameters(payload.get("parameters")),
+        stages=stages,
+        created_at=getattr(base, "created_at", None),
+        updated_at=getattr(base, "updated_at", None),
+        generated_default=True,
+        default_metadata=metadata,
+    )
+
+
+def _generated_pipeline_dict(service: CiService, base=None) -> Dict[str, Any]:
+    try:
+        pipeline = _generated_pipeline(service, base, service.default_branch)
+        data = pipeline_to_dict(pipeline)
+        metadata = pipeline.default_metadata
+    except PipelineError:
+        payload = default_pipelines.for_service(service, service.default_branch)
+        metadata = payload["metadata"]
+        data = {
+            "id": getattr(base, "id", None),
+            "serviceId": service.id,
+            "name": getattr(base, "name", None) or "default",
+            "description": payload["description"],
+            "isDefault": True,
+            "enabled": True,
+            "version": getattr(base, "version", None) or 0,
+            "parameters": payload.get("parameters") or [],
+            "stageCount": 0,
+            "stages": [],
+            "createdAt": None,
+            "updatedAt": None,
+        }
+    data.update(
+        {
+            "isGeneratedDefault": True,
+            "defaultMetadata": metadata,
+        }
+    )
+    return data
+
+
+def list_pipelines(service: CiService | int) -> List[Dict[str, Any]]:
+    if not isinstance(service, CiService):
+        service = db.session.get(CiService, int(service))
+        if service is None:
+            raise LookupError("Service not found.")
     rows = (
-        CiPipeline.query.filter_by(service_id=service_id)
+        CiPipeline.query.filter_by(service_id=service.id)
         .order_by(CiPipeline.is_default.desc(), CiPipeline.id.asc())
         .all()
     )
-    return [pipeline_to_dict(row) for row in rows]
+    if not rows:
+        return [_generated_pipeline_dict(service)]
+
+    items = []
+    for row in rows:
+        if row.is_default and not row.stages:
+            items.append(_generated_pipeline_dict(service, row))
+        else:
+            data = pipeline_to_dict(row)
+            data["isGeneratedDefault"] = False
+            items.append(data)
+    return items
 
 
 def get_pipeline(pipeline_id: int) -> CiPipeline:
@@ -695,9 +775,12 @@ def delete_pipeline(pipeline: CiPipeline, *, actor=None) -> None:
 def create_from_template(
     service: CiService, application_type: Optional[str] = None, *, actor=None
 ) -> Dict[str, Any]:
-    payload = templates.default_pipeline_payload(
-        application_type or service.application_type
-    )
+    selected_type = application_type or service.application_type
+    if selected_type == service.application_type:
+        payload = default_pipelines.for_service(service, service.default_branch)
+    else:
+        payload = templates.default_pipeline_payload(selected_type)
+    payload.pop("metadata", None)
     existing = CiPipeline.query.filter_by(
         service_id=service.id, name=payload["name"]
     ).first()
@@ -920,8 +1003,8 @@ def validate_parameter_values(
 
 
 def resolve_for_build(
-    service: CiService, pipeline_id: Optional[int] = None
-) -> Tuple[CiPipeline, List[CiPipelineStage]]:
+    service: CiService, pipeline_id: Optional[int] = None, *, revision: str = ""
+) -> Tuple[Any, List[Any]]:
     """The pipeline a Run Build should execute, with its runnable stages."""
     if pipeline_id:
         pipeline = db.session.get(CiPipeline, int(pipeline_id))
@@ -929,10 +1012,11 @@ def resolve_for_build(
             raise PipelineError("That pipeline does not belong to this service.")
     else:
         pipeline = service.default_pipeline()
-    if pipeline is None:
-        raise PipelineError("This service has no pipeline configured.")
-    if not pipeline.enabled:
+    if pipeline is not None and not pipeline.enabled:
         raise PipelineError(f"Pipeline '{pipeline.name}' is disabled.")
+    if pipeline is None or not pipeline.stages:
+        generated = _generated_pipeline(service, pipeline, revision)
+        return generated, list(generated.stages)
     stages = [stage for stage in pipeline.stages if stage.enabled]
     if not stages:
         raise PipelineError(f"Pipeline '{pipeline.name}' has no enabled stages.")

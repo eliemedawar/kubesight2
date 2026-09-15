@@ -31,6 +31,7 @@ original, which is where literal values are read back from.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -935,6 +936,37 @@ def _read_when(draft: _Draft, start: int, end: int, stage: str) -> Optional[Dict
 # agent { }
 # ---------------------------------------------------------------------------
 
+_JENKINS_CONTROLLER_LABELS = {"master", "built-in", "built-in-node"}
+
+
+def _runner_labels(draft: _Draft, expression: str, stage: str) -> List[str]:
+    """Translate a Jenkins label expression into KubeSight capabilities.
+
+    Jenkins gives its controller the implicit ``master``/``built-in`` labels.
+    They describe where Jenkins itself runs, not a capability an independent
+    KubeSight runner can advertise. Carrying them across leaves an otherwise
+    valid build queued forever, so they are deliberately discarded.
+    """
+    labels = [
+        part.strip().lower()
+        for part in re.split(r"&&|\|\||,", expression)
+        if part.strip()
+    ]
+    removed = [label for label in labels if label in _JENKINS_CONTROLLER_LABELS]
+    if removed:
+        draft.note(
+            INFO,
+            "Jenkins controller label"
+            + ("s " if len(removed) > 1 else " ")
+            + ", ".join(sorted(set(removed)))
+            + (" were" if len(removed) > 1 else " was")
+            + " removed. KubeSight will use any runner that satisfies the "
+            "remaining capabilities.",
+            stage=stage,
+        )
+    return [label for label in labels if label not in _JENKINS_CONTROLLER_LABELS]
+
+
 def _read_agent(draft: _Draft, stmt: _Stmt, stage: str) -> Dict[str, Any]:
     """``label`` becomes runner labels, ``docker { image }`` becomes the image."""
     out: Dict[str, Any] = {}
@@ -947,11 +979,7 @@ def _read_agent(draft: _Draft, stmt: _Stmt, stage: str) -> Dict[str, Any]:
             if label:
                 # `linux && docker` is a Jenkins label expression; each name is a
                 # capability, which is exactly what runner labels are.
-                out["runnerLabels"] = [
-                    part.strip().lower()
-                    for part in re.split(r"&&|\|\||,", label)
-                    if part.strip()
-                ]
+                out["runnerLabels"] = _runner_labels(draft, label, stage)
         elif inner.head in ("docker", "kubernetes", "dockerfile"):
             if inner.head == "docker":
                 image = _str(named.get("image"), 512)
@@ -963,7 +991,9 @@ def _read_agent(draft: _Draft, stmt: _Stmt, stage: str) -> Dict[str, Any]:
                         elif deeper.head == "label":
                             pos, _ = _stmt_args(draft.text, draft.mask, deeper)
                             if pos:
-                                out["runnerLabels"] = [_str(pos[0], 64).lower()]
+                                out["runnerLabels"] = _runner_labels(
+                                    draft, _str(pos[0], 64), stage
+                                )
                 if image:
                     out["image"] = image
                 if not image and not positional:
@@ -1417,6 +1447,159 @@ def _unique_name(taken: set, name: str) -> str:
     return candidate
 
 
+_HOST_ALIAS_COMMAND = re.compile(
+    r"^\s*(?:grep\b.+?\s+/etc/hosts\s*\|\|\s*)?"
+    r"(?:sudo\s+)?echo\s+(?P<entry>'[^']+'|\"[^\"]+\"|[^>]+?)"
+    r"\s*>>\s*/etc/hosts\s*$"
+)
+_HOSTNAME = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+)
+_GRADLE_HOME_PATH = re.compile(
+    r"(?:/(?:home/[^/\s\"']+|root)/\.gradle|(?:\$\{HOME\}|\$HOME|~)/\.gradle)"
+)
+_GRADLE_PROPERTIES_ECHO = re.compile(
+    r"^\s*echo\s+(?P<quote>['\"])\$\{?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}?"
+    r"(?P=quote)\s*>\s*['\"]?\$GRADLE_USER_HOME/gradle\.properties['\"]?\s*$"
+)
+_JENKINS_PARAMETER_FILE_ECHO = re.compile(
+    r"^\s*echo\s+(['\"])\$\{(?:(?:params|env)\.)?"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}\1\s*"
+    r"(?P<redirect>>>?)\s*(?P<target>.+?)\s*$"
+)
+_ABSOLUTE_SOURCE = re.compile(r"(?<![\w$])/workspace/source(?=/|\b)")
+_ABSOLUTE_WORKSPACE = re.compile(r"(?<![\w$])/workspace(?=/|\b)")
+
+
+def _host_alias_from_command(command: str) -> Optional[Tuple[str, List[str]]]:
+    """Read the common Jenkins ``echo ... >> /etc/hosts`` workaround."""
+    match = _HOST_ALIAS_COMMAND.match(command)
+    if not match:
+        return None
+    entry = match.group("entry").strip()
+    if len(entry) >= 2 and entry[0] == entry[-1] and entry[0] in ("'", '"'):
+        entry = entry[1:-1]
+    fields = entry.split()
+    if len(fields) < 2:
+        return None
+    try:
+        address = str(ipaddress.ip_address(fields[0]))
+    except ValueError:
+        return None
+    hostnames: List[str] = []
+    for hostname in fields[1:]:
+        if not _HOSTNAME.match(hostname):
+            return None
+        if hostname not in hostnames:
+            hostnames.append(hostname)
+    return address, hostnames[:10]
+
+
+def _add_host_alias(stage: Dict[str, Any], address: str, hostnames: List[str]) -> bool:
+    aliases = stage.setdefault("hostAliases", [])
+    existing = next((entry for entry in aliases if entry.get("ip") == address), None)
+    if existing is None:
+        if len(aliases) >= 20:
+            return False
+        existing = {"ip": address, "hostnames": []}
+        aliases.append(existing)
+    for hostname in hostnames:
+        if hostname not in existing["hostnames"] and len(existing["hostnames"]) < 10:
+            existing["hostnames"].append(hostname)
+    return True
+
+
+def _make_kubesight_portable(draft: _Draft, stage: Dict[str, Any]) -> None:
+    """Apply deterministic Jenkins-to-KubeSight shell translations.
+
+    These are deliberately narrow. Each replacement has a native KubeSight
+    equivalent with identical intent; ambiguous shell remains untouched and is
+    still reported by the portability linter for a person to review.
+    """
+    commands: List[str] = []
+    aliases: List[str] = []
+    gradle_home_changed = False
+    workspace_changed = False
+
+    for original in stage.get("commands") or []:
+        alias = _host_alias_from_command(original)
+        if alias and _add_host_alias(stage, alias[0], alias[1]):
+            aliases.extend(alias[1])
+            continue
+
+        command, replacements = _GRADLE_HOME_PATH.subn("$GRADLE_USER_HOME", original)
+        if replacements:
+            gradle_home_changed = True
+            echo = _GRADLE_PROPERTIES_ECHO.match(command)
+            if echo:
+                command = (
+                    "printf '%s' \"${"
+                    + echo.group("name")
+                    + '}\" > "$GRADLE_USER_HOME/gradle.properties"'
+                )
+
+        # Jenkins expands `${settinggradle}` in a triple-double-quoted `sh`
+        # block before the shell sees its surrounding single quotes. Native
+        # shell execution does not: it would write the placeholder literally
+        # and leave files such as settings.gradle syntactically invalid.
+        parameter_echo = _JENKINS_PARAMETER_FILE_ECHO.match(command)
+        if parameter_echo:
+            command = (
+                "printf '%s\\n' \"${"
+                + parameter_echo.group("name")
+                + '}\" '
+                + parameter_echo.group("redirect")
+                + " "
+                + parameter_echo.group("target")
+            )
+            draft.note(
+                INFO,
+                "A Jenkins-interpolated file value was converted to shell "
+                "environment-variable expansion.",
+                stage=stage["name"],
+            )
+
+        command, source_replacements = _ABSOLUTE_SOURCE.subn(
+            "${KUBESIGHT_SOURCE}", command
+        )
+        command, workspace_replacements = _ABSOLUTE_WORKSPACE.subn(
+            "${KUBESIGHT_WORKSPACE}", command
+        )
+        workspace_changed = workspace_changed or bool(
+            source_replacements or workspace_replacements
+        )
+        commands.append(command)
+
+    if gradle_home_changed:
+        commands = [
+            'export GRADLE_USER_HOME="$KUBESIGHT_WORKSPACE/.gradle"',
+            'mkdir -p "$GRADLE_USER_HOME"',
+            *commands,
+        ]
+        draft.note(
+            INFO,
+            "Gradle's Jenkins home directory was moved under "
+            "$KUBESIGHT_WORKSPACE so it is writable on every runner.",
+            stage=stage["name"],
+        )
+    if aliases:
+        draft.note(
+            INFO,
+            "An /etc/hosts shell edit was converted to Runtime & networking "
+            "host aliases: " + ", ".join(sorted(set(aliases))) + ".",
+            stage=stage["name"],
+        )
+    if workspace_changed:
+        draft.note(
+            INFO,
+            "Hard-coded /workspace paths were replaced with KUBESIGHT workspace "
+            "variables so the stage also works on an agent.",
+            stage=stage["name"],
+        )
+    stage["commands"] = commands
+
+
 def _read_stages(
     draft: _Draft,
     start: int,
@@ -1576,6 +1759,7 @@ def _read_stages(
                 offset=stmt.span[0],
             )
 
+        _make_kubesight_portable(draft, stage)
         _suggest_container_image(draft, stage)
         draft.stages.append(stage)
 

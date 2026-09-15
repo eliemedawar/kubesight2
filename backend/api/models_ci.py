@@ -25,8 +25,8 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-# Application types a service can declare. Drives the starter pipeline template
-# and the card icon; never gates execution.
+# Application types a service can declare. Drives the generated default,
+# customization kit and card icon; never gates execution.
 APPLICATION_TYPES = (
     "container",
     "java_maven",

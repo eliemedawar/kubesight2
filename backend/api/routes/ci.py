@@ -326,8 +326,8 @@ def list_pipeline_templates():
 @ci_bp.route("/services/<int:service_id>/pipelines", methods=["GET"])
 @require_permission("ci_pipelines:view")
 def list_pipelines(service_id: int):
-    catalog_service.get_service(service_id)
-    items = pipelines_service.list_pipelines(service_id)
+    service = catalog_service.get_service(service_id)
+    items = pipelines_service.list_pipelines(service)
     return success_response({"items": items, "count": len(items)})
 
 
@@ -598,6 +598,11 @@ def get_service_parameters(service_id: int):
         {
             "pipelineId": pipeline.id,
             "pipelineName": pipeline.name,
+            "pipelineSource": (
+                "kubesight_default"
+                if getattr(pipeline, "generated_default", False)
+                else "configured"
+            ),
             "items": pipelines_service.resolve_parameters(service, pipeline),
         }
     )

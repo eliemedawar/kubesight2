@@ -21,7 +21,7 @@ import pytest
 from api.db import db
 from api.models_application_intelligence import BitbucketCredentialProfile
 from api.secret_encryption import encrypt_secret
-from api.services.ci import jenkinsfile
+from api.services.ci import jenkinsfile, portability
 from tests.conftest import auth_headers
 
 SIMPLE = """
@@ -146,6 +146,99 @@ def test_a_checkout_stage_is_added_because_jenkins_cloned_for_the_whole_job():
     first = draft["stages"][0]
     assert first["stageType"] == "checkout"
     assert first["commands"] == []
+
+
+def test_jenkins_controller_labels_do_not_become_runner_capabilities():
+    draft = jenkinsfile.parse(
+        """
+        pipeline {
+            agent { label 'master && linux' }
+            stages {
+                stage('Build') { steps { sh 'make' } }
+            }
+        }
+        """
+    )
+
+    assert all(stage["runnerLabels"] == ["linux"] for stage in draft["stages"])
+    assert any(
+        "controller label master was removed" in message
+        for message in _messages(draft, jenkinsfile.INFO)
+    )
+
+
+def test_jenkins_host_and_gradle_home_workarounds_become_kubesight_native_fields():
+    draft = jenkinsfile.parse(
+        '''
+        pipeline {
+            agent { label 'master' }
+            stages {
+                stage('build jar file') {
+                    agent { docker { image 'registry.areeba.com/gradle:8-jdk11' } }
+                    steps {
+                        sh """
+                            echo '${params.gradleproperties}' > /home/gradle/.gradle/gradle.properties
+                            grep -q 'registry.areeba.com' /etc/hosts || echo '10.43.17.16 registry.areeba.com' >> /etc/hosts
+                            gradle clean build
+                            cp build/libs/app.jar /workspace/source/app.jar
+                        """
+                    }
+                }
+            }
+        }
+        '''
+    )
+
+    stage = _stage(draft, "build jar file")
+    assert stage["runnerLabels"] == []
+    assert stage["hostAliases"] == [
+        {"ip": "10.43.17.16", "hostnames": ["registry.areeba.com"]}
+    ]
+    assert stage["commands"] == [
+        'export GRADLE_USER_HOME="$KUBESIGHT_WORKSPACE/.gradle"',
+        'mkdir -p "$GRADLE_USER_HOME"',
+        'printf \'%s\' "${gradleproperties}" > "$GRADLE_USER_HOME/gradle.properties"',
+        "gradle clean build",
+        "cp build/libs/app.jar ${KUBESIGHT_SOURCE}/app.jar",
+    ]
+    assert "/etc/hosts" not in "\n".join(stage["commands"])
+    assert "/home/gradle" not in "\n".join(stage["commands"])
+    assert "write_outside_workspace" not in {
+        finding["code"] for finding in portability.analyze(draft["stages"])["findings"]
+    }
+
+
+def test_jenkins_interpolated_multiline_value_is_not_written_literally():
+    draft = jenkinsfile.parse(
+        '''
+        pipeline {
+            agent any
+            parameters {
+                text(name: 'settinggradle', defaultValue: '', description: '')
+            }
+            stages {
+                stage('Gradle settings') {
+                    steps {
+                        sh """
+                            echo "rootProject.name = 'issuing'" > settings.gradle
+                            echo '${settinggradle}' >> settings.gradle
+                        """
+                    }
+                }
+            }
+        }
+        '''
+    )
+
+    stage = _stage(draft, "Gradle settings")
+    assert stage["commands"] == [
+        'echo "rootProject.name = \'issuing\'" > settings.gradle',
+        'printf \'%s\\n\' "${settinggradle}" >> settings.gradle',
+    ]
+    assert any(
+        "Jenkins-interpolated file value" in message
+        for message in _messages(draft, jenkinsfile.INFO)
+    )
 
 
 def test_the_job_environment_is_copied_onto_every_stage():

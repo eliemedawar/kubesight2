@@ -34,7 +34,7 @@ from ...models_ci import (
 )
 from . import artifacts as artifacts_service
 from . import source as source_port
-from . import templates as templates_service
+from . import default_pipelines, templates as templates_service
 from .serializers import service_to_dict
 
 
@@ -265,6 +265,18 @@ def expected_secrets(row: CiService) -> List[Dict[str, Any]]:
 
 def readiness(row: CiService) -> Dict[str, Any]:
     """What still has to be true before this service can build."""
+    pipeline = row.default_pipeline()
+    saved_stages = list(pipeline.stages) if pipeline else []
+    generated_available = not saved_stages and default_pipelines.is_available(
+        row.application_type
+    )
+    custom_has_command = any(
+        stage.enabled and stage.stage_type == "command" and list(stage.commands or [])
+        for stage in saved_stages
+    )
+    pipeline_ok = bool(saved_stages or generated_available)
+    if row.application_type == "generic":
+        pipeline_ok = custom_has_command
     checks = [
         {
             "key": "source",
@@ -274,9 +286,17 @@ def readiness(row: CiService) -> Dict[str, Any]:
         },
         {
             "key": "pipeline",
-            "label": "Pipeline configured",
-            "ok": bool(row.default_pipeline() and row.default_pipeline().stages),
-            "hint": "Add at least one stage on the Pipeline tab.",
+            "label": (
+                "Using KubeSight default pipeline"
+                if generated_available
+                else "Pipeline configured"
+            ),
+            "ok": pipeline_ok,
+            "hint": (
+                "Custom services need at least one command in Customize Pipeline."
+                if row.application_type == "generic"
+                else "Add at least one stage on the Pipeline tab."
+            ),
         },
         {
             "key": "active",
@@ -295,7 +315,16 @@ def can_run_build(row: CiService) -> Optional[str]:
     if not row.source_ready():
         return "Connect a repository and credential before running a build."
     pipeline = row.default_pipeline()
-    if pipeline is None or not pipeline.stages:
+    stages = list(pipeline.stages) if pipeline else []
+    if row.application_type == "generic" and not any(
+        stage.enabled and stage.stage_type == "command" and list(stage.commands or [])
+        for stage in stages
+    ):
+        return (
+            "Custom services need at least one command stage. "
+            "Choose Customize Pipeline and provide the command."
+        )
+    if not stages and not default_pipelines.is_available(row.application_type):
         return "Configure a pipeline with at least one stage before running a build."
     return None
 
@@ -440,12 +469,24 @@ def create_service(payload: Dict[str, Any], *, actor=None) -> Dict[str, Any]:
     db.session.add(row)
     db.session.commit()
 
-    # A new service gets its application type's starter pipeline so it is one
-    # click from runnable instead of landing on an empty editor.
+    # Keep a stable editable pipeline identity, but leave its stages empty.
+    # Until a user explicitly customizes it, resolution supplies an unsaved,
+    # repository-aware KubeSight default at build time.
     if payload.get("createDefaultPipeline") is not False:
         from . import pipelines as pipelines_service
 
-        pipelines_service.create_from_template(row, row.application_type, actor=actor)
+        pipelines_service.create_pipeline(
+            row,
+            {
+                "name": "default",
+                "description": "Uses the KubeSight default until customized.",
+                "isDefault": True,
+                "enabled": True,
+                "parameters": [],
+                "stages": [],
+            },
+            actor=actor,
+        )
 
     log_audit(
         "ci_service_created",

@@ -58,7 +58,18 @@ def service_to_dict(
     recent_statuses: Optional[List[str]] = None,
     include_counts: bool = False,
 ) -> Dict[str, Any]:
+    from . import default_pipelines
+
     pipeline = row.default_pipeline()
+    saved_stage_count = len(pipeline.stages) if pipeline else 0
+    uses_generated_default = (
+        saved_stage_count == 0 and default_pipelines.is_available(row.application_type)
+    )
+    effective_stage_count = (
+        default_pipelines.stage_count(row.application_type)
+        if uses_generated_default
+        else saved_stage_count
+    )
     data: Dict[str, Any] = {
         "id": row.id,
         "name": row.name,
@@ -84,9 +95,10 @@ def service_to_dict(
         "catalogEntryId": row.catalog_entry_id,
         "maxConcurrentBuilds": row.max_concurrent_builds,
         "sourceConfigured": row.source_ready(),
-        "pipelineConfigured": bool(pipeline and pipeline.stages),
+        "pipelineConfigured": bool(saved_stage_count or uses_generated_default),
+        "usingDefaultPipeline": uses_generated_default,
         "pipelineId": pipeline.id if pipeline else None,
-        "pipelineStageCount": len(pipeline.stages) if pipeline else 0,
+        "pipelineStageCount": effective_stage_count,
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
     }

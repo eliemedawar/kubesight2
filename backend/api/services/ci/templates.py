@@ -1,8 +1,8 @@
-"""Starter kits per application type.
+"""Static customization kits per application type.
 
-A registered service should be one click from a runnable pipeline, not a blank
-stage editor. The application type is the one thing we ask for at registration,
-so it is what everything predefinable hangs off:
+Runtime fallbacks live in :mod:`default_pipelines` and are deliberately not
+saved. This registry supplies inline Dockerfiles, expected secret names, and
+the starter kit an operator may explicitly apply. The application type drives:
 
     stages           the ordered pipeline
     parameters       what the Run Build dialog asks, wired to stage conditions
@@ -551,7 +551,7 @@ def expected_secrets_for(application_type: str) -> List[Dict[str, str]]:
 
 
 def default_pipeline_payload(application_type: str) -> Dict[str, Any]:
-    """A ready-to-save pipeline payload for a newly registered service."""
+    """A ready-to-save payload for explicitly materializing a starter kit."""
     template = template_for(application_type)
     return {
         "name": "default",

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from api.services.ci import pipelines as pipelines_service
 from api.services.ci import templates
 from tests.conftest import auth_headers
 
@@ -24,21 +25,18 @@ def _image_stage_types(definition):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("app_type", sorted(templates.TEMPLATES))
-def test_every_template_saves_through_the_pipeline_validator(app, app_type, admin_token, client):
-    """A template is only useful if the API accepts it verbatim.
+def test_every_customization_template_passes_the_pipeline_validator(app, app_type):
+    """Static starter kits remain valid when a user explicitly applies one.
 
-    Registering a service is the path that proves it: the payload goes through
-    ``_parameters``, ``_apply_stages`` and ``_run_condition`` exactly as a
-    hand-written pipeline would.
+    Registration no longer persists these stages: an empty service uses the
+    repository-aware runtime default. The static registry is still offered as
+    a customization source, so it must satisfy the ordinary validators.
     """
-    response = client.post(
-        "/api/ci/services",
-        json={"name": f"Kit {app_type}", "applicationType": app_type},
-        headers=auth_headers(admin_token),
-    )
-    assert response.status_code == 201, response.get_json()
-    data = response.get_json()["data"]
-    assert data["pipelineStageCount"] == len(templates.TEMPLATES[app_type]["stages"])
+    definition = templates.default_pipeline_payload(app_type)
+    with app.app_context():
+        pipelines_service._parameters(definition["parameters"])
+        for position, stage in enumerate(definition["stages"]):
+            pipelines_service.normalize_stage(stage, position, set())
 
 
 @pytest.mark.parametrize("app_type", sorted(templates.TEMPLATES))
@@ -231,18 +229,18 @@ def test_seeding_the_dockerfile_can_be_turned_off(client, admin_token):
     assert data["hasInlineDockerfile"] is False
 
 
-def test_the_starter_pipeline_carries_the_types_parameters(client, admin_token):
+def test_an_empty_service_exposes_its_generated_type_default(client, admin_token):
     service_id = _register(client, admin_token, applicationType="android").get_json()["data"]["id"]
     pipelines = client.get(
         f"/api/ci/services/{service_id}/pipelines", headers=auth_headers(admin_token)
     ).get_json()["data"]["items"]
     default = next(item for item in pipelines if item["isDefault"])
-    assert [param["name"] for param in default["parameters"]] == [
-        "SKIP_TESTS",
-        "BUILD_APK",
-        "BUILD_AAB",
+    assert default["isGeneratedDefault"] is True
+    assert default["defaultMetadata"]["applicationType"] == "android"
+    assert [stage["name"] for stage in default["stages"]] == [
+        "Checkout",
+        "Build Android",
     ]
-    assert default["parameters"][1]["default"] == "true"
 
 
 def test_expected_secrets_report_which_ones_are_still_missing(client, admin_token):
@@ -294,38 +292,25 @@ def test_a_type_with_no_expected_secrets_reports_an_empty_list(client, admin_tok
     assert summary["expectedSecrets"] == []
 
 
-def test_a_parameterised_starter_pipeline_still_accepts_automation_variables(
+def test_a_generated_default_pipeline_accepts_automation_variables(
     app, client, admin_token
 ):
-    """Deploy automation pins the image tag through per-trigger variables.
-
-    Before the starter pipelines declared any parameters, every pipeline took
-    free-form variables. A parameter list turns that check on — so without the
-    engine-reserved pass-through, giving java a SKIP_TESTS parameter would have
-    made every ticket-driven deploy to a newly registered service fail with
-    "this pipeline has no parameter named 'IMAGE_TAG'".
-    """
+    """The unsaved default keeps free-form ticket/deploy variables working."""
     from api.models_ci import CiService
-    from api.services.ci import pipelines as pipelines_service
-
     service_id = _register(client, admin_token).get_json()["data"]["id"]
     with app.app_context():
         service = db_get(CiService, service_id)
-        pipeline = service.default_pipeline()
-        assert [param["name"] for param in pipeline.parameters] == ["SKIP_TESTS"]
+        pipeline, stages = pipelines_service.resolve_for_build(service)
+        assert pipeline.generated_default is True
+        assert stages
+        assert pipeline.parameters == []
 
         accepted = pipelines_service.validate_parameter_values(
             pipeline,
             {"IMAGE_TAG": "REL-4412", "TICKET_TAG": "REL-4412", "KUBESIGHT_TICKET": "TK-9"},
         )
         assert accepted["IMAGE_TAG"] == "REL-4412"
-        # The parameter the pipeline does declare still gets its default.
-        assert accepted["SKIP_TESTS"] == "false"
-
-        # A genuinely unknown variable is still refused: the point of the check
-        # is that a build never runs differently from what was asked for.
-        with pytest.raises(pipelines_service.PipelineError):
-            pipelines_service.validate_parameter_values(pipeline, {"FOO": "bar"})
+        assert accepted["KUBESIGHT_TICKET"] == "TK-9"
 
 
 def db_get(model, row_id):

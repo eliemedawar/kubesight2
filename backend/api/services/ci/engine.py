@@ -128,6 +128,53 @@ class BuildError(ValueError):
     """A build could not be triggered. Message is user-facing."""
 
 
+_IMAGE_VARIABLE_RE = re.compile(
+    r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
+)
+
+
+def _resolve_stage_image(
+    image: Any, env: Dict[str, Any], stage_name: str
+) -> Optional[str]:
+    """Expand build variables in a stage image without invoking a shell.
+
+    Jenkins commonly uses images such as
+    ``registry.example/gradle:${GradleVersion}-jdk11``. Kubernetes does not
+    expand that syntax itself, so handing it the template verbatim leaves the
+    pod in ``InvalidImageName`` before the container can produce any logs.
+    """
+    template = str(image or "").strip()
+    if not template:
+        return None
+
+    missing: List[str] = []
+
+    def replace(match: re.Match) -> str:
+        name = match.group("braced") or match.group("plain")
+        value = str(env.get(name, "")).strip()
+        if not value:
+            missing.append(name)
+        return value
+
+    resolved = _IMAGE_VARIABLE_RE.sub(replace, template)
+    if missing:
+        names = ", ".join(sorted(set(missing)))
+        raise BuildError(
+            f"Stage '{stage_name}' cannot resolve its container image because "
+            f"build input {names} is empty or missing. Set it in Run build or "
+            "give the input a default value."
+        )
+    # A remaining dollar sign means the template used unsupported syntax such
+    # as ${params.NAME}; pass a useful error instead of Kubernetes' opaque
+    # InvalidImageName event. Whitespace is likewise never valid in an image.
+    if "$" in resolved or any(char.isspace() for char in resolved):
+        raise BuildError(
+            f"Stage '{stage_name}' resolved to an invalid container image "
+            f"'{resolved}'. Use ${{VARIABLE}} or $VARIABLE with a build input."
+        )
+    return resolved
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -193,7 +240,10 @@ def trigger_build(
     if blocked:
         raise BuildError(blocked)
 
-    pipeline, stages = pipelines_service.resolve_for_build(service, pipeline_id)
+    selected_ref = commit_sha or branch or service.default_branch or "main"
+    pipeline, stages = pipelines_service.resolve_for_build(
+        service, pipeline_id, revision=selected_ref
+    )
 
     # Values are checked against the pipeline's own parameter definitions, and a
     # bad one is refused rather than dropped: a build that quietly ignored a
@@ -208,6 +258,11 @@ def trigger_build(
         "pipelineId": pipeline.id,
         "pipelineName": pipeline.name,
         "pipelineVersion": pipeline.version,
+        "pipelineSource": (
+            "kubesight_default"
+            if getattr(pipeline, "generated_default", False)
+            else "configured"
+        ),
         "variables": clean_variables,
         # The definitions as they stood, so a build still shows what it was
         # asked after the pipeline changes underneath it.
@@ -1034,7 +1089,7 @@ def _build_execution(
         service_slug=service.slug,
         stage_name=stage.name,
         stage_type=stage_type,
-        image=definition.get("image"),
+        image=_resolve_stage_image(definition.get("image"), env, stage.name),
         working_directory=working_directory,
         commands=list(definition.get("commands") or []),
         env=env,
