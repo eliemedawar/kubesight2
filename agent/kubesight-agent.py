@@ -20,6 +20,15 @@ What it does, in a loop:
     upload     send declared artifacts
     report     post the exit code
 
+Everything a build prints is shown here as well as sent to KubeSight, framed by
+a rule when a stage starts and its verdict when it ends. The terminal you
+started the agent in is usually the first place somebody looks when a build on
+this machine misbehaves, and a machine-specific failure — a missing tool, a
+permission, a full disk — is often legible here before it is anywhere else.
+``--quiet`` drops the output; the verdict is printed either way, because an
+agent that shows a stage starting and never says how it ended has told you
+something false.
+
 About containers: an agent uses the machine as it is — that is the point, and
 the only way an iOS build works at all. But on Linux, where a container is just
 a process, a stage that declares an image runs *inside* that image when this
@@ -159,6 +168,32 @@ class Client:
 _runtime_cache = None          # type: Optional[str]
 _containers_disabled = False   # --no-container
 _runtime_pinned = ""           # --runtime docker|podman
+_echo_output = True            # --quiet turns this off
+
+
+def echo(text: str, stream: str = "stdout") -> None:
+    """Write one line to the terminal this agent is running in.
+
+    Build output goes to KubeSight either way; this is the copy for whoever is
+    watching the machine. Encoding is handled rather than assumed: a build host
+    with LANG=C gives Python an ASCII stdout, and an em dash or a tick in a
+    build's own output would then raise UnicodeEncodeError out of the middle of
+    the streaming loop and take the stage down with it. A log line must never
+    be able to do that, so anything unprintable here is replaced and the line
+    still appears.
+    """
+    handle = sys.stderr if stream == "stderr" else sys.stdout
+    try:
+        handle.write(text + "\n")
+    except UnicodeEncodeError:
+        encoding = getattr(handle, "encoding", None) or "ascii"
+        handle.write(text.encode(encoding, "replace").decode(encoding, "replace") + "\n")
+    except Exception:
+        return  # A closed or broken stdout is not a reason to fail a build.
+    try:
+        handle.flush()
+    except Exception:
+        pass
 
 
 def container_runtime() -> str:
@@ -275,6 +310,12 @@ class LogShipper:
 
     Batched because a chatty build would otherwise be one HTTP request per line;
     time-bounded because a person watching the build should see it move.
+
+    It also echoes each line to this machine's terminal as it arrives, which is
+    the *un*batched copy: somebody watching the agent should see a build move
+    line by line, and — when the network to KubeSight is the thing that broke —
+    should still see it at all. Batching there is an optimisation for HTTP;
+    there is nothing to optimise for a local write.
     """
 
     def __init__(self, client: Client, task_id: int, claim_token: str):
@@ -286,8 +327,11 @@ class LogShipper:
         self.thread.start()
 
     def add(self, content: str, stream: str = "stdout") -> None:
+        line = content.rstrip("\n")
         with self.lock:
-            self.lines.append({"content": content.rstrip("\n"), "stream": stream})
+            self.lines.append({"content": line, "stream": stream})
+        if _echo_output:
+            echo(line, stream)
 
     def _flush(self) -> None:
         with self.lock:
@@ -518,12 +562,13 @@ def pull_image(runtime: str, image: str, shipper: LogShipper) -> None:
     stream([runtime, "pull", image], None, dict(os.environ), shipper)
 
 
-def run_task(client: Client, task: Dict[str, Any], root: str) -> None:
+def run_task(client: Client, task: Dict[str, Any], root: str) -> int:
     task_id, claim = task["taskId"], task["claimToken"]
     workspace = os.path.join(root, str(task.get("workspace") or "build"))
     os.makedirs(workspace, exist_ok=True)
     shipper = LogShipper(client, task_id, claim)
     exit_code, error = 1, None
+    started = time.time()
 
     try:
         if task.get("stageType") == "checkout":
@@ -535,7 +580,7 @@ def run_task(client: Client, task: Dict[str, Any], root: str) -> None:
             if not os.path.isdir(cwd):
                 # Nothing checked out: say what is wrong rather than failing on
                 # the first command with a confusing "no such file".
-                shipper.add("No checkout at %s — did the checkout stage run here?" % cwd, "stderr")
+                shipper.add("No checkout at %s - did the checkout stage run here?" % cwd, "stderr")
                 raise RuntimeError("workspace missing")
             env = {
                 **os.environ,
@@ -610,6 +655,41 @@ def run_task(client: Client, task: Dict[str, Any], root: str) -> None:
             )
         except Exception as exc:
             print("[agent] result post failed: %s" % exc, file=sys.stderr)
+        # Printed even under --quiet: the outcome of a stage is the one line
+        # nobody watching this machine can do without, and a failure that is
+        # only visible in a browser is a failure this terminal lied about.
+        echo(
+            "[agent] build #%s stage '%s' %s"
+            % (
+                task.get("buildNumber"),
+                task.get("stageName"),
+                _outcome(exit_code, error, time.time() - started),
+            ),
+            "stdout" if exit_code == 0 else "stderr",
+        )
+    return exit_code
+
+
+def _outcome(exit_code: int, error: Optional[str], seconds: float) -> str:
+    """The one-line verdict on a finished stage.
+
+    The exit code is named rather than shown alone: "exit 127" is a fact, "the
+    command does not exist on this machine" is the answer, and on an agent —
+    where the toolchain is whatever somebody installed — that distinction is
+    usually the whole debugging session.
+    """
+    took = "%.0fs" % seconds if seconds < 90 else "%.1fm" % (seconds / 60.0)
+    if exit_code == 0:
+        return "succeeded in %s" % took
+    hint = {
+        124: "timed out",
+        126: "command found but not executable",
+        127: "command not found on this machine",
+        137: "killed (SIGKILL - out of memory?)",
+        143: "terminated (SIGTERM)",
+    }.get(exit_code, "")
+    detail = " - %s" % error if error else (" - %s" % hint if hint else "")
+    return "FAILED after %s (exit %s)%s" % (took, exit_code, detail)
 
 
 def upload_artifacts(client: Client, task: Dict[str, Any], workspace: str,
@@ -656,6 +736,9 @@ def main() -> int:
                              "interval; without it KubeSight sets the fleet's")
     parser.add_argument("--insecure", action="store_true",
                         help="Skip TLS verification (for a self-signed KubeSight)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Do not echo build output to this terminal. The outcome of "
+                             "each stage is still printed, pass or fail")
     parser.add_argument("--no-container", action="store_true",
                         help="Never run a stage in a container, even when it declares an "
                              "image and this machine has docker or podman")
@@ -675,9 +758,10 @@ def main() -> int:
     workspace = args.workspace or os.path.expanduser("~/kubesight-agent")
     workspace_error = ""
     os.makedirs(workspace, exist_ok=True)
-    global _containers_disabled, _runtime_pinned
+    global _containers_disabled, _runtime_pinned, _echo_output
     _containers_disabled = bool(args.no_container)
     _runtime_pinned = args.runtime or ""
+    _echo_output = not args.quiet
     capabilities = detect_capabilities()
     print("[agent] %s, capabilities: %s" % (platform.node(), ", ".join(capabilities)))
     runtime = container_runtime()
@@ -695,6 +779,8 @@ def main() -> int:
     else:
         print("[agent] no container runtime: stages run with this machine's own tools")
     print("[agent] workspace: %s%s" % (workspace, " (from --workspace)" if pinned else ""))
+    if not _echo_output:
+        print("[agent] build output is not echoed here (--quiet); read it in KubeSight")
 
     identity = {
         "hostname": platform.node(),
@@ -759,8 +845,11 @@ def main() -> int:
 
             task = client.post_json("/claim", {}) if accepting else None
             if task:
-                print("[agent] running build #%s stage '%s'"
-                      % (task.get("buildNumber"), task.get("stageName")))
+                # A rule above the output and the verdict below it: without the
+                # pair, a long stage's output runs into the next stage's and
+                # neither can be told apart afterwards.
+                echo("[agent] %s build #%s stage '%s' %s"
+                     % ("-" * 8, task.get("buildNumber"), task.get("stageName"), "-" * 8))
                 run_task(client, task, workspace)
                 # Ask again immediately, then keep asking on a fast beat for a
                 # few seconds: reporting the result is what starts the next

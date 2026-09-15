@@ -246,3 +246,79 @@ def list_dockerfiles(
             paths.add(path)
     items = [{"value": path, "label": path} for path in sorted(paths)]
     return {"items": items, "count": len(items), "revision": clean_revision}
+
+
+# A source file read whole, rather than metadata about it. Capped well below
+# MAX_RESPONSE_BYTES because the only caller wants a configuration file: a
+# Jenkinsfile that does not fit in this is a program, not a declaration.
+MAX_FILE_BYTES = 512 * 1024
+
+
+def fetch_file(
+    repository_ref: str,
+    token: str,
+    revision: str,
+    path: str,
+    credential_type: str = "oauth",
+    principal: str = "",
+) -> str:
+    """One file's text at one revision.
+
+    Returns the decoded source. Raises :class:`BitbucketMetadataError` with a
+    message meant for a person when the file, the revision, or the credential
+    is not what it should be.
+    """
+    clean_revision = _clean_text(revision, 256)
+    if not clean_revision or any(ord(char) < 32 for char in clean_revision):
+        raise ValueError("A valid branch, tag, or commit is required.")
+    clean_path = str(path or "").strip().replace("\\", "/").lstrip("/")
+    if not clean_path or ".." in clean_path.split("/") or "\x00" in clean_path:
+        raise ValueError("A repository-relative file path is required.")
+
+    url = (
+        f"{API_ORIGIN}/2.0/repositories/{repository_ref}"
+        f"/src/{quote(clean_revision, safe='')}/{quote(clean_path, safe='/')}"
+    )
+    safe_url = _validate_api_url(url, repository_ref)
+    request = Request(
+        safe_url,
+        method="GET",
+        headers={
+            "Authorization": _authorization_header(token, credential_type, principal),
+            # The src endpoint returns the raw file for a file path and JSON for
+            # a directory, so nothing is asserted about the content type here.
+            "Accept": "*/*",
+            "User-Agent": "KubeSight/application-intelligence",
+        },
+    )
+    try:
+        with _open_api(request, timeout=20) as response:
+            raw = response.read(MAX_FILE_BYTES + 1)
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            message = (
+                "Bitbucket rejected this credential. Verify that it has read access "
+                "to the repository."
+            )
+        elif exc.code == 404:
+            message = (
+                f"'{clean_path}' was not found on {clean_revision}. "
+                "Check the path and the branch."
+            )
+        elif exc.code == 429:
+            message = "Bitbucket rate-limited the request. Try again shortly."
+        else:
+            message = "Bitbucket could not return that file."
+        raise BitbucketMetadataError(message) from exc
+    except (URLError, TimeoutError) as exc:
+        raise BitbucketMetadataError("Bitbucket is temporarily unavailable.") from exc
+    if len(raw) > MAX_FILE_BYTES:
+        raise BitbucketMetadataError(
+            f"'{clean_path}' is larger than {MAX_FILE_BYTES // 1024} KB."
+        )
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BitbucketMetadataError(
+            f"'{clean_path}' is not a text file."
+        ) from exc

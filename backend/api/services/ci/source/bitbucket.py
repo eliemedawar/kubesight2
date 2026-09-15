@@ -18,7 +18,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ....secret_encryption import decrypt_secret
-from ...application_intelligence_bitbucket import BitbucketMetadataError, list_revisions
+from ...application_intelligence_bitbucket import (
+    BitbucketMetadataError,
+    fetch_file,
+    list_revisions,
+)
 from ...application_intelligence_security import validate_relative_path, validate_repository_url
 from . import CheckoutSpec, RepositoryRef, RevisionOption, SourceError
 
@@ -66,6 +70,19 @@ class BitbucketSourceProvider:
             for item in payload.get("items", [])
             if item.get("value")
         ]
+
+    def read_file(self, ref: RepositoryRef, credential, revision: str, path: str) -> str:
+        """One file's text at one revision, for reading configuration out of a
+        repository without cloning it."""
+        token, credential_type, principal = self._credential_parts(credential)
+        try:
+            return fetch_file(
+                ref.full_name, token, revision, path, credential_type, principal
+            )
+        except BitbucketMetadataError as exc:
+            raise SourceError(str(exc)) from exc
+        except ValueError as exc:
+            raise SourceError(str(exc)) from exc
 
     def verify_access(self, ref: RepositoryRef, credential) -> Dict[str, Any]:
         """Read the ref list as a liveness + authorization probe.

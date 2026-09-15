@@ -100,11 +100,15 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
               ))}
             </select>
             {!isEdit && (
-              <span className="field-hint">Sets the starter pipeline.</span>
+              <span className="field-hint">
+                Sets the starter pipeline, its build parameters, and the
+                Dockerfile — all editable afterwards.
+              </span>
             )}
             {isEdit && (
               <span className="field-hint">
-                Fixed after registration — it decided the starter pipeline.
+                Fixed after registration — it decided the starter pipeline and
+                Dockerfile.
               </span>
             )}
           </label>

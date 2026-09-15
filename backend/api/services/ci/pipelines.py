@@ -27,7 +27,7 @@ from ...models_ci import (
     CiSecret,
     CiService,
 )
-from . import templates
+from . import jenkinsfile, templates
 from .serializers import pipeline_to_dict
 
 MAX_STAGES = 40
@@ -65,6 +65,22 @@ PARAMETER_TYPES = ("text", "multiline", "choice", "boolean", "dynamic_choice")
 # the Run Build dialog receives a ready list rather than discovering how to
 # build one.
 PARAMETER_SOURCES = ("branches", "tags", "branches_and_tags")
+
+# Trigger metadata the ENGINE reads, not questions for a person. Deploy
+# automation pins the image tag this way, and ``engine._registry_for`` reads
+# IMAGE_NAME / IMAGE_TAG / DOCKERFILE_PATH off the same dict. They are accepted
+# whatever the pipeline declares: otherwise adding a single build parameter to a
+# pipeline would silently stop the automation that was already driving it, with
+# "this pipeline has no parameter named 'IMAGE_TAG'" as the only explanation. A
+# pipeline that declares one of these names by hand keeps its own definition —
+# the pass-through only covers names it does not define.
+RESERVED_VARIABLES = (
+    "IMAGE_NAME",
+    "IMAGE_TAG",
+    "DOCKERFILE_PATH",
+    "TICKET_TAG",
+    "KUBESIGHT_TICKET",
+)
 MAX_PARAMETERS = 25
 MAX_CHOICES = 100
 # A single-line value is a branch name or a flag; a multiline one is a whole
@@ -690,6 +706,69 @@ def create_from_template(
     return create_pipeline(service, payload, actor=actor)
 
 
+def import_jenkinsfile(
+    content: str, *, service: Optional[CiService] = None
+) -> Dict[str, Any]:
+    """Read a Jenkinsfile into a draft this service could save.
+
+    The draft is *not* written. It goes back to the editor as unsaved changes so
+    a person reviews a translation before it replaces a pipeline that works.
+
+    The one thing reconciled against the database here is secrets. A stage may
+    not reference a secret that does not exist — :func:`_secret_refs` refuses it
+    on save — so credential bindings the Jenkinsfile named are matched against
+    what this service actually has: the ones that exist become stage references,
+    and the ones that do not are reported as work to do, with the stage
+    references left off so the draft still saves.
+    """
+    draft = jenkinsfile.parse(content)
+
+    known = _known_secret_keys(service.id) if service is not None else set()
+    missing: List[str] = []
+    for entry in draft["secrets"]:
+        entry["defined"] = entry["name"] in known
+        if not entry["defined"]:
+            missing.append(entry["name"])
+    if missing:
+        for stage in draft["stages"]:
+            stage["secretRefs"] = [
+                ref for ref in stage["secretRefs"] if ref["name"] not in missing
+            ]
+        draft["notes"].insert(
+            0,
+            {
+                "level": jenkinsfile.ERROR if service is not None else jenkinsfile.WARNING,
+                "stage": "",
+                "message": (
+                    "This job read credentials that this service does not have: "
+                    + ", ".join(sorted(set(missing)))
+                    + ". Add them under Secrets, then attach them to the stages "
+                    "that need them — a stage cannot reference a secret that does "
+                    "not exist, so they were left off."
+                ),
+            },
+        )
+        draft["counts"]["errors"] += 1
+
+    # The draft is run through the same normalizer that saving uses, so the
+    # editor is told now about anything that would be refused later. Reported,
+    # never repaired: a stage silently rewritten to be saveable is a stage that
+    # no longer matches the Jenkinsfile it came from.
+    blocking: List[str] = []
+    for index, stage in enumerate(draft["stages"]):
+        try:
+            normalize_stage(stage, index, known)
+        except PipelineError as exc:
+            blocking.append(str(exc))
+    try:
+        _parameters(draft["parameters"])
+    except PipelineError as exc:
+        blocking.append(str(exc))
+    draft["blocking"] = blocking
+
+    return draft
+
+
 def _demote_other_defaults(service_id: int, keep_id: int) -> None:
     CiPipeline.query.filter(
         CiPipeline.service_id == service_id,
@@ -775,7 +854,11 @@ def validate_parameter_values(
     submitted = {str(k): v for k, v in (values or {}).items()}
     known = {str(p.get("name")) for p in definitions}
 
-    unknown = [name for name in submitted if name not in known]
+    unknown = [
+        name
+        for name in submitted
+        if name not in known and name not in RESERVED_VARIABLES
+    ]
     if unknown and definitions:
         # Only complain when the pipeline HAS parameters: automation still
         # passes free-form variables to pipelines that declare none.
@@ -783,7 +866,11 @@ def validate_parameter_values(
             f"This pipeline has no parameter named '{sorted(unknown)[0]}'."
         )
 
-    accepted: Dict[str, str] = {}
+    accepted: Dict[str, str] = {
+        name: str(value)[:MAX_TEXT_CHARS]
+        for name, value in submitted.items()
+        if name in RESERVED_VARIABLES and name not in known
+    }
     for param in definitions:
         name = str(param.get("name") or "")
         if not name:

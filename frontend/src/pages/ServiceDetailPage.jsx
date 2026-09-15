@@ -243,6 +243,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
         {tab === "settings" && (
           <ServiceSettingsPanel
             service={service}
+            expectedSecrets={summary.expectedSecrets || []}
             canEdit={can.edit}
             canDelete={can.delete}
             canViewSecrets={can.viewSecrets}

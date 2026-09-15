@@ -1304,6 +1304,30 @@ button.sg-ci-workspace-entry:focus-visible {
   font-size: 0.78rem;
 }
 
+/* Template picker above the editor. One row so the select, the button and the
+   reason a type has no template read as a single sentence rather than three
+   stacked controls. */
+.sg-ci-dockerfile-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.sg-ci-dockerfile-tools label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 0.78rem;
+  min-width: 13rem;
+}
+
+.sg-ci-dockerfile-tools .field-hint {
+  flex: 1 1 14rem;
+  margin: 0;
+}
+
 /* ══ Builds → Stages: the stage matrix ═══════════════════════════════════
    Builds are rows, stages are columns, every cell is a duration. Colour here
    is semantic only — the brand red stays on actions and the live row's rail,
@@ -2754,6 +2778,84 @@ button.sg-ci-workspace-entry:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
+   Expected secrets — the keys an application type usually needs, listed above
+   the ones that exist. Deliberately quieter than the table below it: these are
+   suggestions, and a missing one never blocks a build, so nothing here uses
+   the error tone.
+   --------------------------------------------------------------------------- */
+
+.sg-ci-expected {
+  /* Ruled off from the section blurb above it: without this the two paragraphs
+     read as one run of prose and the list looks like part of the explanation. */
+  margin: var(--space-3) 0 var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.sg-ci-expected-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sg-ci-expected-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.8rem;
+}
+
+/* Fixed key and chip columns. Without them each row's description starts at a
+   different x, and the "Fill in" links end up on a ragged edge that reads as
+   sloppy rather than as a column. Both collapse to content when the row has to
+   wrap on a narrow screen. */
+.sg-ci-expected-list li > code {
+  flex: 0 0 15rem;
+}
+
+.sg-ci-expected-list li > .chip {
+  flex: 0 0 auto;
+  min-width: 4.75rem;
+  text-align: center;
+}
+
+/* The description may shrink but never grows: letting it stretch pushed "Fill
+   in" to the far edge of a wide screen, where it no longer reads as belonging
+   to the row it acts on. */
+.sg-ci-expected-list li > .muted {
+  flex: 0 1 34rem;
+}
+
+@media (max-width: 900px) {
+  .sg-ci-expected-list li > code {
+    flex: 0 1 auto;
+  }
+}
+
+/* A secret that is already set has nothing left to do, so it recedes rather
+   than competing with the ones that still need attention. */
+.sg-ci-expected-list li.is-set code,
+.sg-ci-expected-list li.is-set > .muted {
+  opacity: 0.65;
+}
+
+.sg-ci-expected .chip.is-ok {
+  border-color: var(--ok-border, var(--border));
+  background: var(--ok-soft, transparent);
+  color: var(--ok, var(--text-main));
+}
+
+.sg-ci-expected .chip.is-warn {
+  border-color: var(--warn-border, var(--border));
+  background: var(--warn-soft, transparent);
+  color: var(--warn, var(--text-main));
+}
+
+/* ---------------------------------------------------------------------------
    Artifact retention line (ArtifactsPanel)
 
    States the rule and what it currently applies to, above the list it governs.
@@ -2856,3 +2958,278 @@ button.sg-ci-workspace-entry:focus-visible {
   font-style: normal;
 }
 
+
+/* ---------------------------------------------------------------------------
+   Jenkinsfile import
+   ------------------------------------------------------------------------- */
+
+/* Wider than the other dialogs because it is two panes: the file on the left,
+   what it translates to on the right. Reading one while looking at the other is
+   the whole job — stacking them would hide the half you are checking against. */
+.sg-ci-import {
+  max-width: 68rem;
+  width: min(68rem, 94vw);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sg-ci-import-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-3);
+  min-height: 0;
+}
+
+@media (max-width: 60rem) {
+  .sg-ci-import-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.sg-ci-import-source,
+.sg-ci-import-review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.sg-ci-import-sourcebar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.sg-ci-import-path {
+  flex: 1 1 12rem;
+  min-width: 9rem;
+  margin: 0;
+}
+
+/* The real control is the button next to it; a bare file input in a dialog
+   reads as an unstyled stray. */
+.sg-ci-import-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.sg-ci-import-textarea {
+  flex: 1 1 auto;
+  min-height: 22rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+}
+
+.sg-ci-import-readbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.sg-ci-import-error {
+  color: var(--danger);
+  font-size: 0.78rem;
+}
+
+.sg-ci-import-review {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  padding: var(--space-2);
+  max-height: 30rem;
+  overflow: auto;
+}
+
+.sg-ci-import-empty {
+  margin: auto;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  max-width: 24rem;
+}
+
+.sg-ci-import-empty strong {
+  display: block;
+  color: var(--text-strong);
+  margin-bottom: 0.25rem;
+}
+
+.sg-ci-import-summary {
+  margin: 0;
+  font-weight: 600;
+  color: var(--text-strong);
+  font-size: 0.85rem;
+}
+
+.sg-ci-import-group h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-subtle);
+}
+
+.sg-ci-import-group + .sg-ci-import-group {
+  margin-top: var(--space-2);
+}
+
+.sg-ci-import-params,
+.sg-ci-import-secrets,
+.sg-ci-import-notes,
+.sg-ci-import-stages,
+.sg-ci-import-blocking {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+}
+
+.sg-ci-import-params li,
+.sg-ci-import-secrets li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  justify-content: space-between;
+}
+
+.sg-ci-import-params code,
+.sg-ci-import-secrets code {
+  font-size: 0.74rem;
+  color: var(--text-strong);
+}
+
+.sg-ci-import-params span,
+.sg-ci-import-secrets span {
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.sg-ci-import-secrets .is-ready {
+  color: var(--ok);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.sg-ci-import-secrets .is-ready svg {
+  width: 0.8rem;
+  height: 0.8rem;
+}
+
+.sg-ci-import-secrets .is-missing {
+  color: var(--warn);
+}
+
+.sg-ci-import-stages li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.sg-ci-import-stage-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sg-ci-import-stage-copy strong {
+  color: var(--text-strong);
+}
+
+.sg-ci-import-stage-copy small {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.sg-ci-import-stage-copy em {
+  color: var(--info);
+  font-size: 0.72rem;
+  font-style: normal;
+}
+
+/* Level first, then the stage, then the sentence: the eye scans the column of
+   levels to find what actually needs doing. */
+.sg-ci-import-note-level {
+  margin-right: 0.35rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-subtle);
+}
+
+.sg-ci-import-notes li.is-error .sg-ci-import-note-level {
+  color: var(--danger);
+}
+
+.sg-ci-import-notes li.is-warning .sg-ci-import-note-level {
+  color: var(--warn);
+}
+
+.sg-ci-import-note-stage {
+  margin-right: 0.35rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.sg-ci-import-notes li {
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.sg-ci-import-actions {
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sg-ci-import-actions .muted {
+  flex: 1 1 14rem;
+  font-size: 0.75rem;
+  text-align: left;
+}
+
+/* The same notes, kept in the editor after the dialog closes: the list is the
+   to-do for finishing the port, so it belongs beside the stages it names. */
+.sg-ci-import-carryover {
+  border: 1px solid var(--info, var(--border-strong));
+  border-radius: var(--radius-md);
+  background: var(--info-soft, var(--bg-inset));
+  padding: 0.6rem 0.75rem;
+  font-size: 0.8rem;
+}
+
+.sg-ci-import-carryover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: 0.35rem;
+  color: var(--text-strong);
+}
+
+.sg-ci-import-blocking {
+  margin-bottom: 0.35rem;
+  color: var(--danger);
+}
+
+.sg-ci-import-carryover .sg-ci-import-notes {
+  max-height: 11rem;
+  overflow: auto;
+}

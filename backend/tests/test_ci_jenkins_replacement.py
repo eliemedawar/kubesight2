@@ -386,7 +386,15 @@ def test_trigger_variables_reach_every_stage_environment(app, client, admin_toke
             service, trigger_type="automation", variables={"IMAGE_TAG": "v9.9.9"}
         )
         build = db.session.get(CiBuild, data["id"])
-        assert build.pipeline_snapshot["variables"] == {"IMAGE_TAG": "v9.9.9"}
+        # The pinned tag travels untouched, alongside the defaults of whatever
+        # parameters the pipeline declares — the java starter template declares
+        # SKIP_TESTS. IMAGE_TAG is engine metadata rather than a question the
+        # pipeline asks, so it passes through regardless of that parameter list;
+        # without that, giving a pipeline its first parameter would stop the
+        # automation already driving it.
+        variables = build.pipeline_snapshot["variables"]
+        assert variables["IMAGE_TAG"] == "v9.9.9"
+        assert variables["SKIP_TESTS"] == "false"
 
     _drain_ci(app)
 

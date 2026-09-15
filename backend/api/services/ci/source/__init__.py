@@ -73,6 +73,9 @@ class SourceProvider(Protocol):
     def verify_access(self, ref: RepositoryRef, credential) -> Dict[str, Any]:
         """Confirm the credential can read the repository."""
 
+    def read_file(self, ref: RepositoryRef, credential, revision: str, path: str) -> str:
+        """One file's text at one revision. Raises :class:`SourceError`."""
+
     def checkout_spec(
         self, ref: RepositoryRef, credential, revision: str, working_directory=None
     ) -> CheckoutSpec:

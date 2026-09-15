@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createCiSecret,
   deleteCiSecret,
@@ -7,7 +7,13 @@ import {
   updateCiService,
 } from "../../api/ciApi.js";
 import { listRegistries } from "../../api/registriesApi.js";
-import { CRITICALITIES, PlusIcon, TrashIcon, formatRelative } from "./ciShared.jsx";
+import {
+  CRITICALITIES,
+  PlusIcon,
+  TrashIcon,
+  applicationTypeLabel,
+  formatRelative,
+} from "./ciShared.jsx";
 
 /**
  * Settings tab: behaviour, registry, secrets, danger zone.
@@ -21,6 +27,7 @@ import { CRITICALITIES, PlusIcon, TrashIcon, formatRelative } from "./ciShared.j
  */
 export default function ServiceSettingsPanel({
   service,
+  expectedSecrets = [],
   onSaved,
   onDeleted,
   canEdit,
@@ -42,6 +49,17 @@ export default function ServiceSettingsPanel({
   const [error, setError] = useState("");
 
   const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  // Which of the application type's expected secrets are still missing.
+  // Set-ness is recomputed from the list this panel already loaded rather than
+  // read off the summary, so a chip flips the moment its secret is added
+  // instead of on the next page load.
+  const definedKeys = new Set(secrets.map((secret) => secret.key));
+  const missingExpected = expectedSecrets.filter((item) => !definedKeys.has(item.key));
+  // "Fill in" prefills the add form, which sits below the secrets table and can
+  // be off-screen. Focusing the value takes the user there and puts the cursor
+  // where the only thing still missing goes.
+  const newSecretValueRef = useRef(null);
 
   const loadSecrets = () => {
     if (!canViewSecrets) return;
@@ -206,6 +224,52 @@ export default function ServiceSettingsPanel({
             masked out of build logs.
           </p>
 
+          {expectedSecrets.length > 0 && (
+            <div className="sg-ci-expected">
+              <p className="muted">
+                {/* Pluralised rather than "a <type> build", because the
+                    article would be wrong for Android and iOS. */}
+                {missingExpected.length === 0
+                  ? `Every secret ${applicationTypeLabel(service.applicationType)} builds usually need is set.`
+                  : `${applicationTypeLabel(service.applicationType)} builds usually need these. They are suggestions, not requirements — a build is never blocked by a missing one.`}
+              </p>
+              <ul className="sg-ci-expected-list">
+                {expectedSecrets.map((item) => {
+                  const isSet = definedKeys.has(item.key);
+                  return (
+                    <li key={item.key} className={isSet ? "is-set" : ""}>
+                      <code>{item.key}</code>
+                      <span className={`chip ${isSet ? "is-ok" : "is-warn"}`}>
+                        {isSet ? "set" : "not set"}
+                      </span>
+                      <span className="muted">{item.description}</span>
+                      {canManageSecrets && !isSet && (
+                        <button
+                          type="button"
+                          className="btn-link"
+                          onClick={() => {
+                            setNewSecret({
+                              key: item.key,
+                              value: "",
+                              description: item.description,
+                            });
+                            newSecretValueRef.current?.focus();
+                            newSecretValueRef.current?.scrollIntoView({
+                              block: "center",
+                              behavior: "smooth",
+                            });
+                          }}
+                        >
+                          Fill in
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
           {secrets.length === 0 ? (
             <p className="muted">No secrets defined.</p>
           ) : (
@@ -264,6 +328,7 @@ export default function ServiceSettingsPanel({
                   single-line input silently eats the newlines. Values stay
                   write-only; nothing displays one again after it is saved. */}
               <textarea
+                ref={newSecretValueRef}
                 className="sg-ci-secret-value"
                 placeholder="Value — paste a whole file if that is what it is"
                 rows={2}

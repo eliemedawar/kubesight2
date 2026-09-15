@@ -29,23 +29,10 @@ function loadRemembered(serviceId) {
 
 const valuesKey = (serviceId) => `ks.ci.runparams.${serviceId}`;
 
-function loadRememberedValues(serviceId) {
-  try {
-    const raw = window.localStorage.getItem(valuesKey(serviceId));
-    const parsed = raw ? JSON.parse(raw) : null;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function rememberValues(serviceId, values) {
-  try {
-    window.localStorage.setItem(valuesKey(serviceId), JSON.stringify(values));
-  } catch {
-    /* best effort */
-  }
-}
+export const defaultParameterValues = (items) =>
+  Object.fromEntries(
+    items.map((item) => [item.name, String(item.default ?? "")])
+  );
 
 function remember(serviceId, refType, value) {
   try {
@@ -111,17 +98,15 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
         if (cancelled) return;
         const items = data.items || [];
         setParameters(items);
-        // Defaults, plus whatever was used last time for this service — the
-        // usual case is running the same parameters again.
-        const remembered = loadRememberedValues(service.id);
-        setValues(
-          Object.fromEntries(
-            items.map((item) => [
-              item.name,
-              remembered[item.name] ?? String(item.default ?? ""),
-            ])
-          )
-        );
+        // Every manual build starts from the configured defaults. Values edited
+        // for one run are temporary and must not leak into the next build.
+        setValues(defaultParameterValues(items));
+        try {
+          // Remove values saved by older KubeSight versions as well.
+          window.localStorage.removeItem(valuesKey(service.id));
+        } catch {
+          /* localStorage unavailable — defaults are still in memory */
+        }
       } catch {
         // A pipeline with no parameters, or an unreachable listing: the branch
         // picker alone is still a usable Run Build.
@@ -173,7 +158,6 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
         ...(parameters.length ? { variables: values } : {}),
       });
       remember(service.id, refType, ref);
-      rememberValues(service.id, values);
       onStarted(build);
     } catch (err) {
       setError(err.message || "Could not start the build.");

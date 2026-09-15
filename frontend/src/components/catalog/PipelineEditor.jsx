@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import BuildParameters from "./BuildParameters.jsx";
+import JenkinsfileImportModal from "./JenkinsfileImportModal.jsx";
 import {
   applyCiPipelineTemplate,
   lintCiPipeline,
@@ -171,6 +172,11 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
   // edited, because the failure it catches — an absolute /workspace path on an
   // agent — is only visible when a build has already burned.
   const [lint, setLint] = useState(null);
+  const [importing, setImporting] = useState(false);
+  // What the Jenkinsfile could not carry over, kept after the dialog closes:
+  // the list is the to-do for finishing the port, and it is only actionable
+  // next to the stages it is about.
+  const [importNotes, setImportNotes] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -311,11 +317,89 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
     }
   };
 
+  /**
+   * Take a draft from the Jenkinsfile importer.
+   *
+   * Local state only, and deliberately: the draft becomes unsaved changes that
+   * are reviewed and saved with the same button as any other edit. A working
+   * pipeline is never replaced by a translation nobody read.
+   */
+  const applyDraft = (draft) => {
+    setStages(draft.stages.map((stage) => ({ ...stage })));
+    setParameters(draft.parameters.map((item) => ({ ...item })));
+    setImportNotes(draft.notes?.length || draft.blocking?.length ? draft : null);
+    setSelectedIndex(draft.stages.length ? 0 : null);
+    setActivePanel(draft.stages.length ? "stage" : "parameters");
+    setDirty(true);
+    setImporting(false);
+  };
+
   if (loading) return <LoadingState label="Loading pipeline…" />;
 
   return (
     <div className="sg-ci-panel">
       {error && <p className="banner-message error">{error}</p>}
+
+      {importing && (
+        <JenkinsfileImportModal
+          service={service}
+          onApply={applyDraft}
+          onClose={() => setImporting(false)}
+        />
+      )}
+
+      {/* Survives the dialog: what a Jenkinsfile could not carry is work to do
+          in this editor, and it has to still be readable while it is done. */}
+      {importNotes && (
+        <div className="sg-ci-import-carryover">
+          <div className="sg-ci-import-carryover-head">
+            <strong>Imported from a Jenkinsfile — {importNotes.summary}</strong>
+            {/* "Dismiss", not a trash icon: the notes are a reminder, and an
+                icon that reads as delete makes people keep a list they have
+                already dealt with. */}
+            <button
+              type="button"
+              className="btn-outline btn-compact"
+              onClick={() => setImportNotes(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+          {importNotes.blocking?.length > 0 && (
+            <ul className="sg-ci-import-blocking">
+              {importNotes.blocking.map((message, index) => (
+                <li key={index}>{message}</li>
+              ))}
+            </ul>
+          )}
+          <ul className="sg-ci-import-notes">
+            {importNotes.notes.map((note, index) => (
+              <li key={index} className={`is-${note.level}`}>
+                {note.stage ? (
+                  <button
+                    type="button"
+                    className="sg-ci-lint-stage"
+                    onClick={() => {
+                      const position = stages.findIndex(
+                        (stage) => stage.name === note.stage
+                      );
+                      if (position >= 0) {
+                        setSelectedIndex(position);
+                        setActivePanel("stage");
+                      }
+                    }}
+                  >
+                    {note.stage}
+                  </button>
+                ) : (
+                  <span className="sg-ci-import-note-stage">Pipeline</span>
+                )}
+                <span>{note.message}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {lint && lint.counts.error + lint.counts.warning > 0 && (
         <div
@@ -378,6 +462,15 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
         </span>
         {canEdit && (
           <div className="sg-ci-pipeline-actions">
+            <button
+              type="button"
+              className="btn-outline btn-compact"
+              onClick={() => setImporting(true)}
+              disabled={saving}
+              title="Read a Jenkinsfile into these stages and build inputs"
+            >
+              Import Jenkinsfile
+            </button>
             <button
               type="button"
               className="btn-outline btn-compact"

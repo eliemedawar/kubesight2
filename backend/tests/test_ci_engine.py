@@ -55,6 +55,11 @@ def runnable_service(app, client, admin_token):
     client.put(
         f"/api/ci/pipelines/{pipeline_id}",
         json={
+            # Explicitly parameter-free: these tests pass free-form variables,
+            # which a pipeline that declares parameters rejects by design. The
+            # java starter template declares SKIP_TESTS, and inheriting it here
+            # would make the fixture about something other than what it says.
+            "parameters": [],
             "stages": [
                 {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["mock"]},
                 {

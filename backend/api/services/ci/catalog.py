@@ -29,10 +29,12 @@ from ...models_ci import (
     SERVICE_STATUSES,
     CiArtifact,
     CiBuild,
+    CiSecret,
     CiService,
 )
 from . import artifacts as artifacts_service
 from . import source as source_port
+from . import templates as templates_service
 from .serializers import service_to_dict
 
 
@@ -210,6 +212,7 @@ def service_summary(row: CiService) -> Dict[str, Any]:
     return {
         "service": service_detail(row),
         "readiness": readiness(row),
+        "expectedSecrets": expected_secrets(row),
         "latestBuildId": recent_builds[0].id if recent_builds else None,
         "latestBuildStages": latest_stages,
         "recentBuilds": [build_summary(build) for build in recent_builds],
@@ -227,6 +230,37 @@ def service_summary(row: CiService) -> Dict[str, Any]:
             ),
         },
     }
+
+
+def expected_secrets(row: CiService) -> List[Dict[str, Any]]:
+    """The secret keys this application type needs, and whether each is set.
+
+    Advisory, and deliberately NOT one of :func:`readiness`'s checks: a build
+    can be entirely correct without them (the stage that would use one may not
+    be in this pipeline), and a failing readiness check disables Run Build with
+    a reason the backend would not actually enforce.
+
+    A service secret shadows a global of the same key, which is how a service
+    overrides a shared default — so the scope reported is the one that wins.
+    """
+    expected = templates_service.expected_secrets_for(row.application_type)
+    if not expected:
+        return []
+    rows = CiSecret.query.filter(
+        or_(CiSecret.service_id == row.id, CiSecret.scope == "global")
+    ).all()
+    scope_by_key: Dict[str, str] = {}
+    for secret in rows:
+        if secret.scope == "service" or secret.key not in scope_by_key:
+            scope_by_key[secret.key] = secret.scope
+    return [
+        {
+            **item,
+            "set": item["key"] in scope_by_key,
+            "scope": scope_by_key.get(item["key"], ""),
+        }
+        for item in expected
+    ]
 
 
 def readiness(row: CiService) -> Dict[str, Any]:
@@ -390,6 +424,15 @@ def apply_source(row: CiService, payload: Dict[str, Any]) -> None:
 def create_service(payload: Dict[str, Any], *, actor=None) -> Dict[str, Any]:
     row = CiService(name="", slug="", created_by_user_id=getattr(actor, "id", None))
     _apply_identity(row, payload, creating=True)
+    # The application type's starter Dockerfile, so a new service is one click
+    # from a runnable image build instead of an empty editor. Only types whose
+    # pipeline actually builds an image define one, and `container` defines
+    # none on purpose — that type exists to build the repository's own
+    # Dockerfile, and an inline recipe would silently take its place. A caller
+    # that passed its own `dockerfile` keeps it; `createDefaultDockerfile:
+    # false` opts out entirely, mirroring `createDefaultPipeline`.
+    if row.dockerfile is None and payload.get("createDefaultDockerfile") is not False:
+        row.dockerfile = templates_service.dockerfile_for(row.application_type) or None
     # Source is optional at creation: registering the service and connecting the
     # repository are two separate steps in the UI.
     if payload.get("repositoryUrl"):
@@ -507,6 +550,24 @@ def list_branches(row: CiService) -> Dict[str, Any]:
         "count": len(revisions),
         "defaultBranch": row.default_branch,
     }
+
+
+def read_source_file(row: CiService, path: str, revision: str = "") -> Dict[str, Any]:
+    """Read one file out of the service's repository at a revision.
+
+    The service's own working directory is applied first, so a monorepo service
+    asking for ``Jenkinsfile`` gets the one next to its own code rather than the
+    one at the root of the repository.
+    """
+    handler, ref = _repository_ref(row)
+    clean = str(path or "").strip().replace("\\", "/").lstrip("/")
+    if not clean:
+        raise CatalogError("Name the file to read.")
+    if row.working_directory and not clean.startswith(f"{row.working_directory}/"):
+        clean = f"{row.working_directory.strip('/')}/{clean}"
+    chosen = (revision or "").strip() or row.default_branch or "main"
+    content = handler.read_file(ref, row.credential_profile, chosen, clean)
+    return {"path": clean, "revision": chosen, "content": content}
 
 
 def list_credential_profiles() -> List[Dict[str, Any]]:

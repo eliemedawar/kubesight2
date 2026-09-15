@@ -24,6 +24,7 @@ from ..services.ci import artifacts as artifacts_service
 from ..services.ci import cache as cache_service
 from ..services.ci import catalog as catalog_service
 from ..services.ci import engine as engine_service
+from ..services.ci import jenkinsfile as jenkinsfile_service
 from ..services.ci import logs as logs_service
 from ..services.ci import pipelines as pipelines_service
 from ..services.ci import portability as portability_service
@@ -53,6 +54,7 @@ _USER_ERRORS = (
     pipelines_service.PipelineError,
     secrets_service.SecretError,
     engine_service.BuildError,
+    jenkinsfile_service.JenkinsfileError,
     SourceError,
 )
 
@@ -178,6 +180,22 @@ def list_branches(service_id: int):
         return success_response(catalog_service.list_branches(row))
     except _USER_ERRORS as exc:
         return error_response(str(exc), 400)
+
+
+@ci_bp.route("/services/<int:service_id>/source/file", methods=["POST"])
+@require_permission("ci_services:view")
+def read_source_file(service_id: int):
+    """One file out of the service's repository, so a Jenkinsfile can be
+    imported without anyone opening Bitbucket to copy it."""
+    row = catalog_service.get_service(service_id)
+    payload = _payload()
+    try:
+        data = catalog_service.read_source_file(
+            row, payload.get("path"), payload.get("revision") or ""
+        )
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
 
 
 @ci_bp.route("/source/credentials", methods=["GET"])
@@ -336,6 +354,42 @@ def create_pipeline_from_template(service_id: int):
     except _USER_ERRORS as exc:
         return error_response(str(exc), 400)
     return success_response(data, status_code=201)
+
+
+@ci_bp.route("/pipelines/import/jenkinsfile", methods=["POST"])
+@require_permission("ci_pipelines:edit")
+def import_jenkinsfile():
+    """Read a Jenkinsfile into a pipeline draft. Writes nothing.
+
+    ``serviceId`` is optional and only sharpens the answer: with it, credential
+    bindings are checked against the secrets that service actually has.
+    """
+    payload = _payload()
+    service = None
+    if payload.get("serviceId"):
+        try:
+            service = catalog_service.get_service(int(payload["serviceId"]))
+        except (TypeError, ValueError):
+            return error_response("serviceId must be a service id.", 400)
+    try:
+        data = pipelines_service.import_jenkinsfile(
+            payload.get("content"), service=service
+        )
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "ci_jenkinsfile_imported",
+        actor=_actor(),
+        target_type="ci_service",
+        target_id=str(service.id) if service else "",
+        details={
+            "service": service.slug if service else "",
+            "stages": data["counts"]["stages"],
+            "parameters": data["counts"]["parameters"],
+            "errors": data["counts"]["errors"],
+        },
+    )
+    return success_response(data)
 
 
 @ci_bp.route("/pipelines/<int:pipeline_id>", methods=["GET"])

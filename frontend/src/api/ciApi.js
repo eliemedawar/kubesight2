@@ -76,6 +76,26 @@ export const deleteCiPipeline = (id) =>
 
 export const listCiPipelineTemplates = () => request("/api/ci/pipeline-templates");
 
+// One file out of the service's repository. Used by the Dockerfile tab to
+// answer "does the repository already carry one?" without anyone opening
+// Bitbucket; a missing file arrives as a 400 with a readable message.
+export const readCiSourceFile = (serviceId, path, revision = "") =>
+  request(`/api/ci/services/${encodeURIComponent(serviceId)}/source/file`, {
+    method: "POST",
+    body: { path, revision },
+  });
+
+// Read a Jenkinsfile into a pipeline draft. Writes nothing: the draft comes
+// back as stages and parameters for the editor to hold as unsaved changes, so
+// a translation is reviewed before it replaces a pipeline that works. Passing
+// serviceId is what lets the backend check credential bindings against the
+// secrets that service actually has.
+export const importCiJenkinsfile = (content, serviceId) =>
+  request("/api/ci/pipelines/import/jenkinsfile", {
+    method: "POST",
+    body: { content, serviceId },
+  });
+
 export const applyCiPipelineTemplate = (serviceId, applicationType) =>
   request(`/api/ci/services/${encodeURIComponent(serviceId)}/pipelines/from-template`, {
     method: "POST",
