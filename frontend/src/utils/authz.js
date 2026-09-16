@@ -151,6 +151,15 @@ export const NAV_PAGES = [
     section: "Administration",
   },
   { key: "auditLogs", label: "Audit Logs", permission: "audit:view", section: "Administration" },
+  // A token carries its owner's permissions, so minting one is a way to hand
+  // your own access to a machine — which is why api_tokens:manage exists and is
+  // classed as dangerous. The page lists only the holder's own tokens.
+  {
+    key: "apiTokens",
+    label: "API Tokens",
+    permission: "api_tokens:manage",
+    section: "Administration",
+  },
   {
     key: "deploymentRequests",
     label: "Deployment Requests",

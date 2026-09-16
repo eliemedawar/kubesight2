@@ -48,6 +48,10 @@ _EXAMPLE_STAGE_KEYS = (
     "env",
     "secretRefs",
     "artifacts",
+    # Carried, because a build here genuinely needs them: the internal Nexus and
+    # the registry are reachable only by explicit address, and an example that
+    # dropped them would teach a pipeline that cannot resolve its dependencies.
+    "hostAliases",
     "runCondition",
     "timeoutSeconds",
     "continueOnFailure",
@@ -100,104 +104,85 @@ def _from_saved(pipeline: CiPipeline, service: CiService) -> Dict[str, Any]:
     }
 
 
-# The house pattern, taken from the Jenkins jobs this installation actually
-# runs. Everything here is a convention a model cannot infer from a repository
-# and gets wrong every time until it is shown:
+# The house pattern — a pipeline that is RUNNING here, not one reconstructed
+# from a Jenkinsfile. Three stages, which is the first surprise: the Jenkins job
+# it replaced had eight, and five of those were deploys, notifications and
+# file-patching that a build has no business doing.
 #
-#   * the version is not in the build file — it is composed from
-#     version.properties and has to reach later stages through $KUBESIGHT_ENV
-#   * the build is patched before it runs (a settings.gradle fragment, a
-#     gradle.properties for the internal mirror), from build inputs
-#   * the JAR is renamed to app.jar so one Dockerfile serves every service
-#   * `docker build` + `docker push` is NOT a command stage — it is what the
-#     container_image stage is for
-#   * deploys, notifications and promotion are not part of a build
+# Every detail below is a convention no repository reveals and no model guesses:
 #
-# Deliberately free of site-specific addresses: the host alias a particular
-# repository needs arrives with its own Jenkinsfile in evidence.existingPipeline.
+#   * dependencies come from the internal Maven mirror, reached through a Gradle
+#     INIT SCRIPT written at build time — not from gradle.properties, and not
+#     with the credentials inline. The init script reads them from the
+#     environment, which is what secretRefs put there.
+#   * the image carries Gradle itself, so the command is `gradle`, not
+#     `./gradlew` — these projects do not all ship a wrapper.
+#   * the JAR is normalised to app.jar, excluding -plain, -sources and -javadoc,
+#     and failing loudly when there is none, so one Dockerfile serves every
+#     service.
+#   * `docker build` + `docker push` is NOT a command stage. It is what the
+#     container_image stage is for, and a build pod has no Docker socket.
+#   * the build needs host aliases to resolve the internal Nexus at all.
+#
+# Host addresses are deliberately not written here — they differ per site and
+# arrive with the repository's own Jenkinsfile, or with the real saved pipelines
+# this module prefers over this one.
 _HOUSE_JAVA_GRADLE: Dict[str, Any] = {
     "name": "default",
-    "parameters": [
-        {"name": "SKIP_TESTS", "type": "boolean", "label": "Skip tests", "default": "false"},
-        {
-            "name": "GRADLE_PROPERTIES",
-            "type": "multiline",
-            "label": "gradle.properties",
-            "description": "Credentials and mirror settings for the internal Gradle repository.",
-            "default": "",
-        },
-    ],
+    "parameters": [],
     "stages": [
-        {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["linux"],
-         "timeoutSeconds": 600},
         {
-            "name": "Prepare Build",
-            "stageType": "command",
-            "buildEnvironment": "java-jdk11",
-            "runnerLabels": ["linux", "java"],
-            "commands": [
-                "# The version is composed from version.properties, not read from",
-                "# the build file, and later stages need it — so it is exported.",
-                "major=$(grep '^major=' version.properties | cut -d= -f2)",
-                "minor=$(grep '^minor=' version.properties | cut -d= -f2)",
-                "patch=$(grep '^patch=' version.properties | cut -d= -f2)",
-                "suffix=$(grep '^suffix=' version.properties | cut -d= -f2 || true)",
-                'if [ -n "$suffix" ]; then VERSION="$major.$minor.$patch-$suffix"; '
-                'else VERSION="$major.$minor.$patch"; fi',
-                'printf "VERSION=%s\\n" "$VERSION" >> "$KUBESIGHT_ENV"',
-                'echo "Building version $VERSION"',
-                "# Settings the internal mirror needs, supplied as a build input.",
-                'printf "%s\\n" "${GRADLE_PROPERTIES}" > "$KUBESIGHT_WORKSPACE/gradle.properties"',
-            ],
+            "name": "Checkout",
+            "stageType": "checkout",
+            "runnerType": "kubernetes",
+            "runnerLabels": ["linux"],
             "timeoutSeconds": 600,
         },
         {
-            "name": "Build",
+            "name": "Build JAR",
             "stageType": "command",
-            "buildEnvironment": "java-jdk11",
+            "buildEnvironment": "gradle-9-jdk25",
+            "runnerType": "kubernetes",
             "runnerLabels": ["linux", "java"],
-            "env": {"GRADLE_USER_HOME": "$KUBESIGHT_WORKSPACE/.gradle"},
-            "commands": [
-                'mkdir -p "$GRADLE_USER_HOME"',
-                'cp "$KUBESIGHT_WORKSPACE/gradle.properties" "$GRADLE_USER_HOME/gradle.properties"',
-                "./gradlew --no-daemon clean build -x test -x checkstyleMain "
-                "-x checkstyleTest -x compileTestJava --stacktrace",
+            # Named, never valued. The plaintext is injected as environment at
+            # dispatch and masked out of the log; the init script below reads it
+            # with System.getenv rather than embedding it.
+            "secretRefs": [
+                {"name": "NEXUS_USER", "envVar": "NEXUS_USER"},
+                {"name": "NEXUS_PASSWORD", "envVar": "NEXUS_PASSWORD"},
             ],
-            "timeoutSeconds": 2400,
-        },
-        {
-            "name": "Unit Tests",
-            "stageType": "command",
-            "buildEnvironment": "java-jdk11",
-            "runnerLabels": ["linux", "java"],
-            "commands": ["./gradlew --no-daemon test"],
-            "artifacts": [{"path": "build/test-results/test/*.xml", "type": "test-report"}],
-            "runCondition": {"variable": "SKIP_TESTS", "operator": "equals", "value": "false"},
-            "timeoutSeconds": 2400,
-        },
-        {
-            "name": "Package JAR",
-            "stageType": "command",
-            "buildEnvironment": "java-jdk11",
-            "runnerLabels": ["linux", "java"],
             "commands": [
-                "# One canonical app.jar, so a single Dockerfile serves every service.",
-                "jar=$(ls -1 build/libs/*.jar | grep -v -- '-plain[.]jar$' | head -1)",
-                'test -n "$jar" || { echo "no JAR under build/libs"; exit 1; }',
-                'cp "$jar" app.jar',
+                'init="$KUBESIGHT_WORKSPACE/nexus-init.gradle"',
+                "cat > \"$init\" <<'EOF'",
+                "allprojects {",
+                "  repositories {",
+                "    maven {",
+                '      url "https://registry.areeba.com:4443/repository/maven-public/"',
+                "      credentials {",
+                '        username System.getenv("NEXUS_USER")',
+                '        password System.getenv("NEXUS_PASSWORD")',
+                "      }",
+                "    }",
+                "  }",
+                "}",
+                "EOF",
+                'gradle -I "$init" clean build -x test -x checkstyleMain '
+                "-x checkstyleTest -x compileTestJava --stacktrace",
+                "jar=$(ls -1 build/libs/*.jar 2>/dev/null | "
+                "grep -Ev -- '-(plain|sources|javadoc)\\.jar$' | head -n 1) || true",
+                'if [ -z "$jar" ]; then echo "No runnable jar in build/libs:"; '
+                "ls -l build/libs || true; exit 1; fi",
+                'mv "$jar" ./app.jar',
+                'echo "Packaged $jar as app.jar"',
             ],
             "artifacts": [{"path": "app.jar", "type": "jar"}],
-            "timeoutSeconds": 600,
+            "timeoutSeconds": 2400,
         },
         {
-            "name": "Build Container Image",
+            "name": "Build Image",
             "stageType": "container_image",
             "runnerType": "kubernetes",
             "runnerLabels": ["linux"],
-            # docker build / docker push never appear as commands: a build pod
-            # has no Docker socket. BuildKit does this, and the tag can use the
-            # VERSION the Prepare Build stage exported.
-            "env": {"IMAGE_TAG": "V${VERSION}-prod"},
             "timeoutSeconds": 2400,
         },
     ],
@@ -210,15 +195,39 @@ _HOUSE_EXAMPLES: Dict[str, Dict[str, Any]] = {
 }
 
 
+# The inputs the house pipeline's secret references depend on. Shown WITH it,
+# because the pairing is the lesson: a stage may reference a secret that does
+# not exist yet precisely because the proposal asks the user for it in the same
+# breath. A secretRefs entry with no matching requiredInput is a dangling
+# reference, and seeing the two together is what prevents that.
+_HOUSE_REQUIRED_INPUTS = [
+    {
+        "name": "NEXUS_USER",
+        "kind": "secret",
+        "required": True,
+        "label": "Nexus username",
+        "reason": "Dependencies resolve through the internal Maven mirror.",
+    },
+    {
+        "name": "NEXUS_PASSWORD",
+        "kind": "secret",
+        "required": True,
+        "label": "Nexus password",
+        "reason": "Password or token for the Nexus reader account.",
+    },
+]
+
+
 def _from_house(application_type: str) -> Dict[str, Any]:
     kit = _HOUSE_EXAMPLES[application_type]
     return {
         "source": (
-            "how this organisation builds a service — the conventions its "
-            "existing Jenkins jobs follow, expressed in KubeSight's model"
+            "a pipeline currently running in this KubeSight — the conventions "
+            "this organisation's builds actually follow"
         ),
         "applicationType": application_type,
         "pipeline": kit,
+        "requiredInputs": _HOUSE_REQUIRED_INPUTS,
     }
 
 

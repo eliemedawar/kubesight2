@@ -1,0 +1,123 @@
+/* Signal page-specific styles — API tokens.
+
+   The page exists around one fact: a token is visible exactly once. The new
+   token panel is therefore the loudest thing on it, and everything else is a
+   quiet table. */
+
+.sg-tok-new {
+  padding: 1rem 1.1rem;
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--ok-border, var(--ok));
+  border-radius: var(--radius-lg);
+  background: var(--ok-soft);
+}
+
+.sg-tok-new h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.sg-tok-new p {
+  margin: 0.2rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  max-width: 46rem;
+}
+
+/* The value itself: monospace, selectable, and wrapping rather than
+   truncating — a token cut off at the panel edge is a token pasted wrong. */
+.sg-tok-value {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.7rem 0;
+  padding: 0.55rem 0.7rem;
+  background: var(--bg-code, #0d1117);
+  border-radius: var(--radius-md);
+}
+
+.sg-tok-value code {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-code, #d5dbe4);
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.sg-tok-create {
+  max-width: 44rem;
+}
+
+.sg-tok-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.sg-tok-head h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.sg-tok-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.76rem;
+  color: var(--text-subtle);
+}
+
+.sg-tok-toggle input {
+  width: auto;
+}
+
+.sg-tok-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.sg-tok-table th {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-tok-table td {
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-main);
+}
+
+.sg-tok-table code {
+  font-size: 0.74rem;
+}
+
+/* A revoked or expired token stays listed — it is history worth seeing — but
+   reads as inert rather than as something still in use. */
+.sg-tok-table tr.is-dead td {
+  color: var(--text-subtle);
+  text-decoration-color: var(--text-subtle);
+}
+
+.sg-tok-expired {
+  color: var(--danger);
+}
+
+.sg-tok-actions {
+  text-align: right;
+  white-space: nowrap;
+}

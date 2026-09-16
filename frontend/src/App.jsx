@@ -80,6 +80,7 @@ const UpgradeSafeModePage = lazy(() => import("./pages/UpgradeSafeModePage.jsx")
 const ClusterBuilderPage = lazy(() => import("./pages/ClusterBuilderPage.jsx"));
 const UserManagementPage = lazy(() => import("./pages/UserManagementPage.jsx"));
 const AuditLogsPage = lazy(() => import("./pages/AuditLogsPage.jsx"));
+const ApiTokensPage = lazy(() => import("./pages/ApiTokensPage.jsx"));
 const DeploymentRequestsPage = lazy(() => import("./pages/DeploymentRequestsPage.jsx"));
 const MyRequestsPage = lazy(() => import("./pages/MyRequestsPage.jsx"));
 const ChangeBundlesPage = lazy(() => import("./pages/ChangeBundlesPage.jsx"));
@@ -1700,6 +1701,8 @@ export default function App() {
         return <UserManagementPage clusters={allowedClusters} />;
       case "auditLogs":
         return <AuditLogsPage />;
+      case "apiTokens":
+        return <ApiTokensPage />;
       case "deploymentRequests":
         return <DeploymentRequestsPage />;
       case "myRequests":

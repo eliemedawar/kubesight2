@@ -67,6 +67,22 @@ ENVIRONMENTS: Dict[str, Dict[str, Any]] = {
         "requiresWrapper": False,
         "notes": "For projects with no Gradle wrapper.",
     },
+    "gradle-9-jdk25": {
+        # What this installation's working pipelines actually build with. It was
+        # missing from the catalog, which meant a proposal could not ask for the
+        # image the site really uses and had to be corrected into an older one.
+        "label": "Gradle 9 on JDK 25",
+        "env": "CI_TEMPLATE_GRADLE_JDK25_IMAGE",
+        "default": "{registry}/gradle:9.1.0-jdk25-alpine",
+        "provides": {"java": "25", "gradle": "9"},
+        "labels": ["linux", "java"],
+        "requiresWrapper": False,
+        "notes": (
+            "Carries Gradle itself, so a project without a wrapper builds with "
+            "`gradle` directly. Dependencies resolve through the internal Maven "
+            "mirror via an init script."
+        ),
+    },
     "maven-3.9-jdk21": {
         "label": "Maven 3.9 on JDK 21",
         "env": "CI_TEMPLATE_MAVEN_IMAGE",

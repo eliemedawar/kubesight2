@@ -1230,35 +1230,78 @@ def test_every_worked_example_is_itself_a_pipeline_kubesight_would_accept(servic
                 )
             resolved["stages"].append(entry)
 
-        verdict = generated.validate(service, resolved, enforce=True)
+        # An example that references a secret must also declare it — that
+        # pairing is part of what it teaches, and validating without the
+        # declarations would be holding it to a standard no proposal is held to.
+        verdict = generated.validate(
+            service,
+            resolved,
+            declared_inputs=item.get("requiredInputs") or [],
+            enforce=True,
+        )
         assert verdict["valid"], f"{item['source']}: {verdict['errors']}"
+
+        # Every secret the example reads is one it also asks for.
+        declared = {i["name"] for i in item.get("requiredInputs") or []}
+        for stage in pipeline["stages"]:
+            for ref in stage.get("secretRefs") or []:
+                assert ref["name"] in declared, f"{ref['name']} referenced but not declared"
 
 
 def test_the_house_example_carries_the_conventions_a_repository_cannot_show(service):
-    """The things a model gets wrong every time until it is shown them: the
-    version lives in version.properties and has to reach later stages, the JAR
-    is normalised to app.jar, and `docker build` is a container_image stage
-    rather than a command in a pod that has no Docker socket."""
+    """The things a model gets wrong every time until it is shown a pipeline
+    that actually runs: dependencies come from the internal mirror through a
+    Gradle init script reading credentials from the environment, the image
+    carries Gradle so the command is `gradle` not `./gradlew`, the JAR is
+    normalised to app.jar, and `docker build` is a container_image stage."""
     from api.services.ci_assist import examples as examples_module
 
     house = next(
         item
         for item in examples_module.worked_examples(preferred_type="java_gradle")
-        if "this organisation" in item["source"]
+        if "currently running" in item["source"]
     )
     stages = {stage["name"]: stage for stage in house["pipeline"]["stages"]}
     commands = " ".join(
         line for stage in stages.values() for line in stage.get("commands", [])
     )
 
-    assert "version.properties" in commands
-    assert "$KUBESIGHT_ENV" in commands
+    # The init script, and the credentials read from the environment rather
+    # than written into it.
+    assert "nexus-init.gradle" in commands
+    assert 'System.getenv("NEXUS_USER")' in commands
+    assert "$KUBESIGHT_WORKSPACE" in commands
+
+    # `gradle`, not `./gradlew` — the image brings the build tool.
+    assert "gradle -I" in commands
+    assert "./gradlew" not in commands
+
+    # One canonical artifact, and a loud failure when there is none.
     assert "app.jar" in commands
-    assert stages["Build Container Image"]["stageType"] == "container_image"
-    # And it never demonstrates the thing the rules forbid.
-    assert "docker build" not in commands
-    assert "docker push" not in commands
+    assert "exit 1" in commands
+
+    assert stages["Build Image"]["stageType"] == "container_image"
+    # It never demonstrates the thing the rules forbid.
+    assert "docker build" not in commands and "docker push" not in commands
     # Deploys and notifications are not part of a build, so they are not shown.
     assert not any(
         word in " ".join(stages).lower() for word in ("deploy", "notification", "slack")
     )
+
+
+def test_the_house_example_is_three_stages_not_the_jenkins_eight(service):
+    """The Jenkins job this replaced had eight stages; five of them were
+    deploys, notifications and file-patching a build has no business doing.
+    Showing the trimmed version is most of the point."""
+    from api.services.ci_assist import examples as examples_module
+
+    house = next(
+        item
+        for item in examples_module.worked_examples(preferred_type="java_gradle")
+        if "currently running" in item["source"]
+    )
+    assert [s["name"] for s in house["pipeline"]["stages"]] == [
+        "Checkout",
+        "Build JAR",
+        "Build Image",
+    ]
