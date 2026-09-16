@@ -271,3 +271,95 @@ def test_a_source_host_failure_reaches_the_user_as_its_own_message(service):
     finally:
         fake_source.FAKE.fail_with = None
     assert "rejected this credential" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# The build the project already has
+# ---------------------------------------------------------------------------
+
+JENKINSFILE = """
+pipeline {
+  agent any
+  parameters { booleanParam(name: 'SKIP_TESTS', defaultValue: false) }
+  stages {
+    stage('Build')   { steps { sh './gradlew clean build -x test' } }
+    stage('Test')    { steps { sh './gradlew test' } }
+    stage('Package') { steps { sh './gradlew bootJar' } }
+    stage('Deploy')  { steps { sh 'kubectl apply -f k8s/' } }
+  }
+}
+"""
+
+
+def test_an_existing_jenkinsfile_is_translated_not_just_forwarded(service):
+    """A Jenkinsfile is not a hint about the build — it IS the build, written
+    down by the people who run it. KubeSight can already parse one into its own
+    stage model, so handing a model raw Groovy and hoping it infers what a
+    parser can state would be leaving the answer on the floor."""
+    fake_source.FAKE.load({**fake_source.JAVA_GRADLE, "Jenkinsfile": JENKINSFILE})
+    result = evidence_module.collect(service)
+
+    existing = result.existing_pipeline
+    assert existing is not None
+    names = [stage["name"] for stage in existing["stages"]]
+    assert "Build" in names and "Test" in names and "Package" in names
+    build = next(s for s in existing["stages"] if s["name"] == "Build")
+    assert build["commands"] == ["./gradlew clean build -x test"]
+    # It travels in the payload, where the prompt can point at it.
+    assert result.as_payload()["existingPipeline"]["stages"]
+
+
+def test_the_jenkinsfile_is_never_crowded_out_of_the_budget(service, monkeypatch):
+    """Nothing in a repository is worth more. A project with forty build files
+    must not lose the one that describes the build."""
+    monkeypatch.setattr(evidence_module, "MAX_FILES", 2)
+    fake_source.FAKE.load({**fake_source.JAVA_GRADLE, "Jenkinsfile": JENKINSFILE})
+    result = evidence_module.collect(service)
+    assert "Jenkinsfile" in [item["path"] for item in result.files]
+
+
+def test_a_repository_with_no_jenkinsfile_simply_has_none(service):
+    fake_source.FAKE.load(fake_source.JAVA_GRADLE)
+    result = evidence_module.collect(service)
+    assert result.existing_pipeline is None
+    assert "existingPipeline" not in result.as_payload()
+
+
+def test_an_unparseable_jenkinsfile_costs_nothing(service):
+    """A Jenkinsfile that is a Groovy program rather than a declaration adds
+    nothing on top of its own text, which is still in the evidence."""
+    fake_source.FAKE.load(
+        {**fake_source.JAVA_GRADLE, "Jenkinsfile": "node { echo 'scripted, not declarative' }"}
+    )
+    result = evidence_module.collect(service)
+    assert result.existing_pipeline is None
+    assert "Jenkinsfile" in [item["path"] for item in result.files]
+
+
+def test_credentials_the_jenkins_job_used_are_named(service):
+    """A credential binding says WHICH secrets the build needs — exactly what
+    requiredInputs is for."""
+    fake_source.FAKE.load(
+        {
+            **fake_source.JAVA_GRADLE,
+            "Jenkinsfile": """
+pipeline {
+  agent any
+  stages {
+    stage('Build') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'nexus-reader',
+                         usernameVariable: 'NEXUS_USERNAME',
+                         passwordVariable: 'NEXUS_PASSWORD')]) {
+          sh './gradlew build'
+        }
+      }
+    }
+  }
+}
+""",
+        }
+    )
+    result = evidence_module.collect(service)
+    assert result.existing_pipeline is not None
+    assert result.existing_pipeline["credentialsUsed"]

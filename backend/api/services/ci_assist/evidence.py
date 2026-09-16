@@ -90,13 +90,14 @@ _PRIORITY_FILES: Dict[str, int] = {
     "docker-compose.yaml": 2,
     "compose.yml": 2,
     "compose.yaml": 2,
-    # 3 — how it is built today. A Jenkinsfile is the best evidence there is of
-    # what this project's build actually needs, and CI already knows how to read
-    # one — see services/ci/jenkinsfile.py.
-    "jenkinsfile": 3,
-    "bitbucket-pipelines.yml": 3,
-    ".gitlab-ci.yml": 3,
-    "azure-pipelines.yml": 3,
+    # 0 — how it is built TODAY. A Jenkinsfile is not a hint about the build; it
+    # is the build, written down by the people who run it, and KubeSight can
+    # already parse one into its own stage model (services/ci/jenkinsfile.py).
+    # Nothing else in a repository is worth more, so it is never crowded out.
+    "jenkinsfile": 0,
+    "bitbucket-pipelines.yml": 1,
+    ".gitlab-ci.yml": 1,
+    "azure-pipelines.yml": 1,
     "makefile": 3,
     # 4 — framework and runtime hints.
     "tsconfig.json": 4,
@@ -159,9 +160,12 @@ class Evidence:
     files: List[Dict[str, str]] = field(default_factory=list)
     deterministic: Dict[str, Any] = field(default_factory=dict)
     coverage: Dict[str, Any] = field(default_factory=dict)
+    # The project's existing CI, already translated into KubeSight's own stage
+    # model. See :func:`_existing_pipeline`.
+    existing_pipeline: Optional[Dict[str, Any]] = None
 
     def as_payload(self) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "repository": {
                 "revision": self.revision,
                 "workingDirectory": self.working_directory,
@@ -170,6 +174,9 @@ class Evidence:
             "files": self.files,
             "deterministic": self.deterministic,
         }
+        if self.existing_pipeline:
+            payload["existingPipeline"] = self.existing_pipeline
+        return payload
 
 
 def _relative(path: str, root: str) -> Optional[str]:
@@ -303,6 +310,74 @@ def _deterministic_facts(paths: List[str]) -> Dict[str, Any]:
     }
 
 
+def _existing_pipeline(files: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
+    """This project's current build, translated into KubeSight's stage model.
+
+    A repository with a Jenkinsfile has already answered most of the question:
+    somebody wrote down what the build does, and has been running it. KubeSight
+    can read that — ``services/ci/jenkinsfile`` exists to turn one into the same
+    stage dictionaries a pipeline is made of — so there is no reason to hand a
+    model raw Groovy and hope it infers what a parser can state.
+
+    Advisory, not authoritative. The translation is offered as "this is how the
+    project builds today"; a proposal is still expected to produce something
+    that fits KubeSight, and to leave out the parts of a Jenkins job that have
+    no business in a build (deployments, notifications, approvals).
+    """
+    source = next(
+        (
+            item["content"]
+            for item in files
+            if item["path"].lower().rsplit("/", 1)[-1] == "jenkinsfile"
+        ),
+        "",
+    )
+    if not source.strip():
+        return None
+
+    from ..ci import jenkinsfile
+
+    try:
+        draft = jenkinsfile.parse(source)
+    except Exception:
+        # A Jenkinsfile that will not parse is a Groovy program, not a
+        # declaration. The raw text is still in `files`; this simply adds
+        # nothing on top of it.
+        return None
+
+    stages = [
+        {
+            key: stage[key]
+            for key in ("name", "stageType", "commands", "workingDirectory", "runCondition")
+            if stage.get(key)
+        }
+        for stage in draft.get("stages") or []
+    ]
+    if not stages:
+        return None
+
+    return {
+        "source": "Jenkinsfile",
+        "note": (
+            "The project's current Jenkins build, already translated into "
+            "KubeSight's stage model. Treat the stage names and commands as "
+            "strong evidence of what this build actually needs. Leave out "
+            "anything that is not part of producing the artifact — deployments, "
+            "notifications, approvals, environment promotion."
+        ),
+        "stages": stages[:20],
+        "parameters": [
+            {key: param[key] for key in ("name", "type", "default") if key in param}
+            for param in (draft.get("parameters") or [])[:10]
+        ],
+        # Names only. A Jenkins credential binding says WHICH secrets the build
+        # needs, which is exactly what requiredInputs is for.
+        "credentialsUsed": [
+            item.get("name") for item in (draft.get("secrets") or [])[:15] if item.get("name")
+        ],
+    }
+
+
 def collect(service, revision: str = "") -> Evidence:
     """Read one repository into the evidence a proposal may be based on.
 
@@ -377,6 +452,7 @@ def collect(service, revision: str = "") -> Evidence:
     return Evidence(
         revision=chosen,
         working_directory=root,
+        existing_pipeline=_existing_pipeline(files),
         # The tree travels whole where it fits: structure is cheap and is what
         # stops "there is probably a wrapper" being a plausible answer.
         tree=scoped[:5000],

@@ -91,6 +91,19 @@ tests exist, package, and a container image only where the repository is contain
 not add scanning, linting, deployment, promotion or integration-test stages unless the
 repository itself configures them.
 
+Minimum does not mean one stage. A pipeline whose only stage is Checkout builds nothing and
+is never the right answer: a checkout stage on its own produces no artifact. If the evidence
+shows a build system at all, there is at least a build stage to go with it. When you cannot
+work out the build command, say so under analysis.warnings and propose the stage with your
+best command anyway — a stage somebody corrects is worth more than a stage that is missing.
+
+When `evidence.existingPipeline` is present it is this project's CURRENT build, already
+translated into KubeSight's stage model from its Jenkinsfile. It is the strongest evidence
+available: those stage names and commands are what the team actually runs. Follow it closely,
+keeping the stages that produce the artifact and dropping the ones that do not belong in a
+build — deployments, notifications, approvals, environment promotion. Its credentialsUsed are
+the secrets to declare under requiredInputs.
+
 State uncertainty. A version you did not read is absent and named under unknown, never
 guessed. Cite the file each detected value came from in applicationProfile.evidence, with a
 confidence of Confirmed, High, Medium or Low. Never emit numeric scores or percentages."""

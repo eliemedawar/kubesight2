@@ -1157,18 +1157,32 @@ def test_hermes_is_shown_pipelines_that_already_work_here(service, monkeypatch):
             assert set(stage) <= set(generated.STAGE_KEYS) | {"buildEnvironment"}
 
 
-def test_a_worked_example_exists_even_on_a_fresh_installation(app, service, monkeypatch):
-    """Nothing is saved yet on a new install, so the curated starter kit is the
-    fallback — the feature must not be worse on day one."""
+@pytest.mark.parametrize(
+    ("application_type", "expected"),
+    [
+        # Java has a house pattern — the conventions the existing Jenkins jobs
+        # follow, which is the more useful example of the two.
+        ("java_gradle", "this organisation"),
+        ("java_maven", "this organisation"),
+        # A stack with no house pattern falls back to the curated starter kit.
+        ("node", "starter kit"),
+        ("python", "starter kit"),
+    ],
+)
+def test_a_curated_example_exists_even_on_a_fresh_installation(
+    app, service, application_type, expected
+):
+    """Nothing is saved yet on a new install, so a curated example is always
+    included — the feature must not be worse on day one."""
     from api.models_ci import CiPipeline
     from api.services.ci_assist import examples as examples_module
 
     CiPipeline.query.delete()
     db.session.commit()
 
-    examples = examples_module.worked_examples(preferred_type="java_gradle")
+    examples = examples_module.worked_examples(preferred_type=application_type)
     assert examples
-    assert any("starter kit" in item["source"] for item in examples)
+    assert any(expected in item["source"] for item in examples)
 
 
 def test_a_real_pipeline_is_preferred_over_the_starter_kit(app, service, monkeypatch):
@@ -1192,3 +1206,59 @@ def test_a_real_pipeline_is_preferred_over_the_starter_kit(app, service, monkeyp
     assert any("already running" in item["source"] for item in examples)
     real = next(item for item in examples if "already running" in item["source"])
     assert real["pipeline"]["stages"][0]["commands"] == ["make release"]
+
+
+def test_every_worked_example_is_itself_a_pipeline_kubesight_would_accept(service):
+    """An example that would be refused teaches the model to be refused. These
+    are the one thing in the request that MUST be correct, because everything
+    else is described and this is demonstrated."""
+    from api.services.ci import build_environments
+    from api.services.ci_assist import examples as examples_module
+
+    for item in examples_module.worked_examples(preferred_type="java_gradle"):
+        pipeline = item["pipeline"]
+        resolved = {**pipeline, "stages": []}
+        for stage in pipeline["stages"]:
+            entry = dict(stage)
+            key = entry.pop("buildEnvironment", "")
+            if key:
+                environment = build_environments.resolve(key)
+                assert environment is not None, f"unknown environment {key} in an example"
+                entry["image"] = environment["image"]
+                entry["runnerLabels"] = sorted(
+                    set(entry.get("runnerLabels", [])) | set(environment["labels"])
+                )
+            resolved["stages"].append(entry)
+
+        verdict = generated.validate(service, resolved, enforce=True)
+        assert verdict["valid"], f"{item['source']}: {verdict['errors']}"
+
+
+def test_the_house_example_carries_the_conventions_a_repository_cannot_show(service):
+    """The things a model gets wrong every time until it is shown them: the
+    version lives in version.properties and has to reach later stages, the JAR
+    is normalised to app.jar, and `docker build` is a container_image stage
+    rather than a command in a pod that has no Docker socket."""
+    from api.services.ci_assist import examples as examples_module
+
+    house = next(
+        item
+        for item in examples_module.worked_examples(preferred_type="java_gradle")
+        if "this organisation" in item["source"]
+    )
+    stages = {stage["name"]: stage for stage in house["pipeline"]["stages"]}
+    commands = " ".join(
+        line for stage in stages.values() for line in stage.get("commands", [])
+    )
+
+    assert "version.properties" in commands
+    assert "$KUBESIGHT_ENV" in commands
+    assert "app.jar" in commands
+    assert stages["Build Container Image"]["stageType"] == "container_image"
+    # And it never demonstrates the thing the rules forbid.
+    assert "docker build" not in commands
+    assert "docker push" not in commands
+    # Deploys and notifications are not part of a build, so they are not shown.
+    assert not any(
+        word in " ".join(stages).lower() for word in ("deploy", "notification", "slack")
+    )

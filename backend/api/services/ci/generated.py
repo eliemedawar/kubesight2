@@ -769,6 +769,29 @@ def validate(
         names_seen.append(lowered)
         resolved_stages.append(stage)
 
+    # A pipeline that builds nothing.
+    #
+    # Checkout produces no artifact — it puts the source on disk for the stages
+    # that follow. A pipeline consisting only of checkout stages is not a
+    # minimal pipeline, it is a missing one, and it will report success while
+    # having done nothing at all. That is the single worst outcome available
+    # here, so it is said loudly even though the pipeline is storable.
+    runnable = [
+        stage
+        for stage in resolved_stages
+        if str(stage.get("stageType") or "command").strip().lower() != "checkout"
+    ]
+    if resolved_stages and not runnable:
+        warnings.append(
+            _issue(
+                "builds_nothing",
+                "This pipeline only checks the source out — no stage builds, tests or "
+                "packages anything, so a build of it would report success having "
+                "produced nothing. Add the build stage this project needs, or "
+                "regenerate.",
+            )
+        )
+
     # Runner portability, on the stages as KubeSight resolved them. Its error
     # findings are genuine "cannot work there" facts (docker in a build pod, an
     # absolute /workspace on an agent), so they block.

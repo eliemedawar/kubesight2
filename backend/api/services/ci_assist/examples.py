@@ -100,6 +100,128 @@ def _from_saved(pipeline: CiPipeline, service: CiService) -> Dict[str, Any]:
     }
 
 
+# The house pattern, taken from the Jenkins jobs this installation actually
+# runs. Everything here is a convention a model cannot infer from a repository
+# and gets wrong every time until it is shown:
+#
+#   * the version is not in the build file — it is composed from
+#     version.properties and has to reach later stages through $KUBESIGHT_ENV
+#   * the build is patched before it runs (a settings.gradle fragment, a
+#     gradle.properties for the internal mirror), from build inputs
+#   * the JAR is renamed to app.jar so one Dockerfile serves every service
+#   * `docker build` + `docker push` is NOT a command stage — it is what the
+#     container_image stage is for
+#   * deploys, notifications and promotion are not part of a build
+#
+# Deliberately free of site-specific addresses: the host alias a particular
+# repository needs arrives with its own Jenkinsfile in evidence.existingPipeline.
+_HOUSE_JAVA_GRADLE: Dict[str, Any] = {
+    "name": "default",
+    "parameters": [
+        {"name": "SKIP_TESTS", "type": "boolean", "label": "Skip tests", "default": "false"},
+        {
+            "name": "GRADLE_PROPERTIES",
+            "type": "multiline",
+            "label": "gradle.properties",
+            "description": "Credentials and mirror settings for the internal Gradle repository.",
+            "default": "",
+        },
+    ],
+    "stages": [
+        {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["linux"],
+         "timeoutSeconds": 600},
+        {
+            "name": "Prepare Build",
+            "stageType": "command",
+            "buildEnvironment": "java-jdk11",
+            "runnerLabels": ["linux", "java"],
+            "commands": [
+                "# The version is composed from version.properties, not read from",
+                "# the build file, and later stages need it — so it is exported.",
+                "major=$(grep '^major=' version.properties | cut -d= -f2)",
+                "minor=$(grep '^minor=' version.properties | cut -d= -f2)",
+                "patch=$(grep '^patch=' version.properties | cut -d= -f2)",
+                "suffix=$(grep '^suffix=' version.properties | cut -d= -f2 || true)",
+                'if [ -n "$suffix" ]; then VERSION="$major.$minor.$patch-$suffix"; '
+                'else VERSION="$major.$minor.$patch"; fi',
+                'printf "VERSION=%s\\n" "$VERSION" >> "$KUBESIGHT_ENV"',
+                'echo "Building version $VERSION"',
+                "# Settings the internal mirror needs, supplied as a build input.",
+                'printf "%s\\n" "${GRADLE_PROPERTIES}" > "$KUBESIGHT_WORKSPACE/gradle.properties"',
+            ],
+            "timeoutSeconds": 600,
+        },
+        {
+            "name": "Build",
+            "stageType": "command",
+            "buildEnvironment": "java-jdk11",
+            "runnerLabels": ["linux", "java"],
+            "env": {"GRADLE_USER_HOME": "$KUBESIGHT_WORKSPACE/.gradle"},
+            "commands": [
+                'mkdir -p "$GRADLE_USER_HOME"',
+                'cp "$KUBESIGHT_WORKSPACE/gradle.properties" "$GRADLE_USER_HOME/gradle.properties"',
+                "./gradlew --no-daemon clean build -x test -x checkstyleMain "
+                "-x checkstyleTest -x compileTestJava --stacktrace",
+            ],
+            "timeoutSeconds": 2400,
+        },
+        {
+            "name": "Unit Tests",
+            "stageType": "command",
+            "buildEnvironment": "java-jdk11",
+            "runnerLabels": ["linux", "java"],
+            "commands": ["./gradlew --no-daemon test"],
+            "artifacts": [{"path": "build/test-results/test/*.xml", "type": "test-report"}],
+            "runCondition": {"variable": "SKIP_TESTS", "operator": "equals", "value": "false"},
+            "timeoutSeconds": 2400,
+        },
+        {
+            "name": "Package JAR",
+            "stageType": "command",
+            "buildEnvironment": "java-jdk11",
+            "runnerLabels": ["linux", "java"],
+            "commands": [
+                "# One canonical app.jar, so a single Dockerfile serves every service.",
+                "jar=$(ls -1 build/libs/*.jar | grep -v -- '-plain[.]jar$' | head -1)",
+                'test -n "$jar" || { echo "no JAR under build/libs"; exit 1; }',
+                'cp "$jar" app.jar',
+            ],
+            "artifacts": [{"path": "app.jar", "type": "jar"}],
+            "timeoutSeconds": 600,
+        },
+        {
+            "name": "Build Container Image",
+            "stageType": "container_image",
+            "runnerType": "kubernetes",
+            "runnerLabels": ["linux"],
+            # docker build / docker push never appear as commands: a build pod
+            # has no Docker socket. BuildKit does this, and the tag can use the
+            # VERSION the Prepare Build stage exported.
+            "env": {"IMAGE_TAG": "V${VERSION}-prod"},
+            "timeoutSeconds": 2400,
+        },
+    ],
+}
+
+_HOUSE_EXAMPLES: Dict[str, Dict[str, Any]] = {
+    "java_gradle": _HOUSE_JAVA_GRADLE,
+    "java_maven": _HOUSE_JAVA_GRADLE,
+    "java": _HOUSE_JAVA_GRADLE,
+}
+
+
+def _from_house(application_type: str) -> Dict[str, Any]:
+    kit = _HOUSE_EXAMPLES[application_type]
+    return {
+        "source": (
+            "how this organisation builds a service — the conventions its "
+            "existing Jenkins jobs follow, expressed in KubeSight's model"
+        ),
+        "applicationType": application_type,
+        "pipeline": kit,
+    }
+
+
 def _from_template(application_type: str) -> Dict[str, Any]:
     kit = templates.template_for(application_type)
     stages = [
@@ -150,9 +272,17 @@ def worked_examples(preferred_type: str = "") -> List[Dict[str, Any]]:
         seen_types.add(service.application_type)
         examples.append(_from_saved(row, service))
 
-    # And always one curated kit, so there is a canonical reference even when
-    # the real ones are unusual.
-    canonical = preferred_type if preferred_type in templates.TEMPLATES else "java_gradle"
-    examples.append(_from_template(canonical))
+    # The house pattern for this kind of project, where one exists. This is the
+    # example that carries the conventions — the version composed from
+    # version.properties, the JAR normalised to app.jar, `docker build` being a
+    # container_image stage rather than a command — none of which is inferable
+    # from the repository and all of which is got wrong without it.
+    if preferred_type in _HOUSE_EXAMPLES:
+        examples.append(_from_house(preferred_type))
+    else:
+        # And otherwise one curated kit, so there is always a canonical
+        # reference even for a stack with no house pattern yet.
+        canonical = preferred_type if preferred_type in templates.TEMPLATES else "java_gradle"
+        examples.append(_from_template(canonical))
 
     return redact_structure(examples)

@@ -483,3 +483,36 @@ def test_feedback_carries_codes_and_messages_and_nothing_else(service):
     assert feedback
     for item in feedback:
         assert set(item) == {"code", "stage", "field", "message"}
+
+
+# ---------------------------------------------------------------------------
+# A pipeline that builds nothing
+# ---------------------------------------------------------------------------
+
+def test_a_checkout_only_pipeline_is_called_out(service):
+    """Checkout produces no artifact — it puts the source on disk for the stages
+    that follow. A pipeline of nothing but checkout will report success having
+    built nothing, which is the worst outcome available here: a green build that
+    shipped no change."""
+    verdict = generated.validate(
+        service,
+        pipeline(
+            {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["linux"],
+             "commands": [], "timeoutSeconds": 600}
+        ),
+    )
+    assert "builds_nothing" in warning_codes(verdict)
+    message = " ".join(item["message"] for item in verdict["warnings"])
+    assert "produced nothing" in message
+
+
+def test_a_pipeline_with_a_real_stage_is_not_called_out(service):
+    verdict = generated.validate(
+        service,
+        pipeline(
+            {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["linux"],
+             "commands": [], "timeoutSeconds": 600},
+            stage(buildEnvironment="java-jdk11"),
+        ),
+    )
+    assert "builds_nothing" not in warning_codes(verdict)
