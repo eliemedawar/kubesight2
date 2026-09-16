@@ -81,7 +81,7 @@
   padding: 0.42rem 0.95rem;
   background: var(--bg-panel);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-control);
   cursor: text;
   transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }

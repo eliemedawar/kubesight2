@@ -40,7 +40,7 @@
   padding: 3px;
   background: var(--bg-interactive);
   border: 1px solid var(--border);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-control);
 }
 
 .ov-range-pill {
@@ -52,7 +52,7 @@
   font-weight: 600;
   letter-spacing: 0.04em;
   padding: 0.28rem 0.7rem;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-control);
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }

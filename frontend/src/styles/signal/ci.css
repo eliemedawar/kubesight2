@@ -205,7 +205,7 @@
   gap: 0.3rem;
   padding: 0.26rem 0.85rem;
   border: 0;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-control);
   background: var(--accent);
   color: #fff;
   font: inherit;
@@ -1722,7 +1722,7 @@ button.sg-ci-workspace-entry:focus-visible {
 
 .sg-mx-pill {
   padding: 0.05rem 0.45rem;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-chip);
   border: 1px solid currentColor;
   font-size: 0.66rem;
   font-weight: 600;
@@ -2044,7 +2044,7 @@ button.sg-ci-workspace-entry:focus-visible {
   padding: 0.14rem 0.42rem;
   color: var(--text-muted);
   border: 1px solid var(--border);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-chip);
   font-size: 0.6rem;
   text-overflow: ellipsis;
   white-space: nowrap;

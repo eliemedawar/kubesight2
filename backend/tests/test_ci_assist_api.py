@@ -312,7 +312,10 @@ def test_a_failed_analysis_reports_what_happened_and_leaves_the_service_usable(
 
 def test_validate_generated_answers_without_saving_anything(client, admin_token, service_id):
     """The review screen calls this after every edit, so a person correcting a
-    proposal is told the same things Hermes would have been."""
+    proposal is told the same things Hermes would have been.
+
+    Under the default advise policy the objection is a note rather than a veto:
+    the pipeline is saveable and the finding travels with it."""
     verdict = client.post(
         "/api/ci/pipelines/validate-generated",
         json={
@@ -331,8 +334,11 @@ def test_validate_generated_answers_without_saving_anything(client, admin_token,
         headers=auth_headers(admin_token),
     ).get_json()["data"]
 
-    assert verdict["valid"] is False
-    assert any(e["code"] == "unsatisfiable_runner_labels" for e in verdict["errors"])
+    assert verdict["valid"] is True
+    assert any(
+        item["code"] == "unsatisfiable_runner_labels" for item in verdict["warnings"]
+    )
+    # Asking what KubeSight thinks must not create anything.
     assert CiRepositoryAnalysis.query.count() == 0
 
 

@@ -12,24 +12,32 @@ code path — which is why it can live inside ``services/ci`` beside the engine
 without breaking that package's promise. Hand it a pipeline payload from
 anywhere and it answers the same way.
 
-**It rejects rather than repairs.** A proposal quietly rewritten into something
-saveable is a proposal nobody reviewed: it passes the human's glance precisely
-because it looks like what they asked for. Every problem is reported with the
-stage it is about and goes back to the generator to fix, or to the person.
+**It advises rather than refuses.** Under the default ``advise`` policy nothing
+a generator proposes is thrown away: the pipeline is normalized into the nearest
+form KubeSight can actually store, and everything that had to change — or that
+will bite later — is reported against the stage it belongs to and shown in the
+review screen. The person approving the pipeline is the gate.
 
-**Unknown fields are fatal.** This is what makes ``privileged: true``,
-``hostPath``, ``serviceAccount`` and every other field a generator might invent
-a hard failure instead of something silently dropped. A stage model that has no
-field for an escalation cannot carry one, and refusing unknown keys is what
-keeps that true as the model grows.
+That is a deliberate trade and worth being plain about. A stage labelled for a
+runner nobody has still queues forever; a ``docker build`` in a build pod still
+finds no socket. Refusing those caught them a few seconds earlier than the build
+would have. What refusing ALSO did was throw away pipelines that were entirely
+correct apart from one detail, and that is the worse of the two failures.
 
-Errors block. Warnings do not — they are things a person should see before
-approving (an unconfigured build environment, a stage type with no executor yet)
-but which are legitimately what the user asked for.
+**Nothing is silently granted.** The privilege fields are why this is safe
+rather than merely permissive: ``CiPipelineStage`` has no column for
+``privileged``, ``hostPath`` or ``serviceAccount``, so a proposal asking for one
+is not obeyed whatever this module decides. Letting them through drops them and
+says so. Refusing was only ever a way of telling somebody.
+
+``CI_ASSIST_POLICY=enforce`` restores hard refusals for an installation that
+wants the stricter gate. Every check keeps its severity in both modes — the two
+differ in what BLOCKS, never in what is noticed.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -133,6 +141,21 @@ PRIVILEGE_FIELDS = frozenset(
 _NOT_YET_EXECUTABLE = frozenset({"publish_artifact", "scan"})
 
 MAX_STAGES = pipelines.MAX_STAGES
+
+# How a problem is treated once it has been found.
+#
+# "advise" (the default): nothing is refused. The proposal is normalized into
+# what KubeSight can store and every problem is reported for a person to weigh
+# in the review screen.
+# "enforce": a problem blocks, as it did before — for an installation that would
+# rather not save a pipeline it can already see is wrong.
+POLICY_ADVISE = "advise"
+POLICY_ENFORCE = "enforce"
+
+
+def policy() -> str:
+    chosen = os.getenv("CI_ASSIST_POLICY", POLICY_ADVISE).strip().lower()
+    return POLICY_ENFORCE if chosen == POLICY_ENFORCE else POLICY_ADVISE
 
 
 def _issue(code: str, message: str, *, stage: str = "", field: str = "") -> Dict[str, str]:
@@ -492,22 +515,80 @@ def _check_secret_refs(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _storable(stage: Dict[str, Any], name: str, notes: List[Dict[str, str]]) -> Dict[str, Any]:
+    """Bend a stage into something ``pipelines`` will actually accept.
+
+    Only ever applied in ``advise`` mode, and only to the handful of things that
+    would otherwise make the SAVE fail rather than merely be unwise: a timeout
+    outside the allowed range, and a command stage with nothing to run. Both are
+    reported. Everything else is left exactly as proposed — the point is to stop
+    losing a pipeline over a detail, not to quietly redesign it.
+    """
+    out = dict(stage)
+
+    raw_timeout = out.get("timeoutSeconds")
+    try:
+        timeout = int(raw_timeout) if raw_timeout not in (None, "") else 1800
+    except (TypeError, ValueError):
+        timeout = 1800
+    clamped = max(pipelines.MIN_TIMEOUT_SECONDS, min(timeout, pipelines.MAX_TIMEOUT_SECONDS))
+    if clamped != timeout:
+        notes.append(
+            _issue(
+                "timeout_clamped",
+                f"Stage '{name}' asked for a {timeout}s timeout; KubeSight allows "
+                f"{pipelines.MIN_TIMEOUT_SECONDS}s to "
+                f"{pipelines.MAX_TIMEOUT_SECONDS // 3600} hours, so it was set to "
+                f"{clamped}s.",
+                stage=name,
+                field="timeoutSeconds",
+            )
+        )
+    out["timeoutSeconds"] = clamped
+
+    stage_type = str(out.get("stageType") or "command").strip().lower()
+    if stage_type == "command" and not [
+        line for line in (out.get("commands") or []) if str(line).strip()
+    ]:
+        # A command stage with nothing in it cannot be saved and would do
+        # nothing if it could. Disabled keeps it visible in the editor — the
+        # author can see what was proposed and fill it in — without pretending
+        # a build ran it.
+        out["enabled"] = False
+        notes.append(
+            _issue(
+                "empty_command_stage",
+                f"Stage '{name}' is a command stage with nothing to run. It was kept "
+                "but switched off; add a command to enable it.",
+                stage=name,
+                field="commands",
+            )
+        )
+    return out
+
+
 def validate(
     service,
     payload: Dict[str, Any],
     *,
     declared_inputs: Optional[Iterable[Dict[str, Any]]] = None,
+    enforce: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Whether this pipeline may be saved, and what is wrong with it if not.
+    """What is wrong with this pipeline, and whether that stops it being saved.
 
     ``declared_inputs`` are the required inputs the proposal came with: a stage
     may reference a secret that does not exist YET as long as the proposal also
     asks the user to supply it, because that is precisely the flow — propose,
     collect, then save. A reference to neither is a dangling reference.
 
-    Returns ``pipeline`` as the normalized, ready-to-save editor payload when
-    valid, and None when it is not. There is no partial success.
+    Under the default ``advise`` policy ``valid`` is true for anything KubeSight
+    can store, and every objection travels in ``warnings`` for the review screen
+    to show. Under ``enforce`` the objections block, and ``pipeline`` is None.
+    ``enforce=True`` forces the strict answer regardless of the setting, which
+    is what the repair loop uses to decide whether a correction round is worth
+    asking for.
     """
+    strict = policy() == POLICY_ENFORCE if enforce is None else bool(enforce)
     errors: List[Dict[str, str]] = []
     warnings: List[Dict[str, str]] = []
 
@@ -585,17 +666,23 @@ def validate(
             key for key in unknown if key.replace("_", "").lower() in PRIVILEGE_FIELDS
         ]
         if privileged:
-            errors.append(
-                _issue(
-                    "unknown_field",
-                    f"Stage '{name}' asks for {', '.join(privileged)}, which a "
-                    "KubeSight build stage cannot have. Build containers run as a "
-                    "non-root user with a read-only root filesystem and no host "
-                    "access, and that is not configurable from a pipeline.",
-                    stage=name,
-                )
+            # Reported loudly, and then simply not obeyed. ``CiPipelineStage``
+            # has no column for any of these, so the request cannot be honoured
+            # whatever is decided here — which is why dropping it is the honest
+            # outcome rather than a concession. Under enforce it still blocks,
+            # for an installation that would rather see the proposal refused.
+            note = _issue(
+                "unknown_field",
+                f"Stage '{name}' asks for {', '.join(privileged)}, which a KubeSight "
+                "build stage cannot have. Build containers run as a non-root user "
+                "with a read-only root filesystem and no host access, and that is "
+                "not configurable from a pipeline. The request was ignored.",
+                stage=name,
             )
-            continue
+            if strict:
+                errors.append(note)
+                continue
+            warnings.append(note)
 
         dropped = [key for key in unknown if key not in privileged]
         if dropped:
@@ -618,14 +705,28 @@ def validate(
             if k in STAGE_KEYS and k not in IGNORED_STAGE_KEYS
         }
         stage = _resolve_build_environment(stage, name, errors, warnings)
+        if not strict:
+            stage = _storable(stage, name, warnings)
 
         # Structural validation is the SAME function that guards a hand-written
-        # save, so a generated pipeline can never be held to a weaker standard
-        # than one a person typed.
+        # save, so a generated pipeline is never held to a weaker standard than
+        # one a person typed. What differs is the consequence: in advise mode a
+        # stage that still will not normalize is dropped and reported, rather
+        # than taking the whole pipeline down with it.
         try:
             pipelines.normalize_stage(stage, index, known_keys | declared)
         except pipelines.PipelineError as exc:
-            errors.append(_issue("invalid_stage", str(exc), stage=name))
+            if strict:
+                errors.append(_issue("invalid_stage", str(exc), stage=name))
+            else:
+                warnings.append(
+                    _issue(
+                        "stage_dropped",
+                        f"{exc} The stage was left out; the rest of the pipeline was "
+                        "kept.",
+                        stage=name,
+                    )
+                )
             continue
 
         stage_type = str(stage.get("stageType") or "command").strip().lower()
@@ -685,8 +786,21 @@ def validate(
         elif finding["level"] == portability.WARNING:
             warnings.append(entry)
 
-    if errors:
-        return {"valid": False, "errors": errors, "warnings": warnings, "pipeline": None}
+    if not strict and errors:
+        # Advise mode: the objections stand, they simply do not veto. They move
+        # into the warning list so the review screen shows every one of them
+        # next to the stage it is about, and the person decides.
+        warnings = [*errors, *warnings]
+        errors = []
+
+    if errors or not resolved_stages:
+        return {
+            "valid": False,
+            "errors": errors
+            or [_issue("no_stages", "Nothing in this pipeline could be stored.")],
+            "warnings": warnings,
+            "pipeline": None,
+        }
 
     return {
         "valid": True,

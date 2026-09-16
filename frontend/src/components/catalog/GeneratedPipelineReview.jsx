@@ -77,19 +77,30 @@ export default function GeneratedPipelineReview({
         )}
       </header>
 
-      {errors.length > 0 && (
+      {/* Three states, and the middle one is the common one: the pipeline is
+          Hermes's, KubeSight has notes on it, and the decision is yours. */}
+      {errors.length > 0 ? (
         <div className="sg-ci-gen-verdict is-invalid">
-          <strong>KubeSight refused this pipeline.</strong> Hermes could not produce a
-          version that passes. Fix the stages below, or configure the pipeline by hand.
+          <strong>This pipeline cannot be stored.</strong> Nothing in it survived
+          normalization. Fix the stages below, or configure the pipeline by hand.
           <Findings items={general(errors)} tone="error" />
         </div>
-      )}
-      {errors.length === 0 && (
-        <div className="sg-ci-gen-verdict is-valid">
-          <strong>Validated.</strong> Every stage runs on a runner this KubeSight has,
-          with an approved build image, and references its secrets rather than
-          containing them.
+      ) : warnings.length > 0 ? (
+        <div className="sg-ci-gen-verdict is-warn">
+          <strong>
+            {warnings.length} thing{warnings.length === 1 ? "" : "s"} to check before you
+            save.
+          </strong>{" "}
+          KubeSight kept the pipeline as Hermes proposed it and noted what it would have
+          objected to. Read the notes on each stage — they are things that will bite at
+          build time, not reasons you cannot save.
           <Findings items={general(warnings)} tone="warn" />
+        </div>
+      ) : (
+        <div className="sg-ci-gen-verdict is-valid">
+          <strong>Nothing to flag.</strong> Every stage runs on a runner this KubeSight
+          has, with an approved build image, and references its secrets rather than
+          containing them.
         </div>
       )}
 
@@ -102,7 +113,9 @@ export default function GeneratedPipelineReview({
           return (
             <li
               key={`${stage.name}-${index}`}
-              className={stageErrors.length ? "has-error" : ""}
+              className={
+                stageErrors.length ? "has-error" : stageWarnings.length ? "has-warning" : ""
+              }
             >
               <button
                 type="button"
@@ -126,7 +139,9 @@ export default function GeneratedPipelineReview({
                 </span>
               </button>
 
-              {(open || stageErrors.length > 0) && (
+              {/* A stage with notes opens itself: the note is the reason
+                  somebody is looking at this screen at all. */}
+              {(open || stageErrors.length > 0 || stageWarnings.length > 0) && (
                 <div className="sg-ci-gen-detail">
                   {/* Approving a pipeline is approving these lines. They are
                       never summarised away. */}

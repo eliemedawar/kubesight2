@@ -1473,7 +1473,7 @@ body.has-bundle-fab .page-content.ops-layout {
   color: var(--pill, var(--od-teal));
   background: color-mix(in srgb, var(--pill, var(--od-teal)) 13%, transparent);
   border: 1px solid color-mix(in srgb, var(--pill, var(--od-teal)) 30%, transparent);
-  padding: 4px 10px; border-radius: var(--radius-full);
+  padding: 4px 10px; border-radius: var(--radius-chip);
 }
 
 /* ── KubeSight brand logo (cube-with-eye mark, red wordmark) ─── */

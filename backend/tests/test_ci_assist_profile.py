@@ -56,12 +56,56 @@ def test_a_full_profile_survives_normalization_intact():
     assert result["schemaVersion"] == profile.SCHEMA_VERSION
 
 
-def test_an_unrecognised_language_is_refused_rather_than_stored():
-    """A profile decides which build image a pipeline gets. A typo accepted
-    here becomes a lookup that silently finds nothing much later."""
+def test_a_person_typing_a_bad_value_is_told_about_it():
+    """At a form, a typo is worth naming: "Jva" should not silently become
+    "other" and quietly change which build image the pipeline gets."""
     with pytest.raises(profile.ProfileError) as exc:
-        profile.normalize(java_gradle(language="jva"))
+        profile.normalize(java_gradle(language="jva"), source="manual")
     assert "jva" in str(exc.value)
+
+
+def test_a_model_using_a_different_word_is_understood_not_refused():
+    """"executable jar" is exactly what a Spring Boot fat jar is. Losing a
+    correct reading of the repository over a synonym is the same mistake as
+    refusing `type` for `stageType`."""
+    result = profile.normalize(java_gradle(packaging="executable jar"))
+    assert result["packaging"] == "jar"
+    assert any("executable jar" in note for note in result["notes"])
+
+
+@pytest.mark.parametrize(
+    ("field", "given", "expected"),
+    [
+        ("packaging", "fat jar", "jar"),
+        ("packaging", "docker image", "container-image"),
+        ("packaging", "android app bundle", "aab"),
+        ("buildSystem", "Gradle Wrapper", "gradle"),
+        ("buildSystem", "mvnw", "maven"),
+        ("language", "Node.js", "javascript"),
+        ("language", "golang", "go"),
+        ("projectStructure", "multi module", "multi-module"),
+    ],
+)
+def test_the_common_synonyms_are_understood(field, given, expected):
+    assert profile.normalize(java_gradle(**{field: given}))[field] == expected
+
+
+def test_a_value_nobody_recognises_is_recorded_rather_than_fatal():
+    """Failing the whole analysis because one field used an unfamiliar word
+    throws away everything else that was read correctly."""
+    result = profile.normalize(java_gradle(language="brainfuck"))
+    assert result["language"] == "other"
+    assert any("brainfuck" in note for note in result["notes"])
+
+
+def test_what_was_adjusted_is_always_said():
+    """A reading KubeSight changed must be visible, or the profile silently
+    differs from what the model actually reported."""
+    result = profile.normalize(
+        java_gradle(packaging="uber jar", buildSystem="gradlew", projectStructure="multimodule")
+    )
+    assert len(result["notes"]) == 3
+    assert result["notes"] == sorted(result["notes"], key=result["notes"].index)
 
 
 def test_versions_keep_the_form_the_project_wrote_them_in():
@@ -71,9 +115,25 @@ def test_versions_keep_the_form_the_project_wrote_them_in():
         assert profile.normalize(java_gradle(languageVersion=version))["languageVersion"] == version
 
 
-def test_a_version_that_could_not_be_a_version_is_refused():
+def test_a_version_a_person_typed_badly_is_refused():
     with pytest.raises(profile.ProfileError):
-        profile.normalize(java_gradle(languageVersion="17; rm -rf /"))
+        profile.normalize(java_gradle(languageVersion="17; rm -rf /"), source="manual")
+
+
+def test_a_decorated_version_from_a_model_is_trimmed_to_the_version():
+    """Models write "17 (LTS)". The version is still 17, and the whole analysis
+    should not die over the parenthetical."""
+    result = profile.normalize(java_gradle(languageVersion="17 (LTS)"))
+    assert result["languageVersion"] == "17"
+    assert any("17 (LTS)" in note for note in result["notes"])
+
+
+def test_a_dangerous_looking_version_never_survives_whole():
+    """Tolerant is not the same as credulous — whatever comes back is still
+    only the characters a version may contain."""
+    result = profile.normalize(java_gradle(languageVersion="17; rm -rf /"))
+    assert result["languageVersion"] == "17"
+    assert ";" not in result["languageVersion"]
 
 
 def test_an_absolute_dockerfile_path_is_refused():

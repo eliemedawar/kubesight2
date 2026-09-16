@@ -402,7 +402,7 @@ kbd {
   background: var(--ai-soft);
   border: 1px solid var(--ai-border);
   color: var(--ai);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-chip);
   padding: 0.15rem 0.6rem;
   font-size: var(--font-size-xs);
   font-weight: 600;

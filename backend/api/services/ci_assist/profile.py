@@ -69,6 +69,68 @@ PLATFORM_TARGETS = ("android", "ios", "web", "desktop", "server")
 # "Informational" — a detected build value is either evidenced or it is unknown.
 CONFIDENCES = ("Confirmed", "High", "Medium", "Low")
 
+# Other names for things KubeSight already has a word for.
+#
+# "executable jar" is what a Spring Boot fat jar genuinely is, and refusing it
+# because the enum says "jar" loses a correct answer over a synonym — the same
+# mistake as refusing `type` for `stageType`. These are vocabulary, not
+# capability: every one maps onto a value that was already allowed.
+SYNONYMS: Dict[str, Dict[str, str]] = {
+    "language": {
+        "js": "javascript", "node": "javascript", "nodejs": "javascript",
+        "node.js": "javascript", "javascript/typescript": "javascript",
+        "ts": "typescript",
+        "py": "python", "python3": "python",
+        "c#": "csharp", "dotnet": "csharp", ".net": "csharp",
+        "golang": "go",
+        "objc": "objective-c", "objective c": "objective-c",
+        "jvm": "java", "java/kotlin": "java", "kotlin/java": "kotlin",
+        "bash": "shell", "sh": "shell",
+    },
+    "buildSystem": {
+        "gradlew": "gradle", "gradle wrapper": "gradle", "gradle build": "gradle",
+        "mvn": "maven", "mvnw": "maven", "maven wrapper": "maven",
+        "npm scripts": "npm", "yarn berry": "yarn",
+        "requirements.txt": "pip", "pip/requirements": "pip",
+        "setup.py": "setuptools",
+        "go modules": "go", "go build": "go",
+        "msbuild": "dotnet", "dotnet cli": "dotnet",
+        "xcode": "xcodebuild", "swift package manager": "swiftpm", "spm": "swiftpm",
+        "dockerfile": "docker", "docker build": "docker",
+        "makefile": "make",
+        "n/a": "none", "not applicable": "none", "unknown": "",
+    },
+    "packageManager": {
+        "npm scripts": "npm", "pip3": "pip", "pods": "cocoapods",
+        "swift package manager": "swiftpm", "spm": "swiftpm",
+    },
+    "packaging": {
+        # The one that started this.
+        "executable jar": "jar", "fat jar": "jar", "uber jar": "jar",
+        "uber-jar": "jar", "shaded jar": "jar", "runnable jar": "jar",
+        "spring boot jar": "jar", "boot jar": "jar", "bootjar": "jar",
+        "jar file": "jar", "war file": "war",
+        "docker image": "container-image", "container": "container-image",
+        "oci image": "container-image", "image": "container-image",
+        "static site": "static-site", "static": "static-site", "spa": "static-site",
+        "python wheel": "wheel", "npm package": "bundle", "node module": "bundle",
+        "android app bundle": "aab", "app bundle": "aab", "apk file": "apk",
+        "executable": "binary", "binary executable": "binary",
+        "tar": "tarball", "tar.gz": "tarball", "tgz": "tarball",
+        "n/a": "none", "not applicable": "none",
+    },
+    "projectStructure": {
+        "multi module": "multi-module", "multimodule": "multi-module",
+        "multi-project": "multi-module", "mono-repo": "monorepo",
+        "single module": "single", "single-module": "single",
+    },
+    "containerization type": {
+        "docker": "dockerfile", "container": "dockerfile",
+        "podman": "containerfile", "cnb": "buildpack", "buildpacks": "buildpack",
+        "n/a": "none", "not applicable": "none",
+    },
+}
+
 # Fields a user may override. Everything else is either derived or evidence.
 OVERRIDABLE = (
     "language", "languageVersion",
@@ -90,33 +152,74 @@ def _text(value: Any, limit: int = 120) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
-def _enum(value: Any, allowed: Iterable[str], field: str, *, required: bool = False) -> str:
+def _enum(
+    value: Any,
+    allowed: Iterable[str],
+    field: str,
+    *,
+    required: bool = False,
+    strict: bool = True,
+    notes: Optional[List[str]] = None,
+) -> str:
     cleaned = _text(value, 40).lower()
     if not cleaned:
         if required:
             raise ProfileError(f"The application profile needs a {field}.")
         return ""
-    if cleaned not in allowed:
+    if cleaned in allowed:
+        return cleaned
+
+    # A different word for something KubeSight already has.
+    mapped = SYNONYMS.get(field, {}).get(cleaned)
+    if mapped is not None:
+        if mapped and notes is not None:
+            notes.append(f"Read {field} '{cleaned}' as '{mapped}'.")
+        return mapped if mapped in allowed else ""
+
+    if strict:
         raise ProfileError(
             f"'{cleaned}' is not a {field} KubeSight recognises. "
             f"Use one of: {', '.join(allowed)}."
         )
-    return cleaned
+
+    # Tolerant path (anything a model produced): an unrecognised value is
+    # recorded as "other" where the vocabulary has one and dropped where it does
+    # not, and either way it is SAID. Failing the whole analysis because one
+    # field used an unfamiliar word throws away everything else that was right.
+    fallback = "other" if "other" in allowed else ""
+    if notes is not None:
+        notes.append(
+            f"'{cleaned}' is not a {field} KubeSight recognises"
+            + (f"; recorded as '{fallback}'." if fallback else "; left unset.")
+        )
+    return fallback
 
 
-def _version(value: Any) -> str:
+def _version(value: Any, *, strict: bool = True, notes: Optional[List[str]] = None) -> str:
     """A version as written, not as parsed.
 
     Kept verbatim because '17', '1.8', '3.3.2' and '8.7-rc-2' are all real and
     all mean something to the tool that reads them. Only the characters a
-    version cannot contain are refused.
+    version cannot contain are refused — and outside strict mode a value like
+    "17 (LTS)" is trimmed to the part that is a version rather than thrown away.
     """
     cleaned = _text(value, 40)
     if not cleaned:
         return ""
-    if not all(char.isalnum() or char in "._-+" for char in cleaned):
+    if all(char.isalnum() or char in "._-+" for char in cleaned):
+        return cleaned
+    if strict:
         raise ProfileError(f"'{cleaned}' is not a usable version string.")
-    return cleaned
+
+    trimmed = "".join(
+        char for char in cleaned.split()[0] if char.isalnum() or char in "._-+"
+    )
+    if notes is not None:
+        notes.append(
+            f"Read version '{cleaned}' as '{trimmed}'." if trimmed
+            else f"'{cleaned}' is not a usable version; left unset."
+        )
+    return trimmed
 
 
 def _string_list(value: Any, limit: int, item_limit: int = 255) -> List[str]:
@@ -157,10 +260,18 @@ def _evidence(value: Any) -> Dict[str, Dict[str, str]]:
     return out
 
 
-def _containerization(value: Any) -> Dict[str, str]:
+def _containerization(
+    value: Any, *, strict: bool = True, notes: Optional[List[str]] = None
+) -> Dict[str, str]:
     if not isinstance(value, dict):
         return {"type": "none", "dockerfilePath": ""}
-    kind = _enum(value.get("type"), CONTAINERIZATION_TYPES, "containerization type")
+    kind = _enum(
+        value.get("type"),
+        CONTAINERIZATION_TYPES,
+        "containerization type",
+        strict=strict,
+        notes=notes,
+    )
     raw = _text(value.get("dockerfilePath"), 512)
     # Validated BEFORE any tidying: stripping a leading slash first would turn
     # "/etc/passwd" into the perfectly valid "etc/passwd" and accept it, which
@@ -173,40 +284,77 @@ def _containerization(value: Any) -> Dict[str, str]:
     return {"type": kind or "none", "dockerfilePath": path}
 
 
-def normalize(payload: Any, *, source: str = "hermes") -> Dict[str, Any]:
+def normalize(
+    payload: Any, *, source: str = "hermes", strict: Optional[bool] = None
+) -> Dict[str, Any]:
     """Validate an application profile into the shape KubeSight stores.
 
-    Rejects rather than repairs on anything structural: a profile is what the
-    build image and the generated commands are chosen from, so a silently
-    corrected one produces a pipeline that is wrong in a way nobody was told
-    about.
+    Two audiences, two standards, and the difference is deliberate.
+
+    A profile a PERSON typed is validated strictly: they are at a form, a typo
+    is worth telling them about, and "Jva" should not silently become "other".
+
+    A profile a MODEL produced is normalized tolerantly. "executable jar" is
+    exactly what a Spring Boot fat jar is, and refusing it because the
+    vocabulary says "jar" throws away a correct reading of the repository over
+    a synonym. Known synonyms map onto the value they mean; anything genuinely
+    unrecognised is recorded as "other" and NAMED in ``notes`` rather than
+    guessed at or fatal.
+
+    ``strict`` defaults to whether the profile came from a person.
     """
     if not isinstance(payload, dict):
         raise ProfileError("The application profile must be an object.")
 
-    language = _enum(payload.get("language"), LANGUAGES, "language")
-    build_system = _enum(payload.get("buildSystem"), BUILD_SYSTEMS, "build system")
+    if strict is None:
+        strict = source == "manual"
+    notes: List[str] = []
+
+    language = _enum(
+        payload.get("language"), LANGUAGES, "language", strict=strict, notes=notes
+    )
+    build_system = _enum(
+        payload.get("buildSystem"), BUILD_SYSTEMS, "buildSystem", strict=strict, notes=notes
+    )
 
     profile: Dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "language": language,
-        "languageVersion": _version(payload.get("languageVersion")),
+        "languageVersion": _version(
+            payload.get("languageVersion"), strict=strict, notes=notes
+        ),
         "framework": _text(payload.get("framework"), 80).lower(),
-        "frameworkVersion": _version(payload.get("frameworkVersion")),
+        "frameworkVersion": _version(
+            payload.get("frameworkVersion"), strict=strict, notes=notes
+        ),
         "buildSystem": build_system,
-        "buildSystemVersion": _version(payload.get("buildSystemVersion")),
+        "buildSystemVersion": _version(
+            payload.get("buildSystemVersion"), strict=strict, notes=notes
+        ),
         "usesBuildWrapper": bool(payload.get("usesBuildWrapper")),
         "packageManager": _enum(
-            payload.get("packageManager"), PACKAGE_MANAGERS, "package manager"
+            payload.get("packageManager"),
+            PACKAGE_MANAGERS,
+            "packageManager",
+            strict=strict,
+            notes=notes,
         )
         or None,
-        "packaging": _enum(payload.get("packaging"), PACKAGING, "packaging"),
+        "packaging": _enum(
+            payload.get("packaging"), PACKAGING, "packaging", strict=strict, notes=notes
+        ),
         "projectStructure": _enum(
-            payload.get("projectStructure"), PROJECT_STRUCTURES, "project structure"
+            payload.get("projectStructure"),
+            PROJECT_STRUCTURES,
+            "projectStructure",
+            strict=strict,
+            notes=notes,
         )
         or "single",
         "modules": _string_list(payload.get("modules"), MAX_MODULES),
-        "containerization": _containerization(payload.get("containerization")),
+        "containerization": _containerization(
+            payload.get("containerization"), strict=strict, notes=notes
+        ),
         "testsDetected": bool(payload.get("testsDetected")),
         "testFramework": _text(payload.get("testFramework"), 60).lower(),
         "artifactPaths": _string_list(payload.get("artifactPaths"), MAX_ARTIFACT_PATHS, 512),
@@ -219,6 +367,10 @@ def normalize(payload: Any, *, source: str = "hermes") -> Dict[str, Any]:
         "unknown": _string_list(payload.get("unknown"), 30, 60),
         "overrides": payload.get("overrides") if isinstance(payload.get("overrides"), dict) else {},
         "source": source if source in ("hermes", "manual", "derived") else "hermes",
+        # Every value that was read as something other than what arrived. Shown
+        # next to the profile, so a reading KubeSight adjusted is visible rather
+        # than quietly different from what the model said.
+        "notes": notes[:20],
     }
     profile["derivedApplicationType"] = derive_application_type(profile)
     return profile

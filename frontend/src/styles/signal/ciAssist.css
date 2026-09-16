@@ -290,7 +290,7 @@
 
 .sg-ci-profile-badge {
   padding: 0.02rem 0.35rem;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-chip);
   border: 1px solid var(--accent-border, var(--accent));
   background: var(--accent-soft);
   color: var(--accent-strong);
@@ -395,6 +395,13 @@
   border-color: var(--ok-border, var(--ok));
 }
 
+/* Notes without a veto: the pipeline is saveable, and these are the things
+   worth reading before somebody saves it. */
+.sg-ci-gen-verdict.is-warn {
+  background: var(--warn-soft);
+  border-color: var(--warn-border, var(--warn));
+}
+
 .sg-ci-gen-verdict.is-invalid {
   background: var(--danger-soft);
   border-color: var(--danger-border);
@@ -433,6 +440,10 @@
 
 .sg-ci-gen-stages > li.has-error {
   border-color: var(--danger-border);
+}
+
+.sg-ci-gen-stages > li.has-warning {
+  border-color: var(--warn-border, var(--warn));
 }
 
 .sg-ci-gen-stage {
@@ -503,7 +514,7 @@
 .sg-ci-gen-label {
   padding: 0.02rem 0.35rem;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-chip);
   font-size: 0.63rem;
 }
 

@@ -33,6 +33,7 @@ from ..application_intelligence_security import safe_error
 from ..ci import build_environments, generated, pipelines as pipelines_service
 from ..ci.runners.base import available_runner_types
 from . import evidence as evidence_module
+from . import examples as examples_module
 from . import hermes, profile as profile_module
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,39 @@ def capabilities_payload() -> Dict[str, Any]:
         )
 
     shipped = set(available_runner_types())
+
+    # The fleet as it actually is, machine by machine.
+    #
+    # A merged list of every label anybody advertises reads as one capable
+    # runner, which is how a proposal ends up asking for "macos" and "java" on
+    # the same stage — both labels exist, no single machine has both. Showing
+    # the runners individually is the difference between "these words are
+    # allowed" and "this is what you can run on".
+    fleet = []
+    for runner in CiRunner.query.order_by(CiRunner.name.asc()).all():
+        if runner.runner_type not in shipped:
+            continue
+        fleet.append(
+            {
+                "name": runner.name,
+                "type": runner.runner_type,
+                "os": runner.os or "",
+                "arch": runner.arch or "",
+                "capabilities": sorted(
+                    str(item).strip().lower()
+                    for item in (runner.capabilities or [])
+                    if str(item).strip()
+                ),
+                # Said plainly so a proposal can prefer a machine that will
+                # actually pick the work up.
+                "state": (
+                    "online"
+                    if runner.enabled and runner.status == "online"
+                    else "offline" if runner.enabled else "disabled"
+                ),
+            }
+        )
+
     return {
         # Only the types with an executor are offered. The others validate but
         # skip at run time, and proposing one produces a green build that made
@@ -102,6 +136,16 @@ def capabilities_payload() -> Dict[str, Any]:
         "stageTypes": ["checkout", "command", "container_image"],
         "runnerTypes": [item for item in RUNNER_TYPES if item in shipped],
         "runnerLabels": sorted(labels),
+        # What each stage's runnerLabels are actually matched against. A stage
+        # runs on a runner whose capabilities are a SUPERSET of its labels, so
+        # every label on one stage has to be satisfied by one machine.
+        "runners": fleet,
+        "runnerSelection": (
+            "A stage runs on a runner whose capabilities contain ALL of that "
+            "stage's runnerLabels. Choose labels that one machine in `runners` "
+            "satisfies; labels spread across two machines match neither, and "
+            "the build queues forever. Prefer a runner whose state is online."
+        ),
         "buildEnvironments": [
             {
                 "key": item["key"],
@@ -335,6 +379,14 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
     # is a sentence a model acts on, and losing a whole repository analysis to
     # it would make the feature feel arbitrary.
     _step(row, "generating")
+    # Shown alongside the rules: pipelines that already run here. Most of what a
+    # correction round used to teach — the field names, the label discipline,
+    # the level of detail — is learnable from one instance, and learning it
+    # before the first answer costs nothing.
+    worked = examples_module.worked_examples(
+        preferred_type=(hint or {}).get("derivedApplicationType", "")
+        or service.application_type
+    )
     feedback: List[Dict[str, str]] = []
     result = model = prompt_version = None
     for remaining in range(repair_attempts(), -1, -1):
@@ -344,6 +396,7 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
                 capabilities=capabilities,
                 profile_hint=hint,
                 feedback=feedback or None,
+                examples=worked,
             )
             break
         except hermes.ContractFailure as exc:
@@ -407,7 +460,13 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
         # did not contradict, never replace what the user set.
         detected = _merge_user_profile(detected, hint)
     row.application_profile = detected
-    row.warnings = list(result["analysis"]["warnings"])[:20]
+    # Hermes's own caveats, plus anything KubeSight had to read differently from
+    # how it arrived ("executable jar" -> "jar"). A reading that was adjusted is
+    # shown rather than quietly diverging from what the model actually said.
+    row.warnings = [
+        *list(result["analysis"]["warnings"]),
+        *list(detected.get("notes") or []),
+    ][:20]
     db.session.add(row)
     db.session.commit()
 
@@ -416,15 +475,28 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
         return
 
     # --- Validate, and repair if we must ----------------------------------
+    #
+    # Two questions, deliberately separate:
+    #
+    #   strict  — is there anything worth asking Hermes to fix?
+    #   verdict — what will actually be saved and shown?
+    #
+    # The repair loop reads the first, because a correction round is only worth
+    # a user's wait when there is something concrete to correct. The row stores
+    # the second, because under the default advise policy the pipeline is kept
+    # whatever the objections were, and the person approving it is the gate.
     _step(row, "validating")
     proposal = result["pipeline"]
     required_inputs = result["requiredInputs"]
+    strict = generated.validate(
+        service, proposal, declared_inputs=required_inputs, enforce=True
+    )
     verdict = generated.validate(service, proposal, declared_inputs=required_inputs)
-    _record_attempt(row, kind="propose", model=model, errors=verdict["errors"])
+    _record_attempt(row, kind="propose", model=model, errors=strict["errors"])
 
     attempts_left = repair_attempts()
-    seen = {_signature(verdict["errors"])}
-    while not verdict["valid"] and attempts_left > 0:
+    seen = {_signature(strict["errors"])}
+    while not strict["valid"] and attempts_left > 0:
         if _cancelled(row):
             _finish(row, "cancelled", failure_stage="Correcting pipeline")
             return
@@ -435,7 +507,7 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
                 evidence=payload,
                 capabilities=capabilities,
                 previous=proposal,
-                errors=generated.error_feedback(verdict["errors"]),
+                errors=generated.error_feedback(strict["errors"]),
                 profile_hint=hint or detected,
             )
         except HermesError as exc:
@@ -447,17 +519,20 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
 
         proposal = result["pipeline"]
         required_inputs = result["requiredInputs"]
+        strict = generated.validate(
+            service, proposal, declared_inputs=required_inputs, enforce=True
+        )
         verdict = generated.validate(service, proposal, declared_inputs=required_inputs)
-        signature = _signature(verdict["errors"])
+        signature = _signature(strict["errors"])
         repeated = signature in seen
         _record_attempt(
             row,
             kind="repair",
             model=model,
-            errors=verdict["errors"],
-            note="no change in errors" if repeated and not verdict["valid"] else "",
+            errors=strict["errors"],
+            note="no change in errors" if repeated and not strict["valid"] else "",
         )
-        if verdict["valid"]:
+        if strict["valid"]:
             break
         if repeated:
             # The same objection twice. A third attempt costs the user another
@@ -471,6 +546,10 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
         "valid": verdict["valid"],
         "errors": verdict["errors"],
         "warnings": verdict["warnings"],
+        # Kept whole, secret references included. Auto-saving strips references
+        # to secrets that do not exist yet; this is what they are restored from
+        # when somebody supplies the values.
+        "proposed": verdict["pipeline"] or proposal,
     }
     row.pipeline_state = "valid" if verdict["valid"] else "invalid"
 
@@ -482,6 +561,22 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
 
     db.session.add(row)
     db.session.commit()
+
+    # Save it. The review step is skipped deliberately — a pipeline in the
+    # editor is reviewable at leisure and editable in place, which is a better
+    # place to disagree with it than a modal standing between somebody and a
+    # registered service. Anything KubeSight cannot supply (a Nexus password) is
+    # recorded as still needed rather than guessed.
+    saved = None
+    if verdict["valid"]:
+        try:
+            from . import accept as accept_service
+
+            saved = accept_service.auto_accept(row, actor=row.requested_by)
+        except Exception:  # noqa: BLE001 — a save failure must not lose the analysis
+            logger.exception("Auto-saving the generated pipeline failed for %s", row.id)
+            db.session.rollback()
+            row = db.session.get(CiRepositoryAnalysis, row.id)
 
     _finish(row, "analyzed" if verdict["valid"] else "partial")
     log_audit(

@@ -64,7 +64,7 @@
   font-size: 0.72rem;
   font-weight: 700;
   padding: 0.1rem 0.5rem;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-chip);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -93,7 +93,7 @@
   display: inline-flex;
   align-items: center;
   padding: 0.15rem 0.65rem;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-chip);
   background: var(--bg-interactive);
   border: 1px solid var(--border);
   font-size: 0.6875rem;
@@ -402,7 +402,7 @@ button.sg-fl:hover { background: var(--bg-panel-strong); }
 .sg-dchip {
   font-size: 0.72rem;
   padding: 0.3rem 0.7rem;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-chip);
   background: var(--bg-panel-strong);
   border: 1px solid var(--border);
   font-family: var(--font-mono);
@@ -519,7 +519,7 @@ button.sg-fl:hover { background: var(--bg-panel-strong); }
   top: 10px;
   bottom: 10px;
   width: 3px;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-control);
 }
 .sg-tbar--ok { background: var(--ok); }
 .sg-tbar--warn { background: var(--warn); }

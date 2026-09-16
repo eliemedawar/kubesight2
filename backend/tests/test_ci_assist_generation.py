@@ -16,10 +16,11 @@ import pytest
 
 from api.db import db
 from api.models_application_intelligence import BitbucketCredentialProfile
-from api.models_ci import CiRepositoryAnalysis, CiSecret, CiService
+from api.models_ci import CiRepositoryAnalysis, CiRunner, CiSecret, CiService
 from api.secret_encryption import decrypt_secret, encrypt_secret
 from api.services.ci_assist import accept as accept_service
 from api.services.ci_assist import analyses as analyses_service
+from api.services.ci import generated
 from api.services.ci_assist import generator, hermes, schema
 from tests.fixtures import fake_source
 
@@ -78,7 +79,9 @@ class FakeHermes:
             raise response
         return schema.validate_response(copy.deepcopy(response)), "fake-model", "fake-v1"
 
-    def _propose(self, *, evidence, capabilities, profile_hint=None, feedback=None):
+    def _propose(
+        self, *, evidence, capabilities, profile_hint=None, feedback=None, examples=None
+    ):
         return self._next(
             "propose",
             {
@@ -86,6 +89,7 @@ class FakeHermes:
                 "capabilities": capabilities,
                 "hint": profile_hint,
                 "feedback": feedback,
+                "examples": examples,
             },
         )
 
@@ -225,7 +229,8 @@ def test_java_gradle_spring_boot(service, monkeypatch):
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
 
     assert row.state == "analyzed"
-    assert row.pipeline_state == "valid"
+    # Saved, not merely validated: the review step is deliberately skipped.
+    assert row.pipeline_state == "accepted"
     assert row.validation["valid"] is True
 
     profile = row.application_profile
@@ -515,13 +520,25 @@ def test_a_response_missing_a_required_field_fails(service, monkeypatch):
     assert row.state == "failed"
 
 
-def test_a_profile_kubesight_cannot_store_fails_before_a_pipeline_is_considered(
-    app, service, monkeypatch
-):
-    fake = FakeHermes(response({"language": "kobol"}, [checkout()]))
+def test_a_word_kubesight_does_not_know_is_recorded_not_fatal(service, monkeypatch):
+    """Losing a whole repository analysis because one field used an unfamiliar
+    word is the mistake that made "executable jar" fail. The value is recorded
+    as "other", said out loud, and everything else that was read is kept."""
+    fake = FakeHermes(
+        response(
+            {"language": "kobol", "buildSystem": "gradle", "packaging": "jar"},
+            [
+                checkout(),
+                {"name": "Build", "stageType": "command",
+                 "buildEnvironment": "java-jdk11", "runnerLabels": ["linux", "java"],
+                 "commands": ["./gradlew build"]},
+            ],
+        )
+    )
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
-    assert row.state == "failed"
-    assert row.failure_stage == "Detecting application"
+    assert row.state == "analyzed"
+    assert row.application_profile["language"] == "other"
+    assert any("kobol" in note for note in row.warnings)
 
 
 def test_hermes_being_unavailable_never_blocks_the_user(service, monkeypatch):
@@ -579,7 +596,8 @@ def test_an_unavailable_runner_capability_is_sent_back_and_corrected(service, mo
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
 
     assert row.state == "analyzed"
-    assert row.pipeline_state == "valid"
+    # Saved, not merely validated: the review step is deliberately skipped.
+    assert row.pipeline_state == "accepted"
     assert [call["kind"] for call in fake.calls] == ["propose", "repair"]
     # The repair turn carried the objection and nothing else.
     sent = fake.calls[1]["errors"]
@@ -657,11 +675,17 @@ def test_the_loop_stops_when_the_same_objection_comes_back(service, monkeypatch)
     )
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
 
-    assert row.state == "partial"
-    assert row.pipeline_state == "invalid"
     # One propose and one repair, then it stopped — not the full allowance.
     assert [call["kind"] for call in fake.calls] == ["propose", "repair"]
     assert row.attempts[-1]["note"] == "no change in errors"
+    # And the pipeline is saved regardless, carrying the objection as a note.
+    # KubeSight advises; it does not veto.
+    assert row.state == "analyzed"
+    assert row.pipeline_state == "accepted"
+    assert any(
+        item["code"] == "unsatisfiable_runner_labels"
+        for item in row.validation["warnings"]
+    )
 
 
 def test_a_partial_result_keeps_the_profile_it_did_establish(service, monkeypatch):
@@ -687,10 +711,11 @@ def test_a_partial_result_keeps_the_profile_it_did_establish(service, monkeypatc
     )
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
 
-    assert row.state == "partial"
+    assert row.state == "analyzed"
     assert row.application_profile["languageVersion"] == "17"
     assert row.application_profile["buildSystemVersion"] == "8.7"
-    assert row.validation["errors"]
+    # The objections survive as notes rather than as a refusal.
+    assert row.validation["warnings"]
 
 
 def test_the_repair_budget_is_bounded(service, monkeypatch):
@@ -713,9 +738,10 @@ def test_the_repair_budget_is_bounded(service, monkeypatch):
     )
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
 
-    assert row.state == "partial"
     assert len([call for call in fake.calls if call["kind"] == "repair"]) == 2
     assert len(fake.calls) == 3
+    # Bounded, then saved with whatever the last round produced.
+    assert row.state == "analyzed"
 
 
 # ---------------------------------------------------------------------------
@@ -894,22 +920,35 @@ def test_accepting_refuses_while_a_required_answer_is_missing(service, monkeypat
     assert CiSecret.query.filter_by(key="NEXUS_PASSWORD").count() == 0
 
 
-def test_a_user_edit_to_the_proposal_is_validated_like_anything_else(service, monkeypatch):
-    """The review screen lets somebody change a command before accepting. That
-    edit gets the same scrutiny the model's version got."""
+def test_an_edit_that_cannot_work_is_saved_with_the_objection_attached(
+    service, monkeypatch
+):
+    """An edit gets exactly the same scrutiny the model's version got — and
+    under the advise policy that means it is kept, with the objection travelling
+    beside it. The build will find no Docker socket, and the note said so."""
     fake = FakeHermes(valid_java_response())
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
     edited = copy.deepcopy(row.generated_pipeline)
     edited["stages"][1]["commands"] = ["docker build -t app ."]
-    with pytest.raises(accept_service.AcceptError) as exc:
-        accept_service.accept(
-            row,
-            {
-                "pipeline": edited,
-                "inputs": {"NEXUS_PASSWORD": "x", "IMAGE_REPOSITORY": "r/p"},
-            },
-        )
-    assert "Docker socket" in str(exc.value)
+
+    accept_service.accept(
+        row,
+        {
+            "pipeline": edited,
+            "inputs": {"NEXUS_PASSWORD": "x", "IMAGE_REPOSITORY": "r/p"},
+        },
+    )
+    pipeline = db.session.get(CiService, service.id).default_pipeline()
+    assert pipeline.stages[1].commands == ["docker build -t app ."]
+
+    # The objection still exists — it is reported rather than enforced.
+    from api.services.ci import generated
+
+    strict = generated.validate(
+        db.session.get(CiService, service.id), edited, enforce=True
+    )
+    assert not strict["valid"]
+    assert any(e["code"] == "portability_docker_in_stage" for e in strict["errors"])
 
 
 def test_a_user_edit_that_is_fine_is_what_gets_saved(service, monkeypatch):
@@ -929,22 +968,30 @@ def test_a_user_edit_that_is_fine_is_what_gets_saved(service, monkeypatch):
     assert pipeline.stages[1].commands == ["./gradlew --no-daemon clean build"]
 
 
-def test_a_partial_analysis_cannot_be_accepted_as_it_stands(service, monkeypatch):
-    bad = {
-        "name": "Build",
-        "stageType": "command",
-        "runnerLabels": ["linux", "java11"],
-        "commands": ["./gradlew build"],
-    }
+def test_a_stage_that_cannot_be_represented_at_all_is_dropped_and_said(
+    service, monkeypatch
+):
+    """The one thing left that a pipeline cannot survive is a stage KubeSight
+    has no way to store. It is left out, the rest is kept, and the omission is
+    reported — rather than the whole proposal being lost to it."""
     profile = {"language": "java", "buildSystem": "gradle", "packaging": "jar"}
+    # A command stage with nothing in it: unsaveable, and it would do nothing if
+    # it were. Offered twice, so the repair loop gets its chance and gives up.
+    empty = {"name": "Build", "stageType": "command", "runnerLabels": ["linux"],
+             "commands": []}
     fake = FakeHermes(
-        response(profile, [checkout(), bad]),
-        response(profile, [checkout(), dict(bad)]),
+        response(profile, [checkout(), empty]),
+        response(profile, [checkout(), dict(empty)]),
     )
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
-    assert row.state == "partial"
-    with pytest.raises(accept_service.AcceptError):
-        accept_service.accept(row, {"inputs": {}})
+
+    assert row.state == "analyzed"
+    assert any(
+        item["code"] in ("empty_command_stage", "stage_dropped")
+        for item in row.validation["warnings"]
+    )
+    # The checkout stage survived; the pipeline was not thrown away.
+    assert [s["name"] for s in row.generated_pipeline["stages"]][0] == "Checkout"
 
 
 def test_one_analysis_at_a_time_per_service(service, monkeypatch):
@@ -984,7 +1031,9 @@ class RawHermes:
         monkeypatch.setattr(hermes, "propose", self._propose)
         return self
 
-    def _propose(self, *, evidence, capabilities, profile_hint=None, feedback=None):
+    def _propose(
+        self, *, evidence, capabilities, profile_hint=None, feedback=None, examples=None
+    ):
         self.calls.append({"kind": "propose", "feedback": feedback})
         payload = self.payloads.pop(0)
         try:
@@ -1049,3 +1098,97 @@ def test_a_model_that_keeps_answering_malformed_fails_with_the_reason(service, m
     assert "asked again" in row.safe_error_message
     # And the service is left usable, as every failure path must.
     assert db.session.get(CiService, service.id).analysis_state == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Teaching Hermes, rather than correcting it
+# ---------------------------------------------------------------------------
+
+def test_hermes_is_shown_the_fleet_machine_by_machine(service, monkeypatch):
+    """A merged list of every label anybody advertises reads as one very capable
+    runner — which is how a proposal ends up asking for "macos" and "java" on
+    the same stage. Both labels exist; no single machine has both."""
+    fake = FakeHermes(valid_java_response())
+    db.session.add(
+        CiRunner(
+            name="mac-mini-1",
+            runner_type="agent_macos",
+            status="offline",
+            enabled=True,
+            os="darwin",
+            capabilities=["macos", "xcode"],
+        )
+    )
+    db.session.commit()
+
+    run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
+    fleet = fake.calls[0]["capabilities"]["runners"]
+
+    by_name = {item["name"]: item for item in fleet}
+    assert "mac-mini-1" in by_name
+    assert by_name["mac-mini-1"]["capabilities"] == ["macos", "xcode"]
+    # State is said plainly, so a proposal can prefer a machine that will pick
+    # the work up rather than one that is registered and asleep.
+    assert by_name["mac-mini-1"]["state"] == "offline"
+    assert {item["state"] for item in fleet} <= {"online", "offline", "disabled"}
+    # And the rule those labels are matched by is stated, not implied.
+    assert "superset" in fake.calls[0]["capabilities"]["runnerSelection"] or "ALL" in (
+        fake.calls[0]["capabilities"]["runnerSelection"]
+    )
+
+
+def test_hermes_is_shown_pipelines_that_already_work_here(service, monkeypatch):
+    """Everything else describes the shape of a KubeSight pipeline. None of it
+    shows one. A model given a schema and no instance infers the conventions,
+    and every round trip after that is it learning one by rejection."""
+    fake = FakeHermes(valid_java_response())
+    run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
+
+    examples = fake.calls[0]["examples"]
+    assert examples, "Hermes was sent no worked example"
+    for item in examples:
+        stages = item["pipeline"]["stages"]
+        assert stages
+        # An example must not demonstrate a field a proposal may not set:
+        # showing a literal image would teach exactly the mistake the rules
+        # spend a paragraph forbidding.
+        for stage in stages:
+            assert "image" not in stage
+            assert set(stage) <= set(generated.STAGE_KEYS) | {"buildEnvironment"}
+
+
+def test_a_worked_example_exists_even_on_a_fresh_installation(app, service, monkeypatch):
+    """Nothing is saved yet on a new install, so the curated starter kit is the
+    fallback — the feature must not be worse on day one."""
+    from api.models_ci import CiPipeline
+    from api.services.ci_assist import examples as examples_module
+
+    CiPipeline.query.delete()
+    db.session.commit()
+
+    examples = examples_module.worked_examples(preferred_type="java_gradle")
+    assert examples
+    assert any("starter kit" in item["source"] for item in examples)
+
+
+def test_a_real_pipeline_is_preferred_over_the_starter_kit(app, service, monkeypatch):
+    """A pipeline somebody has been building with for months teaches more about
+    what good looks like here than any curated example."""
+    from api.services.ci import pipelines as pipelines_service
+    from api.services.ci_assist import examples as examples_module
+
+    pipelines_service.create_pipeline(
+        service,
+        {
+            "name": "default",
+            "isDefault": True,
+            "stages": [
+                {"name": "Build", "stageType": "command", "runnerLabels": ["linux"],
+                 "commands": ["make release"], "timeoutSeconds": 900}
+            ],
+        },
+    )
+    examples = examples_module.worked_examples()
+    assert any("already running" in item["source"] for item in examples)
+    real = next(item for item in examples if "already running" in item["source"])
+    assert real["pipeline"]["stages"][0]["commands"] == ["make release"]

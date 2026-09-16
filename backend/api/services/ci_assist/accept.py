@@ -26,6 +26,7 @@ an audit entry, or sent anywhere near Hermes again.
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -150,6 +151,101 @@ def _merge_parameters(
     return merged
 
 
+def auto_accept(analysis: CiRepositoryAnalysis, *, actor=None) -> Optional[Dict[str, Any]]:
+    """Save a proposal the moment it exists, without waiting to be asked.
+
+    The review step is skipped by choice: a pipeline in the editor is reviewable
+    at leisure and editable in place, which is a better place to disagree with
+    it than a modal that blocks registration.
+
+    The one thing that cannot be skipped is a value KubeSight does not have.
+    A stage may not reference a secret that does not exist, so a proposal that
+    needs ``NEXUS_PASSWORD`` is saved with that reference REMOVED and the
+    requirement recorded. Nothing silently half-works: the service shows what is
+    still needed, and supplying it re-attaches the reference. Guessing a
+    password is not an option, and neither is refusing to save the other four
+    stages because of one.
+
+    Returns None when there was nothing to save; never raises.
+    """
+    service: CiService = analysis.service
+    proposal = analysis.generated_pipeline
+    if service is None or not isinstance(proposal, dict) or not proposal.get("stages"):
+        return None
+
+    required = analysis.required_inputs or []
+    known = _existing_secret_keys(service.id)
+    wanted = {
+        str(item.get("name"))
+        for item in required
+        if isinstance(item, dict) and str(item.get("kind")) == "secret"
+    }
+    pending = sorted(name for name in wanted if name not in known)
+
+    stripped = copy.deepcopy(proposal)
+    detached: List[str] = []
+    if pending:
+        for stage in stripped.get("stages") or []:
+            if not isinstance(stage, dict):
+                continue
+            kept = []
+            for ref in stage.get("secretRefs") or []:
+                name = ref.get("name") if isinstance(ref, dict) else str(ref)
+                if name in pending:
+                    detached.append(f"{stage.get('name')}:{name}")
+                else:
+                    kept.append(ref)
+            stage["secretRefs"] = kept
+
+    verdict = generated.validate(service, stripped, declared_inputs=required)
+    if not verdict["valid"]:
+        # Nothing storable came out. The proposal stays on the analysis for the
+        # user to look at; it simply does not become the service's pipeline.
+        return None
+
+    existing_pipeline: Optional[CiPipeline] = service.default_pipeline()
+    if existing_pipeline is not None:
+        saved = pipelines_service.update_pipeline(
+            existing_pipeline, verdict["pipeline"], actor=actor
+        )
+    else:
+        saved = pipelines_service.create_pipeline(service, verdict["pipeline"], actor=actor)
+
+    resolved_profile = analysis.application_profile
+    if resolved_profile:
+        service.application_profile = resolved_profile
+        service.profile_source = resolved_profile.get("source") or "hermes"
+        derived = resolved_profile.get("derivedApplicationType")
+        if derived:
+            service.application_type = derived
+    service.analysis_state = "analyzed"
+    service.updated_at = _now()
+    db.session.add(service)
+
+    analysis.pipeline_state = "accepted"
+    analysis.generated_pipeline = verdict["pipeline"]
+    db.session.add(analysis)
+    db.session.commit()
+
+    log_audit(
+        "ci_generated_pipeline_accepted",
+        actor=actor,
+        target_type="ci_service",
+        target_id=str(service.id),
+        details={
+            "service": service.slug,
+            "analysisId": analysis.id,
+            "pipelineId": saved.get("id"),
+            "stageCount": len(verdict["pipeline"].get("stages") or []),
+            "applicationType": service.application_type,
+            "automatic": True,
+            "pendingSecrets": pending,
+            "secretRefsDetached": detached,
+        },
+    )
+    return {"pipeline": saved, "pendingSecrets": pending, "detached": detached}
+
+
 def accept(
     analysis: CiRepositoryAnalysis,
     payload: Dict[str, Any],
@@ -171,7 +267,15 @@ def accept(
             "configure the service manually."
         )
 
-    proposal = payload.get("pipeline") or analysis.generated_pipeline
+    # The proposal as Hermes wrote it, secret references and all — NOT the
+    # already-saved version, which may have had references stripped because the
+    # secrets did not exist yet. Supplying the values is exactly the moment to
+    # put them back.
+    proposal = (
+        payload.get("pipeline")
+        or (analysis.validation or {}).get("proposed")
+        or analysis.generated_pipeline
+    )
     if not isinstance(proposal, dict) or not proposal.get("stages"):
         raise AcceptError("There is no pipeline to accept.")
 

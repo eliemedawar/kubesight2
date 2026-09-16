@@ -247,6 +247,7 @@ def propose(
     capabilities: Dict[str, Any],
     profile_hint: Optional[Dict[str, Any]] = None,
     feedback: Optional[List[Dict[str, str]]] = None,
+    examples: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], str, str]:
     """Ask for an application profile and a pipeline. Returns (result, model, prompt).
 
@@ -268,6 +269,19 @@ def propose(
         },
         "evidence": redact_structure(evidence),
     }
+    if examples:
+        # The rules describe the shape; these ARE the shape. A model given a
+        # schema and no instance has to infer the conventions, and every round
+        # trip that follows is it learning one by rejection.
+        message["workedExamples"] = {
+            "instruction": (
+                "Complete pipelines that already run in this KubeSight. Follow "
+                "their structure, field names and level of detail. They are "
+                "examples of FORM, not of content — build the pipeline this "
+                "repository needs, shaped like these."
+            ),
+            "examples": examples,
+        }
     if profile_hint:
         message["userProvidedProfile"] = {
             "instruction": (

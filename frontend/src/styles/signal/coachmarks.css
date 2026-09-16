@@ -181,7 +181,7 @@
 }
 
 .cm-btn {
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-control);
   font-size: 0.8rem;
   font-weight: 600;
   padding: 6px 14px;

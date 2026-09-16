@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8fa">
+  <title>KubeSight — Cluster overview concept</title>
+  <link rel="stylesheet" href="dashboard-focus.css">
+  <script src="dashboard-focus.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to dashboard</a>
+  <aside class="sidebar">
+    <a class="brand" href="dashboard-focus.html"><img src="../frontend/src/assets/kubesight-mark.png" alt=""><span>KubeSight<span class="brand-period">.</span></span></a>
+    <div class="workspace"><span class="workspace-icon">K</span><div><strong>My workspace</strong><small>Infrastructure</small></div><span class="workspace-label">PRO</span></div>
+    <div class="nav-label">WORKSPACE</div>
+    <nav aria-label="Main navigation">
+      <a class="nav-item active" href="#main" aria-current="page"><span data-icon="overview"></span>Overview</a>
+      <button class="nav-item" data-section="Clusters"><span data-icon="cluster"></span>Clusters<span class="nav-count">2</span></button>
+      <button class="nav-item" data-section="Workloads"><span data-icon="box"></span>Workloads</button>
+      <button class="nav-item" data-section="Storage"><span data-icon="storage"></span>Storage</button>
+      <button class="nav-item" data-section="Alerts"><span data-icon="bell"></span>Alerts<span class="nav-count alert-count">2</span></button>
+      <div class="nav-divider"></div>
+      <button class="nav-item" data-section="Activity"><span data-icon="activity"></span>Activity</button>
+      <button class="nav-item" data-section="Settings"><span data-icon="settings"></span>Settings</button>
+    </nav>
+    <div class="sidebar-bottom"><div class="concept-note"><span class="concept-dot"></span>Design preview <span>01</span></div><div class="profile"><span class="avatar">EM</span><div><strong>Elie Medawar</strong><small>Workspace admin</small></div></div></div>
+  </aside>
+  <div class="app">
+    <header class="topbar"><div class="breadcrumbs">Workspace <span>/</span> <strong>Overview</strong></div><div class="topbar-right"><span class="demo-badge">Sample data</span><span class="topbar-divider"></span><span class="environment"><i></i>Production</span></div></header>
+    <main id="main">
+      <header class="page-heading"><div><div class="eyebrow">YOUR INFRASTRUCTURE, AT A GLANCE</div><h1>Cluster overview<span>.</span></h1><p>A clear view of health, capacity, and what needs your attention.</p></div><button class="button" id="refresh"><span data-icon="refresh"></span><span>Refresh</span></button></header>
+      <section class="cluster-bar" aria-label="Selected cluster"><div class="cluster-identity"><span class="cluster-symbol" data-icon="cluster"></span><label class="sr-only" for="cluster">Cluster</label><select id="cluster"><option value="production">production-eu-01</option><option value="staging">staging-eu-01</option></select><span class="cluster-meta" id="cluster-meta">AWS · eu-west-1</span></div><div class="cluster-status"><span class="ready-pill"><i></i><span id="ready-count">6 / 6 nodes ready</span></span><span class="updated" id="updated">Preview snapshot</span><button class="icon-button" id="cluster-details" aria-label="View cluster details"><span data-icon="info"></span></button></div></section>
+      <section class="metrics" aria-label="Cluster resource summary" id="metrics"></section>
+      <div class="middle-grid">
+        <section class="panel trend-panel"><div class="panel-heading"><div><h2>Resource usage</h2><p>How your cluster is using its capacity</p></div><div class="segmented ranges" aria-label="Chart time range"><button data-range="1h">1h</button><button data-range="6h" class="selected" aria-pressed="true">6h</button><button data-range="24h">24h</button></div></div><div class="chart-toolbar"><div class="chart-tabs" aria-label="Resource metric"><button class="selected" data-metric="memory" aria-pressed="true"><i class="legend-dot memory"></i>Memory</button><button data-metric="cpu"><i class="legend-dot cpu"></i>CPU</button><button data-metric="storage"><i class="legend-dot storage"></i>Storage</button></div><div class="chart-current"><strong id="chart-value">68%</strong><span>current</span></div></div><div class="chart" id="chart"></div><div class="chart-caption"><span><i></i><span id="chart-caption">Memory used / allocatable memory</span></span><span>Cluster aggregate · sample history</span></div></section>
+        <section class="panel attention-panel"><div class="panel-heading"><div class="attention-title"><h2>Needs attention</h2><span class="count" id="attention-count">2</span></div><span class="small-label">NODES</span></div><div id="attention"></div><div class="attention-footer"><span data-icon="check"></span><span id="attention-footer">All nodes are ready and accepting workloads</span></div></section>
+      </div>
+      <section class="panel nodes-panel" aria-labelledby="nodes-title"><div class="panel-heading node-heading"><div><div class="title-with-count"><h2 id="nodes-title">Node capacity</h2><span class="count" id="node-count">6</span></div><p>The essentials for every node. Select a node to inspect it.</p></div><div class="node-tools"><label class="search"><span data-icon="search"></span><input id="search" type="search" placeholder="Find a node…" aria-label="Find a node"><kbd>/</kbd></label><button id="attention-filter" class="button filter-button" aria-pressed="false"><span data-icon="filter"></span>Needs attention</button></div></div><div class="table-scroll"><table><thead><tr><th scope="col">NODE</th><th scope="col">STATUS</th><th scope="col"><button data-sort="cpu">CPU <span>↕</span></button></th><th scope="col"><button data-sort="memory">MEMORY <span>↕</span></button></th><th scope="col"><button data-sort="storage">LOCAL STORAGE <span>↕</span></button></th><th scope="col" class="pods-column">PODS</th><th scope="col"><span class="sr-only">Details</span></th></tr></thead><tbody id="nodes"></tbody></table><div class="empty" id="empty" hidden>No nodes match your search. <button id="clear-filters">Clear filters</button></div></div><footer class="table-footer"><span id="table-count">Showing all 6 nodes</span><span><i class="legend-dot threshold"></i>Resource warning at 80% usage <span class="footer-dot">·</span> Storage = node filesystem</span></footer></section>
+      <footer class="page-footer"><span><span class="footer-mark">K</span> Less noise. More clarity.</span><span>Concept 01 <span class="footer-dot">/</span> Illustrative data · no live connection</span></footer>
+    </main>
+  </div>
+  <dialog id="details"><div class="drawer-head"><span class="eyebrow" id="detail-eyebrow">NODE DETAILS</span><button class="icon-button" id="close-details" aria-label="Close details"><span data-icon="close"></span></button></div><div id="detail-body"></div><div class="drawer-note">Interactive design concept · sample data</div></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

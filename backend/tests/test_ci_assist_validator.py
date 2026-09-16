@@ -55,6 +55,18 @@ def pipeline(*stages, **overrides):
     }
 
 
+def strict(service, payload, **kwargs):
+    """The enforce-mode answer: does KubeSight consider this wrong?
+
+    Most of this file is about DETECTION — can the validator see the problem at
+    all. That is unchanged by policy. What policy decides is the consequence,
+    and under the default (advise) the same finding is reported beside the stage
+    instead of vetoing the pipeline. The consequence is tested on its own below;
+    these use enforce so they keep asserting the thing they are about.
+    """
+    return generated.validate(service, payload, enforce=True, **kwargs)
+
+
 def codes(verdict):
     return {item["code"] for item in verdict["errors"]}
 
@@ -85,7 +97,7 @@ def test_a_reasonable_pipeline_is_accepted_and_comes_back_ready_to_save(service)
 
 
 def test_a_pipeline_with_no_stages_would_build_nothing(service):
-    verdict = generated.validate(service, {"stages": []})
+    verdict = strict(service, {"stages": []})
     assert not verdict["valid"]
     assert "no_stages" in codes(verdict)
 
@@ -111,12 +123,26 @@ def test_a_pipeline_with_no_stages_would_build_nothing(service):
         {"service_account": "cluster-admin"},
     ],
 )
-def test_a_request_for_privilege_is_refused_not_dropped(service, smuggled):
-    """These are the fields that would matter if they worked. The stage model
-    has no place for any of them, so silently ignoring them would work — and
-    would mean a proposal asking for root could be approved by somebody reading
-    a review screen that never showed it. Refusing says it out loud."""
+def test_a_request_for_privilege_is_dropped_and_said_out_loud(service, smuggled):
+    """These are the fields that would matter if they worked. ``CiPipelineStage``
+    has no column for any of them, so the request cannot be honoured whatever is
+    decided here — dropping it is the honest outcome, not a concession. What
+    would NOT be acceptable is dropping it silently: somebody approving a
+    pipeline must be able to see that it asked for root."""
     verdict = generated.validate(service, pipeline(stage(**smuggled)))
+    assert verdict["valid"], verdict["errors"]
+    assert "unknown_field" in warning_codes(verdict)
+
+    saved = verdict["pipeline"]["stages"][0]
+    for field in smuggled:
+        assert field not in saved
+
+
+@pytest.mark.parametrize("smuggled", [{"privileged": True}, {"hostPath": "/"}])
+def test_enforce_mode_still_refuses_privilege_outright(service, smuggled):
+    """For an installation that would rather not store a proposal it can see is
+    wrong. The finding is identical either way; only the consequence differs."""
+    verdict = strict(service, pipeline(stage(**smuggled)))
     assert not verdict["valid"]
     assert "unknown_field" in codes(verdict)
 
@@ -183,7 +209,7 @@ def test_an_alias_cannot_smuggle_privilege(service):
     """There is no alias for any of the privilege fields, and adding one to the
     map would be the mistake this test exists to catch."""
     assert not set(generated.FIELD_ALIASES) & generated.PRIVILEGE_FIELDS
-    verdict = generated.validate(service, pipeline(stage(security_context={"runAsUser": 0})))
+    verdict = strict(service, pipeline(stage(security_context={"runAsUser": 0})))
     assert not verdict["valid"]
     assert "unknown_field" in codes(verdict)
 
@@ -195,7 +221,7 @@ def test_an_alias_cannot_smuggle_privilege(service):
 def test_a_generated_pipeline_may_not_name_its_own_image(service):
     """An image name is the field where 'plausible' and 'correct' look
     identical. A cluster with no route to Docker Hub finds out at run time."""
-    verdict = generated.validate(service, pipeline(stage(image="gradle:8-jdk21")))
+    verdict = strict(service, pipeline(stage(image="gradle:8-jdk21")))
     assert not verdict["valid"]
     assert "image_not_permitted" in codes(verdict)
 
@@ -218,7 +244,7 @@ def test_an_environment_key_resolves_to_the_approved_image_and_its_labels(servic
 
 
 def test_an_environment_key_nobody_has_heard_of_is_refused_with_the_list(service):
-    verdict = generated.validate(service, pipeline(stage(buildEnvironment="java-jdk42")))
+    verdict = strict(service, pipeline(stage(buildEnvironment="java-jdk42")))
     assert not verdict["valid"]
     assert "unknown_build_environment" in codes(verdict)
     assert "java-jdk11" in verdict["errors"][0]["message"]
@@ -244,7 +270,7 @@ def test_a_capability_no_runner_advertises_is_refused_before_it_can_queue_foreve
     """This is the failure the whole check exists for: a stage labelled java11
     against a fleet advertising java17 is accepted by every structural rule and
     then waits forever with 'No online runner provides: java11'."""
-    verdict = generated.validate(service, pipeline(stage(runnerLabels=["linux", "java11"])))
+    verdict = strict(service, pipeline(stage(runnerLabels=["linux", "java11"])))
     assert not verdict["valid"]
     assert "unsatisfiable_runner_labels" in codes(verdict)
     assert "java11" in verdict["errors"][0]["message"]
@@ -273,7 +299,7 @@ def test_a_registered_but_offline_runner_is_a_warning_not_a_refusal(app, service
 
 
 def test_a_runner_type_with_no_executor_is_refused(service):
-    verdict = generated.validate(service, pipeline(stage(runnerType="ssh_linux")))
+    verdict = strict(service, pipeline(stage(runnerType="ssh_linux")))
     assert not verdict["valid"]
     assert "runner_type_unavailable" in codes(verdict)
 
@@ -283,7 +309,7 @@ def test_a_runner_type_with_no_executor_is_refused(service):
 # ---------------------------------------------------------------------------
 
 def test_a_literal_credential_in_a_command_is_refused(service):
-    verdict = generated.validate(
+    verdict = strict(
         service,
         pipeline(stage(commands=["./gradlew build -PnexusPassword=hunter2-actual-value"])),
     )
@@ -292,7 +318,7 @@ def test_a_literal_credential_in_a_command_is_refused(service):
 
 
 def test_a_credential_inside_a_url_is_refused(service):
-    verdict = generated.validate(
+    verdict = strict(
         service,
         pipeline(stage(commands=["curl https://deploy:s3cr3t@nexus.areeba.com/repo"])),
     )
@@ -301,7 +327,7 @@ def test_a_credential_inside_a_url_is_refused(service):
 
 
 def test_a_literal_credential_in_the_environment_is_refused(service):
-    verdict = generated.validate(
+    verdict = strict(
         service, pipeline(stage(env={"NEXUS_PASSWORD": "hunter2-actual-value"}))
     )
     assert not verdict["valid"]
@@ -335,7 +361,7 @@ def test_wiring_an_injected_secret_into_a_tool_is_the_correct_thing_and_is_allow
 
 
 def test_a_reference_to_a_secret_nobody_has_and_nobody_asked_for_is_refused(service):
-    verdict = generated.validate(
+    verdict = strict(
         service, pipeline(stage(secretRefs=[{"name": "MYSTERY_TOKEN"}]))
     )
     assert not verdict["valid"]
@@ -360,7 +386,7 @@ def test_a_secret_the_proposal_is_about_to_ask_for_is_accepted(service):
 
 @pytest.mark.parametrize("path", ["/etc", "../../../etc", "/workspace/source"])
 def test_an_absolute_or_escaping_working_directory_is_refused(service, path):
-    verdict = generated.validate(service, pipeline(stage(workingDirectory=path)))
+    verdict = strict(service, pipeline(stage(workingDirectory=path)))
     assert not verdict["valid"]
     assert {"path_escape", "portability_absolute_workspace"} & codes(verdict)
 
@@ -373,7 +399,7 @@ def test_a_workspace_variable_is_the_supported_way_to_name_a_directory(service):
 
 
 def test_an_artifact_path_may_not_step_outside_the_workspace(service):
-    verdict = generated.validate(
+    verdict = strict(
         service, pipeline(stage(artifacts=[{"path": "../../../etc/shadow", "type": "binary"}]))
     )
     assert not verdict["valid"]
@@ -383,7 +409,7 @@ def test_an_artifact_path_may_not_step_outside_the_workspace(service):
 def test_docker_build_is_refused_because_a_build_pod_has_no_socket(service):
     """And cannot be given one — that is what keeps repository-authored
     commands off the node."""
-    verdict = generated.validate(
+    verdict = strict(
         service, pipeline(stage(commands=["docker build -t app ."]))
     )
     assert not verdict["valid"]
@@ -391,7 +417,7 @@ def test_docker_build_is_refused_because_a_build_pod_has_no_socket(service):
 
 
 def test_installing_packages_is_refused_because_the_root_filesystem_is_read_only(service):
-    verdict = generated.validate(
+    verdict = strict(
         service, pipeline(stage(commands=["apt-get install -y curl"]))
     )
     assert not verdict["valid"]
@@ -405,19 +431,19 @@ def test_installing_packages_is_refused_because_the_root_filesystem_is_read_only
 def test_a_generated_pipeline_is_held_to_the_same_rules_as_a_typed_one(service):
     """Structural validation is literally the function that guards a manual
     save, so a proposal can never be accepted on weaker terms than a person."""
-    verdict = generated.validate(service, pipeline(stage(timeoutSeconds=99999999)))
+    verdict = strict(service, pipeline(stage(timeoutSeconds=99999999)))
     assert not verdict["valid"]
     assert "invalid_stage" in codes(verdict)
 
 
 def test_a_command_stage_with_nothing_to_run_is_refused(service):
-    verdict = generated.validate(service, pipeline(stage(commands=[])))
+    verdict = strict(service, pipeline(stage(commands=[])))
     assert not verdict["valid"]
     assert "invalid_stage" in codes(verdict)
 
 
 def test_two_stages_with_the_same_name_are_refused(service):
-    verdict = generated.validate(service, pipeline(stage(), stage()))
+    verdict = strict(service, pipeline(stage(), stage()))
     assert not verdict["valid"]
     assert "duplicate_stage_name" in codes(verdict)
 
@@ -450,7 +476,9 @@ def test_feedback_carries_codes_and_messages_and_nothing_else(service):
     """A repair prompt must not become a second, quieter channel out of
     KubeSight. It may say what was wrong; it may not carry anything that was
     not already shown to the user."""
-    verdict = generated.validate(service, pipeline(stage(image="gradle:8-jdk21")))
+    # The repair loop asks the strict question — a correction round is only
+    # worth a user's wait when there is something concrete to correct.
+    verdict = strict(service, pipeline(stage(image="gradle:8-jdk21")))
     feedback = generated.error_feedback(verdict["errors"])
     assert feedback
     for item in feedback:
