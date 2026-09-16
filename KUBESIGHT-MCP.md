@@ -18,8 +18,23 @@ The MCP server has no identity of its own. It acts as whoever the token belongs
 to, under the same RBAC as every other route — so an agent sees exactly what
 that person sees, and no more.
 
-Administration → API tokens → create one. For a read-only agent, give its user
-the `*:view` permissions and nothing else.
+Administration → API Tokens → Create a token. It is shown once; only its
+prefix is stored afterwards.
+
+Make it from a user that holds only what the tools read, rather than from an
+admin account — the `viewer` role covers nine of the ten tools as shipped:
+
+| Permission | Unlocks |
+|---|---|
+| `ci_services:view` | overview, services, service |
+| `ci_pipelines:view` | pipeline, build environments |
+| `ci_builds:view` | builds, build, logs |
+| `ci_artifacts:view` | artifacts |
+| `ci_runners:view` | runners — **not in `viewer`; add it** |
+
+`ci_runners:view` is worth adding deliberately: "no runner is online" is the
+single most common reason a build sits queued, and without that permission the
+agent cannot see it and will guess at something else instead.
 
 ### 2. Point Hermes at it
 
