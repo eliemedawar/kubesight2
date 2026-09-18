@@ -160,7 +160,7 @@ spec:
         limits: {cpu: 500m, memory: 512Mi}
       volumeMounts:
         - name: cache
-          mountPath: /cache
+          mountPath: /kubesight-cache
   volumes:
     - name: cache
       persistentVolumeClaim:
@@ -328,7 +328,7 @@ cmd_verify() {
     [ "$(claim_phase)" = "Bound" ] || die \
         "$CLAIM in $NS is not Bound (it is: $(claim_phase)). Run: sh $0 create"
     say "Writing to the cache as uid $BUILD_UID"
-    cache_pod probe 'set -e; d=/cache/.probe; mkdir -p $d; date > $d/write-test; cat $d/write-test; rm -rf $d; echo CACHE-OK'
+    cache_pod probe 'set -e; d=/kubesight-cache/.probe; mkdir -p $d; date > $d/write-test; cat $d/write-test; rm -rf $d; echo CACHE-OK'
 }
 
 cmd_status() {
@@ -361,7 +361,7 @@ cmd_status() {
     if [ "$(claim_phase)" = "Bound" ]; then
         say "Size per service"
         # Read-only: du walks the tree, nothing is written or removed.
-        cache_pod du 'du -sh /cache/* 2>/dev/null; echo ----; du -sh /cache 2>/dev/null'
+        cache_pod du 'du -sh /kubesight-cache/* 2>/dev/null; echo ----; du -sh /kubesight-cache 2>/dev/null'
     fi
 }
 
@@ -384,9 +384,9 @@ cmd_enable() {
     restart_backend
 
     say "On"
-    echo "Every stage now mounts $CLAIM at /cache, with Maven, Gradle, npm,"
+    echo "Every stage now mounts $CLAIM at /kubesight-cache, with Maven, Gradle, npm,"
     echo "yarn, pnpm, pip, Go, Cargo, Composer, NuGet and XDG_CACHE_HOME"
-    echo "pointed into /cache/<service-slug>/."
+    echo "pointed into /kubesight-cache/<service-slug>/."
     echo
     echo "This patched the live ConfigMap. Keep k8s/ci-backend-config.yaml in"
     echo "step (CI_CACHE_CLAIM_NAME: $CLAIM) or the next apply of that file"
@@ -421,15 +421,15 @@ cmd_clean() {
 
     if [ "$ARG" = "--all" ]; then
         target="every service"
-        # -mindepth 1 empties the directory without removing /cache itself,
+        # -mindepth 1 empties the directory without removing /kubesight-cache itself,
         # which is the mount point; -maxdepth 1 keeps it to one pass.
-        script='find /cache -mindepth 1 -maxdepth 1 -exec rm -rf {} + ; echo CLEANED; du -sh /cache'
+        script='find /kubesight-cache -mindepth 1 -maxdepth 1 -exec rm -rf {} + ; echo CLEANED; du -sh /kubesight-cache'
         busy=$(active_jobs "")
     else
         slug=$(slugify "$ARG")
         [ -n "$slug" ] || die "That is not a usable service slug: $ARG"
         target="$slug"
-        script="rm -rf /cache/$slug; echo CLEANED; du -sh /cache/* 2>/dev/null; true"
+        script="rm -rf /kubesight-cache/$slug; echo CLEANED; du -sh /kubesight-cache/* 2>/dev/null; true"
         busy=$(active_jobs "$slug")
     fi
 

@@ -10,21 +10,32 @@
 # for WHY each field is the way it is; run that script to actually do it.
 #
 # WHAT GETS CACHED
-#   Every stage mounts this volume at /cache, and KubeSight points each build
+#   Every stage mounts this volume at /kubesight-cache, and KubeSight points each build
 #   tool it knows at a subdirectory of it — Maven, Gradle, npm, yarn, pnpm,
 #   pip, Go, Cargo, Composer, NuGet, plus XDG_CACHE_HOME as the catch-all for
 #   everything else. Nothing has to be set per pipeline; a stage that sets one
 #   of those variables itself still wins.
 #
-#   One claim holds every service, each under its own subtree:
-#       /cache/<service-slug>/maven      <- $MAVEN_OPTS -Dmaven.repo.local
-#       /cache/<service-slug>/gradle     <- $GRADLE_USER_HOME
-#       /cache/<service-slug>/npm        <- $npm_config_cache
-#       /cache/<service-slug>/...        <- and the rest
-#       $KUBESIGHT_CACHE = /cache/<service-slug>   (for anything hand-rolled)
+#   One claim holds every service, each under its own subtree. The subtree is
+#   $KUBESIGHT_CACHE_DIR, and every stage gets it whether or not the pipeline
+#   mentions it:
+#       $KUBESIGHT_CACHE_DIR = /kubesight-cache/<service-slug>
+#         /gradle                 <- $GRADLE_USER_HOME        (deps, wrapper)
+#         /gradle-build-cache     <- $GRADLE_BUILD_CACHE_DIR  (task outputs)
+#         /dependency-check-data  <- $DC_DATA_DIR             (the NVD database)
+#         /semgrep                <- $SEMGREP_CACHE_DIR       (rulesets)
+#         /buildkit               <- $BUILDKIT_CACHE_DIR      (image layers)
+#         /maven                  <- $MAVEN_OPTS -Dmaven.repo.local
+#         /npm /yarn /pnpm /pip /go /cargo /composer /nuget /xdg
 #   Two services never share a tool's lock files, and a service's own builds
-#   warm each other's cache. The directories are created by the tools on first
-#   use — only the export root has to exist.
+#   warm each other's cache. KubeSight creates the five named subdirectories at
+#   the start of every stage; the rest are made by the tools on first use, so
+#   only the export root has to exist.
+#
+#   The volume is ALSO mounted at /cache, where it used to live, so a pipeline
+#   that still hardcodes /cache/<service-slug> reads the same directories. That
+#   second mount is compatibility only — write new pipelines against
+#   $KUBESIGHT_CACHE_DIR. See CI-CACHE.md for the full contract.
 #
 #   ONE GOTCHA: a stage that sets MAVEN_OPTS itself (for -Xmx, say) replaces
 #   the injected value and silently goes back to a cold ~/.m2 in /tmp. Keep

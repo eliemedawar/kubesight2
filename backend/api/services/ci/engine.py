@@ -1079,8 +1079,16 @@ def _build_execution(
         working_directory = definition.get("workingDirectory") or spec.working_directory
 
     registry = None
+    image_scan = None
     if stage_type == "container_image":
         registry, _ = _registry_for(build, definition)
+        # Read off the SNAPSHOT like everything else here, so a build retried
+        # from an old snapshot is gated exactly as it was when it first ran.
+        # Absent on snapshots taken before scanning existed — those simply have
+        # no gate, which is what they had.
+        candidate = definition.get("imageScan")
+        if isinstance(candidate, dict) and candidate.get("enabled") is not False:
+            image_scan = candidate
 
     return StageExecution(
         build_id=build.id,
@@ -1107,6 +1115,7 @@ def _build_execution(
         branch=build.branch,
         commit_sha=build.commit_sha,
         registry=registry,
+        image_scan=image_scan,
         callback_url=_callback_url(),
         callback_token=callback_token,
         runner_id=build.runner_id,

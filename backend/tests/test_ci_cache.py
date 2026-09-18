@@ -104,7 +104,7 @@ def test_turning_it_on_reaches_the_runner(app, monkeypatch):
         assert k8s.cache_enabled() is True
         assert k8s.cache_claim_name("payment-service") == "ci-cache"
         # One claim for everybody means each service needs its own subtree.
-        assert k8s.cache_base_path("payment-service") == "/cache/payment-service"
+        assert k8s.cache_base_path("payment-service") == "/kubesight-cache/payment-service"
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +316,7 @@ def test_cleaning_one_service_removes_only_its_subtree(app):
     assert result["target"] == "Payment Service"
     assert job["metadata"]["labels"]["kubesight.io/cache-op"] == "clean"
     script = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
-    assert script.startswith("rm -rf /cache/payment-service")
+    assert script.startswith("rm -rf /kubesight-cache/payment-service")
     # Same identity a stage container runs with, so the restricted Pod Security
     # Standard admits it and the files it removes are ones it owns.
     pod = job["spec"]["template"]["spec"]
@@ -332,7 +332,7 @@ def test_cleaning_everything_empties_the_mount_without_removing_it(app):
         k8s.set_kubectl_runner(_cluster(pvc=_bound_pvc(), pv=_nfs_pv(), applied=applied))
         cache_service.clean(all_services=True)
     script = applied[0]["spec"]["template"]["spec"]["containers"][0]["command"][2]
-    assert "-mindepth 1" in script and "/cache" in script
+    assert "-mindepth 1" in script and "/kubesight-cache" in script
 
 
 def test_cleaning_is_refused_while_a_build_is_running(app):
@@ -379,7 +379,7 @@ def test_measured_sizes_are_read_back_from_the_job_log(app):
         },
         "status": {"succeeded": 1, "completionTime": "2026-09-08T10:01:00Z"},
     }
-    logs = "412M\t/cache/payment-service\n96M\t/cache/ledger-ui\nnoise\n508M\t/cache\ndone\n"
+    logs = "412M\t/kubesight-cache/payment-service\n96M\t/kubesight-cache/ledger-ui\nnoise\n508M\t/kubesight-cache\ndone\n"
     with app.app_context():
         cache_service.save_settings({"enabled": True, "claimName": "ci-cache"})
         k8s.set_kubectl_runner(
@@ -405,7 +405,7 @@ def test_the_cache_routes_answer_the_ui(app, client, admin_token):
         response = client.get("/api/ci/cache", headers=auth_headers(admin_token))
         assert response.status_code == 200
         body = response.get_json()["data"]
-        assert body["mountPath"] == "/cache"
+        assert body["mountPath"] == "/kubesight-cache"
         assert [tool["tool"] for tool in body["tools"]][:2] == ["Maven", "Gradle"]
 
         on = client.put(

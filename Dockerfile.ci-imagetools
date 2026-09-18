@@ -1,0 +1,77 @@
+# KubeSight CI image tools — buildctl + trivy + crane in one image.
+#
+# WHY ONE IMAGE AND NOT THREE
+#   A KubeSight stage is exactly one container (see
+#   backend/api/services/ci/runners/kubernetes.py: initContainers in pipeline
+#   order, one status and one log per stage). A container_image stage that
+#   scans has to build, scan and push WITHOUT the registry ever seeing an image
+#   that failed its gate — so all three tools have to be reachable from the
+#   same shell script, which means the same image.
+#
+#   The alternative, three stages with three stock images, was considered and
+#   rejected: a scan that is its own stage can be reordered, disabled or
+#   deleted while the push it was meant to guard carries on. Here the push is
+#   physically below the verdict in one script and there is no arrangement of
+#   the pipeline that gets around it.
+#
+# WHAT IS AND IS NOT IN HERE
+#   buildctl  — the BuildKit CLIENT only. No daemon, no privileges: it is a
+#               gRPC client that talks to the shared rootless buildkitd from
+#               k8s/ci-buildkitd.yaml. Nothing here needs to be privileged.
+#   trivy     — reads the docker archive buildctl writes (`trivy image --input`)
+#               and re-applies the gate to the saved report (`trivy convert`),
+#               so the image is unpacked and scanned exactly once.
+#   crane     — pushes that same archive, byte for byte the thing that was
+#               scanned. A rebuild-then-push would be a different image than
+#               the one the verdict was about.
+#
+# BUILD AND MIRROR
+#   docker build -f Dockerfile.ci-imagetools -t registry.areeba.com/kubesight-ci-imagetools:v1 .
+#   docker push registry.areeba.com/kubesight-ci-imagetools:v1
+#
+#   Then point the backend at it (it already defaults to exactly this name, so
+#   this is only needed if you tag it differently):
+#     CI_IMAGE_TOOLS_IMAGE=registry.areeba.com/kubesight-ci-imagetools:v1
+#
+#   Until it exists, a stage with scanning ARMED fails to pull and says so, and
+#   a stage with scanning off keeps using the plain moby/buildkit client image
+#   exactly as before. An unscanned push is never the fallback.
+#
+# OFFLINE INSTALLATIONS
+#   Trivy's vulnerability database is pulled from an OCI registry. On a cluster
+#   with no route out, mirror it and set on the backend:
+#     CI_TRIVY_DB_REPOSITORY=registry.areeba.com/aquasecurity/trivy-db
+#     CI_TRIVY_SKIP_DB_UPDATE=1
+#   The database is cached on the service's build cache volume when one exists
+#   (CI_CACHE_STORAGE_CLASS / CI_CACHE_CLAIM_NAME), so it is fetched once rather
+#   than on every build.
+
+ARG BUILDKIT_VERSION=v0.23.2
+ARG TRIVY_VERSION=0.58.2
+ARG CRANE_VERSION=v0.20.3
+
+FROM moby/buildkit:${BUILDKIT_VERSION} AS buildkit
+FROM aquasec/trivy:${TRIVY_VERSION} AS trivy
+FROM gcr.io/go-containerregistry/crane:${CRANE_VERSION} AS crane
+
+# Alpine rather than distroless: the runner invokes every stage as
+# `/bin/sh -c <script>`, and the build/scan/push script is shell.
+FROM alpine:3.21
+
+# ca-certificates for the registry and the database mirror over TLS.
+RUN apk add --no-cache ca-certificates && update-ca-certificates
+
+COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
+COPY --from=trivy    /usr/local/bin/trivy /usr/local/bin/trivy
+COPY --from=crane    /ko-app/crane /usr/local/bin/crane
+
+# The stage securityContext is runAsNonRoot 65532 with a read-only root
+# filesystem and ALL capabilities dropped — the same as every other stage, and
+# nothing in here needs more. Everything written goes to /tmp or /workspace,
+# both of which the runner mounts as emptyDir volumes.
+USER 65532:65532
+
+# Fail the image build, not somebody's pipeline, if a tool did not make it in.
+RUN buildctl --version && trivy --version && crane version
+
+ENTRYPOINT ["/bin/sh"]

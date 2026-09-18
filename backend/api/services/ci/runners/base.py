@@ -94,6 +94,12 @@ class StageExecution:
     # Registry push target for container_image stages (host, repository, tag,
     # username, password, verifyTls). Decrypted like secrets — never persisted.
     registry: Optional[Dict[str, Any]] = None
+    # The scan gate a container_image stage builds through, or None for no gate.
+    # Separate from ``registry`` because it is policy the pipeline author chose,
+    # not connection detail resolved from a RegistryConnection — and because a
+    # runner that cannot scan has to be able to see the gate in order to refuse
+    # the stage rather than push past it.
+    image_scan: Optional[Dict[str, Any]] = None
     # Worker callback: where an in-cluster job reports artifacts and metadata,
     # and the fresh plaintext token authorizing it (its hash is on the build).
     callback_url: str = ""

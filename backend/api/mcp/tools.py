@@ -332,7 +332,8 @@ def _pipeline_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
 STAGE_FIELDS = {
     "name", "stageType", "runnerType", "runnerLabels", "image", "workingDirectory",
     "commands", "env", "secretRefs", "artifacts", "resources", "hostAliases",
-    "runCondition", "timeoutSeconds", "continueOnFailure", "parallelGroup", "enabled",
+    "runCondition", "imageScan", "timeoutSeconds", "continueOnFailure",
+    "parallelGroup", "enabled",
 }
 
 
@@ -532,7 +533,11 @@ _STAGE_SCHEMA = {
         "Other fields: image, runnerType, runnerLabels, workingDirectory, env, "
         "secretRefs [{name, envVar}], artifacts [{path, type, name}], "
         "hostAliases, runCondition, resources, timeoutSeconds, "
-        "continueOnFailure, parallelGroup, enabled."
+        "continueOnFailure, parallelGroup, enabled. On a container_image stage, "
+        "imageScan {enabled, scanner: trivy, threshold: critical|high|medium|low, "
+        "onFail: block|warn, ignoreUnfixed} gates the push on a vulnerability "
+        "scan of the image the stage just built — enabled=true means a "
+        "finding at or above threshold stops the image reaching the registry."
     ),
     "properties": {
         "name": {"type": "string"},
@@ -541,6 +546,23 @@ _STAGE_SCHEMA = {
         "commands": {"type": "array", "items": {"type": "string"}},
         "runnerLabels": {"type": "array", "items": {"type": "string"}},
         "env": {"type": "object"},
+        "imageScan": {
+            "type": "object",
+            "description": (
+                "container_image stages only. Gates the push on a scan of the "
+                "image just built."
+            ),
+            "properties": {
+                "enabled": {"type": "boolean"},
+                "scanner": {"type": "string", "enum": ["trivy"]},
+                "threshold": {
+                    "type": "string",
+                    "enum": ["critical", "high", "medium", "low"],
+                },
+                "onFail": {"type": "string", "enum": ["block", "warn"]},
+                "ignoreUnfixed": {"type": "boolean"},
+            },
+        },
         "enabled": {"type": "boolean"},
     },
     "required": ["name"],

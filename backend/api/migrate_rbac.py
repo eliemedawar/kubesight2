@@ -736,6 +736,12 @@ def _migrate_ci_columns() -> None:
         # against it is a syntax error there.
         _add_column_if_missing("ci_pipeline_stages", "run_condition", "JSON")
         _retype_json_column("ci_pipeline_stages", "run_condition")
+        # Image scanning. NULL on every stage that predates it, which reads as
+        # "no scan" — an existing pipeline keeps building and pushing exactly as
+        # it did, and nobody's build starts failing on a gate they never asked
+        # for. Turning it on is an explicit edit.
+        _add_column_if_missing("ci_pipeline_stages", "image_scan", "JSON")
+        _retype_json_column("ci_pipeline_stages", "image_scan")
 
 
 def _migrate_registry_connection_columns() -> None:

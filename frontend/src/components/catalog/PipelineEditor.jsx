@@ -13,7 +13,10 @@ import LoadingState from "../common/LoadingState.jsx";
 import {
   CheckIcon,
   CONDITIONAL_STAGE_TYPES,
+  DEFAULT_IMAGE_SCAN,
   DownIcon,
+  IMAGE_SCAN_ON_FAIL,
+  IMAGE_SCAN_THRESHOLDS,
   PlusIcon,
   RUNNER_TYPES,
   STAGE_TYPES,
@@ -36,6 +39,9 @@ const blankStage = () => ({
   artifacts: [],
   hostAliases: [],
   runCondition: null,
+  // Null, not a default object: a new stage is a command stage, and only an
+  // image stage has an image to gate.
+  imageScan: null,
   timeoutSeconds: 1800,
   continueOnFailure: false,
   enabled: true,
@@ -93,13 +99,20 @@ const conditionSummary = (condition) => {
   return `${condition.variable} ${verb} "${condition.value ?? ""}"`;
 };
 
+/** Armed = a scan actually gates this stage's push. Absent and
+ * `{enabled: false}` are both "not armed", but they are different answers to
+ * "was this image scanned?" and the panel below shows them differently. */
+const scanArmed = (stage) =>
+  Boolean(stage.imageScan && stage.imageScan.enabled !== false);
+
 const stageTypeLabel = (stageType) =>
   STAGE_TYPES.find((type) => type.value === stageType)?.label || stageType;
 
 const stageSummary = (stage) => {
   if (stage.stageType === "checkout") return "Repository source";
   if (stage.stageType === "container_image") {
-    return stage.workingDirectory || "Dockerfile from service root";
+    const where = stage.workingDirectory || "Dockerfile from service root";
+    return scanArmed(stage) ? `${where} · scanned before push` : where;
   }
   if (stage.stageType === "publish_artifact") {
     const count = (stage.artifacts || []).length;
@@ -709,7 +722,7 @@ const STAGE_FIELDS = {
     "secrets",
     "artifacts",
   ]),
-  container_image: new Set(["runner", "workdir", "hostAliases", "env"]),
+  container_image: new Set(["runner", "workdir", "hostAliases", "env", "imageScan"]),
   publish_artifact: new Set([]),
   scan: new Set([]),
 };
@@ -724,6 +737,10 @@ const CLEARED_BY_FIELD = {
   env: { env: {} },
   secrets: { secretRefs: [] },
   artifacts: { artifacts: [] },
+  // Cleared when the stage stops being an image stage: a gate left behind on a
+  // command stage would be rejected on save, and would read as protection that
+  // is not there until then.
+  imageScan: { imageScan: null },
 };
 
 function StageFields({ stage, secretKeys, parameters, canEdit, onChange }) {
@@ -913,6 +930,133 @@ function StageFields({ stage, secretKeys, parameters, canEdit, onChange }) {
                   )}
                 </span>
               </label>
+            </div>
+          </details>
+        )}
+
+        {shows("imageScan") && (
+          <details className="sg-ci-stage-options form-grid__full" open={scanArmed(stage)}>
+            <summary>
+              <span>
+                <strong>Image scan</strong>
+                <small>Checked between building the image and pushing it</small>
+              </span>
+              <span className="sg-ci-option-value">
+                {scanArmed(stage)
+                  ? `Blocks at ${
+                      IMAGE_SCAN_THRESHOLDS.find(
+                        (item) => item.value === (stage.imageScan.threshold || "critical")
+                      )?.label || stage.imageScan.threshold
+                    }`
+                  : stage.imageScan
+                    ? "Turned off"
+                    : "Not configured"}
+              </span>
+            </summary>
+            <div className="sg-ci-stage-options-body">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={scanArmed(stage)}
+                  disabled={!canEdit}
+                  onChange={(event) =>
+                    onChange({
+                      imageScan: event.target.checked
+                        ? { ...DEFAULT_IMAGE_SCAN, ...(stage.imageScan || {}), enabled: true }
+                        : { ...DEFAULT_IMAGE_SCAN, ...(stage.imageScan || {}), enabled: false },
+                    })
+                  }
+                />
+                <span>Scan this image before pushing it</span>
+              </label>
+              <span className="field-hint form-grid__full">
+                BuildKit stops short of the registry: the image it built is scanned
+                here, and pushed only if it passes. Nothing reaches the registry
+                first, so there is no vulnerable tag to clean up afterwards. Builds
+                already running keep the pipeline they started with — this applies
+                from the next build.
+              </span>
+
+              {scanArmed(stage) && (
+                <>
+                  <label>
+                    Block on
+                    <select
+                      value={stage.imageScan.threshold || "critical"}
+                      disabled={!canEdit}
+                      onChange={(event) =>
+                        onChange({
+                          imageScan: { ...stage.imageScan, threshold: event.target.value },
+                        })
+                      }
+                    >
+                      {IMAGE_SCAN_THRESHOLDS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="field-hint">
+                      Every severity is recorded in the report either way. This only
+                      decides which ones stop the push. High is routinely non-empty
+                      on a stock base image.
+                    </span>
+                  </label>
+
+                  <label>
+                    When something is found
+                    <select
+                      value={stage.imageScan.onFail || "block"}
+                      disabled={!canEdit}
+                      onChange={(event) =>
+                        onChange({
+                          imageScan: { ...stage.imageScan, onFail: event.target.value },
+                        })
+                      }
+                    >
+                      {IMAGE_SCAN_ON_FAIL.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="field-hint">
+                      {(stage.imageScan.onFail || "block") === "block"
+                        ? "The stage fails and the image is not pushed."
+                        : "The report is attached and the image is pushed anyway — a gate that only reports."}
+                    </span>
+                  </label>
+
+                  <label className="checkbox-row form-grid__full">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(stage.imageScan.ignoreUnfixed)}
+                      disabled={!canEdit}
+                      onChange={(event) =>
+                        onChange({
+                          imageScan: {
+                            ...stage.imageScan,
+                            ignoreUnfixed: event.target.checked,
+                          },
+                        })
+                      }
+                    />
+                    <span>Ignore findings with no fix available</span>
+                  </label>
+                  <span className="field-hint form-grid__full">
+                    A CVE with no released fix cannot be cleared by rebuilding, so
+                    counting it blocks a build nobody can unblock. Off by default —
+                    ignoring them is a policy choice, not KubeSight's to make.
+                  </span>
+
+                  <p className="banner-message info form-grid__full">
+                    Needs the KubeSight CI image tools (buildctl + Trivy + crane) on
+                    the cluster: build <code>Dockerfile.ci-imagetools</code> and
+                    mirror it. Until it is there, a build of this stage fails to
+                    start and says so — it never falls back to pushing unscanned.
+                  </p>
+                </>
+              )}
             </div>
           </details>
         )}

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from ...db import db
 from ...models_ci import CiBuild, CiRunner, CiService
+from . import cache_layout
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +37,12 @@ RUNNER_NAME = "kubesight-kubernetes"
 
 DEFAULT_CLAIM = "ci-cache"
 DEFAULT_SIZE = "20Gi"
-MOUNT_PATH = "/cache"
+# The same mount path the runner uses, from the same module — a maintenance
+# Job that measured or emptied a different directory than builds write to
+# would be worse than useless, so neither side gets its own copy.
+MOUNT_PATH = cache_layout.CACHE_MOUNT_PATH
 # uid/gid stage containers run as; the cache is handed to them by group.
-BUILD_UID = 65532
+BUILD_UID = cache_layout.CACHE_FS_GROUP
 MAINTENANCE_PURPOSE = "ci-cache-maintenance"
 ACTIVE_BUILD_STATUSES = ("queued", "running")
 
@@ -272,6 +276,10 @@ def _volume_state(name: str) -> Dict[str, Any]:
 CACHED_TOOLS = [
     {"tool": "Maven", "path": "maven"},
     {"tool": "Gradle", "path": "gradle"},
+    {"tool": "Gradle build cache", "path": "gradle-build-cache"},
+    {"tool": "Dependency-Check (NVD)", "path": "dependency-check-data"},
+    {"tool": "Semgrep", "path": "semgrep"},
+    {"tool": "BuildKit layers", "path": "buildkit"},
     {"tool": "npm", "path": "npm"},
     {"tool": "yarn", "path": "yarn"},
     {"tool": "pnpm", "path": "pnpm"},
@@ -700,7 +708,7 @@ def measure() -> Dict[str, Any]:
     # Read-only. The trailing total is what the UI shows against the capacity.
     return _start_job(
         "measure",
-        "du -sh /cache/* 2>/dev/null; du -sh /cache 2>/dev/null; echo done",
+        f"du -sh {MOUNT_PATH}/* 2>/dev/null; du -sh {MOUNT_PATH} 2>/dev/null; echo done",
         namespace,
     )
 
@@ -729,22 +737,27 @@ def clean(service_id: Optional[int] = None, all_services: bool = False) -> Dict[
                 "them would fail them with errors that look unrelated. Try again when they finish."
             )
         # -mindepth 1 empties the directory without removing the mount point.
-        script = "find /cache -mindepth 1 -maxdepth 1 -exec rm -rf {} + ; echo cleaned everything"
+        script = (
+            f"find {MOUNT_PATH} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + ; "
+            "echo cleaned everything"
+        )
         target = "every service"
     else:
         service = db.session.get(CiService, int(service_id)) if service_id else None
         if service is None:
             raise CacheError("That service does not exist.")
-        slug = _dns(service.slug or "")
-        if not slug:
-            raise CacheError("That service has no usable slug.")
+        # The runner's own rule for the directory name, so this deletes the
+        # subtree that service's builds actually wrote — including for a
+        # service whose slug sanitises to nothing, which still HAS a cache.
+        slug = cache_layout.slug_dir(service.slug or "")
         busy = _active_builds(service.id)
         if busy:
             raise CacheError(
                 f"{service.name} has a build running (" + ", ".join(busy) + "). "
                 "Emptying its cache now would fail that build. Try again when it finishes."
             )
-        script = f"rm -rf /cache/{slug}; echo cleaned /cache/{slug}"
+        target_dir = f"{MOUNT_PATH}/{slug}"
+        script = f"rm -rf {target_dir}; echo cleaned {target_dir}"
         target = service.name
 
     result = _start_job("clean", script, namespace)

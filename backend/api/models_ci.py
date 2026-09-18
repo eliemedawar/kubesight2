@@ -57,6 +57,23 @@ STAGE_TYPES = (
     "scan",
 )
 
+# --- Image scanning ---------------------------------------------------------
+# A container_image stage builds, scans and pushes in ONE stage, in that order.
+# The scan is not a stage of its own on purpose: a separate stage could be
+# reordered, disabled or deleted and the gate would silently disappear, while
+# the image it was meant to guard still reached the registry. Here the push is
+# physically downstream of the verdict in the same shell script — there is no
+# arrangement of the pipeline that pushes an unscanned image.
+IMAGE_SCANNERS = ("trivy",)
+
+# Ordered worst-first. A threshold means "this severity and anything above it".
+IMAGE_SCAN_SEVERITIES = ("critical", "high", "medium", "low")
+
+# What a finding at or above the threshold does. ``block`` fails the stage
+# before the push; ``warn`` records the report and pushes anyway. There is no
+# third option: a gate that neither blocks nor reports is not a gate.
+IMAGE_SCAN_ON_FAIL = ("block", "warn")
+
 RUNNER_TYPES = ("kubernetes", "agent_linux", "agent_macos", "ssh_linux", "mock")
 RUNNER_STATUSES = ("online", "offline", "draining", "disabled")
 
@@ -87,6 +104,10 @@ ARTIFACT_TYPES = (
     "test-report",
     "coverage-report",
     "sbom",
+    # The vulnerability report a container_image stage's scan produced. Uploaded
+    # whether the scan passed or blocked the push — a blocked build is exactly
+    # when somebody wants to read why.
+    "scan-report",
 )
 
 ARTIFACT_BACKENDS = ("local", "registry", "s3", "nexus_raw")
@@ -342,6 +363,13 @@ class CiPipelineStage(db.Model):
     # false is closed as ``skipped`` with the reason in its log; it is never
     # dispatched, so a whole-build runner does not even create its container.
     run_condition = db.Column(db.JSON, nullable=True)
+
+    # WHETHER THE IMAGE IT BUILDS MAY BE PUSHED. container_image stages only;
+    # NULL (every stage saved before this existed, and every non-image stage)
+    # means no scan runs and the stage behaves exactly as it did before.
+    # ``{"enabled": true, "scanner": "trivy", "threshold": "critical",
+    #    "onFail": "block", "ignoreUnfixed": false}``
+    image_scan = db.Column(db.JSON, nullable=True)
 
     # HOW it behaves.
     timeout_seconds = db.Column(db.Integer, nullable=False, default=1800)

@@ -140,9 +140,15 @@ What the container gets:
 - the build's workspace at `/workspace`, its checkout at `/workspace/source`
   — **the same paths the Kubernetes runner uses**, so one pipeline's commands
   are correct on either runner;
-- a cache directory at `/cache`, shared by every build on this machine, with
-  Maven, Gradle, npm, yarn, pip and Go pointed into it, so a containerised
-  stage is not slower than a host one;
+- a cache directory at `/cache`, named by `$KUBESIGHT_CACHE_DIR` and shared by
+  every build on this machine, with Maven, Gradle, npm, yarn, pip and Go
+  pointed into it, so a containerised stage is not slower than a host one. The
+  scanner variables the Kubernetes runner sets — `GRADLE_BUILD_CACHE_DIR`,
+  `DC_DATA_DIR`, `SEMGREP_CACHE_DIR`, `BUILDKIT_CACHE_DIR` — are named here too,
+  so one stage script is correct on either runner. The Gradle *build* cache is
+  the one difference: on Kubernetes KubeSight writes an init script that wires
+  it up, and a stage that wants the same here passes `-I` itself. See
+  [CI-CACHE.md](../CI-CACHE.md);
 - the stage's environment and secrets, passed by name so their values never
   appear in `docker run`'s arguments, where any user on the machine could read
   them from the process list;

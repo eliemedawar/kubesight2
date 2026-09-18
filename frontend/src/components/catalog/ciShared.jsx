@@ -48,6 +48,34 @@ export const CONDITIONAL_STAGE_TYPES = {
 
 export const UNIMPLEMENTED_STAGE_TYPES = new Set(Object.keys(CONDITIONAL_STAGE_TYPES));
 
+/** Image scanning — the gate between building an image and pushing it.
+ *
+ * Only on container_image stages, because it is the same stage: KubeSight stops
+ * BuildKit pushing, scans what it built, and pushes only on a pass. There is no
+ * arrangement of the pipeline that pushes an unscanned image, which is the
+ * reason it is a field here and not a stage of its own. */
+export const IMAGE_SCAN_THRESHOLDS = [
+  { value: "critical", label: "Critical only" },
+  { value: "high", label: "High and above" },
+  { value: "medium", label: "Medium and above" },
+  { value: "low", label: "Any finding" },
+];
+
+export const IMAGE_SCAN_ON_FAIL = [
+  { value: "block", label: "Block the push" },
+  { value: "warn", label: "Warn and push anyway" },
+];
+
+/** What a stage gets when scanning is switched on for the first time. Mirrors
+ * templates.default_image_scan() on the backend — keep the two in step. */
+export const DEFAULT_IMAGE_SCAN = {
+  enabled: true,
+  scanner: "trivy",
+  threshold: "critical",
+  onFail: "block",
+  ignoreUnfixed: false,
+};
+
 export const RUNNER_TYPES = [
   { value: "", label: "Any compatible runner" },
   { value: "kubernetes", label: "Kubernetes Job" },

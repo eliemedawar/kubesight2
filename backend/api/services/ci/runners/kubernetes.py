@@ -47,6 +47,7 @@ import re
 import subprocess
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from .. import build_environments, cache_layout
 from .base import (
     FAILED,
     QUEUED,
@@ -380,9 +381,31 @@ def _wrap_stage_script(body: str, *, continue_on_failure: bool) -> str:
     return (
         "set -u\nexport HOME=/tmp TMPDIR=/tmp\n"
         + guard
+        + _cache_prep()
         + f"(\nset -e\n{_LOAD_BUILD_ENV}{body}\n)\nEC=$?\n"
         + record
         + f'echo "{_EXIT_MARKER} $EC"\nexit 0\n'
+    )
+
+
+def _cache_prep() -> str:
+    """Make this service's cache subtree exist, before the stage's own commands.
+
+    Outside the ``set -e`` subshell on purpose: a cache that cannot be written
+    is a slow build, not a failed one — it warns on stderr and the stage runs
+    cold.
+
+    On every stage rather than in one setup container, because the layout has to
+    be right for whichever stage runs first, a build's stages are initContainers
+    with no guaranteed predecessor, and ``mkdir -p`` over an existing tree costs
+    milliseconds. It also quietly repairs a cache somebody emptied by hand.
+
+    Expands nothing at manifest time: the script reads $KUBESIGHT_CACHE_DIR,
+    which ``_plain_env`` has already set — to "" when caching is off, which
+    makes the whole block a no-op.
+    """
+    return cache_layout.prep_script(
+        gradle_init=not _is_off(_env("CI_CACHE_GRADLE_INIT", "1"))
     )
 
 
@@ -436,17 +459,43 @@ def _buildctl_add_hosts(execution: StageExecution) -> str:
     return f"--opt add-hosts={','.join(pairs)} " if pairs else ""
 
 
-def _buildctl_cache(registry: Dict[str, Any]) -> str:
-    """Layer cache kept in the registry beside the image.
+_ON = ("1", "true", "yes", "on")
+
+# Set by the local-cache prelude; empty when that cache is off or has nothing in
+# it yet. Deliberately UNQUOTED where it is used, so an empty value contributes
+# no argument at all rather than an empty one buildctl would reject.
+_LOCAL_CACHE_VAR = "KS_BK_IMPORT"
+
+
+def _buildkit_cache_ref(execution: StageExecution) -> str:
+    """The registry tag the layer cache is pushed to.
+
+    ``CI_BUILDKIT_CACHE_REPO`` collects every service's cache under one
+    repository (``registry.example.com/cache/<slug>:buildcache``), which is what
+    you want where the image repositories themselves are governed and an extra
+    tag in them would be noticed. Without it the cache sits beside the image it
+    belongs to, which is the behaviour this had before.
+    """
+    registry = execution.registry or {}
+    repo = _env("CI_BUILDKIT_CACHE_REPO", "").strip().rstrip("/")
+    if repo:
+        return f"{repo}/{_dns(execution.service_slug, 63)}:buildcache"
+    return f"{registry.get('host', '')}/{registry.get('repository', '')}:buildcache"
+
+
+def _buildctl_registry_cache(execution: StageExecution) -> str:
+    """Layer cache kept in a registry.
 
     buildkitd's own cache is an emptyDir: warm while that pod lives, gone when
     it restarts, and invisible to a second builder. Pushing the cache to a
-    ``:buildcache`` tag makes it survive both. Off unless asked for, because it
-    writes an extra tag into somebody's registry.
+    ``:buildcache`` tag makes it survive both, and is the only option that
+    still works when the builder moves to another node. Off unless asked for,
+    because it writes an extra tag into somebody's registry.
     """
-    if _env("CI_BUILDKIT_REGISTRY_CACHE", "0") not in ("1", "true", "yes"):
+    if _env("CI_BUILDKIT_REGISTRY_CACHE", "0").lower() not in _ON:
         return ""
-    ref = f"{registry['host']}/{registry['repository']}:buildcache"
+    ref = _buildkit_cache_ref(execution)
+    registry = execution.registry or {}
     insecure = ",registry.insecure=true" if registry.get("verifyTls") is False else ""
     return (
         f"--import-cache type=registry,ref={ref}{insecure} "
@@ -454,6 +503,56 @@ def _buildctl_cache(registry: Dict[str, Any]) -> str:
         # dependency-heavy build cheap on the second run.
         f"--export-cache type=registry,ref={ref},mode=max{insecure} "
     )
+
+
+def _buildctl_local_cache(execution: StageExecution) -> Tuple[str, str]:
+    """``(prelude, flags)`` for a layer cache kept on the cache volume.
+
+    buildctl resolves ``type=local`` on the CLIENT side and streams it over the
+    session, so the directory is this pod's — the one on the PersistentVolume.
+    That is what makes this need no change to buildkitd at all.
+
+    It is also why this is safe on the NFS cache volume, while buildkitd's OWN
+    store is not: the snapshotter there needs overlayfs and stays an emptyDir,
+    whereas a local cache export is ordinary blob files and an index.json.
+
+    The import has to be conditional: buildctl fails the build outright on a
+    ``src`` with no ``index.json``, which is exactly an empty cache on the first
+    run. So the prelude looks, and the flag is a shell variable that expands to
+    nothing when there is nothing to import.
+
+    Off unless asked for. A ``mode=max`` local export rewrites the full cache
+    every build and prunes nothing, so it grows until somebody empties it —
+    fine on a volume sized for it, a slow disk-full on one that is not.
+    """
+    if _env("CI_BUILDKIT_LOCAL_CACHE", "0").lower() not in _ON:
+        return "", ""
+    if not cache_base_path(execution.service_slug):
+        return "", ""  # asked for, but there is no volume to put it on
+    prelude = (
+        f'{_LOCAL_CACHE_VAR}=""\n'
+        'if [ -s "$BUILDKIT_CACHE_DIR/index.json" ]; then\n'
+        f'  {_LOCAL_CACHE_VAR}="--import-cache type=local,src=$BUILDKIT_CACHE_DIR"\n'
+        "else\n"
+        '  echo "[kubesight] No BuildKit layer cache yet; this image builds cold."\n'
+        "fi\n"
+    )
+    flags = (
+        f"${_LOCAL_CACHE_VAR} "
+        "--export-cache type=local,dest=$BUILDKIT_CACHE_DIR,mode=max "
+    )
+    return prelude, flags
+
+
+def _buildctl_cache(execution: StageExecution) -> Tuple[str, str]:
+    """``(prelude, flags)`` for every layer cache this stage should use.
+
+    Both kinds can be on at once, and buildctl accepts repeated
+    ``--import-cache``: the registry copy survives the builder moving node, the
+    local copy is far cheaper to read when the build lands back on its volume.
+    """
+    prelude, local = _buildctl_local_cache(execution)
+    return prelude, _buildctl_registry_cache(execution) + local
 
 
 # Resolves a templated tag inside the build pod, after $KUBESIGHT_ENV has been
@@ -484,9 +583,27 @@ def _image_ref_prelude(registry: Dict[str, Any]) -> str:
     return _TAG_RESOLVE_TEMPLATE.format(template=registry["tag"])
 
 
-def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
+def _buildctl_args(
+    execution: StageExecution,
+    meta_file: str,
+    *,
+    output: Optional[str] = None,
+    with_prelude: bool = True,
+) -> str:
+    """The buildctl invocation for a container_image stage.
+
+    ``output`` overrides where buildkitd sends the result — the scanned path
+    asks for a local archive instead of a registry push, which is the whole
+    mechanism behind the gate. ``with_prelude`` is False when the caller has
+    already emitted the tag/cache prelude itself, because that prelude resolves
+    ``$KS_TAG`` and the scanned script needs the resolved tag before the build
+    in order to name the archive and the push after it.
+    """
     registry = execution.registry or {}
-    prelude = _image_ref_prelude(registry)
+    cache_prelude, cache_flags = _buildctl_cache(execution)
+    # The cache prelude runs BEFORE the tag prelude only because neither reads
+    # the other; keeping the order fixed keeps the generated script diffable.
+    prelude = (cache_prelude + _image_ref_prelude(registry)) if with_prelude else ""
     tag = '$KS_TAG' if registry.get("tagIsTemplate") else registry["tag"]
     image_ref = f"{registry['host']}/{registry['repository']}:{tag}"
     context = "/workspace/source"
@@ -505,8 +622,8 @@ def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
             f"--local dockerfile={INLINE_DOCKERFILE_DIR} "
             f"--opt filename=Dockerfile "
             f"{_buildctl_add_hosts(execution)}"
-            f"{_buildctl_cache(registry)}"
-            f"--output {_buildctl_output(registry, image_ref)} "
+            f"{cache_flags}"
+            f"--output {output or _buildctl_output(registry, image_ref)} "
             f"--metadata-file {meta_file}"
         )
     return prelude + (
@@ -516,10 +633,218 @@ def _buildctl_args(execution: StageExecution, meta_file: str) -> str:
         f"--local dockerfile={context}/{dockerfile_dir} "
         f"--opt filename={os.path.basename(dockerfile)} "
         f"{_buildctl_add_hosts(execution)}"
-        f"{_buildctl_cache(registry)}"
-        f"--output {_buildctl_output(registry, image_ref)} "
+        f"{cache_flags}"
+        f"--output {output or _buildctl_output(registry, image_ref)} "
         f"--metadata-file {meta_file}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Image scanning — build, scan, push, in ONE stage
+#
+# Without a gate a container_image stage is a single buildctl call that builds
+# and pushes in one motion: by the time anything could look at the image, it is
+# already in the registry and already pullable. Scanning has to interrupt that,
+# and the only place to interrupt it is inside the stage.
+#
+# So a scanned stage stops buildkitd from pushing at all. The result comes back
+# as a docker archive on the shared workspace, the scanner reads the archive,
+# and only a passing verdict reaches the ``crane push`` on the next line. The
+# registry never sees an image that failed its own gate — not under a temporary
+# tag, not for a moment. That is the property a quarantine-tag design cannot
+# offer, and it is the reason for the extra copy through the workspace.
+#
+# The cost is real and worth stating: the image travels buildkitd -> pod ->
+# registry instead of buildkitd -> registry, so a large image spends an extra
+# minute or two in transfer and needs room for the archive on the build pod's
+# ephemeral storage (see _stage_resources, which raises the default for exactly
+# these stages).
+#
+# All three tools live in ONE image because a stage is one container. That is
+# not a workaround — it is what keeps "one stage = one initContainer = one
+# status = one log" true, which is the property this whole adapter is built on.
+# A scan as its own stage would have been cheaper to build and impossible to
+# rely on: it could be reordered, disabled or deleted while the push it was
+# meant to guard carried on.
+# ---------------------------------------------------------------------------
+
+# Worst first. A threshold means "this severity and everything above it".
+_SEVERITY_ORDER = ("critical", "high", "medium", "low")
+
+
+def image_tools_image() -> str:
+    """The image carrying buildctl + trivy + crane.
+
+    Defaulted rather than required so a fresh installation has something that
+    resolves, and pointed at the same internal registry the build templates
+    use. If it is not there the pod fails to pull, which is visible; if it is
+    there but missing a tool, the guard below says which one. Neither failure
+    mode can end with an unscanned image in the registry.
+    """
+    configured = _env("CI_IMAGE_TOOLS_IMAGE", "").strip()
+    if configured:
+        return configured
+    return f"{build_environments.registry()}/kubesight-ci-imagetools:v1"
+
+
+def scanning_requested(execution: StageExecution) -> bool:
+    """Whether this stage's image must pass a scan before it may be pushed."""
+    scan = execution.image_scan
+    return bool(isinstance(scan, dict) and scan.get("enabled") is not False)
+
+
+def _gated_severities(threshold: str) -> str:
+    """The severities the gate counts, as Trivy spells them."""
+    threshold = str(threshold or "critical").lower()
+    if threshold not in _SEVERITY_ORDER:
+        threshold = "critical"
+    cut = _SEVERITY_ORDER.index(threshold) + 1
+    return ",".join(item.upper() for item in _SEVERITY_ORDER[:cut])
+
+
+def image_archive_path(position: int) -> str:
+    return f"/workspace/.kubesight/image-{position}.tar"
+
+
+def scan_report_path(position: int) -> str:
+    return f"/workspace/.kubesight/scan-{position}.json"
+
+
+def trivy_cache_dir(execution: StageExecution) -> str:
+    """Where Trivy keeps its vulnerability database.
+
+    On the build cache volume when there is one, because the database is tens
+    of megabytes and re-downloading it every build is the difference between a
+    scan that costs seconds and one that costs minutes — and on a cluster with
+    no route to the public database host, the difference between a scan and no
+    scan at all. /tmp otherwise: correct, just cold every time.
+    """
+    base = cache_base_path(execution.service_slug)
+    return f"{base}/trivy" if base else "/tmp/trivy-cache"
+
+
+_TOOL_GUARD = """for KS_TOOL in buildctl trivy crane; do
+  if ! command -v "$KS_TOOL" >/dev/null 2>&1; then
+    echo "[kubesight] This stage scans the image before pushing it, which needs" >&2
+    echo "[kubesight] buildctl, trivy and crane in one image. '$KS_TOOL' is not in" >&2
+    echo "[kubesight] {tools_image}" >&2
+    echo "[kubesight] Build and mirror Dockerfile.ci-imagetools, then point" >&2
+    echo "[kubesight] CI_IMAGE_TOOLS_IMAGE at it. Nothing was built and nothing" >&2
+    echo "[kubesight] was pushed: an unscanned image is never the fallback." >&2
+    exit 1
+  fi
+done
+"""
+
+
+def _scan_and_push_script(execution: StageExecution, meta_file: str) -> str:
+    """build -> scan -> push, as one shell script for one container.
+
+    Ordered so that every exit before the push leaves the registry untouched.
+    ``set -e`` is already in force from :func:`_wrap_stage_script`, so an
+    unhandled failure anywhere above stops short of the push by construction
+    rather than by a check somebody has to remember to write.
+    """
+    registry = execution.registry or {}
+    scan = execution.image_scan or {}
+    position = execution.position
+    archive = image_archive_path(position)
+    report = scan_report_path(position)
+
+    tag = "$KS_TAG" if registry.get("tagIsTemplate") else registry["tag"]
+    image_ref = f"{registry['host']}/{registry['repository']}:{tag}"
+    insecure = " --insecure" if registry.get("verifyTls") is False else ""
+
+    threshold = str(scan.get("threshold") or "critical").lower()
+    on_fail = str(scan.get("onFail") or "block").lower()
+    gated = _gated_severities(threshold)
+    ignore_unfixed = " --ignore-unfixed" if scan.get("ignoreUnfixed") else ""
+
+    db_repo = _env("CI_TRIVY_DB_REPOSITORY", "").strip()
+    db_flag = f" --db-repository {db_repo}" if db_repo else ""
+
+    # The prelude is emitted here rather than left inside _buildctl_args because
+    # the archive name, the scan and the push all need $KS_TAG, and a templated
+    # tag must resolve exactly once for all three to agree.
+    cache_prelude, _ = _buildctl_cache(execution)
+    prelude = cache_prelude + _image_ref_prelude(registry)
+
+    # type=docker rather than type=oci: crane pushes a docker archive and Trivy
+    # reads one, so a single file serves both and no conversion step sits
+    # between what was scanned and what is pushed.
+    build = _buildctl_args(
+        execution,
+        f"/workspace/.kubesight/buildkit-meta-{position}.json",
+        output=f"type=docker,name={image_ref},dest={archive}",
+        with_prelude=False,
+    )
+
+    if on_fail == "block":
+        verdict = (
+            '  echo "[kubesight] Scan BLOCKED the push: findings at or above '
+            f'{threshold.upper()}. Nothing was pushed. The full report is on this '
+            'build as an artifact." >&2\n'
+            "  exit 1\n"
+        )
+    else:
+        verdict = (
+            '  echo "[kubesight] Scan found findings at or above '
+            f'{threshold.upper()}. This gate is set to warn, so the push '
+            'continues. The full report is on this build as an artifact." >&2\n'
+        )
+
+    return (
+        "mkdir -p /workspace/.kubesight\n"
+        + _TOOL_GUARD.format(tools_image=image_tools_image())
+        + prelude
+        + f'echo "[kubesight] == build == {image_ref}"\n'
+        + build
+        + "\n"
+        + f'echo "[kubesight] == scan == trivy, gate at {threshold.upper()} ({on_fail})"\n'
+        # One full-severity pass writes the report; the gate is then applied to
+        # the SAVED report by `trivy convert`. So the image is unpacked and
+        # scanned exactly once, and the artifact always holds every finding —
+        # including the ones below the threshold, which are what somebody reads
+        # when deciding whether to tighten it.
+        + (
+            f"trivy image --input {archive} --format json --output {report} "
+            f"--severity CRITICAL,HIGH,MEDIUM,LOW --scanners vuln --no-progress"
+            f"{ignore_unfixed}{db_flag}\n"
+        )
+        + "set +e\n"
+        + f"trivy convert --format table --severity {gated} --exit-code 1 {report}\n"
+        + "KS_SCAN_RC=$?\n"
+        + "set -e\n"
+        + 'if [ "$KS_SCAN_RC" -ne 0 ]; then\n'
+        + verdict
+        + "fi\n"
+        + f'echo "[kubesight] == push == {image_ref}"\n'
+        + f"crane push{insecure} {archive} {image_ref}\n"
+        # The digest comes from the registry rather than from the build, so the
+        # artifact record names the manifest that is actually pullable.
+        + f"KS_DIGEST=$(crane digest{insecure} {image_ref})\n"
+        + (
+            "printf '{\"image.name\":\"%s\",\"containerimage.digest\":\"%s\"}\\n' "
+            f'"{image_ref}" "$KS_DIGEST" > {meta_file}\n'
+        )
+        # A multi-gigabyte archive on a shared emptyDir would otherwise sit
+        # there for the rest of the build, against the same workspace size limit
+        # every later stage has to fit inside.
+        + f"rm -f {archive}\n"
+        + f'echo "[kubesight] Pushed {image_ref} ($KS_DIGEST)"\n'
+    )
+
+
+def image_stage_script(execution: StageExecution, meta_file: str) -> str:
+    """The body of a container_image stage, gated or not.
+
+    An ungated stage produces exactly the script it produced before scanning
+    existed — byte for byte — so turning the gate off is a true rollback rather
+    than a second code path that happens to look similar.
+    """
+    if not scanning_requested(execution):
+        return "mkdir -p /workspace/.kubesight\n" + _buildctl_args(execution, meta_file)
+    return _scan_and_push_script(execution, meta_file)
 
 
 # ---------------------------------------------------------------------------
@@ -556,9 +881,17 @@ def _stage_resources(execution: StageExecution) -> Dict[str, Any]:
     # when some other tenant fills it, because eviction ranks by usage above
     # request. Off on both is a deliberate "the node has disk to spare", not a
     # fix for a node that is already tight.
-    ephemeral_limit = (execution.resources or {}).get("ephemeralStorage") or _env(
-        "CI_STAGE_EPHEMERAL_LIMIT", "2Gi"
+    # A scanned image stage holds the whole image as an uncompressed archive on
+    # the workspace between the build and the push, which the 2Gi that suits a
+    # compile stage does not fit. Raised only for those stages, and still
+    # overridable per stage — a limit that silently applied everywhere would
+    # make every other stage unschedulable on a small node for no reason.
+    default_ephemeral = (
+        _env("CI_IMAGE_SCAN_EPHEMERAL_LIMIT", "8Gi")
+        if execution.stage_type == "container_image" and scanning_requested(execution)
+        else _env("CI_STAGE_EPHEMERAL_LIMIT", "2Gi")
     )
+    ephemeral_limit = (execution.resources or {}).get("ephemeralStorage") or default_ephemeral
     if not _is_off(ephemeral_limit):
         limits["ephemeral-storage"] = ephemeral_limit
 
@@ -570,12 +903,27 @@ def _stage_resources(execution: StageExecution) -> Dict[str, Any]:
 
 
 
-def _workspace_medium() -> Dict[str, Any]:
+def _workspace_medium(plan: Optional[List[StageExecution]] = None) -> Dict[str, Any]:
     """The /workspace emptyDir. Its sizeLimit is a ceiling kubelet enforces by
     evicting the pod, independent of the per-container ephemeral-storage limit —
     so "off" has to be honoured here too, or removing the limits above still
-    leaves a cap in place."""
-    size = _env("CI_WORKSPACE_SIZE_LIMIT", "5Gi")
+    leaves a cap in place.
+
+    A scanned image stage parks the whole image here as an archive between the
+    build and the push, so the default that fits a checkout plus build output
+    does not fit it. Raising the container's ephemeral limit alone would not
+    help: kubelet evicts on whichever ceiling is hit first, and the eviction
+    reads as the pod dying for no stated reason halfway through a build.
+    """
+    scanned = any(
+        item.stage_type == "container_image" and scanning_requested(item)
+        for item in (plan or [])
+    )
+    size = (
+        _env("CI_IMAGE_SCAN_WORKSPACE_SIZE_LIMIT", "8Gi")
+        if scanned
+        else _env("CI_WORKSPACE_SIZE_LIMIT", "5Gi")
+    )
     return {} if _is_off(size) else {"sizeLimit": size}
 
 
@@ -601,11 +949,15 @@ def _workspace_medium() -> Dict[str, Any]:
 # service, each service confined to its own subtree of it.
 # ---------------------------------------------------------------------------
 
-CACHE_MOUNT_PATH = "/cache"
+# The layout itself — mount paths, per-service directory, tool variables —
+# lives in ../cache_layout.py, shared verbatim with the maintenance Jobs in
+# ../cache.py so the two can never disagree about a path.
+CACHE_MOUNT_PATH = cache_layout.CACHE_MOUNT_PATH
+LEGACY_CACHE_MOUNT_PATH = cache_layout.LEGACY_MOUNT_PATH
 
 # uid/gid the stage containers run as. The cache volume is handed to them
 # through this group — see the fsGroup note on the Job below.
-CACHE_FS_GROUP = 65532
+CACHE_FS_GROUP = cache_layout.CACHE_FS_GROUP
 
 
 def _cache_runtime() -> Dict[str, str]:
@@ -654,18 +1006,18 @@ def cache_claim_name(service_slug: str) -> str:
 
 
 def cache_base_path(service_slug: str) -> str:
-    """Where this service's caches live inside the mount, "" when off.
+    """``$KUBESIGHT_CACHE_DIR`` for this service, "" when caching is off.
 
-    One hand-made volume holds every service, so each gets its own subtree:
-    two services sharing one Gradle or Maven directory would fight over the
-    same lock files. A per-service claim is already isolated, and keeps the
-    bare /cache paths that pipelines written before this point at.
+    Always a per-service subtree, in BOTH storage modes. One hand-made volume
+    holds every service, so each needs its own: two services sharing a Gradle or
+    Maven directory would fight over the same lock files. A per-service claim is
+    isolated by the claim already — it gets the same subtree anyway, so that one
+    rule explains the layout everywhere, and so ``cache.py`` can empty one
+    service's cache by path without knowing which mode produced it.
     """
     if not cache_enabled():
         return ""
-    if cache_claim_override():
-        return f"{CACHE_MOUNT_PATH}/{_dns(service_slug, 63)}"
-    return CACHE_MOUNT_PATH
+    return cache_layout.service_cache_dir(service_slug, CACHE_MOUNT_PATH)
 
 
 def cache_claim(service_slug: str) -> Dict[str, Any]:
@@ -691,50 +1043,33 @@ def cache_claim(service_slug: str) -> Dict[str, Any]:
 
 
 def _mounts() -> List[Dict[str, str]]:
+    """Every stage container's mounts, including both cache paths.
+
+    The cache claim is mounted TWICE: at /kubesight-cache, which is what
+    $KUBESIGHT_CACHE_DIR and every injected tool variable point at, and again at
+    /cache, which is where it used to live. The same volume, so the same bytes —
+    a pipeline that still hardcodes /cache/<slug> keeps its warm cache instead of
+    quietly starting cold. Nothing KubeSight generates emits /cache any more, so
+    the second mount can be dropped once no pipeline mentions it.
+    """
     mounts = [
         {"name": "workspace", "mountPath": "/workspace"},
         {"name": "tmp", "mountPath": "/tmp"},
     ]
     if cache_enabled():
         mounts.append({"name": "cache", "mountPath": CACHE_MOUNT_PATH})
+        mounts.append({"name": "cache", "mountPath": LEGACY_CACHE_MOUNT_PATH})
     return mounts
 
 
 def _tool_cache_env(base: str) -> Dict[str, str]:
-    """Point every build tool KubeSight might meet at the cache volume.
+    """Every build tool's cache variable, from the shared layout.
 
-    Injected on every stage rather than left to each pipeline: a cache nobody
-    remembered to wire up is a cache that does nothing, and the correct
-    variable name differs per tool. A stage's own Environment still wins —
-    ``execution.env`` is merged after this.
-
-    Each tool creates its own directory on first use, so only ``base`` has to
-    exist and be writable. None of these are mount points; they are all plain
-    paths inside the one volume, which is what lets a single hand-made
-    PersistentVolume hold every tool's cache at once.
+    Kept as a thin wrapper rather than inlined at the call site because the
+    agent runner and the maintenance Jobs need the identical mapping, and a
+    second copy of it is a second thing to forget to update.
     """
-    if not base:
-        return {}
-    return {
-        # -Dmaven.repo.local as a JVM property works on every Maven version;
-        # MAVEN_ARGS would only be read by 3.9+.
-        "MAVEN_OPTS": f"-Dmaven.repo.local={base}/maven",
-        "GRADLE_USER_HOME": f"{base}/gradle",
-        "npm_config_cache": f"{base}/npm",
-        "YARN_CACHE_FOLDER": f"{base}/yarn",
-        # pnpm reads npm_config_* too; this is its content-addressable store.
-        "npm_config_store_dir": f"{base}/pnpm",
-        "PIP_CACHE_DIR": f"{base}/pip",
-        "GOMODCACHE": f"{base}/go/mod",
-        "GOCACHE": f"{base}/go/build",
-        "CARGO_HOME": f"{base}/cargo",
-        "COMPOSER_CACHE_DIR": f"{base}/composer",
-        "NUGET_PACKAGES": f"{base}/nuget",
-        # Catch-all for everything that respects the XDG base directories
-        # (yarn berry, pip's http cache, Playwright, sccache...). HOME is /tmp
-        # and dies with the pod, so without this they each start cold.
-        "XDG_CACHE_HOME": f"{base}/xdg",
-    }
+    return cache_layout.tool_env(base)
 
 
 def _plain_env(execution: StageExecution, extra: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -746,6 +1081,11 @@ def _plain_env(execution: StageExecution, extra: Dict[str, str]) -> List[Dict[st
         "KUBESIGHT_BUILD_ID": str(execution.build_id),
         "KUBESIGHT_BUILD_NUMBER": str(execution.build_number),
         "KUBESIGHT_SERVICE": execution.service_slug,
+        # The same value under the name the cache paths are built from. Stage
+        # scripts name their scan project and their cache subdirectory with it,
+        # and "$KUBESIGHT_SERVICE_SLUG" reads as what it is where
+        # "$KUBESIGHT_SERVICE" could be a display name.
+        "KUBESIGHT_SERVICE_SLUG": execution.service_slug,
         "KUBESIGHT_BRANCH": execution.branch or "",
         "KUBESIGHT_COMMIT": execution.commit_sha or "",
         # Where this build's files are, named rather than assumed. A pipeline
@@ -754,8 +1094,11 @@ def _plain_env(execution: StageExecution, extra: Dict[str, str]) -> List[Dict[st
         # stage has to work on both.
         "KUBESIGHT_WORKSPACE": "/workspace",
         "KUBESIGHT_SOURCE": "/workspace/source",
-        # Empty when no cache volume is configured, so a pipeline can use it
-        # unconditionally and simply get a cold build where there is none.
+        # Both empty when no cache volume is configured, so a pipeline can use
+        # them unconditionally and simply get a cold build where there is none.
+        # _tool_cache_env sets them again to the same value when there IS one;
+        # they are declared here so the "off" case still defines the names.
+        "KUBESIGHT_CACHE_DIR": cache_base,
         "KUBESIGHT_CACHE": cache_base,
         **_tool_cache_env(cache_base),
         **(execution.env or {}),
@@ -883,6 +1226,7 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
         elif execution.stage_type == "container_image":
             meta_file = f"/workspace/.kubesight/image-meta-{execution.position}.json"
             registry = execution.registry or {}
+            scanned = scanning_requested(execution)
             image_specs.append(
                 {
                     "stagePosition": execution.position,
@@ -890,19 +1234,59 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                     "uri": f"{registry.get('host','')}/{registry.get('repository','')}:{registry.get('tag','')}",
                 }
             )
+            if scanned:
+                # Declared here rather than from the stage's own `artifacts`,
+                # which the loop above deliberately ignores for image stages.
+                # An absolute path so it resolves outside /workspace/source —
+                # the report describes the image, not the checkout.
+                artifact_specs.append(
+                    {
+                        "path": scan_report_path(execution.position),
+                        "type": "scan-report",
+                        "name": f"{registry.get('repository') or first.service_slug}-scan",
+                        "workdir": "",
+                        "stagePosition": execution.position,
+                    }
+                )
             container = {
                 **base,
-                "image": _env("CI_BUILDKIT_CLIENT_IMAGE", "moby/buildkit:v0.23.2"),
+                # A scanned stage needs buildctl, the scanner and the pusher in
+                # the same container, because it is one stage and a stage is one
+                # container. An unscanned one keeps the plain client image it
+                # has always used.
+                "image": (
+                    image_tools_image()
+                    if scanned
+                    else _env("CI_BUILDKIT_CLIENT_IMAGE", "moby/buildkit:v0.23.2")
+                ),
                 "command": [
                     "/bin/sh",
                     "-c",
                     _wrap_stage_script(
-                        "mkdir -p /workspace/.kubesight\n"
-                        + _buildctl_args(execution, meta_file),
+                        image_stage_script(execution, meta_file),
                         continue_on_failure=bool(execution.continue_on_failure),
                     ),
                 ],
-                "env": _plain_env(execution, {"DOCKER_CONFIG": "/kubesight-docker"})
+                "env": _plain_env(
+                    execution,
+                    {"DOCKER_CONFIG": "/kubesight-docker"}
+                    if not scanned
+                    else {
+                        "DOCKER_CONFIG": "/kubesight-docker",
+                        # Trivy writes its database and its own scratch space
+                        # here. Both must be somewhere writable, because the
+                        # root filesystem is read-only for every stage.
+                        "TRIVY_CACHE_DIR": trivy_cache_dir(execution),
+                        "TRIVY_TEMP_DIR": "/tmp",
+                        # An air-gapped installation mirrors the database and
+                        # points CI_TRIVY_DB_REPOSITORY at the mirror; skipping
+                        # the update then avoids a doomed reach for the public
+                        # host on every build.
+                        "TRIVY_SKIP_DB_UPDATE": (
+                            "true" if _env("CI_TRIVY_SKIP_DB_UPDATE", "0").lower() in _ON else "false"
+                        ),
+                    },
+                )
                 + _secret_env(secret_name, execution),
                 "volumeMounts": _mounts()
                 + [{"name": "docker-config", "mountPath": "/kubesight-docker", "readOnly": True}]
@@ -953,7 +1337,7 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
     }
 
     volumes = [
-        {"name": "workspace", "emptyDir": _workspace_medium()},
+        {"name": "workspace", "emptyDir": _workspace_medium(plan)},
         {"name": "tmp", "emptyDir": {"sizeLimit": "512Mi"}},
     ]
     if cache_enabled():

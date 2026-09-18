@@ -102,7 +102,34 @@ def _stage(
     }
     if run_condition:
         stage["runCondition"] = dict(run_condition)
+    if stage_type == "container_image":
+        stage["imageScan"] = default_image_scan()
     return stage
+
+
+def default_image_scan() -> Dict[str, Any]:
+    """The scan gate a generated image stage is offered, pre-filled and OFF.
+
+    Off, and this is the one decision in the file worth defending. Arming it by
+    default would mean that upgrading KubeSight starts failing builds for every
+    service that never customised its pipeline — on the say-so of a scanner
+    image that installation may not have mirrored yet. A security control that
+    arrives as a surprise outage is uninstalled by the end of the week.
+
+    So it ships visible and pre-filled: the editor shows the gate with the
+    settings KubeSight recommends, and arming it is one toggle and one save by
+    somebody who meant to. ``threshold`` is CRITICAL because that is the band
+    where "rebuild on a newer base image" is a real answer; HIGH on a stock base
+    image is routinely non-empty and a gate nobody can pass is a gate everybody
+    routes around.
+    """
+    return {
+        "enabled": False,
+        "scanner": "trivy",
+        "threshold": "critical",
+        "onFail": "block",
+        "ignoreUnfixed": False,
+    }
 
 
 # ---------------------------------------------------------------------------

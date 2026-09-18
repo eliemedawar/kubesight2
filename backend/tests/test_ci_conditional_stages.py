@@ -743,3 +743,131 @@ def test_the_verto_deploy_tag_comes_from_the_stage_that_built_it(app):
     assert image["env"]["IMAGE_TAG"] == "${APP_VERSION_TAG}"
     for stage in deploys:
         assert any("$APP_VERSION_TAG" in line for line in stage["commands"]), stage["name"]
+
+
+# ---------------------------------------------------------------------------
+# The image scan gate, through the API
+#
+# The gate lives on the container_image stage rather than in a stage of its own,
+# so these are the rules that keep it from being configured into a shape where
+# it looks armed and is not.
+# ---------------------------------------------------------------------------
+
+def test_an_image_scan_round_trips_through_save_and_reload(client, admin_token, service_id):
+    pipeline_id = _pipeline_id(client, admin_token, service_id)
+    response = _save(
+        client,
+        admin_token,
+        pipeline_id,
+        {
+            "stages": [
+                {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["mock"]},
+                {
+                    "name": "Build Image",
+                    "stageType": "container_image",
+                    "runnerLabels": ["linux"],
+                    "imageScan": {"enabled": True, "threshold": "high", "onFail": "warn"},
+                },
+            ]
+        },
+    )
+    assert response.status_code == 200, response.get_json()
+
+    stages = client.get(
+        f"/api/ci/pipelines/{pipeline_id}", headers=auth_headers(admin_token)
+    ).get_json()["data"]["stages"]
+    by_name = {stage["name"]: stage for stage in stages}
+    assert by_name["Build Image"]["imageScan"] == {
+        "enabled": True,
+        "scanner": "trivy",
+        "threshold": "high",
+        "onFail": "warn",
+        "ignoreUnfixed": False,
+    }
+    # A stage nobody configured a scan on reports None, not a disabled gate:
+    # "not considered" and "considered and declined" are different answers.
+    assert by_name["Checkout"]["imageScan"] is None
+
+
+def test_a_scan_on_a_stage_that_builds_no_image_is_rejected(client, admin_token, service_id):
+    """Rejected rather than ignored. Silently dropping a gate somebody
+    configured is the failure that matters here — they would go on believing
+    the image was scanned."""
+    pipeline_id = _pipeline_id(client, admin_token, service_id)
+    response = _save(
+        client,
+        admin_token,
+        pipeline_id,
+        {
+            "stages": [
+                {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["mock"]},
+                {
+                    "name": "Test",
+                    "stageType": "command",
+                    "commands": ["npm test"],
+                    "imageScan": {"enabled": True, "threshold": "critical"},
+                },
+            ]
+        },
+    )
+    assert response.status_code == 400
+    assert "builds no image to scan" in response.get_json()["error"]
+
+
+def test_an_unknown_scan_threshold_is_rejected(client, admin_token, service_id):
+    pipeline_id = _pipeline_id(client, admin_token, service_id)
+    response = _save(
+        client,
+        admin_token,
+        pipeline_id,
+        {
+            "stages": [
+                {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["mock"]},
+                {
+                    "name": "Build Image",
+                    "stageType": "container_image",
+                    "imageScan": {"enabled": True, "threshold": "scary"},
+                },
+            ]
+        },
+    )
+    assert response.status_code == 400
+    assert "scary" in response.get_json()["error"]
+
+
+def test_a_saved_gate_reaches_the_build_snapshot(app, client, admin_token, service_id):
+    """A build runs the pipeline as it stood when it started. If the gate did
+    not make it into the snapshot, editing the pipeline afterwards would decide
+    whether a running build scanned — and a retry would not reproduce it."""
+    pipeline_id = _pipeline_id(client, admin_token, service_id)
+    _save(
+        client,
+        admin_token,
+        pipeline_id,
+        {
+            "stages": [
+                {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["mock"]},
+                {
+                    "name": "Build Image",
+                    "stageType": "container_image",
+                    "runnerLabels": ["mock"],
+                    "imageScan": {"enabled": True, "threshold": "critical", "onFail": "block"},
+                },
+            ]
+        },
+    )
+    build_id = client.post(
+        f"/api/ci/services/{service_id}/builds",
+        json={"branch": "master"},
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]["id"]
+
+    with app.app_context():
+        snapshot = db.session.get(CiBuild, build_id).pipeline_snapshot
+        gate = next(
+            stage["imageScan"]
+            for stage in snapshot["stages"]
+            if stage["name"] == "Build Image"
+        )
+        assert gate["enabled"] is True
+        assert gate["threshold"] == "critical"

@@ -48,6 +48,7 @@ def _execution(position, stage_type="command", **kw):
         repository_url="https://bitbucket.org/areeba/payment-service.git",
         branch="develop",
         registry=kw.get("registry"),
+        image_scan=kw.get("image_scan"),
         callback_url="http://backend:5000/api/ci/worker",
         callback_token="the-callback-token",
     )
@@ -216,6 +217,181 @@ def test_buildkit_stage_uses_client_only_and_docker_config(monkeypatch):
     egress = json.dumps(policy["spec"]["egress"])
     assert "kubesight-buildkit" in egress
     assert "8443" in egress
+
+
+# ---------------------------------------------------------------------------
+# Image scanning — the gate between build and push
+#
+# The property under test throughout is ORDER: the push must be unreachable
+# from a failed scan. Asserting that the right flags are present is not enough,
+# because a script with all the right commands in the wrong order would pass
+# that and push a vulnerable image.
+# ---------------------------------------------------------------------------
+
+_SCAN_REGISTRY = {
+    "host": "nexus.company.local", "port": 8443, "repository": "payment-service",
+    "tag": "develop-3", "dockerfile": "Dockerfile", "username": "ci",
+    "password": "reg-pass", "verifyTls": False, "connectionId": 1,
+}
+
+
+def _scanned_job(monkeypatch, **scan):
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", "tcp://buildkitd.kubesight-buildkit.svc.cluster.local:1234")
+    gate = {"enabled": True, "scanner": "trivy", "threshold": "critical",
+            "onFail": "block", "ignoreUnfixed": False}
+    gate.update(scan)
+    first = _plan(
+        _execution(0, "checkout"),
+        _execution(1, "container_image", registry=_SCAN_REGISTRY, image_scan=gate),
+    )
+    return k8s.build_job_resources(first)
+
+
+def _scan_script(monkeypatch, **scan):
+    _, _, job = _scanned_job(monkeypatch, **scan)
+    return job["spec"]["template"]["spec"]["initContainers"][1]["command"][2]
+
+
+def test_scanned_image_stage_builds_to_an_archive_and_never_pushes_from_buildkit(monkeypatch):
+    """BuildKit must not push. If it did, the scan would be an audit of an
+    image that is already in the registry, not a gate in front of it."""
+    script = _scan_script(monkeypatch)
+
+    assert "push=true" not in script
+    assert "type=docker,name=nexus.company.local/payment-service:develop-3," in script
+    assert "dest=/workspace/.kubesight/image-1.tar" in script
+
+
+def test_scan_sits_between_the_build_and_the_push(monkeypatch):
+    script = _scan_script(monkeypatch)
+
+    build = script.index("buildctl --addr")
+    scan = script.index("trivy image --input")
+    gate = script.index("trivy convert")
+    push = script.index("crane push")
+    assert build < scan < gate < push
+
+    # And the blocking exit is above the push, so a failed gate cannot reach it.
+    blocked = script.index("Scan BLOCKED the push")
+    assert blocked < push
+
+
+def test_blocking_gate_exits_before_the_push(monkeypatch):
+    script = _scan_script(monkeypatch, threshold="high", onFail="block")
+
+    assert "trivy convert --format table --severity CRITICAL,HIGH --exit-code 1" in script
+    # The verdict branch exits; it does not merely warn.
+    verdict = script[script.index('if [ "$KS_SCAN_RC" -ne 0 ]'):script.index("crane push")]
+    assert "exit 1" in verdict
+
+
+def test_warn_gate_reports_and_still_pushes(monkeypatch):
+    script = _scan_script(monkeypatch, onFail="warn")
+
+    verdict = script[script.index('if [ "$KS_SCAN_RC" -ne 0 ]'):script.index("crane push")]
+    assert "exit 1" not in verdict
+    assert "set to warn" in verdict
+
+
+def test_report_is_collected_whether_or_not_the_gate_passed(monkeypatch):
+    """The report is a declared artifact, and stages exit 0 so the collector
+    always runs — a blocked build is exactly when somebody wants to read it."""
+    _, _, job = _scanned_job(monkeypatch)
+    collector = job["spec"]["template"]["spec"]["containers"][0]
+    specs = json.loads(_env_map(collector)["KUBESIGHT_ARTIFACTS"])
+
+    assert {
+        "path": "/workspace/.kubesight/scan-1.json",
+        "type": "scan-report",
+        "name": "payment-service-scan",
+        "workdir": "",
+        "stagePosition": 1,
+    } in specs
+
+
+def test_scanned_stage_uses_the_tools_image_and_keeps_the_restricted_context(monkeypatch):
+    monkeypatch.setenv("CI_IMAGE_TOOLS_IMAGE", "registry.areeba.com/kubesight-ci-imagetools:v1")
+    _, _, job = _scanned_job(monkeypatch)
+    stage = job["spec"]["template"]["spec"]["initContainers"][1]
+
+    assert stage["image"] == "registry.areeba.com/kubesight-ci-imagetools:v1"
+    # Scanning buys no extra privilege: it is still the same locked-down stage.
+    assert stage["securityContext"]["allowPrivilegeEscalation"] is False
+    assert stage["securityContext"]["runAsUser"] == 65532
+    assert stage["securityContext"]["readOnlyRootFilesystem"] is True
+    # Trivy's cache and scratch must be somewhere writable, or a read-only root
+    # filesystem turns every scan into an unexplained failure.
+    env = _env_map(stage)
+    assert env["TRIVY_TEMP_DIR"] == "/tmp"
+    assert env["TRIVY_CACHE_DIR"]
+
+
+def test_missing_tooling_fails_the_stage_rather_than_pushing_unscanned(monkeypatch):
+    script = _scan_script(monkeypatch)
+
+    guard = script[: script.index("buildctl --addr")]
+    assert "command -v" in guard
+    for tool in ("buildctl", "trivy", "crane"):
+        assert tool in guard
+    assert "exit 1" in guard
+
+
+def test_scanned_stage_gets_room_for_the_archive(monkeypatch):
+    """The image is parked on /workspace between build and push. Both ceilings
+    have to allow for it — kubelet evicts on whichever is hit first."""
+    monkeypatch.delenv("CI_STAGE_EPHEMERAL_LIMIT", raising=False)
+    monkeypatch.delenv("CI_WORKSPACE_SIZE_LIMIT", raising=False)
+    _, _, job = _scanned_job(monkeypatch)
+    spec = job["spec"]["template"]["spec"]
+
+    stage = spec["initContainers"][1]
+    assert stage["resources"]["limits"]["ephemeral-storage"] == "8Gi"
+    workspace = next(v for v in spec["volumes"] if v["name"] == "workspace")
+    assert workspace["emptyDir"]["sizeLimit"] == "8Gi"
+
+    # The compile stage beside it keeps the ordinary limit — the raise is for
+    # the stage that holds an image, not for every container in the pod.
+    assert spec["initContainers"][0]["resources"]["limits"]["ephemeral-storage"] == "2Gi"
+
+
+def test_unscanned_stage_is_byte_for_byte_what_it_was(monkeypatch):
+    """Turning the gate off must be a true rollback, not a similar-looking
+    second path."""
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", "tcp://buildkitd:1234")
+    execution = _execution(1, "container_image", registry=_SCAN_REGISTRY)
+    meta = "/workspace/.kubesight/image-meta-1.json"
+
+    assert k8s.image_stage_script(execution, meta) == (
+        "mkdir -p /workspace/.kubesight\n" + k8s._buildctl_args(execution, meta)
+    )
+    # And an explicitly disabled gate is the same as no gate.
+    off = _execution(1, "container_image", registry=_SCAN_REGISTRY,
+                     image_scan={"enabled": False, "threshold": "critical"})
+    assert k8s.image_stage_script(off, meta) == k8s.image_stage_script(execution, meta)
+
+
+def test_digest_recorded_is_the_one_the_registry_returned(monkeypatch):
+    """The artifact record must name the manifest that is actually pullable,
+    not the digest of a local archive the registry never saw."""
+    script = _scan_script(monkeypatch)
+
+    assert "KS_DIGEST=$(crane digest --insecure nexus.company.local/payment-service:develop-3)" in script
+    assert script.index("crane push") < script.index("KS_DIGEST=$(crane digest")
+    assert "> /workspace/.kubesight/image-meta-1.json" in script
+
+
+def test_templated_tag_resolves_once_for_archive_scan_and_push(monkeypatch):
+    """A tag resolved twice could name two different images: one scanned, one
+    pushed."""
+    registry = {**_SCAN_REGISTRY, "tag": "V${APP_VERSION}-7", "tagIsTemplate": True}
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", "tcp://buildkitd:1234")
+    execution = _execution(1, "container_image", registry=registry,
+                           image_scan={"enabled": True, "threshold": "critical", "onFail": "block"})
+    script = k8s.image_stage_script(execution, "/workspace/.kubesight/image-meta-1.json")
+
+    assert script.count("KS_TAG=$(printf") == 1
+    assert script.index("KS_TAG=$(printf") < script.index("buildctl --addr")
+    assert "nexus.company.local/payment-service:$KS_TAG" in script
 
 
 def test_supported_stage_types_follow_buildkit_configuration(monkeypatch):
@@ -758,10 +934,16 @@ def test_no_cache_volume_unless_a_storage_class_is_configured(monkeypatch):
     stage = spec["initContainers"][1]
     env = _env_map(stage)
     assert env["KUBESIGHT_CACHE"] == ""
-    # No tool may be pointed at /cache when there is no /cache to point at.
-    for name in ("GRADLE_USER_HOME", "MAVEN_OPTS", "npm_config_cache", "XDG_CACHE_HOME"):
+    assert env["KUBESIGHT_CACHE_DIR"] == ""
+    # No tool may be pointed at the cache when there is no cache to point at.
+    for name in ("GRADLE_USER_HOME", "MAVEN_OPTS", "npm_config_cache", "XDG_CACHE_HOME",
+                 "GRADLE_BUILD_CACHE_DIR", "DC_DATA_DIR", "SEMGREP_CACHE_DIR",
+                 "BUILDKIT_CACHE_DIR"):
         assert name not in env
     assert "fsGroup" not in spec["securityContext"]
+    # And the prep block is inert rather than absent: one script for every
+    # service, doing nothing when the variable it reads is empty.
+    assert 'if [ -n "${KUBESIGHT_CACHE_DIR:-}" ]' in stage["command"][2]
 
 
 def test_cache_volume_is_per_service_and_mounted_everywhere(monkeypatch):
@@ -780,9 +962,13 @@ def test_cache_volume_is_per_service_and_mounted_everywhere(monkeypatch):
     volume = next(v for v in spec["volumes"] if v["name"] == "cache")
     assert volume["persistentVolumeClaim"]["claimName"] == "ci-cache-payment-service"
     for container in spec["initContainers"]:
-        assert {"name": "cache", "mountPath": "/cache"} in container["volumeMounts"]
+        assert {"name": "cache", "mountPath": "/kubesight-cache"} in container["volumeMounts"]
     stage = spec["initContainers"][1]
-    assert next(e for e in stage["env"] if e["name"] == "KUBESIGHT_CACHE")["value"] == "/cache"
+    # Its own claim is isolated already, and it STILL gets a per-service
+    # subtree: one rule for the layout in both storage modes.
+    env = _env_map(stage)
+    assert env["KUBESIGHT_CACHE_DIR"] == "/kubesight-cache/payment-service"
+    assert env["KUBESIGHT_CACHE"] == env["KUBESIGHT_CACHE_DIR"]
 
     claim = k8s.cache_claim("payment-service")
     assert claim["spec"]["accessModes"] == ["ReadWriteOnce"]
@@ -808,11 +994,15 @@ def test_hand_made_claim_is_shared_by_every_service_under_its_own_subtree(monkey
     volume = next(v for v in spec["volumes"] if v["name"] == "cache")
     assert volume["persistentVolumeClaim"]["claimName"] == "ci-cache"
     for container in spec["initContainers"]:
+        assert {"name": "cache", "mountPath": "/kubesight-cache"} in container["volumeMounts"]
+        # The same claim again at the path it used to live at, so a pipeline
+        # that still hardcodes /cache/<slug> reads the same warm directories.
         assert {"name": "cache", "mountPath": "/cache"} in container["volumeMounts"]
 
     # One claim for every service, so each is confined to its own subtree
     # rather than sharing another service's lock files.
-    assert _env_map(spec["initContainers"][1])["KUBESIGHT_CACHE"] == "/cache/payment-service"
+    env = _env_map(spec["initContainers"][1])
+    assert env["KUBESIGHT_CACHE_DIR"] == "/kubesight-cache/payment-service"
 
     # uid 65532 cannot chown a volume that arrives owned by root, so it is
     # handed over by group instead.
@@ -833,7 +1023,7 @@ def test_every_known_build_tool_is_pointed_at_the_cache(monkeypatch):
     )
     _, _, job = k8s.build_job_resources(first)
     env = _env_map(job["spec"]["template"]["spec"]["initContainers"][1])
-    base = "/cache/payment-service"
+    base = "/kubesight-cache/payment-service"
 
     assert env["MAVEN_OPTS"] == f"-Dmaven.repo.local={base}/maven"
     assert env["GRADLE_USER_HOME"] == f"{base}/gradle"
@@ -847,15 +1037,19 @@ def test_every_known_build_tool_is_pointed_at_the_cache(monkeypatch):
     assert env["COMPOSER_CACHE_DIR"] == f"{base}/composer"
     assert env["NUGET_PACKAGES"] == f"{base}/nuget"
     assert env["XDG_CACHE_HOME"] == f"{base}/xdg"
+    assert env["GRADLE_BUILD_CACHE_DIR"] == f"{base}/gradle-build-cache"
+    assert env["DC_DATA_DIR"] == f"{base}/dependency-check-data"
+    assert env["SEMGREP_CACHE_DIR"] == f"{base}/semgrep"
+    assert env["BUILDKIT_CACHE_DIR"] == f"{base}/buildkit"
 
-    # A per-service dynamic claim is already isolated, so it keeps the bare
-    # /cache paths that pipelines written before this point at.
+    # A per-service dynamic claim is isolated by its claim, and gets the same
+    # per-service subtree anyway — one layout, whichever mode made the volume.
     monkeypatch.delenv("CI_CACHE_CLAIM_NAME", raising=False)
     monkeypatch.setenv("CI_CACHE_STORAGE_CLASS", "nfs-client")
     _, _, job = k8s.build_job_resources(first)
     env = _env_map(job["spec"]["template"]["spec"]["initContainers"][1])
-    assert env["GRADLE_USER_HOME"] == "/cache/gradle"
-    assert env["KUBESIGHT_CACHE"] == "/cache"
+    assert env["GRADLE_USER_HOME"] == f"{base}/gradle"
+    assert env["KUBESIGHT_CACHE_DIR"] == base
 
 
 def test_a_stage_environment_still_beats_the_injected_cache_paths(monkeypatch):

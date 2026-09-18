@@ -145,6 +145,10 @@ def pipeline_stage_to_dict(row: CiPipelineStage) -> Dict[str, Any]:
         "hostAliases": _json_list(row.host_aliases),
         # NULL means "always runs"; the editor renders that as no condition.
         "runCondition": row.run_condition if isinstance(row.run_condition, dict) else None,
+        # NULL means nobody has configured a scan for this image, which the
+        # editor shows as "not configured" rather than as "off" — they are
+        # different answers to "was this image scanned?".
+        "imageScan": row.image_scan if isinstance(row.image_scan, dict) else None,
         "timeoutSeconds": row.timeout_seconds,
         "continueOnFailure": bool(row.continue_on_failure),
         "parallelGroup": row.parallel_group,

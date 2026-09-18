@@ -38,7 +38,7 @@ KUBERNETES = "kubernetes"
 AGENT = "agent"
 
 _WORKSPACE_PATH = re.compile(r"(?<![\w$/])/workspace(?:/|\b)")
-_CACHE_PATH = re.compile(r"(?<![\w$/])/cache(?:/|\b)")
+_CACHE_PATH = re.compile(r"(?<![\w$/])/(?:kubesight-)?cache(?:/|\b)")
 _DOCKER_CMD = re.compile(r"(?<![\w./-])docker(?:-compose)?\s+(build|run|push|images|ps)\b")
 _INSTALL_CMD = re.compile(
     r"(?<![\w./-])(?:sudo\b|apt-get\s+install|apt\s+install|yum\s+install|dnf\s+install|"
@@ -142,10 +142,13 @@ def analyze_stage(stage: Dict[str, Any]) -> List[Dict[str, Any]]:
                 level=WARNING,
                 code="absolute_cache",
                 breaks_on=None,
-                message="/cache exists only while the build cache is switched on, and never "
-                "on an agent.",
-                fix="Use $KUBESIGHT_CACHE and treat an empty value as “no cache”, so the "
-                "stage still runs cold.",
+                message="The cache directory exists only while the build cache is switched "
+                "on, and an agent puts it somewhere else entirely. /cache is also the old "
+                "path, kept mounted only so pipelines like this one keep working.",
+                fix="Use $KUBESIGHT_CACHE_DIR — or the variable for the tool in question: "
+                "$GRADLE_USER_HOME, $GRADLE_BUILD_CACHE_DIR, $DC_DATA_DIR, "
+                "$SEMGREP_CACHE_DIR — and treat an empty value as “no cache”, so the stage "
+                "still runs cold. CI-CACHE.md has the full list.",
             )
         )
 

@@ -541,6 +541,60 @@ ci_artifacts  type=container-image, uri, digest (from containerimage.digest),
               registry, repository, tag, build_id, commit_sha
 ```
 
+### 8a. The scan gate between build and push
+
+A `container_image` stage with `imageScan.enabled` does **not** let buildkitd
+push. The image comes back to the build pod, is scanned there, and is pushed
+only on a pass:
+
+```
+[ ci_build_stage: stage_type=container_image, imageScan.enabled=true ]
+        |
+        v
+Kubernetes Job  image: <CI_IMAGE_TOOLS_IMAGE>   (buildctl + trivy + crane)
+  ONE container, ONE script, in this order:
+        buildctl ... --output type=docker,name=<ref>,dest=/workspace/.kubesight/image-<n>.tar
+        trivy image --input <archive> --format json --output <report>   (all severities)
+        trivy convert --severity <gated> --exit-code 1 <report>          (the verdict)
+          |                                  |
+          | pass                             | fail + onFail=block
+          v                                  v
+        crane push <archive> <ref>         exit 1 — nothing was pushed
+        crane digest <ref>  -> image-meta-<n>.json (the collector reads this)
+        |
+        v
+Nexus                              ci_artifacts: container-image (uri, digest)
+                                                 scan-report    (the full JSON)
+```
+
+Why the image travels through the pod rather than being pushed to a quarantine
+tag and promoted:
+
+- **The registry never holds a failed image.** Not under a temporary tag, not
+  for a moment, with nothing to clean up afterwards. A quarantine tag is
+  cheaper and is a different guarantee.
+- **What was scanned is what is pushed.** The archive crane uploads is the
+  archive Trivy read. A rebuild-before-push would be a second image, and a
+  Dockerfile with `RUN apt-get update` does not produce the same one twice.
+
+Why the scan is a FIELD on the image stage and not a stage of its own: a
+separate stage can be reordered, disabled or deleted while the push it was
+meant to guard carries on. Here the push is physically below the verdict in one
+script, and one stage is still one container, one status and one log.
+
+The costs, stated:
+- The image transfers buildkitd -> pod -> registry instead of straight to the
+  registry, so a large image spends an extra minute or two and loses BuildKit's
+  layer-level dedup against the registry on push.
+- The archive sits on `/workspace` between build and push, so both the
+  workspace `sizeLimit` and the stage's ephemeral-storage limit have to allow
+  for it (`CI_IMAGE_SCAN_WORKSPACE_SIZE_LIMIT`, `CI_IMAGE_SCAN_EPHEMERAL_LIMIT`,
+  both 8Gi by default and both raised for scanned stages only).
+
+Off unless armed per stage, because arming it by default would start failing
+builds for every service that never customised its pipeline, on the say-so of a
+scanner image the installation may not have mirrored.
+
 Why not the alternatives:
 - **DinD** — requires `privileged: true`. Rejected.
 - **Host docker socket mount** — root-equivalent on the node. Rejected.

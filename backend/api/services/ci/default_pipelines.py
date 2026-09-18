@@ -394,6 +394,8 @@ def resolve_default_pipeline(
                     "runnerLabels": ["linux"],
                     "commands": [],
                     "env": {"DOCKERFILE_PATH": dockerfile},
+                    # Pre-filled and off. See templates.default_image_scan.
+                    "imageScan": templates.default_image_scan(),
                     "timeoutSeconds": 2400,
                 },
             ],

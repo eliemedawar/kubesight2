@@ -21,6 +21,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from ...audit import log_audit
 from ...db import db
 from ...models_ci import (
+    IMAGE_SCAN_ON_FAIL,
+    IMAGE_SCAN_SEVERITIES,
+    IMAGE_SCANNERS,
     RUNNER_TYPES,
     STAGE_TYPES,
     CiPipeline,
@@ -456,6 +459,62 @@ def _check_image_tag_template(env: Dict[str, str], stage_name: str) -> None:
         )
 
 
+def _image_scan(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, Any]]:
+    """Normalize a container_image stage's scan gate, or None.
+
+    None and ``{"enabled": false}`` are different things and both are kept:
+    None is "nobody has considered scanning this", false is "somebody looked at
+    it and turned it off". The editor shows them differently and the stage log
+    says which one it is, because "the scan did not run" needs a reason.
+
+    Rejected on a non-image stage rather than ignored. Silently dropping a gate
+    somebody configured is the one failure mode that matters here — they would
+    believe the image was scanned.
+    """
+    if value in (None, "", {}):
+        return None
+    if not isinstance(value, dict):
+        raise PipelineError(f"Stage '{stage_name}' has an invalid image scan configuration.")
+    if stage_type != "container_image":
+        raise PipelineError(
+            f"Stage '{stage_name}' is a {stage_type} stage, so it builds no image to scan. "
+            "Image scanning is configured on the container image stage that pushes it."
+        )
+
+    scanner = _clean(value.get("scanner"), 32).lower() or "trivy"
+    if scanner not in IMAGE_SCANNERS:
+        raise PipelineError(
+            f"Stage '{stage_name}' names an unknown image scanner '{scanner}'. "
+            f"Supported: {', '.join(IMAGE_SCANNERS)}."
+        )
+
+    threshold = _clean(value.get("threshold"), 16).lower() or "critical"
+    if threshold not in IMAGE_SCAN_SEVERITIES:
+        raise PipelineError(
+            f"Stage '{stage_name}' has an unknown scan threshold '{threshold}'. "
+            f"Supported: {', '.join(IMAGE_SCAN_SEVERITIES)}."
+        )
+
+    on_fail = _clean(value.get("onFail"), 16).lower() or "block"
+    if on_fail not in IMAGE_SCAN_ON_FAIL:
+        raise PipelineError(
+            f"Stage '{stage_name}' has an unknown scan failure policy '{on_fail}'. "
+            f"Supported: {', '.join(IMAGE_SCAN_ON_FAIL)}."
+        )
+
+    return {
+        "enabled": value.get("enabled") is not False,
+        "scanner": scanner,
+        "threshold": threshold,
+        "onFail": on_fail,
+        # A CVE with no released fix cannot be acted on by rebuilding, so a gate
+        # that counts it blocks a build nobody can unblock. Off by default all
+        # the same: ignoring unfixed findings is a policy choice, not a default
+        # KubeSight makes on somebody's behalf.
+        "ignoreUnfixed": bool(value.get("ignoreUnfixed")),
+    }
+
+
 def _resources(value: Any) -> Optional[Dict[str, str]]:
     if not isinstance(value, dict):
         return None
@@ -526,6 +585,7 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         "resources": _resources(payload.get("resources")),
         "host_aliases": _host_aliases(payload.get("hostAliases"), name),
         "run_condition": _run_condition(payload.get("runCondition"), name),
+        "image_scan": _image_scan(payload.get("imageScan"), stage_type, name),
         "timeout_seconds": timeout,
         "continue_on_failure": bool(payload.get("continueOnFailure")),
         "parallel_group": _clean(payload.get("parallelGroup"), 64) or None,

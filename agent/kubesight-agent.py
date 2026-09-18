@@ -525,6 +525,16 @@ def container_tool_env(cache: str) -> Dict[str, str]:
     return {
         "MAVEN_OPTS": "-Dmaven.repo.local=" + cache + "/maven",
         "GRADLE_USER_HOME": cache + "/gradle",
+        # Gradle has no environment variable for its build cache directory, so
+        # on Kubernetes KubeSight writes an init script that reads this one. An
+        # agent build gets the variable but not the init script, so a pipeline
+        # that wants a shared build cache here passes -I itself. Named anyway,
+        # so the same stage text is valid on both runners.
+        "GRADLE_BUILD_CACHE_DIR": cache + "/gradle-build-cache",
+        "DC_DATA_DIR": cache + "/dependency-check-data",
+        "SEMGREP_CACHE_DIR": cache + "/semgrep",
+        "SEMGREP_VERSION_CACHE_PATH": cache + "/semgrep/version",
+        "BUILDKIT_CACHE_DIR": cache + "/buildkit",
         "npm_config_cache": cache + "/npm",
         "YARN_CACHE_FOLDER": cache + "/yarn",
         "PIP_CACHE_DIR": cache + "/pip",
@@ -588,6 +598,9 @@ def container_command(runtime, task, workspace, cache, script, uid_gid=None,
         "KUBESIGHT_WORKSPACE": CONTAINER_WORKSPACE,
         "KUBESIGHT_SOURCE": CONTAINER_SOURCE,
         "KUBESIGHT_CACHE": CONTAINER_CACHE,
+        # The name the Kubernetes runner leads with. Same value; a stage script
+        # written against either one runs unchanged on both runners.
+        "KUBESIGHT_CACHE_DIR": CONTAINER_CACHE,
         "KUBESIGHT_ENV": CONTAINER_BUILD_ENV,
     }
     fixed.update(container_tool_env(CONTAINER_CACHE))

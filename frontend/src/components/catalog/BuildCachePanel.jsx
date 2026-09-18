@@ -151,9 +151,10 @@ export default function BuildCachePanel({ canManage }) {
       </div>
 
       <p className="muted sg-ci-cache-lead">
-        One volume mounted at {cache.mountPath} by every stage, with Maven, Gradle, npm, yarn,
-        pnpm, pip, Go, Cargo, Composer and NuGet pointed into it. Each service caches under{" "}
-        <code>{cache.mountPath}/&lt;service&gt;/</code>.
+        One volume mounted at {cache.mountPath} by every stage, with Gradle, Maven, npm, yarn,
+        pnpm, pip, Go, Cargo, Composer, NuGet, Dependency-Check, Semgrep and BuildKit pointed
+        into it. Each service caches under <code>{cache.mountPath}/&lt;service&gt;/</code>, which
+        a stage script can read as <code>$KUBESIGHT_CACHE_DIR</code>.
       </p>
 
       {error && <p className="banner-message error">{error}</p>}

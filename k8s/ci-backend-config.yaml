@@ -50,6 +50,48 @@ data:
   # k8s/ci-buildkitd.yaml is applied and the buildkitd pod is 1/1 Ready.
   CI_BUILDKIT_ADDR: tcp://buildkitd.kubesight-buildkit.svc.cluster.local:1234
 
+  # --- Image scanning (the gate between build and push) ---------------------
+  # A container_image stage with scanning ARMED does not let buildkitd push at
+  # all: the image comes back to the build pod as an archive, Trivy reads it,
+  # and only a passing verdict reaches the `crane push` on the next line. The
+  # registry never holds an image that failed its own gate, not even briefly.
+  #
+  # Scanning is per stage and OFF until someone arms it in the pipeline editor,
+  # so nothing below changes any build until they do.
+  #
+  # The image carrying buildctl + trivy + crane. Build and mirror it first:
+  #   docker build -f Dockerfile.ci-imagetools \
+  #     -t registry.areeba.com/kubesight-ci-imagetools:v1 .
+  # The code already defaults to exactly this name, so this key is only needed
+  # if you tag it differently. Until the image exists, an ARMED stage fails to
+  # pull and says so; a stage with scanning off is untouched.
+  #   CI_IMAGE_TOOLS_IMAGE: registry.areeba.com/kubesight-ci-imagetools:v1
+  #
+  # Trivy's vulnerability database. On a cluster with no route out, mirror it
+  # and name the mirror, or the first scan spends its timeout reaching a host
+  # it cannot get to:
+  #   CI_TRIVY_DB_REPOSITORY: registry.areeba.com/aquasecurity/trivy-db
+  #   CI_TRIVY_SKIP_DB_UPDATE: "1"
+  # The database is cached on the build cache volume configured below, so it is
+  # fetched once rather than on every build.
+  #
+  # ── READ THIS BEFORE ARMING A GATE ON THIS CLUSTER ────────────────────────
+  # A scanned stage parks the WHOLE IMAGE, uncompressed, on /workspace between
+  # the build and the push. These nodes have ~4.5Gi allocatable ephemeral
+  # storage and CI_WORKSPACE_SIZE_LIMIT below is 2Gi — which fits a checkout
+  # and a jar, and does not fit a typical JVM service image plus its archive.
+  #
+  # So arming a gate here needs one of: nodes with more ephemeral storage, a
+  # smaller image (a JRE base rather than a JDK one is usually most of it), or
+  # the two limits below raised to something the node can actually back. Raised
+  # past what the node has, kubelet evicts the pod mid-build and the only
+  # symptom is a build that died without saying why.
+  #
+  # Defaults KubeSight applies to SCANNED image stages only (every other stage
+  # keeps the values further down):
+  #   CI_IMAGE_SCAN_WORKSPACE_SIZE_LIMIT: 8Gi   # the shared /workspace emptyDir
+  #   CI_IMAGE_SCAN_EPHEMERAL_LIMIT: 8Gi        # that one container's cap
+
   # --- Artifact store -------------------------------------------------------
   # Where uploaded artifacts (jars, reports, APKs) are written. Container
   # images are NOT stored here — only their registry coordinates and digest are

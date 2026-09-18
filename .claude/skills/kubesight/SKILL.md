@@ -17,7 +17,7 @@ one thing — **a service's pipeline**:
 | | |
 |---|---|
 | **You can read** | the catalog, pipelines, builds, stage logs, runners, artifacts, and **a service's source code** at any branch, tag or commit |
-| **You can change** | the stages of a service's pipeline: commands, image, labels, env, timeouts, order, whether a stage is enabled |
+| **You can change** | the stages of a service's pipeline: commands, image, labels, env, timeouts, order, whether a stage is enabled, and whether an image is scanned before it is pushed |
 | **You cannot** | start or cancel a build, create or read a secret, register or delete a service, or touch a cluster |
 
 So: when a pipeline is wrong, fix it. When somebody wants it *run*, tell them —
@@ -32,7 +32,8 @@ error, say which permission is missing rather than trying another tool.
 |---|---|
 | **Service** | One buildable application. Has a slug, which is also its image name. |
 | **Pipeline** | An ordered list of stages. **There is no dependency graph** — order is the only relationship. |
-| **Stage** | One step. `checkout` (KubeSight clones; runs no commands), `command` (a shell script), `container_image` (BuildKit builds the Dockerfile; runs no commands). |
+| **Stage** | One step. `checkout` (KubeSight clones; runs no commands), `command` (a shell script), `container_image` (BuildKit builds the Dockerfile and pushes it; runs no commands). |
+| **Image scan** | A gate *inside* a `container_image` stage, not a stage of its own. Armed, BuildKit does not push at all: the image comes back as an archive, Trivy reads it, and only a pass reaches the push. |
 | **Runner** | Where a stage executes. A stage runs on a runner whose capabilities are a **superset** of that stage's `runnerLabels`. |
 | **Build** | One execution. Renders from a *snapshot* of the pipeline, so editing a pipeline never rewrites history. |
 | **Secret** | Stored encrypted and write-only. A pipeline holds *references*; values are never readable, including by you. |
@@ -108,6 +109,9 @@ kubesight_pipeline_stage_update {service: "payment", stage: "Build JAR",
 kubesight_pipeline_stage_add    {service: "payment", after: "Build JAR",
                                  stage: {name: "Test", stageType: "command",
                                          commands: ["gradle test"]}}
+kubesight_pipeline_stage_update {service: "payment", stage: "Build Image",
+                                 changes: {imageScan: {enabled: true, threshold: "critical",
+                                                       onFail: "block"}}}
 kubesight_pipeline_stage_remove {service: "payment", stage: "Legacy Deploy"}
 kubesight_pipeline_save         {service: "payment", stages: [...]}   ← replaces everything
 ```
@@ -126,6 +130,10 @@ Before you write:
   person to add it.
 - **`kubesight_pipeline_save` discards every existing stage.** Use it to rewrite
   a pipeline wholesale, never to change one thing.
+- **A scan is a field on the image stage, never a stage you add.** There is no
+  `scan` stage to insert between "build" and "push", because build and push are
+  one stage — `imageScan` is what splits them. Adding a stage called "Scan"
+  after the image stage would run *after* the push and gate nothing.
 
 After you write:
 
@@ -159,6 +167,13 @@ Almost always one of three things, in this order of likelihood:
    `kubesight_runners_list`. Remember it is a **superset** test: labels spread
    across two machines match neither.
 3. Every compatible runner is at capacity.
+
+**"Why did the push not happen when the build succeeded?"**
+Read the image stage's log. A blocked scan prints `Scan BLOCKED the push` and
+the stage fails with nothing in the registry — the image was built and thrown
+away, which is the gate working. The findings are on the build as a
+`scan-report` artifact; quote the severities from it rather than guessing which
+CVE was the blocker.
 
 **"Why can't this service build?"**
 `kubesight_service_get` → `blockedReason` is the literal sentence KubeSight
