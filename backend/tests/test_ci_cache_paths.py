@@ -474,8 +474,7 @@ def test_a_stage_reports_the_cache_it_is_using():
     """A cold build and a warm one used to produce identical logs, so "why is
     Gradle still downloading on the second run?" had no answer anywhere."""
     script = _job(_execution())["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
-    assert "[kubesight] Cache: $KUBESIGHT_CACHE_DIR (warm)" in script
-    assert "(empty - this build fills it)" in script
+    assert 'echo "[kubesight] Cache: $KUBESIGHT_CACHE_DIR"' in script
 
 
 def test_a_stage_says_so_when_caching_is_switched_off(monkeypatch):
@@ -504,3 +503,44 @@ def test_every_message_the_build_log_gets_is_ascii():
     """It travels as a shell heredoc inside a JSON Job manifest, through
     whatever the stage image's locale happens to be."""
     assert cache_layout.prep_script().isascii()
+
+
+def test_warmth_is_reported_per_tool_not_as_one_verdict():
+    """The scan stages fill dependency-check-data/ and semgrep/ earlier in the
+    SAME build, so a single warm/cold line reads "warm" while Gradle's own
+    directories are empty and Gradle re-downloads its distribution every run.
+    That is the exact bug this has to be able to show, so it lists both sides."""
+    script = _job(_execution())["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
+    assert 'echo "[kubesight]   warm:' in script
+    assert 'echo "[kubesight]   cold:' in script
+    # Both lists are built from the same probe, so neither can silently omit a
+    # tool: every probed directory lands in exactly one of them.
+    assert 'KS_WARM="$KS_WARM $KS_DIR"' in script
+    assert 'KS_COLD="$KS_COLD $KS_DIR"' in script
+
+
+def test_a_tool_pointed_away_from_the_cache_is_called_out_by_name():
+    """The failure that looks like nothing: volume mounted, writable, full of
+    other tools' files, and one tool cold every build because its variable was
+    overridden."""
+    script = _job(_execution())["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
+    for name, subdir in cache_layout.PATH_VARS:
+        assert f'if [ "${{{name}:-}}" != "$KUBESIGHT_CACHE_DIR/{subdir}" ]; then' in script
+    # It prints the offending VALUE, because the common cause is a literal
+    # "$KUBESIGHT_CACHE_DIR/gradle" that Kubernetes never expanded — invisible
+    # unless you can see the stray dollar sign.
+    assert "${GRADLE_USER_HOME:-(unset)}" in script
+
+
+def test_maven_is_not_checked_as_a_path():
+    """MAVEN_OPTS is a string of JVM flags, not a directory; comparing it to a
+    path would warn on every single build."""
+    assert not any(name == "MAVEN_OPTS" for name, _ in cache_layout.PATH_VARS)
+
+
+def test_the_mismatch_check_matches_what_is_actually_injected():
+    """These two lists drifting apart is how the check starts crying wolf: it
+    would warn about a variable KubeSight itself set to something else."""
+    injected = cache_layout.tool_env("/kubesight-cache/test123")
+    for name, subdir in cache_layout.PATH_VARS:
+        assert injected[name] == f"/kubesight-cache/test123/{subdir}", name

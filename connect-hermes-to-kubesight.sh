@@ -8,7 +8,7 @@
 # It writes three things and changes nothing else:
 #   config.yaml   + an mcp_servers.kubesight block (existing file backed up)
 #   .env          + MCP_KUBESIGHT_API_KEY=<token>          (chmod 600)
-#   skills/kubesight/SKILL.md                              (how to use the tools)
+#   skills/kubesight/                                      (how to use the tools)
 #
 # Two values you must set. The URL is resolved by the HERMES CONTAINER, not by
 # this NFS box — check it from inside the container, not from here.
@@ -85,12 +85,19 @@ else
   echo "wrote      .env         (MCP_KUBESIGHT_API_KEY, mode 600)"
 fi
 
-mkdir -p "$HOME_DIR/skills/kubesight"
-echo "made       skills/kubesight/   — copy SKILL.md into it"
+mkdir -p "$HOME_DIR/skills/kubesight/references"
+echo "made       skills/kubesight/references/   — copy the WHOLE skill directory in"
 
 echo
 echo "Now, in order:"
-echo "  1. Copy SKILL.md into $HOME_DIR/skills/kubesight/"
+echo "  1. Copy the WHOLE skill directory, not just SKILL.md:"
+echo "       cp -r <repo>/.claude/skills/kubesight/. $HOME_DIR/skills/kubesight/"
+echo "     SKILL.md is only a router — it points at references/<domain>.md for"
+echo "     each of the seven tool domains. Copy it alone and Hermes gets a table"
+echo "     of contents with nothing behind it, which is worse than no skill:"
+echo "     it will follow a link, find nothing, and answer from the tool"
+echo "     descriptions alone."
+echo "     Check afterwards:  ls $HOME_DIR/skills/kubesight/references/   (8 files)"
 echo "  2. Check ownership matches the uid Hermes runs as:"
 echo "       ls -ln $HOME_DIR/config.yaml $HOME_DIR/.env"
 echo "  3. From INSIDE the Hermes container, prove it can reach KubeSight:"

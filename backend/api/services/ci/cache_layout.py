@@ -211,6 +211,53 @@ def tool_env(base: str) -> Dict[str, str]:
     }
 
 
+# The variables whose whole job is to name a directory inside the cache, and the
+# subdirectory each one must name. MAVEN_OPTS is left out on purpose: it is a
+# string of JVM flags, not a path, so it cannot be compared this way.
+PATH_VARS = (
+    ("GRADLE_USER_HOME", "gradle"),
+    ("GRADLE_BUILD_CACHE_DIR", "gradle-build-cache"),
+    ("DC_DATA_DIR", "dependency-check-data"),
+    ("SEMGREP_CACHE_DIR", "semgrep"),
+)
+
+
+def _mismatch_checks() -> List[str]:
+    """Shell that says when a tool has been pointed away from the cache.
+
+    This is the failure that looks like nothing at all: the volume is mounted,
+    writable and full of other tools' files, and one tool still starts cold
+    every build because something overrode its variable.
+
+    Two ways that happens, and both are easy to do by accident:
+
+    * a stage's own Environment wins over the injected value, by design — so
+      setting ``GRADLE_USER_HOME`` there REPLACES the correct path;
+    * Kubernetes does not shell-expand environment values. It expands
+      ``$(VAR)``, not ``$VAR``, so an Environment entry of
+      ``$KUBESIGHT_CACHE_DIR/gradle`` reaches the container as that literal
+      string. Gradle then treats it as a relative path, creates it under the
+      workspace, and loses it with the pod. The line below prints the value, so
+      a stray ``$`` is visible rather than inferred.
+
+    ``export`` inside the stage's own commands is fine and is the documented way
+    to do it — a shell runs those, and expands them.
+    """
+    lines: List[str] = []
+    for name, subdir in PATH_VARS:
+        lines.extend(
+            [
+                f'    if [ "${{{name}:-}}" != "$KUBESIGHT_CACHE_DIR/{subdir}" ]; then',
+                f'      echo "[kubesight] {name}=${{{name}:-(unset)}}" >&2',
+                f'      echo "[kubesight]   ^ not $KUBESIGHT_CACHE_DIR/{subdir} - that tool'
+                ' starts cold every build. A stage Environment value overrides the'
+                ' injected one, and Kubernetes does not expand \\$VAR in it." >&2',
+                "    fi",
+            ]
+        )
+    return lines
+
+
 def prep_script(*, gradle_init: bool = True) -> str:
     """Shell that makes this service's subtree exist. Run by every stage.
 
@@ -248,23 +295,32 @@ def prep_script(*, gradle_init: bool = True) -> str:
             # On every stage rather than only the first because the drawer shows
             # ONE stage's log at a time, and the stage somebody opens to ask the
             # question is the slow one, not the checkout.
-            # Warm means a TOOL has written something. Probing the directories
-            # the tools own, never the ones this script just created: `gradle/`
-            # always has an init.d in it by now, so it would report warm on the
-            # very first build and the line would be a lie exactly when it
-            # matters most.
+            # PER-TOOL, not one verdict for the volume.
+            #
+            # A single warm/cold line is worse than useless here: the scan
+            # stages fill dependency-check-data/ and semgrep/ earlier in the
+            # SAME build, so the volume reads "warm" while Gradle's own
+            # directories are empty and Gradle re-downloads its distribution
+            # every time. That is exactly the bug this has to be able to show.
+            #
+            # Probing directories the tools own, never ones prep_script writes
+            # into: `gradle/` holds the init.d created moments ago, so it would
+            # report warm on a first build — the build whose answer matters.
             "    KS_WARM=",
+            "    KS_COLD=",
             "    for KS_DIR in " + " ".join(WARMTH_PROBE_DIRS) + "; do",
             '      if [ -n "$(ls -A "$KUBESIGHT_CACHE_DIR/$KS_DIR" 2>/dev/null)" ]; then',
-            "        KS_WARM=1",
-            "        break",
+            '        KS_WARM="$KS_WARM $KS_DIR"',
+            "      else",
+            '        KS_COLD="$KS_COLD $KS_DIR"',
             "      fi",
             "    done",
-            '    if [ -n "$KS_WARM" ]; then',
-            '      echo "[kubesight] Cache: $KUBESIGHT_CACHE_DIR (warm)"',
-            "    else",
-            '      echo "[kubesight] Cache: $KUBESIGHT_CACHE_DIR (empty - this build fills it)"',
-            "    fi",
+            '    echo "[kubesight] Cache: $KUBESIGHT_CACHE_DIR"',
+            '    echo "[kubesight]   warm:${KS_WARM:- (nothing yet)}"',
+            '    echo "[kubesight]   cold:${KS_COLD:- (none)}"',
+        ]
+        + _mismatch_checks()
+        + [
             "  else",
             '    echo "[kubesight] Cache directory $KUBESIGHT_CACHE_DIR is not writable;'
             ' this build runs cold." >&2',

@@ -31,6 +31,34 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SERVER_NAME = "kubesight"
 SERVER_TITLE = "KubeSight Control Plane"
 
+# What a client is told at ``initialize``, before it has read a single tool
+# description. With seventy-odd tools the expensive mistake is not calling the
+# wrong one — it is reading all of them to find the right one, so this is a map
+# rather than a manifesto.
+INSTRUCTIONS = """KubeSight is a Kubernetes control plane. Its tools are grouped into seven \
+domains; pick the domain first and the tool second.
+
+  ci            services, pipelines, builds, build logs, runners, repository source
+  clusters      clusters, nodes, namespaces, resources, events, topology
+  workloads     what is running, and restart / scale / rollback / exec
+  deploys       apply, dry run, diff, deployment approvals, change bundles, Helm
+  observability pod logs, alerts, alert policies, audit trail, dashboard
+  apps          application intelligence, application services, clients, components
+  platform      registries, ticketing, mobile releases, users, roles, settings
+
+Each tool carries its domain in annotations.kubesightDomain. Start wide, then \
+narrow: kubesight_overview for CI, kubesight_dashboard_summary or \
+kubesight_clusters_list for a cluster.
+
+Reads and writes both run as the token's own user, under the same RBAC as the \
+UI, and tools/list already shows only the tools this token may call. Writes go \
+through the same services the UI posts to, so their gates still apply: a \
+cluster configured to require an approved deployment request refuses a deploy \
+without one — check kubesight_deploy_eligibility first — and a Helm release \
+needs its exact confirmation phrase. Approving a deployment request or a change \
+bundle is deliberately not exposed, because an agent that can both ask and \
+approve is an approval process with one participant."""
+
 # JSON-RPC error codes. -32603 is the catch-all; the rest are the spec's.
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -100,17 +128,11 @@ def handle(
                     "title": SERVER_TITLE,
                     "version": server_version,
                 },
-                "instructions": (
-                    "KubeSight is a Kubernetes control plane: clusters and workloads, "
-                    "a CI service catalog with pipelines and builds, artifacts, "
-                    "runners, and alerts. Start with kubesight_overview for "
-                    "orientation, then narrow with the listing tools. The kubesight_repo_* "
-                    "tools read a service's source at any revision without cloning it. "
-                    "Most tools only read; the four kubesight_pipeline_* editing tools "
-                    "change what a service builds, and nothing here can start a build, "
-                    "read a secret's value or touch a cluster. Every call is scoped to "
-                    "the permissions of the token you are using."
-                ),
+                # Read once, at connect, and then carried for the whole session
+                # — so it is worth the lines. What it buys is routing: an agent
+                # that knows the seven domains picks the right tool from a list
+                # of seventy without reading seventy descriptions first.
+                "instructions": INSTRUCTIONS,
             },
         )
 

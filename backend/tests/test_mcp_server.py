@@ -9,12 +9,21 @@ reports points somewhere else entirely.
 
 The **boundary** has to be right or an agent sees more than the person who gave
 it a token, or changes more than it was meant to. Every tool checks a
-permission, only the pipeline editing tools write, and each tool's annotations
-say which it is — all three are asserted here rather than left to the reading of
-the module.
+permission, the tools that write are enumerated rather than counted, and each
+tool's annotations say which it is — all three are asserted here rather than
+left to the reading of the module.
+
+The **surface** is the third thing, and it is new. Eighty tools is past what
+anybody verifies by hand, so the last two tests in this file call every read
+tool once and refuse to let one go untested quietly. They catch the cheap
+mistake this kind of change makes: a relative import that is one dot short, or
+a service signature that moved. Both raise on the first call and never before.
 """
 
 from __future__ import annotations
+
+import pathlib
+import re
 
 import pytest
 
@@ -84,11 +93,16 @@ def test_initialize_agrees_a_version_and_advertises_only_what_exists(client, adm
     assert result["serverInfo"]["name"] == "kubesight"
     assert result["capabilities"] == {"tools": {"listChanged": False}}
     assert "resources" not in result["capabilities"]
-    # The instructions have to say what the write tools are, and what is still
-    # out of reach — a model that assumes it can start a build wastes a call and
-    # tells somebody it did something it did not.
-    assert "kubesight_pipeline_" in result["instructions"]
-    assert "start a build" in result["instructions"]
+    # The instructions are read once and carried all session, and with a surface
+    # this wide their job is routing: name every domain, so a model picks the
+    # right tool out of eighty without reading eighty descriptions.
+    instructions = result["instructions"]
+    for domain in ("ci", "clusters", "workloads", "deploys", "observability", "apps", "platform"):
+        assert domain in instructions
+    # And say where the gates are. A model that assumes it can deploy to an
+    # approval-gated cluster wastes a call and reports a rule as a failure.
+    assert "kubesight_deploy_eligibility" in instructions
+    assert "approv" in instructions.lower()
 
 
 def test_an_unfamiliar_protocol_version_is_answered_not_refused(client, admin_token):
@@ -152,7 +166,12 @@ def test_discovery_needs_no_token_and_leaks_nothing(client):
     assert payload["readOnly"] is False
     # "readOnly: false" alone says a write exists but not how far it reaches,
     # and that second thing is what somebody deciding to hand over a token needs.
-    assert "ci_pipelines:edit" in payload["writes"]
+    # With writes scoped by the token rather than by a fixed list, the honest
+    # summary is the shape of the gates: permissions, and the approvals that
+    # survive them.
+    assert "permissions" in payload["writes"]
+    assert "approv" in payload["writes"].lower()
+    assert payload["domains"]
     assert "tools" not in payload
 
 
@@ -184,14 +203,78 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         if not entry["annotations"]["readOnlyHint"]
     }
     # Enumerated, not counted: a new write tool should have to be added here
-    # deliberately rather than slipping in under a threshold.
+    # deliberately rather than slipping in under a threshold. This list IS the
+    # review — everything an agent holding an admin token can change.
     assert writing == {
+        # CI: the pipeline, and running one
         "kubesight_pipeline_save",
         "kubesight_pipeline_stage_add",
         "kubesight_pipeline_stage_remove",
         "kubesight_pipeline_stage_update",
+        "kubesight_build_run",
+        "kubesight_build_cancel",
+        "kubesight_build_retry",
+        # Workloads
+        "kubesight_workload_restart",
+        "kubesight_workload_scale",
+        "kubesight_workload_rollback",
+        "kubesight_resource_restart",
+        "kubesight_pod_exec",
+        # Deploys, and asking to be allowed one
+        "kubesight_deploy_apply",
+        "kubesight_deployment_request_create",
+        "kubesight_helm_upgrade",
+        "kubesight_helm_rollback",
+        "kubesight_helm_uninstall",
+        # Observability
+        "kubesight_alert_policy_set_enabled",
+        # Platform
+        "kubesight_automation_run_start",
+        "kubesight_automation_run_cancel",
     }
-    assert all(name.startswith("kubesight_pipeline") for name in writing)
+
+
+def test_approving_a_change_is_not_something_an_agent_can_do(client, admin_token):
+    """An agent that can both request a deploy and approve it is an approval
+    process with one participant. The request tool exists; no voting tool does,
+    even for a token that holds the managing permission."""
+    names = {
+        entry["name"]
+        for entry in rpc(client, admin_token, "tools/list").get_json()["result"]["tools"]
+    }
+    assert "kubesight_deployment_request_create" in names
+    for forbidden in ("approve", "reject", "decline", "vote"):
+        assert not any(forbidden in name for name in names)
+
+
+def test_the_tool_list_is_scoped_to_what_the_token_may_call(client, admin_token, viewer_token):
+    """Not the security boundary — ``call`` re-checks, and that is. This is the
+    economy one: a viewer's agent should not spend context reading about tools
+    that will refuse it, or plan around them."""
+    def names(token):
+        return {
+            entry["name"]
+            for entry in rpc(client, token, "tools/list").get_json()["result"]["tools"]
+        }
+
+    admin_names, viewer_names = names(admin_token), names(viewer_token)
+    assert viewer_names < admin_names
+    assert "kubesight_services_list" in viewer_names
+    assert "kubesight_pod_exec" not in viewer_names
+
+
+def test_every_tool_names_a_domain_the_skill_is_split_by(client, admin_token):
+    """The grouping is what makes eighty tools navigable: it is the same seven
+    words the skill's reference files are named after, so an agent reads one
+    page rather than all of them."""
+    from api.mcp.tools import DOMAINS
+
+    tools = rpc(client, admin_token, "tools/list").get_json()["result"]["tools"]
+    seen = {entry["annotations"]["kubesightDomain"] for entry in tools}
+    assert seen <= set(DOMAINS)
+    # Every declared domain actually has tools in it — an empty one is a
+    # reference file nobody will ever need.
+    assert seen == set(DOMAINS)
 
 
 def test_nothing_that_reads_is_marked_destructive(client, admin_token):
@@ -784,3 +867,301 @@ def test_a_write_answers_with_what_it_changed(client, admin_token, service):
     )
     assert "saved" in result["content"][0]["text"]
     assert "Build JAR" in result["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# The whole read surface, once
+# ---------------------------------------------------------------------------
+
+# Plausible arguments for every required field any read tool declares. A tool
+# whose required fields are not all in here is skipped and NAMED by the test
+# below — which is how a new tool with an unfamiliar argument gets noticed
+# instead of quietly going untested.
+_SMOKE_ARGUMENTS = {
+    "cluster": "prod-us-east",
+    "namespace": "default",
+    "service": "issuing",
+    "buildId": 1,
+    "kind": "pods",
+    "name": "anything",
+    "pod": "anything",
+    "workload": "anything",
+    "inventoryId": "prod-us-east/default/anything",
+    "applicationId": 1,
+    "analysisId": 1,
+    "serviceId": 1,
+    "appId": 1,
+    "bundleId": 1,
+    "policyId": 1,
+    "stageId": 1,
+    "release": "anything",
+    "provider": "zoho",
+    "image": "registry.example.com/app:1.0.0",
+    "path": "README.md",
+    "yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n",
+}
+
+
+def _read_tools():
+    from api.mcp.tools.registry import _REGISTRY
+
+    return {name: entry for name, entry in _REGISTRY.items() if not entry["write"]}
+
+
+def test_every_read_tool_actually_runs(client, admin_token, service):
+    """Registration proves a tool exists; only a call proves it works.
+
+    Eighty tools is well past the number anybody checks by hand, and the failure
+    this catches is the cheap, silent one: a mistyped relative import or a
+    service signature that moved. Either raises on the first call and never
+    before it.
+
+    A ToolError counts as working. "No pod 'anything'" is the tool doing its
+    job with fixture arguments; an ImportError or a TypeError is not.
+    """
+    broken = []
+    ran = 0
+    for name, entry in sorted(_read_tools().items()):
+        required = set((entry["schema"] or {}).get("required") or [])
+        if not required <= set(_SMOKE_ARGUMENTS):
+            continue
+        arguments = {key: _SMOKE_ARGUMENTS[key] for key in required}
+        result = call_tool(client, admin_token, name, arguments)
+        ran += 1
+        if result.get("isError"):
+            text = result["content"][0]["text"]
+            # The generic message the protocol substitutes for an unexpected
+            # exception. A refusal written by the tool itself reads differently
+            # and is fine.
+            if "failed inside KubeSight" in text:
+                broken.append((name, text))
+    assert not broken, f"tools that raised rather than refused: {broken}"
+    assert ran == len(_read_tools()), f"{ran} of {len(_read_tools())} read tools exercised"
+
+
+def test_no_read_tool_is_left_untested_without_saying_so(client, admin_token):
+    """The skip list above is only honest if it is short and deliberate.
+
+    A tool skipped here is a tool nobody is checking, so the set is pinned:
+    adding one means adding its argument to _SMOKE_ARGUMENTS or admitting here
+    that it is not covered.
+    """
+    untested = {
+        name
+        for name, entry in _read_tools().items()
+        if not set((entry["schema"] or {}).get("required") or []) <= set(_SMOKE_ARGUMENTS)
+    }
+    assert untested == set(), f"read tools with unmapped required arguments: {sorted(untested)}"
+
+
+# ---------------------------------------------------------------------------
+# The skill and the server, kept in step
+# ---------------------------------------------------------------------------
+
+_SKILL_ROOT = pathlib.Path(__file__).resolve().parents[2] / ".claude" / "skills" / "kubesight"
+
+
+def _skill_files():
+    return [_SKILL_ROOT / "SKILL.md", *sorted((_SKILL_ROOT / "references").glob("*.md"))]
+
+
+@pytest.mark.skipif(not _SKILL_ROOT.exists(), reason="skill not installed in this checkout")
+def test_the_skill_names_no_tool_that_does_not_exist():
+    """A skill that teaches a tool name the server does not have sends an agent
+    into a refusal, and it will not learn from it — the name reads authoritative
+    because it came from its own instructions."""
+    from api.mcp.tools.registry import _REGISTRY
+
+    mentioned = set()
+    for path in _skill_files():
+        mentioned |= set(re.findall(r"kubesight_[a-z_]+\b", path.read_text(encoding="utf-8")))
+    # Prose writes `kubesight_workload_*` for a family; the trailing underscore
+    # survives the word boundary and is not a tool name.
+    mentioned = {name for name in mentioned if not name.endswith("_")}
+    assert mentioned <= set(_REGISTRY), f"skill names tools that do not exist: {sorted(mentioned - set(_REGISTRY))}"
+
+
+@pytest.mark.skipif(not _SKILL_ROOT.exists(), reason="skill not installed in this checkout")
+def test_every_tool_is_taught_somewhere_in_the_skill():
+    """The other direction. A tool nothing documents is a tool an agent reaches
+    for by guessing, which is how it gets used wrong rather than not at all."""
+    from api.mcp.tools.registry import _REGISTRY
+
+    text = "\n".join(path.read_text(encoding="utf-8") for path in _skill_files())
+    missing = sorted(name for name in _REGISTRY if name not in text)
+    assert not missing, f"tools no reference file mentions: {missing}"
+
+
+@pytest.mark.skipif(not _SKILL_ROOT.exists(), reason="skill not installed in this checkout")
+def test_there_is_one_reference_file_per_domain():
+    """The split is the point: an agent reads one page, not seven. That only
+    holds if every domain has a page and no page is orphaned."""
+    from api.mcp.tools import DOMAINS
+
+    present = {path.stem for path in (_SKILL_ROOT / "references").glob("*.md")}
+    # `writing` is cross-cutting rather than a domain — it governs every write.
+    assert present == set(DOMAINS) | {"writing"}
+
+
+@pytest.mark.skipif(not _SKILL_ROOT.exists(), reason="skill not installed in this checkout")
+def test_the_router_stays_small_enough_to_always_load():
+    """SKILL.md is in context for every question whether or not KubeSight comes
+    up. Its job is to route in a page; a reference file that migrated into it
+    would undo the split."""
+    body = (_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    assert len(body.splitlines()) < 120
+    for domain in ("ci", "clusters", "workloads", "deploys", "observability", "apps", "platform"):
+        assert f"references/{domain}.md" in body
+
+
+def test_a_service_refusal_keeps_its_own_words(client, admin_token):
+    """The services return ``(data, error, status)`` and their error strings are
+    written for a person reading the UI — which makes them exactly right to
+    repeat. A wrapper that replaced them with its own wording would throw away
+    the only part of the answer that is actionable."""
+    result = call_tool(
+        client, admin_token, "kubesight_pod_logs",
+        {"cluster": "prod-us-east", "namespace": "default", "pod": "no-such-pod"},
+    )
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "no-such-pod" in text
+    # Not the generic "KubeSight refused the request" fallback, which is what a
+    # wrongly-unwrapped (Response, status) tuple silently produces.
+    assert "refused the request" not in text
+
+
+def test_a_bare_forbidden_is_expanded_into_something_actionable(client, viewer_token):
+    """Services answer access denials with the single word "Forbidden". An agent
+    cannot tell a missing permission from an out-of-scope namespace from that,
+    so it says "access denied" and nobody is any further forward."""
+    from api.mcp.tools.common import unwrap
+    from api.mcp.protocol import ToolError
+
+    with pytest.raises(ToolError) as caught:
+        unwrap((None, "Forbidden", 403), what="thing")
+    message = str(caught.value)
+    assert "permission" in message and "namespace" in message
+    assert "kubesight_roles_list" in message
+
+
+# ---------------------------------------------------------------------------
+# The new domains, answering rather than merely not crashing
+# ---------------------------------------------------------------------------
+
+def test_a_cluster_can_be_named_the_way_a_person_says_it(client, admin_token):
+    """Cluster ids are not what anybody says out loud. Making an agent call a
+    listing tool to translate a name costs a round trip on nearly every
+    cluster-shaped question."""
+    listed = call_tool(client, admin_token, "kubesight_clusters_list")
+    first = listed["structuredContent"]["clusters"][0]
+
+    by_id = call_tool(client, admin_token, "kubesight_cluster_nodes", {"cluster": first["id"]})
+    by_name = call_tool(client, admin_token, "kubesight_cluster_nodes", {"cluster": first["name"]})
+    assert not by_id.get("isError") and not by_name.get("isError")
+    assert by_id["structuredContent"]["clusterId"] == by_name["structuredContent"]["clusterId"]
+
+
+def test_an_unknown_cluster_lists_the_real_ones(client, admin_token):
+    """The agent asked with the word a person used. The useful answer to a wrong
+    word is the right ones, not 'not found'."""
+    result = call_tool(client, admin_token, "kubesight_cluster_nodes", {"cluster": "nope"})
+    assert result["isError"] is True
+    assert "prod-us-east" in result["content"][0]["text"]
+
+
+def test_namespace_resources_can_be_narrowed_to_one_kind(client, admin_token):
+    """Without a kind the payload is every kind at once, which is most of a
+    context window and almost none of it the answer."""
+    everything = call_tool(
+        client, admin_token, "kubesight_namespace_resources",
+        {"cluster": "prod-us-east", "namespace": "payments"},
+    )["structuredContent"]
+    just_pods = call_tool(
+        client, admin_token, "kubesight_namespace_resources",
+        {"cluster": "prod-us-east", "namespace": "payments", "kind": "pods"},
+    )["structuredContent"]
+
+    assert set(just_pods["counts"]) == {"pods"}
+    assert set(everything["counts"]) > {"pods"}
+    assert just_pods["counts"]["pods"] == everything["counts"]["pods"]
+
+
+def test_an_unknown_resource_kind_names_the_real_ones(client, admin_token):
+    result = call_tool(
+        client, admin_token, "kubesight_namespace_resources",
+        {"cluster": "prod-us-east", "namespace": "payments", "kind": "widgets"},
+    )
+    assert result["isError"] is True
+    assert "deployments" in result["content"][0]["text"]
+
+
+def test_logs_can_be_filtered_before_they_are_tailed(client, admin_token):
+    """Filtering after the tail throws away the matches that were further back,
+    which is exactly the case somebody is searching for."""
+    plain = call_tool(
+        client, admin_token, "kubesight_pod_logs",
+        {"cluster": "prod-us-east", "namespace": "payments", "pod": "payments-api-84b5d5"},
+    )["structuredContent"]
+    assert plain["lines"]
+    assert plain["matchedLines"] is None
+
+    filtered = call_tool(
+        client, admin_token, "kubesight_pod_logs",
+        {"cluster": "prod-us-east", "namespace": "payments", "pod": "payments-api-84b5d5",
+         "contains": "WARN"},
+    )["structuredContent"]
+    assert filtered["matchedLines"] == len(filtered["lines"])
+    assert filtered["lines"] and all("WARN" in line for line in filtered["lines"])
+    assert len(filtered["lines"]) < len(plain["lines"])
+
+
+def test_an_unsupported_log_window_is_refused_with_the_allowed_ones(client, admin_token):
+    result = call_tool(
+        client, admin_token, "kubesight_pod_logs",
+        {"cluster": "prod-us-east", "namespace": "payments", "pod": "payments-api-84b5d5",
+         "sinceSeconds": 12345},
+    )
+    assert result["isError"] is True
+    assert "3600" in result["content"][0]["text"]
+
+
+def test_eligibility_answers_before_a_deploy_is_attempted(client, admin_token):
+    """A refusal an agent could have predicted gets reported as a failure. This
+    is the call that turns it back into a rule."""
+    result = call_tool(
+        client, admin_token, "kubesight_deploy_eligibility", {"cluster": "prod-us-east"}
+    )["structuredContent"]
+    assert set(result) >= {"approvalRequired", "hasActiveApproval", "eligible", "requiredApprovals"}
+
+
+def test_every_write_reports_what_it_changed(client, admin_token):
+    """Across domains, not just pipelines.
+
+    ``_summarise`` leads with ``changed`` when a payload carries it and falls
+    back to a row count otherwise — so a write that omits it answers a model
+    with "3 items", from which the model cannot tell whether the write landed.
+    Checked by reading the source rather than by calling twenty write tools for
+    real, which is the trade this test is making deliberately.
+    """
+    import inspect
+
+    from api.mcp.tools.registry import _REGISTRY
+
+    missing = []
+    for name, entry in sorted(_REGISTRY.items()):
+        if not entry["write"]:
+            continue
+        source = inspect.getsource(entry["run"])
+        # The CI editors route their summary through a shared helper.
+        if '"changed"' not in source and "_saved_summary" not in source:
+            missing.append(name)
+    assert not missing, f"write tools with no 'changed' summary: {missing}"
+
+
+def test_the_summary_line_leads_with_the_change_not_a_count(client, admin_token, service):
+    from api.mcp.tools.registry import _summarise
+
+    summary = _summarise("t", {"changed": "scaled x to 3 replicas", "items": [1, 2, 3]})
+    assert "scaled x to 3 replicas" in summary
+    assert "3 items" not in summary

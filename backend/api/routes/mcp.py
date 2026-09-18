@@ -62,9 +62,12 @@ def mcp_endpoint():
     def call(name, arguments):
         return tools.call(name, arguments, user=user)
 
+    # Advertise only what this token could actually call. ``tools.call``
+    # re-checks every permission, so this is not the boundary — it is what keeps
+    # a viewer's agent from planning around sixteen tools that will refuse it.
     body, has_body = protocol.batch(
         message,
-        tools=tools.definitions(),
+        tools=tools.definitions(user=user),
         call=call,
         server_version=SERVER_VERSION,
     )
@@ -104,12 +107,21 @@ def _audit(message, user) -> None:
     if not called:
         return
     writes = [name for name in called if tools.is_write(name)]
+    # The domains touched, alongside the tool names. A reviewer scanning audit
+    # rows reads "deploys, workloads" faster than eleven tool names, and the
+    # names are still there when they want them.
+    domains = sorted({tools.domain_of(name) for name in called} - {""})
     log_audit(
         "mcp_tools_called",
         actor=user,
         target_type="mcp",
         target_id="kubesight",
-        details={"tools": called, "count": len(called), "writes": writes},
+        details={
+            "tools": called,
+            "count": len(called),
+            "writes": writes,
+            "domains": domains,
+        },
     )
 
 
@@ -132,11 +144,19 @@ def mcp_discovery():
             "protocolVersions": list(protocol.SUPPORTED_PROTOCOL_VERSIONS),
             "transport": "streamable-http",
             "readOnly": False,
+            "domains": list(tools.DOMAINS),
             # Named rather than left to "readOnly: false", which says a write
             # exists but not how far it reaches. Somebody deciding whether to
-            # hand an agent a token needs the second thing.
-            "writes": "A service's CI pipeline, with ci_pipelines:edit. Nothing else.",
+            # hand an agent a token needs the second thing — and with a surface
+            # this wide, the honest summary is the shape of the gates, not a
+            # list of verbs.
+            "writes": (
+                "Whatever the token's permissions allow, through the same services "
+                "the UI uses — so a cluster that requires an approved deployment "
+                "request still requires one, and a Helm release still needs its "
+                "confirmation phrase. Approving a change is not exposed."
+            ),
             "authentication": "Bearer — a KubeSight API token or user token.",
-            "usage": "POST JSON-RPC 2.0 to this URL.",
+            "usage": "POST JSON-RPC 2.0 to this URL. tools/list is scoped to the token.",
         }
     )

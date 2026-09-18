@@ -1,22 +1,19 @@
-"""What an agent may ask KubeSight, and what it may change.
+"""The CI half of KubeSight: what an agent may ask about a build, and change.
 
-Most tools here read. Four of them write, and all four write exactly one kind
-of thing: a service's pipeline. That boundary is drawn deliberately.
+Most tools here read. Seven write, and they are two different kinds of thing
+with two different risk profiles, which is worth keeping straight.
 
-**Writes are the pipeline and nothing else.** An agent can rewrite what a build
-runs; it cannot trigger a build, delete a service, write a secret or touch a
-cluster. A pipeline edit is reviewable after the fact — it is stored, versioned,
-audited, and a build snapshots the version it ran — which is what makes it the
-one surface worth opening. Starting a build is not reversible, so it stays on
-the ordinary API with a person pressing the button.
+**Four of them edit a pipeline**, and a pipeline edit is reviewable after the
+fact: it is stored, versioned, audited, and a build snapshots the version it
+ran, so an edit somebody disagrees with can be read afterwards and put back.
 
-**Each tool declares the permission it needs**, and that permission is checked
-against the calling token's user through the same access engine every HTTP route
-uses. The write tools ask for ``ci_pipelines:edit``, which is the same
-permission the editor screen requires — so a token minted without it can read
-everything here and change nothing, and that is the whole gate. There is no
-second, MCP-specific switch, because a permission system an administrator
-cannot see in the roles screen is one they will forget exists.
+**Three of them run a build** — trigger, cancel, retry. Those are not reversible
+in the same way: a build pushes images and can deploy. They are here because
+``ci_builds:run`` is a permission an installation grants deliberately, and a
+token minted without it makes these tools cease to exist for that agent rather
+than exist and always refuse. An agent that can queue a build should say which
+service and which branch before it does, and should not report the build as
+finished — it returns queued and nothing here waits.
 
 **A write is never a blind overwrite.** The edit tools read the current stages
 out of the database, change what was asked, and save the whole thing back
@@ -34,60 +31,26 @@ and one that returned only JSON would make cheap orientation expensive.
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
-from ..access_engine import user_has_permission
-from ..db import db
-from ..models_ci import CiBuild, CiRunner, CiService
-from .protocol import ToolError
-
-# name -> {"permission", "description", "schema", "run", "write", "destructive"}
-_REGISTRY: Dict[str, Dict[str, Any]] = {}
-
-MAX_ROWS = 100
-MAX_LOG_LINES = 400
-MAX_FILE_LINES = 1200
-MAX_FILE_CHARS = 120_000
-MAX_TREE_PATHS = 2_000
-
-
-def tool(
-    name: str,
-    *,
-    permission: str,
-    description: str,
-    schema: Optional[Dict[str, Any]] = None,
-    write: bool = False,
-    destructive: bool = False,
-) -> Callable:
-    """Register one tool, the permission it answers under, and whether it writes.
-
-    ``write`` is not decoration: it becomes the ``readOnlyHint`` a client reads
-    when it decides whether to confirm a call with a person first. A tool that
-    mutated while claiming to be read-only would take that decision away from
-    them, so the flag lives next to the function rather than in a list that can
-    drift away from it.
-    """
-
-    def decorate(func: Callable) -> Callable:
-        _REGISTRY[name] = {
-            "permission": permission,
-            "description": description,
-            "schema": schema or {"type": "object", "properties": {}},
-            "run": func,
-            "write": bool(write),
-            "destructive": bool(destructive),
-        }
-        return func
-
-    return decorate
+from ...db import db
+from ...models_ci import CiBuild, CiRunner, CiService
+from ..protocol import ToolError
+from .registry import (
+    MAX_FILE_CHARS,
+    MAX_FILE_LINES,
+    MAX_LOG_LINES,
+    MAX_ROWS,
+    MAX_TREE_PATHS,
+    _limit,
+    tool as _register,
+)
 
 
-def _limit(arguments: Dict[str, Any], default: int = 25) -> int:
-    try:
-        return max(1, min(int(arguments.get("limit", default)), MAX_ROWS))
-    except (TypeError, ValueError):
-        return default
+def tool(name, **kwargs):
+    """Every tool in this module belongs to the ``ci`` domain."""
+    kwargs.setdefault("domain", "ci")
+    return _register(name, **kwargs)
 
 
 def _service_or_error(reference: Any) -> CiService:
@@ -124,7 +87,7 @@ def _service_or_error(reference: Any) -> CiService:
     ),
 )
 def _overview(_arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import catalog
+    from ...services.ci import catalog
 
     items = catalog.list_services()
     summary = catalog.catalog_summary(items)
@@ -186,7 +149,7 @@ def _overview(_arguments: Dict[str, Any]) -> Dict[str, Any]:
     },
 )
 def _services_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import catalog
+    from ...services.ci import catalog
 
     items = catalog.list_services(
         search=str(arguments.get("search") or ""),
@@ -231,7 +194,7 @@ def _services_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
     },
 )
 def _service_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import catalog
+    from ...services.ci import catalog
 
     row = _service_or_error(arguments.get("service"))
     summary = catalog.service_summary(row)
@@ -263,7 +226,7 @@ def _service_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
     },
 )
 def _pipeline_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import pipelines
+    from ...services.ci import pipelines
 
     row = _service_or_error(arguments.get("service"))
     items = pipelines.list_pipelines(row)
@@ -395,9 +358,9 @@ class _Editable(NamedTuple):
 
 def _editable_pipeline(reference: Any) -> "_Editable":
     """The service, its default pipeline row if it has one, and what is in it."""
-    from ..models_ci import CiPipeline
-    from ..services.ci import pipelines
-    from ..services.ci.serializers import pipeline_stage_to_dict
+    from ...models_ci import CiPipeline
+    from ...services.ci import pipelines
+    from ...services.ci.serializers import pipeline_stage_to_dict
 
     service = _service_or_error(reference)
     row = (
@@ -440,7 +403,7 @@ def _save_stages(
     parameters: Any = None,
 ) -> Dict[str, Any]:
     """Persist a stage list through the same path the editor screen posts to."""
-    from ..services.ci import pipelines
+    from ...services.ci import pipelines
 
     row = target.row
     payload: Dict[str, Any] = {
@@ -806,8 +769,8 @@ def _source_error(exc: Exception) -> ToolError:
     },
 )
 def _repo_revisions(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import catalog
-    from ..services.ci.source import SourceError
+    from ...services.ci import catalog
+    from ...services.ci.source import SourceError
 
     row = _service_or_error(arguments.get("service"))
     requested = arguments.get("kinds")
@@ -861,8 +824,8 @@ def _repo_revisions(arguments: Dict[str, Any]) -> Dict[str, Any]:
     },
 )
 def _repo_tree(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import catalog
-    from ..services.ci.source import SourceError
+    from ...services.ci import catalog
+    from ...services.ci.source import SourceError
 
     row = _service_or_error(arguments.get("service"))
     try:
@@ -922,8 +885,8 @@ def _repo_tree(arguments: Dict[str, Any]) -> Dict[str, Any]:
     },
 )
 def _repo_file(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import catalog
-    from ..services.ci.source import SourceError
+    from ...services.ci import catalog
+    from ...services.ci.source import SourceError
 
     row = _service_or_error(arguments.get("service"))
     try:
@@ -991,8 +954,8 @@ def _repo_file(arguments: Dict[str, Any]) -> Dict[str, Any]:
     },
 )
 def _builds_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import engine
-    from ..services.ci.serializers import build_summary
+    from ...services.ci import engine
+    from ...services.ci.serializers import build_summary
 
     service_id = None
     if arguments.get("service"):
@@ -1028,7 +991,7 @@ def _builds_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
     },
 )
 def _build_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci.serializers import build_to_dict
+    from ...services.ci.serializers import build_to_dict
 
     try:
         build_id = int(arguments.get("buildId"))
@@ -1077,7 +1040,7 @@ def _build_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
     },
 )
 def _build_logs(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import engine, logs
+    from ...services.ci import engine, logs
 
     try:
         build_id = int(arguments.get("buildId"))
@@ -1110,6 +1073,144 @@ def _build_logs(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Running one
+# ---------------------------------------------------------------------------
+
+# Triggering a build is the one CI write that is not a pipeline edit, and it is
+# not reversible the way an edit is — a build pushes images and can deploy. It
+# is here because a token can be minted without ``ci_builds:run`` and then this
+# tool does not exist for that agent at all, which is a cleaner switch than a
+# tool that exists and always refuses.
+#
+# Three habits the description leans on, because getting them wrong is how an
+# agent runs the wrong thing:
+#   - a build is QUEUED, not finished. These tools return immediately.
+#   - a retry re-runs the original's coordinates, not today's HEAD.
+#   - cancelling a running build is a request the runner honours on the next
+#     tick, so the status will not be "cancelled" the moment this returns.
+
+def _build_or_error(reference: Any):
+    from ...services.ci import engine as engine_service
+
+    raw = str(reference or "").strip()
+    if not raw.isdigit():
+        raise ToolError("Name the build by its id, as kubesight_builds_list returns it.")
+    try:
+        return engine_service.get_build(int(raw))
+    except LookupError:
+        raise ToolError(f"No build with id {raw}.")
+
+
+@tool(
+    "kubesight_build_run",
+    permission="ci_builds:run",
+    description=(
+        "Queue a build of a service. Returns as soon as it is queued — the build "
+        "has not run yet, and nothing here waits for it; poll kubesight_build_get "
+        "for the outcome. Defaults to the service's default branch."
+    ),
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "branch": {"type": "string", "description": "Defaults to the service's default branch."},
+            "commitSha": {"type": "string"},
+            "refType": {"type": "string", "enum": ["branch", "tag"]},
+            "variables": {
+                "type": "object",
+                "description": "Per-build environment overrides, applied to every stage.",
+            },
+        },
+        "required": ["service"],
+    },
+)
+def _build_run(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    from ...services.ci import catalog, engine as engine_service
+
+    row = _service_or_error(arguments.get("service"))
+    blocked = catalog.can_run_build(row)
+    if blocked:
+        # The catalog's own sentence, which names the missing piece. Refusing
+        # here rather than letting the engine fail keeps the reason readable.
+        raise ToolError(f"'{row.slug}' cannot build: {blocked}")
+    variables = arguments.get("variables")
+    try:
+        data = engine_service.trigger_build(
+            row,
+            branch=str(arguments.get("branch") or "") or None,
+            commit_sha=str(arguments.get("commitSha") or "") or None,
+            trigger_type="manual",
+            actor=user,
+            variables=variables if isinstance(variables, dict) else None,
+            ref_type=str(arguments.get("refType") or "") or None,
+        )
+    except Exception as exc:
+        raise ToolError(f"Could not queue a build of '{row.slug}': {exc}")
+    return {
+        "changed": f"queued build #{data.get('number')} of {row.slug}",
+        "queued": True,
+        "build": data,
+    }
+
+
+@tool(
+    "kubesight_build_cancel",
+    permission="ci_builds:cancel",
+    description=(
+        "Cancel a queued or running build. A queued build stops immediately; a "
+        "running one is flagged and its runner is told on the next tick, so it "
+        "will still read as running for a moment after this returns."
+    ),
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {"buildId": {"type": "integer"}},
+        "required": ["buildId"],
+    },
+)
+def _build_cancel(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    from ...services.ci import engine as engine_service
+
+    row = _build_or_error(arguments.get("buildId"))
+    try:
+        data = engine_service.cancel_build(row, actor=user)
+    except Exception as exc:
+        raise ToolError(str(exc))
+    return {"changed": f"cancelled build #{row.number}", "build": data}
+
+
+@tool(
+    "kubesight_build_retry",
+    permission="ci_builds:retry",
+    description=(
+        "Queue a new build with the same coordinates as a finished one — the "
+        "same branch, commit and trigger variables. This re-runs the ORIGINAL "
+        "commit, not the branch's current head; to build the latest, use "
+        "kubesight_build_run."
+    ),
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {"buildId": {"type": "integer"}},
+        "required": ["buildId"],
+    },
+)
+def _build_retry(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    from ...services.ci import engine as engine_service
+
+    row = _build_or_error(arguments.get("buildId"))
+    try:
+        data = engine_service.retry_build(row, actor=user)
+    except Exception as exc:
+        raise ToolError(str(exc))
+    return {
+        "changed": f"queued build #{data.get('number')} retrying #{row.number}",
+        "build": data,
+    }
+
+
+# ---------------------------------------------------------------------------
 # The fleet and what it can run
 # ---------------------------------------------------------------------------
 
@@ -1123,7 +1224,7 @@ def _build_logs(arguments: Dict[str, Any]) -> Dict[str, Any]:
     ),
 )
 def _runners_list(_arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci.serializers import runner_to_dict
+    from ...services.ci.serializers import runner_to_dict
 
     rows = CiRunner.query.order_by(CiRunner.name.asc()).all()
     return {
@@ -1146,7 +1247,7 @@ def _runners_list(_arguments: Dict[str, Any]) -> Dict[str, Any]:
     ),
 )
 def _build_environments(_arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..services.ci import build_environments
+    from ...services.ci import build_environments
 
     return {"environments": build_environments.catalog()}
 
@@ -1165,8 +1266,8 @@ def _build_environments(_arguments: Dict[str, Any]) -> Dict[str, Any]:
     },
 )
 def _artifacts_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ..models_ci import CiArtifact
-    from ..services.ci.serializers import artifact_to_dict
+    from ...models_ci import CiArtifact
+    from ...services.ci.serializers import artifact_to_dict
 
     row = _service_or_error(arguments.get("service"))
     rows = (
@@ -1181,85 +1282,3 @@ def _artifacts_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "artifacts": [artifact_to_dict(item) for item in rows],
     }
 
-
-# ---------------------------------------------------------------------------
-# Dispatch
-# ---------------------------------------------------------------------------
-
-def definitions() -> List[Dict[str, Any]]:
-    """The tool list, in MCP's shape."""
-    return [
-        {
-            "name": name,
-            "description": entry["description"],
-            "inputSchema": entry["schema"],
-            # Declared per tool rather than assumed for the surface: a client
-            # that asks a person before a write can only do that if the tools
-            # that write say so.
-            "annotations": {
-                "readOnlyHint": not entry["write"],
-                "destructiveHint": bool(entry["destructive"]),
-            },
-        }
-        for name, entry in sorted(_REGISTRY.items())
-    ]
-
-
-def _summarise(name: str, payload: Any) -> str:
-    """One line for a model deciding what to ask next."""
-    if not isinstance(payload, dict):
-        return f"{name}: done."
-    # A write says what it did before it says how big the result is: a model
-    # that reads "12 stages" after an edit cannot tell whether the edit landed.
-    if payload.get("changed"):
-        return f"{name}: saved — {payload['changed']}."
-    for key in ("paths", "revisions", "services", "builds", "runners", "artifacts",
-                "stages", "environments"):
-        if isinstance(payload.get(key), list):
-            return f"{name}: {len(payload[key])} {key}."
-    if payload.get("content") is not None and payload.get("path"):
-        return f"{name}: {payload['path']} ({payload.get('totalLines', 0)} lines)."
-    if "service" in payload and isinstance(payload["service"], dict):
-        return f"{name}: {payload['service'].get('slug', 'service')}."
-    return f"{name}: ok."
-
-
-def is_write(name: str) -> bool:
-    """Whether a tool changes anything. Read by the route, for the audit row."""
-    entry = _REGISTRY.get(name)
-    return bool(entry and entry["write"])
-
-
-def call(name: str, arguments: Dict[str, Any], *, user) -> Dict[str, Any]:
-    """Run one tool as ``user``, or refuse with a reason they can act on."""
-    import json
-
-    entry = _REGISTRY.get(name)
-    if entry is None:
-        raise ToolError(
-            f"KubeSight has no tool '{name}'. Available: "
-            + ", ".join(sorted(_REGISTRY))
-        )
-
-    # The same permission the equivalent HTTP route requires. An agent never
-    # sees more than the person whose token it is holding.
-    if user is not None and not user_has_permission(user, entry["permission"]):
-        raise ToolError(
-            f"'{name}' needs the '{entry['permission']}' permission, which this "
-            "token does not have."
-        )
-
-    # A write is attributed: the pipeline service records who saved it, and
-    # "who" is the token holder, never KubeSight. Read tools do not receive the
-    # user at all, so one cannot start acting on their behalf by accident.
-    if entry["write"]:
-        payload = entry["run"](arguments or {}, user=user)
-    else:
-        payload = entry["run"](arguments or {})
-    return {
-        "content": [
-            {"type": "text", "text": _summarise(name, payload)},
-            {"type": "text", "text": json.dumps(payload, ensure_ascii=False, default=str)},
-        ],
-        "structuredContent": payload if isinstance(payload, dict) else {"result": payload},
-    }
