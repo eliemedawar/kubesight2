@@ -103,10 +103,13 @@ def handle(
                 "instructions": (
                     "KubeSight is a Kubernetes control plane: clusters and workloads, "
                     "a CI service catalog with pipelines and builds, artifacts, "
-                    "runners, and alerts. These tools are read-only — they answer "
-                    "questions and change nothing. Start with kubesight_overview for "
-                    "orientation, then narrow with the listing tools. Every result is "
-                    "scoped to the permissions of the token you are using."
+                    "runners, and alerts. Start with kubesight_overview for "
+                    "orientation, then narrow with the listing tools. The kubesight_repo_* "
+                    "tools read a service's source at any revision without cloning it. "
+                    "Most tools only read; the four kubesight_pipeline_* editing tools "
+                    "change what a service builds, and nothing here can start a build, "
+                    "read a secret's value or touch a cluster. Every call is scoped to "
+                    "the permissions of the token you are using."
                 ),
             },
         )

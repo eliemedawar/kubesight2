@@ -1,0 +1,32 @@
+# Lets Hermes reach KubeSight's MCP endpoint.
+#
+# The hermes-application-intelligence policy allows egress only to kube-system
+# DNS and to :443 on the public internet, with RFC1918 explicitly excluded.
+# KubeSight's Service is a ClusterIP in 10.0.0.0/8 on :5000, so it is denied by
+# both rules — DNS resolves, then the connection hangs to a timeout.
+#
+# NetworkPolicy egress rules union across policies, so this adds the one hole
+# rather than editing a policy whose other restrictions are deliberate.
+#
+# Set both namespaces to match your cluster before applying:
+#   kubectl get pod -A -l app.kubernetes.io/name=hermes-application-intelligence
+#   kubectl get svc backend-service -A
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hermes-to-kubesight-mcp
+  namespace: kubesight          # the namespace the HERMES pod runs in
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hermes-application-intelligence
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kubesight   # where backend-service lives
+      ports:
+        - port: 5000
+          protocol: TCP

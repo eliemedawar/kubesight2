@@ -1,15 +1,28 @@
-"""What an agent may ask KubeSight, and what it gets back.
+"""What an agent may ask KubeSight, and what it may change.
 
-Every tool here reads. None of them writes, and that is enforced structurally
-rather than by convention: this module imports the serializers and the query
-helpers, and nothing that mutates.
+Most tools here read. Four of them write, and all four write exactly one kind
+of thing: a service's pipeline. That boundary is drawn deliberately.
 
-Two things shape the answers.
+**Writes are the pipeline and nothing else.** An agent can rewrite what a build
+runs; it cannot trigger a build, delete a service, write a secret or touch a
+cluster. A pipeline edit is reviewable after the fact — it is stored, versioned,
+audited, and a build snapshots the version it ran — which is what makes it the
+one surface worth opening. Starting a build is not reversible, so it stays on
+the ordinary API with a person pressing the button.
 
 **Each tool declares the permission it needs**, and that permission is checked
 against the calling token's user through the same access engine every HTTP route
-uses. An agent holding a viewer's token gets a viewer's answers — there is no
-path here that sees more than the person whose token it is.
+uses. The write tools ask for ``ci_pipelines:edit``, which is the same
+permission the editor screen requires — so a token minted without it can read
+everything here and change nothing, and that is the whole gate. There is no
+second, MCP-specific switch, because a permission system an administrator
+cannot see in the roles screen is one they will forget exists.
+
+**A write is never a blind overwrite.** The edit tools read the current stages
+out of the database, change what was asked, and save the whole thing back
+through ``pipelines.update_pipeline`` — the same validator the UI posts to. An
+agent therefore cannot lose a field it did not know to send, which is what would
+happen if it had to echo a pipeline it had only read a summary of.
 
 **Answers come back twice**: a short human-readable summary and the full
 structured payload. The summary is what a model reads when it is deciding what
@@ -20,24 +33,41 @@ and one that returned only JSON would make cheap orientation expensive.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+import re
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from ..access_engine import user_has_permission
 from ..db import db
 from ..models_ci import CiBuild, CiRunner, CiService
 from .protocol import ToolError
 
-# name -> {"permission", "description", "schema", "run"}
+# name -> {"permission", "description", "schema", "run", "write", "destructive"}
 _REGISTRY: Dict[str, Dict[str, Any]] = {}
 
 MAX_ROWS = 100
 MAX_LOG_LINES = 400
+MAX_FILE_LINES = 1200
+MAX_FILE_CHARS = 120_000
+MAX_TREE_PATHS = 2_000
 
 
 def tool(
-    name: str, *, permission: str, description: str, schema: Optional[Dict[str, Any]] = None
+    name: str,
+    *,
+    permission: str,
+    description: str,
+    schema: Optional[Dict[str, Any]] = None,
+    write: bool = False,
+    destructive: bool = False,
 ) -> Callable:
-    """Register one read-only tool and the permission it answers under."""
+    """Register one tool, the permission it answers under, and whether it writes.
+
+    ``write`` is not decoration: it becomes the ``readOnlyHint`` a client reads
+    when it decides whether to confirm a call with a person first. A tool that
+    mutated while claiming to be read-only would take that decision away from
+    them, so the flag lives next to the function rather than in a list that can
+    drift away from it.
+    """
 
     def decorate(func: Callable) -> Callable:
         _REGISTRY[name] = {
@@ -45,6 +75,8 @@ def tool(
             "description": description,
             "schema": schema or {"type": "object", "properties": {}},
             "run": func,
+            "write": bool(write),
+            "destructive": bool(destructive),
         }
         return func
 
@@ -254,14 +286,665 @@ def _pipeline_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "runnerLabels": stage.get("runnerLabels"),
                 "commands": stage.get("commands"),
                 "artifacts": stage.get("artifacts"),
-                # Names only — a pipeline stores references, never values.
-                "secretRefs": [ref.get("name") for ref in stage.get("secretRefs") or []],
+                # Name and destination variable — never a value. The mapping
+                # is here because an agent rewriting this stage has to be able
+                # to put it back; the name alone would silently re-point a
+                # secret at a variable of the same name on the next save.
+                "secretRefs": [
+                    {"name": ref.get("name"), "envVar": ref.get("envVar") or ref.get("name")}
+                    for ref in stage.get("secretRefs") or []
+                ],
                 "hostAliases": stage.get("hostAliases"),
                 "timeoutSeconds": stage.get("timeoutSeconds"),
                 "enabled": stage.get("enabled"),
             }
             for stage in pipeline.get("stages") or []
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Editing a pipeline
+# ---------------------------------------------------------------------------
+#
+# The only writes in this file, and they share one shape: read the stages that
+# are there, change what was asked, hand the whole list to the ordinary
+# validator, save. An agent never posts a pipeline it assembled from a summary,
+# which is what makes a one-field edit safe — nothing it did not mention can be
+# dropped.
+#
+# Three consequences worth knowing before reading the tools:
+#
+# * **A stage save is a full replace.** ``pipelines._apply_stages`` clears and
+#   rebuilds, so stage ids are not stable across an edit. Builds snapshot their
+#   pipeline, so history is unaffected — but an agent must not cache a stage id
+#   across a write.
+# * **A generated default is materialised on first edit**, exactly as the editor
+#   screen does it. Editing "the pipeline" of a service that never saved one
+#   turns KubeSight's suggestion into that service's own pipeline, and the
+#   answer says so.
+# * **Secrets are referenced, never written.** ``_secret_refs`` refuses a name
+#   that is not already a secret of this service, so an agent cannot invent one;
+#   creating secrets stays with a person.
+
+# What a stage may carry. Anything else in a changes object is a typo, and
+# normalize_stage would ignore it silently — so it is rejected here instead.
+STAGE_FIELDS = {
+    "name", "stageType", "runnerType", "runnerLabels", "image", "workingDirectory",
+    "commands", "env", "secretRefs", "artifacts", "resources", "hostAliases",
+    "runCondition", "timeoutSeconds", "continueOnFailure", "parallelGroup", "enabled",
+}
+
+
+_MISSING_SECRET_RE = re.compile(r"references secret '([^']+)'")
+
+
+def _saved_secret_names(row) -> set:
+    """Secret names the stored pipeline already references."""
+    if row is None:
+        return set()
+    return {
+        str(ref.get("name"))
+        for stage in row.stages
+        for ref in (stage.secret_refs or [])
+        if isinstance(ref, dict)
+    }
+
+
+def _pipeline_error(exc: Exception, *, already_saved: Optional[set] = None) -> ToolError:
+    """Validator messages are written for a person and name the stage — keep them.
+
+    This is the correction loop: an agent that sent a bad stage is told exactly
+    what was wrong and can send a good one, rather than being told the call
+    failed.
+
+    One case needs a sentence the validator cannot supply. Because every save is
+    a full replace, a reference that was valid when it was saved and whose secret
+    has since been deleted fails a save that never touched it — and the agent, on
+    the face of the message, has no way to tell that it did not cause this and
+    cannot fix it by sending different stages. Saying so is the difference
+    between a dead end and a thing to go and ask somebody for.
+    """
+    message = str(exc) or "The pipeline was rejected."
+    match = _MISSING_SECRET_RE.search(message)
+    if match and match.group(1) in (already_saved or set()):
+        message += (
+            f" That reference was already in the saved pipeline — the secret has "
+            f"been deleted since. Nothing was changed. Either re-create the secret "
+            f"'{match.group(1)}', or drop the reference from the stage that holds it."
+        )
+    return ToolError(message)
+
+
+class _Editable(NamedTuple):
+    """The pipeline an edit is about to be applied to.
+
+    ``stages`` and ``parameters`` are in the API's own camelCase shape — the same
+    one ``pipelines.normalize_stage`` and ``pipelines._parameters`` read — so they
+    can be edited and handed straight back without a translation step that could
+    lose a field.
+    """
+
+    service: Any
+    row: Any  # CiPipeline, or None when nothing is saved yet
+    stages: List[Dict[str, Any]]
+    parameters: List[Dict[str, Any]]
+    generated: bool
+
+
+def _editable_pipeline(reference: Any) -> "_Editable":
+    """The service, its default pipeline row if it has one, and what is in it."""
+    from ..models_ci import CiPipeline
+    from ..services.ci import pipelines
+    from ..services.ci.serializers import pipeline_stage_to_dict
+
+    service = _service_or_error(reference)
+    row = (
+        CiPipeline.query.filter_by(service_id=service.id, is_default=True).first()
+        or CiPipeline.query.filter_by(service_id=service.id)
+        .order_by(CiPipeline.id.asc())
+        .first()
+    )
+    if row is not None and row.stages:
+        return _Editable(
+            service,
+            row,
+            [pipeline_stage_to_dict(stage) for stage in row.stages],
+            list(row.parameters or []),
+            False,
+        )
+
+    # No saved stages: start from what KubeSight would run anyway, so an edit
+    # against a generated default adds to it rather than replacing it with one
+    # stage. Its parameters come along for the same reason — materialising the
+    # default must not quietly drop the build inputs its Run Build dialog asks
+    # for.
+    generated = pipelines.list_pipelines(service)[0]
+    return _Editable(
+        service,
+        row,
+        list(generated.get("stages") or []),
+        list(generated.get("parameters") or []),
+        True,
+    )
+
+
+def _save_stages(
+    target: "_Editable",
+    stages: List[Dict[str, Any]],
+    *,
+    user,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    parameters: Any = None,
+) -> Dict[str, Any]:
+    """Persist a stage list through the same path the editor screen posts to."""
+    from ..services.ci import pipelines
+
+    row = target.row
+    payload: Dict[str, Any] = {
+        "name": name or (row.name if row is not None else "default"),
+        "isDefault": True,
+        "stages": stages,
+        # Always sent, never left to a default: an update that omitted them
+        # would keep whatever is stored, which is the wrong answer on the save
+        # that materialises a generated default.
+        "parameters": parameters if parameters is not None else target.parameters,
+    }
+    if description is not None:
+        payload["description"] = description
+
+    try:
+        if row is None:
+            return pipelines.create_pipeline(target.service, payload, actor=user)
+        return pipelines.update_pipeline(row, payload, actor=user)
+    except pipelines.PipelineError as exc:
+        raise _pipeline_error(exc, already_saved=_saved_secret_names(row))
+
+
+def _saved_summary(target: "_Editable", saved: Dict[str, Any], change: str) -> Dict[str, Any]:
+    """What a write answers with: what changed, and the pipeline that resulted."""
+    return {
+        "service": target.service.slug,
+        "changed": change,
+        "pipelineId": saved.get("id"),
+        "name": saved.get("name"),
+        "version": saved.get("version"),
+        # Said plainly, because it is a bigger change than the edit itself: this
+        # service now has a pipeline of its own and will stop tracking the
+        # generated default.
+        "materialisedGeneratedDefault": bool(target.generated),
+        "stages": [
+            {
+                "position": stage.get("position"),
+                "name": stage.get("name"),
+                "stageType": stage.get("stageType"),
+                "image": stage.get("image"),
+                "commands": stage.get("commands"),
+                "enabled": stage.get("enabled"),
+            }
+            for stage in saved.get("stages") or []
+        ],
+        "note": (
+            "Builds already running or finished are unaffected — each one runs a "
+            "snapshot of the pipeline as it was when it started."
+        ),
+    }
+
+
+def _stage_index(stages: List[Dict[str, Any]], selector: Any) -> int:
+    """Find one stage by name or 1-based position, or say what the names are."""
+    raw = str(selector if selector is not None else "").strip()
+    if not raw:
+        raise ToolError("Name the stage to change, by name or 1-based position.")
+    if raw.isdigit():
+        position = int(raw)
+        if 1 <= position <= len(stages):
+            return position - 1
+        raise ToolError(
+            f"This pipeline has {len(stages)} stages, so there is no stage {position}."
+        )
+    for index, stage in enumerate(stages):
+        if str(stage.get("name") or "").lower() == raw.lower():
+            return index
+    names = ", ".join(str(stage.get("name")) for stage in stages) or "none"
+    raise ToolError(f"No stage '{raw}'. This pipeline's stages are: {names}.")
+
+
+def _checked_fields(payload: Any, *, what: str) -> Dict[str, Any]:
+    if not isinstance(payload, dict) or not payload:
+        raise ToolError(f"{what} must be an object with at least one field.")
+    unknown = sorted(set(payload) - STAGE_FIELDS)
+    if unknown:
+        raise ToolError(
+            f"A stage has no field {', '.join(unknown)}. Valid fields: "
+            + ", ".join(sorted(STAGE_FIELDS))
+            + "."
+        )
+    return dict(payload)
+
+
+_STAGE_SCHEMA = {
+    "type": "object",
+    "description": (
+        "A stage. name is required; stageType is checkout, command or "
+        "container_image (default command); a command stage needs commands. "
+        "Other fields: image, runnerType, runnerLabels, workingDirectory, env, "
+        "secretRefs [{name, envVar}], artifacts [{path, type, name}], "
+        "hostAliases, runCondition, resources, timeoutSeconds, "
+        "continueOnFailure, parallelGroup, enabled."
+    ),
+    "properties": {
+        "name": {"type": "string"},
+        "stageType": {"type": "string", "enum": ["checkout", "command", "container_image"]},
+        "image": {"type": "string"},
+        "commands": {"type": "array", "items": {"type": "string"}},
+        "runnerLabels": {"type": "array", "items": {"type": "string"}},
+        "env": {"type": "object"},
+        "enabled": {"type": "boolean"},
+    },
+    "required": ["name"],
+}
+
+
+@tool(
+    "kubesight_pipeline_stage_update",
+    permission="ci_pipelines:edit",
+    description=(
+        "Change fields on ONE stage of a service's pipeline and save. Only the "
+        "fields in changes are touched; everything else on that stage is kept, "
+        "so you do not need to read the pipeline back first. Identify the stage "
+        "by name or 1-based position. Use this for 'add a flag to the build "
+        "command', 'bump the image', 'disable the test stage'."
+    ),
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "stage": {"type": "string", "description": "Stage name or 1-based position."},
+            "changes": {
+                "type": "object",
+                "description": (
+                    "Fields to set. Any stage field is allowed, including name to "
+                    "rename. A list or object REPLACES the current value — to add "
+                    "one command, send the full command list."
+                ),
+            },
+        },
+        "required": ["service", "stage", "changes"],
+    },
+)
+def _pipeline_stage_update(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    target = _editable_pipeline(arguments.get("service"))
+    if not target.stages:
+        raise ToolError(
+            f"'{target.service.slug}' has no pipeline stages yet. Use "
+            "kubesight_pipeline_stage_add or kubesight_pipeline_save first."
+        )
+
+    stages = target.stages
+    index = _stage_index(stages, arguments.get("stage"))
+    changes = _checked_fields(arguments.get("changes"), what="changes")
+    before = str(stages[index].get("name"))
+    stages[index] = {**stages[index], **changes}
+
+    saved = _save_stages(target, stages, user=user)
+    fields = ", ".join(sorted(changes))
+    return _saved_summary(target, saved, f"stage '{before}': {fields}")
+
+
+@tool(
+    "kubesight_pipeline_stage_add",
+    permission="ci_pipelines:edit",
+    description=(
+        "Insert a new stage into a service's pipeline and save. Appends at the "
+        "end unless 'after' names an existing stage. The existing stages are "
+        "kept as they are. There is no dependency graph — order is the only "
+        "relationship between stages."
+    ),
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "stage": _STAGE_SCHEMA,
+            "after": {
+                "type": "string",
+                "description": (
+                    "Insert directly after this stage (name or 1-based position). "
+                    "Omit to append at the end; 'start' to put it first."
+                ),
+            },
+        },
+        "required": ["service", "stage"],
+    },
+)
+def _pipeline_stage_add(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    target = _editable_pipeline(arguments.get("service"))
+    stage = _checked_fields(arguments.get("stage"), what="stage")
+    if not str(stage.get("name") or "").strip():
+        raise ToolError("The new stage needs a name.")
+
+    stages = target.stages
+    after = str(arguments.get("after") or "").strip()
+    if not after:
+        at = len(stages)
+    elif after.lower() == "start":
+        at = 0
+    else:
+        at = _stage_index(stages, after) + 1
+    stages.insert(at, stage)
+
+    saved = _save_stages(target, stages, user=user)
+    return _saved_summary(
+        target, saved, f"added stage '{stage['name']}' at position {at + 1}"
+    )
+
+
+@tool(
+    "kubesight_pipeline_stage_remove",
+    permission="ci_pipelines:edit",
+    description=(
+        "Delete one stage from a service's pipeline and save. To stop a stage "
+        "running without losing what it did, prefer setting enabled:false with "
+        "kubesight_pipeline_stage_update — a removed stage is not recoverable "
+        "from KubeSight."
+    ),
+    write=True,
+    destructive=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "stage": {"type": "string", "description": "Stage name or 1-based position."},
+        },
+        "required": ["service", "stage"],
+    },
+)
+def _pipeline_stage_remove(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    target = _editable_pipeline(arguments.get("service"))
+    index = _stage_index(target.stages, arguments.get("stage"))
+    removed = str(target.stages[index].get("name"))
+    remaining = [
+        stage for position, stage in enumerate(target.stages) if position != index
+    ]
+    if not remaining:
+        raise ToolError(
+            f"'{removed}' is the only stage — removing it would leave a pipeline "
+            "that builds nothing. Disable it instead, or replace the pipeline "
+            "with kubesight_pipeline_save."
+        )
+
+    saved = _save_stages(target, remaining, user=user)
+    return _saved_summary(target, saved, f"removed stage '{removed}'")
+
+
+@tool(
+    "kubesight_pipeline_save",
+    permission="ci_pipelines:edit",
+    description=(
+        "REPLACE a service's whole pipeline with the stages given, and save. "
+        "Every existing stage is discarded — for a change to one stage use "
+        "kubesight_pipeline_stage_update instead, which cannot lose the fields "
+        "you did not send. Images should come from kubesight_build_environments; "
+        "secretRefs may only name secrets the service already has."
+    ),
+    write=True,
+    destructive=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "stages": {
+                "type": "array",
+                "items": _STAGE_SCHEMA,
+                "description": "The complete stage list, in execution order.",
+            },
+            "name": {
+                "type": "string",
+                "description": "Pipeline name. Defaults to the current one.",
+            },
+            "description": {"type": "string"},
+            "parameters": {
+                "type": "array",
+                "description": "Build inputs. Omit to keep the current ones.",
+            },
+        },
+        "required": ["service", "stages"],
+    },
+)
+def _pipeline_save(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    target = _editable_pipeline(arguments.get("service"))
+
+    stages = arguments.get("stages")
+    if not isinstance(stages, list) or not stages:
+        raise ToolError(
+            "stages must be a non-empty list. A pipeline with no stages builds nothing."
+        )
+    checked = [_checked_fields(stage, what="Each stage") for stage in stages]
+
+    saved = _save_stages(
+        target,
+        checked,
+        user=user,
+        name=str(arguments.get("name") or "") or None,
+        description=arguments.get("description"),
+        parameters=arguments.get("parameters"),
+    )
+    return _saved_summary(
+        target, saved, f"replaced the pipeline with {len(checked)} stages"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The source a service builds from
+# ---------------------------------------------------------------------------
+#
+# Read straight from the host over its API — no clone, no workspace, no build
+# pod. That is why these are cheap enough for an agent to browse with, and it is
+# also their limit: they see what the repository holds at a revision, not what a
+# build produced from it.
+#
+# Everything goes through the service's own stored credential. No tool here
+# takes a repository URL or a token as an argument, so an agent cannot aim
+# KubeSight's credentials at a repository nobody registered.
+
+
+def _source_error(exc: Exception) -> ToolError:
+    """Source failures are already written for a person — pass them through.
+
+    ``SourceError`` and ``CatalogError`` messages name the credential profile or
+    the missing setting. Replacing them with something generic would hide the
+    one sentence that says what to fix.
+    """
+    return ToolError(str(exc) or "The repository could not be read.")
+
+
+@tool(
+    "kubesight_repo_revisions",
+    permission="ci_services:view",
+    description=(
+        "The branches, tags and recent commits of a service's repository. Use "
+        "this to find the revision to read code at, or to check that a branch a "
+        "build named still exists."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "kinds": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["branch", "tag", "commit"]},
+                "description": "Narrows the fetch. Defaults to all three.",
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS},
+        },
+        "required": ["service"],
+    },
+)
+def _repo_revisions(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from ..services.ci import catalog
+    from ..services.ci.source import SourceError
+
+    row = _service_or_error(arguments.get("service"))
+    requested = arguments.get("kinds")
+    if isinstance(requested, str):
+        requested = [requested]
+    kinds = tuple(
+        kind for kind in (requested or []) if kind in ("branch", "tag", "commit")
+    )
+    try:
+        payload = catalog.list_branches(row, kinds=kinds)
+    except (catalog.CatalogError, SourceError, ValueError) as exc:
+        raise _source_error(exc)
+
+    items = payload["items"][: _limit(arguments, MAX_ROWS)]
+    return {
+        "service": row.slug,
+        "repository": f"{row.repository_workspace}/{row.repository_name}",
+        "defaultBranch": payload.get("defaultBranch"),
+        "count": len(items),
+        "total": payload.get("count"),
+        "revisions": items,
+    }
+
+
+@tool(
+    "kubesight_repo_tree",
+    permission="ci_services:view",
+    description=(
+        "Every file path in a service's repository at one revision — the shape "
+        "of the project, without cloning it. Narrow with pathPrefix before "
+        "reading files. If truncated is true the listing hit a ceiling, so an "
+        "absent path means 'not seen', not 'not there'."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "revision": {
+                "type": "string",
+                "description": (
+                    "Branch, tag or commit. Defaults to the service's default branch."
+                ),
+            },
+            "pathPrefix": {
+                "type": "string",
+                "description": "Only paths under this directory, e.g. 'src/main'.",
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_TREE_PATHS},
+        },
+        "required": ["service"],
+    },
+)
+def _repo_tree(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from ..services.ci import catalog
+    from ..services.ci.source import SourceError
+
+    row = _service_or_error(arguments.get("service"))
+    try:
+        limit = max(1, min(int(arguments.get("limit", 500)), MAX_TREE_PATHS))
+    except (TypeError, ValueError):
+        limit = 500
+    try:
+        payload = catalog.list_source_tree(
+            row,
+            revision=str(arguments.get("revision") or ""),
+            path_prefix=str(arguments.get("pathPrefix") or ""),
+            limit=limit,
+        )
+    except (catalog.CatalogError, SourceError, ValueError) as exc:
+        raise _source_error(exc)
+    payload["service"] = row.slug
+    return payload
+
+
+@tool(
+    "kubesight_repo_file",
+    permission="ci_services:view",
+    description=(
+        "One file's text from a service's repository at a revision — the actual "
+        "code, a Dockerfile, a pom.xml, a Jenkinsfile. Paths are relative to the "
+        "service's working directory. Use startLine/endLine on a long file "
+        "rather than reading all of it."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "path": {
+                "type": "string",
+                "description": (
+                    "Repository path, e.g. 'build.gradle' or 'src/main/App.java'."
+                ),
+            },
+            "revision": {
+                "type": "string",
+                "description": (
+                    "Branch, tag or commit. Defaults to the service's default branch."
+                ),
+            },
+            "startLine": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based, inclusive.",
+            },
+            "endLine": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based, inclusive.",
+            },
+        },
+        "required": ["service", "path"],
+    },
+)
+def _repo_file(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from ..services.ci import catalog
+    from ..services.ci.source import SourceError
+
+    row = _service_or_error(arguments.get("service"))
+    try:
+        payload = catalog.read_source_file(
+            row,
+            str(arguments.get("path") or ""),
+            revision=str(arguments.get("revision") or ""),
+        )
+    except (catalog.CatalogError, SourceError, ValueError) as exc:
+        raise _source_error(exc)
+
+    lines = (payload.get("content") or "").splitlines()
+    total = len(lines)
+
+    def _bound(key: str, fallback: int) -> int:
+        try:
+            return max(1, int(arguments[key]))
+        except (KeyError, TypeError, ValueError):
+            return fallback
+
+    start = _bound("startLine", 1)
+    end = _bound("endLine", start + MAX_FILE_LINES - 1)
+    # A window wider than the ceiling is honoured up to the ceiling rather than
+    # refused: an agent asking for a whole file should get as much of it as
+    # fits, and be told that is what happened.
+    end = min(end, start + MAX_FILE_LINES - 1, total)
+    window = lines[start - 1 : end] if start <= total else []
+
+    text = "\n".join(window)
+    truncated = bool(window) and (start > 1 or end < total)
+    if len(text) > MAX_FILE_CHARS:
+        text = text[:MAX_FILE_CHARS]
+        truncated = True
+
+    return {
+        "service": row.slug,
+        "path": payload["path"],
+        "revision": payload["revision"],
+        "totalLines": total,
+        "startLine": start if window else 0,
+        "endLine": end if window else 0,
+        "truncated": truncated,
+        "content": text,
     }
 
 
@@ -488,9 +1171,13 @@ def definitions() -> List[Dict[str, Any]]:
             "name": name,
             "description": entry["description"],
             "inputSchema": entry["schema"],
-            # Read-only and non-destructive, declared rather than implied — a
-            # client that surfaces write tools differently can then do so.
-            "annotations": {"readOnlyHint": True, "destructiveHint": False},
+            # Declared per tool rather than assumed for the surface: a client
+            # that asks a person before a write can only do that if the tools
+            # that write say so.
+            "annotations": {
+                "readOnlyHint": not entry["write"],
+                "destructiveHint": bool(entry["destructive"]),
+            },
         }
         for name, entry in sorted(_REGISTRY.items())
     ]
@@ -500,12 +1187,25 @@ def _summarise(name: str, payload: Any) -> str:
     """One line for a model deciding what to ask next."""
     if not isinstance(payload, dict):
         return f"{name}: done."
-    for key in ("services", "builds", "runners", "artifacts", "stages", "environments"):
+    # A write says what it did before it says how big the result is: a model
+    # that reads "12 stages" after an edit cannot tell whether the edit landed.
+    if payload.get("changed"):
+        return f"{name}: saved — {payload['changed']}."
+    for key in ("paths", "revisions", "services", "builds", "runners", "artifacts",
+                "stages", "environments"):
         if isinstance(payload.get(key), list):
             return f"{name}: {len(payload[key])} {key}."
+    if payload.get("content") is not None and payload.get("path"):
+        return f"{name}: {payload['path']} ({payload.get('totalLines', 0)} lines)."
     if "service" in payload and isinstance(payload["service"], dict):
         return f"{name}: {payload['service'].get('slug', 'service')}."
     return f"{name}: ok."
+
+
+def is_write(name: str) -> bool:
+    """Whether a tool changes anything. Read by the route, for the audit row."""
+    entry = _REGISTRY.get(name)
+    return bool(entry and entry["write"])
 
 
 def call(name: str, arguments: Dict[str, Any], *, user) -> Dict[str, Any]:
@@ -527,7 +1227,13 @@ def call(name: str, arguments: Dict[str, Any], *, user) -> Dict[str, Any]:
             "token does not have."
         )
 
-    payload = entry["run"](arguments or {})
+    # A write is attributed: the pipeline service records who saved it, and
+    # "who" is the token holder, never KubeSight. Read tools do not receive the
+    # user at all, so one cannot start acting on their behalf by accident.
+    if entry["write"]:
+        payload = entry["run"](arguments or {}, user=user)
+    else:
+        payload = entry["run"](arguments or {})
     return {
         "content": [
             {"type": "text", "text": _summarise(name, payload)},

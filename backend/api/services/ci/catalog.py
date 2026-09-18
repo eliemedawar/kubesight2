@@ -618,9 +618,14 @@ def test_source(row: CiService) -> Dict[str, Any]:
     return handler.verify_access(ref, row.credential_profile)
 
 
-def list_branches(row: CiService) -> Dict[str, Any]:
+def list_branches(row: CiService, kinds: tuple = ()) -> Dict[str, Any]:
+    """Revisions for a registered service.
+
+    ``kinds`` narrows the fetch the same way :func:`preview_revisions` does — a
+    caller that only wants branches should not pay for five pages of tags.
+    """
     handler, ref = _repository_ref(row)
-    revisions = handler.list_revisions(ref, row.credential_profile)
+    revisions = handler.list_revisions(ref, row.credential_profile, kinds=tuple(kinds))
     return {
         "items": [
             {
@@ -633,6 +638,48 @@ def list_branches(row: CiService) -> Dict[str, Any]:
         ],
         "count": len(revisions),
         "defaultBranch": row.default_branch,
+    }
+
+
+def list_source_tree(
+    row: CiService, revision: str = "", path_prefix: str = "", limit: int = 0
+) -> Dict[str, Any]:
+    """Every file path in the service's repository at a revision, without cloning.
+
+    Scoped to the service's working directory first, for the same reason
+    :func:`read_source_file` is: in a monorepo, "the files of this service" means
+    the ones under its own directory, not every file in the repository.
+
+    ``truncated`` travels with the answer rather than being inferred from the
+    count, because two different ceilings can produce it — the provider's walk
+    limit and the caller's ``limit`` — and anything concluding "this repository
+    has no X" has to know which.
+    """
+    handler, ref = _repository_ref(row)
+    chosen = (revision or "").strip() or row.default_branch or "main"
+    listing = handler.list_tree(ref, row.credential_profile, chosen)
+
+    scope = (row.working_directory or "").strip("/")
+    prefix = str(path_prefix or "").strip().replace("\\", "/").strip("/")
+    if scope:
+        prefix = f"{scope}/{prefix}" if prefix else scope
+
+    paths = sorted(listing.paths)
+    if prefix:
+        paths = [item for item in paths if item == prefix or item.startswith(f"{prefix}/")]
+
+    truncated = bool(listing.truncated)
+    if limit and len(paths) > limit:
+        paths = paths[:limit]
+        truncated = True
+
+    return {
+        "repository": ref.full_name,
+        "revision": listing.revision or chosen,
+        "pathPrefix": prefix,
+        "count": len(paths),
+        "paths": paths,
+        "truncated": truncated,
     }
 
 

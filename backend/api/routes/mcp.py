@@ -1,9 +1,9 @@
 """KubeSight's MCP endpoint.
 
 One route, speaking Streamable HTTP. An agent POSTs JSON-RPC and gets JSON back;
-there is no session state, no server-initiated stream and no SSE, because a
-read-only tool server needs none of them — every call is a question with an
-answer.
+there is no session state, no server-initiated stream and no SSE, because this
+server needs none of them — every call is a request with an answer, and the few
+that change something finish before they reply.
 
 Authentication is the ordinary one. A caller presents a KubeSight API token
 (``ksa_…``) or a user JWT in ``Authorization``, ``get_current_user`` resolves it
@@ -86,6 +86,11 @@ def _audit(message, user) -> None:
     somebody's token, repeatedly, is. Arguments are not recorded either — a
     service slug is harmless, but the habit of logging tool arguments is how
     something sensitive eventually ends up in an audit row.
+
+    Writes are named separately in the same row. The pipeline service writes its
+    own ``ci_pipeline_saved`` entry with the stage count and the new version, so
+    what changed is already recorded; what that entry cannot say is that an agent
+    asked for it rather than a person in the editor. This is where that is said.
     """
     items = message if isinstance(message, list) else [message]
     called = sorted(
@@ -98,12 +103,13 @@ def _audit(message, user) -> None:
     )
     if not called:
         return
+    writes = [name for name in called if tools.is_write(name)]
     log_audit(
         "mcp_tools_called",
         actor=user,
         target_type="mcp",
         target_id="kubesight",
-        details={"tools": called, "count": len(called)},
+        details={"tools": called, "count": len(called), "writes": writes},
     )
 
 
@@ -125,7 +131,11 @@ def mcp_discovery():
             "protocol": "mcp",
             "protocolVersions": list(protocol.SUPPORTED_PROTOCOL_VERSIONS),
             "transport": "streamable-http",
-            "readOnly": True,
+            "readOnly": False,
+            # Named rather than left to "readOnly: false", which says a write
+            # exists but not how far it reaches. Somebody deciding whether to
+            # hand an agent a token needs the second thing.
+            "writes": "A service's CI pipeline, with ci_pipelines:edit. Nothing else.",
             "authentication": "Bearer — a KubeSight API token or user token.",
             "usage": "POST JSON-RPC 2.0 to this URL.",
         }
