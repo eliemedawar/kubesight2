@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCiStageLogs } from "../../api/ciApi.js";
 import { formatDuration } from "./ciShared.jsx";
-import { getBaseUrl } from "../../api/client.js";
-import { ciStageLogDownloadPath } from "../../api/ciApi.js";
+import { downloadCiStageLog } from "../../api/ciApi.js";
 import { parseApiTime } from "../../lib/apiTime.js";
 
 // Log output is the one thing that must feel live; the loop ends when the
@@ -122,7 +121,15 @@ export default function StageLogViewer({ buildId, stage }) {
     if (target) target.scrollIntoView({ block: "center" });
   };
 
-  const downloadUrl = `${getBaseUrl()}${ciStageLogDownloadPath(buildId, stage.id)}`;
+  // A navigation carries no Authorization header, so the log is fetched
+  // through a short-lived ticket rather than a bare link — see ciApi.js.
+  const downloadLog = async () => {
+    try {
+      await downloadCiStageLog(buildId, stage.id);
+    } catch (err) {
+      setError(err.message || "That log could not be downloaded.");
+    }
+  };
 
   const quietSeconds = Math.max(0, Math.floor((now - lastLineAt) / 1000));
   // Prefer the server's own start time; fall back to when this view opened so
@@ -160,9 +167,9 @@ export default function StageLogViewer({ buildId, stage }) {
           Follow
         </label>
         {lines.length > 0 && (
-          <a className="btn-outline btn-compact" href={downloadUrl} download>
+          <button type="button" className="btn-outline btn-compact" onClick={downloadLog}>
             Download
-          </a>
+          </button>
         )}
       </div>
 

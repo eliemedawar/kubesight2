@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  ciArtifactDownloadPath,
   deleteCiArtifact,
+  downloadCiArtifact,
   getCiArtifactPolicy,
   listCiServiceArtifacts,
   purgeCiArtifacts,
 } from "../../api/ciApi.js";
-import { getBaseUrl } from "../../api/client.js";
 import EmptyState from "../common/EmptyState.jsx";
 import LoadingState from "../common/LoadingState.jsx";
 import { formatBytes, formatRelative, shortSha } from "./ciShared.jsx";
@@ -74,6 +73,24 @@ export default function ArtifactsPanel({
       setNotice(describe(result));
     } catch (err) {
       setError(err.message || "That did not work.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  // Downloading is not `run`: there is nothing to reload afterwards and
+  // nothing to report on success — the browser's own download shelf IS the
+  // confirmation. Only the failure needs saying, and the one that actually
+  // happens is an expired session, which used to surface as Chrome silently
+  // saving the API's 401 body as "download.json".
+  const download = async (artifact) => {
+    setError("");
+    setNotice("");
+    setBusy(`download-${artifact.id}`);
+    try {
+      await downloadCiArtifact(artifact.id);
+    } catch (err) {
+      setError(err.message || `${artifact.name} could not be downloaded.`);
     } finally {
       setBusy("");
     }
@@ -242,13 +259,14 @@ export default function ArtifactsPanel({
                   <td>{formatRelative(artifact.createdAt)}</td>
                   <td className="table-actions-cell">
                     {artifact.downloadable && (
-                      <a
+                      <button
+                        type="button"
                         className="btn-outline btn-compact"
-                        href={`${getBaseUrl()}${ciArtifactDownloadPath(artifact.id)}`}
-                        download
+                        onClick={() => download(artifact)}
+                        disabled={busy === `download-${artifact.id}`}
                       >
-                        Download
-                      </a>
+                        {busy === `download-${artifact.id}` ? "Starting…" : "Download"}
+                      </button>
                     )}
                     {artifact.deployable && canDeploy && (
                       <button

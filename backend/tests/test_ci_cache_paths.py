@@ -464,3 +464,43 @@ def test_a_scan_gated_image_stage_still_defines_its_cache_variable(monkeypatch):
 
     assert 'KS_BK_IMPORT=""' in script
     assert script.index('KS_BK_IMPORT=""') < script.index("$KS_BK_IMPORT --export-cache")
+
+
+# ---------------------------------------------------------------------------
+# Saying which of the three cold-build causes it is
+# ---------------------------------------------------------------------------
+
+def test_a_stage_reports_the_cache_it_is_using():
+    """A cold build and a warm one used to produce identical logs, so "why is
+    Gradle still downloading on the second run?" had no answer anywhere."""
+    script = _job(_execution())["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
+    assert "[kubesight] Cache: $KUBESIGHT_CACHE_DIR (warm)" in script
+    assert "(empty - this build fills it)" in script
+
+
+def test_a_stage_says_so_when_caching_is_switched_off(monkeypatch):
+    """The most common reason a build is still slow, and the least visible:
+    nothing is broken, nobody turned it on."""
+    monkeypatch.delenv("CI_CACHE_CLAIM_NAME", raising=False)
+    monkeypatch.delenv("CI_CACHE_STORAGE_CLASS", raising=False)
+    script = _job(_execution())["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
+    assert "[kubesight] Cache: off. Every build starts cold." in script
+    assert "Runners -> Build cache" in script
+
+
+def test_warmth_is_judged_only_by_directories_that_start_out_empty():
+    """The real rule is not "we did not create it" — prep_script creates some of
+    these, and an empty directory probes false, which is correct. The rule is
+    that nothing prep_script WRITES may sit inside a probed directory. Only one
+    thing is written: the Gradle init script. So `gradle/` and `gradle/init.d`
+    are the two paths that would report warm on a first build, which is exactly
+    the build whose answer matters."""
+    forbidden = {"gradle", f"gradle/init.d"}
+    for name in cache_layout.WARMTH_PROBE_DIRS:
+        assert name not in forbidden, f"{name} contains the init script we just wrote"
+
+
+def test_every_message_the_build_log_gets_is_ascii():
+    """It travels as a shell heredoc inside a JSON Job manifest, through
+    whatever the stage image's locale happens to be."""
+    assert cache_layout.prep_script().isascii()

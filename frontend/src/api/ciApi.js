@@ -1,4 +1,32 @@
-import { request } from "./client";
+import { getBaseUrl, request } from "./client";
+
+/**
+ * Hand a file to the browser's own download manager.
+ *
+ * Not `fetch` + blob: a CI artifact is routinely a 200MB JAR, and buffering one
+ * in memory to hand it straight back to the disk costs the memory, loses the
+ * progress bar and cannot resume a dropped transfer. A navigation to a URL that
+ * answers with `Content-Disposition: attachment` streams instead.
+ *
+ * The cost of that choice is authentication: a navigation sends no headers, so
+ * the credential has to travel in the URL. That is what the ticket is — a
+ * two-minute token good for this one resource and nothing else (see
+ * `auth_utils.create_download_ticket`).
+ *
+ * The anchor is synthetic rather than `window.location` so the current page is
+ * never navigated away from if the response turns out not to be an attachment.
+ */
+const startDownload = (path, ticket) => {
+  const url = `${getBaseUrl()}${path}?ticket=${encodeURIComponent(ticket)}`;
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.rel = "noopener";
+  // No `download` attribute: it would override the filename the server sends in
+  // Content-Disposition, and the server is the one that knows it.
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+};
 
 // ---------------------------------------------------------------------------
 // Services — the CI Service Catalog
@@ -162,6 +190,19 @@ export const getCiStageLogs = (buildId, stageId, after = 0, limit = 1000) =>
 export const ciStageLogDownloadPath = (buildId, stageId) =>
   `/api/ci/builds/${encodeURIComponent(buildId)}/stages/${encodeURIComponent(stageId)}/logs/download`;
 
+export const createCiStageLogDownloadTicket = (buildId, stageId) =>
+  request(
+    `/api/ci/builds/${encodeURIComponent(buildId)}/stages/${encodeURIComponent(
+      stageId
+    )}/logs/download-ticket`,
+    { method: "POST" }
+  );
+
+export const downloadCiStageLog = async (buildId, stageId) => {
+  const { ticket } = await createCiStageLogDownloadTicket(buildId, stageId);
+  startDownload(ciStageLogDownloadPath(buildId, stageId), ticket);
+};
+
 // ---------------------------------------------------------------------------
 // Artifacts
 // ---------------------------------------------------------------------------
@@ -176,6 +217,14 @@ export const getCiArtifact = (id) => request(`/api/ci/artifacts/${encodeURICompo
 
 export const ciArtifactDownloadPath = (id) =>
   `/api/ci/artifacts/${encodeURIComponent(id)}/download`;
+
+export const createCiArtifactDownloadTicket = (id) =>
+  request(`/api/ci/artifacts/${encodeURIComponent(id)}/download-ticket`, { method: "POST" });
+
+export const downloadCiArtifact = async (id) => {
+  const { ticket } = await createCiArtifactDownloadTicket(id);
+  startDownload(ciArtifactDownloadPath(id), ticket);
+};
 
 // ---------------------------------------------------------------------------
 // Secrets — values are write-only; reads return names and metadata only.

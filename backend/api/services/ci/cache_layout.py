@@ -83,6 +83,20 @@ PRECREATED_SUBDIRS = (
 # this makes --build-cache use the persistent directory with no change to the
 # pipeline. It configures WHERE the cache is, never whether it is on: a build
 # that does not pass --build-cache (or set org.gradle.caching) is unaffected.
+# Directories whose contents prove a TOOL has used this cache before. Every one
+# of them is created by the tool that owns it, never by prep_script — a probe
+# that included ``gradle/`` would report warm on the first build, because this
+# script has just put an init.d inside it.
+WARMTH_PROBE_DIRS = (
+    "gradle/caches",
+    "gradle/wrapper",
+    "gradle-build-cache",
+    "maven",
+    "npm",
+    "dependency-check-data",
+    "semgrep",
+)
+
 GRADLE_INIT_SCRIPT_NAME = "kubesight-build-cache.gradle"
 GRADLE_INIT_SCRIPT = """\
 // Written by KubeSight before every stage. Points Gradle's local build cache at
@@ -225,10 +239,41 @@ def prep_script(*, gradle_init: bool = True) -> str:
         lines.append("    :")
     lines.extend(
         [
+            # Say what the cache is, on every stage, in one line.
+            #
+            # Without this a cold build and a warm one produce identical logs,
+            # and "why is Gradle still downloading its distribution on the
+            # second run?" has no answer visible anywhere — the three causes
+            # (switched off, unwritable, genuinely first run) look the same.
+            # On every stage rather than only the first because the drawer shows
+            # ONE stage's log at a time, and the stage somebody opens to ask the
+            # question is the slow one, not the checkout.
+            # Warm means a TOOL has written something. Probing the directories
+            # the tools own, never the ones this script just created: `gradle/`
+            # always has an init.d in it by now, so it would report warm on the
+            # very first build and the line would be a lie exactly when it
+            # matters most.
+            "    KS_WARM=",
+            "    for KS_DIR in " + " ".join(WARMTH_PROBE_DIRS) + "; do",
+            '      if [ -n "$(ls -A "$KUBESIGHT_CACHE_DIR/$KS_DIR" 2>/dev/null)" ]; then',
+            "        KS_WARM=1",
+            "        break",
+            "      fi",
+            "    done",
+            '    if [ -n "$KS_WARM" ]; then',
+            '      echo "[kubesight] Cache: $KUBESIGHT_CACHE_DIR (warm)"',
+            "    else",
+            '      echo "[kubesight] Cache: $KUBESIGHT_CACHE_DIR (empty - this build fills it)"',
+            "    fi",
             "  else",
             '    echo "[kubesight] Cache directory $KUBESIGHT_CACHE_DIR is not writable;'
             ' this build runs cold." >&2',
             "  fi",
+            "else",
+            # The single most common reason a build is still slow, and until now
+            # the least visible one: nothing is wrong, nobody turned it on.
+            '  echo "[kubesight] Cache: off. Every build starts cold."',
+            '  echo "[kubesight] Turn it on under Runners -> Build cache, or see CI-CACHE.md."',
             "fi",
         ]
     )

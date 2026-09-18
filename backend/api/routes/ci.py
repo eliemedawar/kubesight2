@@ -2,19 +2,27 @@
 
 Route layer only: validate the request shape, resolve the row, delegate to
 ``services/ci``, and serialize. Every endpoint is gated by an existing
-``@require_permission`` key — CI adds no second authentication path.
+``@require_permission`` key.
+
+The two file-download routes are the one exception, and only halfway: they
+also accept a ``?ticket=`` download ticket, because a browser downloads by
+navigating and a navigation carries no Authorization header. The ticket is
+minted by an ordinary ``@require_permission`` endpoint, names one resource,
+expires in two minutes, and cannot authenticate anything else — see
+``auth_utils.create_download_ticket``. The permission is still checked on the
+user it resolves to.
 """
 
 from __future__ import annotations
 
 import io
 
-from flask import Blueprint, request, send_file
+from flask import Blueprint, g, request, send_file
 
 from ..audit import log_audit
-from ..auth_utils import get_current_user
+from ..auth_utils import create_download_ticket, get_current_user
 from ..db import db
-from ..decorators import require_permission
+from ..decorators import require_download_access, require_permission
 from ..models_application_intelligence import BitbucketCredentialProfile
 from ..models_ci import CiRunner
 from ..response import error_response, success_response
@@ -60,7 +68,15 @@ _USER_ERRORS = (
 
 
 def _actor():
-    return get_current_user()
+    """Who is making this request, for the audit trail.
+
+    ``g.download_actor`` is the fallback for the two download routes: they can
+    be reached with a ticket in the URL instead of a bearer header (a browser
+    navigation sends no headers), and ``get_current_user`` reads the header and
+    only the header. Without this, every browser download would be audited as
+    nobody.
+    """
+    return get_current_user() or getattr(g, "download_actor", None)
 
 
 def _int_arg(name: str, default: int) -> int:
@@ -662,8 +678,26 @@ def get_stage_logs(build_id: int, stage_id: int):
     return success_response(payload)
 
 
-@ci_bp.route("/builds/<int:build_id>/stages/<int:stage_id>/logs/download", methods=["GET"])
+def _stage_log_resource(build_id: int, stage_id: int) -> str:
+    return f"ci-stage-log:{build_id}:{stage_id}"
+
+
+@ci_bp.route(
+    "/builds/<int:build_id>/stages/<int:stage_id>/logs/download-ticket", methods=["POST"]
+)
 @require_permission("ci_builds:view")
+def create_stage_log_download_ticket(build_id: int, stage_id: int):
+    # Resolve first: a ticket for a stage that does not exist is a ticket that
+    # cannot be spent, and the 404 belongs here rather than mid-download.
+    build = engine_service.get_build(build_id)
+    stage = engine_service.get_build_stage(build, stage_id)
+    return success_response(
+        {"ticket": create_download_ticket(_actor(), _stage_log_resource(build_id, stage.id))}
+    )
+
+
+@ci_bp.route("/builds/<int:build_id>/stages/<int:stage_id>/logs/download", methods=["GET"])
+@require_download_access("ci_builds:view", _stage_log_resource)
 def download_stage_logs(build_id: int, stage_id: int):
     build = engine_service.get_build(build_id)
     stage = engine_service.get_build_stage(build, stage_id)
@@ -718,8 +752,35 @@ def get_artifact(artifact_id: int):
     return success_response(artifact_to_dict(row))
 
 
-@ci_bp.route("/artifacts/<int:artifact_id>/download", methods=["GET"])
+def _artifact_resource(artifact_id: int) -> str:
+    return f"ci-artifact:{artifact_id}"
+
+
+@ci_bp.route("/artifacts/<int:artifact_id>/download-ticket", methods=["POST"])
 @require_permission("ci_artifacts:view")
+def create_artifact_download_ticket(artifact_id: int):
+    """A short-lived URL credential for ONE artifact, minted on the click.
+
+    The browser downloads by navigating, and a navigation carries no
+    Authorization header — see ``create_download_ticket``. Minted here rather
+    than handed out with the artifact list so the two-minute clock starts when
+    somebody actually wants the file, not when the page loaded.
+    """
+    from ..models_ci import CiArtifact
+
+    row = db.session.get(CiArtifact, artifact_id)
+    if row is None:
+        return error_response("Artifact not found.", 404)
+    if row.storage_backend != "local" or not row.storage_ref:
+        return error_response(
+            "This artifact is not stored locally. Pull it from its registry instead.",
+            400,
+        )
+    return success_response({"ticket": create_download_ticket(_actor(), _artifact_resource(row.id))})
+
+
+@ci_bp.route("/artifacts/<int:artifact_id>/download", methods=["GET"])
+@require_download_access("ci_artifacts:view", _artifact_resource)
 def download_artifact(artifact_id: int):
     from ..models_ci import CiArtifact
 
