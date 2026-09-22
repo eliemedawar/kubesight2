@@ -20,6 +20,28 @@ import {
 } from "../components/catalog/ciShared.jsx";
 
 const REFRESH_MS = 4000;
+// A poll that fails is almost always a blip -- the backend rolling, a reset
+// connection -- not an outage. Back off instead of giving up, and stay quiet
+// until the failures start to look like a pattern rather than a hiccup.
+const RETRY_MS = 8000;
+const MAX_RETRY_MS = 60000;
+const FAILURES_BEFORE_BANNER = 3;
+const retryDelay = (failures) =>
+  Math.min(RETRY_MS * 2 ** Math.max(0, failures - 1), MAX_RETRY_MS);
+
+// `fetch` rejects with a bare "Failed to fetch" when the request never reached
+// the backend at all. That is the browser's wording, not ours, and it tells the
+// reader nothing -- anything that carries a status came from the API and says
+// something useful, so only the native strings get replaced.
+const NATIVE_FETCH_FAILURES = new Set([
+  "Failed to fetch",
+  "Load failed",
+  "NetworkError when attempting to fetch resource.",
+]);
+const describeError = (err) =>
+  !err?.status && NATIVE_FETCH_FAILURES.has(err?.message)
+    ? "Lost contact with the backend. Retrying..."
+    : err?.message || "Could not load the service catalog.";
 
 // Health-strip tiles ARE the filters (the Alerts pattern): each shows a live
 // count and clicking it narrows the grid to exactly the cards it counted.
@@ -89,19 +111,30 @@ export default function ServiceCatalogPage({ clusters = [] }) {
   const [creating, setCreating] = useState(false);
   const timerRef = useRef(null);
 
+  const failuresRef = useRef(0);
+
   const load = useCallback(async ({ background = false } = {}) => {
     if (!background) setLoading(true);
     try {
       const data = await listCiServices();
       setServices(data.items || []);
       setSummary(data.summary || null);
+      failuresRef.current = 0;
       setError("");
-      return (data.items || []).some(
-        (item) => item.latestBuild && isBuildActive(item.latestBuild.status)
-      );
+      return {
+        ok: true,
+        active: (data.items || []).some(
+          (item) => item.latestBuild && isBuildActive(item.latestBuild.status)
+        ),
+      };
     } catch (err) {
-      setError(err.message || "Could not load the service catalog.");
-      return false;
+      failuresRef.current += 1;
+      // A background tick that misses once while the grid is already on screen
+      // is not worth a banner: the next one almost always repaints it.
+      if (!background || failuresRef.current >= FAILURES_BEFORE_BANNER) {
+        setError(describeError(err));
+      }
+      return { ok: false, active: false };
     } finally {
       setLoading(false);
     }
@@ -111,9 +144,21 @@ export default function ServiceCatalogPage({ clusters = [] }) {
   useEffect(() => {
     if (!canView || opened) return undefined;
     let cancelled = false;
+    failuresRef.current = 0;
     const tick = async (background) => {
-      const active = await load({ background });
-      if (cancelled || !active) return;
+      const { ok, active } = await load({ background });
+      if (cancelled) return;
+      // A failed poll must never be read as "nothing is building". That used to
+      // end the chain on the first blip, freezing the strip and leaving a stale
+      // banner over live data with nothing left running to clear it.
+      if (!ok) {
+        timerRef.current = window.setTimeout(
+          () => tick(true),
+          retryDelay(failuresRef.current)
+        );
+        return;
+      }
+      if (!active) return;
       timerRef.current = window.setTimeout(() => tick(true), REFRESH_MS);
     };
     tick(false);

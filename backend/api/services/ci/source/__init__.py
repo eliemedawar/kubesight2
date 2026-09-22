@@ -21,7 +21,18 @@ class SourceError(RuntimeError):
 
     Messages are safe to show a user: they never echo a token or a URL that
     embeds one.
+
+    ``retryable`` matters only to callers that retry — the merge check's verdict
+    delivery, above all. A timeout is worth another attempt in a minute; a
+    rejected credential is not, and retrying one forever turns an integration
+    into a denial of service against its own host. It defaults to True because
+    every pre-existing raise site is a read that a user is about to repeat by
+    hand anyway.
     """
+
+    def __init__(self, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass
@@ -107,6 +118,34 @@ class SourceProvider(Protocol):
         self, ref: RepositoryRef, credential, revision: str, working_directory=None
     ) -> CheckoutSpec:
         """Everything a runner needs to fetch the source."""
+
+    # --- Writes. Optional: a provider that cannot report a verdict simply does
+    # not implement these, and merge checks refuse to be enabled against it
+    # rather than running checks nobody will ever be told the result of.
+
+    def post_check_verdict(
+        self,
+        ref: RepositoryRef,
+        credential,
+        *,
+        commit_sha: str,
+        status_key: str,
+        state: str,
+        name: str,
+        description: str,
+        url: str,
+    ) -> None:
+        """Report a merge check's verdict against a commit.
+
+        ``state`` is one of ``running``, ``passed``, ``failed`` — the port's
+        vocabulary, translated by the provider into whatever its host calls
+        those. Raises :class:`SourceError`.
+        """
+
+    def post_pull_request_note(
+        self, ref: RepositoryRef, credential, *, pull_request_id: str, markdown: str
+    ) -> None:
+        """Leave a comment explaining a verdict. Raises :class:`SourceError`."""
 
 
 _PROVIDERS: Dict[str, SourceProvider] = {}

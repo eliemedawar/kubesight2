@@ -102,6 +102,17 @@ export const STATUS_TONE = {
   offline: "unknown",
   draining: "warn",
   disabled: "unknown",
+  // Merge checks. `passed`/`failed` are the check's own states; `allowed` and
+  // `blocked` are the verdict it reports; `delivered` is whether Bitbucket has
+  // been told. Three vocabularies on purpose — a verdict that was reached and
+  // never delivered has to be distinguishable from one that passed.
+  passed: "ok",
+  allowed: "ok",
+  blocked: "danger",
+  error: "danger",
+  delivered: "ok",
+  unknown: "unknown",
+  not_applicable: "unknown",
 };
 
 export const TERMINAL_BUILD_STATUSES = new Set([

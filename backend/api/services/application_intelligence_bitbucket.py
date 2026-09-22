@@ -83,6 +83,13 @@ def _authorization_header(
     return f"Bearer {token}"
 
 
+# Public alias. The merge-check writer needs exactly this scheme (Bearer for an
+# OAuth/access token, Basic for an Atlassian API token) and must not carry a
+# second copy of it — two implementations of one auth scheme drift, and the
+# symptom is a 401 on a path nobody tests often.
+authorization_header = _authorization_header
+
+
 def _request_json(
     url: str,
     token: str,

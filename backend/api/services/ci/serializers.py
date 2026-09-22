@@ -164,6 +164,9 @@ def pipeline_to_dict(row: CiPipeline, *, with_stages: bool = True) -> Dict[str, 
         "description": row.description,
         "isDefault": bool(row.is_default),
         "enabled": bool(row.enabled),
+        # 'build' | 'merge_check'. Generated pipelines are SimpleNamespace
+        # stand-ins with no column, so this is read defensively.
+        "purpose": getattr(row, "purpose", None) or "build",
         "version": row.version,
         "parameters": _json_list(row.parameters),
         "stageCount": len(row.stages),

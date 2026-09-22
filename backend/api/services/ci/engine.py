@@ -414,7 +414,12 @@ def advance_ci_builds() -> bool:
         CiBuild.query.filter(CiBuild.status.in_(("queued", "running"))).count()
     )
     if not active:
-        return False
+        # Merge checks settle and DELIVER on this same clock, and a verdict
+        # waiting to be handed to Bitbucket outlives the build that produced it
+        # — a retry after a backoff is work with no running build behind it. So
+        # the early return asks about that too, or a delivery that failed once
+        # would wait for whatever happens to build next.
+        return _settle_merge_checks() > 0
 
     # A pass already in flight is doing exactly this work; a second one would
     # poll the same stage and race on the transition the first is committing.
@@ -446,13 +451,41 @@ def _run_pass() -> bool:
         except Exception:
             logger.exception("CI runner bookkeeping failed")
 
-    for step in (_reap_stale_builds, _process_cancellations, _advance_running, _dispatch_queued):
+    for step in (
+        _reap_stale_builds,
+        _process_cancellations,
+        _advance_running,
+        _dispatch_queued,
+        _settle_merge_checks,
+    ):
         try:
             step()
         except Exception:
             logger.exception("CI engine step %s failed", step.__name__)
             db.session.rollback()
     return True
+
+
+def _settle_merge_checks() -> int:
+    """Judge and deliver merge check verdicts, as one step of the CI pass.
+
+    Imported here rather than at module scope: merge checks are built ON the
+    engine (they trigger ordinary builds through it), so a module-level import
+    would be a cycle. The engine knowing one function name is the whole of the
+    coupling in this direction.
+
+    Never raises. A source host that is down must not stop builds advancing.
+    """
+    try:
+        from .merge_checks import pending_work, settle
+
+        if not pending_work():
+            return 0
+        return settle()
+    except Exception:
+        logger.exception("Merge check settlement failed")
+        db.session.rollback()
+        return 0
 
 
 def advance_build_now(build_id: int) -> None:

@@ -10,6 +10,7 @@ import BuildDetailDrawer from "../components/catalog/BuildDetailDrawer.jsx";
 import BuildsPanel from "../components/catalog/BuildsPanel.jsx";
 import DockerfilePanel from "../components/catalog/DockerfilePanel.jsx";
 import HermesAnalysisPanel from "../components/catalog/HermesAnalysisPanel.jsx";
+import MergeChecksPanel from "../components/catalog/MergeChecksPanel.jsx";
 import PipelineEditor from "../components/catalog/PipelineEditor.jsx";
 import RunBuildModal from "../components/catalog/RunBuildModal.jsx";
 import ServiceFormModal from "../components/catalog/ServiceFormModal.jsx";
@@ -25,6 +26,10 @@ const TABS = [
   // in: where the code is, what it is, then how to build it.
   ["application", "Application"],
   ["pipeline", "Pipeline"],
+  // Between Pipeline and Dockerfile because that is where it sits in the life
+  // of a change: the pipeline is how this service is built, merge checks are
+  // what a pull request has to survive before it becomes something to build.
+  ["mergeChecks", "Merge Checks"],
   ["dockerfile", "Dockerfile"],
   ["builds", "Builds"],
   ["artifacts", "Artifacts"],
@@ -32,7 +37,7 @@ const TABS = [
 ];
 
 /**
- * One service, seven tabs.
+ * One service, nine tabs.
  *
  * Run Build lives in the header so it is reachable from every tab, and is
  * disabled with a reason when the service is not ready — never silently
@@ -51,6 +56,8 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
     manageSecrets: hasPermission("ci_secrets:manage"),
     manageArtifacts: hasPermission("ci_artifacts:manage"),
     deploy: hasPermission("apps:deploy"),
+    viewMergeChecks: hasPermission("ci_merge_checks:view"),
+    manageMergeChecks: hasPermission("ci_merge_checks:manage"),
   };
 
   const [summary, setSummary] = useState(null);
@@ -195,7 +202,12 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
       {error && <ErrorBanner message={error} />}
 
       <div className="tab-bar" role="tablist" aria-label="Service sections">
-        {TABS.map(([value, label]) => {
+        {/* Merge checks is the one tab behind a permission of its own — it
+            carries a webhook secret and the gate that decides what may be
+            merged, so a role without that permission is not shown the door. */}
+        {TABS.filter(
+          ([value]) => value !== "mergeChecks" || can.viewMergeChecks
+        ).map(([value, label]) => {
           const latest = summary.recentBuilds?.[0];
           const buildsAlert =
             value === "builds" && latest && ["failed", "timeout"].includes(latest.status);
@@ -251,6 +263,13 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             service={service}
             canEdit={can.editPipeline}
             onChanged={load}
+          />
+        )}
+        {tab === "mergeChecks" && (
+          <MergeChecksPanel
+            service={service}
+            canEdit={can.manageMergeChecks}
+            canView={can.viewMergeChecks}
           />
         )}
         {tab === "dockerfile" && (

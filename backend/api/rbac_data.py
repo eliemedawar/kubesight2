@@ -112,6 +112,8 @@ PERMISSIONS = [
     ("ci_runners:manage", "Enable, label, and configure CI runners"),
     ("ci_secrets:view", "View the names of CI secrets (never their values)"),
     ("ci_secrets:manage", "Create, update, and delete CI secrets and source credentials"),
+    ("ci_merge_checks:view", "View merge check configuration and pull request verdicts"),
+    ("ci_merge_checks:manage", "Configure merge checks and the quality gate policy"),
 ]
 
 ALL_PERMISSION_KEYS = [key for key, _ in PERMISSIONS]
@@ -224,6 +226,7 @@ PERMISSION_GROUPS = [
             "ci_artifacts:view", "ci_artifacts:manage",
             "ci_runners:view", "ci_runners:manage",
             "ci_secrets:view", "ci_secrets:manage",
+            "ci_merge_checks:view", "ci_merge_checks:manage",
         ],
     },
     {
@@ -262,6 +265,9 @@ DANGEROUS_PERMISSION_KEYS = {
     "ci_runners:manage",
     # Deleting artifacts destroys the only copy of a build's output.
     "ci_artifacts:manage",
+    # Changing the quality gate changes what is allowed to be merged, across
+    # every service that inherits it.
+    "ci_merge_checks:manage",
 }
 
 
@@ -325,6 +331,7 @@ VIEWER_PERMISSIONS = [
     "ci_pipelines:view",
     "ci_builds:view",
     "ci_artifacts:view",
+    "ci_merge_checks:view",
 ]
 
 OPERATOR_PERMISSIONS = [
@@ -378,6 +385,7 @@ OPERATOR_PERMISSIONS = [
     "ci_artifacts:view",
     "ci_runners:view",
     "ci_secrets:view",
+    "ci_merge_checks:view",
 ]
 
 CLUSTER_ADMIN_PERMISSIONS = [
@@ -447,6 +455,8 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "ci_runners:view",
     "ci_secrets:view",
     "ci_secrets:manage",
+    "ci_merge_checks:view",
+    "ci_merge_checks:manage",
 ]
 
 HERMES_AGENT_PERMISSIONS = [

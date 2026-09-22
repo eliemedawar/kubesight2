@@ -11,6 +11,7 @@ import {
 } from "../lib/settingsSections.js";
 import ICONS from "./settings/settingsIcons.jsx";
 import PreferencesPanel from "./settings/PreferencesPanel.jsx";
+import MergeChecksPolicyPanel from "./settings/MergeChecksPolicyPanel.jsx";
 
 /**
  * Settings — the one place things get configured.
@@ -194,6 +195,12 @@ export default function SettingsPage({
             isPageAllowed={isPageAllowed}
             canOpenIntegrations={canOpenIntegrations}
             onOpenIntegrations={() => onNavigate?.("integrations")}
+          />
+        );
+      case "mergeChecks":
+        return (
+          <MergeChecksPolicyPanel
+            canManage={hasPermission("ci_merge_checks:manage") || isAdmin}
           />
         );
       default:

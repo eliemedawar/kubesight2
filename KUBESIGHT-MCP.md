@@ -4,7 +4,7 @@ Lets an agent — Hermes, Claude Code, anything that speaks MCP — ask KubeSigh
 questions and act on the answers. "Which services are failing?" "Why did build
 214 stop?" "What version of payments is in prod?" "Roll it back."
 
-**Eighty tools across seven domains.** Sixty read, twenty write. There is no
+**Eighty-five tools across seven domains.** Sixty-four read, twenty-one write. There is no
 fixed list of what an agent may change: it may do exactly what its token's
 permissions allow, through the same services the UI posts to — so the gates
 inside those services still apply, and nothing here can route around one.
@@ -30,9 +30,18 @@ worth a minute:
 |---|---|
 | answer questions and nothing else | the `viewer` role, plus `ci_runners:view` |
 | debug CI and fix pipelines | + `ci_pipelines:edit`, `ci_builds:run`, `ci_builds:cancel`, `ci_builds:retry` |
+| explain why a pull request was blocked | + `ci_merge_checks:view` |
+| move the org-wide quality gate | + `ci_merge_checks:manage` — think before granting this |
 | operate workloads | + `apps:deploy` |
 | deploy | + `apps:dryrun`, `apps:diff`, and `deployment_requests:request` so it can ask |
 | manage Helm | + `helm:upgrade`, `helm:rollback`; add `helm:uninstall` only deliberately |
+
+`ci_merge_checks:manage` deserves its own moment. It is the only permission here
+that changes what is *allowed to be merged*, across every service that inherits
+the policy — and an agent that can relax a gate to get a merge through defeats
+the gate. Grant it when somebody wants an agent to tune the number for them, and
+not by default. It still cannot switch a service's checks off or re-send a
+verdict; there is no tool for either, deliberately.
 
 `ci_runners:view` is worth adding even to a read-only token: "no runner is
 online" is the single most common reason a build sits queued, and without that

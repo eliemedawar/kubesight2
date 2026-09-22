@@ -3238,3 +3238,657 @@ button.sg-ci-workspace-entry:focus-visible {
   max-height: 11rem;
   overflow: auto;
 }
+
+/* ── Merge checks ──────────────────────────────────────────────────
+   The tab between Pipeline and Dockerfile, plus the quality gate form it
+   shares with Settings → Merge checks. Prefixed sg-mc- rather than sg-ci-
+   because the same form renders inside the settings shell, where the CI
+   panel's own layout rules do not apply. */
+
+.sg-mc-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5);
+}
+
+.sg-mc-head h4 {
+  margin-bottom: var(--space-2);
+}
+
+.sg-mc-head > div {
+  min-width: 0;
+}
+
+/* The on/off switch reads as a state, not as a button: it saves immediately,
+   and a Save button beside it would suggest it had not. */
+.sg-mc-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sg-mc-switch input {
+  margin: 0;
+}
+
+.sg-mc-blockers {
+  margin: var(--space-4) 0 0;
+  padding: var(--space-3) var(--space-4) var(--space-3) var(--space-6);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--text-subtle);
+  font-size: var(--font-size-sm);
+}
+
+.sg-mc-blockers li + li {
+  margin-top: var(--space-2);
+}
+
+/* URL and secret: a wide read-only field with its actions on the same line,
+   because both exist to be copied and nothing else. */
+.sg-mc-copyrow {
+  display: flex;
+  flex-direction: row;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.sg-mc-copyrow input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.sg-mc-copyrow button {
+  flex: none;
+}
+
+.sg-mc-choices {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin: 0;
+}
+
+.sg-mc-choices legend {
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-subtle);
+}
+
+/* `label.sg-mc-check` as well as the bare class: `.form-grid label` in
+   index.css lays every label out as a stacked grid, which would put a checkbox
+   on its own line above its text. Matching the element too gives this the same
+   specificity, and ci.css is imported after, so the row wins. */
+.sg-mc-check,
+label.sg-mc-check {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--font-size-base);
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-main);
+}
+
+.sg-mc-check input {
+  margin: 0.18rem 0 0;
+  flex: none;
+}
+
+.sg-mc-check + .sg-mc-check {
+  margin-top: var(--space-2);
+}
+
+.sg-mc-check .field-hint {
+  display: block;
+  flex-basis: 100%;
+}
+
+.sg-mc-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--space-4);
+  /* Each card keeps its own height. Without this, expanding one card's script
+     stretches the two beside it into tall empty boxes. */
+  align-items: start;
+}
+
+.sg-mc-tool {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: var(--bg-panel-strong);
+}
+
+.sg-mc-tool p.muted {
+  margin: var(--space-2) 0 var(--space-2);
+  font-size: var(--font-size-xs);
+}
+
+/* The generated shell, shown on request. Scrolls rather than wraps: a wrapped
+   shell line reads as two commands. */
+.sg-mc-commands {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  max-height: 18rem;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.sg-mc-summary {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--font-size-base);
+  color: var(--text-subtle);
+}
+
+.sg-mc-summary li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  line-height: 1.55;
+}
+
+.sg-mc-summary li + li {
+  margin-top: var(--space-2);
+}
+
+.sg-mc-summary svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: none;
+  margin-top: 0.22rem;
+  color: var(--ok);
+}
+
+/* The Bitbucket half of the setup. Set apart because it is the half KubeSight
+   cannot do, and a reader skimming the tab has to notice it. */
+.sg-mc-finish {
+  border-left: 3px solid var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.sg-mc-steps {
+  margin: var(--space-3) 0 0;
+  padding-left: var(--space-5);
+  font-size: var(--font-size-base);
+  color: var(--text-subtle);
+}
+
+.sg-mc-steps li + li {
+  margin-top: var(--space-3);
+}
+
+.sg-mc-table {
+  /* Nine short columns and two sentences. Below this the sentences win the
+     width negotiation and the commit column disappears; the wrapper scrolls. */
+  min-width: 62rem;
+}
+
+.sg-mc-table td {
+  vertical-align: top;
+}
+
+/* The bound goes on the SPAN, not the cell: `max-width` on a `td` under
+   `table-layout: auto` is advisory and browsers largely ignore it, which left
+   the sentence clipped at whatever width the column happened to get. A block
+   inside the cell is bound normally, and the column sizes to it. */
+.sg-mc-cell-wide .sg-mc-sub {
+  max-width: 22rem;
+}
+
+.sg-mc-sub {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  /* `td { white-space: nowrap }` is global in index.css — without undoing it
+     here a sentence is one very long line that the clamp simply cuts. */
+  white-space: normal;
+  /* Wraps inside its cell instead of running across the one beside it. */
+  overflow-wrap: anywhere;
+  /* Two lines, then it is a tooltip — the full text is on `title`. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.sg-mc-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .sg-mc-head {
+    flex-direction: column;
+  }
+
+  .sg-mc-copyrow {
+    flex-wrap: wrap;
+  }
+
+  .sg-mc-copyrow input {
+    flex-basis: 100%;
+  }
+}
+
+/* ── Merge checks: editing a check's script ───────────────────────── */
+
+.sg-mc-tag {
+  align-self: center;
+  padding: 0.05rem var(--space-2);
+  border-radius: var(--radius-chip);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent-strong);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* The card being edited takes the whole row. A shell script in a third of the
+   width wraps every line and is unreadable, which would make the editor
+   technically present and practically unusable. */
+.sg-mc-tool.is-open {
+  grid-column: 1 / -1;
+}
+
+.sg-mc-script {
+  margin-top: var(--space-2);
+}
+
+.sg-mc-script > .field-hint {
+  display: block;
+  margin-bottom: var(--space-2);
+}
+
+/* Shared by the read-only view and the editor so the script looks the same
+   whether or not you can edit it. `textarea` needs the font and the tab size
+   said explicitly — neither is inherited. */
+.sg-mc-commands,
+textarea.sg-mc-commands {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+  tab-size: 2;
+  /* `pre` so an indented shell block keeps its shape; the box scrolls rather
+     than wrapping, because a wrapped shell line reads as two commands. */
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}
+
+textarea.sg-mc-commands:read-only {
+  color: var(--text-subtle);
+}
+
+.sg-mc-script-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+/* ── Merge checks: is it actually enforced? ───────────────────────── */
+
+.sg-mc-enforce {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: var(--font-size-base);
+  line-height: 1.5;
+}
+
+.sg-mc-enforce--ok {
+  border-color: var(--ok-border);
+  background: var(--ok-soft);
+  color: var(--text-main);
+}
+
+.sg-mc-enforce--warn {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--text-main);
+}
+
+.sg-mc-enforce--unknown {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+  color: var(--text-subtle);
+}
+
+/* ── The quality gate form ─────────────────────────────────────────
+   Not `.form-grid`: that grid is for labelled text fields of similar
+   weight, and this form is one headline number plus a table of four
+   refinements. Prefixed sg-qg- because it renders inside the settings
+   shell as well as the CI panel, and neither one's layout rules apply
+   to the other. */
+
+.sg-qg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* The total: the number the whole gate is. Given the visual weight of a
+   headline because it IS the gate — the per-check caps only narrow it. */
+.sg-qg-total {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  max-width: 58rem;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-lg);
+  background: var(--accent-soft);
+}
+
+.sg-qg-total-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex: none;
+}
+
+.sg-qg-total-label {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* A number field sized like a number. The default full-width input made a
+   one-digit answer look like a paragraph and hid how few of these there are. */
+.sg-qg-num {
+  width: 6.5rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-panel);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-base);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.sg-qg-num--hero {
+  width: 7.5rem;
+  padding: var(--space-3);
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.sg-qg-num::placeholder {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: none;
+}
+
+.sg-qg-num:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* What the number DOES, in words, live. "5" does not say whether 5 passes,
+   and that is the single thing people read this field wrong about. */
+.sg-qg-sentence {
+  margin: 0;
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+  color: var(--text-subtle);
+}
+
+.sg-qg-sentence strong {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+/* Only the NUMBERS are mono. Setting it on every `strong` in the sentence put
+   "nothing is blocked" in a typeface that reads as a code literal. */
+.sg-qg-sentence .sg-qg-n {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.sg-qg-section h5 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sg-qg-section p {
+  margin: 0;
+  font-size: var(--font-size-xs);
+}
+
+/* One row per check, so a check's limit and what it counts are read together.
+   They used to sit in separate sections, which meant answering "what does
+   ESLint block on" took two lookups and a memory. */
+.sg-qg-table {
+  display: flex;
+  flex-direction: column;
+  max-width: 58rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.sg-qg-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 7rem minmax(11rem, 14rem);
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-panel);
+}
+
+.sg-qg-row + .sg-qg-row {
+  border-top: 1px solid var(--border);
+}
+
+.sg-qg-row--head {
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+  background: var(--bg-inset);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sg-qg-check {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.sg-qg-name {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.sg-qg-hint {
+  display: block;
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.sg-qg-sev {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-panel);
+  color: var(--text-main);
+  font-size: var(--font-size-sm);
+}
+
+.sg-qg-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--text-main);
+}
+
+.sg-qg-toggle input {
+  margin: 0;
+  flex: none;
+}
+
+.sg-qg-block {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  max-width: 58rem;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel-strong);
+  font-size: var(--font-size-base);
+  color: var(--text-main);
+}
+
+.sg-qg-block input {
+  margin: 0.2rem 0 0;
+  flex: none;
+}
+
+.sg-qg-block > span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+/* Inherit / override: one control with two states rather than two loose
+   radios, because it is a switch between two modes and not a checklist. */
+.sg-mc-gatemode {
+  display: inline-flex;
+  flex-direction: row;
+  gap: 0;
+  margin-bottom: var(--space-4);
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+}
+
+.sg-mc-gatemode label.sg-mc-check {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.sg-mc-gatemode label.sg-mc-check:has(input:checked) {
+  background: var(--bg-panel);
+  color: var(--text-strong);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* The radio carries no information the pill does not, so it is hidden — but it
+   stays IN FLOW, inside its own label.
+   `position: absolute` here was a bug with teeth. With no positioned ancestor
+   the input resolved against the initial containing block, so it stopped moving
+   with the label it belongs to and sat at a fixed spot on the page. Clicking the
+   label focuses it, the browser scrolls every ancestor to bring the focused
+   element into view — including `.shell`, which is `overflow: hidden` — and the
+   entire app scrolled away with no scrollbar to bring it back.
+   Zero-sized and in flow, the input is where its label is, so focusing it
+   scrolls nothing. */
+.sg-mc-gatemode label.sg-mc-check input[type="radio"] {
+  position: static;
+  width: 0;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.sg-mc-gatemode label.sg-mc-check:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (max-width: 860px) {
+  .sg-qg-total {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+
+  .sg-qg-row {
+    grid-template-columns: minmax(0, 1fr) 6rem;
+    row-gap: var(--space-2);
+  }
+
+  /* The "counts" control drops under the row it belongs to rather than
+     shrinking into unreadability beside it. */
+  .sg-qg-row > [role="cell"]:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .sg-qg-row--head span:last-child {
+    display: none;
+  }
+}

@@ -38,8 +38,15 @@ kubesight_service_get   {service: "payment"}     → state, readiness, blockedRe
 kubesight_pipeline_get  {service: "payment"}     → what it actually runs
 kubesight_builds_list   {service: "payment"}     → history
 kubesight_build_get     {buildId: 214}           → which stage failed
-kubesight_build_logs    {buildId: 214, stageId: 981}  → why
+kubesight_build_failure {buildId: 214}           → WHY, in one call
+kubesight_build_logs    {buildId: 214, stageId: 981}  → one stage, in full
 ```
+
+For "why did it break", reach for `kubesight_build_failure` rather than the
+`build_get` → `build_logs` pair. It finds the failed stage itself and returns
+the tail of its log, and it takes `{service: "payment"}` instead of a build id
+to mean "the last one that failed". Fall back to `kubesight_build_logs` when the
+tail is not enough or the interesting stage is one that passed.
 
 `service` accepts an id **or** a slug **or** a name. Use whichever the person
 gave you rather than looking it up first.
@@ -159,6 +166,51 @@ and the problem — fix what it says and try once more. One case is not yours to
 fix: a secret referenced by the *saved* pipeline that has since been deleted
 blocks every edit, including ones that never touched it. The message says so;
 relay it and ask for the secret back.
+
+## Merge checks — the gate on a pull request
+
+Separate from building. A pull request arrives by webhook, KubeSight runs a
+pipeline of checks (ESLint, Semgrep, SonarQube, OWASP Dependency-Check) against
+the PR's head commit, counts what each reported, and posts a verdict to
+Bitbucket as a commit **build status**.
+
+**KubeSight does not block the merge and you must not say it does.** Bitbucket's
+branch restriction "require passing builds" is what blocks it. A gate can be
+perfectly configured and enforce nothing, and the two look identical from
+inside KubeSight — so `kubesight_merge_checks_status` asks Bitbucket and returns
+`enforcement`. Read it before telling anybody they are protected:
+
+| `enforcement` | What to say |
+|---|---|
+| `enforced: true` | A failed check stops the merge. |
+| `enforced: false` | Checks run and report; **anyone can still merge**. Name the uncovered branches. |
+| `known: false` | You could not look. Say that, never "you are protected". |
+
+```
+kubesight_merge_checks_status  {service: "payment"}   → on? what runs? enforced?
+kubesight_merge_checks_history {service: "payment", blockedOnly: true}
+kubesight_merge_checks_history {service: "payment", pullRequest: "142"}
+kubesight_merge_check_policy_get                      → the org-wide limits
+```
+
+Reading a verdict:
+
+- `problems` against `limit` is the whole gate. A cap is a **maximum that
+  passes**: 5 allows 5 and blocks 6.
+- `byCheck` says which tool blocked it. A check with `status` other than `ok`
+  found nothing **because it did not run** — that is a broken check, not clean
+  code, and the fix is different. Never report it as zero problems.
+- `reportedToBitbucket` is separate from the verdict. `failed` there means the
+  gate decided correctly and Bitbucket was never told, which is an integration
+  problem for a human, not a code problem for the author.
+- Each check has a build behind it. `buildId` → `kubesight_build_failure` for
+  the actual tool output.
+
+`kubesight_merge_check_policy_set` moves the limit for **every service that
+inherits it**. Say the current number and the proposed one and get an explicit
+yes before calling it. There is deliberately no tool that switches a service's
+checks off or re-sends a verdict: relaxing a gate to get a merge through is the
+failure the gate exists to prevent, and it stays a human action in the UI.
 
 ## The two hard questions
 

@@ -214,6 +214,11 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         "kubesight_build_run",
         "kubesight_build_cancel",
         "kubesight_build_retry",
+        # Merge checks: moves the quality gate for every service that inherits
+        # it. Nothing here can switch a service's checks off or re-send a
+        # verdict — an agent relaxing a gate to get a merge through is the exact
+        # failure the gate exists to prevent.
+        "kubesight_merge_check_policy_set",
         # Workloads
         "kubesight_workload_restart",
         "kubesight_workload_scale",
@@ -1165,3 +1170,134 @@ def test_the_summary_line_leads_with_the_change_not_a_count(client, admin_token,
     summary = _summarise("t", {"changed": "scaled x to 3 replicas", "items": [1, 2, 3]})
     assert "scaled x to 3 replicas" in summary
     assert "3 items" not in summary
+
+
+# ---------------------------------------------------------------------------
+# Merge checks and build failures, through the agent's own surface
+# ---------------------------------------------------------------------------
+
+def test_an_agent_can_read_a_merge_gate_and_why_a_pull_request_was_blocked(
+    app, client, admin_token, service
+):
+    from api.db import db
+    from api.models_merge_checks import CiMergeCheck, CiMergeCheckConfig
+
+    # The `app` fixture already holds an application context, so these rows go
+    # in directly rather than through one of their own.
+    with app.app_context():
+        config = CiMergeCheckConfig(
+            service_id=service.id,
+            enabled=True,
+            tools=["eslint", "semgrep"],
+            events=["pullrequest:created"],
+            target_branches=["master"],
+            gate_mode="override",
+            max_total_problems=5,
+        )
+        db.session.add(config)
+        db.session.flush()
+        db.session.add(
+            CiMergeCheck(
+                service_id=service.id,
+                config_id=config.id,
+                pull_request_id="142",
+                title="Refund endpoint",
+                author="Rita",
+                destination_branch="master",
+                commit_sha="9f2c71ad55be31e0",
+                state="failed",
+                verdict="blocked",
+                total_problems=9,
+                gate={"maxTotalProblems": 5},
+                reasons=["9 problems in total; the quality gate allows at most 5."],
+                metrics={
+                    "eslint": {"status": "ok", "problems": 9},
+                    "semgrep": {"status": "missing", "problems": 0},
+                },
+                delivery_state="delivered",
+            )
+        )
+        db.session.commit()
+
+    status = call_tool(
+        client,
+        admin_token,
+        "kubesight_merge_checks_status",
+        # Skipped: it would reach out to Bitbucket, which a test does not own.
+        {"service": "issuing", "checkEnforcement": False},
+    )
+    assert status["structuredContent"]["enabled"] is True
+    assert status["structuredContent"]["gate"]["maxTotalProblems"] == 5
+    assert status["structuredContent"]["checks"] == ["eslint", "semgrep"]
+
+    history = call_tool(
+        client,
+        admin_token,
+        "kubesight_merge_checks_history",
+        {"service": "issuing", "pullRequest": "142"},
+    )
+    entry = history["structuredContent"]["checks"][0]
+    assert entry["verdict"] == "blocked"
+    assert entry["problems"] == 9 and entry["limit"] == 5
+    # The distinction the agent must not flatten: 9 real problems from one check,
+    # and another that never ran. Reporting the second as "0 problems" would
+    # read as clean.
+    assert entry["byCheck"]["eslint"] == {"status": "ok", "problems": 9}
+    assert entry["byCheck"]["semgrep"]["status"] == "missing"
+
+
+def test_an_agent_reads_the_quality_gate_before_it_moves_it(client, admin_token):
+    before = call_tool(client, admin_token, "kubesight_merge_check_policy_get")
+    assert before["structuredContent"]["configured"]["maxTotalProblems"] is None
+
+    changed = call_tool(
+        client, admin_token, "kubesight_merge_check_policy_set", {"maxTotalProblems": 5}
+    )
+    assert changed["structuredContent"]["changed"]["maxTotalProblems"] == {
+        "from": None,
+        "to": 5,
+    }
+
+    after = call_tool(client, admin_token, "kubesight_merge_check_policy_get")
+    assert after["structuredContent"]["effective"]["maxTotalProblems"] == 5
+
+
+def test_build_failure_explains_in_one_call_and_says_so_when_nothing_failed(
+    app, client, admin_token, service
+):
+    from api.db import db
+    from api.models_ci import CiBuild, CiBuildStage, CiLogChunk
+
+    assert service.slug == "issuing"
+    empty = call_tool(
+        client, admin_token, "kubesight_build_failure", {"service": "issuing"}
+    )
+    assert empty["structuredContent"]["failed"] is False
+
+    with app.app_context():
+        build = CiBuild(
+            service_id=service.id, number=7, status="failed", branch="master",
+            commit_sha="deadbeefcafe", pipeline_snapshot={"stages": []},
+        )
+        db.session.add(build)
+        db.session.flush()
+        ok = CiBuildStage(build_id=build.id, position=0, name="Checkout", status="success")
+        bad = CiBuildStage(
+            build_id=build.id, position=1, name="Build", status="failed",
+            exit_code=1, error="Stage 'Build' failed.",
+        )
+        db.session.add_all([ok, bad])
+        db.session.flush()
+        for seq, text in enumerate(["compiling…", "error: cannot find symbol"], start=1):
+            db.session.add(
+                CiLogChunk(build_stage_id=bad.id, seq=seq, stream="stdout", content=text)
+            )
+        db.session.commit()
+
+    found = call_tool(
+        client, admin_token, "kubesight_build_failure", {"service": "issuing"}
+    )["structuredContent"]
+    assert found["number"] == 7
+    assert [stage["name"] for stage in found["failedStages"]] == ["Build"]
+    # The whole point: the reason arrives without a second call for a stage id.
+    assert "cannot find symbol" in "\n".join(found["failedStages"][0]["tail"])

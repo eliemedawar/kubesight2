@@ -392,7 +392,14 @@ button svg {
   height: 100vh;
   height: 100dvh;
   min-height: 0;
-  overflow: hidden;
+  /* `clip`, not `hidden`. Both hide the overflow; only `hidden` also makes this
+     a SCROLL CONTAINER with no scrollbar. Anything that scrolls a focused
+     element into view — a browser focusing an off-screen input, an errant
+     scrollIntoView — can then push the whole application out of sight, and
+     there is no scrollbar to bring it back: the only way out is a reload.
+     `clip` cannot be scrolled at all, programmatically or otherwise, so that
+     failure mode stops existing rather than being fixed one cause at a time. */
+  overflow: clip;
   position: relative;
 }
 

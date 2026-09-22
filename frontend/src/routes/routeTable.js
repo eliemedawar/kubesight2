@@ -53,6 +53,10 @@ export const TAB_VALUES = {
     "source",
     "application",
     "pipeline",
+    // Slugifies to "mergechecks" in the URL and resolves back to this. A tab
+    // missing from this list is not a tab with an ugly URL — the whole route
+    // fails to parse and the app lands on the dashboard.
+    "mergeChecks",
     "dockerfile",
     "builds",
     "artifacts",
@@ -82,9 +86,17 @@ export const TAB_VALUES = {
   // pages/ChangeBundlesPage.jsx:243 — the visible set is RBAC-filtered, the
   // page falls back when a tab is not available to this user
   changeBundles: ["mine", "pending", "all"],
-  // lib/settingsSections.js — the preference sections only; the Administration
-  // rows are `link:` navigations to other pages, not sections of this one
-  settings: ["profile", "appearance", "workspace", "notifications", "security"],
+  // lib/settingsSections.js — the preference sections, plus the Administration
+  // rows that are PANELS of this page. The remaining Administration rows are
+  // `link:` navigations to other pages and are not sections of this one.
+  settings: [
+    "profile",
+    "appearance",
+    "workspace",
+    "notifications",
+    "security",
+    "mergeChecks",
+  ],
   // pages/ApplicationServicesPage.jsx:1440
   applicationServices: ["overview", "dr"],
   // Resource tabs are RBAC-filtered at render time; the full static set is

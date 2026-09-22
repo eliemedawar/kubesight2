@@ -1072,6 +1072,132 @@ def _build_logs(arguments: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@tool(
+    "kubesight_build_failure",
+    permission="ci_builds:view",
+    description=(
+        "Why a build failed, in one call: the stage that failed and the tail of "
+        "its log. Name a buildId, or name a service to get its most recent "
+        "failed build. This is the tool for 'why did the build break' and 'why "
+        "did my pull request get blocked' - kubesight_build_logs is for reading "
+        "a specific stage you already have the id of."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "buildId": {"type": "integer", "description": "The build to explain."},
+            "service": {
+                "type": "string",
+                "description": (
+                    "Instead of buildId: this service's most recent failed build."
+                ),
+            },
+            "tail": {
+                "type": "integer",
+                "description": f"Log lines per failed stage (default 120, max {MAX_LOG_LINES}).",
+            },
+        },
+    },
+)
+def _build_failure(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """The failing stage and its output, without the two-step.
+
+    Every investigation goes build -> which stage -> that stage's log, and an
+    agent doing it by hand spends two round trips discovering something the
+    database already knows. Worse, it has to guess which stage to read when
+    several ran, and the interesting one is rarely the last.
+
+    Bounded on purpose: the TAIL of each failed stage, not the whole log. A
+    build log runs to tens of thousands of lines and the reason is nearly always
+    at the end; handing a model the whole thing buries the answer it came for.
+    ``kubesight_build_logs`` is still there when the tail is not enough.
+    """
+    from ...services.ci import logs
+
+    build = None
+    if arguments.get("buildId") is not None:
+        try:
+            build_id = int(arguments["buildId"])
+        except (TypeError, ValueError):
+            raise ToolError("buildId must be a number.")
+        build = db.session.get(CiBuild, build_id)
+        if build is None:
+            raise ToolError(f"No build {build_id}.")
+    elif arguments.get("service"):
+        service = _service_or_error(arguments.get("service"))
+        build = (
+            CiBuild.query.filter(
+                CiBuild.service_id == service.id,
+                CiBuild.status.in_(("failed", "timeout")),
+            )
+            .order_by(CiBuild.number.desc())
+            .first()
+        )
+        if build is None:
+            return {
+                "service": service.slug,
+                "failed": False,
+                "message": f"No failed build on record for '{service.slug}'.",
+            }
+    else:
+        raise ToolError("Name a buildId or a service.")
+
+    try:
+        tail = max(1, min(int(arguments.get("tail", 120)), MAX_LOG_LINES))
+    except (TypeError, ValueError):
+        tail = 120
+
+    stages = sorted(build.stages, key=lambda item: item.position)
+    failed = [stage for stage in stages if stage.status in ("failed", "timeout")]
+    if not failed and build.status in ("failed", "timeout"):
+        # The build failed without any stage owning it — a runner that went
+        # away, a dispatch that never happened. `build.error` is the only
+        # account of it, and saying "no failed stage" without it is useless.
+        return {
+            "build": build.id,
+            "number": build.number,
+            "service": build.service.slug if build.service else None,
+            "status": build.status,
+            "failedStages": [],
+            "error": build.error,
+            "message": (
+                "No stage reported the failure; the build itself did. The error "
+                "above is the whole account of it."
+            ),
+        }
+
+    explained = []
+    for stage in failed:
+        payload = logs.read(stage.id, after_seq=0, limit=MAX_LOG_LINES * 4)
+        lines = [line["content"] for line in payload.get("lines") or []]
+        explained.append(
+            {
+                "id": stage.id,
+                "name": stage.name,
+                "status": stage.status,
+                "exitCode": stage.exit_code,
+                "error": stage.error,
+                "truncated": len(lines) > tail,
+                "tail": lines[-tail:],
+            }
+        )
+
+    return {
+        "build": build.id,
+        "number": build.number,
+        "service": build.service.slug if build.service else None,
+        "status": build.status,
+        "branch": build.branch,
+        "commit": (build.commit_sha or "")[:12],
+        "trigger": build.trigger_type,
+        "error": build.error,
+        "failedStages": explained,
+        "skipped": [
+            stage.name for stage in stages if stage.status == "skipped"
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Running one
 # ---------------------------------------------------------------------------
@@ -1282,3 +1408,245 @@ def _artifacts_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "artifacts": [artifact_to_dict(item) for item in rows],
     }
 
+
+
+# ---------------------------------------------------------------------------
+# Merge checks — the gate between a pull request and a merge
+# ---------------------------------------------------------------------------
+#
+# Read tools plus one write. The write moves a NUMBER, not code: it changes what
+# is allowed to be merged across every service that inherits it, which is why it
+# is gated on its own permission and why the description tells the agent to say
+# the current value before changing it.
+#
+# Deliberately absent: anything that delivers or re-delivers a verdict, and
+# anything that turns a service's checks off. An agent relaxing a gate to get a
+# merge through is the exact failure this feature exists to prevent, so
+# switching merge checks off stays a human action in the UI.
+
+
+@tool(
+    "kubesight_merge_checks_status",
+    permission="ci_merge_checks:view",
+    description=(
+        "Whether a service's merge gate is on, what it runs, the limits it "
+        "enforces, and - asked of Bitbucket - whether a failed check would "
+        "actually stop a merge. Start here for 'why did my PR get blocked' and "
+        "'is the gate even working'."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "checkEnforcement": {
+                "type": "boolean",
+                "description": (
+                    "Also ask Bitbucket whether a branch restriction requires "
+                    "passing builds. Costs a round trip; default true."
+                ),
+            },
+        },
+        "required": ["service"],
+    },
+)
+def _merge_checks_status(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from ...services.ci import merge_checks
+
+    row = _service_or_error(arguments.get("service"))
+    config = merge_checks.config_payload(row)
+    gate = config.get("effectiveGate") or {}
+    payload: Dict[str, Any] = {
+        "service": row.slug,
+        "enabled": config.get("enabled"),
+        "checks": config.get("tools"),
+        "events": config.get("events"),
+        "targetBranches": config.get("targetBranches") or ["(every branch)"],
+        "gate": {
+            key: value for key, value in gate.items() if key not in ("sources", "mode")
+        },
+        "gateMode": gate.get("mode"),
+        "statusKey": config.get("statusKey"),
+        "webhookUrl": config.get("webhookUrl") or config.get("webhookPath"),
+        "canReportVerdict": config.get("canReportVerdict"),
+        "editedScripts": [
+            item["tool"]
+            for item in config.get("checkScripts") or []
+            if item.get("customized")
+        ],
+    }
+    if arguments.get("checkEnforcement") is not False:
+        # The single most useful field: from inside KubeSight, a gate that only
+        # reports looks identical to one that actually blocks.
+        payload["enforcement"] = merge_checks.merge_enforcement(row)
+    return payload
+
+
+@tool(
+    "kubesight_merge_checks_history",
+    permission="ci_merge_checks:view",
+    description=(
+        "Recent pull requests this service's gate judged: the verdict, how many "
+        "problems each check reported, and whether the verdict reached Bitbucket. "
+        "Use for 'what blocked PR 142' and 'is anything failing to report'."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "pullRequest": {
+                "type": "string",
+                "description": "Narrow to one pull request id.",
+            },
+            "blockedOnly": {"type": "boolean", "description": "Only blocked merges."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS},
+        },
+        "required": ["service"],
+    },
+)
+def _merge_checks_history(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from ...services.ci import merge_checks
+
+    row = _service_or_error(arguments.get("service"))
+    items = merge_checks.list_checks(row, limit=_limit(arguments))
+
+    wanted = str(arguments.get("pullRequest") or "").strip()
+    if wanted:
+        items = [item for item in items if str(item.get("pullRequestId")) == wanted]
+    if arguments.get("blockedOnly"):
+        items = [item for item in items if item.get("verdict") == "blocked"]
+
+    return {
+        "service": row.slug,
+        "count": len(items),
+        "checks": [
+            {
+                "pullRequest": item["pullRequestId"],
+                "title": item["title"],
+                "author": item["author"],
+                "into": item["destinationBranch"],
+                "commit": item["shortSha"],
+                "verdict": item["verdict"],
+                "state": item["state"],
+                "problems": item["totalProblems"],
+                "limit": (item.get("gate") or {}).get("maxTotalProblems"),
+                # Per check, so "which tool blocked it" is answerable without a
+                # second call. A check that did not run says so rather than
+                # reporting zero problems.
+                "byCheck": {
+                    name: {
+                        "status": report.get("status"),
+                        "problems": report.get("problems"),
+                    }
+                    for name, report in (item.get("metrics") or {}).items()
+                    if isinstance(report, dict)
+                },
+                "reasons": item["reasons"],
+                "reportedToBitbucket": item["deliveryState"],
+                "deliveryError": item["deliveryError"],
+                "buildId": item["buildId"],
+                "url": item["pullRequestUrl"],
+                "at": item["createdAt"],
+            }
+            for item in items
+        ],
+    }
+
+
+@tool(
+    "kubesight_merge_check_policy_get",
+    permission="ci_merge_checks:view",
+    description=(
+        "The installation-wide quality gate every service inherits unless it "
+        "overrides it: the total problem limit, the per-check limits, and the "
+        "severity floors."
+    ),
+)
+def _merge_check_policy_get(_arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from ...services.ci.merge_checks import policy as policy_service
+
+    row = policy_service.get_policy()
+    resolved = policy_service.resolve_gate(None, row)
+    return {
+        "configured": policy_service.gate_payload(row),
+        "effective": {
+            key: value
+            for key, value in resolved.items()
+            if key not in ("sources", "mode")
+        },
+        "enabledByDefault": bool(row.enabled_by_default),
+        "note": (
+            "A null limit is no limit. A service whose gate mode is 'override' "
+            "ignores these entirely rather than merging field by field."
+        ),
+    }
+
+
+@tool(
+    "kubesight_merge_check_policy_set",
+    permission="ci_merge_checks:manage",
+    description=(
+        "Change the installation-wide quality gate. This changes what may be "
+        "merged across EVERY service that inherits it, so read the current value "
+        "with kubesight_merge_check_policy_get and say what it is and what it "
+        "would become before calling this. Send null for a field to mean 'no "
+        "limit'. It cannot turn a service's checks off."
+    ),
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "maxTotalProblems": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": (
+                    "Findings across all checks added together. This many passes; "
+                    "one more blocks the merge."
+                ),
+            },
+            "maxEslintProblems": {"type": ["integer", "null"], "minimum": 0},
+            "maxSemgrepProblems": {"type": ["integer", "null"], "minimum": 0},
+            "maxSonarProblems": {"type": ["integer", "null"], "minimum": 0},
+            "maxDependencyProblems": {"type": ["integer", "null"], "minimum": 0},
+            "eslintCountWarnings": {"type": "boolean"},
+            "semgrepMinSeverity": {"type": "string"},
+            "sonarMinSeverity": {"type": "string"},
+            "dependencyMinSeverity": {"type": "string"},
+            "blockOnToolError": {
+                "type": "boolean",
+                "description": "Whether a check that could not run blocks the merge.",
+            },
+        },
+    },
+)
+def _merge_check_policy_set(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    from ...audit import log_audit
+    from ...services.ci.merge_checks import policy as policy_service
+
+    row = policy_service.get_policy()
+    before = policy_service.gate_payload(row)
+    try:
+        policy_service.apply_gate_fields(row, arguments)
+    except policy_service.PolicyError as exc:
+        raise ToolError(str(exc)) from exc
+    row.updated_by_user_id = getattr(user, "id", None)
+    db.session.add(row)
+    db.session.commit()
+
+    after = policy_service.gate_payload(row)
+    changed = {
+        key: {"from": before[key], "to": after[key]}
+        for key in after
+        if before.get(key) != after.get(key)
+    }
+    log_audit(
+        "ci_merge_check_policy_saved",
+        actor=user,
+        target_type="ci_merge_check_policy",
+        target_id="1",
+        details={"changed": changed, "via": "mcp"},
+    )
+    return {
+        "changed": changed or "nothing",
+        "gate": after,
+        "appliesTo": "every service whose gate mode is 'inherit'",
+    }

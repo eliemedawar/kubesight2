@@ -24,6 +24,7 @@ from ...models_ci import (
     IMAGE_SCAN_ON_FAIL,
     IMAGE_SCAN_SEVERITIES,
     IMAGE_SCANNERS,
+    PIPELINE_PURPOSES,
     RUNNER_TYPES,
     STAGE_TYPES,
     CiPipeline,
@@ -689,8 +690,15 @@ def list_pipelines(service: CiService | int) -> List[Dict[str, Any]]:
         service = db.session.get(CiService, int(service))
         if service is None:
             raise LookupError("Service not found.")
+    # Build pipelines only. A merge check pipeline belongs to the Merge Checks
+    # tab, which reads it through its own configuration — listing it here would
+    # put a pipeline that runs no build and produces no artifact at the top of
+    # the Pipeline tab on any service whose default is still the generated one.
     rows = (
         CiPipeline.query.filter_by(service_id=service.id)
+        .filter(
+            db.or_(CiPipeline.purpose == "build", CiPipeline.purpose.is_(None))
+        )
         .order_by(CiPipeline.is_default.desc(), CiPipeline.id.asc())
         .all()
     )
@@ -723,13 +731,20 @@ def create_pipeline(
         raise PipelineError(f"This service already has a pipeline named '{name}'.")
 
     is_default = payload.get("isDefault")
+    purpose = str(payload.get("purpose") or "build").strip().lower()
+    if purpose not in PIPELINE_PURPOSES:
+        raise PipelineError(f"'{purpose}' is not a pipeline purpose.")
     pipeline = CiPipeline(
         service_id=service.id,
         name=name,
         description=_clean(payload.get("description"), 2000) or None,
-        # The first pipeline is the default whatever the payload says, so a
-        # service can never end up with pipelines and no default.
-        is_default=bool(is_default) or not service.pipelines,
+        purpose=purpose,
+        # The first BUILD pipeline is the default whatever the payload says, so
+        # a service can never end up with build pipelines and no default. A
+        # merge check pipeline is never a default — it is not a build.
+        is_default=(
+            purpose == "build" and (bool(is_default) or not service.build_pipelines())
+        ),
         enabled=payload.get("enabled") is not False,
         # Validated here rather than defaulted to []: a create that silently
         # dropped its build inputs produced a pipeline whose Run Build dialog
@@ -776,7 +791,7 @@ def update_pipeline(
         pipeline.description = _clean(payload.get("description"), 2000) or None
     if "enabled" in payload:
         pipeline.enabled = bool(payload.get("enabled"))
-    if payload.get("isDefault"):
+    if payload.get("isDefault") and (pipeline.purpose or "build") == "build":
         pipeline.is_default = True
 
     if "parameters" in payload:
@@ -815,7 +830,7 @@ def delete_pipeline(pipeline: CiPipeline, *, actor=None) -> None:
     if was_default:
         # Never leave a service with pipelines but no default.
         replacement = (
-            CiPipeline.query.filter_by(service_id=service_id)
+            CiPipeline.query.filter_by(service_id=service_id, purpose="build")
             .order_by(CiPipeline.id.asc())
             .first()
         )

@@ -720,6 +720,16 @@ def _migrate_ci_columns() -> None:
         # reads back as the raw string and then iterates as characters.
         _add_column_if_missing("ci_pipelines", "parameters", "JSON")
         _retype_json_column("ci_pipelines", "parameters")
+        # What a pipeline is for. Every pipeline that existed before merge
+        # checks is a build pipeline, which is what the default backfills to —
+        # nothing about those services changes.
+        _add_column_if_missing(
+            "ci_pipelines", "purpose", "VARCHAR(16) DEFAULT 'build'"
+        )
+        with db.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE ci_pipelines SET purpose = 'build' WHERE purpose IS NULL")
+            )
     if "ci_pipeline_stages" in existing:
         # Added after the table shipped: db.create_all() will not alter an
         # existing table, so a deployed database needs this backfilled. Existing
@@ -742,6 +752,32 @@ def _migrate_ci_columns() -> None:
         # for. Turning it on is an explicit edit.
         _add_column_if_missing("ci_pipeline_stages", "image_scan", "JSON")
         _retype_json_column("ci_pipeline_stages", "image_scan")
+
+
+def _migrate_merge_check_columns() -> None:
+    """Columns merge checks added after their tables first shipped.
+
+    The tables themselves come from ``db.create_all()``; this is only the
+    forward-compatible backfill, mirroring every other migrator here.
+    """
+    existing = set(inspect(db.engine).get_table_names())
+    if "ci_merge_check_configs" not in existing:
+        return
+    # Per-tool command overrides. Empty on every configuration that predates
+    # editing, which reads as "use the generated script" — the behaviour those
+    # configurations already had.
+    _add_column_if_missing("ci_merge_check_configs", "custom_commands", "JSON")
+    _retype_json_column("ci_merge_check_configs", "custom_commands")
+    # Semgrep's own cap and severity floor. The gate columns are declared on one
+    # mixin and therefore exist on BOTH tables — adding them to only one is the
+    # mistake this loop exists to prevent. NULL everywhere, which means
+    # "no cap" on the policy and "inherit" on a service: adding a check to the
+    # catalogue must not start blocking merges on a limit nobody set.
+    for table in ("ci_merge_check_policies", "ci_merge_check_configs"):
+        if table not in existing:
+            continue
+        _add_column_if_missing(table, "max_semgrep_problems", "INTEGER")
+        _add_column_if_missing(table, "semgrep_min_severity", "VARCHAR(16)")
 
 
 def _migrate_registry_connection_columns() -> None:
@@ -1177,6 +1213,7 @@ def run_migrations() -> None:
     _migrate_client_service_connections()
     _migrate_client_service_egress_connections()
     _migrate_registry_connection_columns()
+    _migrate_merge_check_columns()
     _seed_builtin_ci_runners()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations

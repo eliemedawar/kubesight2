@@ -15,6 +15,7 @@ costs a page and loading all seven costs the answer.
 | The question is about… | Read |
 |---|---|
 | a build, a pipeline, a runner, a service's source | [references/ci.md](references/ci.md) |
+| a pull request that was blocked, the quality gate | [references/ci.md](references/ci.md) |
 | a cluster, a namespace, a pod's state, events, topology | [references/clusters.md](references/clusters.md) |
 | what is running and what version; restart, scale, roll back, exec | [references/workloads.md](references/workloads.md) |
 | deploying, Helm, approvals, change bundles | [references/deploys.md](references/deploys.md) |
@@ -25,9 +26,15 @@ costs a page and loading all seven costs the answer.
 
 Two questions are common enough to answer here:
 
-- **"Why did build N fail?"** → `kubesight_build_get {buildId: N}` returns
-  `failedStages` directly, then `kubesight_build_logs` on that stage id. Read
+- **"Why did build N fail?"** → `kubesight_build_failure {buildId: N}` in one
+  call: it finds the failed stage and returns the tail of its log. Give it
+  `{service: "payment"}` instead to mean the last failed build. Use
+  `kubesight_build_logs` when you need a specific stage in full. Read
   [ci.md](references/ci.md) if the answer is not in the log.
+- **"Why was my pull request blocked?"** → `kubesight_merge_checks_status`
+  then `kubesight_merge_checks_history {service, pullRequest}`. Check
+  `enforcement` before saying a branch is protected — a gate that reports and
+  does not block looks the same from inside KubeSight.
 - **"Is anything broken?"** → `kubesight_pod_issues {cluster}` for a cluster,
   `kubesight_overview` for CI. Both are one call and both are cheap.
 

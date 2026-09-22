@@ -2874,3 +2874,12 @@ from .models_ci import (  # noqa: E402,F401
     CiSecret,
     CiService,
 )
+
+# Merge checks. Bolted onto the CI domain rather than inside it: the tables
+# reference ci_services and ci_builds, but nothing on the build path reads them
+# — a build triggered by a merge check is an ordinary build.
+from .models_merge_checks import (  # noqa: E402,F401
+    CiMergeCheck,
+    CiMergeCheckConfig,
+    CiMergeCheckPolicy,
+)

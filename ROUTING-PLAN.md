@@ -86,6 +86,7 @@ only on pages listed in `CLUSTER_CONTEXT_PAGE_KEYS` / `NAMESPACE_CONTEXT_PAGE_KE
 | `alerts` | `/alerts/:tab` (`open`\|`history`\|`policies`) | `?cluster` | `AlertsPage.jsx:155` + tab hint |
 | `serviceCatalog` | `/service-catalog` | — | `ServiceCatalogPage.jsx:64` `opened` |
 | ↳ service detail | `/service-catalog/:serviceId/:tab` | `?build` | `ServiceDetailPage.jsx:60`, `:68` `openBuildId` |
+|  | tabs: overview, source, application, pipeline, mergechecks, dockerfile, builds, artifacts, settings | | `routeTable.js` `TAB_VALUES.serviceDetail` — a tab absent from that list makes the whole route unparseable |
 | `blueprints` | `/blueprints` · `/blueprints/:blueprintId` | — | `BlueprintsPage.jsx:270` `detail` |
 | `applicationServices` | `/app-services` · `/app-services/:serviceId/:tab` | — | `ApplicationServicesPage.jsx:1542`, `:1440` |
 | `applicationIntelligence` | `/application-intelligence` · `/application-intelligence/:appId/:tab` | — | `ApplicationIntelligencePage.jsx:2160` tab, `:1277` selectedId |

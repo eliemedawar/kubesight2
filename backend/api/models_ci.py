@@ -74,6 +74,15 @@ IMAGE_SCAN_SEVERITIES = ("critical", "high", "medium", "low")
 # third option: a gate that neither blocks nor reports is not a gate.
 IMAGE_SCAN_ON_FAIL = ("block", "warn")
 
+# What a pipeline is FOR. A service's pipelines used to be interchangeable, and
+# "the default one" was simply the first — which stops being safe the moment
+# something other than Run Build owns a pipeline. A merge check pipeline runs
+# ESLint and a dependency scan and produces no artifact; running it because it
+# happened to be the only row would be a silent, confusing wrong answer.
+#
+# Existing rows read as 'build', which is what they are.
+PIPELINE_PURPOSES = ("build", "merge_check")
+
 RUNNER_TYPES = ("kubernetes", "agent_linux", "agent_macos", "ssh_linux", "mock")
 RUNNER_STATUSES = ("online", "offline", "draining", "disabled")
 
@@ -260,11 +269,24 @@ class CiService(db.Model):
         """Whether this service has enough source configuration to build."""
         return bool(self.repository_url and self.credential_profile_id)
 
+    def build_pipelines(self):
+        """The pipelines Run Build may choose from — never a merge check one."""
+        return [
+            pipeline
+            for pipeline in self.pipelines
+            if (pipeline.purpose or "build") == "build"
+        ]
+
     def default_pipeline(self):
-        for pipeline in self.pipelines:
+        buildable = self.build_pipelines()
+        for pipeline in buildable:
             if pipeline.is_default:
                 return pipeline
-        return self.pipelines[0] if self.pipelines else None
+        # The fallback is deliberately over `buildable` rather than over every
+        # pipeline: a service whose only saved pipeline is its merge check one
+        # still builds from the generated default, which is what it did before
+        # merge checks existed.
+        return buildable[0] if buildable else None
 
 
 class CiPipeline(db.Model):
@@ -291,6 +313,9 @@ class CiPipeline(db.Model):
     description = db.Column(db.Text, nullable=True)
     is_default = db.Column(db.Boolean, nullable=False, default=True)
     enabled = db.Column(db.Boolean, nullable=False, default=True)
+    # See PIPELINE_PURPOSES. Only a 'build' pipeline can be a service's default,
+    # be listed on the Pipeline tab, or be what Run Build runs.
+    purpose = db.Column(db.String(16), nullable=False, default="build")
     version = db.Column(db.Integer, nullable=False, default=1)
     # What a person is asked before a build starts. A list of
     # {name, type, label, description, default, required, choices, source} —

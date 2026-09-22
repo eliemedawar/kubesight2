@@ -106,6 +106,48 @@ ENVIRONMENTS: Dict[str, Dict[str, Any]] = {
         "provides": {"python": "3.12"},
         "labels": ["linux", "python"],
     },
+    "sonar-scanner": {
+        # Merge checks. The scanner CLI only — the SonarQube server is an
+        # installation of its own that KubeSight connects to, never one it runs.
+        "label": "SonarQube Scanner CLI",
+        "env": "CI_TEMPLATE_SONAR_SCANNER_IMAGE",
+        "default": "{registry}/sonarsource/sonar-scanner-cli:latest",
+        "provides": {"sonar": "true"},
+        "labels": ["linux"],
+        "notes": (
+            "Needs SONAR_HOST_URL and SONAR_TOKEN as CI secrets. The scanner "
+            "uploads to the server; the merge check then reads the issue counts "
+            "back over the web API."
+        ),
+    },
+    "semgrep": {
+        # Merge checks, and the server-free alternative to SonarQube. Semgrep
+        # OSS is a binary that reads the checkout and exits — there is nothing
+        # to run, keep up, or hold state in, which is the whole reason to pick
+        # it over a scanner that needs a server.
+        "label": "Semgrep (static analysis)",
+        "env": "CI_TEMPLATE_SEMGREP_IMAGE",
+        "default": "{registry}/semgrep/semgrep:latest",
+        "provides": {"semgrep": "true"},
+        "labels": ["linux"],
+        "notes": (
+            "Caches downloaded rulesets in $SEMGREP_CACHE_DIR. Telemetry is off. "
+            "Point SEMGREP_RULES at a directory in the repository to run with no "
+            "network at all."
+        ),
+    },
+    "dependency-check": {
+        "label": "OWASP Dependency-Check",
+        "env": "CI_TEMPLATE_DEPENDENCY_CHECK_IMAGE",
+        "default": "{registry}/owasp/dependency-check:latest",
+        "provides": {"dependencyCheck": "true"},
+        "labels": ["linux"],
+        "notes": (
+            "Keeps its NVD database in the build cache at $DC_DATA_DIR. The "
+            "first run builds that database and is slow; later runs update it. "
+            "Set NVD_API_KEY as a CI secret to avoid NVD rate limiting."
+        ),
+    },
     "android": {
         "label": "Android SDK",
         "env": "CI_TEMPLATE_ANDROID_IMAGE",

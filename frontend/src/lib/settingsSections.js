@@ -82,7 +82,23 @@ export const SETTINGS_SECTIONS = [
     anchor: "settings-security",
   },
 
-  // ─── Administration (link-outs) ───
+  // ─── Administration ───
+  {
+    // The one administration entry that is a PANEL rather than a link-out: the
+    // quality gate is a number, not a workspace, and sending somebody to a page
+    // of their own to type one field would be the wrong shape. It is here
+    // rather than on a service because it is the installation's policy —
+    // raising the bar is one edit, not one per repository.
+    id: "mergeChecks",
+    group: "administration",
+    label: "Merge checks",
+    icon: "mergeChecks",
+    panel: "mergeChecks",
+    title: "Merge checks",
+    summary:
+      "The quality gate a pull request has to clear before KubeSight will let it merge.",
+    requires: { anyPermissions: ["ci_merge_checks:view", "ci_merge_checks:manage"] },
+  },
   {
     id: "userManagement",
     group: "administration",
