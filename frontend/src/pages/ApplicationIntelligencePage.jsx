@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouteParam, useRouter } from "../routes/RouterContext.jsx";
 
 import {
   cancelApplicationAnalysis,
@@ -2157,7 +2158,7 @@ function ApplicationDetail({
   onOpenAnalysis,
   onCollectRuntime,
 }) {
-  const [tab, setTab] = useState("Overview");
+  const [tab, setTab] = useRouteParam("tab", "Overview");
   const [rerunMode, setRerunMode] = useState("Quick");
   // The detail view mounts before the analysis resolves, so adopt the last
   // mode used once it is known rather than silently offering Quick.
@@ -2301,6 +2302,11 @@ function ApplicationDetail({
 export default function ApplicationIntelligencePage({ clusters = [], canManage, canAnalyze }) {
   const [applications, setApplications] = useState([]);
   const [credentials, setCredentials] = useState([]);
+  // Which application is open is an address, so a refresh of
+  // /application-intelligence/<id> reloads it without a click.
+  const { route, params: routeParams, navigate } = useRouter();
+  const routeAppId =
+    route.key === "applicationIntelligenceDetail" ? routeParams.appId || "" : "";
   const [selected, setSelected] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [findings, setFindings] = useState([]);
@@ -2339,6 +2345,19 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
 
   useEffect(() => { loadList(); loadCredentials(); }, [loadList, loadCredentials]);
 
+  const openApplication = useCallback(
+    (applicationId) =>
+      navigate({
+        key: "applicationIntelligenceDetail",
+        params: { appId: String(applicationId) },
+      }),
+    [navigate]
+  );
+  const closeApplication = useCallback(
+    () => navigate({ key: "applicationIntelligence" }),
+    [navigate]
+  );
+
   const loadDetail = useCallback(async (applicationId, analysisId) => {
     const app = await getIntelligenceApplication(applicationId);
     const chosenId = analysisId || app.analyses?.[0]?.id;
@@ -2374,6 +2393,24 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
       setRuntimeError(err.message || "Runtime evidence could not be loaded.");
     }
   }, []);
+
+  // The address drives the detail, not the click: opening a link straight to
+  // /application-intelligence/<id> loads it with nothing else having happened.
+  useEffect(() => {
+    if (!routeAppId) {
+      if (selected) {
+        setSelected(null);
+        setAnalysis(null);
+      }
+      return;
+    }
+    if (selected && String(selected.id) === String(routeAppId)) {
+      return;
+    }
+    loadDetail(routeAppId).catch((err) => {
+      setError(err.message || "The application could not be loaded.");
+    });
+  }, [routeAppId, selected, loadDetail]);
 
   useEffect(() => {
     if (!analysis?.id) return undefined;
@@ -2486,7 +2523,7 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
                           </small>
                         </td>
                         <td>{formatTimestamp(latest?.createdAt)}</td>
-                        <td><button type="button" className="btn-outline" onClick={() => loadDetail(item.id)}>Open</button></td>
+                        <td><button type="button" className="btn-outline" onClick={() => openApplication(item.id)}>Open</button></td>
                       </tr>
                     );
                   })}
@@ -2516,7 +2553,7 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
           onPullRequestCreated={(created) => {
             setPullRequests((items) => [created, ...items]);
           }}
-          onBack={() => { setSelected(null); setAnalysis(null); }}
+          onBack={closeApplication}
           onCancel={async () => {
             if (!analysis?.id) return;
             const next = await cancelApplicationAnalysis(analysis.id);

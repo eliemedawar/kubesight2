@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { getCiServiceSummary, listCiPipelines, updateCiService } from "../api/ciApi.js";
 import { getCiAssistAvailability } from "../api/ciAssistApi.js";
 import { useAuth } from "../context/AuthContext";
+import { useRouteParam, useRouteQuery } from "../routes/RouterContext.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import ArtifactsPanel from "../components/catalog/ArtifactsPanel.jsx";
@@ -57,14 +58,16 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
   // Whether the assisted path may be offered at all. Asked once, here, so the
   // Application tab can show a reason instead of a control that fails.
   const [assist, setAssist] = useState(null);
-  const [tab, setTab] = useState(initialTab || "overview");
+  const [tab, setTab] = useRouteParam("tab", initialTab || "overview");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [runOpen, setRunOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState("");
-  const [openBuildId, setOpenBuildId] = useState(initialBuildId || null);
+  // Replace, not push: the build drawer opens over the Builds tab rather
+  // than being a place of its own, so Back leaves the service in one press.
+  const [openBuildId, setOpenBuildId] = useRouteQuery("build", initialBuildId || null);
   // Bumped after a build is triggered so the Builds and Artifacts tabs reload.
   const [refreshToken, setRefreshToken] = useState(0);
 
@@ -101,7 +104,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
     setRunOpen(false);
     setRefreshToken((value) => value + 1);
     setTab("builds");
-    setOpenBuildId(build.id);
+    setOpenBuildId(String(build.id));
     load();
   };
 

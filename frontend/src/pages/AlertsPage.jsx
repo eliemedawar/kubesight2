@@ -7,12 +7,12 @@ import TriageTiles from "../components/alerts/TriageTiles.jsx";
 import ActivityStrip from "../components/alerts/ActivityStrip.jsx";
 import AlertFeed from "../components/alerts/AlertFeed.jsx";
 import AlertDetailDrawer from "../components/alerts/AlertDetailDrawer.jsx";
+import { useRouteParam } from "../routes/RouterContext.jsx";
 import AlertHistoryTab from "../components/alerts/AlertHistoryTab.jsx";
 import { listAlertHistory } from "../api/alertPoliciesApi.js";
 import { isNamespaceScopeLoading, SCOPE_LOADING_HINT } from "../utils/accessViewState.js";
 import {
   buildAlertsScopeSummary,
-  consumeAlertsTabHint,
   hasAlertMonitoringScope,
 } from "../lib/alertDisplay.js";
 import {
@@ -152,13 +152,7 @@ export default function AlertsPage({
   accessError = "",
 }) {
   const alerts = data.alerts || [];
-  const [tab, setTab] = useState(() => {
-    const hint = consumeAlertsTabHint();
-    if (hint === "history" || hint === "policies") {
-      return hint;
-    }
-    return "open";
-  });
+  const [tab, setTab] = useRouteParam("tab", "open");
   const [severityFilter, setSeverityFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [query, setQuery] = useState("");

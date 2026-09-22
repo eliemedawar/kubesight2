@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listCiServices } from "../api/ciApi.js";
 import { useAuth } from "../context/AuthContext";
+import { useRouter } from "../routes/RouterContext.jsx";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
@@ -60,8 +61,31 @@ export default function ServiceCatalogPage({ clusters = [] }) {
   const [search, setSearch] = useState("");
   const [tile, setTile] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
-  // {serviceId, tab?, buildId?} — deep links from cards land on the right tab.
-  const [opened, setOpened] = useState(null);
+  // The open service is an address: /service-catalog/:serviceId/:tab?build=
+  // Back closes it, and a link reproduces the exact tab and build.
+  const { route, params: routeParams, query: routeQuery, navigate } = useRouter();
+  const opened =
+    route.key === "serviceDetail"
+      ? {
+          serviceId: routeParams.serviceId,
+          tab: routeParams.tab,
+          buildId: routeQuery.build || undefined,
+        }
+      : null;
+  const setOpened = useCallback(
+    (next) => {
+      if (!next) {
+        navigate({ key: "serviceCatalog" });
+        return;
+      }
+      navigate({
+        key: "serviceDetail",
+        params: { serviceId: String(next.serviceId), tab: next.tab || "overview" },
+        query: next.buildId ? { build: String(next.buildId) } : {},
+      });
+    },
+    [navigate]
+  );
   const [creating, setCreating] = useState(false);
   const timerRef = useRef(null);
 

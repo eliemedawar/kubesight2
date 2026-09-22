@@ -11,6 +11,7 @@ import {
 import DiffBlock from "../components/changes/DiffBlock.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { usePermission } from "../hooks/usePermission.js";
+import { useRouteParam } from "../routes/RouterContext.jsx";
 import { useChangeBundle } from "../context/ChangeBundleContext";
 
 const STATUS_STYLE = {
@@ -248,7 +249,16 @@ export default function ChangeBundlesPage() {
     return list.length ? list : [{ key: "mine", label: "My Bundles" }];
   }, [canCreate, canManage]);
 
-  const [activeTab, setActiveTab] = useState(tabs[0]?.key || "mine");
+  const [activeTab, setActiveTab] = useRouteParam("tab", tabs[0]?.key || "mine");
+
+  // The visible set is RBAC-filtered, so an address can name a tab this user
+  // cannot open. Correct it in place rather than leaving it in history.
+  const [, replaceTab] = useRouteParam("tab", "mine", { replace: true });
+  useEffect(() => {
+    if (tabs.length && !tabs.some((entry) => entry.key === activeTab)) {
+      replaceTab(tabs[0].key);
+    }
+  }, [tabs, activeTab, replaceTab]);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

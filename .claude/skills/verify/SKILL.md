@@ -29,8 +29,12 @@ description: Launch KubeSight locally in mock mode and drive it with Playwright 
   `device_scale_factor=2` for crisp screenshots.
 - Login: `admin`/`admin123` (full access) or `viewer`/`viewer123` (non-admin)
   — both seeded, fully onboarded, no MFA. Inputs via `get_by_label("Username"/"Password")`.
-- Sidebar nav items are `<button>`s: `get_by_role("button", name=..., exact=True)`
-  (plain text match collides with section labels).
+- Sidebar nav items are `<a href="#/...">` links inside a hover flyout per
+  section: `get_by_role("link", name=..., exact=True)` (plain text match
+  collides with section labels). The flyout opens on hovering the section
+  trigger (`.sidebar-section-trigger`), so hover the section first, or skip the
+  chrome entirely and drive the address bar — every view has a URL now
+  (`page.goto(f"{BASE}/#/alerts/history")`). See ROUTING-PLAN.md for the table.
 - Topbar cluster/namespace selectors are custom `SearchableSelect`
   (`.ss-wrap` trigger → `.ss-dropdown .ss-option`); namespace selector only
   exists on namespace-scoped pages. Mock fixtures only populate the

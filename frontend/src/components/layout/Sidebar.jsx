@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import BrandMark from "../BrandMark.jsx";
+import { pageHref } from "../../routes/RouterContext.jsx";
 
 const NAV_ICONS = {
   dashboard: (
@@ -384,11 +385,26 @@ export default function Sidebar({ pages, activePage, onNavigate, open = false })
               >
                 <div className="sidebar-flyout-links">
                   {section.pages.map((page) => (
-                    <button
+                    <a
                       key={page.key}
-                      type="button"
+                      href={pageHref(page.key)}
                       className={`nav-link ${activePage === page.key ? "active" : ""}`}
-                      onClick={() => handleNavigate(page.key)}
+                      onClick={(event) => {
+                        // Let the browser handle the modified clicks that mean
+                        // "somewhere else": new tab, new window, download.
+                        if (
+                          event.defaultPrevented ||
+                          event.button !== 0 ||
+                          event.metaKey ||
+                          event.ctrlKey ||
+                          event.shiftKey ||
+                          event.altKey
+                        ) {
+                          return;
+                        }
+                        event.preventDefault();
+                        handleNavigate(page.key);
+                      }}
                       aria-current={activePage === page.key ? "page" : undefined}
                     >
                       <span className="nav-link-icon">
@@ -403,7 +419,7 @@ export default function Sidebar({ pages, activePage, onNavigate, open = false })
                         )}
                       </span>
                       <span className="nav-link-label">{page.label}</span>
-                    </button>
+                    </a>
                   ))}
                 </div>
               </div>

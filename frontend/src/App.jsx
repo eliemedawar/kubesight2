@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getClusterOverview,
   getDashboardSummary,
@@ -19,6 +19,7 @@ import {
 } from "./api";
 import { useAuth } from "./context/AuthContext";
 import { useChangeBundle } from "./context/ChangeBundleContext";
+import { useRouter } from "./routes/RouterContext.jsx";
 import ChangeBundleDrawer from "./components/changes/ChangeBundleDrawer.jsx";
 import AppShell from "./components/layout/AppShell.jsx";
 import RouteLoadingFallback from "./components/common/RouteLoadingFallback.jsx";
@@ -126,9 +127,107 @@ export default function App() {
     document.body.classList.toggle("has-bundle-fab", bundleFabVisible);
     return () => document.body.classList.remove("has-bundle-fab");
   }, [bundleFabVisible]);
-  const [activePage, setActivePage] = useState("dashboard");
-  const [selectedClusterId, setSelectedClusterId] = useState("");
-  const [selectedNamespace, setSelectedNamespace] = useState("");
+  // The URL is the single source of truth for which page is open. `pageKey`
+  // is what renderPage and the permission checks switch on; `navKey` is the
+  // sidebar entry that highlights (a drill-down keeps its parent lit).
+  const {
+    route,
+    pageKey: routePageKey,
+    navKey: routeNavKey,
+    params: routeParams,
+    query: routeQuery,
+    queryKeys: routeQueryKeys,
+    navigate,
+    navigateToPage,
+  } = useRouter();
+  const activePage = routePageKey;
+
+  // ── Scope (cluster + namespace) ────────────────────────────────────────
+  // On the pages that show the topbar selectors the scope lives in the URL,
+  // so a link reproduces what the sender was looking at and Back undoes a
+  // cluster switch. `sticky*` remembers the choice across pages whose address
+  // does not name a scope, so a detour through Audit Logs does not lose it.
+  const routeCarriesCluster = routeQueryKeys.includes("cluster");
+  const routeCarriesNamespace = routeQueryKeys.includes("ns");
+  const [stickyClusterId, setStickyClusterId] = useState("");
+  const [stickyNamespace, setStickyNamespace] = useState("");
+  const selectedClusterId =
+    (routeCarriesCluster ? routeQuery.cluster : "") || stickyClusterId;
+  const selectedNamespace =
+    (routeCarriesNamespace ? routeQuery.ns : "") || stickyNamespace;
+
+  // Snapshot the setters need, so they keep one identity across renders.
+  const scopeRef = useRef(null);
+  scopeRef.current = {
+    clusterId: selectedClusterId,
+    namespace: selectedNamespace,
+    routeKey: route.key,
+    params: routeParams,
+    query: routeQuery,
+    carriesCluster: routeCarriesCluster,
+    carriesNamespace: routeCarriesNamespace,
+  };
+
+  // Corrections replace (an effect fixing invalid state is not a place you
+  // navigated to); the topbar passes { push: true } because changing cluster
+  // is a move Back should undo.
+  const setSelectedClusterId = useCallback(
+    (value, { push = false } = {}) => {
+      const snap = scopeRef.current;
+      const next = typeof value === "function" ? value(snap.clusterId) : value;
+      if ((next || "") === (snap.clusterId || "")) {
+        return;
+      }
+      setStickyClusterId(next || "");
+      // The old namespace belonged to the old cluster.
+      setStickyNamespace("");
+      if (snap.carriesCluster) {
+        const query = { ...snap.query };
+        if (next) {
+          query.cluster = next;
+        } else {
+          delete query.cluster;
+        }
+        delete query.ns;
+        navigate(
+          { key: snap.routeKey, params: snap.params, query },
+          { replace: !push }
+        );
+      }
+    },
+    [navigate]
+  );
+
+  const setSelectedNamespace = useCallback(
+    (value, { push = false } = {}) => {
+      const snap = scopeRef.current;
+      const next = typeof value === "function" ? value(snap.namespace) : value;
+      if ((next || "") === (snap.namespace || "")) {
+        return;
+      }
+      setStickyNamespace(next || "");
+      if (snap.carriesNamespace) {
+        const query = { ...snap.query };
+        if (next) {
+          query.ns = next;
+        } else {
+          delete query.ns;
+        }
+        navigate(
+          { key: snap.routeKey, params: snap.params, query },
+          { replace: !push }
+        );
+      }
+    },
+    [navigate]
+  );
+
+  // Clusters and namespaces both start empty and arrive asynchronously. The
+  // effects that correct an out-of-range selection must not run before the
+  // list they check against exists, or a deep link's scope is wiped between
+  // first paint and the first response.
+  const [clustersLoaded, setClustersLoaded] = useState(false);
+  const [namespaceScope, setNamespaceScope] = useState("");
   const [loadingState, setLoadingState] = useState({
     core: false,
     namespaces: false,
@@ -144,8 +243,10 @@ export default function App() {
   const [dashboardSummary, setDashboardSummary] = useState(null);
   const [dashboardRefreshedAt, setDashboardRefreshedAt] = useState(null);
   const [inventoryItems, setInventoryItems] = useState([]);
-  const [selectedApplicationId, setSelectedApplicationId] = useState("");
-  const [applicationDetailsTab, setApplicationDetailsTab] = useState("overview");
+  const selectedApplicationId =
+    routePageKey === "applicationDetails" ? routeParams.appId || "" : "";
+  const applicationDetailsTab =
+    routePageKey === "applicationDetails" ? routeParams.tab || "overview" : "overview";
   const [applicationDetail, setApplicationDetail] = useState(null);
   const [editCatalogOpen, setEditCatalogOpen] = useState(false);
   const [editCatalogSaving, setEditCatalogSaving] = useState(false);
@@ -159,8 +260,22 @@ export default function App() {
   const [routingError, setRoutingError] = useState("");
   const [testingEmail, setTestingEmail] = useState(false);
   const [testEmailMessage, setTestEmailMessage] = useState("");
-  const [preferredLogPod, setPreferredLogPod] = useState("");
-  const [resourceActiveTab, setResourceActiveTab] = useState("pods");
+  const preferredLogPod = routePageKey === "logs" ? routeQuery.pod || "" : "";
+  const resourceActiveTab =
+    routePageKey === "resources" ? routeParams.tab || "pods" : "pods";
+  const setResourceActiveTab = useCallback(
+    (nextTab, { replace = false } = {}) => {
+      const snap = scopeRef.current;
+      if (!nextTab || nextTab === snap.params.tab) {
+        return;
+      }
+      navigate(
+        { key: snap.routeKey, params: { ...snap.params, tab: nextTab }, query: snap.query },
+        { replace }
+      );
+    },
+    [navigate]
+  );
   // Decided (approved/declined) deployment requests for the current user, shown
   // in the notifications bell. "Seen" signatures are persisted per user so the
   // badge only counts decisions the user has not opened yet.
@@ -215,10 +330,14 @@ export default function App() {
   const visibleResourceTabs = useMemo(() => getVisibleResourceTabs(), [getVisibleResourceTabs, authUser?.id]);
 
   useEffect(() => {
-    if (visibleResourceTabs.length && !visibleResourceTabs.includes(resourceActiveTab)) {
-      setResourceActiveTab(visibleResourceTabs[0] || "pods");
+    if (routePageKey !== "resources") {
+      return;
     }
-  }, [visibleResourceTabs, resourceActiveTab]);
+    if (visibleResourceTabs.length && !visibleResourceTabs.includes(resourceActiveTab)) {
+      // A tab this role cannot see is a correction, not a destination.
+      setResourceActiveTab(visibleResourceTabs[0] || "pods", { replace: true });
+    }
+  }, [routePageKey, visibleResourceTabs, resourceActiveTab, setResourceActiveTab]);
 
   const resolvedActivePage = useMemo(() => {
     if (!visiblePages.length) {
@@ -279,12 +398,6 @@ export default function App() {
 
   const isDashboardPage = resolvedActivePage === "dashboard";
 
-  useEffect(() => {
-    if (resolvedActivePage && resolvedActivePage !== activePage) {
-      setActivePage(resolvedActivePage);
-    }
-  }, [resolvedActivePage, activePage]);
-
   const applyPageError = (message, { expectedDenied = false } = {}) => {
     if (!shouldShowAccessError(message, { expectedDenied })) {
       setErrorState((prev) => ({ ...prev, page: "" }));
@@ -312,9 +425,9 @@ export default function App() {
     }
   };
 
-  const handleNavigate = (pageKey) => {
+  const handleNavigate = (pageKey, options) => {
     if (isPageAllowed(pageKey)) {
-      setActivePage(pageKey);
+      navigateToPage(pageKey, options);
     }
   };
 
@@ -409,12 +522,25 @@ export default function App() {
       return;
     }
     if (!allowedKeys.includes(activePage) && !isPageAllowed(activePage)) {
-      setActivePage(getFirstAllowedPage() || allowedKeys[0]);
+      // Replace: a forbidden address must not sit in history, or Back walks
+      // straight back into the redirect.
+      navigateToPage(getFirstAllowedPage() || allowedKeys[0], { replace: true });
     }
-  }, [isAuthenticated, authLoading, visiblePages, activePage, getFirstAllowedPage, isPageAllowed]);
+  }, [
+    isAuthenticated,
+    authLoading,
+    visiblePages,
+    activePage,
+    getFirstAllowedPage,
+    isPageAllowed,
+    navigateToPage,
+  ]);
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    // `clustersLoaded` is the guard that makes deep links survive: without it
+    // this runs on first paint, sees an empty list, and clears the cluster the
+    // URL asked for before the API has answered.
+    if (!isAuthenticated || !clustersLoaded) {
       return;
     }
     if (!allowedClusters.length) {
@@ -426,10 +552,12 @@ export default function App() {
     if (!allowedClusters.some((cluster) => cluster.id === selectedClusterId)) {
       setSelectedClusterId(allowedClusters[0].id);
     }
-  }, [isAuthenticated, allowedClusters, selectedClusterId]);
+  }, [isAuthenticated, clustersLoaded, allowedClusters, selectedClusterId, setSelectedClusterId]);
 
   useEffect(() => {
-    if (!selectedClusterId) {
+    // Only correct the namespace once this cluster's namespaces have actually
+    // loaded, for the same reason as the cluster guard above.
+    if (!selectedClusterId || namespaceScope !== selectedClusterId) {
       return;
     }
     if (!allowedNamespaces.length) {
@@ -441,12 +569,69 @@ export default function App() {
     if (!allowedNamespaces.some((ns) => ns.name === selectedNamespace)) {
       setSelectedNamespace(allowedNamespaces[0]?.name || "");
     }
-  }, [selectedClusterId, allowedNamespaces, selectedNamespace]);
+  }, [
+    selectedClusterId,
+    namespaceScope,
+    allowedNamespaces,
+    selectedNamespace,
+    setSelectedNamespace,
+  ]);
+
+  // Write the resolved scope into the address bar on the pages that carry it,
+  // so what is on screen is always what the URL says. Replace, never push:
+  // filling in a default is not a place the user navigated to.
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    const query = { ...routeQuery };
+    let changed = false;
+    if (routeCarriesCluster && selectedClusterId && query.cluster !== selectedClusterId) {
+      query.cluster = selectedClusterId;
+      changed = true;
+    }
+    if (routeCarriesNamespace && selectedNamespace && query.ns !== selectedNamespace) {
+      query.ns = selectedNamespace;
+      changed = true;
+    }
+    if (changed) {
+      navigate({ key: route.key, params: routeParams, query }, { replace: true });
+    }
+  }, [
+    isAuthenticated,
+    routeCarriesCluster,
+    routeCarriesNamespace,
+    selectedClusterId,
+    selectedNamespace,
+    route.key,
+    routeParams,
+    routeQuery,
+    navigate,
+  ]);
+
+  // Keep the sticky memory in step with a scope that arrived via the URL, so
+  // leaving for a page with no scope in its address does not lose it.
+  useEffect(() => {
+    if (routeCarriesCluster && routeQuery.cluster && routeQuery.cluster !== stickyClusterId) {
+      setStickyClusterId(routeQuery.cluster);
+    }
+    if (routeCarriesNamespace && routeQuery.ns && routeQuery.ns !== stickyNamespace) {
+      setStickyNamespace(routeQuery.ns);
+    }
+  }, [
+    routeCarriesCluster,
+    routeCarriesNamespace,
+    routeQuery.cluster,
+    routeQuery.ns,
+    stickyClusterId,
+    stickyNamespace,
+  ]);
 
   const applyClusterList = (clusters, preferredId) => {
     const filtered = clusters;
     const firstCluster = resolveDefaultClusterId(filtered, preferredId);
     setData((prev) => ({ ...prev, clusters: filtered }));
+    setClustersLoaded(true);
     setSelectedClusterId((current) =>
       filtered.some((cluster) => cluster.id === current) ? current : firstCluster
     );
@@ -634,6 +819,7 @@ export default function App() {
         defaultNamespace = namespaces[0]?.name || "";
         setData((prev) => ({ ...prev, namespaces }));
         clusterContextClusterRef.current = selectedClusterId;
+        setNamespaceScope(selectedClusterId);
 
         // Merge later phases in without blocking first paint. Counts and metrics
         // carry disjoint fields, so merging by name is order-independent —
@@ -1156,10 +1342,11 @@ export default function App() {
     if (!inventoryId) {
       return;
     }
-    setSelectedApplicationId(inventoryId);
-    setApplicationDetailsTab(tab);
     if (isPageAllowed("applicationDetails")) {
-      setActivePage("applicationDetails");
+      navigateToPage("applicationDetails", {
+        params: { appId: inventoryId, tab: tab || "overview" },
+        query: selectedClusterId ? { cluster: selectedClusterId } : undefined,
+      });
     }
   };
 
@@ -1509,7 +1696,18 @@ export default function App() {
               loading={loadingState.page}
               user={authUser}
               activeTab={applicationDetailsTab}
-              onTabChange={setApplicationDetailsTab}
+              onTabChange={(nextTab) =>
+                navigate(
+                  {
+                    key: route.key,
+                    params: { ...routeParams, tab: nextTab },
+                    query: routeQuery,
+                  },
+                  // A tab is a place: Back should step through the tabs you
+                  // opened, not jump out of the application.
+                  { replace: false }
+                )
+              }
               onBack={() => handleNavigate("inventory")}
               onRefreshDetail={() => loadApplicationDetail(selectedApplicationId)}
               canViewLogs={hasPermission("logs:view")}
@@ -1577,14 +1775,13 @@ export default function App() {
             visibleTabs={visibleResourceTabs}
             isAdmin={isAdmin}
             onNavigateToLogs={(prefill) => {
-              if (prefill?.clusterId) {
-                setSelectedClusterId(prefill.clusterId);
-              }
-              if (prefill?.namespace) {
-                setSelectedNamespace(prefill.namespace);
-              }
-              setPreferredLogPod(prefill?.pod || "");
-              handleNavigate("logs");
+              handleNavigate("logs", {
+                query: {
+                  cluster: prefill?.clusterId || selectedClusterId,
+                  ns: prefill?.namespace || selectedNamespace,
+                  pod: prefill?.pod || undefined,
+                },
+              });
             }}
           />
         );
@@ -1606,9 +1803,16 @@ export default function App() {
             selectedClusterId={selectedClusterId}
             selectedNamespace={selectedNamespace}
             preferredPod={preferredLogPod}
-            onPreferredPodApplied={() => setPreferredLogPod("")}
-            onClusterChange={setSelectedClusterId}
-            onNamespaceChange={setSelectedNamespace}
+            onPreferredPodApplied={() => {
+              if (!routeQuery.pod) {
+                return;
+              }
+              const query = { ...routeQuery };
+              delete query.pod;
+              navigate({ key: route.key, params: routeParams, query }, { replace: true });
+            }}
+            onClusterChange={(id) => setSelectedClusterId(id, { push: true })}
+            onNamespaceChange={(ns) => setSelectedNamespace(ns, { push: true })}
             hasClusters={hasClusters}
             hasNamespaces={hasNamespaces}
             coreLoading={loadingState.core}
@@ -1653,8 +1857,9 @@ export default function App() {
             onOpenCluster={
               isPageAllowed("clusters")
                 ? (clusterId) => {
-                  if (clusterId) setSelectedClusterId(clusterId);
-                  setActivePage("clusters");
+                  navigateToPage("clusters", {
+                    query: clusterId ? { cluster: clusterId } : undefined,
+                  });
                 }
                 : null
             }
@@ -1845,14 +2050,14 @@ export default function App() {
     <>
     <AppShell
       visiblePages={visiblePages}
-      activePage={activePage === "applicationDetails" ? "inventory" : activePage}
+      activePage={routeNavKey}
       onNavigate={handleNavigate}
       allowedClusters={allowedClusters}
       allowedNamespaces={allowedNamespaces}
       selectedClusterId={selectedClusterId}
       selectedNamespace={selectedNamespace}
-      onClusterChange={setSelectedClusterId}
-      onNamespaceChange={setSelectedNamespace}
+      onClusterChange={(id) => setSelectedClusterId(id, { push: true })}
+      onNamespaceChange={(ns) => setSelectedNamespace(ns, { push: true })}
       loadingCore={loadingState.core}
       loadingNamespaces={namespacesLoading}
       loadingResources={resourcesLoading}

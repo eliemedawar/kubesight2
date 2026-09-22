@@ -15,6 +15,7 @@ import {
   unlockUser,
   updateUser,
 } from "../api";
+import { useRouteParam } from "../routes/RouterContext.jsx";
 import { useAuth } from "../context/AuthContext";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
@@ -119,7 +120,7 @@ export default function UserManagementPage({ clusters = [] }) {
     hasPermission("users:view") && !canCreate && !canUpdate && !canDisable && !canDelete;
   const canViewRoles = hasPermission("roles:view");
   const canManageRoles = hasPermission("roles:manage") || hasPermission("users:manage");
-  const [activeTab, setActiveTab] = useState("users");
+  const [activeTab, setActiveTab] = useRouteParam("tab", "users");
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);
   const [loading, setLoading] = useState(true);

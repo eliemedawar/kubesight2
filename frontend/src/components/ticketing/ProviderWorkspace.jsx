@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import ErrorBanner from "../common/ErrorBanner.jsx";
+import { useRouteParam } from "../../routes/RouterContext.jsx";
 import { minutesToNextSync, timeAgo } from "../zoho/common.jsx";
 import { IconArrowLeft, IconRefresh } from "../zoho/icons.jsx";
 import ZohoFieldSyncTab from "../zoho/ZohoFieldSyncTab.jsx";
@@ -34,7 +35,7 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   const [ticketsLoading, setTicketsLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [tab, setTab] = useState("overview");
+  const [tab, setTab] = useRouteParam("tab", "overview");
 
   const [testing, setTesting] = useState(false);
   const [syncing, setSyncing] = useState(false);

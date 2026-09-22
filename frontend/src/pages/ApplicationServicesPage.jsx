@@ -15,9 +15,15 @@ import EmptyState from "../components/common/EmptyState.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import TopologyViewer, {
+
+
   computeLayout,
   rectExitPoint,
 } from "../components/common/TopologyViewer.jsx";
+import { useEntityRoute, useRouteParam } from "../routes/RouterContext.jsx";
+
+/** URL ids are strings; record ids usually are not. Compare through this. */
+const sameId = (a, b) => a !== null && a !== undefined && String(a) === String(b);
 
 // Supported workload kinds for linked resources, DR counterparts and topology.
 const WORKLOAD_KINDS = ["deployment", "statefulset", "daemonset", "pod"];
@@ -1437,7 +1443,7 @@ function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdi
     );
     return { ...base, nodes };
   }, [service]);
-  const [tab, setTab] = useState("overview");
+  const [tab, setTab] = useRouteParam("tab", "overview");
 
   // Close on Escape.
   useEffect(() => {
@@ -1539,14 +1545,19 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [healthFilter, setHealthFilter] = useState("all");
-  const [selectedId, setSelectedId] = useState(null);
+  // Open service in the address; ids arrive from the URL as strings.
+  const [selectedId, setSelectedId] = useEntityRoute(
+    "applicationServices",
+    "applicationServiceDetail",
+    "serviceId"
+  );
   const [modalOpen, setModalOpen] = useState(false);
   const [editingService, setEditingService] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [deleting, setDeleting] = useState(false);
 
-  const selectedService = services.find((s) => s.id === selectedId) || null;
+  const selectedService = services.find((s) => sameId(selectedId, s.id)) || null;
 
   const loadServices = async () => {
     setLoading(true);
@@ -1606,7 +1617,7 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
     try {
       await deleteApplicationService(svc.id);
       setServices((prev) => prev.filter((s) => s.id !== svc.id));
-      if (selectedId === svc.id) setSelectedId(null);
+      if (sameId(selectedId, svc.id)) setSelectedId(null);
     } catch (err) {
       setError(err.message || "Delete failed.");
     } finally { setDeleting(false); }
@@ -1673,9 +1684,9 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
                       const nodeCount = svc.topology?.nodes?.length ?? 0;
                       return (
                         <tr key={svc.id}
-                          className={selectedId === svc.id ? "table-row--selected" : ""}
+                          className={sameId(selectedId, svc.id) ? "table-row--selected" : ""}
                           style={{ cursor: "pointer" }}
-                          onClick={() => setSelectedId(svc.id === selectedId ? null : svc.id)}>
+                          onClick={() => setSelectedId(sameId(selectedId, svc.id) ? null : svc.id)}>
                           <td>
                             <strong>{svc.name}</strong>
                             {svc.description && (

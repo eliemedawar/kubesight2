@@ -18,6 +18,8 @@ import RequestsTable, {
   waitingFor,
 } from "../components/clusters/RequestsTable.jsx";
 
+import { useRouteParam } from "../routes/RouterContext.jsx";
+
 const TABS = [
   { key: "active", label: "Active Requests" },
   { key: "history", label: "Request History" },
@@ -123,7 +125,7 @@ export default function DeploymentRequestsPage() {
   const { hasPermission } = usePermission();
   const canManage = hasPermission("deployment_requests:manage");
 
-  const [activeTab, setActiveTab] = useState("active");
+  const [activeTab, setActiveTab] = useRouteParam("tab", "active");
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

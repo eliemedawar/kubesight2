@@ -202,9 +202,10 @@ export default function ResourcesPage({
       visibleTabs.filter((tab) => RESOURCE_TAB_DEFINITIONS.some((def) => def.tabKey === tab)),
     [visibleTabs]
   );
-  const [internalActiveTab, setInternalActiveTab] = useState(tabKeys[0] || "pods");
-  const activeTab = activeTabProp || internalActiveTab;
-  const setActiveTab = onActiveTabChange || setInternalActiveTab;
+  // One source only: the route, handed down by App. The old internal fallback
+  // could disagree with the prop, which is exactly the desync routing removes.
+  const activeTab = activeTabProp || tabKeys[0] || "pods";
+  const setActiveTab = onActiveTabChange || (() => {});
   const { hasPermission } = usePermission();
   const canDeploy = hasPermission("apps:deploy");
   const [workloadPodFilter, setWorkloadPodFilter] = useState({ name: "", kind: "" });
@@ -218,9 +219,10 @@ export default function ResourcesPage({
 
   useEffect(() => {
     if (!tabKeys.includes(activeTab)) {
-      setActiveTab(tabKeys[0] || "pods");
+      // A correction, not a destination — do not leave it in history.
+      setActiveTab(tabKeys[0] || "pods", { replace: true });
     }
-  }, [tabKeys, activeTab]);
+  }, [tabKeys, activeTab, setActiveTab]);
 
   const closeInspectModal = useCallback(() => {
     setInspectModal(CLOSED_MODAL);

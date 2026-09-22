@@ -6,13 +6,15 @@ import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import RequestsTable from "../components/clusters/RequestsTable.jsx";
 
+import { useRouteParam } from "../routes/RouterContext.jsx";
+
 const TABS = [
   { key: "active", label: "Active" },
   { key: "history", label: "History" },
 ];
 
 export default function MyRequestsPage() {
-  const [activeTab, setActiveTab] = useState("active");
+  const [activeTab, setActiveTab] = useRouteParam("tab", "active");
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

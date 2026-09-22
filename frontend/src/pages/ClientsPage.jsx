@@ -14,6 +14,10 @@ import EmptyState from "../components/common/EmptyState.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import ClientDetailModal from "../components/clients/ClientDetailModal.jsx";
+import { useEntityRoute } from "../routes/RouterContext.jsx";
+
+/** URL ids are strings; record ids usually are not. Compare through this. */
+const sameId = (a, b) => a !== null && a !== undefined && String(a) === String(b);
 
 const STATUS_BADGE = {
   healthy: "pass",
@@ -173,14 +177,16 @@ export default function ClientsPage({ clusters = [] }) {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [selectedId, setSelectedId] = useState(null);
+  // The open client is an address. The id comes back from the URL as a
+  // string, so every comparison against a record id goes through sameId().
+  const [selectedId, setSelectedId] = useEntityRoute("clients", "clientDetail", "clientId");
   const [modalOpen, setModalOpen] = useState(false);
   const [editingClient, setEditingClient] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [deleting, setDeleting] = useState(false);
 
-  const selectedClient = clients.find((c) => c.id === selectedId) || null;
+  const selectedClient = clients.find((c) => sameId(selectedId, c.id)) || null;
 
   const loadData = async () => {
     setLoading(true);
@@ -246,7 +252,7 @@ export default function ClientsPage({ clusters = [] }) {
     try {
       await deleteClient(client.id);
       setClients((prev) => prev.filter((c) => c.id !== client.id));
-      if (selectedId === client.id) setSelectedId(null);
+      if (sameId(selectedId, client.id)) setSelectedId(null);
     } catch (err) {
       setError(err.message || "Delete failed.");
     } finally {
@@ -327,9 +333,9 @@ export default function ClientsPage({ clusters = [] }) {
                     {filtered.map((c) => (
                       <tr
                         key={c.id}
-                        className={selectedId === c.id ? "table-row--selected" : ""}
+                        className={sameId(selectedId, c.id) ? "table-row--selected" : ""}
                         style={{ cursor: "pointer" }}
-                        onClick={() => setSelectedId(c.id === selectedId ? null : c.id)}
+                        onClick={() => setSelectedId(sameId(selectedId, c.id) ? null : c.id)}
                       >
                         <td>
                           <strong>{c.name}</strong>

@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "../routes/RouterContext.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import BuildDetail from "../components/clusterBuilder/BuildDetail.jsx";
@@ -34,13 +35,29 @@ export default function ClusterBuilderPage({
   canDownloadKubeconfig = false,
   onOpenCluster = null,
 }) {
-  const [tab, setTab] = useState("floor");
+  // Tab and open build are both addresses: /cluster-builder/:tab and
+  // /cluster-builder/builds/:buildId. Back closes a build, then steps tabs.
+  const { route, params: routeParams, navigate } = useRouter();
+  const onBuildDetail = route.key === "clusterBuildDetail";
+  const tab = onBuildDetail ? "floor" : routeParams.tab || "floor";
+  const selectedBuildId = onBuildDetail ? routeParams.buildId || null : null;
+  const setTab = useCallback(
+    (next) => navigate({ key: "clusterBuilder", params: { tab: next } }),
+    [navigate]
+  );
+  const openBuildId = useCallback(
+    (id) => navigate({ key: "clusterBuildDetail", params: { buildId: String(id) } }),
+    [navigate]
+  );
+  const closeBuild = useCallback(
+    () => navigate({ key: "clusterBuilder", params: { tab: "floor" } }),
+    [navigate]
+  );
   const [builds, setBuilds] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [options, setOptions] = useState(null);
-  const [selectedBuildId, setSelectedBuildId] = useState(null);
   const [editingBuild, setEditingBuild] = useState(null);
   const [infra, setInfra] = useState(EMPTY_INFRA);
   const previousStatuses = useRef(null);
@@ -144,8 +161,8 @@ export default function ClusterBuilderPage({
 
   const openBuild = (id) => {
     setEditingBuild(null);
-    setTab("floor");
-    setSelectedBuildId(id);
+    // One navigation, so opening a build costs exactly one Back press.
+    openBuildId(id);
   };
 
   return (
@@ -163,7 +180,7 @@ export default function ClusterBuilderPage({
             key={entry.id}
             type="button"
             className={`sg-cb-tab ${tab === entry.id ? "is-active" : ""}`}
-            onClick={() => { setTab(entry.id); setSelectedBuildId(null); }}
+            onClick={() => setTab(entry.id)}
           >
             {entry.label}
           </button>
@@ -178,11 +195,10 @@ export default function ClusterBuilderPage({
           canDownloadKubeconfig={canDownloadKubeconfig}
           onOpenCluster={onOpenCluster}
           notify={notify}
-          onBack={() => { setSelectedBuildId(null); reloadBuilds(); }}
-          onDeleted={() => { setSelectedBuildId(null); reloadBuilds(); }}
+          onBack={() => { closeBuild(); reloadBuilds(); }}
+          onDeleted={() => { closeBuild(); reloadBuilds(); }}
           onEdit={(build) => {
             setEditingBuild(build);
-            setSelectedBuildId(null);
             setTab("new");
           }}
           addonCatalog={options?.addons || []}

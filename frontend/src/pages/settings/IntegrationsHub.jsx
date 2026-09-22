@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { useEntityRoute } from "../../routes/RouterContext.jsx";
 import ErrorBanner from "../../components/common/ErrorBanner.jsx";
 import LoadingState from "../../components/common/LoadingState.jsx";
 import PageTitle from "../../components/common/PageTitle.jsx";
@@ -104,7 +105,14 @@ export default function IntegrationsHub({ hasPermission = () => false, isAdmin =
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [selectedKey, setSelectedKey] = useState("");
+  // Which integration is open is an address, so a link to a specific one
+  // (and Back out of it) works like every other drill-down.
+  const [openKey, setSelectedKey] = useEntityRoute(
+    "integrations",
+    "integrationDetail",
+    "integrationKey"
+  );
+  const selectedKey = openKey || "";
 
   const load = useCallback(async () => {
     setLoading(true);

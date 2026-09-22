@@ -102,7 +102,9 @@ export default function ApplicationDetailsPage({
   onRefreshDetail,
   clusterOptions = [],
 }) {
-  const [tab, setTab] = useState(activeTab);
+  // One source: the route, handed down as `activeTab`. A local mirror here
+  // was the same desync the router exists to remove.
+  const tab = activeTab;
   const [logPod, setLogPod] = useState(null);
   const [logLines, setLogLines] = useState([]);
   const [logLoading, setLogLoading] = useState(false);
@@ -173,10 +175,6 @@ export default function ApplicationDetailsPage({
   }, [detail]);
 
   useEffect(() => {
-    setTab(activeTab);
-  }, [activeTab, detail?.id]);
-
-  useEffect(() => {
     setLogPod(null);
     setLogLines([]);
     setLogError("");
@@ -213,7 +211,6 @@ export default function ApplicationDetailsPage({
   );
 
   const changeTab = (key) => {
-    setTab(key);
     onTabChange?.(key);
   };
 

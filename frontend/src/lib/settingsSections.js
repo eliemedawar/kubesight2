@@ -20,8 +20,6 @@
  * `settings:view` check.
  */
 
-const SECTION_HINT_KEY = "kubesight.settings.section";
-
 /** Rail groups, in render order. */
 export const SETTINGS_GROUPS = [
   { id: "preferences", label: "Preferences" },
@@ -162,27 +160,3 @@ export function groupSettingsSections(sections) {
   })).filter((group) => group.sections.length > 0);
 }
 
-/**
- * Deep link into a settings section from elsewhere in the app. Session storage
- * rather than the URL, matching how the rest of the app deep-links — there is
- * no router, so navigation is app state plus a hint the target consumes once.
- */
-export function setSettingsSectionHint(sectionId) {
-  try {
-    window.sessionStorage.setItem(SECTION_HINT_KEY, sectionId);
-  } catch {
-    /* storage unavailable (private mode) — the link lands on the first section */
-  }
-}
-
-export function consumeSettingsSectionHint() {
-  try {
-    const hint = window.sessionStorage.getItem(SECTION_HINT_KEY);
-    if (hint) {
-      window.sessionStorage.removeItem(SECTION_HINT_KEY);
-    }
-    return hint || "";
-  } catch {
-    return "";
-  }
-}

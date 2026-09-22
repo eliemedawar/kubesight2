@@ -6,6 +6,7 @@ import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import TopologyViewer from "../components/common/TopologyViewer.jsx";
 import { getClusterTopology, getNamespaceTopology } from "../api/topologyApi.js";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
+import { useRouteParam } from "../routes/RouterContext.jsx";
 
 const EMPTY_GRAPH = { nodes: [], edges: [] };
 
@@ -22,7 +23,13 @@ export default function TopologyPage({
   coreLoading = false,
   accessError = "",
 }) {
-  const [view, setView] = useState({ level: "cluster", namespace: "" });
+  // The drill-down level is an address: /topology and /topology/:namespace.
+  // Back leaves a namespace and returns to the cluster map.
+  const [openNamespaceName, setOpenNamespaceName] = useRouteParam("namespace", "");
+  const [, replaceNamespaceName] = useRouteParam("namespace", "", { replace: true });
+  const view = openNamespaceName
+    ? { level: "namespace", namespace: openNamespaceName }
+    : { level: "cluster", namespace: "" };
   const [clusterTopo, setClusterTopo] = useState(null);
   const [nsTopo, setNsTopo] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -62,7 +69,6 @@ export default function TopologyPage({
     (namespace) => {
       if (!clusterId || !namespace) return;
       const seq = ++reqRef.current;
-      setView({ level: "namespace", namespace });
       setNsTopo(null);
       setError("");
       setWarnings([]);
@@ -85,21 +91,37 @@ export default function TopologyPage({
     [clusterId]
   );
 
-  // Reset to the cluster view and (re)load Level 1 whenever the cluster changes.
+  // Reset to the cluster view and (re)load Level 1 whenever the cluster
+  // changes. Only on an actual change: on first mount this must not throw away
+  // a namespace the address asked for.
+  const lastClusterRef = useRef(null);
   useEffect(() => {
-    setView({ level: "cluster", namespace: "" });
+    const changed = lastClusterRef.current !== null && lastClusterRef.current !== clusterId;
+    lastClusterRef.current = clusterId;
+    if (changed) {
+      // The old namespace belonged to the old cluster — a correction, so replace.
+      replaceNamespaceName("");
+    }
     setNsTopo(null);
     setClusterTopo(null);
     setWarnings([]);
     loadCluster();
-  }, [clusterId, loadCluster]);
+  }, [clusterId, loadCluster, replaceNamespaceName]);
+
+  // The address drives the drill-down: whatever namespace it names gets loaded,
+  // whether that came from a click, a Back press, or a pasted link.
+  useEffect(() => {
+    if (openNamespaceName) {
+      openNamespace(openNamespaceName);
+    }
+  }, [openNamespaceName, openNamespace]);
 
   const backToCluster = () => {
     reqRef.current += 1; // cancel any in-flight namespace load
     setError("");
     setWarnings([]);
     setLoading(false);
-    setView({ level: "cluster", namespace: "" });
+    setOpenNamespaceName("");
   };
 
   const refresh = () => {
@@ -109,7 +131,8 @@ export default function TopologyPage({
 
   const handleNodeClick = (node) => {
     if (node?.kind === "namespace" && node.namespace) {
-      openNamespace(node.namespace);
+      // Navigate only; the effect above does the loading.
+      setOpenNamespaceName(node.namespace);
     }
   };
 

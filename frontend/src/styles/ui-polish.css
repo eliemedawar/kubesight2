@@ -403,6 +403,15 @@ td:last-child button,
 }
 
 .nav-link {
+  /* Nav links are anchors (so middle-click opens a tab), which means the
+     button defaults they used to inherit have to be stated. */
+  text-decoration: none;
+  background: none;
+  border: 0;
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
   padding: 0.5rem 0.65rem;
   font-size: var(--font-size-sm);
   border-radius: var(--radius-sm);

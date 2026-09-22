@@ -38,6 +38,10 @@ import {
   updateMobileApp,
   uploadMobileBuild,
 } from "../api/mobileAppsApi.js";
+import { useEntityRoute } from "../routes/RouterContext.jsx";
+
+/** URL ids are strings; record ids usually are not. Compare through this. */
+const sameId = (a, b) => a !== null && a !== undefined && String(a) === String(b);
 
 const AppFormModal = lazy(() => import("../components/mobileApps/AppFormModal.jsx"));
 const PublishDialog = lazy(() => import("../components/mobileApps/PublishDialog.jsx"));
@@ -64,7 +68,12 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
   const [notice, setNotice] = useState("");
 
   // Drawer (one open app at a time) + its loaded builds/publishes.
-  const [selectedAppId, setSelectedAppId] = useState(null);
+  // The open app drawer is an address; the id is a string from the URL.
+  const [selectedAppId, setSelectedAppId] = useEntityRoute(
+    "mobileApps",
+    "mobileAppDetail",
+    "appId"
+  );
   const [builds, setBuilds] = useState([]);
   const [publishes, setPublishes] = useState([]);
   const [resigns, setResigns] = useState([]);
@@ -102,7 +111,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
   const [deletingApp, setDeletingApp] = useState(false);
 
   const selectedApp = useMemo(
-    () => apps.find((a) => a.id === selectedAppId) || null,
+    () => apps.find((a) => sameId(selectedAppId, a.id)) || null,
     [apps, selectedAppId]
   );
   const editingApp = useMemo(
@@ -349,7 +358,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
       }
       setFormOpen(false);
       await refreshApps();
-      if (formMode === "edit" && editingAppId === selectedAppId) {
+      if (formMode === "edit" && sameId(selectedAppId, editingAppId)) {
         await loadDrawerData(selectedAppId);
       }
     } catch (err) {
@@ -366,7 +375,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     try {
       await deleteMobileApp(deleteApp.id);
       setNotice(`Deleted ${deleteApp.name}.`);
-      if (selectedAppId === deleteApp.id) closeDrawer();
+      if (sameId(selectedAppId, deleteApp.id)) closeDrawer();
       setDeleteApp(null);
       await refreshApps();
     } catch (err) {

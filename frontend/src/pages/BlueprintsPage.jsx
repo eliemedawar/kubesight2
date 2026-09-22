@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   createServiceBlueprint,
   deleteServiceBlueprint,
@@ -7,6 +7,7 @@ import {
   updateServiceBlueprint,
 } from "../api/serviceBlueprintsApi.js";
 import { useAuth } from "../context/AuthContext";
+import { useEntityRoute } from "../routes/RouterContext.jsx";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
@@ -267,6 +268,13 @@ export default function BlueprintsPage({ clusters = [] }) {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  // The open blueprint is an address; the detail is fetched from whatever id
+  // the address names, so a pasted link loads it with no click involved.
+  const [openBlueprintId, setOpenBlueprintId] = useEntityRoute(
+    "blueprints",
+    "blueprintDetail",
+    "blueprintId"
+  );
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -292,17 +300,27 @@ export default function BlueprintsPage({ clusters = [] }) {
     if (canView) loadData();
   }, [canView]);
 
-  const openDetail = async (id) => {
+  const loadDetail = useCallback(async (id) => {
     setDetailLoading(true);
     try {
-      const data = await getServiceBlueprint(id);
-      setDetail(data);
+      setDetail(await getServiceBlueprint(id));
     } catch (err) {
       setError(err.message || "Failed to load blueprint.");
     } finally {
       setDetailLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!openBlueprintId) {
+      setDetail(null);
+      return;
+    }
+    if (detail && String(detail.id) === String(openBlueprintId)) {
+      return;
+    }
+    loadDetail(openBlueprintId);
+  }, [openBlueprintId, detail, loadDetail]);
 
   const openCreate = () => {
     setEditorBlueprint(null);
@@ -327,6 +345,7 @@ export default function BlueprintsPage({ clusters = [] }) {
       setEditorOpen(false);
       setEditorBlueprint(null);
       setDetail(saved);
+      setOpenBlueprintId(saved.id, { replace: true });
       await loadData();
     } catch (err) {
       setSaveError(err.message || "Save failed.");
@@ -340,7 +359,7 @@ export default function BlueprintsPage({ clusters = [] }) {
     if (!window.confirm(`Delete blueprint "${detail.name}"? This cannot be undone.`)) return;
     try {
       await deleteServiceBlueprint(detail.id);
-      setDetail(null);
+      setOpenBlueprintId(null);
       await loadData();
     } catch (err) {
       setError(err.message || "Delete failed.");
@@ -431,7 +450,7 @@ export default function BlueprintsPage({ clusters = [] }) {
                   key={bp.id}
                   blueprint={bp}
                   active={detail?.id === bp.id}
-                  onView={() => openDetail(bp.id)}
+                  onView={() => setOpenBlueprintId(bp.id)}
                   onDeploy={() => setDeployBlueprint(bp)}
                   canDeploy={canDeploy}
                 />
@@ -447,7 +466,7 @@ export default function BlueprintsPage({ clusters = [] }) {
             ) : (
               <BlueprintDetail
                 detail={detail}
-                onClose={() => setDetail(null)}
+                onClose={() => setOpenBlueprintId(null)}
                 onEdit={openEdit}
                 onDelete={handleDelete}
                 onDeploy={() => setDeployBlueprint(detail)}

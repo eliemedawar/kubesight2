@@ -3,6 +3,7 @@ import { listTicketingProviders } from "../api/ticketingApi.js";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import ProviderWorkspace from "../components/ticketing/ProviderWorkspace.jsx";
 import { TicketingProvider } from "../components/ticketing/TicketingContext.jsx";
+import { useRouter } from "../routes/RouterContext.jsx";
 import { IconChevronRight, IconPlug, IconRefresh } from "../components/zoho/icons.jsx";
 import { timeAgo } from "../components/zoho/common.jsx";
 
@@ -12,9 +13,9 @@ import { timeAgo } from "../components/zoho/common.jsx";
 // inside a <TicketingProvider> so everything below it is bound to that provider
 // and never has to know which one it is.
 //
-// The chosen provider is remembered in localStorage, not the URL: this page is
-// reached through the app's own nav state (there is no router), so a per-browser
-// memory is what makes "open Ticketing" land back where the operator left off.
+// The open provider is in the address (/ticketing/:provider). localStorage
+// still remembers the last one, but only to decide where a bare /ticketing
+// lands — an explicit address always wins over the memory.
 const LAST_PROVIDER_KEY = "kubesight.ticketing.provider";
 
 function readLastProvider() {
@@ -96,7 +97,8 @@ export default function TicketingPage({ canManage = false, embedded = false }) {
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState(() => readLastProvider());
+  const { route, params: routeParams, navigate } = useRouter();
+  const selected = route.key === "ticketingProvider" ? routeParams.provider || "" : "";
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -117,16 +119,31 @@ export default function TicketingPage({ canManage = false, embedded = false }) {
 
   const open = (key) => {
     rememberProvider(key);
-    setSelected(key);
+    navigate({ key: "ticketingProvider", params: { provider: key } });
   };
 
   const back = () => {
     rememberProvider("");
-    setSelected("");
+    navigate({ key: "ticketing" });
     // The cards show each provider's last sync, which the workspace may have
     // just changed — re-read rather than showing a stale card.
     load();
   };
+
+  // A bare /ticketing goes to where the operator left off, if that provider
+  // still exists. Replace, so Back does not bounce off the redirect.
+  useEffect(() => {
+    if (selected || loading || !providers.length) {
+      return;
+    }
+    const remembered = readLastProvider();
+    if (remembered && providers.some((p) => p.key === remembered)) {
+      navigate(
+        { key: "ticketingProvider", params: { provider: remembered } },
+        { replace: true }
+      );
+    }
+  }, [selected, loading, providers, navigate]);
 
   const active = providers.find((p) => p.key === selected);
 

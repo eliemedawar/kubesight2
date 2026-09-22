@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState } from "react";
 
+import { useRouteParam } from "../routes/RouterContext.jsx";
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import HelmChartCatalog from "../components/inventory/HelmChartCatalog.jsx";
@@ -50,7 +51,7 @@ export default function InventoryPage({
   isAdmin = false,
   onRefresh,
 }) {
-  const [activeSection, setActiveSection] = useState("templates");
+  const [activeSection, setActiveSection] = useRouteParam("section", "templates");
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardInitialState, setWizardInitialState] = useState(null);

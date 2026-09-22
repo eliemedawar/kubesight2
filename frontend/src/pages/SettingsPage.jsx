@@ -1,11 +1,10 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef } from "react";
 import PageTitle from "../components/common/PageTitle.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import { normalizeSettings } from "../utils/formatters.js";
-import { setAlertsTabHint } from "../lib/alertDisplay.js";
 import { isAdminUser } from "../utils/authz.js";
+import { useRouteParam } from "../routes/RouterContext.jsx";
 import {
-  consumeSettingsSectionHint,
   groupSettingsSections,
   PREFERENCE_ANCHORS,
   visibleSettingsSections,
@@ -60,10 +59,11 @@ export default function SettingsPage({
   // Sections that render a panel; the link-out rows are never "active".
   const panelSections = useMemo(() => sections.filter((section) => !section.link), [sections]);
 
-  const [activeId, setActiveId] = useState(() => {
-    const hint = consumeSettingsSectionHint();
-    return hint || "";
-  });
+  // The open section is an address. Two setters, because a rail click is a
+  // place you navigated to and a scrollspy write is not — pushing on scroll
+  // would leave a history entry under every card you scrolled past.
+  const [activeId, openSectionInUrl] = useRouteParam("section", "");
+  const [, trackSectionInUrl] = useRouteParam("section", "", { replace: true });
 
   // Resolve the active section once the visible set is known — a hint may point
   // at something this user cannot see, and the fallback differs per role.
@@ -72,9 +72,10 @@ export default function SettingsPage({
 
   useEffect(() => {
     if (active && active.id !== activeId) {
-      setActiveId(active.id);
+      // Normalising to a section this user can actually see: replace.
+      trackSectionInUrl(active.id);
     }
-  }, [active, activeId]);
+  }, [active, activeId, trackSectionInUrl]);
 
   // The preference sections share one panel, so picking one is a scroll rather
   // than a panel swap. Only a click scrolls: the scrollspy below also writes
@@ -90,6 +91,26 @@ export default function SettingsPage({
   // Scrolling that column moves the rail highlight to whichever card is in
   // view. Only the shared preferences panel needs this; every other panel is a
   // single section.
+  // A deep link has to land on the card it names, and the scrollspy must not
+  // claim the top card before that has happened — otherwise opening
+  // #/settings/security scrolls nowhere and the address rewrites itself to the
+  // first section a moment later.
+  const spyReadyRef = useRef(false);
+  const initialScrollRef = useRef(false);
+  useEffect(() => {
+    if (initialScrollRef.current || !active) {
+      return undefined;
+    }
+    initialScrollRef.current = true;
+    if (active.anchor) {
+      document.getElementById(active.anchor)?.scrollIntoView({ block: "start" });
+    }
+    const timer = setTimeout(() => {
+      spyReadyRef.current = true;
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [active]);
+
   const isPreferences = active?.panel === "preferences";
   useEffect(() => {
     if (!isPreferences || typeof IntersectionObserver === "undefined") return undefined;
@@ -103,28 +124,30 @@ export default function SettingsPage({
         entries.forEach((entry) => {
           if (!entry.isIntersecting) return;
           const match = anchors.find(({ node }) => node === entry.target);
-          if (match) setActiveId(match.id);
+          if (match && spyReadyRef.current) trackSectionInUrl(match.id);
         });
       },
       { rootMargin: "-15% 0px -70% 0px" }
     );
     anchors.forEach(({ node }) => observer.observe(node));
     return () => observer.disconnect();
-  }, [isPreferences]);
+  }, [isPreferences, trackSectionInUrl]);
 
   const openSection = (sectionId) => {
     const target = panelSections.find((section) => section.id === sectionId);
     if (target?.anchor) {
       scrollToRef.current = target.anchor;
     }
-    setActiveId(sectionId);
+    openSectionInUrl(sectionId);
   };
 
   const followLink = (section) => {
-    if (section.alertsTab) {
-      setAlertsTabHint(section.alertsTab);
-    }
-    onNavigate?.(section.link);
+    // The target tab travels in the address now, not in a one-shot hint that
+    // the next mount of Alerts has to consume.
+    onNavigate?.(
+      section.link,
+      section.alertsTab ? { params: { tab: section.alertsTab } } : undefined
+    );
   };
 
   // Dirty tracking against the last saved settings. Theme is excluded: it is

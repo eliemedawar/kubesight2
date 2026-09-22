@@ -4,6 +4,7 @@ import App from "./App.jsx";
 import ErrorBoundary from "./components/common/ErrorBoundary.jsx";
 import { AuthProvider } from "./context/AuthContext.jsx";
 import { ChangeBundleProvider } from "./context/ChangeBundleContext.jsx";
+import { RouterProvider } from "./routes/RouterContext.jsx";
 import { loadRuntimeConfig } from "./runtimeConfig.js";
 import "./styles/fonts.css";
 import "./index.css";
@@ -42,11 +43,13 @@ async function bootstrap() {
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
       <ErrorBoundary>
-        <AuthProvider>
-          <ChangeBundleProvider>
-            <App />
-          </ChangeBundleProvider>
-        </AuthProvider>
+        <RouterProvider>
+          <AuthProvider>
+            <ChangeBundleProvider>
+              <App />
+            </ChangeBundleProvider>
+          </AuthProvider>
+        </RouterProvider>
       </ErrorBoundary>
     </React.StrictMode>
   );
