@@ -2813,6 +2813,40 @@ button.sg-ci-workspace-entry:focus-visible {
   white-space: nowrap;
 }
 
+/* Which tools keep one copy for every service. Same quiet legend as the
+   backing-store choice; the options wrap as a row of checkboxes. */
+.sg-ci-cache-shared {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.sg-ci-cache-shared legend {
+  padding: 0;
+  margin-bottom: 0.3rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-subtle);
+}
+
+.sg-ci-cache-shared-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+}
+
+.sg-ci-cache-shared-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
 /* ---------------------------------------------------------------------------
    Expected secrets — the keys an application type usually needs, listed above
    the ones that exist. Deliberately quieter than the table below it: these are

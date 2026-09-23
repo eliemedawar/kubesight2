@@ -30,6 +30,9 @@ def _hand_made_claim(monkeypatch):
     PersistentVolume made by hand, every service inside it."""
     monkeypatch.delenv("CI_CACHE_STORAGE_CLASS", raising=False)
     monkeypatch.setenv("CI_CACHE_CLAIM_NAME", CLAIM)
+    # Everything in this file is the PER-SERVICE contract, so nothing is shared
+    # here. The shared subtree has its own tests in test_ci_cache_shared.py.
+    monkeypatch.setenv("CI_CACHE_SHARED", "none")
     monkeypatch.delenv("CI_BUILDKIT_LOCAL_CACHE", raising=False)
     monkeypatch.delenv("CI_BUILDKIT_REGISTRY_CACHE", raising=False)
     monkeypatch.delenv("CI_BUILDKIT_CACHE_REPO", raising=False)

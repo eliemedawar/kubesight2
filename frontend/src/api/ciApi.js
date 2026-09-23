@@ -282,6 +282,10 @@ export const getCiCache = () => request("/api/ci/cache");
 export const setCiCacheEnabled = (enabled) =>
   request("/api/ci/cache", { method: "PUT", body: { enabled } });
 
+// Which tools every service shares one cache of (keys from cache.shared.options).
+export const setCiCacheShared = (shared) =>
+  request("/api/ci/cache", { method: "PUT", body: { shared } });
+
 // Create-only. Needs the cluster-scoped grant in k8s/ci-cache-rbac.yaml,
 // and says so if it is missing.
 export const createCiCacheVolume = (payload) =>

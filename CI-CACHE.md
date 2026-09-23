@@ -49,6 +49,55 @@ and silently lose `-Dmaven.repo.local` with it — keep both:
 MAVEN_OPTS=-Xmx2g -Dmaven.repo.local=$KUBESIGHT_CACHE_DIR/maven
 ```
 
+### The shared subtree
+
+Some caches are the same for every service, so on the one hand-made volume
+(`CI_CACHE_CLAIM_NAME` mode) they keep **one copy for everybody** instead of one
+per service:
+
+```
+$KUBESIGHT_SHARED_CACHE_DIR = /kubesight-cache/_shared
+```
+
+| Tool (key) | Variable(s) now pointing at `$KUBESIGHT_SHARED_CACHE_DIR/...` |
+|---|---|
+| Dependency-Check (`dependency-check`) | `DC_DATA_DIR` -> `dependency-check-data` |
+| Semgrep (`semgrep`) | `SEMGREP_CACHE_DIR`, `SEMGREP_VERSION_CACHE_PATH` -> `semgrep` |
+| npm (`npm`) | `npm_config_cache` -> `npm` |
+| yarn (`yarn`) | `YARN_CACHE_FOLDER` -> `yarn` |
+| pnpm (`pnpm`) | `npm_config_store_dir` -> `pnpm` |
+| pip (`pip`) | `PIP_CACHE_DIR` -> `pip` |
+| Go modules (`go`) | `GOMODCACHE` -> `go/mod` |
+
+All seven are shared by default. Pick them on the Runners page (Build cache ->
+*Shared across services*) or with `CI_CACHE_SHARED` (`dependency-check,npm`,
+`all`, `none`). A change takes effect on the next build and moves nothing: the
+tool starts cold once in its new place.
+
+**Never shared, and not offered:** Gradle's user home (its lock protocol pings
+the lock owner over localhost, which a build in another pod cannot hear, so
+builds time out on a lock nobody will release), Maven's local repository (not
+safe for concurrent writers, and leaks SNAPSHOTs between services), BuildKit's
+export (a `type=local` export rewrites one `index.json`, so services would evict
+each other) and the Gradle build cache (keyed by task inputs, so there is almost
+nothing to reuse across services anyway).
+
+**Dependency-Check queues.** Its H2 database does not survive two processes
+updating it at once, so the generated scan stage takes a lock
+(`$DC_DATA_DIR/.kubesight-scan.lock`, a directory, because `mkdir` is atomic on
+NFS) with a heartbeat. A lock whose pod died goes stale after 10 minutes. A
+scan waiting on another says so in its log. If you write your own
+Dependency-Check stage against a shared `DC_DATA_DIR`, copy that lock from the
+generated one.
+
+Storage-class mode never shares: each service has its own claim, so there is no
+volume in common. `$KUBESIGHT_SHARED_CACHE_DIR` is empty there, and when nothing
+is shared.
+
+The warm/cold line in each stage log marks shared directories, e.g.
+`warm: gradle/caches npm(shared)`. That's why a service's very first build can
+already be warm.
+
 ### When there is no cache
 
 `$KUBESIGHT_CACHE_DIR` is **empty** and none of the tool variables are set. A
@@ -244,7 +293,13 @@ same for an install with nothing saved in the UI.
 ```sh
 sh k8s/ci-cache.sh clean <service-slug>    # one service's subtree
 sh k8s/ci-cache.sh clean --all
+sh k8s/ci-cache.sh clean --shared          # the subtree every service shares
 ```
+
+On the Runners page, the usage table (after *Measure*) lists the shared
+subtree as *Shared by every service* with its own *Clean*. Cleaning one service
+does **not** touch the shared subtree. Cleaning the shared one is refused while
+ANY build is running, since any of them may be reading it.
 
 Refused while a build that would be reading those files is running: deleting a
 Gradle cache underneath a build fails it with errors that look nothing like the
@@ -255,12 +310,12 @@ cause.
 | | |
 |---|---|
 | **Storage class** | none — a hand-made NFS PersistentVolume, `ReadWriteMany`, `Retain` |
-| **Size** | 20Gi is comfortable for a handful of Java/Node services. Budget roughly 1–2Gi per Java service for Gradle, **plus ~6–8Gi once for `dependency-check-data`** — the NVD database is shared per service and is by far the largest single item. |
+| **Size** | 20Gi is comfortable for a handful of Java/Node services. Budget roughly 1–2Gi per Java service for Gradle, **plus ~6–8Gi once for `dependency-check-data`** — the NVD database is by far the largest single item; shared (the default) it is paid once for the whole volume, per service it is paid once per service. |
 | **Growth** | Gradle prunes its own caches; `removeUnusedEntriesAfterDays = 30` is set on the build cache by the init script. **BuildKit's local export prunes nothing** — if `CI_BUILDKIT_LOCAL_CACHE` is on, that directory grows until somebody empties it. |
 | **Cleanup policy** | none automatic. Watch the card on the Runners page (or `sh k8s/ci-cache.sh status`) and `clean` a service when it gets large. |
 | **Filling up** | NFS enforces no quota, so `capacity` on the PV is metadata only — it is the **export** that fills. Unlike a node-local volume this evicts nothing; builds just start failing to write, and the prep block reports it per stage. |
 | **Permissions** | stage containers run as uid/gid 65532 with a read-only root filesystem and no `CAP_CHOWN`. The Job sets `fsGroup: 65532` with `fsGroupChangePolicy: OnRootMismatch`. On NFS that chown is done by kubelet *as root against the server*, so the export must be `chown 65532:65532` and `chmod 2775` on the server itself — the setgid bit is what keeps the group on subdirectories the build tools create. |
-| **Concurrency** | one pod holds the volume at a time per service, because build tools lock their cache directories and a service's builds are serialised by its `maxConcurrentBuilds`. |
+| **Concurrency** | one pod holds a service's own subtree at a time, because build tools lock their cache directories and a service's builds are serialised by its `maxConcurrentBuilds`. The shared subtree IS written by several pods at once, which is why only content-addressed, concurrency-safe caches are allowed in it, and why Dependency-Check takes its own lock. |
 
 ---
 
@@ -271,6 +326,7 @@ cause.
 | `CI_CACHE_CLAIM_NAME` | — | Mount this existing claim. One volume, every service in its own subtree. Takes precedence over the storage class; KubeSight never creates, resizes or deletes it. |
 | `CI_CACHE_STORAGE_CLASS` | — | Provision one PVC per service from this class. |
 | `CI_CACHE_SIZE` | `10Gi` | Size of a per-service PVC (storage-class mode only). |
+| `CI_CACHE_SHARED` | all shareable | Which tools share `/kubesight-cache/_shared` (claim mode only): comma list of `dependency-check,semgrep,npm,yarn,pnpm,pip,go`, or `all` / `none`. |
 | `CI_CACHE_GRADLE_INIT` | `1` | Write the Gradle init script. `0`/`off` to leave `init.d` alone. |
 | `CI_BUILDKIT_LOCAL_CACHE` | `0` | Export image layers to `$BUILDKIT_CACHE_DIR`. |
 | `CI_BUILDKIT_REGISTRY_CACHE` | `0` | Export image layers to a `:buildcache` tag. |

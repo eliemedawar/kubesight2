@@ -186,6 +186,35 @@ def runtime_config() -> Dict[str, str]:
     }
 
 
+def shared_tools() -> tuple:
+    """The tools that cache into the shared subtree: saved here, else
+    ``CI_CACHE_SHARED``, else every shareable tool. Whether sharing applies at
+    all (only on the one hand-made claim) is the runner's decision."""
+    saved = stored_settings()
+    if "shared" in saved:
+        return cache_layout.parse_shared(saved.get("shared") or [])
+    return cache_layout.parse_shared(os.getenv("CI_CACHE_SHARED"))
+
+
+def set_shared(tools) -> Dict[str, Any]:
+    """Choose which tools share one cache across services.
+
+    Takes effect on the next build. Nothing is moved or deleted: a tool taken
+    out of the shared set starts cold once in each service's own subtree, and
+    one put in starts cold once in the shared one.
+    """
+    if not isinstance(tools, (list, tuple)):
+        raise CacheError("Send shared as a list of tool names.")
+    unknown = [str(t) for t in tools if str(t).strip().lower() not in cache_layout.SHAREABLE_KEYS]
+    if unknown:
+        raise CacheError(
+            "These cannot be shared: " + ", ".join(unknown) + ". Shareable: "
+            + ", ".join(cache_layout.SHAREABLE_KEYS) + "."
+        )
+    save_settings({"shared": list(cache_layout.parse_shared(list(tools)))})
+    return status()
+
+
 def save_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
     row = _runner_row()
     if row is None:
@@ -347,6 +376,18 @@ def status() -> Dict[str, Any]:
         "claim": claim,
         "volume": volume,
         "tools": CACHED_TOOLS,
+        # Which tools every service shares one copy of, and where. Only real on
+        # the hand-made claim; storage-class mode keeps everything per service.
+        "shared": {
+            "applies": not runtime["storageClass"] or bool(runtime["claimName"]),
+            "path": cache_layout.shared_cache_dir(MOUNT_PATH),
+            "dirName": cache_layout.SHARED_DIR_NAME,
+            "tools": list(shared_tools()),
+            "options": [
+                {"key": key, "label": label, "path": subdir}
+                for key, label, subdir, _ in cache_layout.SHAREABLE_TOOLS
+            ],
+        },
         "maintenance": maintenance_status(namespace),
         "warnings": warnings,
         # Prefill for the create form: this cluster's other volumes are NFS.
@@ -720,8 +761,10 @@ def _active_builds(service_id: Optional[int]) -> List[str]:
     return [f"#{row.number}" for row in query.limit(10).all()]
 
 
-def clean(service_id: Optional[int] = None, all_services: bool = False) -> Dict[str, Any]:
-    """Empty one service's cache, or all of them.
+def clean(
+    service_id: Optional[int] = None, all_services: bool = False, shared: bool = False
+) -> Dict[str, Any]:
+    """Empty one service's cache, the shared one, or all of them.
 
     Refuses while a build that would be reading those files is running:
     deleting a Gradle cache underneath a build fails it with errors that look
@@ -729,7 +772,19 @@ def clean(service_id: Optional[int] = None, all_services: bool = False) -> Dict[
     """
     namespace = _require_claim_mode()
 
-    if all_services:
+    if shared and not all_services:
+        # Any running build may be reading it, whichever service it belongs to.
+        busy = _active_builds(None)
+        if busy:
+            raise CacheError(
+                "Builds are running (" + ", ".join(busy) + "). The shared cache is read by "
+                "every service, so emptying it now could fail any of them. Try again when "
+                "they finish."
+            )
+        target_dir = cache_layout.shared_cache_dir(MOUNT_PATH)
+        script = f"rm -rf {target_dir}; echo cleaned {target_dir}"
+        target = "the shared cache"
+    elif all_services:
         busy = _active_builds(None)
         if busy:
             raise CacheError(

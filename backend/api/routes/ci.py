@@ -854,7 +854,7 @@ def purge_artifacts():
         "ci_artifacts_purged",
         actor=_actor(),
         target_type="ci_service" if service_id else "ci_artifacts",
-        target_id=str(service_id or "all"),
+        target_id=str(service_id or ("all" if all_services else "shared")),
         details={
             "deleted": result["deleted"],
             "freedBytes": result["freedBytes"],
@@ -1104,8 +1104,21 @@ def get_build_cache():
 @require_permission("ci_runners:manage")
 def update_build_cache():
     payload = _payload()
+    if "shared" in payload and "enabled" not in payload:
+        try:
+            state = cache_service.set_shared(payload["shared"])
+        except _USER_ERRORS as exc:
+            return error_response(str(exc), 400)
+        log_audit(
+            "ci_cache_shared_changed",
+            actor=_actor(),
+            target_type="ci_cache",
+            target_id=state.get("claimName") or "",
+            details={"shared": state.get("shared", {}).get("tools")},
+        )
+        return success_response(state)
     if "enabled" not in payload:
-        return error_response("Send enabled: true or false.")
+        return error_response("Send enabled: true or false, or shared: [tools].")
     enabled = bool(payload["enabled"])
     try:
         state = cache_service.set_enabled(enabled)
@@ -1162,13 +1175,15 @@ def measure_build_cache():
 def clean_build_cache():
     payload = _payload()
     all_services = bool(payload.get("all"))
+    shared = bool(payload.get("shared"))
     service_id = payload.get("serviceId")
-    if not all_services and not service_id:
-        return error_response("Name a service to clean, or send all: true.")
+    if not all_services and not shared and not service_id:
+        return error_response("Name a service to clean, or send shared: true or all: true.")
     try:
         result = cache_service.clean(
-            service_id=None if all_services else int(service_id),
+            service_id=None if (all_services or shared) else int(service_id),
             all_services=all_services,
+            shared=shared,
         )
     except (TypeError, ValueError):
         return error_response("That service id is not a number.")

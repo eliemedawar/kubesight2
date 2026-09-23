@@ -25,11 +25,36 @@ The shape on disk
         semgrep/                      SEMGREP_CACHE_DIR      (downloaded rulesets)
         buildkit/                     BUILDKIT_CACHE_DIR     (exported layer cache)
         maven/ npm/ yarn/ pnpm/ pip/ go/ cargo/ composer/ nuget/ xdg/
+      _shared/                        KUBESIGHT_SHARED_CACHE_DIR - one subtree for everybody
+        dependency-check-data/        the NVD database is the same for every service
+        npm/ yarn/ pnpm/ pip/ go/mod/ semgrep/
 
 Every service gets its own subtree **in both storage modes**. A per-service
 PersistentVolumeClaim is isolated already, but keeping the slug in the path
 means one rule explains the layout, and ``clean`` can delete one service's cache
 by path without having to know which mode produced it.
+
+The shared subtree
+------------------
+
+Some caches hold nothing specific to a service: the NVD database is the same
+for everybody, and npm, pnpm, pip and Go modules are content-addressed stores
+built for many projects to share. One copy per service costs a cold build per
+service and N copies of the same bytes, so on the one hand-made volume those
+tools point at ``_shared/`` instead (``SHAREABLE_TOOLS``, operator-selectable).
+``_shared`` can never collide with a service: ``slug_dir`` folds ``_`` to ``-``
+and strips leading dashes.
+
+NOT shared, on purpose: Gradle's user home (its cross-process locking pings the
+lock owner over localhost, which a build in another pod cannot hear, so builds
+time out waiting for a lock nobody will release), Maven's local repository (not
+safe for concurrent writers, and leaks SNAPSHOTs between services), BuildKit's
+export (``type=local`` rewrites one ``index.json``, so services would evict each
+other) and Gradle's build cache (keyed by task inputs, so services almost never
+hit each other's entries anyway).
+
+A per-service claim (storage-class mode) has no volume in common to share, so
+there everything stays per service.
 
 What is deliberately NOT here
 -----------------------------
@@ -117,6 +142,64 @@ if (kubesightCacheDir) {
 """
 
 
+# The one subtree every service uses. A leading underscore is something
+# slug_dir can never produce, so no service can own - or clean - it by accident.
+SHARED_DIR_NAME = "_shared"
+
+# Tools whose cache may live in the shared subtree: key, label, subdirectory,
+# and every variable that points into it. Only tools that are safe with
+# concurrent writers from different pods, and whose contents are not specific
+# to one service, belong here - the module docstring says why Gradle, Maven and
+# BuildKit do not.
+SHAREABLE_TOOLS = (
+    ("dependency-check", "Dependency-Check (NVD)", "dependency-check-data", ("DC_DATA_DIR",)),
+    ("semgrep", "Semgrep", "semgrep", ("SEMGREP_CACHE_DIR", "SEMGREP_VERSION_CACHE_PATH")),
+    ("npm", "npm", "npm", ("npm_config_cache",)),
+    ("yarn", "yarn", "yarn", ("YARN_CACHE_FOLDER",)),
+    ("pnpm", "pnpm", "pnpm", ("npm_config_store_dir",)),
+    ("pip", "pip", "pip", ("PIP_CACHE_DIR",)),
+    ("go", "Go modules", "go/mod", ("GOMODCACHE",)),
+)
+SHAREABLE_KEYS = tuple(key for key, _, _, _ in SHAREABLE_TOOLS)
+# Shared unless an operator says otherwise: each one is a cold build per
+# service and a duplicate copy of the same bytes when it is not.
+DEFAULT_SHARED = SHAREABLE_KEYS
+_SHAREABLE_SUBDIR = {key: subdir for key, _, subdir, _ in SHAREABLE_TOOLS}
+
+
+def parse_shared(value) -> tuple:
+    """A shared-tools setting - a list, or a comma-separated ``CI_CACHE_SHARED``
+    string - as known keys in canonical order.
+
+    ``None`` means "never configured" and gives the default; an empty list,
+    ``"none"`` or ``"off"`` shares nothing; ``"all"`` shares every shareable
+    tool. Unknown names are dropped rather than refused: a stale setting naming
+    a tool this version no longer shares must not stop builds.
+    """
+    if value is None:
+        return DEFAULT_SHARED
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "none", "off", "0", "false"):
+            return ()
+        if text in ("all", "default", "on", "1", "true"):
+            return SHAREABLE_KEYS
+        wanted = {part.strip() for part in text.split(",")}
+    else:
+        wanted = {str(part).strip().lower() for part in value}
+    return tuple(key for key in SHAREABLE_KEYS if key in wanted)
+
+
+def shared_subdirs(shared) -> set:
+    """The per-tool subdirectories that live under ``_shared/`` for this set."""
+    return {_SHAREABLE_SUBDIR[key] for key in shared if key in _SHAREABLE_SUBDIR}
+
+
+def shared_cache_dir(mount_path: str = CACHE_MOUNT_PATH) -> str:
+    """``$KUBESIGHT_SHARED_CACHE_DIR`` - the subtree every service shares."""
+    return f"{mount_path.rstrip('/')}/{SHARED_DIR_NAME}"
+
+
 def slug_dir(service_slug: str) -> str:
     """The one directory name a service is allowed to own.
 
@@ -149,7 +232,7 @@ def precreated_dirs(base: str) -> List[str]:
     return [f"{base}/{name}" for name in PRECREATED_SUBDIRS]
 
 
-def tool_env(base: str) -> Dict[str, str]:
+def tool_env(base: str, shared_base: str = "", shared=()) -> Dict[str, str]:
     """Point every build tool KubeSight might meet at this service's subtree.
 
     Injected on every stage rather than left to each pipeline: a cache nobody
@@ -161,9 +244,25 @@ def tool_env(base: str) -> Dict[str, str]:
     which is what lets a single hand-made PersistentVolume hold every tool's
     cache at once. ``{}`` when caching is off, so a pipeline can reference
     ``$KUBESIGHT_CACHE_DIR`` unconditionally and simply get a cold build.
+
+    With ``shared_base`` and a set of ``shared`` tool keys, those tools'
+    variables point into the shared subtree instead - same subdirectory name,
+    different parent - and ``KUBESIGHT_SHARED_CACHE_DIR`` names it.
     """
     if not base:
         return {}
+    env = _service_tool_env(base)
+    if shared_base and shared:
+        env["KUBESIGHT_SHARED_CACHE_DIR"] = shared_base
+        for key, _, _, names in SHAREABLE_TOOLS:
+            if key not in shared:
+                continue
+            for name in names:
+                env[name] = shared_base + env[name][len(base):]
+    return env
+
+
+def _service_tool_env(base: str) -> Dict[str, str]:
     return {
         # --- the path itself, under both names ------------------------------
         "KUBESIGHT_CACHE_DIR": base,
@@ -222,7 +321,7 @@ PATH_VARS = (
 )
 
 
-def _mismatch_checks() -> List[str]:
+def _mismatch_checks(shared=()) -> List[str]:
     """Shell that says when a tool has been pointed away from the cache.
 
     This is the failure that looks like nothing at all: the volume is mounted,
@@ -244,12 +343,16 @@ def _mismatch_checks() -> List[str]:
     to do it — a shell runs those, and expands them.
     """
     lines: List[str] = []
+    shared_dirs = shared_subdirs(shared)
     for name, subdir in PATH_VARS:
+        parent = (
+            "$KUBESIGHT_SHARED_CACHE_DIR" if subdir in shared_dirs else "$KUBESIGHT_CACHE_DIR"
+        )
         lines.extend(
             [
-                f'    if [ "${{{name}:-}}" != "$KUBESIGHT_CACHE_DIR/{subdir}" ]; then',
+                f'    if [ "${{{name}:-}}" != "{parent}/{subdir}" ]; then',
                 f'      echo "[kubesight] {name}=${{{name}:-(unset)}}" >&2',
-                f'      echo "[kubesight]   ^ not $KUBESIGHT_CACHE_DIR/{subdir} - that tool'
+                f'      echo "[kubesight]   ^ not {parent}/{subdir} - that tool'
                 ' starts cold every build. A stage Environment value overrides the'
                 ' injected one, and Kubernetes does not expand \\$VAR in it." >&2',
                 "    fi",
@@ -258,7 +361,7 @@ def _mismatch_checks() -> List[str]:
     return lines
 
 
-def prep_script(*, gradle_init: bool = True) -> str:
+def prep_script(*, gradle_init: bool = True, shared=()) -> str:
     """Shell that makes this service's subtree exist. Run by every stage.
 
     Runs OUTSIDE the stage's own ``set -e`` subshell and never exits non-zero: a
@@ -271,8 +374,20 @@ def prep_script(*, gradle_init: bool = True) -> str:
     layout on the one that does. Reads ``$KUBESIGHT_CACHE_DIR`` rather than
     taking the path as an argument, so the same text is correct for every
     service and does nothing at all when caching is off.
+
+    ``shared`` is the set of tool keys whose directories live under
+    ``$KUBESIGHT_SHARED_CACHE_DIR``: those are created, probed and checked
+    there instead. It is known at manifest time, so it shapes the text.
     """
-    dirs = " ".join(f'"$KUBESIGHT_CACHE_DIR/{name}"' for name in PRECREATED_SUBDIRS)
+    shared_dirs = shared_subdirs(shared)
+    paths = [
+        f'"$KUBESIGHT_SHARED_CACHE_DIR/{name}"' if name in shared_dirs
+        else f'"$KUBESIGHT_CACHE_DIR/{name}"'
+        for name in PRECREATED_SUBDIRS
+    ]
+    dirs = " ".join(paths)
+    own_probes = [name for name in WARMTH_PROBE_DIRS if name not in shared_dirs]
+    shared_probes = [name for name in WARMTH_PROBE_DIRS if name in shared_dirs]
     init_path = f'"$KUBESIGHT_CACHE_DIR/gradle/init.d/{GRADLE_INIT_SCRIPT_NAME}"'
     lines = [
         'if [ -n "${KUBESIGHT_CACHE_DIR:-}" ]; then',
@@ -308,18 +423,36 @@ def prep_script(*, gradle_init: bool = True) -> str:
             # report warm on a first build — the build whose answer matters.
             "    KS_WARM=",
             "    KS_COLD=",
-            "    for KS_DIR in " + " ".join(WARMTH_PROBE_DIRS) + "; do",
+            "    for KS_DIR in " + " ".join(own_probes) + "; do",
             '      if [ -n "$(ls -A "$KUBESIGHT_CACHE_DIR/$KS_DIR" 2>/dev/null)" ]; then',
             '        KS_WARM="$KS_WARM $KS_DIR"',
             "      else",
             '        KS_COLD="$KS_COLD $KS_DIR"',
             "      fi",
             "    done",
-            '    echo "[kubesight] Cache: $KUBESIGHT_CACHE_DIR"',
+        ]
+        + (
+            [
+                # Marked as shared, so "warm" on a service's FIRST build is
+                # explained rather than surprising.
+                "    for KS_DIR in " + " ".join(shared_probes) + "; do",
+                '      if [ -n "$(ls -A "$KUBESIGHT_SHARED_CACHE_DIR/$KS_DIR" 2>/dev/null)" ]; then',
+                '        KS_WARM="$KS_WARM $KS_DIR(shared)"',
+                "      else",
+                '        KS_COLD="$KS_COLD $KS_DIR(shared)"',
+                "      fi",
+                "    done",
+            ]
+            if shared_probes
+            else []
+        )
+        + ['    echo "[kubesight] Cache: $KUBESIGHT_CACHE_DIR"']
+        + (['    echo "[kubesight] Shared: $KUBESIGHT_SHARED_CACHE_DIR"'] if shared_dirs else [])
+        + [
             '    echo "[kubesight]   warm:${KS_WARM:- (nothing yet)}"',
             '    echo "[kubesight]   cold:${KS_COLD:- (none)}"',
         ]
-        + _mismatch_checks()
+        + _mismatch_checks(shared)
         + [
             "  else",
             '    echo "[kubesight] Cache directory $KUBESIGHT_CACHE_DIR is not writable;'

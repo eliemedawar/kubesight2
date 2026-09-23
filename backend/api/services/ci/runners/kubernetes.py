@@ -406,7 +406,8 @@ def _cache_prep() -> str:
     makes the whole block a no-op.
     """
     return cache_layout.prep_script(
-        gradle_init=not _is_off(_env("CI_CACHE_GRADLE_INIT", "1"))
+        gradle_init=not _is_off(_env("CI_CACHE_GRADLE_INIT", "1")),
+        shared=cache_shared_tools() if cache_enabled() else (),
     )
 
 
@@ -1022,6 +1023,31 @@ def cache_base_path(service_slug: str) -> str:
     return cache_layout.service_cache_dir(service_slug, CACHE_MOUNT_PATH)
 
 
+def cache_shared_tools() -> tuple:
+    """Which tools cache into the subtree every service shares.
+
+    Only on the one hand-made claim: a per-service claim (storage-class mode)
+    has no volume in common with any other service, so there is nothing to
+    share and everything stays in the service's own subtree. Saved in the UI,
+    else ``CI_CACHE_SHARED``, else the default set.
+    """
+    if not cache_claim_override():
+        return ()
+    try:
+        from .. import cache as cache_settings
+
+        return cache_settings.shared_tools()
+    except Exception:  # pragma: no cover - depends on app/db state
+        return cache_layout.parse_shared(os.getenv("CI_CACHE_SHARED"))
+
+
+def cache_shared_path() -> str:
+    """``$KUBESIGHT_SHARED_CACHE_DIR``, "" when nothing is shared."""
+    if not cache_enabled() or not cache_shared_tools():
+        return ""
+    return cache_layout.shared_cache_dir(CACHE_MOUNT_PATH)
+
+
 def cache_claim(service_slug: str) -> Dict[str, Any]:
     """The per-service cache PVC. Applied separately from the Job and never
     given an ownerReference — it must outlive the build that created it."""
@@ -1064,18 +1090,19 @@ def _mounts() -> List[Dict[str, str]]:
     return mounts
 
 
-def _tool_cache_env(base: str) -> Dict[str, str]:
+def _tool_cache_env(base: str, shared_base: str = "", shared=()) -> Dict[str, str]:
     """Every build tool's cache variable, from the shared layout.
 
     Kept as a thin wrapper rather than inlined at the call site because the
     agent runner and the maintenance Jobs need the identical mapping, and a
     second copy of it is a second thing to forget to update.
     """
-    return cache_layout.tool_env(base)
+    return cache_layout.tool_env(base, shared_base, shared)
 
 
 def _plain_env(execution: StageExecution, extra: Dict[str, str]) -> List[Dict[str, Any]]:
     cache_base = cache_base_path(execution.service_slug)
+    shared_base = cache_shared_path() if cache_base else ""
     env = {
         "HOME": "/tmp",
         "TMPDIR": "/tmp",
@@ -1102,7 +1129,9 @@ def _plain_env(execution: StageExecution, extra: Dict[str, str]) -> List[Dict[st
         # they are declared here so the "off" case still defines the names.
         "KUBESIGHT_CACHE_DIR": cache_base,
         "KUBESIGHT_CACHE": cache_base,
-        **_tool_cache_env(cache_base),
+        # "" unless some tools cache into the subtree every service shares.
+        "KUBESIGHT_SHARED_CACHE_DIR": shared_base,
+        **_tool_cache_env(cache_base, shared_base, cache_shared_tools() if shared_base else ()),
         **(execution.env or {}),
         **extra,
     }

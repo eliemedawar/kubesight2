@@ -1113,6 +1113,8 @@ def test_every_known_build_tool_is_pointed_at_the_cache(monkeypatch):
     spells its cache variable differently."""
     monkeypatch.delenv("CI_CACHE_STORAGE_CLASS", raising=False)
     monkeypatch.setenv("CI_CACHE_CLAIM_NAME", "ci-cache")
+    # Per-service paths throughout; the shared subtree is test_ci_cache_shared.py.
+    monkeypatch.setenv("CI_CACHE_SHARED", "none")
     first = _plan(
         _execution(0, "checkout", secrets={"KUBESIGHT_GIT_TOKEN": "t",
                                            "KUBESIGHT_GIT_CREDENTIAL_TYPE": "oauth",

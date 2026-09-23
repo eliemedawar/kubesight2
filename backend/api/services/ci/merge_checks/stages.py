@@ -284,12 +284,44 @@ def _dependency_check_commands(min_severity: str) -> List[str]:
     run on a cold cache downloads it and takes many minutes. That is a property
     of the tool, and the honest thing is to let it happen once rather than to
     disable the update and scan against an empty database.
+
+    That database is usually SHARED by every service (``_shared/`` in the
+    cache), and its embedded H2 file does not survive two processes updating
+    it at once. So a scan takes a lock first: a directory, because ``mkdir`` is
+    atomic on NFS where ``flock`` is not reliably, kept fresh by a heartbeat so
+    a lock whose pod was killed goes stale after ten minutes instead of blocking
+    every scan forever. Scans queue behind each other; with a warm database
+    each one is a minute or two.
     """
     floors = _DC_BY_FLOOR.get(min_severity, _DC_BY_FLOOR["high"])
     pattern = "|".join(floors)
     return [
         'DATA_DIR="${DC_DATA_DIR:-/tmp/dependency-check-data}"',
         'mkdir -p "$DATA_DIR" reports',
+        "",
+        "# One scan at a time per NVD database - see the stage's docstring.",
+        'DC_LOCK="$DATA_DIR/.kubesight-scan.lock"',
+        "DC_WAITED=0",
+        'until mkdir "$DC_LOCK" 2>/dev/null; do',
+        '  if [ -n "$(find "$DC_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then',
+        '    echo "Breaking a stale Dependency-Check lock ($(cat "$DC_LOCK/owner" 2>/dev/null))."',
+        '    rm -rf "$DC_LOCK"',
+        "    continue",
+        "  fi",
+        '  if [ $((DC_WAITED % 60)) -eq 0 ]; then',
+        '    echo "Waiting for another Dependency-Check scan ($(cat "$DC_LOCK/owner" 2>/dev/null))' \
+        ' to finish with the NVD database..."',
+        "  fi",
+        "  sleep 5",
+        "  DC_WAITED=$((DC_WAITED + 5))",
+        "done",
+        'echo "${KUBESIGHT_SERVICE_SLUG:-?} build ${KUBESIGHT_BUILD_NUMBER:-?}" > "$DC_LOCK/owner"',
+        '( while sleep 60; do touch "$DC_LOCK" 2>/dev/null || exit 0; done ) &',
+        "DC_HEARTBEAT=$!",
+        # `|| true`: the stage runs under set -e, and a heartbeat that already
+        # exited must not fail the scan on its way out.
+        'dc_unlock() { kill "$DC_HEARTBEAT" 2>/dev/null || true; rm -rf "$DC_LOCK"; }',
+        "trap dc_unlock EXIT",
         "",
         'NVD_ARGS=""',
         'if [ -n "${NVD_API_KEY:-}" ]; then NVD_ARGS="--nvdApiKey $NVD_API_KEY"; fi',
@@ -304,6 +336,8 @@ def _dependency_check_commands(min_severity: str) -> List[str]:
         '  --data "$DATA_DIR" \\',
         "  --failOnCVSS 11 \\",
         "  $NVD_ARGS || true",
+        "dc_unlock",
+        "trap - EXIT",
         "",
         "REPORT=reports/dependency-check-report.json",
         'if [ ! -s "$REPORT" ]; then',

@@ -8,6 +8,7 @@
 #   sh k8s/ci-cache.sh status              config, binding, size per service
 #   sh k8s/ci-cache.sh clean <service>     empty one service's cache
 #   sh k8s/ci-cache.sh clean --all         empty every service's cache
+#   sh k8s/ci-cache.sh clean --shared      empty the cache every service shares
 #
 # k8s/ci-cache-volume.yaml is the annotated version of what `create` applies —
 # read it for why each field is the way it is.
@@ -414,7 +415,7 @@ cmd_disable() {
 # ---------------------------------------------------------------------------
 cmd_clean() {
     need_cluster
-    [ -n "$ARG" ] || die "clean needs a service slug, or --all:" \
+    [ -n "$ARG" ] || die "clean needs a service slug, --shared or --all:" \
         "  sh $0 clean payment-service" \
         "  sh $0 clean --all"
     [ "$(claim_phase)" = "Bound" ] || die "$CLAIM in $NS is not Bound — nothing to clean."
@@ -424,6 +425,12 @@ cmd_clean() {
         # -mindepth 1 empties the directory without removing /kubesight-cache itself,
         # which is the mount point; -maxdepth 1 keeps it to one pass.
         script='find /kubesight-cache -mindepth 1 -maxdepth 1 -exec rm -rf {} + ; echo CLEANED; du -sh /kubesight-cache'
+        busy=$(active_jobs "")
+    elif [ "$ARG" = "--shared" ]; then
+        # The subtree every service shares (NVD database, npm, pip...). Any
+        # running build may be reading it, so any build in flight blocks this.
+        target="the shared cache"
+        script="rm -rf /kubesight-cache/_shared; echo CLEANED; du -sh /kubesight-cache/* 2>/dev/null; true"
         busy=$(active_jobs "")
     else
         slug=$(slugify "$ARG")

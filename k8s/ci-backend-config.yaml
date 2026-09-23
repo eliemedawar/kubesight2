@@ -26,7 +26,7 @@ data:
   # carries git + python3). The code default is `kubesight-backend:latest`, a
   # bare tag no node can pull — every build fails at checkout unless this is a
   # real registry path. Keep the tag in step with the deployed backend.
-  CI_WORKER_IMAGE: registry.areeba.com/kubesight-backend:v1.1.54
+  CI_WORKER_IMAGE: registry.areeba.com/kubesight-backend:v1.1.95
   CI_IMAGE_PULL_POLICY: IfNotPresent
 
   # Where the collector posts logs, status and artifacts back to. The code

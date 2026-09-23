@@ -6,6 +6,7 @@ import {
   listCiServices,
   measureCiCache,
   setCiCacheEnabled,
+  setCiCacheShared,
 } from "../../api/ciApi.js";
 
 /**
@@ -21,6 +22,11 @@ import {
  * resized or re-pathed in place, so the form would be a lie. Emptying is per
  * service, because a service's cache is its own subtree and one bad dependency
  * should not cost everybody else their warm cache.
+ *
+ * The exception is the shared subtree: tools whose cache is the same for
+ * everybody (the NVD database, npm, pip, Go modules...) keep ONE copy under
+ * _shared/, chosen per tool. Gradle, Maven and BuildKit are never offered —
+ * they break when two pods write the same directory.
  */
 
 const BACKINGS = [
@@ -125,7 +131,26 @@ export default function BuildCachePanel({ canManage }) {
   const hasVolume = Boolean(cache.claim?.exists);
   const usage = cache.maintenance?.usage || [];
   const total = usage.find((row) => row.service === "(total)");
-  const perService = usage.filter((row) => row.service !== "(total)");
+  const shared = cache.shared || null;
+  const sharedDir = shared?.dirName || "_shared";
+  const sharedSet = new Set(shared?.tools || []);
+  // The shared subtree first: it is usually the biggest, and it is everybody's.
+  const perService = usage
+    .filter((row) => row.service !== "(total)")
+    .sort((a, b) => (b.service === sharedDir) - (a.service === sharedDir));
+  const toggleShared = (key) => {
+    const next = shared.options
+      .map((option) => option.key)
+      .filter((optionKey) => (optionKey === key ? !sharedSet.has(key) : sharedSet.has(optionKey)));
+    const label = shared.options.find((option) => option.key === key)?.label || key;
+    run(
+      "shared",
+      () => setCiCacheShared(next),
+      sharedSet.has(key)
+        ? `${label} is per service again from the next build. Each service starts it cold once.`
+        : `${label} is shared from the next build. It starts cold once, then warm for everybody.`
+    );
+  };
   const startCreate = () =>
     setForm({
       backing: cache.suggestions?.backing || "nfs",
@@ -154,7 +179,15 @@ export default function BuildCachePanel({ canManage }) {
         One volume mounted at {cache.mountPath} by every stage, with Gradle, Maven, npm, yarn,
         pnpm, pip, Go, Cargo, Composer, NuGet, Dependency-Check, Semgrep and BuildKit pointed
         into it. Each service caches under <code>{cache.mountPath}/&lt;service&gt;/</code>, which
-        a stage script can read as <code>$KUBESIGHT_CACHE_DIR</code>.
+        a stage script can read as <code>$KUBESIGHT_CACHE_DIR</code>
+        {shared?.applies && sharedSet.size > 0 ? (
+          <>
+            ; the tools ticked below share one copy under <code>{shared.path}/</code> (
+            <code>$KUBESIGHT_SHARED_CACHE_DIR</code>).
+          </>
+        ) : (
+          "."
+        )}
       </p>
 
       {error && <p className="banner-message error">{error}</p>}
@@ -324,6 +357,31 @@ export default function BuildCachePanel({ canManage }) {
         </form>
       )}
 
+      {shared?.applies && !form && (
+        <fieldset className="sg-ci-cache-shared">
+          <legend>Shared across services</legend>
+          <div className="sg-ci-cache-shared-options">
+            {shared.options.map((option) => (
+              <label key={option.key} title={`${shared.path}/${option.path}`}>
+                <input
+                  type="checkbox"
+                  checked={sharedSet.has(option.key)}
+                  disabled={!canManage || Boolean(busy)}
+                  onChange={() => toggleShared(option.key)}
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+          <p className="muted sg-ci-cache-note">
+            One copy for every service instead of one each. Gradle, Maven and BuildKit always stay
+            per service: they corrupt or deadlock when two builds write the same directory.
+            Dependency-Check scans queue behind each other so only one updates the NVD database
+            at a time.
+          </p>
+        </fieldset>
+      )}
+
       {/* One row, one primary. Which action is primary depends on what is
           missing: with no volume the thing to do is create it, and the switch
           is the secondary control beside it. */}
@@ -416,14 +474,33 @@ export default function BuildCachePanel({ canManage }) {
           </thead>
           <tbody>
             {perService.map((row) => {
+              const isShared = row.service === sharedDir;
               const service = services.find((item) => item.slug === row.service);
               return (
                 <tr key={row.service}>
-                  <td>{service?.name || row.service}</td>
+                  <td>{isShared ? <strong>Shared by every service</strong> : service?.name || row.service}</td>
                   <td>{row.size}</td>
                   {canManage && (
                     <td>
-                      {service ? (
+                      {isShared ? (
+                        <button
+                          type="button"
+                          className="btn-outline btn-compact"
+                          disabled={Boolean(busy) || cache.maintenance?.phase === "running"}
+                          onClick={() => {
+                            if (
+                              !window.confirm(
+                                "Empty the shared cache? The next build of every service " +
+                                  "re-downloads the NVD database and its shared packages once."
+                              )
+                            )
+                              return;
+                            run("clean", () => cleanCiCache({ shared: true }));
+                          }}
+                        >
+                          Clean
+                        </button>
+                      ) : service ? (
                         <button
                           type="button"
                           className="btn-outline btn-compact"
