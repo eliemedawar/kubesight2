@@ -33,6 +33,7 @@ from ...models_ci import (
     CiService,
 )
 from . import default_pipelines, jenkinsfile, templates
+from . import resources as ci_resources
 from .serializers import pipeline_to_dict
 
 MAX_STAGES = 40
@@ -516,15 +517,17 @@ def _image_scan(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[s
     }
 
 
-def _resources(value: Any) -> Optional[Dict[str, str]]:
-    if not isinstance(value, dict):
-        return None
-    out = {}
-    for key in ("cpu", "memory", "ephemeralStorage"):
-        raw = _clean(value.get(key), 32)
-        if raw:
-            out[key] = raw
-    return out or None
+def _resources(value: Any, stage_name: str) -> Optional[Dict[str, str]]:
+    """This stage's override of the service's Build resources.
+
+    Same vocabulary as the service-level setting — a quantity, or "off" for no
+    limit — because they are the same field at different scopes, and the runner
+    reads whichever is nearest. See ``resources.py`` for how the layers resolve.
+    """
+    try:
+        return ci_resources.normalize(value, source=f"Stage '{stage_name}' resources")
+    except ci_resources.ResourceError as exc:
+        raise PipelineError(str(exc))
 
 
 def _known_secret_keys(service_id: int) -> set:
@@ -583,7 +586,7 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         "env": env,
         "secret_refs": _secret_refs(payload.get("secretRefs"), known_keys),
         "artifacts": _artifact_specs(payload.get("artifacts")),
-        "resources": _resources(payload.get("resources")),
+        "resources": _resources(payload.get("resources"), name),
         "host_aliases": _host_aliases(payload.get("hostAliases"), name),
         "run_condition": _run_condition(payload.get("runCondition"), name),
         "image_scan": _image_scan(payload.get("imageScan"), stage_type, name),

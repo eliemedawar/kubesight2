@@ -220,7 +220,18 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
   useEffect(() => {
     load();
     listCiSecrets(service.id)
-      .then((data) => setSecretKeys((data.items || []).map((item) => item.key)))
+      // The list is this service's secrets plus every global one, so a service
+      // secret shadowing a global of the same name arrives twice. One row per
+      // name, and it is the service's own that the build will resolve.
+      .then((data) => {
+        const byKey = new Map();
+        for (const item of data.items || []) {
+          if (!byKey.has(item.key) || item.scope === "service") {
+            byKey.set(item.key, item.scope);
+          }
+        }
+        setSecretKeys([...byKey].map(([key, scope]) => ({ key, scope })));
+      })
       .catch(() => setSecretKeys([]));
   }, [service.id]);
 
@@ -1115,11 +1126,12 @@ function StageFields({ stage, secretKeys, parameters, canEdit, onChange }) {
             <div className="sg-ci-stage-options-body">
               {secretKeys.length === 0 ? (
                 <p className="muted">
-                  No secrets are defined for this service yet. Add them on the Settings tab.
+                  No secrets are available to this service yet. Add one — for this
+                  service or for every service — on the Settings tab.
                 </p>
               ) : (
                 <div className="sg-ci-secret-refs">
-                  {secretKeys.map((key) => {
+                  {secretKeys.map(({ key, scope }) => {
                     const ref = (stage.secretRefs || []).find((item) => item.name === key);
                     return (
                       <label key={key} className="checkbox-row">
@@ -1136,6 +1148,7 @@ function StageFields({ stage, secretKeys, parameters, canEdit, onChange }) {
                           }
                         />
                         <code>{key}</code>
+                        {scope === "global" && <span className="chip">global</span>}
                         {ref && (
                           <input
                             className="sg-ci-envvar-input"

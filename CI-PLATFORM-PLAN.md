@@ -507,6 +507,42 @@ Job           ci-<serviceSlug>-<number>       restricted securityContext, TTL, d
 Namespace `kubesight-ci` with `pod-security.kubernetes.io/enforce: restricted`,
 ResourceQuota and LimitRange — `k8s/application-analysis-worker.yaml` cloned.
 
+#### Build resources — who decides what a stage may use
+
+Three layers, narrowest first, resolved per field in `services/ci/resources.py`:
+
+| Layer | Where | Scope |
+| --- | --- | --- |
+| Stage | `CiPipelineStage.resources`, pipeline editor | one step of one pipeline |
+| Service | `CiService.build_resources`, Catalog → Settings → **Build resources** | every stage this service builds |
+| Installation | `CI_STAGE_*` in `k8s/ci-backend-config.yaml` | everything |
+
+Each of `cpu`, `memory`, `ephemeralStorage` is a Kubernetes quantity, the word
+`off` for no limit, or absent to inherit the layer below. Absent and `off` are
+different answers: `off` stops the layer below from applying.
+
+**Ephemeral storage is open by default** — no limit, no request, no `sizeLimit`
+on the shared `/workspace`. The choice is about which failure an operator can
+read: a capped build is evicted mid-run and the build log shows a stage that
+stopped for no stated reason, while an uncapped one shows up as node disk
+pressure, which is already monitored. It is also what makes the scan gate usable
+on small nodes without editing a ConfigMap.
+
+Two couplings that exist because kubelet enforces two separate ceilings:
+
+- a limit brings a **256Mi request** with it unless the installation names one.
+  Without a request Kubernetes defaults the request *to* the limit, so an 8Gi cap
+  would demand 8Gi free on every candidate node — unschedulable exactly where
+  somebody capped because disk is tight;
+- an explicit limit **raises the `/workspace` `sizeLimit`** to match, and an
+  explicit `off` removes it. Otherwise a stage granted 16Gi still dies at the
+  volume's ceiling, with nothing in the build log to say why.
+
+The service envelope is read live at dispatch rather than from the build
+snapshot: it is infrastructure sizing, not pipeline definition, so raising it has
+to fix the retry of the build that was just evicted — not only builds started
+afterwards.
+
 ---
 
 ## 8. BuildKit architecture
@@ -586,10 +622,13 @@ The costs, stated:
 - The image transfers buildkitd -> pod -> registry instead of straight to the
   registry, so a large image spends an extra minute or two and loses BuildKit's
   layer-level dedup against the registry on push.
-- The archive sits on `/workspace` between build and push, so both the
-  workspace `sizeLimit` and the stage's ephemeral-storage limit have to allow
-  for it (`CI_IMAGE_SCAN_WORKSPACE_SIZE_LIMIT`, `CI_IMAGE_SCAN_EPHEMERAL_LIMIT`,
-  both 8Gi by default and both raised for scanned stages only).
+- The archive sits on `/workspace` between build and push, so wherever a disk
+  cap is in force, both the workspace `sizeLimit` and the stage's
+  ephemeral-storage limit have to allow for it. Disk is uncapped by default, and
+  where an installation has capped it KubeSight raises both for scanned stages
+  only, to the larger of the cap and `CI_IMAGE_SCAN_WORKSPACE_SIZE_LIMIT` /
+  `CI_IMAGE_SCAN_EPHEMERAL_LIMIT` (8Gi each). A cap a service chose itself is
+  never raised for it — see Build resources below.
 
 Off unless armed per stage, because arming it by default would start failing
 builds for every service that never customised its pipeline, on the say-so of a

@@ -33,6 +33,7 @@ from ...models_ci import (
     CiService,
 )
 from . import artifacts as artifacts_service
+from . import resources as ci_resources
 from . import source as source_port
 from . import default_pipelines, templates as templates_service
 from .serializers import service_to_dict
@@ -382,6 +383,18 @@ def _apply_identity(row: CiService, payload: Dict[str, Any], *, creating: bool) 
         if status not in SERVICE_STATUSES:
             raise CatalogError(f"Status must be one of: {', '.join(SERVICE_STATUSES)}.")
         row.status = status
+
+    if "buildResources" in payload:
+        # What this service's build stages may use. Absent field = installation
+        # default; "off" = no limit at all, which is what ephemeral storage does
+        # out of the box. Validated here rather than at dispatch, so a typo is a
+        # red field on save instead of a pod that never gets created.
+        try:
+            row.build_resources = ci_resources.normalize(
+                payload.get("buildResources"), source="Build resources"
+            )
+        except ci_resources.ResourceError as exc:
+            raise CatalogError(str(exc))
 
     if "maxConcurrentBuilds" in payload:
         try:

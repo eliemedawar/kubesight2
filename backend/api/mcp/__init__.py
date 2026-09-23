@@ -28,8 +28,10 @@ tool runs as that token's user under the same RBAC every route uses. An agent
 holding a viewer's token sees exactly what a viewer sees, and changes nothing.
 Giving this its own identity would have created a second, invisible permission
 system — which is also why there is no separate "allow agent writes" switch: the
-write tools need ``ci_pipelines:edit``, the same permission the editor screen
-needs, so an installation decides by minting the token it means to hand over.
+write tools need the permission the equivalent screen needs
+(``ci_pipelines:edit`` to edit a pipeline, ``ci_services:edit`` to edit a
+service's Dockerfile), so an installation decides by minting the token it means
+to hand over.
 
 **It serves over HTTP from the backend itself.** Not a stdio subprocess: Hermes
 runs in its own container, and a stdio server would have to be packaged into it

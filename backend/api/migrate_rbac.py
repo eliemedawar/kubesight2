@@ -715,6 +715,11 @@ def _migrate_ci_columns() -> None:
         _retype_json_column("ci_services", "application_profile")
         _add_column_if_missing("ci_services", "profile_source", "VARCHAR(16)")
         _add_column_if_missing("ci_services", "analysis_state", "VARCHAR(16)")
+        # Per-service build resource envelope. NULL means "the installation
+        # defaults decide", which is what every service had before the column,
+        # so there is nothing to backfill.
+        _add_column_if_missing("ci_services", "build_resources", "JSON")
+        _retype_json_column("ci_services", "build_resources")
     if "ci_pipelines" in existing:
         # JSON, not TEXT: on PostgreSQL a db.JSON attribute over a text column
         # reads back as the raw string and then iterates as characters.

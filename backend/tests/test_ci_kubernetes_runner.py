@@ -40,6 +40,7 @@ def _execution(position, stage_type="command", **kw):
         env=kw.get("env", {}),
         secrets=kw.get("secrets", {}),
         artifacts=kw.get("artifacts", []),
+        resources=kw.get("resources", {}),
         host_aliases=kw.get("host_aliases", []),
         timeout_seconds=600,
         continue_on_failure=kw.get("cof", False),
@@ -337,10 +338,11 @@ def test_missing_tooling_fails_the_stage_rather_than_pushing_unscanned(monkeypat
 
 
 def test_scanned_stage_gets_room_for_the_archive(monkeypatch):
-    """The image is parked on /workspace between build and push. Both ceilings
-    have to allow for it — kubelet evicts on whichever is hit first."""
-    monkeypatch.delenv("CI_STAGE_EPHEMERAL_LIMIT", raising=False)
-    monkeypatch.delenv("CI_WORKSPACE_SIZE_LIMIT", raising=False)
+    """The image is parked on /workspace between build and push. Where caps are
+    in force both ceilings have to allow for it — kubelet evicts on whichever is
+    hit first."""
+    monkeypatch.setenv("CI_STAGE_EPHEMERAL_LIMIT", "2Gi")
+    monkeypatch.setenv("CI_WORKSPACE_SIZE_LIMIT", "2Gi")
     _, _, job = _scanned_job(monkeypatch)
     spec = job["spec"]["template"]["spec"]
 
@@ -349,9 +351,23 @@ def test_scanned_stage_gets_room_for_the_archive(monkeypatch):
     workspace = next(v for v in spec["volumes"] if v["name"] == "workspace")
     assert workspace["emptyDir"]["sizeLimit"] == "8Gi"
 
-    # The compile stage beside it keeps the ordinary limit — the raise is for
+    # The checkout stage beside it keeps the ordinary limit — the raise is for
     # the stage that holds an image, not for every container in the pod.
     assert spec["initContainers"][0]["resources"]["limits"]["ephemeral-storage"] == "2Gi"
+
+
+def test_scanned_stage_is_not_capped_on_an_uncapped_installation(monkeypatch):
+    """The raise exists so a cap cannot evict a scanned build. With no cap there
+    is nothing to raise, and inventing one would cap a build the installation
+    deliberately left open."""
+    monkeypatch.delenv("CI_STAGE_EPHEMERAL_LIMIT", raising=False)
+    monkeypatch.delenv("CI_WORKSPACE_SIZE_LIMIT", raising=False)
+    _, _, job = _scanned_job(monkeypatch)
+    spec = job["spec"]["template"]["spec"]
+
+    assert "ephemeral-storage" not in spec["initContainers"][1]["resources"]["limits"]
+    workspace = next(v for v in spec["volumes"] if v["name"] == "workspace")
+    assert workspace["emptyDir"] == {}
 
 
 def test_unscanned_stage_is_byte_for_byte_what_it_was(monkeypatch):
@@ -702,15 +718,94 @@ def _stage_containers(job):
     return spec["initContainers"] + [spec["containers"][0]]
 
 
-def test_ephemeral_storage_is_accounted_for_by_default():
-    """The default shape: a modest request so the scheduler sees the build, and
-    a cap so one runaway stage cannot fill the node."""
+def test_ephemeral_storage_is_open_by_default(monkeypatch):
+    """Out of the box a build's disk is neither capped nor reserved: no request,
+    no limit, no ceiling on the shared workspace. A capped build dies to an
+    eviction that reads, in the build log, as a stage that stopped for no stated
+    reason; an uncapped one shows as node disk pressure, where operators look."""
+    monkeypatch.delenv("CI_STAGE_EPHEMERAL_REQUEST", raising=False)
+    monkeypatch.delenv("CI_STAGE_EPHEMERAL_LIMIT", raising=False)
+    monkeypatch.delenv("CI_WORKSPACE_SIZE_LIMIT", raising=False)
+
+    first = _plan(_execution(0, commands=["mvn package"]))
+    _, _, job = k8s.build_job_resources(first)
+
+    for container in _stage_containers(job):
+        assert "ephemeral-storage" not in container["resources"]["requests"]
+        assert "ephemeral-storage" not in container["resources"]["limits"]
+
+    volumes = {v["name"]: v for v in job["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["workspace"]["emptyDir"] == {}
+
+    # cpu and memory are capped as they always were — only disk is open.
+    stage = _stage_containers(job)[0]
+    assert stage["resources"]["limits"]["memory"] == "4Gi"
+    assert stage["resources"]["limits"]["cpu"] == "2"
+
+
+def test_a_cap_brings_its_own_request(monkeypatch):
+    """A limit with no request makes Kubernetes default the request TO the limit,
+    so an 8Gi cap would demand 8Gi free on every candidate node — unschedulable
+    exactly where somebody capped because disk is tight."""
+    monkeypatch.delenv("CI_STAGE_EPHEMERAL_REQUEST", raising=False)
+    monkeypatch.setenv("CI_STAGE_EPHEMERAL_LIMIT", "8Gi")
+
     first = _plan(_execution(0, commands=["mvn package"]))
     _, _, job = k8s.build_job_resources(first)
 
     stage = _stage_containers(job)[0]
+    assert stage["resources"]["limits"]["ephemeral-storage"] == "8Gi"
     assert stage["resources"]["requests"]["ephemeral-storage"] == "256Mi"
-    assert stage["resources"]["limits"]["ephemeral-storage"] == "2Gi"
+
+
+def test_a_service_cap_raises_the_workspace_ceiling_with_it(monkeypatch):
+    """The emptyDir ceiling is enforced separately, so a stage granted 16Gi that
+    kept a 2Gi workspace would be evicted anyway — and the build would say
+    nothing about why."""
+    monkeypatch.setenv("CI_WORKSPACE_SIZE_LIMIT", "2Gi")
+
+    first = _plan(
+        _execution(0, commands=["mvn package"], resources={"ephemeralStorage": "16Gi"})
+    )
+    _, _, job = k8s.build_job_resources(first)
+
+    stage = _stage_containers(job)[0]
+    assert stage["resources"]["limits"]["ephemeral-storage"] == "16Gi"
+    volumes = {v["name"]: v for v in job["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["workspace"]["emptyDir"]["sizeLimit"] == "16Gi"
+
+
+def test_a_service_can_uncap_over_an_installation_default(monkeypatch):
+    """"No limit" on the service has to beat a cap set installation-wide, on both
+    ceilings — otherwise the setting removes one and the pod is evicted at the
+    other."""
+    monkeypatch.setenv("CI_STAGE_EPHEMERAL_LIMIT", "2Gi")
+    monkeypatch.setenv("CI_WORKSPACE_SIZE_LIMIT", "2Gi")
+
+    first = _plan(
+        _execution(0, commands=["mvn package"], resources={"ephemeralStorage": "off"})
+    )
+    _, _, job = k8s.build_job_resources(first)
+
+    stage = _stage_containers(job)[0]
+    assert "ephemeral-storage" not in stage["resources"]["limits"]
+    assert "ephemeral-storage" not in stage["resources"]["requests"]
+    volumes = {v["name"]: v for v in job["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["workspace"]["emptyDir"] == {}
+
+
+def test_cpu_and_memory_can_be_uncapped_too():
+    """One vocabulary for every field. The requests stay, so the scheduler still
+    reserves a floor for the pod."""
+    first = _plan(
+        _execution(0, commands=["mvn package"], resources={"cpu": "off", "memory": "off"})
+    )
+    _, _, job = k8s.build_job_resources(first)
+
+    stage = job["spec"]["template"]["spec"]["initContainers"][0]
+    assert "cpu" not in stage["resources"]["limits"]
+    assert "memory" not in stage["resources"]["limits"]
+    assert stage["resources"]["requests"]["memory"] == "256Mi"
 
 
 def test_ephemeral_storage_can_be_switched_off_entirely(monkeypatch):
@@ -740,10 +835,13 @@ def test_ephemeral_storage_can_be_switched_off_entirely(monkeypatch):
 def test_workspace_size_limit_can_be_switched_off(monkeypatch):
     """The emptyDir ceiling is enforced separately from the container limit, so
     it needs its own "off" or a build stays capped after the limits are gone."""
-    monkeypatch.setenv("CI_WORKSPACE_SIZE_LIMIT", "off")
+    monkeypatch.setenv("CI_WORKSPACE_SIZE_LIMIT", "5Gi")
+    _, _, job = k8s.build_job_resources(_plan(_execution(0, commands=["mvn package"])))
+    volumes = {v["name"]: v for v in job["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["workspace"]["emptyDir"]["sizeLimit"] == "5Gi"
 
-    first = _plan(_execution(0, commands=["mvn package"]))
-    _, _, job = k8s.build_job_resources(first)
+    monkeypatch.setenv("CI_WORKSPACE_SIZE_LIMIT", "off")
+    _, _, job = k8s.build_job_resources(_plan(_execution(0, commands=["mvn package"])))
 
     volumes = {v["name"]: v for v in job["spec"]["template"]["spec"]["volumes"]}
     assert volumes["workspace"]["emptyDir"] == {}

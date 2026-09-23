@@ -1,7 +1,7 @@
 # Writing — before you change anything
 
 Read this once, before your first write in a conversation. It applies to all
-twenty write tools regardless of domain.
+twenty-three write tools regardless of domain.
 
 ## Say it, then do it
 
@@ -80,6 +80,9 @@ Not a permission problem — these tools do not exist:
   a person votes. An agent that can both ask and approve is an approval process
   with one participant.
 - **Delete** a workload, a service, a cluster connection or a user.
+- **Commit to a repository.** You can edit the Dockerfile KubeSight *stores* for
+  a service; the file in the repository is read-only from here, and there is no
+  tool that opens a pull request.
 - **Read or write a secret's value.** Pipelines hold references; values are
   stored encrypted and write-only.
 - **Edit platform configuration** — registries, ticketing field mappings, roles.

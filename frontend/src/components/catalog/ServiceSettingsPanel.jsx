@@ -4,6 +4,7 @@ import {
   deleteCiSecret,
   deleteCiService,
   listCiSecrets,
+  updateCiSecret,
   updateCiService,
 } from "../../api/ciApi.js";
 import { listRegistries } from "../../api/registriesApi.js";
@@ -15,8 +16,52 @@ import {
   formatRelative,
 } from "./ciShared.jsx";
 
+// What a build stage of this service may use. Each row is three-way: inherit the
+// installation default, name a value, or take the limit off entirely. Ephemeral
+// storage ships open — no limit, no request — so "Default" and "No limit" read
+// the same out of the box, and the select still says which one was CHOSEN,
+// because an installation that later sets a cap should apply to the first and
+// not to the second.
+const RESOURCE_FIELDS = [
+  {
+    key: "cpu",
+    label: "CPU",
+    placeholder: "2",
+    hint: "Cores per stage container. 500m is half a core.",
+  },
+  {
+    key: "memory",
+    label: "Memory",
+    placeholder: "4Gi",
+    hint: "A stage that exceeds its memory limit is OOM-killed and the build fails there.",
+  },
+  {
+    key: "ephemeralStorage",
+    label: "Ephemeral storage",
+    placeholder: "8Gi",
+    hint:
+      "Disk for the checkout, build output and the shared /workspace. With no " +
+      "limit a build writes whatever the node has; with one, kubelet evicts the " +
+      "pod at the ceiling and the build stops without saying why.",
+  },
+];
+
+const OFF_WORDS = new Set(["off", "none", "no", "0", "false", "unlimited"]);
+
+const resourceMode = (value) => {
+  const text = String(value ?? "").trim();
+  if (!text) return "default";
+  return OFF_WORDS.has(text.toLowerCase()) ? "off" : "custom";
+};
+
+// "Default" has to name the number it resolves to, and the API reports that
+// rather than the UI guessing: an installation that sets CI_STAGE_MEMORY_LIMIT
+// should see its own value here.
+const defaultLabel = (value) =>
+  !value || OFF_WORDS.has(String(value).toLowerCase()) ? "no limit" : value;
+
 /**
- * Settings tab: behaviour, registry, secrets, danger zone.
+ * Settings tab: behaviour, build resources, registry, secrets, danger zone.
  *
  * The registry is where container_image stages push. Without one those stages
  * skip with an explanation rather than pretending to have built something, and
@@ -24,6 +69,11 @@ import {
  *
  * Secret values are write-only. The list shows names and metadata because the
  * API has no path that returns a value — rotating means entering a new one.
+ *
+ * A secret is either scoped to this service or global — visible to every
+ * service in the catalog. The scope is chosen when adding, and can be changed
+ * afterwards, so a value that turns out to be shared (an NVD API key, a common
+ * registry token) does not have to be pasted into each service in turn.
  */
 export default function ServiceSettingsPanel({
   service,
@@ -41,14 +91,50 @@ export default function ServiceSettingsPanel({
     ownerTeam: service.ownerTeam || "",
     maxConcurrentBuilds: service.maxConcurrentBuilds || 1,
     registryConnectionId: service.registryConnectionId || "",
+    buildResources: { ...(service.buildResources || {}) },
   });
+  // Which of the three the user picked, kept beside the value because the value
+  // alone cannot say it: an empty box under "Custom" and an untouched field both
+  // send nothing, and switching to Custom has to leave the box visible to type
+  // in rather than snapping back to Default.
+  const [resourceModes, setResourceModes] = useState(() =>
+    Object.fromEntries(
+      RESOURCE_FIELDS.map((field) => [
+        field.key,
+        resourceMode((service.buildResources || {})[field.key]),
+      ])
+    )
+  );
+  const resourceDefaults = service.buildResourceDefaults || {};
   const [registries, setRegistries] = useState([]);
   const [secrets, setSecrets] = useState([]);
-  const [newSecret, setNewSecret] = useState({ key: "", value: "", description: "" });
+  const [newSecret, setNewSecret] = useState({
+    key: "",
+    value: "",
+    description: "",
+    scope: "service",
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  const setResource = (key, value) =>
+    setForm((prev) => {
+      const next = { ...prev.buildResources };
+      // Absent, not empty: an absent key is what tells the backend to fall back
+      // to the installation default for this field only.
+      if (value === null) delete next[key];
+      else next[key] = value;
+      return { ...prev, buildResources: next };
+    });
+
+  const setResourceMode = (key, mode) => {
+    setResourceModes((prev) => ({ ...prev, [key]: mode }));
+    if (mode === "default") setResource(key, null);
+    else if (mode === "off") setResource(key, "off");
+    else setResource(key, resourceMode(form.buildResources[key]) === "custom" ? form.buildResources[key] : "");
+  };
 
   // Which of the application type's expected secrets are still missing.
   // Set-ness is recomputed from the list this panel already loaded rather than
@@ -82,7 +168,19 @@ export default function ServiceSettingsPanel({
     setSaving(true);
     setError("");
     try {
-      onSaved(await updateCiService(service.id, form));
+      const updated = await updateCiService(service.id, form);
+      // What came back is the truth, and it can differ from what was typed:
+      // "Custom" with an empty box stores nothing, which IS "Default". Re-derive
+      // the rows from the response so the card never claims a setting the
+      // service does not have.
+      const saved = updated.buildResources || {};
+      setForm((prev) => ({ ...prev, buildResources: { ...saved } }));
+      setResourceModes(
+        Object.fromEntries(
+          RESOURCE_FIELDS.map((field) => [field.key, resourceMode(saved[field.key])])
+        )
+      );
+      onSaved(updated);
     } catch (err) {
       setError(err.message || "Could not save settings.");
     } finally {
@@ -93,17 +191,40 @@ export default function ServiceSettingsPanel({
   const addSecret = async () => {
     setError("");
     try {
-      await createCiSecret(service.id, newSecret);
-      setNewSecret({ key: "", value: "", description: "" });
+      // A null service id is what picks the global route in the API client.
+      await createCiSecret(newSecret.scope === "global" ? null : service.id, newSecret);
+      setNewSecret({ key: "", value: "", description: "", scope: "service" });
       loadSecrets();
     } catch (err) {
       setError(err.message || "Could not add the secret.");
     }
   };
 
+  // Moving a secret between scopes keeps the stored value, so pipelines that
+  // already reference the name keep working — only who can see it changes.
+  const changeScope = async (secret, scope) => {
+    const message =
+      scope === "global"
+        ? `Make "${secret.key}" global? Every service in the catalog will be able ` +
+          "to reference it, and its value stays as it is."
+        : `Make "${secret.key}" service-only? Other services referencing it will ` +
+          "lose it, and their next build fails on the reference.";
+    if (!window.confirm(message)) return;
+    setError("");
+    try {
+      await updateCiSecret(secret.id, { scope, serviceId: service.id });
+      loadSecrets();
+    } catch (err) {
+      setError(err.message || "Could not change the scope.");
+    }
+  };
+
   const removeSecret = async (secret) => {
-    if (!window.confirm(`Delete secret "${secret.key}"? Pipelines referencing it will fail.`))
-      return;
+    const scopeNote =
+      secret.scope === "global"
+        ? "It is global: pipelines in every service that reference it will fail."
+        : "Pipelines referencing it will fail.";
+    if (!window.confirm(`Delete secret "${secret.key}"? ${scopeNote}`)) return;
     try {
       await deleteCiSecret(secret.id);
       loadSecrets();
@@ -206,11 +327,68 @@ export default function ServiceSettingsPanel({
             </span>
           </label>
         </div>
+      </section>
+
+      <section className="form-section">
+        <h4>Build resources</h4>
+        <p className="muted">
+          What every stage of this service's builds may use on the node. Leave a
+          row on <strong>Default</strong> and the installation's value applies;
+          choose <strong>No limit</strong> and the field is left off the pod
+          entirely. A single stage can still override any of this from the
+          pipeline editor.
+        </p>
+        <div className="form-grid">
+          {RESOURCE_FIELDS.map((field) => {
+            const mode = resourceModes[field.key];
+            return (
+              <label key={field.key}>
+                {field.label}
+                <div className="sg-ci-inline-field sg-ci-resource-row">
+                  <select
+                    value={mode}
+                    disabled={!canEdit}
+                    onChange={(event) => setResourceMode(field.key, event.target.value)}
+                  >
+                    <option value="default">
+                      Default ({defaultLabel(resourceDefaults[field.key])})
+                    </option>
+                    <option value="custom">Custom…</option>
+                    <option value="off">No limit</option>
+                  </select>
+                  {mode === "custom" && (
+                    <input
+                      value={form.buildResources[field.key] || ""}
+                      placeholder={field.placeholder}
+                      disabled={!canEdit}
+                      aria-label={`${field.label} limit`}
+                      onChange={(event) => setResource(field.key, event.target.value)}
+                    />
+                  )}
+                </div>
+                <span className="field-hint">{field.hint}</span>
+              </label>
+            );
+          })}
+        </div>
+        {resourceModes.ephemeralStorage === "custom" && (
+          <p className="field-hint">
+            A limit here also raises the shared <code>/workspace</code> ceiling to
+            match, so a build cannot be evicted below what you asked for, and a
+            small request is added alongside it — without one Kubernetes would
+            demand the full size free on every node before it would schedule the
+            build.
+          </p>
+        )}
         {canEdit && (
           <div className="sg-ci-panel-actions">
             <button type="button" className="primary" onClick={save} disabled={saving}>
               {saving ? "Saving…" : "Save settings"}
             </button>
+            <span className="muted sg-ci-panel-note">
+              Applies to the next build, including a retry of one that has
+              already run.
+            </span>
           </div>
         )}
       </section>
@@ -221,7 +399,9 @@ export default function ServiceSettingsPanel({
           <p className="muted">
             Referenced by name from a pipeline stage and injected as environment
             variables. Values are encrypted at rest, never returned by the API, and
-            masked out of build logs.
+            masked out of build logs. A <strong>global</strong> secret is available
+            to every service; one of this service's own with the same name wins over
+            it.
           </p>
 
           {expectedSecrets.length > 0 && (
@@ -248,11 +428,12 @@ export default function ServiceSettingsPanel({
                           type="button"
                           className="btn-link"
                           onClick={() => {
-                            setNewSecret({
+                            setNewSecret((prev) => ({
+                              ...prev,
                               key: item.key,
                               value: "",
                               description: item.description,
-                            });
+                            }));
                             newSecretValueRef.current?.focus();
                             newSecretValueRef.current?.scrollIntoView({
                               block: "center",
@@ -291,20 +472,40 @@ export default function ServiceSettingsPanel({
                         <code>{secret.key}</code>
                       </td>
                       <td>
-                        <span className="chip">{secret.scope}</span>
+                        <span
+                          className={`chip sg-ci-scope-chip${
+                            secret.scope === "global" ? " is-global" : ""
+                          }`}
+                        >
+                          {secret.scope === "global" ? "global" : "this service"}
+                        </span>
                       </td>
                       <td>{secret.description || "—"}</td>
                       <td>{secret.lastUsedAt ? formatRelative(secret.lastUsedAt) : "never"}</td>
                       <td className="table-actions-cell">
-                        {canManageSecrets && secret.scope === "service" && (
-                          <button
-                            type="button"
-                            className="icon-button danger"
-                            aria-label={`Delete ${secret.key}`}
-                            onClick={() => removeSecret(secret)}
-                          >
-                            <TrashIcon />
-                          </button>
+                        {canManageSecrets && (
+                          <span className="sg-ci-secret-row-actions">
+                            <button
+                              type="button"
+                              className="btn-link"
+                              onClick={() =>
+                                changeScope(
+                                  secret,
+                                  secret.scope === "global" ? "service" : "global"
+                                )
+                              }
+                            >
+                              {secret.scope === "global" ? "Make service-only" : "Make global"}
+                            </button>
+                            <button
+                              type="button"
+                              className="icon-button danger"
+                              aria-label={`Delete ${secret.key}`}
+                              onClick={() => removeSecret(secret)}
+                            >
+                              <TrashIcon />
+                            </button>
+                          </span>
                         )}
                       </td>
                     </tr>
@@ -346,6 +547,19 @@ export default function ServiceSettingsPanel({
                   setNewSecret((prev) => ({ ...prev, description: event.target.value }))
                 }
               />
+              {/* Scope is chosen before the value is sent, because the two
+                  scopes are different API routes — not a flag on one record. */}
+              <select
+                className="sg-ci-secret-scope"
+                aria-label="Secret scope"
+                value={newSecret.scope}
+                onChange={(event) =>
+                  setNewSecret((prev) => ({ ...prev, scope: event.target.value }))
+                }
+              >
+                <option value="service">This service only</option>
+                <option value="global">Global — all services</option>
+              </select>
               <button
                 type="button"
                 className="btn-outline btn-compact"

@@ -14,6 +14,9 @@ import {
   formatRelative,
   isBuildActive,
   shortSha,
+  FAILURES_BEFORE_BANNER,
+  retryDelay,
+  describeError,
 } from "./ciShared.jsx";
 
 // Matched to the engine's own tick, and only while a build is live — the grid
@@ -106,6 +109,8 @@ export default function StageMatrix({
   const cardRef = useRef(null);
   const timerRef = useRef(null);
 
+  const failuresRef = useRef(0);
+
   const load = useCallback(async () => {
     try {
       const payload = await getCiStageMatrix(service.id, {
@@ -113,11 +118,20 @@ export default function StageMatrix({
         limit: PAGE_SIZE,
       });
       setData(payload);
+      failuresRef.current = 0;
       setError("");
-      return (payload.rows || []).some((row) => isBuildActive(row.status));
+      return {
+        ok: true,
+        active: (payload.rows || []).some((row) => isBuildActive(row.status)),
+      };
     } catch (err) {
-      setError(err.message || "Could not load the stage history.");
-      return false;
+      failuresRef.current += 1;
+      // One missed tick while the grid is already on screen is not worth a
+      // banner; at 1.5s the next one almost always repaints it.
+      if (failuresRef.current >= FAILURES_BEFORE_BANNER) {
+        setError(describeError(err, "Could not load the stage history."));
+      }
+      return { ok: false, active: false };
     } finally {
       setLoading(false);
     }
@@ -125,9 +139,17 @@ export default function StageMatrix({
 
   useEffect(() => {
     let cancelled = false;
+    failuresRef.current = 0;
     const tick = async () => {
-      const active = await load();
-      if (cancelled || !active) return;
+      const { ok, active } = await load();
+      if (cancelled) return;
+      // A failed poll is not "nothing is building": retry with a backoff so a
+      // blip cannot freeze the grid behind a stale banner.
+      if (!ok) {
+        timerRef.current = window.setTimeout(tick, retryDelay(failuresRef.current));
+        return;
+      }
+      if (!active) return;
       timerRef.current = window.setTimeout(tick, REFRESH_MS);
     };
     tick();

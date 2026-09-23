@@ -1,11 +1,21 @@
 """The CI half of KubeSight: what an agent may ask about a build, and change.
 
-Most tools here read. Seven write, and they are two different kinds of thing
-with two different risk profiles, which is worth keeping straight.
+Most tools here read. Ten write, and they are four different kinds of thing
+with four different risk profiles, which is worth keeping straight.
 
 **Four of them edit a pipeline**, and a pipeline edit is reviewable after the
 fact: it is stored, versioned, audited, and a build snapshots the version it
 ran, so an edit somebody disagrees with can be read afterwards and put back.
+
+**Two of them edit the Dockerfile** a service stores — the image recipe, which
+is a document rather than a set of fields. Reviewable in the same way, with one
+asymmetry worth naming: storing a Dockerfile on a service that had none makes
+every later build ignore the one in the repository, so that tool says so and
+the one that clears it again is the same tool.
+
+**One moves the merge-check quality gate** for every service that inherits it,
+which is the only tool here that changes what may be *merged* rather than what
+is built. Nothing here can switch a service's checks off or re-send a verdict.
 
 **Three of them run a build** — trigger, cancel, retry. Those are not reversible
 in the same way: a build pushes images and can deploy. They are here because
@@ -19,7 +29,12 @@ finished — it returns queued and nothing here waits.
 out of the database, change what was asked, and save the whole thing back
 through ``pipelines.update_pipeline`` — the same validator the UI posts to. An
 agent therefore cannot lose a field it did not know to send, which is what would
-happen if it had to echo a pipeline it had only read a summary of.
+happen if it had to echo a pipeline it had only read a summary of. The Dockerfile
+tools work the same way round: ``kubesight_dockerfile_edit`` replaces named
+snippets in the stored text rather than taking a whole file, so a line the agent
+never mentioned cannot go missing. ``kubesight_dockerfile_set`` does take the
+whole document, and is the one place here where sending less than everything
+loses it — which is why it returns a diff of what it did.
 
 **Answers come back twice**: a short human-readable summary and the full
 structured payload. The summary is what a model reads when it is deciding what
@@ -720,6 +735,419 @@ def _pipeline_save(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
     return _saved_summary(
         target, saved, f"replaced the pipeline with {len(checked)} stages"
     )
+
+
+# ---------------------------------------------------------------------------
+# The Dockerfile a service's image is built from
+# ---------------------------------------------------------------------------
+#
+# The recipe lives in one of two places, and which one it is decides what an
+# edit can mean.
+#
+# **Stored on the service** it is a KubeSight document. The runner mounts it
+# beside the build context and points BuildKit's dockerfile local at it, so the
+# checkout is never modified and the repository never learns it happened. This
+# is the copy these tools write.
+#
+# **Absent**, the image stage builds the Dockerfile the repository committed at
+# the revision being built. Nothing here can change that one: KubeSight reads a
+# repository, it does not commit to it. An agent asked to edit it can only store
+# an edited copy — and that is a bigger change than it looks, because from then
+# on every build ignores the repository's file, including the fixes somebody
+# later pushes to it. ``kubesight_dockerfile_set`` says so when it happens.
+#
+# Two write tools rather than one, for the reason the pipeline has four: a whole
+# document sent back is a document that can silently lose the lines the agent
+# did not think to repeat. ``kubesight_dockerfile_edit`` replaces exact snippets
+# and touches nothing else.
+
+# Enough of a diff to read at a glance and see what moved; a Dockerfile rewritten
+# wholesale is not made clearer by printing all of it a second time.
+MAX_DIFF_LINES = 120
+
+
+def _image_stages(row: CiService) -> List[Dict[str, Any]]:
+    """The container_image stages that would build this Dockerfile.
+
+    A service with none has a Dockerfile nothing builds — worth saying, because
+    it is the difference between "your edit takes effect next build" and "your
+    edit takes effect never".
+    """
+    from ...services.ci import pipelines
+
+    items = pipelines.list_pipelines(row)
+    pipeline = items[0] if items else {}
+    return [
+        {
+            "stage": stage.get("name"),
+            "position": stage.get("position"),
+            "enabled": bool(stage.get("enabled", True)),
+            # Where the stage would look in the repository. An inline Dockerfile
+            # overrides this outright — BuildKit is handed the mounted file, so
+            # DOCKERFILE_PATH stops being consulted at all.
+            "repositoryPath": (stage.get("env") or {}).get("DOCKERFILE_PATH") or "Dockerfile",
+            "imageScan": bool((stage.get("imageScan") or {}).get("enabled")),
+        }
+        for stage in (pipeline.get("stages") or [])
+        if stage.get("stageType") == "container_image"
+    ]
+
+
+def _stored_dockerfile(row: CiService) -> str:
+    """The stored Dockerfile, or a refusal that says why there is none to edit."""
+    text = row.dockerfile or ""
+    if not text.strip():
+        raise ToolError(
+            f"'{row.slug}' stores no Dockerfile — its image stages build the one "
+            "committed in the repository, and KubeSight cannot write to a "
+            "repository. Read it with kubesight_repo_file and store the edited "
+            "copy with kubesight_dockerfile_set, which makes KubeSight's copy the "
+            "one every build uses from then on."
+        )
+    return text
+
+
+def _dockerfile_change(before: str, after: str) -> Dict[str, Any]:
+    """What actually changed, as counts and a diff.
+
+    Returned by both write tools because it is the only honest answer to "did
+    that do what I meant": a model that sent a whole document back cannot
+    otherwise tell an intended edit from an accidental deletion.
+    """
+    import difflib
+
+    diff = list(
+        difflib.unified_diff(
+            before.splitlines(), after.splitlines(), "stored", "saved", lineterm="", n=2
+        )
+    )
+    body = diff[2:]
+    return {
+        "linesAdded": sum(1 for line in body if line.startswith("+")),
+        "linesRemoved": sum(1 for line in body if line.startswith("-")),
+        "diff": "\n".join(diff[:MAX_DIFF_LINES]),
+        "diffTruncated": len(diff) > MAX_DIFF_LINES,
+    }
+
+
+def _save_dockerfile(row: CiService, text: str, *, user, change: str) -> Dict[str, Any]:
+    """Persist through the same call the Dockerfile tab's Save button makes."""
+    from ...services.ci import catalog
+
+    before = row.dockerfile or ""
+    try:
+        detail = catalog.update_service(row, {"dockerfile": text}, actor=user)
+    except catalog.CatalogError as exc:
+        raise ToolError(str(exc)) from exc
+
+    after = detail.get("dockerfile") or ""
+    stages = _image_stages(row)
+    return {
+        "service": row.slug,
+        "changed": change,
+        "source": "inline" if after else "repository",
+        "totalLines": len(after.splitlines()),
+        "content": after,
+        **_dockerfile_change(before, after),
+        "builtBy": stages,
+        "note": (
+            "It takes effect on the next build — a build already running carries "
+            "the Dockerfile it started with."
+            if stages
+            else "But this service's pipeline has no container_image stage, so "
+            "nothing builds this Dockerfile. Add one with "
+            "kubesight_pipeline_stage_add."
+        ),
+    }
+
+
+@tool(
+    "kubesight_dockerfile_get",
+    permission="ci_services:view",
+    description=(
+        "The Dockerfile a service's image is built from, and which of the two "
+        "places it comes from: stored in KubeSight, which overrides the "
+        "repository, or committed in the repository. Returns the text either "
+        "way, and names the container_image stages that build it."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "revision": {
+                "type": "string",
+                "description": (
+                    "Only used when the Dockerfile comes from the repository: "
+                    "which revision to read it at. Defaults to the default branch."
+                ),
+            },
+        },
+        "required": ["service"],
+    },
+)
+def _dockerfile_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from ...services.ci import catalog
+    from ...services.ci.source import SourceError
+
+    row = _service_or_error(arguments.get("service"))
+    payload: Dict[str, Any] = {
+        "service": row.slug,
+        "builtBy": _image_stages(row),
+        "maxCharacters": catalog.MAX_DOCKERFILE_CHARS,
+    }
+
+    stored = row.dockerfile or ""
+    if stored.strip():
+        return {
+            **payload,
+            "source": "inline",
+            "path": "Dockerfile",
+            "content": stored,
+            "totalLines": len(stored.splitlines()),
+            "note": (
+                "Stored in KubeSight. Every build mounts this beside the context "
+                "and ignores the repository's own Dockerfile — including any path "
+                "a stage set as DOCKERFILE_PATH. Editable with "
+                "kubesight_dockerfile_edit."
+            ),
+        }
+
+    # No stored copy, so the answer is in the repository. Fetched rather than
+    # pointed at: "which Dockerfile does this build" is one question, and
+    # answering it in two calls is how an agent ends up reporting that a service
+    # has no Dockerfile when it has always had one.
+    path = payload["builtBy"][0]["repositoryPath"] if payload["builtBy"] else "Dockerfile"
+    try:
+        found = catalog.read_source_file(
+            row, path, revision=str(arguments.get("revision") or "")
+        )
+    except (catalog.CatalogError, SourceError, ValueError) as exc:
+        return {
+            **payload,
+            "source": "repository",
+            "path": path,
+            "content": None,
+            "unreadable": str(exc) or "The repository could not be read.",
+            "note": (
+                "This service stores no Dockerfile, so builds use the "
+                f"repository's {path} — which could not be read just now."
+            ),
+        }
+
+    content = found.get("content") or ""
+    return {
+        **payload,
+        "source": "repository",
+        "path": found.get("path") or path,
+        "revision": found.get("revision"),
+        "content": content[:MAX_FILE_CHARS],
+        "totalLines": len(content.splitlines()),
+        "note": (
+            "Committed in the repository, not in KubeSight. Editing it here is "
+            "not possible — KubeSight never commits. kubesight_dockerfile_set "
+            "would store a KubeSight copy, which every build would then use "
+            "INSTEAD of this file, including after somebody fixes this file."
+        ),
+    }
+
+
+@tool(
+    "kubesight_dockerfile_edit",
+    permission="ci_services:edit",
+    description=(
+        "Change part of the Dockerfile a service stores in KubeSight: replace "
+        "each exact snippet with another, and save. Prefer this to sending the "
+        "whole file back — every line you did not mention is kept exactly as it "
+        "was. Each 'find' must appear exactly once, so include enough "
+        "surrounding text to be unambiguous. Read the file first with "
+        "kubesight_dockerfile_get."
+    ),
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "replacements": {
+                "type": "array",
+                "minItems": 1,
+                "description": (
+                    "Applied in order, each to the result of the one before. "
+                    "Newlines and indentation are part of the match."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "find": {
+                            "type": "string",
+                            "description": "Exact text, appearing exactly once.",
+                        },
+                        "replace": {
+                            "type": "string",
+                            "description": "What replaces it. Empty deletes it.",
+                        },
+                    },
+                    "required": ["find", "replace"],
+                },
+            },
+        },
+        "required": ["service", "replacements"],
+    },
+)
+def _dockerfile_edit(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    row = _service_or_error(arguments.get("service"))
+    text = _stored_dockerfile(row)
+
+    replacements = arguments.get("replacements")
+    if not isinstance(replacements, list) or not replacements:
+        raise ToolError("replacements must be a non-empty list of {find, replace}.")
+
+    for index, item in enumerate(replacements, start=1):
+        if not isinstance(item, dict):
+            raise ToolError(f"Replacement {index} must be an object of {{find, replace}}.")
+        find = str(item.get("find") or "")
+        replace = str(item.get("replace") or "")
+        if not find:
+            raise ToolError(
+                f"Replacement {index} has no 'find'. To add to the end of the "
+                "file, match its last line and put that line back with your "
+                "addition after it."
+            )
+        if find == replace:
+            raise ToolError(f"Replacement {index} replaces text with itself.")
+        # Exactly once, never "the first one". A snippet that matches twice is an
+        # agent that has not read enough of the file to know which line it means,
+        # and choosing one for it is how the wrong FROM gets bumped.
+        occurrences = text.count(find)
+        if occurrences == 0:
+            raise ToolError(
+                f"Replacement {index} is not in '{row.slug}'s Dockerfile, so "
+                "nothing was saved. Read the current text with "
+                "kubesight_dockerfile_get — whitespace and indentation count."
+            )
+        if occurrences > 1:
+            raise ToolError(
+                f"Replacement {index} matches {occurrences} places in '{row.slug}'s "
+                "Dockerfile, so it is ambiguous and nothing was saved. Include a "
+                "neighbouring line to pin down the one you mean."
+            )
+        text = text.replace(find, replace)
+
+    if text.rstrip() == (row.dockerfile or "").rstrip():
+        raise ToolError(
+            "Those replacements leave the Dockerfile exactly as it was. Nothing "
+            "was saved."
+        )
+    if not text.strip():
+        raise ToolError(
+            "That empties the Dockerfile, which means 'build the repository's one "
+            "instead'. If that is what you want, say it plainly with "
+            "kubesight_dockerfile_set {useRepositoryDockerfile: true}."
+        )
+
+    count = len(replacements)
+    return _save_dockerfile(
+        row,
+        text,
+        user=user,
+        change=f"edited the Dockerfile ({count} replacement{'' if count == 1 else 's'})",
+    )
+
+
+@tool(
+    "kubesight_dockerfile_set",
+    permission="ci_services:edit",
+    description=(
+        "Replace a service's whole stored Dockerfile, or clear it so builds go "
+        "back to the repository's own. This DISCARDS whatever was stored, so use "
+        "kubesight_dockerfile_edit to change part of one. On a service that "
+        "stored none it starts overriding the repository's Dockerfile for every "
+        "build — the answer says so, and you should repeat it."
+    ),
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "Service id or slug."},
+            "dockerfile": {
+                "type": "string",
+                "description": (
+                    "The complete file. Newlines and indentation are content."
+                ),
+            },
+            "useRepositoryDockerfile": {
+                "type": "boolean",
+                "description": (
+                    "true clears the stored Dockerfile, so image stages build the "
+                    "one committed in the repository again. Send instead of "
+                    "'dockerfile', never with it."
+                ),
+            },
+        },
+        "required": ["service"],
+    },
+)
+def _dockerfile_set(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    row = _service_or_error(arguments.get("service"))
+    stored = row.dockerfile or ""
+    clearing = bool(arguments.get("useRepositoryDockerfile"))
+    text = str(arguments.get("dockerfile") or "").replace("\r\n", "\n").rstrip()
+
+    if clearing and text:
+        raise ToolError(
+            "Send either a dockerfile or useRepositoryDockerfile, not both — they "
+            "ask for opposite things."
+        )
+    if clearing:
+        if not stored.strip():
+            raise ToolError(
+                f"'{row.slug}' already builds the repository's Dockerfile; there "
+                "is nothing stored to clear."
+            )
+        return _save_dockerfile(
+            row,
+            "",
+            user=user,
+            change=(
+                "cleared the stored Dockerfile — image stages now build the one "
+                "committed in the repository"
+            ),
+        )
+
+    if not text:
+        # An empty string is not a Dockerfile, it is a different decision, and
+        # one worth arriving at deliberately rather than through a field that
+        # happened to come back blank.
+        raise ToolError(
+            "dockerfile is empty. To make builds use the repository's own "
+            "Dockerfile instead, send useRepositoryDockerfile: true."
+        )
+    if not any(line.strip().upper().startswith("FROM ") for line in text.splitlines()):
+        raise ToolError(
+            "That has no FROM instruction, so BuildKit would refuse it at build "
+            "time. Nothing was saved."
+        )
+    if text == stored.rstrip():
+        raise ToolError(f"'{row.slug}' already stores exactly that. Nothing was saved.")
+
+    started_overriding = not stored.strip()
+    saved = _save_dockerfile(
+        row,
+        text,
+        user=user,
+        change=(
+            "stored a Dockerfile in KubeSight, which now overrides the repository's"
+            if started_overriding
+            else f"replaced the stored Dockerfile ({len(text.splitlines())} lines)"
+        ),
+    )
+    saved["startedOverridingRepository"] = started_overriding
+    if started_overriding:
+        saved["note"] = (
+            "Every build from now on builds this and ignores the Dockerfile in "
+            "the repository — including changes somebody pushes there later. "
+            "kubesight_dockerfile_set {useRepositoryDockerfile: true} undoes that."
+        )
+    return saved
 
 
 # ---------------------------------------------------------------------------

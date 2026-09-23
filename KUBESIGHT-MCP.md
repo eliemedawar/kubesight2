@@ -4,7 +4,7 @@ Lets an agent — Hermes, Claude Code, anything that speaks MCP — ask KubeSigh
 questions and act on the answers. "Which services are failing?" "Why did build
 214 stop?" "What version of payments is in prod?" "Roll it back."
 
-**Eighty-five tools across seven domains.** Sixty-four read, twenty-one write. There is no
+**Eighty-eight tools across seven domains.** Sixty-five read, twenty-three write. There is no
 fixed list of what an agent may change: it may do exactly what its token's
 permissions allow, through the same services the UI posts to — so the gates
 inside those services still apply, and nothing here can route around one.
@@ -30,6 +30,7 @@ worth a minute:
 |---|---|
 | answer questions and nothing else | the `viewer` role, plus `ci_runners:view` |
 | debug CI and fix pipelines | + `ci_pipelines:edit`, `ci_builds:run`, `ci_builds:cancel`, `ci_builds:retry` |
+| edit a service's stored Dockerfile | + `ci_services:edit` |
 | explain why a pull request was blocked | + `ci_merge_checks:view` |
 | move the org-wide quality gate | + `ci_merge_checks:manage` — think before granting this |
 | operate workloads | + `apps:deploy` |
@@ -129,7 +130,7 @@ split is the difference between a fast answer and a slow one at this size.
 
 | Domain | Answers | Writes |
 |---|---|---|
-| **ci** | services, pipelines, builds, build logs, runners, repository source | pipeline edits; run / cancel / retry a build |
+| **ci** | services, pipelines, builds, build logs, runners, repository source, the Dockerfile | pipeline edits; Dockerfile edits; run / cancel / retry a build |
 | **clusters** | clusters, nodes, namespaces, resources, events, topology | — |
 | **workloads** | what is running and at what version | restart, scale, rollback, exec |
 | **deploys** | apply, dry run, diff, approvals, change bundles, Helm | apply, request approval, Helm upgrade / rollback / uninstall |
@@ -163,6 +164,14 @@ holding a viewer's token is a viewer.
 connection or a user. Restart, scale, rollback and pipeline edits are all
 reversible; a deletion leaves nothing to put back, and an audit row does not
 undo it. `helm:uninstall` is the one exception and it is marked destructive.
+
+**Nothing commits to a repository.** The source tools read; the Dockerfile tools
+write KubeSight's own copy of the recipe, which the runner mounts beside the
+build context. An agent can therefore change what an image is built from without
+anyone's repository changing under them — and cannot fix the file in the
+repository either, which is a sentence it has to say rather than work around.
+Storing a copy on a service that had none makes every later build ignore the
+committed file, so the tool answers `startedOverridingRepository: true`.
 
 **Secret values are unreachable**, including by an admin token. A pipeline
 stores references; `kubesight_pipeline_get` returns names. Log output is masked

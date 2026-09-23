@@ -211,6 +211,12 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         "kubesight_pipeline_stage_add",
         "kubesight_pipeline_stage_remove",
         "kubesight_pipeline_stage_update",
+        # CI: the image recipe. Writes KubeSight's own copy only — there is no
+        # tool that commits to a repository, so an edit here can never reach the
+        # source. Storing one on a service that had none is the change worth
+        # noticing: every later build then ignores the repository's Dockerfile.
+        "kubesight_dockerfile_edit",
+        "kubesight_dockerfile_set",
         "kubesight_build_run",
         "kubesight_build_cancel",
         "kubesight_build_retry",
@@ -875,6 +881,221 @@ def test_a_write_answers_with_what_it_changed(client, admin_token, service):
 
 
 # ---------------------------------------------------------------------------
+# The Dockerfile
+# ---------------------------------------------------------------------------
+#
+# Two things are protected here. One is the boundary: KubeSight reads a
+# repository and never writes to it, so an agent editing "the Dockerfile" is
+# always editing KubeSight's copy — and on a service that had no copy, creating
+# one silently retires the repository's file for every future build. That has to
+# be said out loud rather than discovered from a build that ignored a commit.
+#
+# The other is the edit itself. A document sent back whole is a document whose
+# unmentioned lines can vanish, so the narrow tool matches exact text and
+# refuses anything ambiguous rather than picking the first occurrence.
+
+_DOCKERFILE = "\n".join(
+    [
+        "FROM registry.areeba.com/openjdk11:jdk-11.0.11_9-alpine-slim",
+        "WORKDIR /app",
+        "COPY --chown=65532:65532 app.jar /app/app.jar",
+        "USER 65532:65532",
+        "EXPOSE 8080",
+        'ENTRYPOINT ["java", "-jar", "/app/app.jar"]',
+    ]
+)
+
+
+@pytest.fixture()
+def dockerfiled(service):
+    service.dockerfile = _DOCKERFILE
+    db.session.commit()
+    return service
+
+
+def test_the_stored_dockerfile_comes_back_with_who_builds_it(
+    client, admin_token, dockerfiled
+):
+    """One call has to answer both halves of "what does this build": the text,
+    and whether any stage actually builds it. The fixture's pipeline has no
+    container_image stage, which is exactly the case a model would otherwise
+    report as "edited and ready"."""
+    result = call_tool(client, admin_token, "kubesight_dockerfile_get", {"service": "issuing"})
+    payload = result["structuredContent"]
+
+    assert payload["source"] == "inline"
+    assert payload["content"] == _DOCKERFILE
+    assert payload["totalLines"] == 6
+    assert payload["builtBy"] == []
+
+
+def test_a_service_with_no_stored_dockerfile_says_where_the_real_one_is(
+    client, admin_token, service
+):
+    """Not "no Dockerfile". The repository has one and builds it; KubeSight just
+    does not hold a copy. Reading it needs a connected repository, and the
+    fixture has no credential — so the answer says it could not be read rather
+    than implying there is nothing there."""
+    result = call_tool(client, admin_token, "kubesight_dockerfile_get", {"service": "issuing"})
+    payload = result["structuredContent"]
+
+    assert payload["source"] == "repository"
+    assert payload["content"] is None
+    assert payload["unreadable"]
+
+
+def test_an_edit_changes_the_line_it_named_and_nothing_else(
+    client, admin_token, dockerfiled
+):
+    """The whole reason the narrow tool exists: a base image bumped without
+    sending the file back, so no line can be lost by not being repeated."""
+    result = call_tool(
+        client, admin_token, "kubesight_dockerfile_edit",
+        {
+            "service": "issuing",
+            "replacements": [{"find": "openjdk11:jdk-11.0.11_9", "replace": "openjdk17:jdk-17.0.9"}],
+        },
+    )
+    payload = result["structuredContent"]
+
+    assert "openjdk17:jdk-17.0.9" in payload["content"]
+    assert payload["totalLines"] == 6
+    assert 'ENTRYPOINT ["java", "-jar", "/app/app.jar"]' in payload["content"]
+    assert (payload["linesAdded"], payload["linesRemoved"]) == (1, 1)
+    assert "FROM" in payload["diff"]
+
+
+def test_a_snippet_that_matches_twice_is_refused_rather_than_guessed(
+    client, admin_token, dockerfiled
+):
+    """Picking the first occurrence is how the wrong line gets rewritten, and
+    the agent has no way to notice. A refusal that names the count sends it back
+    to the file with enough context to be specific."""
+    result = call_tool(
+        client, admin_token, "kubesight_dockerfile_edit",
+        {"service": "issuing", "replacements": [{"find": "65532", "replace": "1000"}]},
+    )
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "ambiguous" in text and "nothing was saved" in text
+    assert db.session.get(CiService, dockerfiled.id).dockerfile == _DOCKERFILE
+
+
+def test_a_snippet_that_is_not_there_saves_nothing(client, admin_token, dockerfiled):
+    """Half an edit is worse than none, so a replacement is checked against the
+    text before any of them are applied."""
+    result = call_tool(
+        client, admin_token, "kubesight_dockerfile_edit",
+        {
+            "service": "issuing",
+            "replacements": [
+                {"find": "EXPOSE 8080", "replace": "EXPOSE 9090"},
+                {"find": "HEALTHCHECK", "replace": "# none"},
+            ],
+        },
+    )
+    assert result["isError"] is True
+    assert db.session.get(CiService, dockerfiled.id).dockerfile == _DOCKERFILE
+
+
+def test_editing_what_the_repository_owns_points_at_the_only_thing_that_can_be_done(
+    client, admin_token, service
+):
+    """KubeSight does not commit. An agent asked to "fix the Dockerfile" on a
+    service that stores none must not be left guessing at a tool that would —
+    there is none, and the refusal says what the alternative actually means."""
+    result = call_tool(
+        client, admin_token, "kubesight_dockerfile_edit",
+        {"service": "issuing", "replacements": [{"find": "FROM", "replace": "FROM"}]},
+    )
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "cannot write to a repository" in text
+    assert "kubesight_dockerfile_set" in text
+
+
+def test_storing_the_first_dockerfile_says_it_now_overrides_the_repository(
+    client, admin_token, service
+):
+    """The consequence nobody asks about and everybody is surprised by: from
+    here on, a fix pushed to the repository's Dockerfile changes nothing."""
+    result = call_tool(
+        client, admin_token, "kubesight_dockerfile_set",
+        {"service": "issuing", "dockerfile": _DOCKERFILE},
+    )
+    payload = result["structuredContent"]
+
+    assert payload["startedOverridingRepository"] is True
+    assert "overrides the repository" in result["content"][0]["text"]
+    assert "ignores the Dockerfile in the repository" in payload["note"]
+    assert db.session.get(CiService, service.id).dockerfile == _DOCKERFILE
+
+
+def test_a_document_with_no_from_is_refused_before_it_costs_a_build(
+    client, admin_token, dockerfiled
+):
+    """BuildKit would reject it anyway — but an hour later, on a runner, as a
+    failed build somebody has to go and read."""
+    result = call_tool(
+        client, admin_token, "kubesight_dockerfile_set",
+        {"service": "issuing", "dockerfile": "WORKDIR /app\nEXPOSE 8080\n"},
+    )
+    assert result["isError"] is True
+    assert "FROM" in result["content"][0]["text"]
+    assert db.session.get(CiService, dockerfiled.id).dockerfile == _DOCKERFILE
+
+
+def test_clearing_is_asked_for_in_words_not_by_sending_nothing(
+    client, admin_token, dockerfiled
+):
+    """An empty string is what a broken caller sends, and it would quietly
+    change which file every build uses. The decision needs its own field."""
+    empty = call_tool(
+        client, admin_token, "kubesight_dockerfile_set",
+        {"service": "issuing", "dockerfile": "   "},
+    )
+    assert empty["isError"] is True
+    assert "useRepositoryDockerfile" in empty["content"][0]["text"]
+
+    cleared = call_tool(
+        client, admin_token, "kubesight_dockerfile_set",
+        {"service": "issuing", "useRepositoryDockerfile": True},
+    )
+    assert cleared["structuredContent"]["source"] == "repository"
+    assert db.session.get(CiService, dockerfiled.id).dockerfile is None
+
+
+def test_a_dockerfile_write_is_refused_to_a_token_that_may_only_read(
+    client, viewer_token, dockerfiled
+):
+    """The same gate as every other write: ci_services:edit, the permission the
+    Dockerfile tab's Save button needs."""
+    result = call_tool(
+        client, viewer_token, "kubesight_dockerfile_set",
+        {"service": "issuing", "dockerfile": "FROM alpine:3.20\n"},
+    )
+    assert result["isError"] is True
+    assert "ci_services:edit" in result["content"][0]["text"]
+    assert db.session.get(CiService, dockerfiled.id).dockerfile == _DOCKERFILE
+
+
+def test_a_dockerfile_write_is_audited_as_the_token_holder(
+    client, admin_token, dockerfiled
+):
+    """It goes through catalog.update_service — the same call the UI makes — so
+    it writes the row the UI writes, attributed to whoever the token belongs
+    to."""
+    from api.models import AuditLog
+
+    call_tool(
+        client, admin_token, "kubesight_dockerfile_edit",
+        {"service": "issuing", "replacements": [{"find": "EXPOSE 8080", "replace": "EXPOSE 9090"}]},
+    )
+    saved = AuditLog.query.filter_by(action="ci_service_updated").all()
+    assert saved and saved[-1].actor_user_id is not None
+
+
+# ---------------------------------------------------------------------------
 # The whole read surface, once
 # ---------------------------------------------------------------------------
 
@@ -1158,8 +1379,10 @@ def test_every_write_reports_what_it_changed(client, admin_token):
         if not entry["write"]:
             continue
         source = inspect.getsource(entry["run"])
-        # The CI editors route their summary through a shared helper.
-        if '"changed"' not in source and "_saved_summary" not in source:
+        # The CI editors route their summary through a shared helper — one for
+        # the pipeline, one for the Dockerfile.
+        helpers = ("_saved_summary", "_save_dockerfile")
+        if '"changed"' not in source and not any(helper in source for helper in helpers):
             missing.append(name)
     assert not missing, f"write tools with no 'changed' summary: {missing}"
 

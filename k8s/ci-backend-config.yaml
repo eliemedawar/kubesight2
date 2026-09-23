@@ -78,19 +78,21 @@ data:
   # ── READ THIS BEFORE ARMING A GATE ON THIS CLUSTER ────────────────────────
   # A scanned stage parks the WHOLE IMAGE, uncompressed, on /workspace between
   # the build and the push. These nodes have ~4.5Gi allocatable ephemeral
-  # storage and CI_WORKSPACE_SIZE_LIMIT below is 2Gi — which fits a checkout
-  # and a jar, and does not fit a typical JVM service image plus its archive.
+  # storage, which fits a checkout and a jar and does not fit a typical JVM
+  # service image plus its archive.
   #
-  # So arming a gate here needs one of: nodes with more ephemeral storage, a
-  # smaller image (a JRE base rather than a JDK one is usually most of it), or
-  # the two limits below raised to something the node can actually back. Raised
-  # past what the node has, kubelet evicts the pod mid-build and the only
-  # symptom is a build that died without saying why.
+  # Nothing caps that any more (see Per-stage resources below: disk is open by
+  # default), so the failure to expect here is the NODE filling up rather than
+  # the pod being evicted at its own ceiling. Arming a gate on these nodes still
+  # wants one of: nodes with more ephemeral storage, or a smaller image — a JRE
+  # base rather than a JDK one is usually most of it.
   #
-  # Defaults KubeSight applies to SCANNED image stages only (every other stage
-  # keeps the values further down):
+  # Where a cap IS in force — set below, or per service in Settings — KubeSight
+  # raises it for scanned image stages only, to the larger of the cap and these:
   #   CI_IMAGE_SCAN_WORKSPACE_SIZE_LIMIT: 8Gi   # the shared /workspace emptyDir
   #   CI_IMAGE_SCAN_EPHEMERAL_LIMIT: 8Gi        # that one container's cap
+  # A cap a SERVICE chose is never raised behind its back: a ceiling that moves
+  # on its own is not a ceiling.
 
   # --- Artifact store -------------------------------------------------------
   # Where uploaded artifacts (jars, reports, APKs) are written. Container
@@ -148,18 +150,31 @@ data:
   #   CI_BUILDKIT_REGISTRY_CACHE: "1"
 
   # --- Per-stage resources --------------------------------------------------
+  # These are the INSTALLATION defaults. A service overrides them in Service
+  # Catalog -> Settings -> Build resources, and a single stage overrides that in
+  # the pipeline editor; whichever is nearest wins, per field.
+  #
   # CPU and memory are sized for nodes with ~4.5Gi allocatable ephemeral-storage.
   # The request is what the scheduler matches; the limit only caps.
   CI_STAGE_CPU_LIMIT: "2"
   CI_STAGE_MEMORY_LIMIT: 4Gi
-  # "off" leaves ephemeral-storage off the manifest entirely: no cap on what a
-  # build writes, and nothing reserved from the scheduler. Note the trade — a
-  # pod with no request is the first thing kubelet evicts under disk pressure.
+  # Disk is OPEN by default — both keys left off the manifest entirely: no cap on
+  # what a build writes, and nothing reserved from the scheduler. The trade, so
+  # it is chosen rather than inherited: a pod with no request is the first thing
+  # kubelet evicts under disk pressure, and a build with no limit can fill the
+  # node. Both are visible as node pressure, where an operator is looking; the
+  # capped failure is an eviction mid-build that the build log cannot explain.
+  #
+  # To account for disk again, name a quantity here (a matching 256Mi request is
+  # added automatically, so the scheduler does not demand the full cap free on
+  # every node), or cap only the services that need it from the UI.
   CI_STAGE_EPHEMERAL_REQUEST: "off"
   CI_STAGE_EPHEMERAL_LIMIT: "off"
-  # The /workspace emptyDir shared by every stage of a build. Must fit on the
-  # node's ephemeral storage next to buildkitd's layer cache.
-  CI_WORKSPACE_SIZE_LIMIT: 2Gi
+  # The /workspace emptyDir shared by every stage of a build. A second ceiling,
+  # enforced by evicting the pod, so it is "off" for the same reason. A cap set
+  # here must fit on the node beside buildkitd's layer cache; KubeSight raises it
+  # on its own only to match a larger limit a service or stage was granted.
+  CI_WORKSPACE_SIZE_LIMIT: "off"
 
   # --- Housekeeping ---------------------------------------------------------
   CI_JOB_TTL_SECONDS: "900"

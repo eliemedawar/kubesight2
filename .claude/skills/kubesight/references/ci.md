@@ -167,6 +167,54 @@ fix: a secret referenced by the *saved* pipeline that has since been deleted
 blocks every edit, including ones that never touched it. The message says so;
 relay it and ask for the secret back.
 
+## The Dockerfile — which of the two, and which one you can edit
+
+A service's image recipe lives in **one of two places**, and the answer to "edit
+the Dockerfile" depends entirely on which:
+
+| Where | What builds it | Can you change it |
+|---|---|---|
+| **Stored in KubeSight** (`source: "inline"`) | mounted beside the build context; the repository is never touched | yes, these tools |
+| **Committed in the repository** (`source: "repository"`) | the `container_image` stage reads it at the built revision | **no** — KubeSight reads repositories, it never commits |
+
+```
+kubesight_dockerfile_get  {service: "acquiring-ui"}
+kubesight_dockerfile_edit {service: "acquiring-ui",
+                           replacements: [{find: "openjdk11:jdk-11.0.11_9",
+                                           replace: "openjdk17:jdk-17.0.9"}]}
+kubesight_dockerfile_set  {service: "acquiring-ui", dockerfile: "FROM …
+…"}
+kubesight_dockerfile_set  {service: "acquiring-ui", useRepositoryDockerfile: true}
+```
+
+`kubesight_dockerfile_get` returns the text from wherever it lives — it reads the
+repository's copy for you when KubeSight stores none — plus `builtBy`, the image
+stages that would build it. **`builtBy: []` means nothing builds this file**; an
+edit to it changes no image, and saying "done" would be wrong.
+
+**Prefer `kubesight_dockerfile_edit`.** It replaces exact snippets in the stored
+text and keeps every line you did not mention, so you cannot lose one by
+forgetting to repeat it. Each `find` must match **exactly once** — whitespace and
+indentation included — and an ambiguous or missing one saves nothing at all,
+including the replacements beside it. `kubesight_dockerfile_set` replaces the
+whole document; use it to write a Dockerfile from scratch, not to change a line.
+
+Three things to say out loud:
+
+- **Storing the first Dockerfile retires the repository's.** On a service that
+  had none, `kubesight_dockerfile_set` answers
+  `startedOverridingRepository: true`, and from then on every build ignores the
+  repository's file — including a fix somebody pushes there next week. Say that
+  when it happens; `{useRepositoryDockerfile: true}` undoes it.
+- **It takes effect on the next build**, like a pipeline edit. Nothing rebuilds
+  by itself, and a build already running carries the file it started with.
+- **An inline Dockerfile overrides `DOCKERFILE_PATH`.** A stage pointing at
+  `docker/Dockerfile.prod` is pointing at nothing once a copy is stored; BuildKit
+  is handed the stored one.
+
+Both writes answer with `linesAdded`, `linesRemoved` and a `diff`. Quote the
+diff rather than describing the change from memory — it is what was saved.
+
 ## Merge checks — the gate on a pull request
 
 Separate from building. A pull request arrives by webhook, KubeSight runs a

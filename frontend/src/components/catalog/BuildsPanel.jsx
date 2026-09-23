@@ -11,6 +11,9 @@ import {
   formatRelative,
   isBuildActive,
   shortSha,
+  FAILURES_BEFORE_BANNER,
+  retryDelay,
+  describeError,
 } from "./ciShared.jsx";
 
 // Only a live build polls at all (the loop stops the moment nothing is
@@ -75,6 +78,8 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
   const [openBuild, setOpenBuild] = useState(null);
   const timerRef = useRef(null);
 
+  const failuresRef = useRef(0);
+
   const load = useCallback(async () => {
     try {
       const data = await listCiServiceBuilds(service.id, {
@@ -83,11 +88,20 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
       });
       setBuilds(data.items || []);
       setQueueDepth(data.queueDepth || 0);
+      failuresRef.current = 0;
       setError("");
-      return (data.items || []).some((build) => isBuildActive(build.status));
+      return {
+        ok: true,
+        active: (data.items || []).some((build) => isBuildActive(build.status)),
+      };
     } catch (err) {
-      setError(err.message || "Could not load builds.");
-      return false;
+      failuresRef.current += 1;
+      // One missed tick while the table is already on screen is not worth a
+      // banner; at 1.5s the next one almost always repaints it.
+      if (failuresRef.current >= FAILURES_BEFORE_BANNER) {
+        setError(describeError(err, "Could not load builds."));
+      }
+      return { ok: false, active: false };
     } finally {
       setLoading(false);
     }
@@ -98,9 +112,17 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
   useEffect(() => {
     if (view !== "table") return undefined;
     let cancelled = false;
+    failuresRef.current = 0;
     const tick = async () => {
-      const active = await load();
-      if (cancelled || !active) return;
+      const { ok, active } = await load();
+      if (cancelled) return;
+      // A failed poll is not "nothing is building": retry with a backoff so a
+      // blip cannot freeze the table behind a stale banner.
+      if (!ok) {
+        timerRef.current = window.setTimeout(tick, retryDelay(failuresRef.current));
+        return;
+      }
+      if (!active) return;
       timerRef.current = window.setTimeout(tick, REFRESH_MS);
     };
     tick();

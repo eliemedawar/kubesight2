@@ -21,6 +21,7 @@ from ...models_ci import (
     CiSecret,
     CiService,
 )
+from . import resources as ci_resources
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
@@ -94,6 +95,13 @@ def service_to_dict(
         "intelligenceApplicationId": row.intelligence_application_id,
         "catalogEntryId": row.catalog_entry_id,
         "maxConcurrentBuilds": row.max_concurrent_builds,
+        # What this service's build stages may use, and what the installation
+        # would give them if it said nothing. The defaults travel with the row so
+        # the Settings card can name what "Default" currently resolves to instead
+        # of printing a number this file hardcoded and an operator has since
+        # changed.
+        "buildResources": row.build_resources or {},
+        "buildResourceDefaults": ci_resources.installation_defaults(),
         # Assisted configuration. Null on every service registered before it
         # existed, which the UI renders as "not analyzed" — the same thing it
         # showed before there was anything to say.

@@ -48,6 +48,7 @@ import subprocess
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .. import build_environments, cache_layout
+from .. import resources as ci_resources
 from .base import (
     FAILED,
     QUEUED,
@@ -657,8 +658,9 @@ def _buildctl_args(
 # The cost is real and worth stating: the image travels buildkitd -> pod ->
 # registry instead of buildkitd -> registry, so a large image spends an extra
 # minute or two in transfer and needs room for the archive on the build pod's
-# ephemeral storage (see _stage_resources, which raises the default for exactly
-# these stages).
+# ephemeral storage. Nothing caps that by default; where an installation or a
+# service HAS set a cap, resources.ephemeral_limit raises it for exactly these
+# stages rather than letting the gate turn into an eviction.
 #
 # All three tools live in ONE image because a stage is one container. That is
 # not a workaround — it is what keeps "one stage = one initContainer = one
@@ -863,66 +865,66 @@ _SECURITY_CONTEXT = {
 _DEFAULT_REQUESTS = {"cpu": "100m", "memory": "256Mi"}
 
 
+def _scanning(execution: StageExecution) -> bool:
+    return execution.stage_type == "container_image" and scanning_requested(execution)
+
+
 def _stage_resources(execution: StageExecution) -> Dict[str, Any]:
+    """CPU, memory and ephemeral storage for one stage container.
+
+    ``execution.resources`` is already the merged view — the stage's own values
+    over the service's Build resources (see ``engine._build_execution``). What is
+    left for this function is the installation default underneath, and turning
+    "off" into an absent key rather than a literal value. The decisions live in
+    ``services/ci/resources.py``; this only shapes them into a manifest.
+    """
+    chosen = execution.resources or {}
+    defaults = ci_resources.installation_defaults()
     limits = {
-        "cpu": (execution.resources or {}).get("cpu") or _env("CI_STAGE_CPU_LIMIT", "2"),
-        "memory": (execution.resources or {}).get("memory") or _env("CI_STAGE_MEMORY_LIMIT", "4Gi"),
+        "cpu": chosen.get("cpu") or defaults["cpu"],
+        "memory": chosen.get("memory") or defaults["memory"],
     }
+    # "off" is honoured for CPU and memory as well, since a user who asks for no
+    # limit has a reason — a compile that is throttled to uselessness by a CPU
+    # cap is the usual one. Worth knowing before choosing it: an unlimited
+    # container can be OOM-killed only after it has already pushed the NODE into
+    # memory pressure, which takes its neighbours with it. The requests below
+    # stay either way, so the scheduler still reserves a floor.
+    for key in ("cpu", "memory"):
+        if _is_off(limits[key]):
+            limits.pop(key)
+
     requests = dict(_DEFAULT_REQUESTS)
 
-    # The scheduler matches REQUESTS. A limit with no request makes Kubernetes
-    # default the request to the limit, so the ephemeral-storage cap below would
-    # silently demand its full size on every node — unschedulable on hosts with
-    # small root disks. Request a modest floor explicitly and let the limit cap.
-    #
-    # Either half can be set to "off" for a cluster that would rather not account
-    # for build disk at all. Dropping the limit lets a runaway build fill the
-    # node; dropping the request makes this pod the first thing kubelet evicts
-    # when some other tenant fills it, because eviction ranks by usage above
-    # request. Off on both is a deliberate "the node has disk to spare", not a
-    # fix for a node that is already tight.
-    # A scanned image stage holds the whole image as an uncompressed archive on
-    # the workspace between the build and the push, which the 2Gi that suits a
-    # compile stage does not fit. Raised only for those stages, and still
-    # overridable per stage — a limit that silently applied everywhere would
-    # make every other stage unschedulable on a small node for no reason.
-    default_ephemeral = (
-        _env("CI_IMAGE_SCAN_EPHEMERAL_LIMIT", "8Gi")
-        if execution.stage_type == "container_image" and scanning_requested(execution)
-        else _env("CI_STAGE_EPHEMERAL_LIMIT", "2Gi")
-    )
-    ephemeral_limit = (execution.resources or {}).get("ephemeralStorage") or default_ephemeral
+    ephemeral_limit = ci_resources.ephemeral_limit(chosen, scanning=_scanning(execution))
     if not _is_off(ephemeral_limit):
         limits["ephemeral-storage"] = ephemeral_limit
 
-    ephemeral_request = _env("CI_STAGE_EPHEMERAL_REQUEST", "256Mi")
+    ephemeral_request = ci_resources.ephemeral_request(ephemeral_limit)
     if not _is_off(ephemeral_request):
         requests["ephemeral-storage"] = ephemeral_request
 
     return {"requests": requests, "limits": limits}
 
 
-
 def _workspace_medium(plan: Optional[List[StageExecution]] = None) -> Dict[str, Any]:
-    """The /workspace emptyDir. Its sizeLimit is a ceiling kubelet enforces by
-    evicting the pod, independent of the per-container ephemeral-storage limit —
-    so "off" has to be honoured here too, or removing the limits above still
-    leaves a cap in place.
+    """The /workspace emptyDir, sized to whatever the plan's stages were granted.
 
-    A scanned image stage parks the whole image here as an archive between the
-    build and the push, so the default that fits a checkout plus build output
-    does not fit it. Raising the container's ephemeral limit alone would not
-    help: kubelet evicts on whichever ceiling is hit first, and the eviction
-    reads as the pod dying for no stated reason halfway through a build.
+    Its sizeLimit is a ceiling kubelet enforces by EVICTING the pod, independent
+    of the per-container ephemeral-storage limit — so it has to honour "off" too
+    (or removing the limits still leaves a cap in place) and it has to rise with
+    an explicit limit (or a stage granted 8Gi still dies at the default, and the
+    eviction reads as the pod disappearing halfway through a build for no stated
+    reason). Both rules live in ``services/ci/resources.py``.
     """
-    scanned = any(
-        item.stage_type == "container_image" and scanning_requested(item)
-        for item in (plan or [])
-    )
-    size = (
-        _env("CI_IMAGE_SCAN_WORKSPACE_SIZE_LIMIT", "8Gi")
-        if scanned
-        else _env("CI_WORKSPACE_SIZE_LIMIT", "5Gi")
+    stages = list(plan or [])
+    size = ci_resources.workspace_size_limit(
+        # What the stages were EXPLICITLY granted, not what they resolved to. A
+        # stage that simply inherits the open default says nothing about the
+        # workspace — an installation is free to leave containers uncapped and
+        # still cap the shared volume, and usually should.
+        [(item.resources or {}).get("ephemeralStorage") for item in stages],
+        scanning=any(_scanning(item) for item in stages),
     )
     return {} if _is_off(size) else {"sizeLimit": size}
 

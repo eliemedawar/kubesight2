@@ -57,6 +57,63 @@ def test_create_service_generates_slug_and_starter_pipeline(client, admin_token)
     assert data["sourceConfigured"] is False
 
 
+def test_build_resources_default_to_nothing_set(client, admin_token):
+    """A fresh service names no envelope of its own, and the API says what the
+    installation would give it \u2014 which for disk is nothing at all."""
+    data = create_service(client, admin_token).get_json()["data"]
+
+    assert data["buildResources"] == {}
+    assert data["buildResourceDefaults"]["ephemeralStorage"] == "off"
+    assert data["buildResourceDefaults"]["memory"] == "4Gi"
+
+
+def test_build_resources_are_saved_per_field(client, admin_token):
+    """Each field stands on its own: a value, "off" for no limit, or absent to
+    inherit. An absent field must not be written as an empty string \u2014 that is
+    what the runner reads as "the installation decides"."""
+    service_id = create_service(client, admin_token).get_json()["data"]["id"]
+
+    response = client.put(
+        f"/api/ci/services/{service_id}",
+        json={"buildResources": {"ephemeralStorage": "16Gi", "cpu": "off", "memory": ""}},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    saved = response.get_json()["data"]["buildResources"]
+    assert saved == {"cpu": "off", "ephemeralStorage": "16Gi"}
+
+
+def test_build_resources_reject_a_value_kubernetes_would_not_take(client, admin_token):
+    """Caught on save, not at dispatch: the alternative is a pod that fails to
+    create hours later with the reason in an event nobody is watching."""
+    service_id = create_service(client, admin_token).get_json()["data"]["id"]
+
+    response = client.put(
+        f"/api/ci/services/{service_id}",
+        json={"buildResources": {"ephemeralStorage": "8 gigs"}},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 400
+    assert "Ephemeral storage" in response.get_json()["error"]
+
+
+def test_build_resources_can_be_cleared_back_to_the_default(client, admin_token):
+    service_id = create_service(client, admin_token).get_json()["data"]["id"]
+    headers = auth_headers(admin_token)
+
+    client.put(
+        f"/api/ci/services/{service_id}",
+        json={"buildResources": {"ephemeralStorage": "16Gi"}},
+        headers=headers,
+    )
+    response = client.put(
+        f"/api/ci/services/{service_id}", json={"buildResources": {}}, headers=headers
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["data"]["buildResources"] == {}
+
+
 def test_slug_collision_gets_a_suffix(client, admin_token):
     create_service(client, admin_token)
     second = create_service(client, admin_token)
@@ -354,6 +411,119 @@ def test_global_secret_scope_is_independent_of_service_scope(client, admin_token
         ).status_code
         == 400
     )
+
+
+def test_service_secret_can_be_promoted_to_global(app, client, admin_token):
+    """The value survives the move, and a second service then resolves it."""
+    service_id = create_service(client, admin_token).get_json()["data"]["id"]
+    other_id = create_service(client, admin_token, name="other-service").get_json()["data"][
+        "id"
+    ]
+    secret_id = (
+        client.post(
+            f"/api/ci/services/{service_id}/secrets",
+            json={"key": "NVD_API_KEY", "value": "nvd-value"},
+            headers=auth_headers(admin_token),
+        )
+        .get_json()["data"]["id"]
+    )
+
+    promoted = client.put(
+        f"/api/ci/secrets/{secret_id}",
+        json={"scope": "global"},
+        headers=auth_headers(admin_token),
+    )
+    assert promoted.status_code == 200
+    assert promoted.get_json()["data"]["scope"] == "global"
+    assert promoted.get_json()["data"]["serviceId"] is None
+
+    with app.app_context():
+        from api.services.ci import secrets as secrets_service
+
+        assert secrets_service.resolve_for_service(other_id)["NVD_API_KEY"] == "nvd-value"
+
+
+def test_global_secret_can_be_demoted_to_one_service(app, client, admin_token):
+    service_id = create_service(client, admin_token).get_json()["data"]["id"]
+    other_id = create_service(client, admin_token, name="other-service").get_json()["data"][
+        "id"
+    ]
+    secret_id = (
+        client.post(
+            "/api/ci/secrets",
+            json={"key": "NVD_API_KEY", "value": "nvd-value"},
+            headers=auth_headers(admin_token),
+        )
+        .get_json()["data"]["id"]
+    )
+
+    demoted = client.put(
+        f"/api/ci/secrets/{secret_id}",
+        json={"scope": "service", "serviceId": service_id},
+        headers=auth_headers(admin_token),
+    )
+    assert demoted.status_code == 200
+    assert demoted.get_json()["data"]["serviceId"] == service_id
+
+    with app.app_context():
+        from api.services.ci import secrets as secrets_service
+
+        assert "NVD_API_KEY" in secrets_service.resolve_for_service(service_id)
+        assert "NVD_API_KEY" not in secrets_service.resolve_for_service(other_id)
+
+
+def test_promotion_is_rejected_when_a_global_of_that_name_exists(client, admin_token):
+    service_id = create_service(client, admin_token).get_json()["data"]["id"]
+    client.post(
+        "/api/ci/secrets",
+        json={"key": "SHARED", "value": "global-value"},
+        headers=auth_headers(admin_token),
+    )
+    secret_id = (
+        client.post(
+            f"/api/ci/services/{service_id}/secrets",
+            json={"key": "SHARED", "value": "service-value"},
+            headers=auth_headers(admin_token),
+        )
+        .get_json()["data"]["id"]
+    )
+
+    clash = client.put(
+        f"/api/ci/secrets/{secret_id}",
+        json={"scope": "global"},
+        headers=auth_headers(admin_token),
+    )
+    assert clash.status_code == 400
+    # The secret stays where it was rather than half-moving.
+    listed = client.get(
+        f"/api/ci/services/{service_id}/secrets", headers=auth_headers(admin_token)
+    ).get_json()["data"]["items"]
+    scopes = sorted(item["scope"] for item in listed if item["key"] == "SHARED")
+    assert scopes == ["global", "service"]
+
+
+def test_changing_scope_leaves_the_value_untouched(app, client, admin_token):
+    """A move is not a rotation — pipelines referencing the name keep working."""
+    service_id = create_service(client, admin_token).get_json()["data"]["id"]
+    secret_id = (
+        client.post(
+            f"/api/ci/services/{service_id}/secrets",
+            json={"key": "TOKEN", "value": "keep-me"},
+            headers=auth_headers(admin_token),
+        )
+        .get_json()["data"]["id"]
+    )
+    response = client.put(
+        f"/api/ci/secrets/{secret_id}",
+        json={"scope": "global"},
+        headers=auth_headers(admin_token),
+    )
+    assert "keep-me" not in response.get_data(as_text=True)
+
+    with app.app_context():
+        from api.services.ci import secrets as secrets_service
+
+        assert secrets_service.resolve_for_service(service_id)["TOKEN"] == "keep-me"
 
 
 def test_service_secrets_shadow_global_secrets(app, client, admin_token):

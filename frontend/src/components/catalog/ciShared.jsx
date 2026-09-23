@@ -124,6 +124,36 @@ export const TERMINAL_BUILD_STATUSES = new Set([
 
 export const isBuildActive = (status) => !TERMINAL_BUILD_STATUSES.has(status);
 
+// --- Polling that survives a blip -------------------------------------------
+// Every CI view polls while a build is in flight, so every one of them is
+// exposed to a momentary network failure -- the backend rolling, a reset
+// connection, an ingress that drops a SYN. A poll that fails is a blip, not an
+// outage: back off and keep the chain alive rather than treating the failure as
+// "nothing is running", which freezes the view and leaves a banner with nothing
+// left running to clear it.
+const RETRY_MS = 8000;
+const MAX_RETRY_MS = 60000;
+export const FAILURES_BEFORE_BANNER = 3;
+
+/** Backoff for the Nth consecutive failure: 8s, 16s, 32s, then 60s. */
+export const retryDelay = (failures) =>
+  Math.min(RETRY_MS * 2 ** Math.max(0, failures - 1), MAX_RETRY_MS);
+
+// `fetch` rejects with a bare "Failed to fetch" when the request never reached
+// the backend at all. That is the browser's wording, not ours, and it tells the
+// reader nothing -- anything carrying a status came from the API and says
+// something useful, so only the native strings get replaced.
+const NATIVE_FETCH_FAILURES = new Set([
+  "Failed to fetch",
+  "Load failed",
+  "NetworkError when attempting to fetch resource.",
+]);
+
+export const describeError = (err, fallback) =>
+  !err?.status && NATIVE_FETCH_FAILURES.has(err?.message)
+    ? "Lost contact with the backend. Retrying..."
+    : err?.message || fallback;
+
 export function StatusPill({ status, children }) {
   if (!status) return null;
   return (

@@ -11,7 +11,8 @@ Two invariants this module exists to hold:
 
 Global secrets (``scope='global'``) are visible to every service; service
 secrets shadow a global of the same key, so a service can override a shared
-default without renaming anything.
+default without renaming anything. A secret can be created in either scope and
+moved between them afterwards — see :func:`_apply_scope`.
 """
 
 from __future__ import annotations
@@ -107,7 +108,56 @@ def create_secret(
     return secret_to_dict(row)
 
 
+def _apply_scope(row: CiSecret, payload: Dict[str, Any]) -> Optional[str]:
+    """Move an existing secret between the service and global scopes.
+
+    Promoting is how a value every pipeline needs — an NVD API key, a shared
+    registry token — stops being pasted into each service one at a time.
+    Demoting needs a target service, because a global belongs to none.
+    Returns the previous scope, or ``None`` when nothing moved.
+    """
+    scope = str(payload.get("scope") or "").strip().lower()
+    if scope not in ("global", "service"):
+        raise SecretError("Scope must be 'global' or 'service'.")
+
+    if scope == "global":
+        service_id = None
+    else:
+        raw = payload.get("serviceId", row.service_id)
+        if raw in (None, ""):
+            raise SecretError("A service is required to make a secret service-scoped.")
+        try:
+            service_id = int(raw)
+        except (TypeError, ValueError):
+            raise SecretError("That service id is not valid.") from None
+
+    if scope == row.scope and service_id == row.service_id:
+        return None
+
+    # Same check as create_secret, for the same reason: the table's unique
+    # constraint cannot police a NULL service_id.
+    scope_filter = (
+        CiSecret.service_id.is_(None)
+        if service_id is None
+        else CiSecret.service_id == service_id
+    )
+    clash = CiSecret.query.filter(
+        CiSecret.scope == scope,
+        scope_filter,
+        CiSecret.key == row.key,
+        CiSecret.id != row.id,
+    ).first()
+    if clash:
+        raise SecretError(f"A {scope} secret named '{row.key}' already exists.")
+
+    previous = row.scope
+    row.scope = scope
+    row.service_id = service_id
+    return previous
+
+
 def update_secret(row: CiSecret, payload: Dict[str, Any], *, actor=None) -> Dict[str, Any]:
+    moved_from = _apply_scope(row, payload) if payload.get("scope") else None
     if "description" in payload:
         row.description = (
             " ".join(str(payload.get("description") or "").split())[:255] or None
@@ -127,7 +177,14 @@ def update_secret(row: CiSecret, payload: Dict[str, Any], *, actor=None) -> Dict
         actor=actor,
         target_type="ci_secret",
         target_id=str(row.id),
-        details={"key": row.key, "scope": row.scope, "valueRotated": rotated},
+        details={
+            "key": row.key,
+            "scope": row.scope,
+            "serviceId": row.service_id,
+            "valueRotated": rotated,
+            # Only present when the secret changed hands between scopes.
+            **({"scopeChangedFrom": moved_from} if moved_from else {}),
+        },
     )
     return secret_to_dict(row)
 

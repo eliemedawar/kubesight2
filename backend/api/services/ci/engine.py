@@ -42,6 +42,7 @@ from . import artifacts as artifacts_service
 from . import logs as logs_service
 from . import pipelines as pipelines_service
 from . import queue as queue_service
+from . import resources as ci_resources
 from . import scheduler as scheduler_service
 from . import secrets as secrets_service
 from . import source as source_port
@@ -1135,7 +1136,14 @@ def _build_execution(
         commands=list(definition.get("commands") or []),
         env=env,
         secrets=stage_secrets,
-        resources=definition.get("resources") or {},
+        # Stage over service, and whatever neither sets is left to the
+        # installation default in the runner. Read off the SERVICE row rather
+        # than the build snapshot on purpose: the envelope is infrastructure
+        # sizing, not pipeline definition, so raising it has to fix the retry of
+        # the build that was just evicted — not only builds started afterwards.
+        resources=ci_resources.merge(
+            definition.get("resources"), service.build_resources
+        ),
         artifacts=list(definition.get("artifacts") or []),
         # Absent from snapshots taken before host aliases existed — a build
         # retried from such a snapshot simply gets none.

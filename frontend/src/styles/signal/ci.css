@@ -328,6 +328,13 @@
   min-width: 0;
 }
 
+/* Mode select plus its value box. The box is narrow on purpose: what goes in it
+   is "8Gi", and a full-width field invites a sentence. */
+.sg-ci-resource-row input {
+  flex: 0 0 6.5rem;
+  min-width: 0;
+}
+
 .sg-ci-dl {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
@@ -654,6 +661,30 @@ button.sg-ci-strip-node:hover {
 .sg-ci-secret-form input {
   flex: 1;
   min-width: 9rem;
+}
+
+/* Scope change and delete belong on one line: the cell is sized to its content,
+   so without this they stack and the row grows to two lines. */
+.sg-ci-secret-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+/* Scope sits with the fields, not the Add button: it is part of what is being
+   created, and it must not stretch like the text inputs beside it. */
+.sg-ci-secret-scope {
+  flex: none;
+  min-width: 11rem;
+}
+
+/* A global secret is the exception in a service's list — mark it so a row that
+   cannot be edited here is recognisable before its buttons are read. */
+.sg-ci-scope-chip.is-global {
+  border-color: var(--info-border, var(--border));
+  background: var(--info-soft, transparent);
+  color: var(--info, var(--text-main));
 }
 
 /* Secret values are often whole files — give the field room and a code face,

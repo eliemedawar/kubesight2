@@ -221,6 +221,18 @@ class CiService(db.Model):
         db.Integer, db.ForeignKey("app_catalog_entries.id"), nullable=True
     )
 
+    # What this service's build stages may use: {"cpu", "memory",
+    # "ephemeralStorage"}, each a Kubernetes quantity or "off" for no limit, and
+    # each key optional — an absent one inherits the installation default. NULL
+    # is every service that has never been given one, which is the same thing as
+    # an empty map and is what every service had before the column existed.
+    #
+    # On the service rather than the stage because it describes what the
+    # application needs to build, not one step of one pipeline; a stage may still
+    # override it (``CiPipelineStage.resources``) when one step is the outlier.
+    # See ``services/ci/resources.py`` for how the three layers resolve.
+    build_resources = db.Column(db.JSON, nullable=True)
+
     max_concurrent_builds = db.Column(db.Integer, nullable=False, default=1)
     # Monotonic per-service build number. Incremented under the same transaction
     # that inserts the build, with UNIQUE(service_id, number) as the backstop.
