@@ -123,7 +123,6 @@ export const ROUTES = [
     defaults: { tab: "pods" },
     query: ["cluster", "ns"],
   },
-  { key: "topology", path: "/topology/:namespace?", query: ["cluster"] },
 
   // Inventory — the app drill-down is listed first so it is not swallowed
   // by /inventory/:section

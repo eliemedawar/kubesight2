@@ -152,7 +152,7 @@ export const PERMISSION_GROUPS = [
   },
   {
     id: "ci",
-    label: "CI / Service Catalog",
+    label: "Build Center — CI Services",
     keys: [
       "ci_services:view",
       "ci_services:create",
@@ -239,7 +239,7 @@ export const PERMISSION_CATALOG = [
   { key: "change_bundles:manage", label: "Approve or reject change bundles", dangerous: true },
   { key: "mobile_apps:view", label: "View mobile applications", dangerous: false },
   { key: "mobile_apps:manage", label: "Manage mobile applications and store credentials", dangerous: true },
-  { key: "ci_services:view", label: "View the CI Service Catalog", dangerous: false },
+  { key: "ci_services:view", label: "View CI services (Build Center)", dangerous: false },
   { key: "ci_services:create", label: "Register CI services", dangerous: false },
   { key: "ci_services:edit", label: "Edit CI services and their source", dangerous: false },
   { key: "ci_services:delete", label: "Delete CI services and build history", dangerous: true },

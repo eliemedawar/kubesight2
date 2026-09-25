@@ -1,6 +1,12 @@
 """Tests for Resources-page restart action (pods + workloads)."""
 
+import pytest
+
 from tests.conftest import auth_headers
+
+# These cover the write paths themselves; the approval gate has its own tests
+# in test_cluster_approval_gate.py.
+pytestmark = pytest.mark.usefixtures("no_cluster_approvals")
 
 CLUSTER = "prod-us-east"
 NAMESPACE = "payments"

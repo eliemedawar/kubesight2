@@ -1,0 +1,182 @@
+// Sidebar / jump-palette icons, keyed by page key or workspace key.
+
+export const NAV_ICONS = {
+  dashboard: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path d="M2 4.5A2.5 2.5 0 014.5 2h2A2.5 2.5 0 019 4.5v2A2.5 2.5 0 016.5 9h-2A2.5 2.5 0 012 6.5v-2zM2 13.5A2.5 2.5 0 014.5 11h2A2.5 2.5 0 019 13.5v2A2.5 2.5 0 016.5 18h-2A2.5 2.5 0 012 15.5v-2zM11 4.5A2.5 2.5 0 0113.5 2h2A2.5 2.5 0 0118 4.5v2A2.5 2.5 0 0115.5 9h-2A2.5 2.5 0 0111 6.5v-2zM11 13.5A2.5 2.5 0 0113.5 11h2A2.5 2.5 0 0118 13.5v2A2.5 2.5 0 0115.5 18h-2A2.5 2.5 0 0111 15.5v-2z" />
+    </svg>
+  ),
+  clusters: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm14 1a1 1 0 11-2 0 1 1 0 012 0zM2 13a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 01-2 2H4a2 2 0 01-2-2v-2zm14 1a1 1 0 11-2 0 1 1 0 012 0z" clipRule="evenodd" />
+    </svg>
+  ),
+  clusterOverview: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
+    </svg>
+  ),
+  clusterManagement: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+    </svg>
+  ),
+  namespaces: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+    </svg>
+  ),
+  inventory: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M5 3a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2V5a2 2 0 00-2-2H5zm0 2h10v7h-2l-1 2H8l-1-2H5V5z" clipRule="evenodd" />
+    </svg>
+  ),
+  resources: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z" />
+    </svg>
+  ),
+  logs: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+    </svg>
+  ),
+  alerts: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+    </svg>
+  ),
+  userManagement: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path d="M9 6a3 3 0 11-6 0 3 3 0 016 0zM17 6a3 3 0 11-6 0 3 3 0 016 0zM12.93 17c.046-.327.07-.66.07-1a6.97 6.97 0 00-1.5-4.33A5 5 0 0119 16v1h-6.07zM6 11a5 5 0 015 5v1H1v-1a5 5 0 015-5z" />
+    </svg>
+  ),
+  auditLogs: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
+    </svg>
+  ),
+  imageRegistries: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path d="M3 4a2 2 0 012-2h10a2 2 0 012 2v2H3V4z" />
+      <path fillRule="evenodd" d="M3 8h14v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8zm3 3a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1z" clipRule="evenodd" />
+    </svg>
+  ),
+  integrations: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M7.5 6.5l-2-2a2.12 2.12 0 00-3 3l2 2m8-3l2-2a2.12 2.12 0 013 3l-2 2M7 13l-2 2a2.12 2.12 0 003 3l2-2m3-3l2 2a2.12 2.12 0 01-3 3l-2-2" />
+      <path d="M7 10h6M10 7v6" />
+    </svg>
+  ),
+  settings: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+    </svg>
+  ),
+  mobileApps: (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="5" y="2" width="14" height="20" rx="2" />
+      <path d="M12 18h.01" />
+    </svg>
+  ),
+  serviceCatalog: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M17.5 6.8a1.6 1.6 0 0 0-.8-1.39l-5.9-3.2a1.6 1.6 0 0 0-1.6 0l-5.9 3.2a1.6 1.6 0 0 0-.8 1.39v6.4a1.6 1.6 0 0 0 .8 1.39l5.9 3.2a1.6 1.6 0 0 0 1.6 0l5.9-3.2a1.6 1.6 0 0 0 .8-1.39z" />
+      <path d="m2.7 6 7.3 4 7.3-4M10 18V10" />
+    </svg>
+  ),
+  blueprints: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path d="M3 3a2 2 0 012-2h4a1 1 0 011 1v16a1 1 0 01-1.447.894L5 17.118l-1.553.776A1 1 0 012 17V3zm10-2a2 2 0 00-2 2v14a1 1 0 001.447.894L15 16.882l1.553.776A1 1 0 0018 16.764V3a2 2 0 00-2-2h-3z" />
+    </svg>
+  ),
+  applicationServices: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm3.293 1.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L7.586 10 5.293 7.707a1 1 0 010-1.414zM11 12a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
+    </svg>
+  ),
+  applicationIntelligence: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 2v2M4.3 4.3l1.4 1.4M2 10h2m.3 5.7 1.4-1.4M10 16v2m5.7-2.3-1.4-1.4M16 10h2m-2.3-5.7-1.4 1.4" />
+      <circle cx="10" cy="10" r="4" />
+      <path d="M8.4 10.2l1.1 1.1 2.3-2.6" />
+    </svg>
+  ),
+  clients: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-6-3a2 2 0 11-4 0 2 2 0 014 0zm-2 4a5 5 0 00-4.546 2.916A5.986 5.986 0 0010 16a5.986 5.986 0 004.546-2.084A5 5 0 0010 11z" clipRule="evenodd" />
+    </svg>
+  ),
+  components: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path d="M9 2.5a1 1 0 011 0l4.5 2.598a1 1 0 01.5.866V8L10 10.5 5 8V5.964a1 1 0 01.5-.866L9 2.5z" />
+      <path d="M3 9.5l4.5 2.598V17L3 14.402V9.5zM17 9.5v4.902L12.5 17v-4.902L17 9.5z" opacity="0.6" />
+    </svg>
+  ),
+  buildCenter: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M17.5 6.8a1.6 1.6 0 0 0-.8-1.39l-5.9-3.2a1.6 1.6 0 0 0-1.6 0l-5.9 3.2a1.6 1.6 0 0 0-.8 1.39v6.4a1.6 1.6 0 0 0 .8 1.39l5.9 3.2a1.6 1.6 0 0 0 1.6 0l5.9-3.2a1.6 1.6 0 0 0 .8-1.39z" />
+      <path d="m2.7 6 7.3 4 7.3-4M10 18V10" />
+    </svg>
+  ),
+  architecture: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="7.5" y="2" width="5" height="4" rx="1" />
+      <rect x="2" y="14" width="5" height="4" rx="1" />
+      <rect x="13" y="14" width="5" height="4" rx="1" />
+      <path d="M10 6v4M4.5 14v-2a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v2" />
+    </svg>
+  ),
+  myRequests: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M17 3 8.5 11.5M17 3l-5 14-3.5-5.5L3 8l14-5z" />
+    </svg>
+  ),
+  changeBundles: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 2 2.5 6 10 10l7.5-4L10 2z" />
+      <path d="M2.5 10 10 14l7.5-4M2.5 14 10 18l7.5-4" />
+    </svg>
+  ),
+  deploymentRequests: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 2.5 3.5 5v4.5c0 4 2.8 7 6.5 8 3.7-1 6.5-4 6.5-8V5L10 2.5z" />
+      <path d="m7.2 10 2 2 3.8-4" />
+    </svg>
+  ),
+  ticketing: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2.5 6.5a1.5 1.5 0 0 1 1.5-1.5h12a1.5 1.5 0 0 1 1.5 1.5v1.8a1.8 1.8 0 0 0 0 3.4v1.8A1.5 1.5 0 0 1 16 15H4a1.5 1.5 0 0 1-1.5-1.5v-1.8a1.8 1.8 0 0 0 0-3.4V6.5z" />
+      <path d="M12 5v10" strokeDasharray="1.5 1.8" />
+    </svg>
+  ),
+  apiTokens: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="6.5" cy="13.5" r="3.5" />
+      <path d="m9 11 7.5-7.5M14 6l2 2M12 8l1.5 1.5" />
+    </svg>
+  ),
+  clusterBuilder: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2.5" y="11" width="6" height="6" rx="1" />
+      <rect x="11.5" y="11" width="6" height="6" rx="1" />
+      <rect x="7" y="3" width="6" height="6" rx="1" />
+      <path d="M14.5 5.5h3M16 4v3" />
+    </svg>
+  ),
+  upgrade: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 0l-3 3a1 1 0 001.414 1.414L9 9.414V13a1 1 0 102 0V9.414l1.293 1.293a1 1 0 001.414-1.414z" clipRule="evenodd" />
+    </svg>
+  ),
+};
+
+export const FALLBACK_NAV_ICON = (
+  <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm0-2a6 6 0 100-12 6 6 0 000 12z" clipRule="evenodd" />
+  </svg>
+);
+
+export function navIcon(key) {
+  return NAV_ICONS[key] || FALLBACK_NAV_ICON;
+}

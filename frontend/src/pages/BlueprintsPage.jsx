@@ -433,7 +433,7 @@ export default function BlueprintsPage({ clusters = [] }) {
       <div className={`sg-cat-layout${detail ? " sg-cat-layout--split" : ""}`}>
         <div>
           {loading ? (
-            <LoadingState label="Loading service catalog…" />
+            <LoadingState label="Loading blueprints…" />
           ) : filtered.length === 0 ? (
             <EmptyState
               message="No service blueprints found."

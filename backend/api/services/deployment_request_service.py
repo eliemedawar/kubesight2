@@ -222,6 +222,10 @@ def _public_base_url() -> str:
     return ""
 
 
+def _user_email(user: Optional[User]) -> str:
+    return (getattr(user, "email", "") or "").strip().lower() if user else ""
+
+
 def _dedupe_emails(addresses: List[str]) -> List[str]:
     out: List[str] = []
     seen: set[str] = set()
@@ -724,6 +728,10 @@ def create_request(
     # Snapshot the audience and quorum at creation time. Use the per-cluster
     # override when set so a cluster configured with 0 auto-approves.
     recipients, _ = _resolve_recipients_with_source()
+    # Nobody approves their own request, so the requester is not in its pool.
+    requester_email = _user_email(user)
+    if requester_email:
+        recipients = [r for r in recipients if r.strip().lower() != requester_email]
     configured_required = cluster_required_approvals(cluster_id)
     total = len(recipients)
     # 0 = auto-approve (no approval needed). Otherwise clamp the quorum to the
@@ -923,6 +931,14 @@ def record_vote(
         )
 
     email = (voter_email or "").strip().lower()
+    requester_email = _user_email(req.requester)
+    if (email and email == requester_email) or (
+        actor is not None and req.requester_id is not None and actor.id == req.requester_id
+    ):
+        raise DeploymentRequestError(
+            "You cannot vote on your own deployment request; another approver must decide it.",
+            403,
+        )
     if not email:
         # No voter identity (legacy token / actor without an email) — treat as a
         # single decisive action.
@@ -971,20 +987,6 @@ def decide_request(
 # ---------------------------------------------------------------------------
 # Deploy eligibility (gate cluster deploys on an approved request)
 # ---------------------------------------------------------------------------
-
-def _user_is_admin(user: Optional[User]) -> bool:
-    """Reuse the shared admin convention so admins bypass the approval gate."""
-    if user is None:
-        return False
-    try:
-        from ..access_engine import is_admin
-    except ImportError:
-        return False
-    try:
-        return bool(is_admin(user))
-    except Exception:
-        return False
-
 
 def _active_approval(user: Optional[User], cluster_id: str) -> Optional[DeploymentRequest]:
     """The user's approved, still-valid request for this cluster.
@@ -1035,19 +1037,11 @@ def deploy_eligibility(user: Optional[User], cluster_id: str) -> Dict[str, Any]:
     non-admin can deploy as soon as their request is approved; one approval
     covers multiple deploys until the window ends.
 
-    Admins are exempt: they may deploy directly without an approved request, so
-    approval is reported as not required for them.
+    Nobody is exempt — admins and MCP tokens (Hermes) included. The cluster's
+    configured approval count is the rule for everyone; a cluster set to 0 is
+    the only way to change it without a request.
     """
     required = cluster_required_approvals(cluster_id)
-    if user is not None and _user_is_admin(user):
-        return {
-            "clusterId": str(cluster_id or ""),
-            "requiredApprovals": required,
-            "approvalRequired": False,
-            "hasActiveApproval": True,
-            "eligible": True,
-            "activeRequest": None,
-        }
     approval_required = required > 0
     active = _active_approval(user, cluster_id) if approval_required else None
     has_active_approval = active is not None
@@ -1078,4 +1072,47 @@ def assert_deploy_allowed(user: Optional[User], cluster_id: str) -> None:
             "This cluster requires an approved deployment request before deploying. "
             "Request one from the Clusters tab.",
             403,
+        )
+
+
+def check_cluster_change_allowed(
+    user: Optional[User],
+    cluster_id: str,
+    *,
+    action: str,
+    target_type: str,
+    target_id: str,
+) -> Optional[Tuple[str, int]]:
+    """Approval gate for any user-driven change to a cluster.
+
+    Returns ``(message, status)`` when the change must be refused, else None.
+    Shared by YAML apply, Helm install/upgrade/rollback/uninstall and workload
+    restart/scale/rollback so every path — UI and MCP alike — enforces the same
+    per-cluster rule. Fails closed if the check itself errors.
+    """
+    if not user:
+        return None
+    try:
+        assert_deploy_allowed(user, cluster_id)
+        return None
+    except DeploymentRequestError as exc:
+        log_audit(
+            "unauthorized_deployment_attempt",
+            actor=user,
+            target_type=target_type,
+            target_id=target_id,
+            details={"action": action, "cluster": cluster_id, "reason": "approval_required"},
+        )
+        return str(exc), exc.status_code
+    except Exception as exc:  # noqa: BLE001 — fail closed if the gate errors
+        log_audit(
+            "deployment_failed",
+            actor=user,
+            target_type=target_type,
+            target_id=target_id,
+            details={"action": action, "error": str(exc), "reason": "approval_check_failed"},
+        )
+        return (
+            "Unable to verify deployment approval. Please try again or contact an administrator.",
+            500,
         )

@@ -94,7 +94,8 @@ function buildSubtitle(clusters) {
 
 export default function ClustersPage({ data, hasClusters, coreLoading = false, accessError = "" }) {
   const { user, hasPermission } = useAuth();
-  // Admins/managers configure who gets the request emails; everyone else requests.
+  // Admins/managers configure who gets the request emails. Everyone — admins
+  // included — requests approval on clusters that require it.
   const canManageRecipients = hasPermission("deployment_requests:manage");
   const canRequest = hasPermission("deployment_requests:request");
   const requesterName = user?.fullName || user?.username || "";
@@ -231,7 +232,7 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
                 {cluster.region && cluster.region !== "unknown" ? (
                   <span className="sg-tag">{cluster.region}</span>
                 ) : null}
-                {!canManageRecipients && canRequest ? (
+                {canRequest ? (
                   <button
                     type="button"
                     className="sg-clusters-request"

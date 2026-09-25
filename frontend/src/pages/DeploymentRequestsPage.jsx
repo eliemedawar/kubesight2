@@ -7,6 +7,7 @@ import {
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { usePermission } from "../hooks/usePermission.js";
+import { useAuth } from "../context/AuthContext";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import RequestsTable, {
@@ -29,7 +30,9 @@ const TABS = [
    Real fields only: cluster, requester, free-text message, optional
    requested window, quorum votes. Approve/decline reuse the existing
    handlers passed down from the page. */
-function RequestDecisionCard({ row, canManage, decide, busy }) {
+function RequestDecisionCard({ row, canManage, decide, busy, currentUserId }) {
+  // The server refuses a vote on your own request; don't offer one.
+  const isOwn = currentUserId != null && row.requesterId === currentUserId;
   const required = row.requiredApprovals ?? 1;
   const approvals = row.approvals ?? 0;
   const declines = row.declines ?? 0;
@@ -95,7 +98,9 @@ function RequestDecisionCard({ row, canManage, decide, busy }) {
           ))}
           <span className="sg-rq-approvers-note">{note}</span>
         </div>
-        {canManage ? (
+        {canManage && isOwn ? (
+          <span className="muted">Your request — another approver must decide it.</span>
+        ) : canManage ? (
           <div className="sg-rq-actions">
             <button
               type="button"
@@ -123,6 +128,7 @@ function RequestDecisionCard({ row, canManage, decide, busy }) {
 
 export default function DeploymentRequestsPage() {
   const { hasPermission } = usePermission();
+  const { user } = useAuth();
   const canManage = hasPermission("deployment_requests:manage");
 
   const [activeTab, setActiveTab] = useRouteParam("tab", "active");
@@ -275,6 +281,7 @@ export default function DeploymentRequestsPage() {
                   canManage={canManage}
                   decide={decide}
                   busy={busyId === row.id}
+                  currentUserId={user?.id}
                 />
               ))}
             </div>

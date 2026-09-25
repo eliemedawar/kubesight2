@@ -160,7 +160,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
       <div className="sg-ph">
         <div>
           <button type="button" className="sg-ci-back" onClick={onBack}>
-            ← Service Catalog
+            ← CI Services
           </button>
           <h2>
             {service.name} <StatusPill status={service.status} />

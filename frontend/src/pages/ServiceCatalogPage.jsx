@@ -113,7 +113,7 @@ export default function ServiceCatalogPage({ clusters = [] }) {
       // A background tick that misses once while the grid is already on screen
       // is not worth a banner: the next one almost always repaints it.
       if (!background || failuresRef.current >= FAILURES_BEFORE_BANNER) {
-        setError(describeError(err, "Could not load the service catalog."));
+        setError(describeError(err, "Could not load the CI services."));
       }
       return { ok: false, active: false };
     } finally {
@@ -207,7 +207,7 @@ export default function ServiceCatalogPage({ clusters = [] }) {
     <div className="ops-page">
       <div className="sg-ph">
         <div>
-          <h2>Service Catalog</h2>
+          <h2>CI Services</h2>
           <p className="sg-ph-sub">{subtitle}</p>
         </div>
         <div className="sg-ph-actions">
@@ -282,7 +282,7 @@ export default function ServiceCatalogPage({ clusters = [] }) {
       </div>
 
       {loading ? (
-        <LoadingState label="Loading service catalog…" />
+        <LoadingState label="Loading CI services…" />
       ) : filtered.length === 0 ? (
         <EmptyState
           message={

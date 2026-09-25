@@ -106,5 +106,25 @@ def operator_token(client):
     return payload["data"]["token"]
 
 
+@pytest.fixture()
+def no_cluster_approvals(app):
+    """Configure every cluster to deploy without an approved request.
+
+    The approval gate applies to everyone, admins included, and an unconfigured
+    installation requires one approval — so tests that exercise a write's happy
+    path opt out explicitly, the same way an operator would (global default 0).
+    """
+    from api.db import db
+    from api.models import DeploymentRequestSetting
+
+    row = DeploymentRequestSetting.query.first() or DeploymentRequestSetting(
+        recipients=[], group_ids=[]
+    )
+    row.required_approvals = 0
+    row.cluster_required_approvals = {}
+    db.session.add(row)
+    db.session.commit()
+
+
 def auth_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}

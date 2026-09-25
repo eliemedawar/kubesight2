@@ -1,0 +1,505 @@
+/*
+ * Control-plane navigation v2.
+ *
+ * Every destination is visible: groups are labelled lists, not hover flyouts.
+ * Built only on the theme tokens so light and dark follow automatically.
+ *   .nav-jump        "Jump to…" button (opens the Ctrl/⌘+K palette)
+ *   .nav-group       a labelled, foldable group of links
+ *   .nav-ws          a workspace entry with its tabs nested while active
+ *   .ws-bar          the workspace header + tab strip on top of the page
+ *   .jump-*          the palette itself
+ */
+
+/* ── Sidebar frame ─────────────────────────────────────────────────── */
+
+.sidebar.sidebar--v2 {
+  padding: var(--space-4) var(--space-3) var(--space-3);
+  gap: 0;
+}
+
+.sidebar--v2 .sidebar-brand {
+  margin-bottom: var(--space-3);
+}
+
+.nav-jump {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  min-height: 2.25rem;
+  margin: 0 0 var(--space-2);
+  padding: 0.4rem 0.5rem 0.4rem 0.65rem;
+  border: 1px solid var(--sidebar-border);
+  border-radius: var(--radius-control, var(--radius-md));
+  background: var(--bg-inset, transparent);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+.nav-jump:hover {
+  border-color: var(--border-strong);
+  color: var(--text-main);
+}
+
+.nav-jump:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.nav-jump-icon {
+  display: inline-flex;
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.nav-jump-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.nav-jump-label {
+  flex: 1;
+  text-align: left;
+}
+
+.nav-jump-kbd,
+.jump-esc {
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--sidebar-border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+/* ── Groups ────────────────────────────────────────────────────────── */
+
+.sidebar--v2 nav.nav-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 0;
+  flex: 1;
+}
+
+.nav-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-group + .nav-group {
+  margin-top: var(--space-2);
+}
+
+.nav-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.55rem 0.4rem 0.3rem 0.65rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--sidebar-section-label);
+  font-family: var(--font-sans);
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.nav-group-head:hover {
+  color: var(--sidebar-nav-hover-text);
+}
+
+.nav-group-head:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.nav-group.is-active .nav-group-head {
+  color: var(--sidebar-nav-text);
+}
+
+.nav-group-chevron {
+  display: inline-flex;
+  width: 0.85rem;
+  height: 0.85rem;
+  opacity: 0;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.nav-group-chevron svg {
+  width: 100%;
+  height: 100%;
+}
+
+.nav-group-head:hover .nav-group-chevron,
+.nav-group-head:focus-visible .nav-group-chevron,
+.nav-group.is-collapsed .nav-group-chevron {
+  opacity: 0.8;
+}
+
+.nav-group.is-collapsed .nav-group-chevron {
+  transform: rotate(-90deg);
+}
+
+.nav-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.nav-group-items[hidden] {
+  display: none;
+}
+
+.sidebar--v2 .nav-link {
+  min-height: 2.1rem;
+  padding: 0.4rem 0.65rem;
+  text-decoration: none;
+}
+
+/* ── Workspace entries ─────────────────────────────────────────────── */
+
+/* While one of its tabs is open, the entry reads as the parent of the lit
+   tab rather than competing with it. */
+.sidebar--v2 .nav-ws.is-active > .nav-ws-link.active {
+  background: transparent;
+  border-left-color: transparent;
+  color: var(--sidebar-nav-hover-text);
+}
+
+.sidebar--v2 .nav-ws.is-active > .nav-ws-link.active:hover {
+  background: var(--sidebar-nav-hover-bg);
+}
+
+.nav-ws-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 1px 0 var(--space-1) 1.15rem;
+  padding-left: 0.55rem;
+  border-left: 1px solid var(--sidebar-border);
+}
+
+.sidebar--v2 .nav-link.nav-ws-tab {
+  min-height: 1.9rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8125rem;
+}
+
+/* ── Workspace bar (top of page) ───────────────────────────────────── */
+
+.ws-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-5);
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ws-bar-head {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.ws-bar-icon {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 1.9rem;
+  height: 1.9rem;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ws-bar-icon svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.ws-bar-text {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 0.65rem;
+  row-gap: 0.1rem;
+  min-width: 0;
+}
+
+.ws-bar-title {
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+}
+
+.ws-bar-desc {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.ws-tabs {
+  display: flex;
+  gap: var(--space-1);
+  margin-bottom: -1px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ws-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.ws-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.8rem 0.65rem;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 550;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.ws-tab:hover {
+  color: var(--text-strong);
+  border-bottom-color: var(--border-strong);
+}
+
+.ws-tab.is-active {
+  color: var(--text-strong);
+  font-weight: 650;
+  border-bottom-color: var(--accent);
+}
+
+.ws-tab:focus-visible {
+  outline: none;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--ring);
+}
+
+.ws-tab-icon {
+  display: inline-flex;
+  width: 0.95rem;
+  height: 0.95rem;
+  opacity: 0.7;
+}
+
+.ws-tab.is-active .ws-tab-icon {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.ws-tab-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Jump palette ──────────────────────────────────────────────────── */
+
+.jump-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh var(--space-4) var(--space-4);
+  background: var(--backdrop, rgba(15, 12, 20, 0.4));
+}
+
+.jump-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(36rem, 100%);
+  max-height: min(28rem, 76vh);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated, var(--bg-panel));
+  box-shadow: var(--shadow-lg);
+}
+
+.jump-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.8rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.jump-input-row > svg {
+  flex-shrink: 0;
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.jump-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-strong);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md, 1rem);
+}
+
+.jump-input::placeholder {
+  color: var(--text-muted);
+}
+
+.jump-results {
+  margin: 0;
+  padding: var(--space-1);
+  overflow-y: auto;
+  list-style: none;
+}
+
+.jump-option {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: var(--radius-md);
+  color: var(--text-main);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.jump-option.is-cursor {
+  background: var(--sidebar-nav-active-bg);
+  color: var(--sidebar-nav-active-text);
+}
+
+.jump-option-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 1rem;
+  height: 1rem;
+  opacity: 0.75;
+}
+
+.jump-option-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.jump-option-label {
+  font-weight: 600;
+}
+
+.jump-option-context {
+  margin-left: auto;
+  padding-left: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.jump-empty {
+  padding: var(--space-4);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+
+/* ── Narrow screens: sidebar becomes a drawer ──────────────────────── */
+
+@media (max-width: 1023px) {
+  .sidebar {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .sidebar--v2 .nav-link {
+    min-height: 2.5rem;
+  }
+
+  .ws-bar-desc {
+    display: none;
+  }
+
+  .shell--sidebar-open .topbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 110;
+    width: min(18rem, 88vw);
+    height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    pointer-events: none;
+  }
+
+  .shell--sidebar-open .topbar-leading {
+    width: 0;
+    height: 0;
+  }
+
+  .shell--sidebar-open .topbar-selectors,
+  .shell--sidebar-open .topbar-actions {
+    display: none;
+  }
+
+  .shell--sidebar-open .icon-button.topbar-menu-button {
+    position: fixed;
+    top: var(--space-4);
+    left: calc(min(18rem, 88vw) - 3.25rem);
+    z-index: 111;
+    display: inline-grid;
+    background: var(--sidebar-bg);
+    border-color: var(--sidebar-border);
+    pointer-events: auto;
+  }
+
+  .shell--sidebar-open .sidebar-brand {
+    padding-right: 3rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .jump-option-context {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-group-chevron,
+  .ws-tab,
+  .nav-jump {
+    transition: none;
+  }
+}

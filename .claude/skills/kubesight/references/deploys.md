@@ -19,8 +19,10 @@ without a live approved request — and that failure is a policy working, not an
 error. Saying so up front is the difference between "prod requires an approved
 deployment request; want me to raise one?" and "the deploy failed".
 
-Admins are exempt, and eligibility reports that honestly rather than pretending
-the gate applies.
+Nobody is exempt — not admins, and not you holding an admin's token. The same
+rule covers Helm install/upgrade/rollback/uninstall and workload
+restart/scale/rollback, so check eligibility before any of those too. You can
+never approve your own request: another approver has to vote on it.
 
 ## Preview before applying
 

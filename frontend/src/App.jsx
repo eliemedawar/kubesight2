@@ -77,7 +77,6 @@ const InventoryPage = lazy(() => import("./pages/InventoryPage.jsx"));
 const ApplicationDetailsPage = lazy(() => import("./pages/ApplicationDetailsPage.jsx"));
 const NamespacesPage = lazy(() => import("./pages/NamespacesPage.jsx"));
 const ResourcesPage = lazy(() => import("./pages/ResourcesPage.jsx"));
-const TopologyPage = lazy(() => import("./pages/TopologyPage.jsx"));
 const LogsPage = lazy(() => import("./pages/LogsPage.jsx"));
 const AlertsPage = lazy(() => import("./pages/AlertsPage.jsx"));
 const UpgradeSafeModePage = lazy(() => import("./pages/UpgradeSafeModePage.jsx"));
@@ -1808,16 +1807,6 @@ export default function App() {
                 },
               });
             }}
-          />
-        );
-      case "topology":
-        return (
-          <TopologyPage
-            clusterId={selectedClusterId}
-            cluster={selectedCluster}
-            hasClusters={hasClusters}
-            coreLoading={loadingState.core}
-            accessError={pageAccessError}
           />
         );
       case "logs":

@@ -11,7 +11,10 @@ calls the service the UI calls, and the gates live inside those services:
 * ``install_or_upgrade_release`` demands an exact confirmation phrase, the same
   one a person types into the Helm dialog. It is generated from the release and
   namespace, so producing it means having named the right release in the right
-  place — which is the point of the phrase.
+  place — which is the point of the phrase. It, rollback and uninstall are also
+  under the same per-cluster approval rule as ``apply_yaml``.
+* Nobody is exempt from that rule — not admins, and not an agent holding an
+  admin's token. A requester can never vote on their own request.
 * A change bundle is approved as a unit and executed by KubeSight afterwards.
   An agent can build one and submit it; only an approver's vote runs it.
 
@@ -447,7 +450,11 @@ def _helm_release_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "name. The phrase is not busywork: it is the check that you named the "
         "release and namespace you meant."
     ),
-    approval="The confirmation phrase is the gate; there is no separate approval.",
+    approval=(
+        "Needs the exact confirmation phrase AND, on a cluster configured to "
+        "require approvals, a live approved deployment request for the token's "
+        "user — check kubesight_deploy_eligibility first."
+    ),
     write=True,
     schema={
         "type": "object",
@@ -495,6 +502,11 @@ def _helm_upgrade(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         "if no revision is named. Read kubesight_helm_release_get first — the "
         "revision numbers are in its history."
     ),
+    approval=(
+        "On a cluster configured to require approvals this fails unless the "
+        "token's user has a live approved deployment request — check "
+        "kubesight_deploy_eligibility first."
+    ),
     write=True,
     schema={
         "type": "object",
@@ -530,6 +542,11 @@ def _helm_rollback(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         "workloads and, depending on the chart, their PersistentVolumeClaims — "
         "which is not something a rollback brings back. Confirm with a person "
         "before calling it."
+    ),
+    approval=(
+        "On a cluster configured to require approvals this fails unless the "
+        "token's user has a live approved deployment request — check "
+        "kubesight_deploy_eligibility first."
     ),
     write=True,
     destructive=True,

@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import ErrorBanner from "../common/ErrorBanner";
 import LoadingState from "../common/LoadingState";
+import { buildJumpTargets, buildNavGroups, workspaceOfPage } from "../../lib/navigation.js";
+import JumpPalette from "./JumpPalette";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
+import WorkspaceTabs from "./WorkspaceTabs";
 
 export default function AppShell({
   visiblePages,
@@ -45,6 +48,14 @@ export default function AppShell({
   children,
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [jumpOpen, setJumpOpen] = useState(false);
+
+  const navGroups = useMemo(() => buildNavGroups(visiblePages), [visiblePages]);
+  const jumpTargets = useMemo(() => buildJumpTargets(navGroups), [navGroups]);
+  const workspaceKey = workspaceOfPage(activePage);
+  const workspaceTabs = workspaceKey
+    ? navGroups.flatMap((group) => group.items).find((item) => item.key === workspaceKey)?.tabs
+    : null;
 
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
   const toggleSidebar = useCallback(() => setSidebarOpen((open) => !open), []);
@@ -56,6 +67,18 @@ export default function AppShell({
     },
     [closeSidebar, onNavigate]
   );
+
+  // Ctrl/⌘+K opens the jump palette from anywhere.
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setJumpOpen((isOpen) => !isOpen);
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   useEffect(() => {
     const media = window.matchMedia("(min-width: 1024px)");
@@ -95,7 +118,22 @@ export default function AppShell({
         onClick={closeSidebar}
         tabIndex={sidebarOpen ? 0 : -1}
       />
-      <Sidebar pages={visiblePages} activePage={activePage} onNavigate={handleNavigate} open={sidebarOpen} />
+      <Sidebar
+        pages={visiblePages}
+        activePage={activePage}
+        onNavigate={handleNavigate}
+        onOpenJump={() => setJumpOpen(true)}
+        open={sidebarOpen}
+      />
+      <JumpPalette
+        open={jumpOpen}
+        targets={jumpTargets}
+        onClose={() => setJumpOpen(false)}
+        onSelect={(target) => {
+          setJumpOpen(false);
+          handleNavigate(target.pageKey);
+        }}
+      />
       <section className="workspace">
         <Topbar
           allowedClusters={allowedClusters}
@@ -135,7 +173,17 @@ export default function AppShell({
         ) : null}
         <ErrorBanner message={errorMessage} />
         {clusterBannerMessage ? <p className="banner-message">{clusterBannerMessage}</p> : null}
-        <main className="page-content ops-layout">{children}</main>
+        <main className="page-content ops-layout">
+          {workspaceTabs ? (
+            <WorkspaceTabs
+              workspaceKey={workspaceKey}
+              tabs={workspaceTabs}
+              activePageKey={activePage}
+              onNavigate={handleNavigate}
+            />
+          ) : null}
+          {children}
+        </main>
       </section>
     </div>
   );

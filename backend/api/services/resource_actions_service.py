@@ -381,6 +381,28 @@ def _check_resource_restart_access(
     return None
 
 
+def _check_resource_change_allowed(
+    user: Optional[User],
+    cluster_id: str,
+    namespace: str,
+    normalized: str,
+    name: str,
+) -> Optional[Tuple[str, int]]:
+    """Restart access plus the cluster's deployment-approval rule."""
+    denied = _check_resource_restart_access(user, cluster_id, namespace, normalized, name)
+    if denied:
+        return denied
+    from .deployment_request_service import check_cluster_change_allowed
+
+    return check_cluster_change_allowed(
+        user,
+        cluster_id,
+        action="restart",
+        target_type=normalized,
+        target_id=f"{cluster_id}/{namespace}/{name}",
+    )
+
+
 def restart_resource(
     user: Optional[User],
     cluster_id: str,
@@ -395,7 +417,7 @@ def restart_resource(
     if normalized not in RESTART_SUPPORTED_KINDS:
         return None, f"Restart is not supported for {normalized}", 400
 
-    denied = _check_resource_restart_access(user, cluster_id, namespace, normalized, name)
+    denied = _check_resource_change_allowed(user, cluster_id, namespace, normalized, name)
     if denied:
         return None, denied[0], denied[1]
 

@@ -52,6 +52,9 @@ def _parse_action_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, str]], 
     }, None, 200
 
 
+_READ_ACTIONS = {"rollout-history"}
+
+
 def _check_deployment_action_access(
     user: Optional[User],
     cluster_id: str,
@@ -89,7 +92,19 @@ def _check_deployment_action_access(
         )
         return "Forbidden", 403
 
-    return None
+    if action in _READ_ACTIONS:
+        return None
+
+    # A change to the cluster: the cluster's deployment-approval rule applies.
+    from .deployment_request_service import check_cluster_change_allowed
+
+    return check_cluster_change_allowed(
+        user,
+        cluster_id,
+        action=action,
+        target_type="deployment",
+        target_id=f"{cluster_id}/{namespace}/{workload_name}",
+    )
 
 
 def _deployment_resource_name(workload_name: str) -> str:

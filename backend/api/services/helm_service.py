@@ -542,6 +542,10 @@ def install_or_upgrade_release(
     if (confirmation or "").strip() != expected:
         return None, f"Confirmation must be exactly: {expected}", 400
 
+    denied = _approval_gate(user, cluster_id, namespace, release_name, "upgrade" if is_upgrade else "install")
+    if denied:
+        return None, denied[0], denied[1]
+
     try:
         ensure_helm_installed()
     except HelmNotInstalledError as exc:
@@ -638,6 +642,9 @@ def rollback_release(
         return None, "Forbidden", 403
     if user and not can_access_namespace(user, cluster_id, namespace):
         return None, "Forbidden", 403
+    denied = _approval_gate(user, cluster_id, namespace, release_name, "rollback")
+    if denied:
+        return None, denied[0], denied[1]
 
     ok, err = validate_release_name(release_name)
     if not ok:
@@ -686,6 +693,9 @@ def uninstall_release(
         return None, "Forbidden", 403
     if user and not can_access_namespace(user, cluster_id, namespace):
         return None, "Forbidden", 403
+    denied = _approval_gate(user, cluster_id, namespace, release_name, "uninstall")
+    if denied:
+        return None, denied[0], denied[1]
 
     ok, err = validate_release_name(release_name)
     if not ok:
@@ -861,6 +871,21 @@ def get_release_detail(
         "renderedManifest": sanitize_yaml_preview(manifest) if manifest else "",
         "manifest": manifest,
     }
+
+
+def _approval_gate(
+    user: Optional[User], cluster_id: str, namespace: str, release_name: str, action: str
+) -> Optional[Tuple[str, int]]:
+    """The cluster's deployment-approval rule, same as a YAML apply."""
+    from .deployment_request_service import check_cluster_change_allowed
+
+    return check_cluster_change_allowed(
+        user,
+        cluster_id,
+        action=f"helm_{action}",
+        target_type="helm_release",
+        target_id=f"{cluster_id}/{namespace}/{release_name}",
+    )
 
 
 def _audit_unauthorized(user: Optional[User], payload: Dict[str, Any], action: str) -> None:

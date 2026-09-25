@@ -171,7 +171,14 @@ def _action_body(user, arguments: Dict[str, Any]) -> Dict[str, Any]:
     workload = str(arguments.get("workload") or "").strip()
     if not workload:
         raise ToolError("Name the workload.")
-    return {"clusterId": cluster_id, "namespace": namespace, "workloadName": workload}
+    # These tools act on deployments only, and the service refuses a body
+    # that does not say so.
+    return {
+        "clusterId": cluster_id,
+        "namespace": namespace,
+        "workloadType": "deployment",
+        "workloadName": workload,
+    }
 
 
 @tool(
@@ -182,6 +189,11 @@ def _action_body(user, arguments: Dict[str, Any]) -> Dict[str, Any]:
         "a time under the deployment's own strategy; nothing about the spec "
         "changes. The usual fix for a pod holding a stale config or a bad "
         "connection pool."
+    ),
+    approval=(
+        "On a cluster configured to require approvals this fails unless the "
+        "token's user has a live approved deployment request — check "
+        "kubesight_deploy_eligibility first."
     ),
     write=True,
     schema={
@@ -209,6 +221,11 @@ def _workload_restart(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]
         "Set a deployment's replica count. Scaling to 0 stops the application "
         "without deleting it — say so plainly when you do it, because to anyone "
         "watching it looks exactly like an outage."
+    ),
+    approval=(
+        "On a cluster configured to require approvals this fails unless the "
+        "token's user has a live approved deployment request — check "
+        "kubesight_deploy_eligibility first."
     ),
     write=True,
     schema={
@@ -240,6 +257,11 @@ def _workload_scale(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         "Undo a deployment's last rollout, or go back to a named revision from "
         "kubesight_rollout_history. Read the history first: 'the previous one' "
         "is not always the one that worked."
+    ),
+    approval=(
+        "On a cluster configured to require approvals this fails unless the "
+        "token's user has a live approved deployment request — check "
+        "kubesight_deploy_eligibility first."
     ),
     write=True,
     schema={
@@ -275,6 +297,11 @@ def _workload_rollback(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any
         "Restart something that is not a deployment: a single pod (deleted so "
         "its controller recreates it), a statefulset or a daemonset. For a "
         "deployment use kubesight_workload_restart."
+    ),
+    approval=(
+        "On a cluster configured to require approvals this fails unless the "
+        "token's user has a live approved deployment request — check "
+        "kubesight_deploy_eligibility first."
     ),
     write=True,
     schema={

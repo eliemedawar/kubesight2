@@ -22,8 +22,8 @@ const WELCOME_STEPS = [
     title: "Welcome to KubeSight",
     body: (ctx) =>
       ctx.isAdmin
-        ? "The sidebar is your map. As an administrator you see every area — infrastructure, monitoring, services, and administration."
-        : "The sidebar is your map. It only lists the areas your role has access to, so what you see here is exactly what you can use.",
+        ? "The sidebar is your map, grouped by what you are doing: build applications, deliver them, run the infrastructure, observe it, and administer the platform. Press Ctrl+K to jump anywhere."
+        : "The sidebar is your map. It only lists the areas your role has access to, so what you see here is exactly what you can use. Press Ctrl+K to jump anywhere.",
   },
   {
     target: '[data-tour="cluster-select"]',
@@ -301,25 +301,39 @@ const PAGE_TOURS = {
 
   serviceCatalog: [
     {
-      target: ".sg-ph",
-      title: "Service Catalog",
-      body: "Reusable service blueprints — versioned definitions of the services your team deploys.",
+      target: ".ws-tabs",
+      title: "Build Center",
+      body: "Everything about building your software lives here: CI services, source analysis in Application Intelligence, and mobile app releases. Each tab is its own page with its own link.",
+    },
+    {
+      target: ".sg-ci-health",
+      title: "Build health",
+      body: "Live counts of what is building, failing, queued or still needs setup. Click a tile to filter the services below.",
+    },
+    {
+      target: ".sg-cat-new.primary",
+      title: "Register a service",
+      body: "Connect a repository and describe its pipeline to start building it here.",
+      when: (ctx) => ctx.hasPermission("ci_services:create"),
+    },
+    {
+      target: ".sg-cat-search",
+      title: "Search",
+      body: "Find a service by name.",
+    },
+  ],
+
+  blueprints: [
+    {
+      target: ".ws-tabs",
+      title: "Service Architecture",
+      body: "Blueprints, App Services, Clients and Components now live together. Blueprints describe a service logically, App Services are the real deployed ones, and Clients are who consumes them.",
     },
     {
       target: ".sg-cat-new",
       title: "New blueprint",
       body: "Define a new service blueprint: components, defaults, and topology.",
       when: (ctx) => ctx.hasPermission("service_blueprints:create"),
-    },
-    {
-      target: ".sg-cat-tabs",
-      title: "Status filter",
-      body: "Filter blueprints by lifecycle status.",
-    },
-    {
-      target: ".sg-cat-search",
-      title: "Search",
-      body: "Find a blueprint by name.",
     },
     {
       target: ".sg-card-grid",

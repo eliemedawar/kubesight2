@@ -66,6 +66,9 @@ export const INTEGRATION_VIEW_PERMISSIONS = [
   "applications:view",
 ];
 
+// Who may open each page. WHERE a page sits in the sidebar (its group, and
+// whether it is folded into a workspace such as Build Center) is decided by
+// lib/navigation.js; `section` here is only a label for this list.
 export const NAV_PAGES = [
   // Dashboard
   { key: "dashboard", label: "Dashboard", permission: "overview:view", section: "Dashboard" },
@@ -80,7 +83,6 @@ export const NAV_PAGES = [
   },
   { key: "namespaces", label: "Namespaces", permission: "namespaces:view", section: "Infrastructure" },
   { key: "resources", label: "Resources", permission: "resources:view", section: "Infrastructure" },
-  { key: "topology", label: "Topology", permission: "resources:view", section: "Infrastructure" },
 
   // Inventory
   { key: "inventory", label: "Inventory", permission: "inventory:view", section: "Inventory" },
@@ -108,7 +110,7 @@ export const NAV_PAGES = [
   // different question, different model, unchanged permissions.
   {
     key: "serviceCatalog",
-    label: "Service Catalog",
+    label: "CI Services",
     permission: "ci_services:view",
     section: "Services",
   },
@@ -236,7 +238,6 @@ export const CLUSTER_CONTEXT_PAGE_KEYS = new Set([
   "applicationDetails",
   "namespaces",
   "resources",
-  "topology",
   "logs",
   "alerts",
   "upgrade",
@@ -1046,11 +1047,6 @@ export function pageAllowed(user, pageKey) {
       );
     case "resources":
       return canAccessResourcesPage(user);
-    case "topology":
-      return (
-        hasPermission(user, "resources:view") &&
-        (isAdminUser(user) || hasAnyClusterAccess(user))
-      );
     case "logs":
       return canAccessLogsPage(user);
     case "alerts":
