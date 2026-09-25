@@ -208,6 +208,45 @@ semgrep scan \
 `SEMGREP_CACHE_DIR`, `SEMGREP_VERSION_CACHE_PATH` and `XDG_CACHE_HOME` are
 already exported, which is what keeps the ruleset downloads between runs.
 
+### Install dependencies (Node: yarn / npm / pnpm)
+
+Nothing to write in the stage. `npm_config_cache`, `YARN_CACHE_FOLDER` and
+`npm_config_store_dir` keep the downloaded **tarballs**, which makes
+"Fetching packages" fast. They cannot help yarn's `[4/4] Building fresh
+packages`: that step runs every dependency's install script (node-sass
+compiling with node-gyp, electron fetching its binary, core-js, husky...) into
+`node_modules`, and `node_modules` is empty on every build because the
+workspace is an `emptyDir`.
+
+So any stage whose commands run an install (`yarn`, `yarn install`,
+`corepack yarn install`, `npm ci`, `npm install`, `pnpm install`...) also keeps
+**`node_modules` itself**, as `$KUBESIGHT_CACHE_DIR/node-modules/<key>.tar`:
+
+- **Key:** package.json, every lockfile, `.npmrc`/`.yarnrc`/`.yarnrc.yml`,
+  `node -v`, the CPU architecture, the stage image, the working directory and
+  `NODE_ENV`. Change any of them and it is a new key, installed cold once.
+- **Before the commands:** if the key is there it is restored, and the install
+  that follows finds nothing to do (yarn prints `Already up-to-date`). Root
+  lifecycle scripts (`prepare`, `postinstall`) still run.
+- **After the commands, only if they succeeded:** a cold install is saved.
+  Every `node_modules` in the tree is included, so workspace monorepos work.
+  It is written to a `.partial` file and renamed, so a half archive never
+  appears under the real name.
+- **`npm ci`** would delete a restored tree first, so after a restore that one
+  call runs as `npm install --no-save --prefer-offline` instead, and the log says
+  so. The tree already matches the lockfile, which is all `npm ci` promises.
+- **Housekeeping:** the 3 most recently used keys per service are kept
+  (`CI_CACHE_NODE_MODULES_KEEP`). A tar that will not extract is deleted and the
+  install runs cold.
+- **Per service only.** It is never offered under `_shared/`, because native
+  modules are built for one image. Cleaning a service's cache removes it.
+- **Off switches:** `KUBESIGHT_NODE_MODULES_CACHE=0` in a stage's Environment
+  turns it off for that stage; `CI_CACHE_NODE_MODULES=0` turns it off for the
+  installation. A `node_modules` already in the checkout is left alone.
+
+Each install stage logs one `[kubesight] node_modules cache:` line saying what
+happened: restored, nothing saved yet, saved (with its size), or why not.
+
 ### Build Image (BuildKit)
 
 Nothing to write in the stage — layer caching is a runner setting, off by
@@ -328,6 +367,8 @@ cause.
 | `CI_CACHE_SIZE` | `10Gi` | Size of a per-service PVC (storage-class mode only). |
 | `CI_CACHE_SHARED` | all shareable | Which tools share `/kubesight-cache/_shared` (claim mode only): comma list of `dependency-check,semgrep,npm,yarn,pnpm,pip,go`, or `all` / `none`. |
 | `CI_CACHE_GRADLE_INIT` | `1` | Write the Gradle init script. `0`/`off` to leave `init.d` alone. |
+| `CI_CACHE_NODE_MODULES` | `1` | Keep `node_modules` per lockfile for install stages. `0`/`off` to install cold every time. |
+| `CI_CACHE_NODE_MODULES_KEEP` | `3` | How many lockfiles' `node_modules` each service keeps; the least recently used go first. |
 | `CI_BUILDKIT_LOCAL_CACHE` | `0` | Export image layers to `$BUILDKIT_CACHE_DIR`. |
 | `CI_BUILDKIT_REGISTRY_CACHE` | `0` | Export image layers to a `:buildcache` tag. |
 | `CI_BUILDKIT_CACHE_REPO` | — | Put those tags under one repository rather than beside each image. |

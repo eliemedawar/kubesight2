@@ -24,6 +24,7 @@ The shape on disk
         dependency-check-data/        DC_DATA_DIR            (the NVD database)
         semgrep/                      SEMGREP_CACHE_DIR      (downloaded rulesets)
         buildkit/                     BUILDKIT_CACHE_DIR     (exported layer cache)
+        node-modules/                 <lockfile-key>.tar     (a whole node_modules per lockfile)
         maven/ npm/ yarn/ pnpm/ pip/ go/ cargo/ composer/ nuget/ xdg/
       _shared/                        KUBESIGHT_SHARED_CACHE_DIR - one subtree for everybody
         dependency-check-data/        the NVD database is the same for every service
@@ -120,6 +121,7 @@ WARMTH_PROBE_DIRS = (
     "npm",
     "dependency-check-data",
     "semgrep",
+    "node-modules",
 )
 
 GRADLE_INIT_SCRIPT_NAME = "kubesight-build-cache.gradle"
@@ -467,3 +469,194 @@ def prep_script(*, gradle_init: bool = True, shared=()) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+# --- node_modules -------------------------------------------------------------
+#
+# The package managers' own caches (npm/, yarn/, pnpm/ above) hold downloaded
+# TARBALLS. They make yarn's "Fetching packages" fast and do nothing at all for
+# "[4/4] Building fresh packages": that step runs every dependency's install
+# script (node-sass compiling itself with node-gyp, electron fetching a binary,
+# core-js, husky...) into a node_modules that is empty on every build, because
+# the workspace is an emptyDir. No package-manager setting changes that - only
+# keeping node_modules itself does.
+#
+# So an install stage keeps it: one tar per lockfile, keyed on everything that
+# decides what an install produces. Same key, same tree, and the install that
+# follows the restore finds nothing to do. One tar rather than the directory
+# itself because node_modules is a hundred thousand small files and the volume
+# is NFS, where each one is a round trip; a single archive streams.
+#
+# Per-service ONLY, never offered under _shared/: two services with different
+# lockfiles share nothing, and native modules are built for one image.
+NODE_MODULES_SUBDIR = "node-modules"
+NODE_MODULES_KEEP = 3
+
+# A stage is an install stage when its commands run a package manager's install.
+# Matched on the text, because that is all a stage is: "corepack yarn install
+# --frozen-lockfile", a bare "yarn", "npm ci", "pnpm i" and the lockfile-
+# detection one-liner the default pipelines emit all count.
+_NODE_INSTALL_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:yarn|pnpm)(?:[ \t]+-{1,2}[\w-]+(?:=\S+)?)*"
+    r"(?:\s+(?:install|i)\b|[ \t]*(?:$|[;&|)]))"
+    r"|(?:^|[\s;&|(])npm\s+(?:ci|install|i)(?:\s|$|[;&|)])",
+    re.MULTILINE,
+)
+
+
+def runs_node_install(commands) -> bool:
+    """Whether these stage commands install a Node project's dependencies."""
+    text = commands if isinstance(commands, str) else "\n".join(commands or [])
+    return bool(_NODE_INSTALL_RE.search(text))
+
+
+def _sh_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
+
+def node_modules_wrap(
+    commands: str, *, image: str = "", workdir: str = "", keep: int = NODE_MODULES_KEEP
+) -> str:
+    """The stage's own commands, with a node_modules restore before them and a
+    save after them.
+
+    Runs inside the stage's ``set -e`` subshell, already in its working
+    directory. Both halves are functions called with ``|| true`` - which also
+    suspends ``set -e`` inside them - so a cache that cannot be read or written
+    is a cold install, never a failed stage. The save only runs when the
+    commands succeeded: ``set -e`` has left the subshell otherwise, and a
+    non-zero status that did not trip it is kept and returned unchanged.
+
+    The key covers what decides the tree an install produces: package.json,
+    every lockfile, .npmrc/.yarnrc, the node version, the CPU architecture, the
+    stage image (native modules are built against its libc) and the working
+    directory. NODE_ENV too, because production installs leave out
+    devDependencies.
+
+    A restore is never re-saved - the same key means the same inputs - and an
+    ``npm ci`` after one would delete it, so that one call becomes
+    ``npm install --no-save``: the tree already matches the lockfile, which is
+    all ``npm ci`` guarantees. ``KUBESIGHT_NODE_MODULES_CACHE=0`` in the stage's
+    Environment turns the whole thing off for that stage.
+    """
+    keep = max(1, int(keep or NODE_MODULES_KEEP))
+    tag = "[kubesight] node_modules cache:"
+    lines = [
+        "ks_nm_prepare() {",
+        "  KS_NM_KEY=",
+        '  [ -n "${KUBESIGHT_CACHE_DIR:-}" ] || return 0',
+        '  case "${KUBESIGHT_NODE_MODULES_CACHE:-1}" in',
+        "    0|false|off|no|FALSE|OFF|NO)",
+        f'      echo "{tag} off for this stage (KUBESIGHT_NODE_MODULES_CACHE)."',
+        "      return 0 ;;",
+        "  esac",
+        "  KS_NM_LOCKS=",
+        "  for KS_F in yarn.lock package-lock.json npm-shrinkwrap.json pnpm-lock.yaml; do",
+        '    if [ -f "$KS_F" ]; then KS_NM_LOCKS="$KS_NM_LOCKS $KS_F"; fi',
+        "  done",
+        '  if [ -z "$KS_NM_LOCKS" ]; then',
+        f'    echo "{tag} no lockfile in $PWD to key it on; installing cold."',
+        "    return 0",
+        "  fi",
+        "  if ! command -v tar >/dev/null 2>&1; then",
+        f'    echo "{tag} this image has no tar; installing cold."',
+        "    return 0",
+        "  fi",
+        "  KS_NM_SUM=",
+        "  for KS_T in sha256sum sha1sum md5sum cksum; do",
+        '    if command -v "$KS_T" >/dev/null 2>&1; then KS_NM_SUM=$KS_T; break; fi',
+        "  done",
+        '  [ -n "$KS_NM_SUM" ] || return 0',
+        "  KS_NM_KEY=$( {",
+        "    echo v1",
+        f"    echo {_sh_quote(image)}",
+        f"    echo {_sh_quote(workdir)}",
+        "    cat package.json $KS_NM_LOCKS .npmrc .yarnrc .yarnrc.yml 2>/dev/null",
+        "    node -v 2>/dev/null",
+        "    uname -m 2>/dev/null",
+        '    echo "NODE_ENV=${NODE_ENV:-}"',
+        "  } | \"$KS_NM_SUM\" | tr -dc '0-9a-f' | cut -c1-16 )",
+        '  [ -n "$KS_NM_KEY" ] || return 0',
+        f'  KS_NM_DIR="$KUBESIGHT_CACHE_DIR/{NODE_MODULES_SUBDIR}"',
+        '  KS_NM_ARCHIVE="$KS_NM_DIR/$KS_NM_KEY.tar"',
+        # Checked in, or left by an earlier stage of this build: either way it
+        # is not ours to replace, and not a clean result to save.
+        "  if [ -e node_modules ]; then",
+        f'    echo "{tag} node_modules is already here; leaving it alone."',
+        "    KS_NM_KEY=",
+        "    return 0",
+        "  fi",
+        '  if [ -f "$KS_NM_ARCHIVE" ]; then',
+        "    KS_NM_T0=$(date +%s)",
+        '    if tar -xf - < "$KS_NM_ARCHIVE" 2>/dev/null; then',
+        "      KUBESIGHT_NODE_MODULES_RESTORED=1",
+        "      export KUBESIGHT_NODE_MODULES_RESTORED",
+        # The mtime is what pruning keeps by, so a key in use stays.
+        '      touch "$KS_NM_ARCHIVE" 2>/dev/null || true',
+        f'      echo "{tag} restored $KS_NM_KEY in $(( $(date +%s) - KS_NM_T0 ))s;'
+        ' the install below should find nothing to do."',
+        "    else",
+        f'      echo "{tag} $KS_NM_KEY could not be read; discarding it and installing cold." >&2',
+        '      rm -f "$KS_NM_ARCHIVE" 2>/dev/null',
+        "      find . -path ./.git -prune -o -name node_modules -type d -prune"
+        " -exec rm -rf {} + 2>/dev/null",
+        "    fi",
+        "  else",
+        f'    echo "{tag} nothing saved for this lockfile yet ($KS_NM_KEY);'
+        ' this install runs cold and is saved after."',
+        "  fi",
+        "}",
+        "ks_nm_save() {",
+        '  [ -n "${KS_NM_KEY:-}" ] || return 0',
+        '  [ -z "${KUBESIGHT_NODE_MODULES_RESTORED:-}" ] || return 0',
+        # Every node_modules, not just the root one: a workspace monorepo keeps
+        # one per package, and those are built by the same step 4.
+        "  KS_NM_DIRS=$(find . -path ./.git -prune -o -name node_modules -type d -prune"
+        " -print 2>/dev/null)",
+        '  if [ -z "$KS_NM_DIRS" ]; then',
+        f'    echo "{tag} the install left no node_modules; nothing to save."',
+        "    return 0",
+        "  fi",
+        '  if ! mkdir -p "$KS_NM_DIR" 2>/dev/null; then',
+        f'    echo "{tag} $KS_NM_DIR is not writable; not saved." >&2',
+        "    return 0",
+        "  fi",
+        # Through stdin/stdout rather than -f: GNU tar reads a "host:" prefix
+        # in an -f argument as a remote tape, and every tar streams the same.
+        # Written aside and renamed, so a build that dies mid-write - or a second
+        # pod saving the same key - never leaves half an archive under the real
+        # name.
+        '  KS_NM_TMP="$KS_NM_DIR/.$KS_NM_KEY.${HOSTNAME:-pod}.$$.partial"',
+        "  KS_NM_T0=$(date +%s)",
+        '  if tar -cf - $KS_NM_DIRS 2>/dev/null > "$KS_NM_TMP"'
+        ' && mv -f "$KS_NM_TMP" "$KS_NM_ARCHIVE" 2>/dev/null; then',
+        '    KS_NM_SIZE=$(du -sh "$KS_NM_ARCHIVE" 2>/dev/null | cut -f1)',
+        f'    echo "{tag} saved $KS_NM_KEY (${{KS_NM_SIZE:-?}}) in $(( $(date +%s) - KS_NM_T0 ))s;'
+        ' the next build with this lockfile skips the install."',
+        "  else",
+        '    rm -f "$KS_NM_TMP" 2>/dev/null',
+        f'    echo "{tag} could not write $KS_NM_ARCHIVE; not saved." >&2',
+        "    return 0",
+        "  fi",
+        f'  ls -1t "$KS_NM_DIR"/*.tar 2>/dev/null | tail -n +{keep + 1}'
+        ' | while read -r KS_OLD; do rm -f "$KS_OLD"; done',
+        '  find "$KS_NM_DIR" -name ".*.partial" -mmin +60 -exec rm -f {} + 2>/dev/null',
+        "  return 0",
+        "}",
+        "npm() {",
+        '  if [ "${1:-}" = ci ] && [ -n "${KUBESIGHT_NODE_MODULES_RESTORED:-}" ]; then',
+        "    shift",
+        '    echo "[kubesight] npm ci -> npm install --no-save: node_modules was restored for'
+        ' this exact lockfile, and npm ci would delete it first."',
+        '    command npm install --no-save --prefer-offline --no-audit --no-fund "$@"',
+        "    return",
+        "  fi",
+        '  command npm "$@"',
+        "}",
+        "ks_nm_prepare || true",
+        commands,
+        "KS_NM_RC=$?",
+        'if [ "$KS_NM_RC" -eq 0 ]; then ks_nm_save || true; fi',
+        '(exit "$KS_NM_RC")',
+    ]
+    return "\n".join(lines)

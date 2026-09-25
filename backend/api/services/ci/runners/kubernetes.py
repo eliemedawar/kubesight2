@@ -411,11 +411,42 @@ def _cache_prep() -> str:
     )
 
 
+def _node_modules_cached(execution: StageExecution) -> bool:
+    """Whether this stage keeps its node_modules between builds.
+
+    Only a stage that runs an install - later stages already find node_modules
+    in the shared workspace - and only with the cache on, so a cache-off
+    build's script carries none of it. ``CI_CACHE_NODE_MODULES=0`` switches it
+    off for the installation; a stage's own ``KUBESIGHT_NODE_MODULES_CACHE=0``
+    for that one stage.
+    """
+    return (
+        cache_enabled()
+        and not _is_off(_env("CI_CACHE_NODE_MODULES", "1"))
+        and cache_layout.runs_node_install(execution.commands)
+    )
+
+
+def _node_modules_keep() -> int:
+    """How many lockfiles' node_modules a service keeps; the oldest-used go."""
+    try:
+        return max(1, int(_env("CI_CACHE_NODE_MODULES_KEEP", str(cache_layout.NODE_MODULES_KEEP))))
+    except ValueError:
+        return cache_layout.NODE_MODULES_KEEP
+
+
 def _command_stage_script(execution: StageExecution) -> str:
     workdir = "/workspace/source"
     if execution.working_directory:
         workdir = f"/workspace/source/{execution.working_directory}"
     commands = "\n".join(execution.commands or ["true"])
+    if _node_modules_cached(execution):
+        commands = cache_layout.node_modules_wrap(
+            commands,
+            image=execution.image or "",
+            workdir=execution.working_directory or "",
+            keep=_node_modules_keep(),
+        )
     return _wrap_stage_script(
         f"cd {workdir}\n{commands}",
         continue_on_failure=bool(execution.continue_on_failure),
