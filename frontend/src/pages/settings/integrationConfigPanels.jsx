@@ -7,6 +7,7 @@ import ICONS from "./settingsIcons.jsx";
 
 const ImageRegistriesPage = lazy(() => import("../ImageRegistriesPage.jsx"));
 const TicketingConfigPanel = lazy(() => import("./TicketingConfigPanel.jsx"));
+const TicketAgentConfigPanel = lazy(() => import("./TicketAgentConfigPanel.jsx"));
 
 /**
  * The Configuration tab, per integration.
@@ -207,6 +208,14 @@ export default function ConfigurationPanel({ integration, hasPermission, onChang
 
   if (key === "hermes") {
     return <HermesConfig integration={integration} />;
+  }
+
+  if (key === "ticket_agent") {
+    return (
+      <Suspense fallback={<LoadingState label="Loading configuration..." />}>
+        <TicketAgentConfigPanel canManage={hasPermission("ticketing:manage")} onChanged={onChanged} />
+      </Suspense>
+    );
   }
 
   if (key === "bitbucket") {

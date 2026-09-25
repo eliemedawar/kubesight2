@@ -125,6 +125,12 @@ BuildKit", which is the cluster's job. An agent says so rather than pretending.
 - Git credentials travel as `GIT_CONFIG_*` environment variables, never in
   argv, so they cannot be read from the process list on a shared machine.
 - Declared artifacts are uploaded when the stage succeeds.
+- A stage that installs Node dependencies (`yarn install`, `npm ci`,
+  `pnpm install`...) keeps its `node_modules`, one tar per lockfile, in
+  `.cache/node-modules/<service>/`. It works with or without a container, so on
+  a Mac too. The next build with the same lockfile restores it instead of
+  re-running every package's install script. See `CI-CACHE.md` → *Install
+  dependencies (Node)*. `KUBESIGHT_NODE_MODULES_CACHE=0` on a stage turns it off.
 
 ## Stages in containers (Linux)
 

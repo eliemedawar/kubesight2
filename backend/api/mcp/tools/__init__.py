@@ -15,7 +15,7 @@ The seven domains, and what each answers:
 ``deploys``             apply, dry run, diff, approvals, change bundles, Helm
 ``observability``       pod logs, alerts, alert policies, audit, the dashboard
 ``apps``                application intelligence, app services, clients
-``platform``            registries, ticketing, mobile releases, users, roles
+``platform``            registries, ticketing (+ the ticket agent), mobile releases, users, roles
 ======================  =====================================================
 
 The same seven names split the ``kubesight`` skill into reference files, so an
@@ -44,6 +44,7 @@ from . import deploys  # noqa: F401,E402
 from . import observability  # noqa: F401,E402
 from . import apps  # noqa: F401,E402
 from . import platform  # noqa: F401,E402
+from . import tickets  # noqa: F401,E402  (platform domain: the Hermes ticket agent)
 
 __all__ = [
     "DOMAINS",

@@ -141,6 +141,7 @@ def serialize(row: JiraIntegration) -> Dict[str, Any]:
         "transitionDeployed": row.transition_deployed or "",
         "transitionFailed": row.transition_failed or "",
         "transitionCancelled": row.transition_cancelled or "",
+        "transitionImpediment": row.transition_impediment or "",
         "ticketOwnerEmail": row.ticket_owner_email or "",
         "lastSyncAt": _iso(row.last_sync_at),
         "lastSyncStatus": row.last_sync_status,
@@ -208,6 +209,7 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         ("transitionDeployed", "transition_deployed"),
         ("transitionFailed", "transition_failed"),
         ("transitionCancelled", "transition_cancelled"),
+        ("transitionImpediment", "transition_impediment"),
         ("ticketOwnerEmail", "ticket_owner_email"),
     ):
         if key in payload and payload.get(key) is not None:
@@ -803,7 +805,12 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Deploy automation: a freshly-resolved issue carrying one valid change starts
     # its run immediately when auto-run is on. Never lets automation break the
     # webhook response (maybe_auto_run swallows every error).
-    if record.resolved and error is None and (has_tag or (has_variable and has_value)):
+    # With the Hermes ticket agent on, every issue goes to Hermes instead.
+    from .ticket_agent.engine import on_ticket_received
+
+    if on_ticket_received(record.id):
+        pass
+    elif record.resolved and error is None and (has_tag or (has_variable and has_value)):
         from .deploy_automation_service import maybe_auto_run
 
         maybe_auto_run(record.id)
@@ -840,6 +847,7 @@ _OUTCOME_TRANSITION_ATTR = {
     "deployed": "transition_deployed",
     "failed": "transition_failed",
     "cancelled": "transition_cancelled",
+    "impediment": "transition_impediment",
 }
 
 
@@ -849,6 +857,7 @@ def report_ticket_outcome(
     *,
     comment: Optional[str] = None,
     resolution: Optional[str] = None,
+    public: bool = False,  # noqa: ARG001 — Jira comments already reach the reporter
 ) -> None:
     """Write a finished automation run's result back to its Jira issue.
 
@@ -918,7 +927,7 @@ def list_inbound_tickets(limit: int = 50) -> List[Dict[str, Any]]:
     return shared.list_inbound_tickets(limit, provider=PROVIDER)
 
 
-def post_ticket_comment(ticket_id: Optional[str], comment: str) -> None:
+def post_ticket_comment(ticket_id: Optional[str], comment: str, public: bool = False) -> None:  # noqa: ARG001
     """Post a standalone comment on an issue (used by the rollout watcher)."""
     if not (ticket_id and comment):
         return

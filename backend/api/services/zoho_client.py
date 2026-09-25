@@ -700,6 +700,29 @@ def add_ticket_comment(
     return payload
 
 
+def get_ticket(cfg: ZohoConfig, ticket_id: str) -> Dict[str, Any]:
+    """One ticket (subject, description as HTML, status, custom fields)."""
+    url = f"{cfg.api_base.rstrip('/')}/tickets/{ticket_id}"
+    status, payload = _ticket_request(cfg, "GET", url)
+    if status != 200:
+        raise ZohoError(_error_detail("Reading the Zoho ticket failed", status, payload), status)
+    return payload
+
+
+def list_ticket_comments(cfg: ZohoConfig, ticket_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """The ticket's newest comments (``content`` is HTML or plain text)."""
+    url = (
+        f"{cfg.api_base.rstrip('/')}/tickets/{ticket_id}/comments"
+        f"?from=0&limit={max(1, min(int(limit), 50))}&sortBy=-commentedTime"
+    )
+    status, payload = _ticket_request(cfg, "GET", url)
+    if status == 204:
+        return []
+    if status != 200:
+        raise ZohoError(_error_detail("Reading the Zoho comments failed", status, payload), status)
+    return [c for c in payload.get("data") or [] if isinstance(c, dict)]
+
+
 def _error_detail(prefix: str, status: int, payload: Dict[str, Any]) -> str:
     detail = ""
     if isinstance(payload, dict):

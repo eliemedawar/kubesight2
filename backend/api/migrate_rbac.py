@@ -934,6 +934,9 @@ def _migrate_zoho_integration_columns() -> None:
         _add_column_if_missing("zoho_integration", "ticket_status_failed", "VARCHAR(120) DEFAULT 'Failed'")
         _add_column_if_missing("zoho_integration", "ticket_status_cancelled", "VARCHAR(120) DEFAULT 'Canceled'")
         _add_column_if_missing(
+            "zoho_integration", "ticket_status_impediment", "VARCHAR(120) DEFAULT 'Impediment'"
+        )
+        _add_column_if_missing(
             "zoho_integration", "ticket_owner_email", "VARCHAR(255) DEFAULT 'zagent@areeba.com'"
         )
         # Variable-change automation (Variable picklist + Value field + App->Variable cascade).
@@ -953,6 +956,11 @@ def _migrate_zoho_integration_columns() -> None:
     if "zoho_inbound_tickets" in inspect(db.engine).get_table_names():
         _add_column_if_missing("zoho_inbound_tickets", "variable_name", "TEXT")
         _add_column_if_missing("zoho_inbound_tickets", "variable_value", "TEXT")
+    # Hermes ticket agent (2026-09-25): the impediment status/transition.
+    if "jira_integration" in inspect(db.engine).get_table_names():
+        _add_column_if_missing(
+            "jira_integration", "transition_impediment", "VARCHAR(120) DEFAULT 'Impediment'"
+        )
 
 
 def _migrate_ticketing_tables() -> None:

@@ -61,6 +61,9 @@ import { markTourSeen, readTourState, setToursMuted } from "./utils/tourStorage.
 // changes what teammates see.
 const withLocalTheme = (settings) => ({ ...settings, theme: readThemePreference() });
 
+// How often the Resources page re-reads the active tab from the cluster while Live is on.
+const RESOURCES_LIVE_INTERVAL_MS = 5_000;
+
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const OnboardingPage = lazy(() => import("./pages/OnboardingPage.jsx"));
 const NoFeaturesPage = lazy(() =>
@@ -370,6 +373,23 @@ export default function App() {
     return "";
   }, [resourceCacheEnabled, resolvedActivePage, resourceActiveTab]);
 
+  // Resources page streams status by polling the cluster; the viewer can pause it.
+  const [resourcesLive, setResourcesLive] = useState(() => {
+    try {
+      return window.localStorage.getItem("kubesight.resources.live") !== "off";
+    } catch {
+      return true;
+    }
+  });
+  const handleResourcesLiveChange = useCallback((next) => {
+    setResourcesLive(next);
+    try {
+      window.localStorage.setItem("kubesight.resources.live", next ? "on" : "off");
+    } catch {
+      // Per-browser convenience only.
+    }
+  }, []);
+
   const {
     resources: cachedResources,
     rawResources: cachedRawResources,
@@ -386,6 +406,8 @@ export default function App() {
     activeListKey: activeResourceListKey,
     enabled: resourceCacheEnabled,
     filterResources: getAllowedResources,
+    liveIntervalMs:
+      resourcesLive && pageNeedsResourceTabs(resolvedActivePage) ? RESOURCES_LIVE_INTERVAL_MS : 0,
   });
 
   const allowedResources = useMemo(
@@ -1769,6 +1791,9 @@ export default function App() {
             onRefreshTab={() => refreshResourceTab(listKeyForTab(resourceActiveTab))}
             tabLoading={isTabLoading(listKeyForTab(resourceActiveTab))}
             tabRefreshing={isTabRefreshing(listKeyForTab(resourceActiveTab))}
+            live={resourcesLive}
+            liveIntervalMs={RESOURCES_LIVE_INTERVAL_MS}
+            onLiveChange={handleResourcesLiveChange}
             isTabLoaded={isTabLoaded}
             tabErrors={resourceTabErrors}
             accessError={pageAccessError}

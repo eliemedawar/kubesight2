@@ -128,6 +128,7 @@ def serialize(row: ZohoIntegration) -> Dict[str, Any]:
         "ticketStatusDeployed": row.ticket_status_deployed or "Closed",
         "ticketStatusFailed": row.ticket_status_failed or "Failed",
         "ticketStatusCancelled": row.ticket_status_cancelled or "Canceled",
+        "ticketStatusImpediment": row.ticket_status_impediment or "Impediment",
         "ticketOwnerEmail": row.ticket_owner_email or "",
         "lastSyncAt": _iso(row.last_sync_at),
         "lastSyncStatus": row.last_sync_status,
@@ -466,6 +467,7 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         ("ticketStatusDeployed", "ticket_status_deployed"),
         ("ticketStatusFailed", "ticket_status_failed"),
         ("ticketStatusCancelled", "ticket_status_cancelled"),
+        ("ticketStatusImpediment", "ticket_status_impediment"),
         ("ticketOwnerEmail", "ticket_owner_email"),
     ):
         if key in payload and payload.get(key) is not None:
@@ -1591,7 +1593,15 @@ def resolve_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
     # carrying one valid change (tag OR variable+value) starts its run
     # immediately. Never lets automation break the webhook response to Zoho
     # (maybe_auto_run swallows every error).
-    if record.resolved and error is None and (has_tag or (has_variable and has_value)):
+    #
+    # With the Hermes ticket agent on, EVERY ticket goes to Hermes instead —
+    # including ones the dropdown match could not resolve — and the auto-run
+    # stays out of the way so a ticket is never handled twice.
+    from .ticket_agent.engine import on_ticket_received
+
+    if on_ticket_received(record.id):
+        pass
+    elif record.resolved and error is None and (has_tag or (has_variable and has_value)):
         from .deploy_automation_service import maybe_auto_run
 
         maybe_auto_run(record.id)
@@ -1643,13 +1653,19 @@ def _prune_inbound_tickets(keep: int = INBOUND_TICKET_RETENTION) -> int:
         .offset(max(1, int(keep)))
         .all()
     )
+    from .ticket_agent import engine as ticket_agent
+
     deleted = 0
     for row in overflow:
         runs = DeployAutomationRun.query.filter_by(ticket_record_id=row.id).all()
         if any(r.status in OPEN_STATUSES for r in runs):
             continue
+        # Hermes still working on it (or waiting on an approval) — keep it.
+        if ticket_agent.ticket_has_open_task(row.id):
+            continue
         for run in runs:
             db.session.delete(run)
+        ticket_agent.delete_for_ticket(row.id)
         db.session.delete(row)
         deleted += 1
     if deleted:
@@ -1673,6 +1689,9 @@ def delete_inbound_ticket(record_id: int) -> Optional[Dict[str, Any]]:
         "ticketNumber": row.ticket_number,
         "resolved": bool(row.resolved),
     }
+    from .ticket_agent import engine as ticket_agent
+
+    ticket_agent.delete_for_ticket(row.id)
     db.session.delete(row)
     db.session.commit()
     return info
@@ -1706,6 +1725,9 @@ def list_inbound_tickets(limit: int = 50, provider: Optional[str] = "zoho") -> L
         if snapshot_ids
         else {}
     )
+    from .ticket_agent import engine as ticket_agent
+
+    agent_tasks = ticket_agent.tasks_by_ticket([r.id for r in rows])
     out: List[Dict[str, Any]] = []
     for r in rows:
         snapshot = snapshots.get(r.app_service_id) if r.app_service_id else None
@@ -1728,6 +1750,8 @@ def list_inbound_tickets(limit: int = 50, provider: Optional[str] = "zoho") -> L
                 "resolved": bool(r.resolved),
                 "error": r.error,
                 "receivedAt": _iso(r.received_at),
+                # Hermes ticket agent tasks for this ticket, newest first.
+                "agentTasks": agent_tasks.get(r.id, []),
             }
         )
     return out
@@ -1746,6 +1770,8 @@ _OUTCOME_STATUS_ATTR = {
     "deployed": "ticket_status_deployed",
     "failed": "ticket_status_failed",
     "cancelled": "ticket_status_cancelled",
+    # Hermes ticket agent: not understandable / approval refused.
+    "impediment": "ticket_status_impediment",
 }
 
 
@@ -1770,6 +1796,7 @@ def report_ticket_outcome(
     *,
     comment: Optional[str] = None,
     resolution: Optional[str] = None,
+    public: bool = False,
 ) -> None:
     """Write a finished automation run's result back to its Desk ticket.
 
@@ -1816,14 +1843,14 @@ def report_ticket_outcome(
                 logger.warning("Zoho ticket resolution update failed (%s)", ticket_id, exc_info=True)
         if comment:
             try:
-                zoho_client.add_ticket_comment(cfg, ticket_id, comment)
+                zoho_client.add_ticket_comment(cfg, ticket_id, comment, is_public=public)
             except Exception:
                 logger.warning("Zoho ticket comment failed (%s)", ticket_id, exc_info=True)
 
     _dispatch_ticket_work(_work)
 
 
-def post_ticket_comment(ticket_id: Optional[str], comment: str) -> None:
+def post_ticket_comment(ticket_id: Optional[str], comment: str, public: bool = False) -> None:
     """Post a comment on a Desk ticket WITHOUT touching status/owner/resolution.
 
     Used by follow-on automations (e.g. Mobile Applications reporting that a
@@ -1843,8 +1870,40 @@ def post_ticket_comment(ticket_id: Optional[str], comment: str) -> None:
 
     def _work() -> None:
         try:
-            zoho_client.add_ticket_comment(cfg, ticket_id, comment)
+            zoho_client.add_ticket_comment(cfg, ticket_id, comment, is_public=public)
         except Exception:
             logger.warning("Zoho ticket comment failed (%s)", ticket_id, exc_info=True)
 
     _dispatch_ticket_work(_work)
+
+
+def fetch_ticket_details(ticket_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The ticket's description and latest comments, read from Desk.
+
+    For the Hermes ticket agent: a webhook carries only the fields it was set
+    up to send, and the description is where a free-text request lives. Needs
+    OAuth (not write-back); returns None when it can't read. Synchronous —
+    called from the agent's worker thread, never from a webhook.
+    """
+    if not ticket_id:
+        return None
+    row = get_or_create_config()
+    if not (row.refresh_token_encrypted and row.client_id and row.org_id):
+        return None
+    cfg = _to_client_config(row)
+    out: Dict[str, Any] = {"description": None, "comments": []}
+    try:
+        ticket = zoho_client.get_ticket(cfg, str(ticket_id))
+        out["description"] = ticket.get("description")
+    except Exception:
+        logger.warning("Zoho ticket read failed (%s)", ticket_id, exc_info=True)
+        return None
+    try:
+        out["comments"] = [
+            c.get("content")
+            for c in zoho_client.list_ticket_comments(cfg, str(ticket_id))
+            if c.get("content")
+        ]
+    except Exception:
+        logger.warning("Zoho ticket comments read failed (%s)", ticket_id, exc_info=True)
+    return out

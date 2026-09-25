@@ -242,6 +242,13 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         # Platform
         "kubesight_automation_run_start",
         "kubesight_automation_run_cancel",
+        # The Hermes ticket agent: act on a ticket (checked against the
+        # catalog and the confidence bar), park it behind a human approval,
+        # move it, comment on it. Approving is deliberately NOT a tool.
+        "kubesight_ticket_execute",
+        "kubesight_ticket_request_approval",
+        "kubesight_ticket_set_status",
+        "kubesight_ticket_comment",
     }
 
 
@@ -1122,6 +1129,7 @@ _SMOKE_ARGUMENTS = {
     "stageId": 1,
     "release": "anything",
     "provider": "zoho",
+    "ticketRecordId": 1,
     "image": "registry.example.com/app:1.0.0",
     "path": "README.md",
     "yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n",

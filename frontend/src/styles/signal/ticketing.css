@@ -1619,3 +1619,37 @@
   background: var(--warn-soft, var(--bg-inset));
   line-height: 1.5;
 }
+
+/* ── Hermes ticket agent: one card per task, above the runs ─────── */
+.sg-zh-agent {
+  border-left: 3px solid var(--accent-border);
+}
+.sg-zh-agent-line {
+  margin: 0 0 0.45rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.sg-zh-agent-quote {
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 2px solid var(--border);
+  background: var(--accent-soft);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sg-zh-agent-reasons {
+  margin: 0 0 0.5rem;
+  padding-left: 1.1rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.sg-zh-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}

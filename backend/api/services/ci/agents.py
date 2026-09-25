@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ...audit import log_audit
 from ...db import db
+from . import cache_layout
 from ...models_ci import RUNNER_TYPES, CiAgentTask, CiBuild, CiBuildStage, CiRunner
 
 logger = logging.getLogger(__name__)
@@ -372,7 +373,42 @@ def _task_payload(build: CiBuild, stage: CiBuildStage, task: CiAgentTask) -> Dic
             ),
             "token": (execution.secrets or {}).get("KUBESIGHT_GIT_TOKEN", ""),
         }
+    else:
+        _add_node_modules_cache(payload, execution)
     return payload
+
+
+def _add_node_modules_cache(payload: Dict[str, Any], execution) -> None:
+    """Keep node_modules between builds on an agent, as the Kubernetes runner does.
+
+    The restore/save shell is added to the commands HERE, on the server, rather
+    than copied into the agent script: one text for every runner, and an agent
+    that is never upgraded still gets it. The agent's part is only to say where
+    the archives go - ``cacheSlug`` is the directory name it uses, already made
+    safe by the same rule as the cluster's per-service subtree. An agent too old
+    to know ``cacheSlug`` runs the wrapper against ``$KUBESIGHT_CACHE_DIR`` in a
+    container, and as a plain install without one.
+    """
+    payload["cacheSlug"] = cache_layout.slug_dir(execution.service_slug)
+    if os.getenv("CI_CACHE_NODE_MODULES", "1").strip().lower() in _NODE_MODULES_OFF:
+        return
+    if not cache_layout.runs_node_install(execution.commands):
+        return
+    try:
+        keep = max(1, int(os.getenv("CI_CACHE_NODE_MODULES_KEEP", "") or cache_layout.NODE_MODULES_KEEP))
+    except ValueError:
+        keep = cache_layout.NODE_MODULES_KEEP
+    payload["commands"] = [
+        cache_layout.node_modules_wrap(
+            "\n".join(execution.commands or ["true"]),
+            image=execution.image or "",
+            workdir=execution.working_directory or "",
+            keep=keep,
+        )
+    ]
+
+
+_NODE_MODULES_OFF = {"off", "none", "no", "0", "false"}
 
 
 def authorize_task(runner: CiRunner, task_id: int, claim_token: str) -> CiAgentTask:

@@ -208,8 +208,12 @@ def report_outcome(
     *,
     comment: Optional[str] = None,
     resolution: Optional[str] = None,
+    public: bool = False,
 ) -> None:
     """Route a finished run's write-back to whichever provider owns the ticket.
+
+    ``public`` makes the comment visible to the requester where the provider
+    distinguishes (Desk comments are private by default; Jira's are not).
 
     Deploy automation is provider-agnostic — it only knows the intake row — so
     this is where the ticket's ``provider`` column turns back into a vendor call.
@@ -220,19 +224,21 @@ def report_outcome(
         return
     try:
         provider.sync.report_ticket_outcome(
-            ticket_id, outcome, comment=comment, resolution=resolution
+            ticket_id, outcome, comment=comment, resolution=resolution, public=public
         )
     except Exception:  # noqa: BLE001 — best-effort by contract
         pass
 
 
-def post_comment(provider_key: str, ticket_id: Optional[str], comment: str) -> None:
-    """Route a standalone comment (rollout watcher) to the owning provider."""
+def post_comment(
+    provider_key: str, ticket_id: Optional[str], comment: str, public: bool = False
+) -> None:
+    """Route a standalone comment (rollout watcher, ticket agent) to the owning provider."""
     provider = get(provider_key)
     if provider is None:
         return
     try:
-        provider.sync.post_ticket_comment(ticket_id, comment)
+        provider.sync.post_ticket_comment(ticket_id, comment, public=public)
     except Exception:  # noqa: BLE001 — best-effort by contract
         pass
 

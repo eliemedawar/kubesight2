@@ -189,6 +189,9 @@ export default function ResourcesPage({
   onRefreshTab,
   tabLoading = false,
   tabRefreshing = false,
+  live = false,
+  liveIntervalMs = 5000,
+  onLiveChange,
   isTabLoaded = () => false,
   tabErrors = {},
   accessError = "",
@@ -236,15 +239,21 @@ export default function ResourcesPage({
     setExecModal(CLOSED_EXEC_MODAL);
   }, []);
 
-  const loadAllNsIssues = useCallback(async () => {
+  const loadAllNsIssues = useCallback(async ({ background = false } = {}) => {
     if (!clusterId) {
       return;
     }
-    setAllNsData((prev) => ({ ...prev, loading: true, error: "" }));
+    if (!background) {
+      setAllNsData((prev) => ({ ...prev, loading: true, error: "" }));
+    }
     try {
       const payload = await getClusterPodIssues(clusterId);
       setAllNsData({ pods: payload.pods || [], loading: false, error: "" });
     } catch (err) {
+      // A failed live tick keeps the last scan on screen.
+      if (background) {
+        return;
+      }
       setAllNsData({
         pods: [],
         loading: false,
@@ -265,6 +274,27 @@ export default function ResourcesPage({
       loadAllNsIssues();
     }
   }, [allNsMode, loadAllNsIssues]);
+
+  // The per-namespace tabs go live in the resource cache; the cross-namespace
+  // scan is local to this page, so it polls here (a little slower — it walks every namespace).
+  useEffect(() => {
+    if (!allNsMode || !live) {
+      return undefined;
+    }
+    let busy = false;
+    const timer = window.setInterval(async () => {
+      if (busy || document.hidden) {
+        return;
+      }
+      busy = true;
+      try {
+        await loadAllNsIssues({ background: true });
+      } finally {
+        busy = false;
+      }
+    }, liveIntervalMs * 2);
+    return () => window.clearInterval(timer);
+  }, [allNsMode, live, liveIntervalMs, loadAllNsIssues]);
 
   const openTextInspect = useCallback(async ({ title, mode, fetchContent }) => {
     setInspectModal({
@@ -885,11 +915,27 @@ export default function ResourcesPage({
                   {allNsMode ? "All namespaces ✓" : "All namespaces"}
                 </button>
               ) : null}
+              {onLiveChange ? (
+                <button
+                  type="button"
+                  className={`btn-outline btn-sm resources-live-toggle${live ? " active" : ""}`}
+                  onClick={() => onLiveChange(!live)}
+                  aria-pressed={live}
+                  title={
+                    live
+                      ? `Live: statuses update every ${Math.round(liveIntervalMs / 1000)}s. Click to pause.`
+                      : "Paused: click to update statuses automatically"
+                  }
+                >
+                  <span className="resources-live-dot" aria-hidden="true" />
+                  {live ? "Live" : "Paused"}
+                </button>
+              ) : null}
               {onRefreshTab ? (
                 <button
                   type="button"
                   className="btn-outline btn-sm resources-tab-refresh"
-                  onClick={isAllNsPods ? loadAllNsIssues : onRefreshTab}
+                  onClick={isAllNsPods ? () => loadAllNsIssues() : onRefreshTab}
                   disabled={isAllNsPods ? allNsData.loading : tabLoading || tabRefreshing}
                   aria-busy={isAllNsPods ? allNsData.loading : tabRefreshing}
                 >

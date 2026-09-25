@@ -533,6 +533,11 @@ def node_modules_wrap(
     directory. NODE_ENV too, because production installs leave out
     devDependencies.
 
+    The same text runs on every runner: the Kubernetes one wraps its stage
+    script with it, and the server wraps an agent task's commands with it
+    before sending them, so the Linux and Mac agents need no copy of their own
+    - only a ``KUBESIGHT_NODE_MODULES_DIR`` to put the archives in.
+
     A restore is never re-saved - the same key means the same inputs - and an
     ``npm ci`` after one would delete it, so that one call becomes
     ``npm install --no-save``: the tree already matches the lockfile, which is
@@ -544,7 +549,13 @@ def node_modules_wrap(
     lines = [
         "ks_nm_prepare() {",
         "  KS_NM_KEY=",
-        '  [ -n "${KUBESIGHT_CACHE_DIR:-}" ] || return 0',
+        # KUBESIGHT_NODE_MODULES_DIR is how an agent names its own per-service
+        # directory (its cache is one folder for every service, and a Mac agent
+        # has no KUBESIGHT_CACHE_DIR at all). Kubernetes leaves it unset and the
+        # service's own subtree is the answer.
+        '  KS_NM_DIR="${KUBESIGHT_NODE_MODULES_DIR:-}"',
+        f'  if [ -z "$KS_NM_DIR" ] && [ -n "${{KUBESIGHT_CACHE_DIR:-}}" ]; then KS_NM_DIR="$KUBESIGHT_CACHE_DIR/{NODE_MODULES_SUBDIR}"; fi',
+        '  [ -n "$KS_NM_DIR" ] || return 0',
         '  case "${KUBESIGHT_NODE_MODULES_CACHE:-1}" in',
         "    0|false|off|no|FALSE|OFF|NO)",
         f'      echo "{tag} off for this stage (KUBESIGHT_NODE_MODULES_CACHE)."',
@@ -563,7 +574,8 @@ def node_modules_wrap(
         "    return 0",
         "  fi",
         "  KS_NM_SUM=",
-        "  for KS_T in sha256sum sha1sum md5sum cksum; do",
+        # shasum is what a Mac has; cksum is POSIX and always there.
+        "  for KS_T in sha256sum sha1sum shasum md5sum cksum; do",
         '    if command -v "$KS_T" >/dev/null 2>&1; then KS_NM_SUM=$KS_T; break; fi',
         "  done",
         '  [ -n "$KS_NM_SUM" ] || return 0',
@@ -573,11 +585,11 @@ def node_modules_wrap(
         f"    echo {_sh_quote(workdir)}",
         "    cat package.json $KS_NM_LOCKS .npmrc .yarnrc .yarnrc.yml 2>/dev/null",
         "    node -v 2>/dev/null",
-        "    uname -m 2>/dev/null",
+        # -s as well as -m: a host-mode agent builds native modules for its OS.
+        "    uname -sm 2>/dev/null",
         '    echo "NODE_ENV=${NODE_ENV:-}"',
         "  } | \"$KS_NM_SUM\" | tr -dc '0-9a-f' | cut -c1-16 )",
         '  [ -n "$KS_NM_KEY" ] || return 0',
-        f'  KS_NM_DIR="$KUBESIGHT_CACHE_DIR/{NODE_MODULES_SUBDIR}"',
         '  KS_NM_ARCHIVE="$KS_NM_DIR/$KS_NM_KEY.tar"',
         # Checked in, or left by an earlier stage of this build: either way it
         # is not ours to replace, and not a clean result to save.

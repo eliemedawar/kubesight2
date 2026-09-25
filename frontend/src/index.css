@@ -1432,6 +1432,50 @@ tr:last-child td {
   background: var(--accent-soft);
 }
 
+.resources-live-toggle {
+  flex-shrink: 0;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.resources-live-toggle.active,
+.resources-live-toggle.active:hover {
+  border-color: var(--ok-border);
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.resources-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.45;
+}
+
+.resources-live-toggle.active .resources-live-dot {
+  opacity: 1;
+  animation: resources-live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes resources-live-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--ok-border);
+  }
+  50% {
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .resources-live-toggle.active .resources-live-dot {
+    animation: none;
+  }
+}
+
 .resource-tab-error {
   color: var(--danger);
 }

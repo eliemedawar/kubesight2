@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import EmptyState from "../common/EmptyState.jsx";
 import { useTicketing } from "../ticketing/TicketingContext.jsx";
-import { IconChevronRight, IconPlay, IconTrash } from "./icons.jsx";
+import { IconChevronRight, IconPlay, IconRefresh, IconTrash } from "./icons.jsx";
+import AgentTaskCard, { AgentTaskPill } from "./AgentTaskCard.jsx";
 import { CopyButton } from "./common.jsx";
 import { ACTIVE_RUN_STATUSES, RunDetail, RunStatusPill } from "./ZohoRunDetail.jsx";
 
@@ -10,7 +11,14 @@ const FILTERS = [
   { key: "unresolved", label: "Unresolved" },
   { key: "active", label: "Running" },
   { key: "approval", label: "Awaiting approval" },
+  { key: "impediment", label: "Impediment" },
 ];
+
+// The ticket's first Hermes reading (the handle task) — what the column shows.
+const handleTask = (t) => (t.agentTasks || []).find((task) => task.kind === "handle");
+const agentWaiting = (t) => (t.agentTasks || []).some((task) => task.status === "awaiting_approval");
+// Hermes can be asked again once it has settled on something other than a run.
+const REHANDLE = new Set(["impediment", "error", "superseded", "done"]);
 
 // Inbound room: webhook setup strip, triage filters, and one table where each
 // ticket owns its automation runs (expand a row to see the pipeline).
@@ -28,6 +36,12 @@ export default function ZohoTicketsTab({
   cancellingRunId,
   onDeleteTicket,
   deletingTicketId,
+  agentActive = false,
+  onApproveTask,
+  onRejectTask,
+  decidingTaskId,
+  onHandleAgain,
+  handlingTicketId,
 }) {
   const { name: providerName } = useTicketing();
   const [filter, setFilter] = useState("all");
@@ -57,7 +71,9 @@ export default function ZohoTicketsTab({
       all: tickets.length,
       unresolved: tickets.filter((t) => !t.resolved).length,
       active: tickets.filter((t) => ACTIVE_RUN_STATUSES.has(latest(t)?.status)).length,
-      approval: tickets.filter((t) => latest(t)?.status === "awaiting_approval").length,
+      approval: tickets.filter((t) => latest(t)?.status === "awaiting_approval" || agentWaiting(t))
+        .length,
+      impediment: tickets.filter((t) => handleTask(t)?.status === "impediment").length,
     };
   }, [tickets, runsByTicket]);
 
@@ -66,7 +82,8 @@ export default function ZohoTicketsTab({
     const latest = runsByTicket.get(t.id)?.[0];
     if (filter === "unresolved" && t.resolved) return false;
     if (filter === "active" && !ACTIVE_RUN_STATUSES.has(latest?.status)) return false;
-    if (filter === "approval" && latest?.status !== "awaiting_approval") return false;
+    if (filter === "approval" && latest?.status !== "awaiting_approval" && !agentWaiting(t)) return false;
+    if (filter === "impediment" && handleTask(t)?.status !== "impediment") return false;
     if (!query) return true;
     return [
       t.ticketNumber,
@@ -156,6 +173,7 @@ export default function ZohoTicketsTab({
                   <th>Deployment</th>
                   <th>Change</th>
                   <th>Resolution</th>
+                  <th>Hermes</th>
                   <th>Automation</th>
                   {canManage ? <th aria-label="Actions" /> : null}
                 </tr>
@@ -164,18 +182,21 @@ export default function ZohoTicketsTab({
                 {visible.map((t) => {
                   const ticketRuns = runsByTicket.get(t.id) || [];
                   const latest = ticketRuns[0];
-                  const isOpen = expanded.has(t.id) && ticketRuns.length > 0;
-                  const cols = canManage ? 8 : 7;
+                  const tasks = t.agentTasks || [];
+                  const hasDetail = ticketRuns.length > 0 || tasks.length > 0;
+                  const isOpen = expanded.has(t.id) && hasDetail;
+                  const cols = canManage ? 9 : 8;
+                  const firstReading = handleTask(t);
                   return [
                     <tr
                       key={t.id}
-                      className={`sg-zh-trow ${ticketRuns.length ? "sg-zh-trow--exp" : ""} ${
+                      className={`sg-zh-trow ${hasDetail ? "sg-zh-trow--exp" : ""} ${
                         isOpen ? "sg-zh-trow--open" : ""
                       }`}
-                      onClick={ticketRuns.length ? () => toggle(t.id) : undefined}
+                      onClick={hasDetail ? () => toggle(t.id) : undefined}
                     >
                       <td className="sg-zh-tdchev">
-                        {ticketRuns.length ? (
+                        {hasDetail ? (
                           <button
                             type="button"
                             className="btn-ghost sg-zh-chev"
@@ -242,6 +263,12 @@ export default function ZohoTicketsTab({
                         )}
                       </td>
                       <td>
+                        <AgentTaskPill task={firstReading} />
+                        {agentWaiting(t) && firstReading?.status !== "awaiting_approval" ? (
+                          <span className="status-pill warn">Needs approval</span>
+                        ) : null}
+                      </td>
+                      <td>
                         {latest ? (
                           <>
                             <RunStatusPill status={latest.status} />
@@ -255,6 +282,22 @@ export default function ZohoTicketsTab({
                       </td>
                       {canManage ? (
                         <td className="sg-zh-tactions" onClick={(e) => e.stopPropagation()}>
+                          {agentActive &&
+                          REHANDLE.has(firstReading?.status) &&
+                          !ACTIVE_RUN_STATUSES.has(latest?.status) ? (
+                            <button
+                              type="button"
+                              className="btn-ghost sg-zh-trun"
+                              onClick={() => onHandleAgain(t)}
+                              disabled={handlingTicketId === t.id}
+                              title="Hand this ticket to Hermes again (e.g. after the requester fixed it)"
+                              aria-label={`Ask Hermes again about ticket ${
+                                t.ticketNumber || t.ticketId || t.id
+                              }`}
+                            >
+                              <IconRefresh />
+                            </button>
+                          ) : null}
                           {canRun(t, latest) ? (
                             <button
                               type="button"
@@ -286,6 +329,16 @@ export default function ZohoTicketsTab({
                       <tr key={`${t.id}-detail`} className="sg-zh-tdetail">
                         <td colSpan={cols}>
                           <div className="sg-zh-tdetail-runs">
+                            {tasks.map((task) => (
+                              <AgentTaskCard
+                                key={`task-${task.id}`}
+                                task={task}
+                                canManage={canManage}
+                                deciding={decidingTaskId === task.id}
+                                onApprove={onApproveTask}
+                                onReject={onRejectTask}
+                              />
+                            ))}
                             {ticketRuns.map((run) => (
                               <RunDetail
                                 key={run.id}

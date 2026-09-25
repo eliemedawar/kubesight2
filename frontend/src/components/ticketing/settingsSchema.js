@@ -241,6 +241,13 @@ const ZOHO_SECTIONS = [
       { key: "ticketStatusDeployed", row: "status", label: "Status — deployed", placeholder: "Closed", default: "Closed" },
       { key: "ticketStatusFailed", row: "status", label: "Status — failed", placeholder: "Failed", default: "Failed" },
       { key: "ticketStatusCancelled", row: "status", label: "Status — canceled", placeholder: "Canceled", default: "Canceled" },
+      {
+        key: "ticketStatusImpediment",
+        label: "Status — impediment (Hermes ticket agent)",
+        title: "Where Hermes parks a ticket it cannot act on — create this status in Desk first",
+        placeholder: "Impediment",
+        default: "Impediment",
+      },
     ],
   },
 ];
@@ -441,6 +448,13 @@ const JIRA_SECTIONS = [
       { key: "transitionDeployed", row: "status", label: "Transition — deployed", placeholder: "Done", default: "Done" },
       { key: "transitionFailed", row: "status", label: "Transition — failed", placeholder: "Done", default: "Done" },
       { key: "transitionCancelled", row: "status", label: "Transition — cancelled", placeholder: "Done", default: "Done" },
+      {
+        key: "transitionImpediment",
+        label: "Transition — impediment (Hermes ticket agent)",
+        title: "Where Hermes parks an issue it cannot act on",
+        placeholder: "Impediment",
+        default: "Impediment",
+      },
     ],
   },
 ];

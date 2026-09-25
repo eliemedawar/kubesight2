@@ -8,6 +8,12 @@ import ZohoFlowStrip from "../zoho/ZohoFlowStrip.jsx";
 import ZohoOverviewTab from "../zoho/ZohoOverviewTab.jsx";
 import { ACTIVE_RUN_STATUSES } from "../zoho/ZohoRunDetail.jsx";
 import ZohoTicketsTab from "../zoho/ZohoTicketsTab.jsx";
+import {
+  approveAgentTask,
+  getTicketAgentSettings,
+  handleTicketAgain,
+  rejectAgentTask,
+} from "../../api/ticketAgentApi.js";
 import { useTicketing } from "./TicketingContext.jsx";
 
 // One provider's workspace: command bar → flow strip → three rooms. This is the
@@ -52,6 +58,11 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   const [startingTicketId, setStartingTicketId] = useState(null);
   const [cancellingRunId, setCancellingRunId] = useState(null);
 
+  // Hermes ticket agent (Hermes handles each ticket through the MCP tools).
+  const [agentActive, setAgentActive] = useState(false);
+  const [decidingTaskId, setDecidingTaskId] = useState(null);
+  const [handlingTicketId, setHandlingTicketId] = useState(null);
+
   const webhookUrl =
     typeof window !== "undefined"
       ? `${window.location.origin.replace(/\/$/, "")}/api/ticketing/${providerKey}/inbound`
@@ -72,6 +83,9 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
       const ticketsPromise = api.listInboundTickets(10).catch(() => ({ items: [] }));
       const jenkinsPromise = api.getJenkinsConfig().catch(() => null);
       const runsPromise = api.listAutomationRuns(50).catch(() => ({ items: [] }));
+      getTicketAgentSettings()
+        .then((agent) => setAgentActive(Boolean(agent?.active)))
+        .catch(() => setAgentActive(false));
       try {
         setConfig(await api.getConfig());
       } catch (err) {
@@ -128,6 +142,93 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
     }, 10000);
     return () => clearInterval(timer);
   }, [hasActiveRun, api]);
+
+  // While Hermes is reading a ticket (or a task waits on a human), poll the
+  // ticket log too — that is where the agent's tasks ride.
+  const agentBusy = tickets.some((t) =>
+    (t.agentTasks || []).some((task) =>
+      ["pending", "running", "awaiting_approval", "deciding"].includes(task.status)
+    )
+  );
+  useEffect(() => {
+    if (!agentBusy) return undefined;
+    const timer = setInterval(async () => {
+      try {
+        const [inbound, res] = await Promise.all([
+          api.listInboundTickets(10),
+          api.listAutomationRuns(50),
+        ]);
+        setTickets(inbound?.items || []);
+        setRuns(res?.items || []);
+      } catch {
+        /* transient — next poll retries */
+      }
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [agentBusy, api]);
+
+  const refreshTickets = async () => {
+    try {
+      const inbound = await api.listInboundTickets(10);
+      setTickets(inbound?.items || []);
+    } catch {
+      /* best-effort */
+    }
+  };
+
+  const approveTask = async (task) => {
+    if (!window.confirm(`Approve and run what Hermes proposed for ${task.ticketNumber || "this ticket"}?`)) {
+      return;
+    }
+    setError("");
+    setNotice("");
+    setDecidingTaskId(task.id);
+    try {
+      const done = await approveAgentTask(task.id);
+      setNotice(`Approved — run #${done.runId} started.`);
+      await Promise.all([refreshTickets(), refreshRuns()]);
+    } catch (err) {
+      setError(err.message || "Failed to approve.");
+      await refreshTickets();
+    } finally {
+      setDecidingTaskId(null);
+    }
+  };
+
+  const rejectTask = async (task) => {
+    const note = window.prompt(
+      "Reject this request? Optionally say why — Hermes uses it in its comment to the requester.",
+      ""
+    );
+    if (note === null) return;
+    setError("");
+    setNotice("");
+    setDecidingTaskId(task.id);
+    try {
+      await rejectAgentTask(task.id, note);
+      setNotice("Rejected — Hermes will tell the requester and park the ticket.");
+      await refreshTickets();
+    } catch (err) {
+      setError(err.message || "Failed to reject.");
+    } finally {
+      setDecidingTaskId(null);
+    }
+  };
+
+  const handleAgain = async (ticket) => {
+    setError("");
+    setNotice("");
+    setHandlingTicketId(ticket.id);
+    try {
+      await handleTicketAgain(ticket.id);
+      setNotice(`Handed ${ticket.ticketNumber || ticket.ticketId || "the ticket"} back to Hermes.`);
+      await refreshTickets();
+    } catch (err) {
+      setError(err.message || "Failed to hand the ticket to Hermes.");
+    } finally {
+      setHandlingTicketId(null);
+    }
+  };
 
   const refreshRuns = async () => {
     try {
@@ -267,9 +368,13 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
 
   // Attention badge on the Tickets & runs tab: unresolved tickets + runs
   // waiting on a human.
-  const unresolvedCount = tickets.filter((t) => !t.resolved).length;
+  // With the agent on, "unresolved" dropdowns are Hermes' job, not a human's.
+  const unresolvedCount = agentActive ? 0 : tickets.filter((t) => !t.resolved).length;
   const awaitingCount = runs.filter((r) => r.status === "awaiting_approval").length;
-  const attentionCount = unresolvedCount + awaitingCount;
+  const agentAttention = tickets.filter((t) =>
+    (t.agentTasks || []).some((task) => ["awaiting_approval", "error"].includes(task.status))
+  ).length;
+  const attentionCount = unresolvedCount + awaitingCount + agentAttention;
 
   return (
     <div className="zoho-page">
@@ -413,6 +518,12 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
           cancellingRunId={cancellingRunId}
           onDeleteTicket={removeTicket}
           deletingTicketId={deletingTicketId}
+          agentActive={agentActive}
+          onApproveTask={approveTask}
+          onRejectTask={rejectTask}
+          decidingTaskId={decidingTaskId}
+          onHandleAgain={handleAgain}
+          handlingTicketId={handlingTicketId}
         />
       ) : null}
 

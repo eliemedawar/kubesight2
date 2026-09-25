@@ -393,6 +393,38 @@ def _hermes(user, can_manage: bool) -> Optional[Dict[str, Any]]:
     )
 
 
+def _ticket_agent(user, can_manage: bool) -> Optional[Dict[str, Any]]:
+    from .ticket_agent import hermes as agent_hermes, settings as agent_settings
+
+    row = agent_settings.get_or_create()
+    hermes_ok = agent_hermes.dedicated() and agent_hermes.is_configured()
+    configured = hermes_ok
+    if not hermes_ok:
+        message = agent_hermes.configuration_hint()
+    elif not row.enabled:
+        message = "Hermes is reachable; the agent is off, so tickets use the dropdown automation."
+    else:
+        approvals = "Telegram approvals" if agent_settings.telegram_ready(row) else "approvals in KubeSight only"
+        message = f"Hermes handles every inbound ticket · confidence bar {row.min_confidence} · {approvals}"
+    outcome = None
+    if row.last_test_status:
+        outcome = row.last_test_status == "ok"
+    return _descriptor(
+        key="ticket_agent",
+        name="Hermes ticket agent",
+        category="Intelligence",
+        configured=configured,
+        enabled=bool(row.enabled) and hermes_ok,
+        last_outcome=outcome,
+        last_tested_at=row.last_test_at,
+        message=message,
+        capabilities=["ticket-handling", "telegram-approvals"],
+        used_by=["Ticketing", "Deploy automation"],
+        can_manage=can_manage,
+        testable=agent_settings.telegram_ready(row),
+    )
+
+
 # ─── Registry ───
 #
 # view/manage are permission keys; `admin_only` marks the three whose backing
@@ -415,6 +447,8 @@ _ADAPTERS: List[Dict[str, Any]] = [
      "view": "applications:view", "manage": "applications:manage"},
     {"key": "hermes", "name": "Hermes", "category": "Intelligence", "fn": _hermes,
      "view": "applications:view", "manage": "applications:manage"},
+    {"key": "ticket_agent", "name": "Hermes ticket agent", "category": "Intelligence",
+     "fn": _ticket_agent, "view": "ticketing:view", "manage": "ticketing:manage"},
 ]
 
 _BY_KEY = {entry["key"]: entry for entry in _ADAPTERS}
@@ -612,6 +646,11 @@ def run_test(user, key: str) -> Dict[str, Any]:
         return _test_registries()
     if key == "hermes":
         return _test_hermes(user)
+    if key == "ticket_agent":
+        from .ticket_agent.settings import test_telegram
+
+        result = test_telegram()
+        return {"ok": result.get("status") == "ok", "message": result.get("message") or ""}
     raise IntegrationActionError("This integration cannot be tested.")
 
 
@@ -676,6 +715,11 @@ def set_enabled(user, key: str, enabled: bool) -> None:
         return
     if key == "registries":
         _set_registries_enabled(enabled)
+        return
+    if key == "ticket_agent":
+        from .ticket_agent.settings import update as update_agent
+
+        update_agent({"enabled": enabled})
         return
     raise IntegrationActionError("This integration cannot be switched on or off here.")
 
@@ -799,6 +843,8 @@ def activity_for(key: str, *, limit: int = 50) -> List[Dict[str, Any]]:
             return _audit_activity(["bitbucket_credential_profile"], limit)
         if key == "hermes":
             return _audit_activity(["hermes"], limit)
+        if key == "ticket_agent":
+            return _audit_activity(["ticket_interpretation", "ticket_agent_settings"], limit)
     except Exception:  # noqa: BLE001 — an empty timeline beats a 500 on a side panel
         return []
     return []

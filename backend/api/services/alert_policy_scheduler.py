@@ -130,6 +130,15 @@ def _scheduler_loop(app: Flask) -> None:
             logger.exception("Deploy automation tick failed")
         try:
             with app.app_context():
+                from .ticket_agent.engine import tick as ticket_agent_tick
+
+                # Hermes ticket agent: hand pending tickets to Hermes, collect
+                # Telegram approval presses, expire unanswered approvals.
+                ticket_agent_tick()
+        except Exception:
+            logger.exception("Ticket agent tick failed")
+        try:
+            with app.app_context():
                 from .mobile_app_service import (
                     advance_mobile_builds,
                     advance_mobile_publishes,

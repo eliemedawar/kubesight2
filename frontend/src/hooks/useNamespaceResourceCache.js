@@ -24,6 +24,8 @@ function setsEqual(a, b) {
  * @param {string} options.activeListKey - resource list key to load/refresh (e.g. "pods")
  * @param {boolean} options.enabled - fetch when true
  * @param {function} options.filterResources - RBAC filter: (clusterId, namespace, partial) => filtered
+ * @param {number} options.liveIntervalMs - when > 0, re-read the active tab from the cluster
+ *   (bypassing both caches) on this interval, quietly, while the browser tab is visible
  */
 export function useNamespaceResourceCache({
   clusterId,
@@ -31,6 +33,7 @@ export function useNamespaceResourceCache({
   activeListKey = "",
   enabled = true,
   filterResources,
+  liveIntervalMs = 0,
 }) {
   const [resources, setResources] = useState(emptyNamespaceResources);
   const [rawResources, setRawResources] = useState(emptyNamespaceResources);
@@ -82,7 +85,7 @@ export function useNamespaceResourceCache({
   );
 
   const fetchListKey = useCallback(
-    async (listKey, { force = false, silent = false } = {}) => {
+    async (listKey, { force = false, silent = false, background = false } = {}) => {
       if (!clusterId || !namespace || !listKey) {
         return;
       }
@@ -107,10 +110,13 @@ export function useNamespaceResourceCache({
         return;
       }
 
-      if (!silent) {
-        setKeyLoading(listKey, true);
-      } else {
-        setKeyRefreshing(listKey, true);
+      // A background (live) poll shows no spinner — it would flicker every tick.
+      if (!background) {
+        if (!silent) {
+          setKeyLoading(listKey, true);
+        } else {
+          setKeyRefreshing(listKey, true);
+        }
       }
 
       const request = (async () => {
@@ -135,6 +141,10 @@ export function useNamespaceResourceCache({
           const message = err?.message || "Failed to load resources";
           if (!cached) {
             applyListKey(clusterId, namespace, listKey, []);
+          }
+          // One failed live tick keeps the last good rows instead of flashing an error.
+          if (background) {
+            return cached?.items || [];
           }
           setTabErrors((prev) => ({ ...prev, [listKey]: message }));
           throw err;
@@ -217,6 +227,34 @@ export function useNamespaceResourceCache({
 
     return () => window.clearInterval(timer);
   }, [enabled, clusterId, namespace, activeListKey, fetchListKey]);
+
+  // Live mode: poll the active tab straight from the cluster. Skips while the
+  // browser tab is hidden and catches up the moment it becomes visible again.
+  useEffect(() => {
+    if (!enabled || !clusterId || !namespace || !activeListKey || !(liveIntervalMs > 0)) {
+      return undefined;
+    }
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) {
+        return;
+      }
+      if (resourceCache.getInflight(clusterId, namespace, activeListKey)) {
+        return;
+      }
+      fetchListKey(activeListKey, { force: true, silent: true, background: true }).catch(() => {});
+    };
+    const timer = window.setInterval(tick, liveIntervalMs);
+    const onVisible = () => {
+      if (!document.hidden) {
+        tick();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [enabled, clusterId, namespace, activeListKey, liveIntervalMs, fetchListKey]);
 
   // Re-sync when cache is updated externally (future watch API).
   useEffect(() => {

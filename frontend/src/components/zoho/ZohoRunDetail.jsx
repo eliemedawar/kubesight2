@@ -20,6 +20,15 @@ const ENV_STEPS = [
   { key: "pods", label: "Pod health" },
 ];
 
+// Restarts (asked for through the Hermes ticket agent) change nothing but the
+// pod-template stamp: gate the running image, hand off, restart, watch pods.
+const RESTART_STEPS = [
+  { key: "image_check", label: "Image check" },
+  { key: "approval", label: "Approval" },
+  { key: "deploy", label: "Restart" },
+  { key: "pods", label: "Pod health" },
+];
+
 // Custom (non-cluster) environments deploy entirely through Jenkins — there is
 // no image gate, no approval bundle, and no rollout to watch, so the k8s strip
 // would be all skips plus a misleading "Pod health". Show only the stages that
@@ -78,7 +87,13 @@ export function RunStatusPill({ status }) {
 export function RunPipeline({ run }) {
   const steps = new Map((run.steps || []).map((s) => [s.key, s]));
   const custom = Boolean(run.customEnvironment);
-  const stepList = custom ? CUSTOM_STEPS : run.changeType === "env_var" ? ENV_STEPS : STEPS;
+  const stepList = custom
+    ? CUSTOM_STEPS
+    : run.changeType === "env_var"
+    ? ENV_STEPS
+    : run.changeType === "restart"
+    ? RESTART_STEPS
+    : STEPS;
 
   // Resolve each rendered stage to a chip state up front.
   const chips = stepList.map((step) => {
@@ -162,7 +177,9 @@ export function RunDetail({ run, canManage, cancelling, onCancel, showHead = tru
               custom env
             </span>
           ) : null}
-          {run.changeType === "env_var" ? (
+          {run.changeType === "restart" ? (
+            <span className="sg-tag">restart</span>
+          ) : run.changeType === "env_var" ? (
             <span className="sg-tag mono" title={`set ${run.variableName} to ${run.variableValue}`}>
               {run.variableName}={run.variableValue}
             </span>
@@ -178,7 +195,13 @@ export function RunDetail({ run, canManage, cancelling, onCancel, showHead = tru
               {run.imageTag}
             </span>
           )}
-          {run.auto ? <span className="sg-zh-count">auto</span> : null}
+          {String(run.triggeredBy || "").startsWith("hermes") ? (
+            <span className="sg-zh-count" title={run.triggeredBy}>
+              hermes
+            </span>
+          ) : run.auto ? (
+            <span className="sg-zh-count">auto</span>
+          ) : null}
           <span className="sg-zh-run-spacer" />
           <span className="sg-zh-htime">
             {run.createdAt ? new Date(run.createdAt).toLocaleString() : ""}

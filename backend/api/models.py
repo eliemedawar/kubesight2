@@ -2012,6 +2012,9 @@ class ZohoIntegration(db.Model):
     ticket_status_deployed = db.Column(db.String(120), nullable=False, default="Closed")
     ticket_status_failed = db.Column(db.String(120), nullable=False, default="Failed")
     ticket_status_cancelled = db.Column(db.String(120), nullable=False, default="Canceled")
+    # Hermes ticket agent: a ticket Hermes could not understand (or whose
+    # approval was declined) is parked here with a comment saying what is missing.
+    ticket_status_impediment = db.Column(db.String(120), nullable=False, default="Impediment")
     # Email of the agent tickets are reassigned to (resolved to an agent id at
     # call time and cached). Defaults to the zagent service account.
     ticket_owner_email = db.Column(db.String(255), nullable=False, default="zagent@areeba.com")
@@ -2807,6 +2810,7 @@ class JiraIntegration(db.Model):
     transition_deployed = db.Column(db.String(120), nullable=False, default="Done")
     transition_failed = db.Column(db.String(120), nullable=False, default="Done")
     transition_cancelled = db.Column(db.String(120), nullable=False, default="Done")
+    transition_impediment = db.Column(db.String(120), nullable=False, default="Impediment")
     # Assignee for automated issues; resolved to an accountId at call time.
     ticket_owner_email = db.Column(db.String(255), nullable=False, default="")
 
@@ -2882,4 +2886,8 @@ from .models_merge_checks import (  # noqa: E402,F401
     CiMergeCheck,
     CiMergeCheckConfig,
     CiMergeCheckPolicy,
+)
+from .models_ticket_agent import (  # noqa: E402,F401
+    TicketAgentSettings,
+    TicketInterpretation,
 )

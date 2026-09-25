@@ -398,11 +398,23 @@ def _open_target_run(cluster_id: str, namespace: str, name: str):
     )
 
 
-def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str, Any]:
+def start_run(
+    ticket_record_id: int,
+    user=None,
+    auto: bool = False,
+    override: Optional[Dict[str, Any]] = None,
+    triggered_by: Optional[str] = None,
+) -> Dict[str, Any]:
     """Create a run for one inbound ticket. Raises AutomationError on bad input.
 
     A ticket carries exactly ONE change: an image tag (deploy flow) or a
     variable + value (env-var change flow) — the run's ``change_type`` follows.
+
+    ``override`` is the Hermes ticket agent's reading of the ticket
+    (``snapshotId``, ``changeType`` image|env_var|restart, ``tag``,
+    ``variable``, ``value``), already checked against the published targets. It
+    replaces the ticket's own dropdown fields — which may be empty or wrong on
+    a free-text ticket — and is the only way to ask for a ``restart``.
 
     ``auto`` marks the webhook path (see :func:`maybe_auto_run`) and makes this
     return as soon as the run is persisted — every outbound call is left to the
@@ -412,31 +424,44 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
     ticket = ZohoInboundTicket.query.get(int(ticket_record_id))
     if ticket is None:
         raise AutomationError("Inbound ticket not found.", 404)
-    if not ticket.resolved or not ticket.app_service_id:
-        raise AutomationError("This ticket did not resolve to a deployment — nothing to run.", 400)
-    tag = (ticket.tag or "").strip()
-    variable = (ticket.variable_name or "").strip()
-    value = (ticket.variable_value or "").strip()
-    if tag and variable:
+    restart = False
+    if override is not None:
+        snapshot_id = override.get("snapshotId")
+        change_type = override.get("changeType") or "image"
+        if change_type not in ("image", "env_var", "restart"):
+            raise AutomationError(f"Unknown change type '{change_type}'.", 400)
+        restart = change_type == "restart"
+        tag = (override.get("tag") or "").strip() if change_type == "image" else ""
+        variable = (override.get("variable") or "").strip() if change_type == "env_var" else ""
+        value = (override.get("value") or "").strip() if change_type == "env_var" else ""
+    else:
+        if not ticket.resolved or not ticket.app_service_id:
+            raise AutomationError("This ticket did not resolve to a deployment — nothing to run.", 400)
+        snapshot_id = ticket.app_service_id
+        tag = (ticket.tag or "").strip()
+        variable = (ticket.variable_name or "").strip()
+        value = (ticket.variable_value or "").strip()
+    # A restart carries no tag and no variable by definition.
+    if not restart and tag and variable:
         raise AutomationError(
             "This ticket has both an image tag and a variable — automation needs exactly one change.",
             400,
         )
-    if not tag and not variable:
+    if not restart and not tag and not variable:
         raise AutomationError(
             "This ticket has no image tag and no variable — automation needs one change.", 400
         )
     if variable and not value:
         raise AutomationError("This ticket picks a variable but has no value to set it to.", 400)
-    snapshot = ZohoDeploymentSnapshot.query.get(ticket.app_service_id)
+    snapshot = ZohoDeploymentSnapshot.query.get(snapshot_id) if snapshot_id else None
     if snapshot is None:
         raise AutomationError("The ticket's deployment snapshot no longer exists.", 404)
     from .zoho_sync_service import CUSTOM_SOURCE_CLUSTER
 
-    if snapshot.cluster_id == CUSTOM_SOURCE_CLUSTER and variable:
+    if snapshot.cluster_id == CUSTOM_SOURCE_CLUSTER and (variable or restart):
         raise AutomationError(
-            f"'{snapshot.namespace}' is a custom environment — variable changes need a live "
-            "cluster deployment; only tag deploys route to Jenkins.",
+            f"'{snapshot.namespace}' is a custom environment — variable changes and restarts need "
+            "a live cluster deployment; only tag deploys route to Jenkins.",
             400,
         )
 
@@ -455,6 +480,7 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
     ahead = _open_target_run(snapshot.cluster_id, snapshot.namespace, snapshot.deployment_name)
 
     jrow = get_or_create_jenkins()
+    who = triggered_by or getattr(user, "username", None) or ("auto" if auto else None)
     run = DeployAutomationRun(
         ticket_record_id=ticket.id,
         ticket_number=ticket.ticket_number or ticket.ticket_id,
@@ -462,7 +488,7 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
         cluster_id=snapshot.cluster_id,
         namespace=snapshot.namespace,
         deployment_name=snapshot.deployment_name,
-        change_type="env_var" if variable else "image",
+        change_type="restart" if restart else ("env_var" if variable else "image"),
         variable_name=variable or None,
         variable_value=value if variable else None,
         # Registry/deploy tag = template applied; the router gets the raw tag.
@@ -471,9 +497,14 @@ def start_run(ticket_record_id: int, user=None, auto: bool = False) -> Dict[str,
         status=WAITING_STATUS if ahead else "queued",
         steps=_initial_steps(),
         auto=bool(auto),
-        triggered_by=(getattr(user, "username", None) or ("auto" if auto else None)),
+        triggered_by=(who[:120] if who else None),
     )
-    if variable:
+    if restart:
+        # Nothing to build and nothing to verify: image_check gates the RUNNING
+        # image (restarted pods re-pull it), then straight to the handoff.
+        _set_step(run, "build", "skip", "not needed for a restart")
+        _set_step(run, "verify", "skip", "nothing to verify for a restart")
+    elif variable:
         # No Jenkins build for a variable change; image_check gates the RUNNING
         # image (the change restarts pods) and verify becomes the variable check.
         _set_step(run, "build", "skip", "not needed for a variable change")
@@ -800,6 +831,8 @@ def _advance(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
             # variable against the live spec, then hand off straight away.
             if _is_custom_run(run):
                 _do_trigger_custom(run, jrow)
+            elif _is_restart_run(run):
+                _do_resolve_restart(run, jrow)
             elif _is_env_run(run):
                 _do_resolve_variable(run, jrow)
             else:
@@ -826,6 +859,10 @@ def _is_env_run(run: DeployAutomationRun) -> bool:
     return (run.change_type or "image") == "env_var"
 
 
+def _is_restart_run(run: DeployAutomationRun) -> bool:
+    return (run.change_type or "image") == "restart"
+
+
 def _is_custom_run(run: DeployAutomationRun) -> bool:
     """A run against a custom (non-cluster) environment — snapshotted under the
     sentinel cluster id. No live deployment exists: the whole deploy is the
@@ -839,6 +876,8 @@ def _change_summary(run: DeployAutomationRun) -> str:
     """Human one-liner of what this run changes — used in messages/emails/audit."""
     if _is_env_run(run):
         return f"{run.variable_name}={run.variable_value}"
+    if _is_restart_run(run):
+        return "restart"
     return _target_image(run)
 
 
@@ -876,8 +915,9 @@ def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
         return
     who = run.ticket_number or f"run #{run.id}"
     env_run = _is_env_run(run)
+    restart_run = _is_restart_run(run)
     # What the ticket asked for, phrased per change type.
-    change = _change_summary(run) if env_run else run.image_tag
+    change = _change_summary(run) if (env_run or restart_run) else run.image_tag
     comment = None
     resolution = None
     if outcome == "started":
@@ -897,6 +937,15 @@ def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
             resolution = (
                 f"KubeSight built {run.deployment_name} (tag {shown_tag}) for {run.namespace} "
                 f"via {engine_name}; the build succeeded. ({who})"
+            )
+        elif restart_run:
+            comment = (
+                f"Restart complete: {run.deployment_name} in {run.namespace} was restarted "
+                f"(via {mode}); pods reported healthy."
+            )
+            resolution = (
+                f"KubeSight restarted {run.deployment_name} in {run.namespace}; "
+                f"pods reported healthy. ({who})"
             )
         elif env_run:
             comment = (
@@ -927,9 +976,25 @@ def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
             f"Automation cancelled for {run.deployment_name} -> {change} in "
             f"{run.namespace}. {run.error or ''}".strip()
         )
+    public = False
+    try:
+        from .ticket_agent import engine as ticket_agent, settings as agent_settings
+
+        if ticket_agent.is_agent_run(run):
+            # Hermes started this run, so Hermes speaks on the ticket: its own
+            # comment already announced the start (status only here), and the
+            # outcome goes back to it as a follow-up to write up — with this
+            # comment as the fallback if it can't.
+            if outcome == "started":
+                comment = None
+            elif ticket_agent.on_run_finished(run, outcome, comment, resolution):
+                return
+            public = agent_settings.comments_public()
+    except Exception:  # the agent hook must never take the write-back down
+        logger.exception("Ticket agent outcome hook failed: run_id=%s", run.id)
     try:
         ticketing.report_outcome(
-            provider, ticket_id, outcome, comment=comment, resolution=resolution
+            provider, ticket_id, outcome, comment=comment, resolution=resolution, public=public
         )
     except Exception:  # write-back must never affect the run
         pass
@@ -1173,6 +1238,66 @@ def _do_resolve_variable(run: DeployAutomationRun, jrow: JenkinsConnection) -> N
         f"Deployment '{run.deployment_name}' in '{run.namespace}' has no environment "
         f"variable '{var}'. Changeable variables: {hint}.",
     )
+
+
+def _do_resolve_restart(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
+    """queued → handoff for restart runs: one gate, then the ordinary handoff.
+
+    A restart reschedules every pod, and each re-pulls its image — so, exactly
+    as for a variable change, every RUNNING image must still be in the registry
+    first, or the restart would turn a working deployment into ImagePullBackOff.
+    """
+    from ..k8s_provider import (
+        K8sCommandError,
+        _run_for_access,
+        resolve_cluster_access,
+        should_use_real_k8s,
+    )
+    from .registry_service import check_image
+
+    def check(image: str):
+        return check_image(image, preferred_connection_id=jrow.registry_connection_id)
+
+    _set_step(run, "image_check", "run", "checking the running image is still in the registry")
+    if not should_use_real_k8s(run.cluster_id):
+        from ..mock_data import NAMESPACE_RESOURCES
+
+        ns_res = (NAMESPACE_RESOURCES.get(run.cluster_id) or {}).get(run.namespace) or {}
+        entry = next(
+            (d for d in ns_res.get("deployments", []) if d.get("name") == run.deployment_name), None
+        )
+        image = (entry or {}).get("image")
+        if not _gate_running_images(run, [image] if image else [], check):
+            return
+        run.container_name = run.deployment_name
+        _do_handoff(run)
+        return
+
+    access = resolve_cluster_access(run.cluster_id)
+    if not access:
+        _fail(run, "image_check", f"Cluster '{run.cluster_id}' was not found.")
+        return
+    try:
+        raw = _run_for_access(
+            access,
+            ["get", "deployment", run.deployment_name, "-n", run.namespace, "-o", "json"],
+        )
+        spec = json.loads(raw)
+    except (K8sCommandError, ValueError) as exc:
+        _fail(run, "image_check", f"Could not read deployment '{run.deployment_name}': {exc}")
+        return
+    containers = (
+        (((spec.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
+    )
+    images: List[str] = []
+    for c in containers:
+        img = c.get("image")
+        if img and img not in images:
+            images.append(img)
+    if not _gate_running_images(run, images, check):
+        return
+    run.container_name = ",".join(c.get("name") for c in containers if c.get("name")) or None
+    _do_handoff(run)
 
 
 # A parameter template placeholder: {app}, {tag}, {environment}, {ticket} or any
@@ -1736,6 +1861,27 @@ def _set_env_in_yaml(yaml_text: str, variable: str, value: str) -> str:
     return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
 
 
+RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
+
+
+def _restart_in_yaml(yaml_text: str, when: str) -> str:
+    """Return the manifest with the pod-template restart stamp set to ``when``.
+
+    Exactly what ``kubectl rollout restart`` does: a changed pod-template
+    annotation makes the controller roll every pod, with nothing else changed.
+    """
+    doc = yaml.safe_load(yaml_text)
+    if not isinstance(doc, dict) or (doc.get("kind") or "").lower() != "deployment":
+        raise AutomationError("The live manifest is not a Deployment.", 500)
+    template = (doc.setdefault("spec", {}) or {}).setdefault("template", {})
+    metadata = template.setdefault("metadata", {}) or {}
+    template["metadata"] = metadata
+    annotations = metadata.get("annotations") or {}
+    annotations[RESTART_ANNOTATION] = when
+    metadata["annotations"] = annotations
+    return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+
+
 def _handoff_bundle(run: DeployAutomationRun, required: int) -> None:
     """Author + submit a Change Bundle with an edit_deployment item (image swap only).
 
@@ -1758,14 +1904,17 @@ def _handoff_bundle(run: DeployAutomationRun, required: int) -> None:
         return
 
     try:
-        if _is_env_run(run):
+        if _is_restart_run(run):
+            swapped = _restart_in_yaml(data["yaml"], datetime.now(timezone.utc).isoformat())
+        elif _is_env_run(run):
             swapped = _set_env_in_yaml(data["yaml"], run.variable_name or "", run.variable_value or "")
         else:
             swapped = _swap_image_in_yaml(
                 data["yaml"], run.deployment_name, run.container_name or "", _target_image(run)
             )
     except (AutomationError, yaml.YAMLError) as exc:
-        _fail(run, "approval", f"Could not prepare the {'variable' if _is_env_run(run) else 'image'} change: {exc}")
+        kind = "restart" if _is_restart_run(run) else ("variable" if _is_env_run(run) else "image")
+        _fail(run, "approval", f"Could not prepare the {kind} change: {exc}")
         return
 
     now = datetime.now(timezone.utc)
@@ -1782,11 +1931,12 @@ def _handoff_bundle(run: DeployAutomationRun, required: int) -> None:
                 "yaml": swapped,
             },
         )
-        change_note = (
-            f"{run.variable_name}={run.variable_value} (automated variable change)"
-            if _is_env_run(run)
-            else f"{run.image_tag} (automated deploy request)"
-        )
+        if _is_restart_run(run):
+            change_note = "restart (automated restart request)"
+        elif _is_env_run(run):
+            change_note = f"{run.variable_name}={run.variable_value} (automated variable change)"
+        else:
+            change_note = f"{run.image_tag} (automated deploy request)"
         submitted = submit_bundle(
             None,
             bundle.id,
@@ -1828,6 +1978,24 @@ def _handoff_direct(run: DeployAutomationRun) -> None:
     from .deployment_service import _run_kubectl_for_cluster
 
     _set_step(run, "approval", "skip", "cluster requires no approvals")
+
+    if _is_restart_run(run):
+        _set_step(run, "deploy", "run", "restarting the pods")
+        if should_use_real_k8s(run.cluster_id):
+            try:
+                _run_kubectl_for_cluster(
+                    run.cluster_id,
+                    ["rollout", "restart", f"deployment/{run.deployment_name}", "-n", run.namespace],
+                )
+            except K8sCommandError as exc:
+                _fail(run, "deploy", f"kubectl rollout restart failed: {exc}")
+                return
+            detail = f"rollout restart of {run.deployment_name}"
+        else:
+            detail = f"[mock] rollout restart of {run.deployment_name}"
+        _set_step(run, "deploy", "done", detail)
+        _begin_rollout_watch(run)
+        return
 
     if _is_env_run(run):
         _set_step(run, "deploy", "run", "applying the variable change")
@@ -1964,7 +2132,7 @@ def _do_check_pods(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
             if updated >= desired and total <= updated and available >= updated:
                 _complete_deployed(run, f"{available}/{desired} ready")
                 return
-            what = "spec" if _is_env_run(run) else "image"
+            what = "spec" if (_is_env_run(run) or _is_restart_run(run)) else "image"
             if updated < desired:
                 detail = f"{updated}/{desired} pods updated to the new {what}"
             elif total > updated:
@@ -1995,7 +2163,7 @@ def _handle_rollout_failure(
     from ..k8s_provider import K8sCommandError
     from .deployment_service import _run_kubectl_for_cluster
 
-    what = "variable change" if _is_env_run(run) else "image"
+    what = "restart" if _is_restart_run(run) else ("variable change" if _is_env_run(run) else "image")
     message = (
         f"The {what} was applied but the pods did not become ready within {timeout_min} min"
         + (f" (last seen: {last_seen})." if last_seen else ".")

@@ -50,6 +50,7 @@ import json
 import mimetypes
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -509,6 +510,22 @@ def stream(command: List[str], cwd: str, env: Dict[str, str], shipper: LogShippe
         raise
 
 
+# Where the server's node_modules wrapper keeps its archives. The agent's cache
+# is ONE folder for every service, so the archives get a directory per service
+# under it - the server sends the name already made safe (cacheSlug), and it is
+# checked again here because it becomes a path on this machine.
+NODE_MODULES_DIR = "node-modules"
+_CACHE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def node_modules_dir(cache: str, task: Dict[str, Any]) -> str:
+    """``$KUBESIGHT_NODE_MODULES_DIR`` for this task, or "" to leave it unset."""
+    slug = str(task.get("cacheSlug") or "")
+    if not _CACHE_SLUG_RE.match(slug):
+        return ""
+    return cache.rstrip("/") + "/" + NODE_MODULES_DIR + "/" + slug
+
+
 def container_mode(task: Dict[str, Any]) -> str:
     """auto (default), always, or never — from the stage's own environment."""
     raw = str((task.get("env") or {}).get("KUBESIGHT_CONTAINER", "auto")).strip().lower()
@@ -604,6 +621,9 @@ def container_command(runtime, task, workspace, cache, script, uid_gid=None,
         "KUBESIGHT_ENV": CONTAINER_BUILD_ENV,
     }
     fixed.update(container_tool_env(CONTAINER_CACHE))
+    nm_dir = node_modules_dir(CONTAINER_CACHE, task)
+    if nm_dir:
+        fixed["KUBESIGHT_NODE_MODULES_DIR"] = nm_dir
     stage_env = {str(k): str(v) for k, v in (task.get("env") or {}).items()}
     for key in sorted(fixed):
         # A stage that sets one of these itself wins, exactly as on Kubernetes.
@@ -691,8 +711,15 @@ def run_task(client: Client, task: Dict[str, Any], root: str) -> int:
                 # machine's directories, so one pipeline runs on either.
                 "KUBESIGHT_WORKSPACE": workspace,
                 "KUBESIGHT_SOURCE": os.path.join(workspace, "source"),
-                **{str(k): str(v) for k, v in (task.get("env") or {}).items()},
             }
+            # A stage running on the machine itself (a Mac, or Linux without
+            # docker/podman) keeps node_modules under the same cache folder a
+            # container would mount. Set before the stage's own Environment, so
+            # a stage can still point it elsewhere.
+            host_nm_dir = node_modules_dir(os.path.join(root, ".cache"), task)
+            if host_nm_dir:
+                env["KUBESIGHT_NODE_MODULES_DIR"] = host_nm_dir
+            env.update({str(k): str(v) for k, v in (task.get("env") or {}).items()})
             build_env = os.path.join(workspace, ".kubesight", "build.env")
             env["KUBESIGHT_ENV"] = build_env
             # Prefixed rather than appended: a stage overrides an inherited

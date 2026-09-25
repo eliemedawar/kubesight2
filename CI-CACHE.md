@@ -244,6 +244,17 @@ So any stage whose commands run an install (`yarn`, `yarn install`,
   turns it off for that stage; `CI_CACHE_NODE_MODULES=0` turns it off for the
   installation. A `node_modules` already in the checkout is left alone.
 
+**On the Linux and Mac agents too.** The server wraps an agent task's install
+commands with the same shell before sending them, and the agent puts the
+archives in `<agent root>/.cache/node-modules/<service>/`
+(`$KUBESIGHT_NODE_MODULES_DIR`). It works in container mode and in host mode,
+where a Mac or a Linux machine without docker has no `KUBESIGHT_CACHE_DIR` at
+all. The agent's cache is one folder for every service, which is why the
+archives get a directory per service. The key includes `uname -s`, so a host-mode
+Mac and Linux machine never trade native modules. An agent too old to send
+`cacheSlug` still restores and saves, under `$KUBESIGHT_CACHE_DIR/node-modules`
+in a container, and installs cold on the host.
+
 Each install stage logs one `[kubesight] node_modules cache:` line saying what
 happened: restored, nothing saved yet, saved (with its size), or why not.
 
