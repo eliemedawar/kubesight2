@@ -1,0 +1,122 @@
+#  KubeSight — Bitbucket Pipelines
+#
+#  KubeSight is a Python 3.12 (Flask) backend plus a React/Vite frontend, so
+#  there is no Gradle build here. Java 17 is used only to run the centralized
+#  release-notes project, exactly as in the other areeba services.
+
+image: atlassian/default-image:4
+
+# Tag ancestry is part of release-note correctness. The default shallow clone
+# can omit the previous release tag, branch, or commits in the release range.
+clone:
+  depth: full
+
+definitions:
+  caches:
+    frontend-node: frontend/node_modules
+  services:
+    docker:
+      memory: 3072
+
+  steps:
+    - step: &backend-tests
+        name: Backend tests (pytest)
+        image: python:3.12
+        caches:
+          - pip
+        script:
+          - if [ -n "${BITBUCKET_PR_DESTINATION_BRANCH}" ] && [ "${BITBUCKET_PR_DESTINATION_BRANCH}" != "main" ]; then printf 'not a target branch we want to check'; exit 0; fi
+          - cd backend
+          - pip install -r requirements.txt
+          - export K8S_REAL_MODE=false
+          - export JWT_SECRET_KEY=ci-test-secret-do-not-use-in-production
+          - python -m pytest tests -q --junitxml=test-results/backend-junit.xml
+
+    - step: &frontend-build
+        name: Frontend tests + build (vitest, vite)
+        image: node:20
+        caches:
+          - frontend-node
+        script:
+          - if [ -n "${BITBUCKET_PR_DESTINATION_BRANCH}" ] && [ "${BITBUCKET_PR_DESTINATION_BRANCH}" != "main" ]; then printf 'not a target branch we want to check'; exit 0; fi
+          - cd frontend
+          - npm ci
+          - npm test
+          - npm run build
+
+    - step: &build-images
+        name: Build + push Docker images
+        services:
+          - docker
+        script:
+          - export IMAGE_TAG="${BITBUCKET_TAG:-$BITBUCKET_BUILD_NUMBER}"
+          - echo "$DOCKER_PASSWORD" | docker login "$DOCKER_REGISTRY" -u "$DOCKER_USERNAME" --password-stdin
+          - docker build -t "$DOCKER_REGISTRY/kubesight-backend:$IMAGE_TAG" backend
+          - docker build -t "$DOCKER_REGISTRY/kubesight-frontend:$IMAGE_TAG" frontend
+          - docker push "$DOCKER_REGISTRY/kubesight-backend:$IMAGE_TAG"
+          - docker push "$DOCKER_REGISTRY/kubesight-frontend:$IMAGE_TAG"
+
+pipelines:
+  tags:
+    # Bitbucket selects this more-specific glob for x.y.0 tags.
+    "*.*.0":
+      - step:
+          name: Generate Initial Confluence Release Notes
+          image: gradle:9.1.0-jdk17
+          caches:
+            - gradle
+          script:
+            - &clone-release-notes |
+              export RELEASE_NOTES_TOOL_DIR=/tmp/release-notes
+              export RELEASE_NOTES_ASKPASS=/tmp/release-notes-askpass
+              printf '%s\n' \
+                '#!/bin/sh' \
+                'case "$1" in' \
+                '  *Username*) printf "%s\n" "x-bitbucket-api-token-auth" ;;' \
+                '  *) printf "%s\n" "$BITBUCKET_API_TOKEN" ;;' \
+                'esac' > "${RELEASE_NOTES_ASKPASS}"
+              chmod 0700 "${RELEASE_NOTES_ASKPASS}"
+              GIT_ASKPASS="${RELEASE_NOTES_ASKPASS}" GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "${RELEASE_NOTES_REF:-master}" "https://bitbucket.org/areebasal/be-release-notes.git" "${RELEASE_NOTES_TOOL_DIR}"
+              rm -f "${RELEASE_NOTES_ASKPASS}"
+            - RELEASE_NOTES_REPOSITORY_DIR="${BITBUCKET_CLONE_DIR}" "/tmp/release-notes/gradlew" -p "/tmp/release-notes" generateInitialReleaseNotes --no-daemon
+      - step: *build-images
+    "*.*.*":
+      - step:
+          name: Generate Confluence Patch Release Notes
+          image: gradle:9.1.0-jdk17
+          caches:
+            - gradle
+          script:
+            - *clone-release-notes
+            - RELEASE_NOTES_REPOSITORY_DIR="${BITBUCKET_CLONE_DIR}" "/tmp/release-notes/gradlew" -p "/tmp/release-notes" generatePatchReleaseNotes --no-daemon
+      - step: *build-images
+
+  custom:
+    zoho-ready-for-tag:
+      - step:
+          name: Move Merged PR Tasks to Ready For Tag
+          image: gradle:9.1.0-jdk17
+          clone:
+            enabled: false
+          caches:
+            - gradle
+          script:
+            - *clone-release-notes
+            - /tmp/release-notes/gradlew -p "/tmp/release-notes" updateMergedPullRequestStatus --no-daemon
+    manual-trigger:
+      - parallel:
+          - step: *backend-tests
+          - step: *frontend-build
+      - step: *build-images
+
+  pull-requests:
+    "**":
+      - parallel:
+          - step: *backend-tests
+          - step: *frontend-build
+
+triggers:
+  pullrequest-fulfilled:
+    - condition: "BITBUCKET_PR_ID > 0"
+      pipelines:
+        - zoho-ready-for-tag
