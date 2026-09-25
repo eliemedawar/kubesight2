@@ -400,7 +400,7 @@ function AnalyzeModal({
     const confirmed = window.confirm(
       `Delete credential profile "${selected.name}"?\n\n`
       + "Its encrypted token will be permanently removed. Profiles already used "
-      + "by an application cannot be deleted.",
+      + "by an application, pull-request record, or CI service cannot be deleted.",
     );
     if (!confirmed) return;
     setCredentialDeleting(true);

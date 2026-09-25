@@ -28,6 +28,7 @@ from ..models import (
     ApplicationFindingStatusEvent,
     ApplicationPullRequest,
     BitbucketCredentialProfile,
+    CiService,
     IntelligenceApplication,
     User,
 )
@@ -265,17 +266,23 @@ def delete_credential(credential_id: int, user: User) -> dict:
     pull_request_count = ApplicationPullRequest.query.filter_by(
         credential_profile_id=row.id
     ).count()
-    if application_count or pull_request_count:
-        suffix = "" if application_count == 1 else "s"
-        pr_detail = (
-            f" and {pull_request_count} pull-request record"
-            f"{'' if pull_request_count == 1 else 's'}"
-            if pull_request_count
-            else ""
+    # CI and Application Intelligence share credential profiles.
+    ci_service_count = CiService.query.filter_by(
+        credential_profile_id=row.id
+    ).count()
+    usages = [
+        f"{count} {label}{'' if count == 1 else 's'}"
+        for count, label in (
+            (application_count, "application"),
+            (pull_request_count, "pull-request record"),
+            (ci_service_count, "CI service"),
         )
+        if count
+    ]
+    if usages:
         raise ValueError(
-            f"This credential profile is used by {application_count} application"
-            f"{suffix}{pr_detail}. Update or delete those records first."
+            f"This credential profile is used by {' and '.join(usages)}. "
+            "Update or delete those records first."
         )
     deleted = {
         "id": row.id,

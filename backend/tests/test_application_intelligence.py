@@ -378,6 +378,53 @@ def test_credential_profile_delete_is_guarded_and_audited(
         assert db.session.get(BitbucketCredentialProfile, used["id"]) is not None
 
 
+def test_credential_profile_used_only_by_ci_cannot_be_deleted(
+    app, client, operator_token
+):
+    from sqlalchemy import text
+
+    from api.models_ci import CiService
+
+    credential = _create_credential(client, operator_token)
+    with app.app_context():
+        # Match production's foreign-key enforcement when running on SQLite.
+        if db.engine.dialect.name == "sqlite":
+            db.session.execute(text("PRAGMA foreign_keys=ON"))
+        service = CiService(
+            name="Payment CI",
+            slug="payment-ci",
+            credential_profile_id=credential["id"],
+        )
+        db.session.add(service)
+        db.session.commit()
+        service_id = service.id
+
+    response = client.delete(
+        f"/api/bitbucket-credential-profiles/{credential['id']}",
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 409
+    assert "used by 1 CI service" in response.get_json()["error"]
+    assert "bb-secret-value" not in response.get_data(as_text=True)
+    with app.app_context():
+        assert db.session.get(BitbucketCredentialProfile, credential["id"]) is not None
+        service = db.session.get(CiService, service_id)
+        assert service.credential_profile_id == credential["id"]
+        assert AuditLog.query.filter_by(
+            action="application.credential_profile.deleted"
+        ).count() == 0
+        # Removing the reference makes the profile eligible for deletion.
+        service.credential_profile_id = None
+        db.session.commit()
+
+    deleted = client.delete(
+        f"/api/bitbucket-credential-profiles/{credential['id']}",
+        headers=auth_headers(operator_token),
+    )
+    assert deleted.status_code == 200
+    assert deleted.get_json()["data"] == {"deleted": True, "id": credential["id"]}
+
+
 def test_atlassian_api_token_profile_reuses_encrypted_secret_on_update(
     app, client, operator_token
 ):
