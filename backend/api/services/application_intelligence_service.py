@@ -478,6 +478,7 @@ def application_to_dict(row: IntelligenceApplication, *, include_history=False) 
         "mappedNamespace": row.mapped_namespace,
         "mappedWorkloadKind": row.mapped_workload_kind,
         "mappedWorkloadName": row.mapped_workload_name,
+        "ciServiceId": row.ci_service_id,
         "createdBy": row.created_by.username if row.created_by else None,
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
@@ -758,6 +759,117 @@ def update_application(application_id: int, payload: dict, user: User) -> dict:
     return application_to_dict(row)
 
 
+def _get_ci_service(ci_service_id: int) -> CiService:
+    row = db.session.get(CiService, ci_service_id)
+    if row is None:
+        raise LookupError("CI service not found.")
+    return row
+
+
+def _intelligence_for_ci_service(ci: CiService) -> tuple[IntelligenceApplication | None, bool]:
+    """The analysis that belongs to a CI service, and whether it is linked.
+
+    The link on the CI row wins, then the back-reference. Failing both, an
+    application registered earlier for the same repository is offered as an
+    unlinked match, so analyses run before the two were joined are not lost.
+    """
+    if ci.intelligence_application_id:
+        row = db.session.get(IntelligenceApplication, ci.intelligence_application_id)
+        if row is not None:
+            return row, True
+    row = IntelligenceApplication.query.filter_by(ci_service_id=ci.id).first()
+    if row is not None:
+        return row, True
+    if ci.repository_workspace and ci.repository_name:
+        row = (
+            IntelligenceApplication.query.filter(
+                func.lower(IntelligenceApplication.repository_workspace)
+                == ci.repository_workspace.lower(),
+                func.lower(IntelligenceApplication.repository_name)
+                == ci.repository_name.lower(),
+                IntelligenceApplication.ci_service_id.is_(None),
+            )
+            .order_by(IntelligenceApplication.updated_at.desc())
+            .first()
+        )
+        if row is not None:
+            return row, False
+    return None, False
+
+
+def ci_service_intelligence(ci_service_id: int) -> dict:
+    ci = _get_ci_service(ci_service_id)
+    row, linked = _intelligence_for_ci_service(ci)
+    return {
+        "application": application_to_dict(row, include_history=True) if row else None,
+        "linked": linked,
+        "sourceConfigured": bool(ci.repository_url and ci.credential_profile_id),
+    }
+
+
+def enable_ci_service_intelligence(ci_service_id: int, user: User) -> dict:
+    """Link, or create, the Intelligence application for a CI service.
+
+    The repository, branch, credential and working directory are the CI
+    service's own — there is one place to say where the code is.
+    """
+    ci = _get_ci_service(ci_service_id)
+    row, linked = _intelligence_for_ci_service(ci)
+    created = False
+    if row is None:
+        if not (ci.repository_url and ci.credential_profile_id):
+            raise ValueError("Connect this service's repository on the Source tab first.")
+        credential = ci.credential_profile
+        if not credential or not credential.enabled or not credential.read_only:
+            raise ValueError(
+                "Analysis only runs with an enabled, read-only credential. "
+                "Mark this service's Bitbucket credential read-only, or pick one that is."
+            )
+        slug = _slug(ci.slug or ci.name)
+        if IntelligenceApplication.query.filter_by(slug=slug).first():
+            slug = _slug(f"{slug}-ci-{ci.id}")
+        row = IntelligenceApplication(
+            name="",
+            slug="",
+            repository_url="",
+            repository_workspace="",
+            repository_name="",
+            credential_profile_id=0,
+            created_by_user_id=user.id,
+        )
+        _apply_application_payload(
+            row,
+            {
+                "name": ci.name,
+                "slug": slug,
+                "description": ci.description or "",
+                "repositoryUrl": ci.repository_url,
+                "defaultBranch": ci.default_branch,
+                "credentialProfileId": ci.credential_profile_id,
+                "repositorySubdirectory": ci.working_directory or "",
+            },
+            creating=True,
+        )
+        db.session.add(row)
+        db.session.flush()
+        created = True
+    row.ci_service_id = ci.id
+    ci.intelligence_application_id = row.id
+    db.session.commit()
+    if created or not linked:
+        log_audit(
+            "application.created" if created else "application.updated",
+            actor=user,
+            target_type="intelligence_application",
+            target_id=str(row.id),
+            details={
+                "repository": f"{row.repository_workspace}/{row.repository_name}",
+                "ci_service_id": ci.id,
+            },
+        )
+    return ci_service_intelligence(ci.id)
+
+
 def delete_application(application_id: int, user: User) -> None:
     row = get_application(application_id)
     if row.analyses.filter(~ApplicationAnalysis.status.in_(TERMINAL_STATUSES)).count():
@@ -771,6 +883,10 @@ def delete_application(application_id: int, user: User) -> None:
                     path.unlink()
             except OSError:
                 pass
+    # The CI row holds a foreign key to this one; drop the link, not the service.
+    CiService.query.filter_by(intelligence_application_id=row.id).update(
+        {"intelligence_application_id": None}, synchronize_session=False
+    )
     db.session.delete(row)
     db.session.commit()
     log_audit(

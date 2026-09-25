@@ -932,11 +932,12 @@ def record_vote(
 
     email = (voter_email or "").strip().lower()
     requester_email = _user_email(req.requester)
-    if (email and email == requester_email) or (
-        actor is not None and req.requester_id is not None and actor.id == req.requester_id
+    if action == "approve" and (
+        (email and email == requester_email)
+        or (actor is not None and req.requester_id is not None and actor.id == req.requester_id)
     ):
         raise DeploymentRequestError(
-            "You cannot vote on your own deployment request; another approver must decide it.",
+            "You cannot approve your own deployment request; another approver must decide it.",
             403,
         )
     if not email:

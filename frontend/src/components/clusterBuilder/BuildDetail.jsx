@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Blueprint from "./Blueprint.jsx";
+import AddonsPanel from "./AddonsPanel.jsx";
 import GrowPanel from "./GrowPanel.jsx";
 import WorkloadsPanel from "./WorkloadsPanel.jsx";
 import PhaseRail from "./PhaseRail.jsx";
@@ -35,6 +36,7 @@ import {
   getClusterBuildKubeconfig,
   getClusterBuildLogs,
   preflightClusterBuild,
+  removeClusterBuildAddon,
   retryClusterBuild,
   startClusterBuild,
 } from "../../api/clusterBuildsApi.js";
@@ -90,7 +92,7 @@ function FailureHero({ point, build, log, canExecute, onRetry, busy }) {
 
 function DayTwo({
   build, canCreate, canDownloadKubeconfig, onOpenCluster, onGrow, onBringWorkloads,
-  notify, busy, setBusy,
+  onAddAddons, notify, busy, setBusy,
 }) {
   const download = async () => {
     setBusy(true);
@@ -122,6 +124,11 @@ function DayTwo({
       {canCreate ? (
         <button className="btn-outline btn-sm" type="button" onClick={onGrow}>
           Add worker machines
+        </button>
+      ) : null}
+      {canCreate ? (
+        <button className="btn-outline btn-sm" type="button" onClick={onAddAddons}>
+          Add plugins
         </button>
       ) : null}
       {canCreate ? (
@@ -318,6 +325,7 @@ export default function BuildDetail({
 }) {
   const [growing, setGrowing] = useState(false);
   const [bringing, setBringing] = useState(false);
+  const [addingAddons, setAddingAddons] = useState(false);
   const [build, setBuild] = useState(null);
   const [logs, setLogs] = useState(null);
   // The step being viewed: {id, nodeId, phase}.
@@ -459,6 +467,12 @@ export default function BuildDetail({
     ? progress.timeline.filter((cell) => cell.state === "todo")
     : [];
   const addonStep = steps.find((step) => step.phase === "addons");
+  // Requested on day two and not proven yet. On a first build nothing carries
+  // installedAt until the add-ons phase runs, so this is scoped to a cluster
+  // that already exists.
+  const pendingAddons = build.resultClusterId
+    ? (build.addons || []).filter((addon) => typeof addon === "object" && !addon.installedAt)
+    : [];
   const workloadStep = steps.find((step) => step.phase === "workloads");
 
   const act = async (fn, after) => {
@@ -507,7 +521,8 @@ export default function BuildDetail({
         {build.status === "building"
           ? <LiveBadge label={build.currentPhase === "workloads" && isGrowthRun
             ? "Copying workloads"
-            : isGrowthRun ? "Adding machines" : "Building"} />
+            : isGrowthRun && pendingAddons.length ? "Installing plugins"
+              : isGrowthRun ? "Adding machines" : "Building"} />
           : <StatusPill status={build.status} />}
         <span className="muted sg-cb-mono sg-cb-detail-meta">
           v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}
@@ -636,8 +651,11 @@ export default function BuildDetail({
               canCreate={canCreate}
               canDownloadKubeconfig={canDownloadKubeconfig}
               onOpenCluster={onOpenCluster}
-              onGrow={() => { setBringing(false); setGrowing(true); }}
-              onBringWorkloads={() => { setGrowing(false); setBringing(true); }}
+              onGrow={() => { setBringing(false); setAddingAddons(false); setGrowing(true); }}
+              onBringWorkloads={() => {
+                setGrowing(false); setAddingAddons(false); setBringing(true);
+              }}
+              onAddAddons={() => { setGrowing(false); setBringing(false); setAddingAddons(true); }}
               notify={notify}
               busy={busy}
               setBusy={setBusy}
@@ -653,6 +671,17 @@ export default function BuildDetail({
           notify={notify}
           onChanged={load}
           onClose={() => setGrowing(false)}
+        />
+      ) : null}
+
+      {isDone && addingAddons ? (
+        <AddonsPanel
+          build={build}
+          catalog={addonCatalog}
+          canExecute={canExecute}
+          notify={notify}
+          onChanged={load}
+          onClose={() => setAddingAddons(false)}
         />
       ) : null}
 
@@ -810,10 +839,48 @@ export default function BuildDetail({
         />
       </div>
 
-      {(build.addons || []).length && !isDone ? (
+      {(build.addons || []).length && !isDone && !pendingAddons.length ? (
         <div className="card sg-cb-addonline">
           <span className="sg-cb-config-label">Add-ons queued</span>
           <AddonChips addons={build.addons} catalog={addonCatalog} />
+        </div>
+      ) : null}
+
+      {pendingAddons.length && !isDone ? (
+        <div className="card sg-cb-addonline">
+          <span className="sg-cb-config-label">Plugins being installed</span>
+          {pendingAddons.map((addon) => (
+            <span className="sg-cb-addonline-pending" key={addon.id}>
+              <AddonChips addons={[addon]} catalog={addonCatalog} />
+              {canExecute && (build.status === "failed" || build.status === "cancelled") ? (
+                <button
+                  className="btn-ghost btn-sm"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    const name = addonDisplayName(addon, addonCatalog);
+                    if (!window.confirm(
+                      `Withdraw ${name}? Nothing is removed from the cluster — the request `
+                      + "is dropped, and retry will no longer try to install it."
+                    )) return;
+                    act(() => removeClusterBuildAddon(build.id, addon.id), () => {
+                      failureOpened.current = false;
+                      load();
+                    });
+                  }}
+                >
+                  Withdraw
+                </button>
+              ) : null}
+            </span>
+          ))}
+          {build.status === "failed" || build.status === "cancelled" ? (
+            <p className="muted sg-cb-addonline-note">
+              The cluster itself is untouched and still serving. Retry resumes the
+              plugin install where it stopped; withdrawing drops a plugin that did not
+              go in, and once nothing is left to install the build returns to completed.
+            </p>
+          ) : null}
         </div>
       ) : null}
     </div>

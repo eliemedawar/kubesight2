@@ -91,8 +91,13 @@ def test_requester_emailed_on_approve_and_reject(app, monkeypatch):
     admin = _admin_with_email()
     sent = _capture_service_email(monkeypatch)
 
+    # A requester cannot approve their own bundle, so someone else does.
+    approver = User.query.filter_by(username="operator").first()
+    approver.email = "approver@areeba.com"
+    db.session.commit()
+
     approved = _make_bundle(admin)
-    decide_bundle(approved.id, "approve", actor=admin)
+    decide_bundle(approved.id, "approve", actor=approver)
     assert approved.status == "approved"
 
     rejected = _make_bundle(admin)

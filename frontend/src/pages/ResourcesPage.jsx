@@ -15,6 +15,7 @@ import {
 import { RESOURCE_TAB_DEFINITIONS, listKeyForTab } from "../lib/resourceTypes.js";
 import { EMPTY_MESSAGES, formatAccessError } from "../utils/authz.js";
 import { usePermission } from "../hooks/usePermission.js";
+import { isPendingApproval, pendingApprovalMessage } from "../utils/pendingApproval.js";
 
 const ResourceInspectModal = lazy(() => import("../components/resources/ResourceInspectModal.jsx"));
 const EditResourceModal = lazy(() => import("../components/resources/EditResourceModal.jsx"));
@@ -425,7 +426,9 @@ export default function ResourcesPage({
             setInspectModal((prev) => ({
               ...prev,
               loading: false,
-              content: payload.output || `${resourceKind}/${resourceName} restarted.`,
+              content: isPendingApproval(payload)
+                ? pendingApprovalMessage(payload)
+                : payload.output || `${resourceKind}/${resourceName} restarted.`,
             }));
             onRefreshTab?.();
           })

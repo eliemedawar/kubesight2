@@ -15,6 +15,8 @@
 .sidebar.sidebar--v2 {
   padding: var(--space-4) var(--space-3) var(--space-3);
   gap: 0;
+  /* Brand, jump button and footer stay put; only the link list scrolls. */
+  overflow: hidden;
 }
 
 .sidebar--v2 .sidebar-brand {
@@ -88,8 +90,19 @@
   display: flex;
   flex-direction: column;
   gap: 0;
-  margin-top: 0;
   flex: 1;
+  min-height: 0;
+  margin: 0 calc(-1 * var(--space-2)) 0 0;
+  padding: 0 var(--space-2) var(--space-2) 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.sidebar--v2 .sidebar-footer {
+  margin-top: var(--space-2);
 }
 
 .nav-group {
@@ -98,7 +111,7 @@
 }
 
 .nav-group + .nav-group {
-  margin-top: var(--space-2);
+  margin-top: var(--space-1);
 }
 
 .nav-group-head {
@@ -106,7 +119,7 @@
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 0.55rem 0.4rem 0.3rem 0.65rem;
+  padding: 0.5rem 0.4rem 0.25rem 0.65rem;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -168,8 +181,8 @@
 }
 
 .sidebar--v2 .nav-link {
-  min-height: 2.1rem;
-  padding: 0.4rem 0.65rem;
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
   text-decoration: none;
 }
 

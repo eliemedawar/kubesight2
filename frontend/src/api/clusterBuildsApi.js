@@ -46,6 +46,18 @@ export const preflightClusterGrowth = (id) =>
 export const growClusterBuild = (id, payload = {}) =>
   request(`/api/cluster-builds/${id}/grow`, { method: "POST", body: payload });
 
+// --- Day two: installing add-ons on a finished cluster ---------------------
+
+/** Install catalog add-ons on the cluster; only the new ones are applied. */
+export const addClusterBuildAddons = (id, addons) =>
+  request(`/api/cluster-builds/${id}/addons`, { method: "POST", body: { addons } });
+
+/** Withdraw a requested add-on that never installed (e.g. after a failure). */
+export const removeClusterBuildAddon = (id, addonId) =>
+  request(`/api/cluster-builds/${id}/addons/${encodeURIComponent(addonId)}`, {
+    method: "DELETE",
+  });
+
 // --- Bringing workloads from an existing cluster ----------------------------
 
 /** Clusters that can act as a source, plus the registries to check against. */

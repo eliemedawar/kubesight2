@@ -6,6 +6,11 @@ holding a token (Hermes over MCP) exactly as for anybody else, and it covers
 every write path — YAML apply, Helm, and workload restart/scale/rollback — not
 only the Deploy screen. The one way through without a request is configuring
 the cluster to 0.
+
+A gated YAML apply, restart, scale or rollback is not refused: it is sent for
+approval as a one-item change bundle (202, ``pendingApproval``) and the bundle
+executor applies it once another approver approves. Helm has no bundle form and
+is still refused.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -83,11 +88,18 @@ def test_cluster_at_zero_needs_no_request(app):
         ("/api/inventory/actions/rollback", ACTION_BODY),
     ],
 )
-def test_admin_workload_actions_are_gated(client, admin_token, path, body):
+def test_admin_workload_actions_are_sent_for_approval(client, admin_token, path, body):
+    from api.models import ChangeBundle
+
     _require(1)
     response = client.post(path, headers=auth_headers(admin_token), json=body)
-    assert response.status_code == 403
-    assert "approved deployment request" in response.get_json()["error"]
+    assert response.status_code == 202, response.get_json()
+    data = response.get_json()["data"]
+    assert data["pendingApproval"] is True and data["applied"] is False
+    bundle = ChangeBundle.query.get(data["bundleId"])
+    assert bundle.status == "pending_approval"
+    assert bundle.requester_user_id == _admin().id
+    assert [i.resource_name for i in bundle.items] == ["payments-api"]
 
 
 def test_admin_workload_action_allowed_with_an_approved_request(client, admin_token):
@@ -117,18 +129,93 @@ def _never(*_args, **_kwargs):
     raise AssertionError("helm must not run without an approval")
 
 
-def test_admin_yaml_apply_is_gated(app):
+MANIFEST = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\ndata:\n  a: b\n"
+
+
+def _operator_approver() -> User:
+    approver = User.query.filter_by(username="operator").first()
+    approver.email = "approver@example.com"
+    db.session.commit()
+    return approver
+
+
+def test_admin_yaml_apply_is_sent_for_approval(app):
+    from api.models import ChangeBundle
     from api.services.deployment_service import apply_yaml
 
     _require(1)
-    manifest = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
-    data, err, status = apply_yaml(_admin(), CLUSTER, NAMESPACE, manifest, "")
-    assert status == 403 and data is None
-    assert "approved deployment request" in err
+    data, err, status = apply_yaml(_admin(), CLUSTER, NAMESPACE, MANIFEST, "")
+    assert err is None and status == 202
+    assert data["pendingApproval"] is True
+    bundle = ChangeBundle.query.get(data["bundleId"])
+    assert bundle.status == "pending_approval"
+    assert bundle.items[0].action_type == "apply_yaml"
+    assert "kind: ConfigMap" in bundle.items[0].yaml_preview
 
 
-def test_mcp_writes_are_gated_for_an_admin_token(client, admin_token):
-    """Hermes holds a token like anybody else, so it gets the same answer."""
+def test_invalid_yaml_is_refused_not_queued(app):
+    from api.models import ChangeBundle
+    from api.services.deployment_service import apply_yaml
+
+    _require(1)
+    data, _err, status = apply_yaml(_admin(), CLUSTER, NAMESPACE, "not: [valid", "")
+    assert data is None and status >= 400
+    assert ChangeBundle.query.count() == 0
+
+
+def test_queued_change_is_applied_automatically_once_approved(app):
+    """The whole point: edit, wait for the approval, and it happens by itself."""
+    from api.models import ChangeBundle
+    from api.services.change_bundle_executor import process_due_bundles
+    from api.services.change_bundle_service import decide_bundle
+    from api.services.deployment_service import apply_yaml
+
+    _require(1)
+    data, _err, _status = apply_yaml(_admin(), CLUSTER, NAMESPACE, MANIFEST, "")
+    bundle = ChangeBundle.query.get(data["bundleId"])
+
+    # Nothing runs while it waits.
+    process_due_bundles(now=datetime.now(timezone.utc) + timedelta(minutes=5))
+    db.session.refresh(bundle)
+    assert bundle.status == "pending_approval"
+
+    decide_bundle(bundle.id, "approve", actor=_operator_approver())
+    db.session.refresh(bundle)
+    assert bundle.status == "approved"
+
+    # The scheduler's next tick applies it.
+    result = process_due_bundles()
+    db.session.refresh(bundle)
+    assert result["executed"] == 1
+    assert bundle.status == "completed"
+    assert bundle.items[0].status == "succeeded"
+
+
+def test_queued_restart_and_rollback_execute(app):
+    from api.models import ChangeBundle
+    from api.services.change_bundle_executor import process_due_bundles
+    from api.services.change_bundle_service import decide_bundle
+    from api.services.inventory_actions_service import restart_deployment, rollback_deployment
+
+    _require(1)
+    approver = _operator_approver()
+    ids = []
+    for call in (restart_deployment, rollback_deployment):
+        data, _err, status = call(_admin(), {**ACTION_BODY, "revision": 2})
+        assert status == 202
+        ids.append(data["bundleId"])
+        decide_bundle(data["bundleId"], "approve", actor=approver)
+    process_due_bundles()
+    modes = []
+    for bundle_id in ids:
+        bundle = ChangeBundle.query.get(bundle_id)
+        assert bundle.status == "completed", bundle.items[0].execution_result
+        modes.append(bundle.items[0].execution_result["mode"])
+    assert modes == ["restart", "rollback"]
+
+
+def test_mcp_writes_are_sent_for_approval_for_an_admin_token(client, admin_token):
+    """Hermes holds a token like anybody else, so its change waits for approval too."""
     _require(1)
     eligibility = call_tool(
         client, admin_token, "kubesight_deploy_eligibility", {"cluster": CLUSTER}
@@ -141,8 +228,18 @@ def test_mcp_writes_are_gated_for_an_admin_token(client, admin_token):
         "kubesight_workload_restart",
         {"cluster": CLUSTER, "namespace": NAMESPACE, "workload": "payments-api"},
     )
-    assert result["isError"] is True
-    assert "approved deployment request" in result["content"][0]["text"]
+    assert not result.get("isError"), result
+    assert "NOT applied yet" in result["content"][0]["text"]
+    assert result["structuredContent"]["pendingApproval"] is True
+
+    applied = call_tool(
+        client,
+        admin_token,
+        "kubesight_deploy_apply",
+        {"cluster": CLUSTER, "namespace": NAMESPACE, "yaml": MANIFEST},
+    )
+    assert not applied.get("isError"), applied
+    assert applied["structuredContent"]["pendingApproval"] is True
 
 
 def _pending_request_by(user: User) -> DeploymentRequest:
@@ -206,3 +303,42 @@ def test_requester_is_left_out_of_their_own_approver_pool(app):
     )
     assert data["totalRecipients"] == 1
     assert data["status"] == "pending"
+
+
+def _pending_bundle_by(user: User):
+    from api.models import ChangeBundle
+
+    bundle = ChangeBundle(
+        requester_user_id=user.id,
+        status="pending_approval",
+        required_approvals=1,
+        total_recipients=2,
+        requested_start_time=datetime.now(timezone.utc) + timedelta(hours=1),
+        requested_end_time=datetime.now(timezone.utc) + timedelta(hours=3),
+    )
+    db.session.add(bundle)
+    db.session.commit()
+    return bundle
+
+
+def test_requester_cannot_approve_their_own_change_bundle(app):
+    """Change bundles are where approval-gated automation and ticket deploys go."""
+    from api.services import change_bundle_service as bundles
+
+    admin = _admin()
+    admin.email = "admin@example.com"
+    db.session.commit()
+    bundle = _pending_bundle_by(admin)
+    with pytest.raises(bundles.ChangeBundleError) as exc:
+        bundles.decide_bundle(bundle.id, "approve", actor=admin)
+    assert exc.value.status_code == 403
+    with pytest.raises(bundles.ChangeBundleError):
+        bundles.record_vote(bundle.id, "approve", voter_email="admin@example.com")
+    db.session.refresh(bundle)
+    assert bundle.status == "pending_approval"
+
+
+def test_requester_may_still_decline_their_own_request(app):
+    req = _pending_request_by(_admin())
+    data = svc.decide_request(req.id, "decline", actor=_admin())
+    assert data["declines"] == 1 or data["status"] == "declined"

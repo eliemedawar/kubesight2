@@ -52,9 +52,6 @@ def _parse_action_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, str]], 
     }, None, 200
 
 
-_READ_ACTIONS = {"rollout-history"}
-
-
 def _check_deployment_action_access(
     user: Optional[User],
     cluster_id: str,
@@ -92,15 +89,51 @@ def _check_deployment_action_access(
         )
         return "Forbidden", 403
 
-    if action in _READ_ACTIONS:
+    return None
+
+
+# action -> (bundle action type, human wording) for a change queued for approval.
+_QUEUE_AS = {
+    "restart": ("restart_workload", "restart"),
+    "scale": ("scale_replicas", "scale"),
+    "rollback": ("rollback_deployment", "roll back"),
+}
+
+
+def _approval_or_queue(
+    user: Optional[User],
+    cluster_id: str,
+    namespace: str,
+    workload_name: str,
+    action: str,
+    **extra: Any,
+) -> Optional[Tuple[Optional[Dict[str, Any]], Optional[str], int]]:
+    """The cluster's approval rule for a deployment action.
+
+    ``None`` → go ahead. Otherwise the change was sent for approval as a change
+    bundle (202, applied automatically once approved) or refused.
+    """
+    if not user:
         return None
+    from .change_bundle_service import gate_or_queue
 
-    # A change to the cluster: the cluster's deployment-approval rule applies.
-    from .deployment_request_service import check_cluster_change_allowed
-
-    return check_cluster_change_allowed(
+    action_type, verb = _QUEUE_AS[action]
+    detail = ""
+    if action == "scale":
+        detail = f" to {extra.get('replicas')} replicas"
+    elif action == "rollback" and extra.get("revision"):
+        detail = f" to revision {extra.get('revision')}"
+    return gate_or_queue(
         user,
         cluster_id,
+        bundle_payload={
+            "actionType": action_type,
+            "namespace": namespace,
+            "resourceKind": "Deployment",
+            "resourceName": workload_name,
+            **{k: v for k, v in extra.items() if v is not None},
+        },
+        what=f"{verb} deployment/{workload_name}{detail}",
         action=action,
         target_type="deployment",
         target_id=f"{cluster_id}/{namespace}/{workload_name}",
@@ -238,6 +271,10 @@ def restart_deployment(
     if denied:
         return None, denied[0], denied[1]
 
+    queued = _approval_or_queue(user, cluster_id, namespace, workload_name, "restart")
+    if queued is not None:
+        return queued
+
     if not should_use_real_k8s(cluster_id):
         output = f'deployment.apps/{workload_name} restarted'
         data = {
@@ -317,6 +354,10 @@ def scale_deployment(
     denied = _check_deployment_action_access(user, cluster_id, namespace, workload_name, "scale")
     if denied:
         return None, denied[0], denied[1]
+
+    queued = _approval_or_queue(user, cluster_id, namespace, workload_name, "scale", replicas=replicas)
+    if queued is not None:
+        return queued
 
     if not should_use_real_k8s(cluster_id):
         output = f'deployment.apps/{workload_name} scaled'
@@ -404,6 +445,10 @@ def rollback_deployment(
     denied = _check_deployment_action_access(user, cluster_id, namespace, workload_name, "rollback")
     if denied:
         return None, denied[0], denied[1]
+
+    queued = _approval_or_queue(user, cluster_id, namespace, workload_name, "rollback", revision=revision)
+    if queued is not None:
+        return queued
 
     if not should_use_real_k8s(cluster_id):
         output = f'deployment.apps/{workload_name} rolled back'

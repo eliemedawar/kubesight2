@@ -682,8 +682,12 @@ function ManualHosts({ manualNodes, setManualNodes }) {
 // Step 3 — Add-ons
 // ---------------------------------------------------------------------------
 
-function AddonShelf({ catalog, value, onChange, k8sVersion }) {
+/** The add-on catalog as a shelf of cards. Shared with day two, where
+ *  ``installed`` lists what the cluster already runs: those cards stay on the
+ *  shelf, ticked and locked, so the choice reads against what is there. */
+export function AddonShelf({ catalog, value, onChange, k8sVersion, installed = [] }) {
   const selectedById = new Map(value.map((addon) => [addon.id, addon]));
+  const installedById = new Map(installed.map((addon) => [addon.id, addon]));
 
   const toggle = (entry, checked) => {
     if (!checked) {
@@ -730,6 +734,31 @@ function AddonShelf({ catalog, value, onChange, k8sVersion }) {
           || "";
         const provenance = addonProvenance(entry, version);
         const installable = usableVersions.length > 0;
+        const present = installedById.get(entry.id);
+        if (present) {
+          return (
+            <div key={entry.id} className="sg-cb-addon is-on is-installed">
+              <label className="sg-cb-addon-head">
+                <input type="checkbox" checked disabled readOnly />
+                <span>
+                  <span className="an">
+                    {entry.displayName}
+                    <span className="sg-cb-tierchip">installed</span>
+                  </span>
+                  <span className="ad">
+                    Already running on this cluster
+                    {present.version ? ` · v${present.version}` : ""}
+                    {Object.values(present.config || {})
+                      .map((item) => (Array.isArray(item) ? item.join(", ") : item))
+                      .filter(Boolean)
+                      .map((item) => ` · ${item}`)
+                      .join("")}
+                  </span>
+                </span>
+              </label>
+            </div>
+          );
+        }
         return (
           <div key={entry.id} className={`sg-cb-addon ${selected ? "is-on" : ""}`}>
             <label className="sg-cb-addon-head">

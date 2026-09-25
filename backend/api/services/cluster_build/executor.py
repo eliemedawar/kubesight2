@@ -1473,6 +1473,87 @@ echo "HTTP $CODE from {url}"
     )
 
 
+_KUBELET_CONFIG = "/var/lib/kubelet/config.yaml"
+
+
+def _mark_addon_installed(build: ClusterBuild, addon_id: str) -> None:
+    """Stamp one selection as proven, so a later run of the phase skips it.
+
+    Committed per add-on: when the third of three fails, retry resumes at the
+    third instead of re-applying the two that already answer.
+    """
+    stamp = _utcnow().isoformat()
+    # A fresh list: a JSON column is not mutation-tracked.
+    build.addons_json = [
+        {**item, "installedAt": item.get("installedAt") or stamp}
+        if item.get("id") == addon_id else dict(item)
+        for item in (build.addons_json or [])
+    ]
+    db.session.commit()
+
+
+def _enable_kubelet_serving_certs(
+    build: ClusterBuild,
+    resolved,
+    primary: ClusterBuildNode,
+    stream: _StreamTail,
+) -> None:
+    """Make every kubelet request a CA-signed serving certificate.
+
+    A no-op on a cluster initialised with Metrics Server selected. On one
+    that was not, each kubelet gets ``serverTLSBootstrap: true`` and a restart,
+    and the cluster's kubelet-config is re-uploaded so a machine that joins
+    later is configured the same way. Only kubelets that change are restarted.
+    """
+    cps, workers, _ = _nodes_by_role(build)
+    script = (
+        "set -e\n"
+        f"cfg={_KUBELET_CONFIG}\n"
+        'if grep -Eq "^serverTLSBootstrap:[[:space:]]*true[[:space:]]*$" "$cfg"; then\n'
+        '  echo "serving-certificate bootstrap already on"\n'
+        "else\n"
+        '  sed -i "/^serverTLSBootstrap:/d" "$cfg"\n'
+        '  echo "serverTLSBootstrap: true" >> "$cfg"\n'
+        "  systemctl restart kubelet\n"
+        '  echo "KS_CHANGED=1"\n'
+        "fi\n"
+    )
+    changed = False
+    for node in cps + workers:
+        _check_cancelled(build)
+        output = _run_traced(
+            _target_for(build, node),
+            script,
+            timeout_s=180,
+            stream=stream,
+            display_command=(
+                f"enable kubelet serving certificates on "
+                f"{node.hostname or node.address}"
+            ),
+        )
+        changed = changed or "KS_CHANGED=1" in (output.output or "")
+    if not changed:
+        return
+    config = kubeadm.render_init_config(
+        k8s_version=build.k8s_version,
+        control_plane_endpoint=build.control_plane_endpoint,
+        pod_cidr=build.pod_cidr,
+        service_cidr=build.service_cidr,
+        profile=resolved,
+        node_name=primary.hostname or primary.address,
+        server_tls_bootstrap=True,
+    )
+    _upload_and_run_traced(
+        _target_for(build, primary),
+        "/etc/kubernetes/kubesight-kubelet-upload.yaml",
+        config,
+        "kubeadm init phase upload-config kubelet "
+        "--config /etc/kubernetes/kubesight-kubelet-upload.yaml",
+        timeout_s=300,
+        stream=stream,
+    )
+
+
 def _phase_addons(
     build: ClusterBuild,
     resolved,
@@ -1492,9 +1573,31 @@ def _phase_addons(
         for index, descriptor in enumerate(addon_registry.available())
     }
     selections.sort(key=lambda item: catalog_order.get(item.get("id"), 999))
+    # Installed selections are proven already; re-applying them on day two
+    # would revert whatever was changed on the live cluster since.
+    pending = [item for item in selections if not item.get("installedAt")]
 
     try:
-        for selection in selections:
+        if any(
+            item.get("id") == "metrics-server" and item.get("installedAt")
+            for item in selections
+        ):
+            # The approver's policy names every machine, so a machine that
+            # joined after Metrics Server went in is not covered until it is
+            # re-rendered. Idempotent, and cheap next to a node that serves no
+            # metrics and whose logs cannot be read.
+            stream.header("kubelet serving-certificate approver")
+            _upload_and_run_traced(
+                target,
+                "/etc/kubernetes/kubesight-addon-csr-approver.yaml",
+                _metrics_csr_approver_manifest(build, resolved),
+                "kubectl --kubeconfig /etc/kubernetes/admin.conf "
+                "apply -f /etc/kubernetes/kubesight-addon-csr-approver.yaml",
+                timeout_s=600,
+                stream=stream,
+            )
+            _enable_kubelet_serving_certs(build, resolved, primary, stream)
+        for selection in pending:
             _check_cancelled(build)
             addon_id = str(selection.get("id") or "")
             descriptor = addon_registry.get(addon_id)
@@ -1531,6 +1634,10 @@ def _phase_addons(
                     timeout_s=660,
                     stream=stream,
                 )
+                # A cluster built without Metrics Server was initialised
+                # without serving-certificate bootstrap; turn it on now that
+                # the approver is there to sign the requests.
+                _enable_kubelet_serving_certs(build, resolved, primary, stream)
             for command in descriptor.readiness_commands:
                 _kubectl(target, command, timeout_s=960, stream=stream)
 
@@ -1557,6 +1664,7 @@ def _phase_addons(
                 _verify_ingress_data_path(build, target, stream)
             elif addon_id == "metallb":
                 _configure_metallb(build, target, selection, stream)
+            _mark_addon_installed(build, addon_id)
         _check_cancelled(build)
         _step_done(step, stream.text())
     except _Cancelled:

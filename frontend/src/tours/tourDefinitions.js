@@ -303,7 +303,7 @@ const PAGE_TOURS = {
     {
       target: ".ws-tabs",
       title: "Build Center",
-      body: "Everything about building your software lives here: CI services, source analysis in Application Intelligence, and mobile app releases. Each tab is its own page with its own link.",
+      body: "Everything about building your software lives here: CI services — each with its own Intelligence tab for source analysis — and mobile app releases. Each tab is its own page with its own link.",
     },
     {
       target: ".sg-ci-health",

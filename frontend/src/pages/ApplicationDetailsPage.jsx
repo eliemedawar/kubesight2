@@ -30,6 +30,7 @@ import {
   hasHelmRelease,
   inventoryIdsMatch,
 } from "../utils/inventoryPermissions.js";
+import { isPendingApproval, pendingApprovalMessage } from "../utils/pendingApproval.js";
 
 const CLOSED_INSPECT_MODAL = {
   open: false,
@@ -119,6 +120,8 @@ export default function ApplicationDetailsPage({
   const [actionModal, setActionModal] = useState(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState("");
+  // Set when a change was sent for approval instead of being applied.
+  const [approvalNotice, setApprovalNotice] = useState("");
   const [scaleReplicas, setScaleReplicas] = useState("");
   const [rollbackRevision, setRollbackRevision] = useState("");
   const [inspectModal, setInspectModal] = useState(CLOSED_INSPECT_MODAL);
@@ -373,8 +376,9 @@ export default function ApplicationDetailsPage({
     setActionError("");
     try {
       const payload = buildWorkloadActionPayload(actionItem);
+      let result = null;
       if (actionModal === "restart") {
-        await restartWorkload(payload);
+        result = await restartWorkload(payload);
       } else if (actionModal === "scale") {
         const replicas = Number(scaleReplicas);
         if (!Number.isFinite(replicas) || replicas < 0 || replicas > 50) {
@@ -382,14 +386,15 @@ export default function ApplicationDetailsPage({
           setActionBusy(false);
           return;
         }
-        await scaleWorkload({ ...payload, replicas });
+        result = await scaleWorkload({ ...payload, replicas });
       } else if (actionModal === "rollback") {
         const body = { ...payload };
         if (rollbackRevision.trim()) {
           body.revision = Number(rollbackRevision);
         }
-        await rollbackWorkload(body);
+        result = await rollbackWorkload(body);
       }
+      setApprovalNotice(isPendingApproval(result) ? pendingApprovalMessage(result) : "");
       closeActionModal();
       onRefreshDetail?.();
       onHelmActionComplete?.();
@@ -435,6 +440,9 @@ export default function ApplicationDetailsPage({
         actionLabel="Back to Inventory"
         onAction={onBack}
       />
+      {approvalNotice ? (
+        <p className="banner-message" role="status">{approvalNotice}</p>
+      ) : null}
 
       <nav className="app-details-tabs" aria-label="Application sections">
         {visibleTabs.map((t) => (
@@ -806,7 +814,8 @@ export default function ApplicationDetailsPage({
                         setVersionActionBusy(true);
                         setVersionActionError("");
                         try {
-                          await rollbackApplicationVersion(selectedVersion.id, rollbackConfirm);
+                          const result = await rollbackApplicationVersion(selectedVersion.id, rollbackConfirm);
+                          setApprovalNotice(isPendingApproval(result) ? pendingApprovalMessage(result) : "");
                           onRefreshDetail?.();
                           setRollbackConfirm("");
                         } catch (err) {

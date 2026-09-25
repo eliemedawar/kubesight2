@@ -597,39 +597,6 @@ def apply_yaml(
         )
         return None, "Forbidden", 403
 
-    # Gate the deploy on an approved deployment request when the cluster requires
-    # one. Local import avoids a circular import at module load.
-    if user:
-        from .deployment_request_service import (
-            DeploymentRequestError,
-            assert_deploy_allowed,
-        )
-
-        try:
-            assert_deploy_allowed(user, cluster_id)
-        except DeploymentRequestError as exc:
-            log_audit(
-                "unauthorized_deployment_attempt",
-                actor=user,
-                target_type="namespace",
-                target_id=f"{cluster_id}/{namespace}",
-                details={"action": "apply", "reason": "approval_required"},
-            )
-            return None, str(exc), exc.status_code
-        except Exception as exc:  # noqa: BLE001 — fail closed if the gate errors
-            log_audit(
-                "deployment_failed",
-                actor=user,
-                target_type="namespace",
-                target_id=f"{cluster_id}/{namespace}",
-                details={"action": "apply", "error": str(exc), "reason": "approval_check_failed"},
-            )
-            return (
-                None,
-                "Unable to verify deployment approval. Please try again or contact an administrator.",
-                500,
-            )
-
     validation, err, code = validate_yaml(yaml_content, namespace, user=user)
     if err:
         return None, err, code
@@ -644,6 +611,25 @@ def apply_yaml(
             details={"action": "apply", "error": image_err, "reason": "image_not_in_registry"},
         )
         return None, image_err, 422
+
+    # The cluster's approval rule. Checked after validation so only a manifest
+    # this user could apply is ever queued: without a live approved request, the
+    # change is sent for approval as a change bundle and applied automatically
+    # once approved (202, ``pendingApproval``). Local import avoids a cycle.
+    if user:
+        from .change_bundle_service import gate_or_queue
+
+        queued = gate_or_queue(
+            user,
+            cluster_id,
+            bundle_payload={"actionType": "apply_yaml", "namespace": namespace, "yaml": yaml_content},
+            what=f"apply YAML to {namespace}",
+            action="apply",
+            target_type="namespace",
+            target_id=f"{cluster_id}/{namespace}",
+        )
+        if queued is not None:
+            return queued
 
     path = _write_temp_yaml(sanitize_for_apply(yaml_content))
     try:

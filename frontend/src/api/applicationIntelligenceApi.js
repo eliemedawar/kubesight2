@@ -134,3 +134,10 @@ export const updateBitbucketCredentialProfile = (id, body) =>
 
 export const deleteBitbucketCredentialProfile = (id) =>
   request(`/api/bitbucket-credential-profiles/${id}`, { method: "DELETE" });
+
+// The analysis that belongs to a CI service: its repository is the service's.
+export const getCiServiceIntelligence = (serviceId) =>
+  request(`/api/ci/services/${serviceId}/intelligence`);
+
+export const enableCiServiceIntelligence = (serviceId) =>
+  request(`/api/ci/services/${serviceId}/intelligence`, { method: "POST" });

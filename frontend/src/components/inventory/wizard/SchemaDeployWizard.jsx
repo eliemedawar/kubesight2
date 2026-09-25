@@ -9,6 +9,7 @@ import { checkImage, listRegistries } from "../../../api/registriesApi.js";
 import { getClusterDeployEligibility } from "../../../api/deploymentRequestsApi.js";
 import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
 import YamlPreviewPanel from "./YamlPreviewPanel.jsx";
+import { approvalNotice, isPendingApproval, pendingApprovalMessage } from "../../../utils/pendingApproval.js";
 import SearchableSelect from "../../common/SearchableSelect.jsx";
 import NamespaceSelect from "../NamespaceSelect.jsx";
 import AddToBundleButton from "../../changes/AddToBundleButton.jsx";
@@ -356,6 +357,11 @@ export default function SchemaDeployWizard({
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Set when the deploy was sent for approval instead of applied.
+  const [queuedMessage, setQueuedMessage] = useState("");
+  useEffect(() => {
+    if (!open) setQueuedMessage("");
+  }, [open]);
   const [configResources, setConfigResources] = useState({ configMaps: [], secrets: [] });
   const [storageClasses, setStorageClasses] = useState([]);
   const [eligibility, setEligibility] = useState(null);
@@ -739,6 +745,11 @@ export default function SchemaDeployWizard({
     try {
       const payload = resolved?.payload || (await resolve()).payload;
       const result = await applyWizardDeploy({ ...payload, confirmation });
+      if (isPendingApproval(result)) {
+        // Nothing is deployed yet, so no success callback.
+        setQueuedMessage(pendingApprovalMessage(result));
+        return;
+      }
       onSuccess?.(result);
       onClose();
     } catch (err) {
@@ -762,11 +773,9 @@ export default function SchemaDeployWizard({
 
   // Only block when the eligibility check is definitive: approval required and the
   // user has no active approval. In-flight or errored checks never disable Deploy —
-  // the backend 403 is the authoritative fallback surfaced in `error`.
-  const approvalBlocked = Boolean(
-    eligibility && eligibility.approvalRequired && !eligibility.hasActiveApproval,
-  );
-  const requiredApprovals = eligibility?.requiredApprovals;
+  // A gated cluster does not block the deploy: it is sent for approval and
+  // applied automatically once approved.
+  const approvalMessage = approvalNotice(eligibility);
 
   // Missing images in a block-enforced linked registry stop the deploy.
   const missingImages = imageChecks.filter(
@@ -807,29 +816,13 @@ export default function SchemaDeployWizard({
 
         <div className="wizard-modal__body">
           {error ? <p className="error-banner">{error}</p> : null}
+          {queuedMessage ? <p className="banner-message" role="status">{queuedMessage}</p> : null}
 
           {step.key === "basics" ? (
             <div className="wizard-step-panel">
               <h4>Basics</h4>
-              {approvalBlocked ? (
-                <p
-                  className="error-banner"
-                  style={{
-                    background: "var(--danger-soft)",
-                    border: "1px solid var(--danger-border)",
-                    color: "var(--danger)",
-                    fontWeight: 600,
-                    padding: "0.75rem 1rem",
-                    borderRadius: "8px",
-                  }}
-                >
-                  This cluster requires an approved deployment request — request one from
-                  the Clusters tab
-                  {requiredApprovals
-                    ? ` (needs ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"})`
-                    : ""}
-                  .
-                </p>
+              {approvalMessage ? (
+                <p className="banner-message" role="status">{approvalMessage}</p>
               ) : null}
               <Field label="Application name">
                 <input value={answers.basics.appName} onChange={(e) => setBasics("appName", e.target.value)} placeholder="orders" />
@@ -1639,25 +1632,8 @@ export default function SchemaDeployWizard({
           {step.key === "review" ? (
             <div className="wizard-step-panel">
               <h4>Review &amp; Deploy</h4>
-              {approvalBlocked ? (
-                <p
-                  className="error-banner"
-                  style={{
-                    background: "var(--danger-soft)",
-                    border: "1px solid var(--danger-border)",
-                    color: "var(--danger)",
-                    fontWeight: 600,
-                    padding: "0.75rem 1rem",
-                    borderRadius: "8px",
-                  }}
-                >
-                  This cluster requires an approved deployment request — request one from
-                  the Clusters tab
-                  {requiredApprovals
-                    ? ` (needs ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"})`
-                    : ""}
-                  .
-                </p>
+              {approvalMessage ? (
+                <p className="banner-message" role="status">{approvalMessage}</p>
               ) : null}
               {resolved?.summary ? (
                 <ul className="schema-review-summary">
@@ -1734,8 +1710,12 @@ export default function SchemaDeployWizard({
                 }}
                 onAdded={onClose}
               />
-              <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase || approvalBlocked || imageBlocked}>
-                {busy ? "Deploying…" : "Deploy Application"}
+              <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase || Boolean(queuedMessage) || imageBlocked}>
+                {queuedMessage
+                  ? "Sent for approval"
+                  : busy
+                    ? "Deploying…"
+                    : approvalMessage ? "Send for approval" : "Deploy Application"}
               </button>
             </>
           ) : (

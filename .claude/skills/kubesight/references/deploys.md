@@ -19,10 +19,18 @@ without a live approved request — and that failure is a policy working, not an
 error. Saying so up front is the difference between "prod requires an approved
 deployment request; want me to raise one?" and "the deploy failed".
 
-Nobody is exempt — not admins, and not you holding an admin's token. The same
-rule covers Helm install/upgrade/rollback/uninstall and workload
-restart/scale/rollback, so check eligibility before any of those too. You can
-never approve your own request: another approver has to vote on it.
+Nobody is exempt — not admins, and not you holding an admin's token. You can
+never approve your own request or bundle: another approver has to vote on it.
+
+On a gated cluster without a live approved request, `kubesight_deploy_apply`,
+`kubesight_workload_restart/scale/rollback` and `kubesight_resource_restart` do
+**not** fail and do **not** apply. They send the change for approval as a
+change bundle, and KubeSight applies it by itself once it is approved (an
+unapproved one expires after 24h). The result has `pendingApproval: true` and a
+`bundleId`, and its summary starts "NOT applied yet". Tell the person exactly
+that: "sent for approval as bundle #N; it will be applied once approved". Never
+report it as done. Helm install/upgrade/rollback/uninstall has no bundle form
+and is still refused on a gated cluster.
 
 ## Preview before applying
 

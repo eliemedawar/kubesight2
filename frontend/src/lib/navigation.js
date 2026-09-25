@@ -19,7 +19,6 @@ export const WORKSPACES = {
     description: "Build pipelines, source analysis and mobile releases",
     tabs: [
       { pageKey: "serviceCatalog", label: "CI Services" },
-      { pageKey: "applicationIntelligence", label: "Application Intelligence" },
       { pageKey: "mobileApps", label: "Mobile Apps" },
     ],
   },
@@ -92,11 +91,24 @@ export const NAV_GROUPS = [
   },
 ];
 
-const WORKSPACE_OF_PAGE = new Map(
-  Object.entries(WORKSPACES).flatMap(([key, ws]) =>
+/**
+ * Pages that keep their route (old links, analyses of repositories no CI
+ * service builds) but get no tab or sidebar entry of their own, because they
+ * are reached from inside another page. They light the workspace they sit in.
+ *
+ * Application Intelligence analyzes the repository a CI service already
+ * points at, so it lives as the Intelligence tab of each service.
+ */
+export const FOLDED_PAGES = {
+  applicationIntelligence: "buildCenter",
+};
+
+const WORKSPACE_OF_PAGE = new Map([
+  ...Object.entries(WORKSPACES).flatMap(([key, ws]) =>
     ws.tabs.map((tab) => [tab.pageKey, key])
-  )
-);
+  ),
+  ...Object.entries(FOLDED_PAGES),
+]);
 
 /** The workspace key a page is folded into, or null. */
 export function workspaceOfPage(pageKey) {
@@ -119,7 +131,7 @@ export function sidebarKeyFor(navKey) {
  */
 export function buildNavGroups(visiblePages) {
   const byKey = new Map(visiblePages.map((page) => [page.key, page]));
-  const placed = new Set();
+  const placed = new Set(Object.keys(FOLDED_PAGES));
 
   const groups = NAV_GROUPS.map((group) => {
     const items = group.items

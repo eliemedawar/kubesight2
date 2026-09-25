@@ -11,6 +11,7 @@ import { usePermission } from "../../hooks/usePermission.js";
 import { formatAccessError, isAccessDeniedError } from "../../utils/authz.js";
 import YamlPreviewPanel from "../inventory/wizard/YamlPreviewPanel.jsx";
 import AddToBundleButton from "../changes/AddToBundleButton.jsx";
+import { approvalNotice, isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 
 // kubectl kind -> human label / YAML Kind casing for the editable resource kinds.
 const KIND_META = {
@@ -54,6 +55,7 @@ export default function EditResourceModal({
   const meta = metaForKind(kind);
 
   const [step, setStep] = useState("edit");
+  const [queuedMessage, setQueuedMessage] = useState("");
   const [yaml, setYaml] = useState("");
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState(null);
@@ -128,13 +130,10 @@ export default function EditResourceModal({
 
   if (!open) return null;
 
-  // Only block when the check is definitive (approval required, none active).
-  // In-flight/errored checks never disable the buttons — the backend 403 is the
-  // authoritative fallback surfaced in `error`.
-  const approvalBlocked = Boolean(
-    eligibility && eligibility.approvalRequired && !eligibility.hasActiveApproval,
-  );
-  const requiredApprovals = eligibility?.requiredApprovals;
+  // On a cluster that needs approval (and no live approved request), applying
+  // does not fail: the backend sends the change for approval and applies it
+  // automatically once approved. Say so up front, and relabel the button.
+  const needsApproval = Boolean(approvalNotice(eligibility));
 
   const runPreview = async () => {
     setBusy(true);
@@ -168,7 +167,7 @@ export default function EditResourceModal({
     setBusy(true);
     setError("");
     try {
-      await applyDeployYaml({
+      const result = await applyDeployYaml({
         clusterId,
         namespace,
         yaml,
@@ -176,6 +175,11 @@ export default function EditResourceModal({
         // for other kinds, but we leave it unset to keep intent clear.
         deploymentName: kind === "deployment" ? resourceName : "",
       });
+      if (isPendingApproval(result)) {
+        setQueuedMessage(pendingApprovalMessage(result));
+        setStep("queued");
+        return;
+      }
       onSuccess?.();
       onClose();
     } catch (err) {
@@ -207,25 +211,19 @@ export default function EditResourceModal({
 
         {error ? <p className="banner-message error">{error}</p> : null}
 
-        {approvalBlocked ? (
-          <p
-            className="error-banner"
-            style={{
-              background: "var(--danger-soft)",
-              border: "1px solid var(--danger-border)",
-              color: "var(--danger)",
-              fontWeight: 600,
-              padding: "0.75rem 1rem",
-              borderRadius: "8px",
-            }}
-          >
-            This cluster requires an approved deployment request before applying changes —
-            request one from the Clusters tab
-            {requiredApprovals
-              ? ` (needs ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"})`
-              : ""}
-            .
-          </p>
+        {needsApproval && step !== "queued" ? (
+          <p className="banner-message" role="status">{approvalNotice(eligibility)}</p>
+        ) : null}
+
+        {step === "queued" ? (
+          <div className="deploy-preview">
+            <p className="banner-message" role="status">{queuedMessage}</p>
+            <div className="modal-actions">
+              <button type="button" className="btn-primary" onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </div>
         ) : null}
 
         {step === "edit" ? (
@@ -260,7 +258,7 @@ export default function EditResourceModal({
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={busy || !yaml.trim() || approvalBlocked}
+                  disabled={busy || !yaml.trim()}
                   onClick={runPreview}
                 >
                   {busy ? "Validating..." : "Validate & Preview"}
@@ -304,10 +302,12 @@ export default function EditResourceModal({
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy || approvalBlocked}
+                disabled={busy}
                 onClick={applyYaml}
               >
-                {busy ? "Applying..." : "Apply to Cluster"}
+                {busy
+                  ? needsApproval ? "Sending..." : "Applying..."
+                  : needsApproval ? "Send for approval" : "Apply to Cluster"}
               </button>
             </div>
           </div>

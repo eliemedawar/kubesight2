@@ -65,6 +65,10 @@ ACTION_TYPES: Dict[str, Dict[str, str]] = {
     "update_resources": {"mode": "apply", "permission": "apps:deploy"},
     "update_hpa": {"mode": "apply", "permission": "apps:deploy"},
     "scale_replicas": {"mode": "scale", "permission": "apps:deploy"},
+    # Queued automatically when a direct change hits a cluster that needs approval.
+    "apply_yaml": {"mode": "apply", "permission": "apps:deploy"},
+    "restart_workload": {"mode": "restart", "permission": "apps:deploy"},
+    "rollback_deployment": {"mode": "rollback", "permission": "apps:deploy"},
     "delete_deployment": {"mode": "delete", "permission": "apps:delete"},
 }
 
@@ -418,6 +422,7 @@ def build_item_preview(action_type: str, payload: Dict[str, Any]) -> Dict[str, A
         }
 
     if action_type in (
+        "apply_yaml",
         "edit_deployment",
         "edit_configmap",
         "edit_secret",
@@ -453,6 +458,41 @@ def build_item_preview(action_type: str, payload: Dict[str, Any]) -> Dict[str, A
             "yamlPreview": preview,
             "execution": {"mode": "scale", "replicas": replicas},
             "resourceKind": resource_kind or "Deployment",
+            "resourceName": resource_name,
+            "namespace": namespace,
+        }
+
+    if action_type == "restart_workload":
+        if not resource_name:
+            raise ChangeBundleError("A target resource name is required to restart.", 400)
+        kind = resource_kind or "Deployment"
+        verb = "Delete pod (its controller recreates it)" if kind.lower() == "pod" else "Rollout restart"
+        return {
+            "yamlPreview": f"# {verb}: {kind.lower()}/{resource_name} in namespace {namespace}\n",
+            "execution": {"mode": "restart"},
+            "resourceKind": kind,
+            "resourceName": resource_name,
+            "namespace": namespace,
+        }
+
+    if action_type == "rollback_deployment":
+        if not resource_name:
+            raise ChangeBundleError("A target deployment name is required to roll back.", 400)
+        revision = payload.get("revision")
+        if revision not in (None, ""):
+            try:
+                revision = int(revision)
+            except (TypeError, ValueError):
+                raise ChangeBundleError("revision must be a whole number.", 400)
+            if revision < 1:
+                raise ChangeBundleError("revision must be 1 or greater.", 400)
+        else:
+            revision = None
+        target = f"revision {revision}" if revision else "the previous revision"
+        return {
+            "yamlPreview": f"# Roll back deployment/{resource_name} to {target}\n",
+            "execution": {"mode": "rollback", "revision": revision},
+            "resourceKind": "Deployment",
             "resourceName": resource_name,
             "namespace": namespace,
         }
@@ -750,6 +790,10 @@ def submit_bundle(
 
     # Snapshot the approval audience + quorum at submission time.
     recipients, _ = _resolve_recipients_with_source()
+    # Nobody approves their own bundle, so the requester is not in its pool.
+    requester_email = (getattr(user, "email", "") or "").strip().lower() if user else ""
+    if requester_email:
+        recipients = [r for r in recipients if r.strip().lower() != requester_email]
     total = len(recipients)
     configured_required = _bundle_required_approvals(bundle)
     if configured_required <= 0:
@@ -844,6 +888,16 @@ def record_vote(
             raise ChangeBundleError("The deployment window has already passed.", 409)
 
     email = (voter_email or "").strip().lower()
+    requester = bundle.requester
+    requester_email = (getattr(requester, "email", "") or "").strip().lower() if requester else ""
+    if action == "approve" and (
+        (email and email == requester_email)
+        or (actor is not None and bundle.requester_user_id is not None
+            and actor.id == bundle.requester_user_id)
+    ):
+        raise ChangeBundleError(
+            "You cannot approve your own change bundle; another approver must decide it.", 403
+        )
     if reason and action == "decline":
         bundle.rejection_reason = reason
     if not email:
@@ -1109,3 +1163,130 @@ def notify_requester_outcome(bundle: ChangeBundle, status: Optional[str] = None,
         )
     except Exception:  # noqa: BLE001 — outcome mail is best-effort by design
         pass
+
+
+# ---------------------------------------------------------------------------
+# Queue a direct change for approval (cluster requires approvals)
+# ---------------------------------------------------------------------------
+
+def _approval_ttl_hours() -> int:
+    import os
+
+    try:
+        return max(1, int(os.getenv("CHANGE_APPROVAL_TTL_HOURS", "24")))
+    except ValueError:
+        return 24
+
+
+def queue_for_approval(
+    user: Optional[User],
+    payload: Dict[str, Any],
+    *,
+    source: str = "",
+) -> Dict[str, Any]:
+    """Turn one direct change into a submitted, single-item change bundle.
+
+    Used when somebody (a person in the UI, or Hermes over MCP) makes a change on
+    a cluster that requires approvals and has no live approved request. Instead
+    of refusing, the exact change is staged, sent to the cluster's approvers, and
+    applied by the bundle executor as soon as it is approved. It stays open for
+    ``CHANGE_APPROVAL_TTL_HOURS`` (24h); after that an unapproved change expires. The caller's own draft bundle is left
+    alone: this is a bundle of its own. The window is open from now, so once
+    approved the scheduler's next tick applies it.
+    """
+    bundle = ChangeBundle(requester_user_id=user.id if user else None, status="draft")
+    db.session.add(bundle)
+    db.session.commit()
+    try:
+        add_item(user, bundle.id, payload)
+        db.session.refresh(bundle)
+        invalid = [i for i in bundle.items if i.validation_status == "invalid"]
+        if invalid:
+            raise ChangeBundleError(invalid[0].validation_message or "The change failed validation.", 400)
+        now = datetime.now(timezone.utc)
+        what = source or payload.get("actionType") or "change"
+        result = submit_bundle(
+            user,
+            bundle.id,
+            note=f"Sent for approval automatically: {what}.",
+            window_start=(now + timedelta(minutes=1)).isoformat(),
+            window_end=(now + timedelta(hours=_approval_ttl_hours())).isoformat(),
+        )
+        # Submitting needs a future start; a queued change has no reason to
+        # wait once approved, so its window is open from now.
+        row = ChangeBundle.query.get(bundle.id)
+        if row is not None and row.requested_start_time is not None:
+            row.requested_start_time = now
+            db.session.commit()
+            result = {**serialize_bundle(row), "emailResult": result.get("emailResult")}
+    except Exception:
+        # Never leave a half-built bundle behind.
+        db.session.rollback()
+        leftover = ChangeBundle.query.get(bundle.id)
+        if leftover is not None and leftover.status == "draft":
+            db.session.delete(leftover)
+            db.session.commit()
+        raise
+    return result
+
+
+def pending_approval_response(bundle: Dict[str, Any], *, cluster_id: str, what: str) -> Dict[str, Any]:
+    """The payload a write returns when its change was queued rather than applied."""
+    required = bundle.get("requiredApprovals")
+    return {
+        "pendingApproval": True,
+        "applied": False,
+        "bundleId": bundle.get("id"),
+        "requiredApprovals": required,
+        "status": bundle.get("status"),
+        "windowEnd": bundle.get("requestedEndTime") or bundle.get("windowEnd"),
+        "emailResult": bundle.get("emailResult"),
+        "message": (
+            f"{cluster_id} requires {required} approval(s). Your change ({what}) was sent "
+            f"for approval as change bundle #{bundle.get('id')} and will be applied "
+            "automatically once it is approved."
+        ),
+    }
+
+
+def gate_or_queue(
+    user: Optional[User],
+    cluster_id: str,
+    *,
+    bundle_payload: Dict[str, Any],
+    what: str,
+    action: str,
+    target_type: str,
+    target_id: str,
+) -> Optional[Tuple[Optional[Dict[str, Any]], Optional[str], int]]:
+    """The approval rule for a direct change, as the write paths use it.
+
+    ``None`` → go ahead (the cluster needs no approval, or the user holds a live
+    approved deployment request). Otherwise a ``(data, error, status)`` triple to
+    return as-is: 202 with a pending-approval payload when the change was queued
+    as a change bundle, or the refusal when it could not be.
+    """
+    from .deployment_request_service import check_cluster_change_allowed
+
+    denied = check_cluster_change_allowed(
+        user, cluster_id, action=action, target_type=target_type, target_id=target_id
+    )
+    if not denied:
+        return None
+    message, status = denied
+    if status != 403:
+        return None, message, status
+    try:
+        bundle = queue_for_approval(
+            user, {"clusterId": cluster_id, **bundle_payload}, source=what
+        )
+    except ChangeBundleError as exc:
+        return None, f"{message} Queuing it for approval failed: {exc}", exc.status_code
+    log_audit(
+        "change_queued_for_approval",
+        actor=user,
+        target_type=target_type,
+        target_id=target_id,
+        details={"action": action, "cluster": cluster_id, "bundleId": bundle.get("id")},
+    )
+    return pending_approval_response(bundle, cluster_id=cluster_id, what=what), None, 202

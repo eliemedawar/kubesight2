@@ -10,6 +10,7 @@ import BuildDetailDrawer from "../components/catalog/BuildDetailDrawer.jsx";
 import BuildsPanel from "../components/catalog/BuildsPanel.jsx";
 import DockerfilePanel from "../components/catalog/DockerfilePanel.jsx";
 import HermesAnalysisPanel from "../components/catalog/HermesAnalysisPanel.jsx";
+import IntelligencePanel from "../components/catalog/IntelligencePanel.jsx";
 import MergeChecksPanel from "../components/catalog/MergeChecksPanel.jsx";
 import PipelineEditor from "../components/catalog/PipelineEditor.jsx";
 import RunBuildModal from "../components/catalog/RunBuildModal.jsx";
@@ -25,6 +26,9 @@ const TABS = [
   // Between Source and Pipeline because that is the order the questions come
   // in: where the code is, what it is, then how to build it.
   ["application", "Application"],
+  // Application Intelligence reads the same repository the Source tab points
+  // at, so it lives here rather than as a page that asks for it again.
+  ["intelligence", "Intelligence"],
   ["pipeline", "Pipeline"],
   // Between Pipeline and Dockerfile because that is where it sits in the life
   // of a change: the pipeline is how this service is built, merge checks are
@@ -37,7 +41,7 @@ const TABS = [
 ];
 
 /**
- * One service, nine tabs.
+ * One service, ten tabs.
  *
  * Run Build lives in the header so it is reachable from every tab, and is
  * disabled with a reason when the service is not ready — never silently
@@ -58,6 +62,9 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
     deploy: hasPermission("apps:deploy"),
     viewMergeChecks: hasPermission("ci_merge_checks:view"),
     manageMergeChecks: hasPermission("ci_merge_checks:manage"),
+    viewIntelligence: hasPermission("applications:view"),
+    manageIntelligence: hasPermission("applications:manage"),
+    analyzeIntelligence: hasPermission("applications:analyze"),
   };
 
   const [summary, setSummary] = useState(null);
@@ -206,7 +213,9 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             carries a webhook secret and the gate that decides what may be
             merged, so a role without that permission is not shown the door. */}
         {TABS.filter(
-          ([value]) => value !== "mergeChecks" || can.viewMergeChecks
+          ([value]) =>
+            (value !== "mergeChecks" || can.viewMergeChecks) &&
+            (value !== "intelligence" || can.viewIntelligence)
         ).map(([value, label]) => {
           const latest = summary.recentBuilds?.[0];
           const buildsAlert =
@@ -256,6 +265,14 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
               load();
             }}
             onConfigureManually={() => setTab("pipeline")}
+          />
+        )}
+        {tab === "intelligence" && can.viewIntelligence && (
+          <IntelligencePanel
+            service={service}
+            canManage={can.manageIntelligence}
+            canAnalyze={can.analyzeIntelligence}
+            onGoToTab={setTab}
           />
         )}
         {tab === "pipeline" && (

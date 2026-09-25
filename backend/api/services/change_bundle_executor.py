@@ -88,7 +88,7 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optio
         return None, None
 
     # For changes to an existing object, confirm the target still exists.
-    if mode in ("scale", "delete"):
+    if mode in ("scale", "delete", "restart", "rollback"):
         try:
             _run_kubectl_for_cluster(
                 item.cluster_id,
@@ -136,6 +136,11 @@ def _apply_item(item: ChangeBundleItem, mode: str) -> str:
     if mode == "apply":
         path = _write_temp_yaml(sanitize_for_apply(item.yaml_preview or ""))
         try:
+            # Same as a direct apply: a change queued for a brand-new namespace
+            # must not fail just because the namespace does not exist yet.
+            from .deployment_service import _ensure_namespace
+
+            _ensure_namespace(_run_kubectl_for_cluster, item.cluster_id, item.namespace)
             return _run_kubectl_for_cluster(
                 item.cluster_id, ["apply", "-f", path, "-n", item.namespace]
             ).strip()
@@ -148,6 +153,23 @@ def _apply_item(item: ChangeBundleItem, mode: str) -> str:
             item.cluster_id,
             ["scale", _resource_arg(item), f"--replicas={int(replicas)}", "-n", item.namespace],
         ).strip()
+
+    if mode == "restart":
+        if (item.resource_kind or "").lower() == "pod":
+            # A pod restarts by being deleted; its controller recreates it.
+            return _run_kubectl_for_cluster(
+                item.cluster_id, ["delete", "pod", item.resource_name, "-n", item.namespace]
+            ).strip()
+        return _run_kubectl_for_cluster(
+            item.cluster_id, ["rollout", "restart", _resource_arg(item), "-n", item.namespace]
+        ).strip()
+
+    if mode == "rollback":
+        args = ["rollout", "undo", _resource_arg(item), "-n", item.namespace]
+        revision = (item.new_payload_json or {}).get("execution", {}).get("revision")
+        if revision:
+            args.append(f"--to-revision={int(revision)}")
+        return _run_kubectl_for_cluster(item.cluster_id, args).strip()
 
     if mode == "delete":
         return _run_kubectl_for_cluster(

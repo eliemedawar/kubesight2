@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { NAV_PAGES } from "../utils/authz.js";
 import { routeForPageKey } from "../routes/routeTable.js";
 import {
+  FOLDED_PAGES,
   NAV_GROUPS,
   WORKSPACES,
   buildJumpTargets,
@@ -17,6 +18,7 @@ describe("navigation layout", () => {
     const placed = [
       ...NAV_GROUPS.flatMap((group) => group.items.filter((item) => item.page).map((item) => item.page)),
       ...Object.values(WORKSPACES).flatMap((ws) => ws.tabs.map((tab) => tab.pageKey)),
+      ...Object.keys(FOLDED_PAGES),
     ];
     expect(new Set(placed).size).toBe(placed.length);
     expect(placed.sort()).toEqual(sidebarPages.map((page) => page.key).sort());
@@ -37,6 +39,14 @@ describe("navigation layout", () => {
     ["serviceCatalog", "applicationIntelligence", "mobileApps"].forEach((key) => {
       expect(workspaceOfPage(key)).toBe("buildCenter");
     });
+    // Application Intelligence is a tab of each CI service, not of the workspace.
+    const build = buildNavGroups(sidebarPages)
+      .flatMap((group) => group.items)
+      .find((item) => item.key === "buildCenter");
+    expect(build.tabs.map((tab) => tab.pageKey)).toEqual(["serviceCatalog", "mobileApps"]);
+    expect(
+      buildNavGroups(sidebarPages).some((group) => group.id === "more")
+    ).toBe(false);
     ["blueprints", "applicationServices", "clients"].forEach((key) => {
       expect(workspaceOfPage(key)).toBe("architecture");
     });

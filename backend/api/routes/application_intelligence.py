@@ -181,6 +181,31 @@ def delete_application(application_id: int):
 
 
 @application_intelligence_bp.route(
+    "/api/ci/services/<int:ci_service_id>/intelligence", methods=["GET"]
+)
+@require_permission("applications:view")
+def get_ci_service_intelligence(ci_service_id: int):
+    try:
+        return success_response(service.ci_service_intelligence(ci_service_id))
+    except LookupError as exc:
+        return _not_found(exc)
+
+
+@application_intelligence_bp.route(
+    "/api/ci/services/<int:ci_service_id>/intelligence", methods=["POST"]
+)
+@require_permission("applications:manage")
+def enable_ci_service_intelligence(ci_service_id: int):
+    try:
+        data = service.enable_ci_service_intelligence(ci_service_id, get_current_user())
+    except LookupError as exc:
+        return _not_found(exc)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
+
+
+@application_intelligence_bp.route(
     "/api/applications/<int:application_id>/analyses", methods=["POST"]
 )
 @require_permission("applications:analyze")

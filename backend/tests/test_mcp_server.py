@@ -1387,9 +1387,10 @@ def test_every_write_reports_what_it_changed(client, admin_token):
         if not entry["write"]:
             continue
         source = inspect.getsource(entry["run"])
-        # The CI editors route their summary through a shared helper — one for
-        # the pipeline, one for the Dockerfile.
-        helpers = ("_saved_summary", "_save_dockerfile")
+        # Some writes route their summary through a shared helper — the CI
+        # editors (pipeline, Dockerfile), and the deploy/workload writes, whose
+        # summary says "NOT applied yet" when the change was sent for approval.
+        helpers = ("_saved_summary", "_save_dockerfile", "changed_or_queued")
         if '"changed"' not in source and not any(helper in source for helper in helpers):
             missing.append(name)
     assert not missing, f"write tools with no 'changed' summary: {missing}"

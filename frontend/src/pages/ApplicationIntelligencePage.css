@@ -126,7 +126,8 @@
 .ai-detail { display: grid; gap: 1rem; }
 .ai-back { justify-self: start; }
 .ai-detail__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-.ai-detail__head h2 { margin: 0; }
+.ai-detail__head h2,
+.ai-detail__head h3 { margin: 0; }
 .ai-detail__sub { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; margin: .35rem 0 0; color: var(--text-muted); font-size: var(--font-size-sm); }
 .ai-actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
 .ai-actions .ss-wrap { width: 9rem; min-width: 9rem; }

@@ -20,6 +20,7 @@ import { useAuth } from "../../../context/AuthContext.jsx";
 import { formatAccessError, isAccessDeniedError } from "../../../utils/authz.js";
 import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
 import YamlPreviewPanel from "./YamlPreviewPanel.jsx";
+import { approvalNotice, isPendingApproval, pendingApprovalMessage } from "../../../utils/pendingApproval.js";
 import AddToBundleButton from "../../changes/AddToBundleButton.jsx";
 import {
   WIZARD_STEPS,
@@ -72,6 +73,11 @@ export default function ApplicationBuilderWizard({
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Set when the deploy was sent for approval instead of applied.
+  const [queuedMessage, setQueuedMessage] = useState("");
+  useEffect(() => {
+    if (!open) setQueuedMessage("");
+  }, [open]);
   const [storageClasses, setStorageClasses] = useState([]);
   const [storageClassesLoading, setStorageClassesLoading] = useState(false);
   const [clusterNodes, setClusterNodes] = useState([]);
@@ -347,6 +353,11 @@ export default function ApplicationBuilderWizard({
         confirmation,
         yaml: state.advancedYamlEdit ? state.editedYaml : undefined,
       });
+      if (isPendingApproval(result)) {
+        // Nothing is deployed yet, so no success callback.
+        setQueuedMessage(pendingApprovalMessage(result));
+        return;
+      }
       onSuccess?.(result);
       onClose();
     } catch (err) {
@@ -417,11 +428,9 @@ export default function ApplicationBuilderWizard({
 
   const displayYaml = state.advancedYamlEdit ? state.editedYaml : generatedYaml;
 
-  // Only block on a definitive result; in-flight/errored checks leave Deploy enabled.
-  const approvalBlocked = Boolean(
-    eligibility && eligibility.approvalRequired && !eligibility.hasActiveApproval,
-  );
-  const requiredApprovals = eligibility?.requiredApprovals;
+  // A gated cluster does not block the deploy: it is sent for approval and
+  // applied automatically once approved.
+  const approvalMessage = approvalNotice(eligibility);
 
   const renderStep = () => {
     if (stepIndex < 0) {
@@ -437,25 +446,8 @@ export default function ApplicationBuilderWizard({
       case "basics":
         return (
           <>
-            {approvalBlocked ? (
-              <p
-                className="error-banner"
-                style={{
-                  background: "var(--danger-soft)",
-                  border: "1px solid var(--danger-border)",
-                  color: "var(--danger)",
-                  fontWeight: 600,
-                  padding: "0.75rem 1rem",
-                  borderRadius: "8px",
-                }}
-              >
-                This cluster requires an approved deployment request — request one from
-                the Clusters tab
-                {requiredApprovals
-                  ? ` (needs ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"})`
-                  : ""}
-                .
-              </p>
+            {approvalMessage ? (
+              <p className="banner-message" role="status">{approvalMessage}</p>
             ) : null}
             <StepBasics state={state} setState={setState} clusterOptions={clusterSelectOptions} nameValidation={nameValidation} />
           </>
@@ -490,25 +482,8 @@ export default function ApplicationBuilderWizard({
         return (
           <div className="wizard-step-panel">
             <h4>Review & Deploy</h4>
-            {approvalBlocked ? (
-              <p
-                className="error-banner"
-                style={{
-                  background: "var(--danger-soft)",
-                  border: "1px solid var(--danger-border)",
-                  color: "var(--danger)",
-                  fontWeight: 600,
-                  padding: "0.75rem 1rem",
-                  borderRadius: "8px",
-                }}
-              >
-                This cluster requires an approved deployment request — request one from
-                the Clusters tab
-                {requiredApprovals
-                  ? ` (needs ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"})`
-                  : ""}
-                .
-              </p>
+            {approvalMessage ? (
+              <p className="banner-message" role="status">{approvalMessage}</p>
             ) : null}
             <StorageReadinessBanner readiness={storageReadiness} />
             {manifestWarnings.length ? (
@@ -600,6 +575,7 @@ export default function ApplicationBuilderWizard({
 
         <div className="wizard-modal__body">
           {error ? <p className="error-banner">{error}</p> : null}
+          {queuedMessage ? <p className="banner-message" role="status">{queuedMessage}</p> : null}
           {renderStep()}
         </div>
 
@@ -642,9 +618,13 @@ export default function ApplicationBuilderWizard({
                     type="button"
                     className="btn-primary"
                     onClick={applyDeploy}
-                    disabled={busy || confirmation !== confirmationPhrase || approvalBlocked}
+                    disabled={busy || confirmation !== confirmationPhrase || Boolean(queuedMessage)}
                   >
-                    {busy ? "Deploying…" : "Deploy Application"}
+                    {queuedMessage
+                  ? "Sent for approval"
+                  : busy
+                    ? "Deploying…"
+                    : approvalMessage ? "Send for approval" : "Deploy Application"}
                   </button>
                 </>
               ) : (

@@ -13,7 +13,14 @@ const ACTION_OPTIONS = [
   { value: "delete_deployment", label: "Delete deployment", needs: [] },
 ];
 
-const ACTION_LABEL = Object.fromEntries(ACTION_OPTIONS.map((o) => [o.value, o.label]));
+const ACTION_LABEL = {
+  ...Object.fromEntries(ACTION_OPTIONS.map((o) => [o.value, o.label])),
+  // Not offered here: KubeSight stages these itself when a direct change on an
+  // approval-gated cluster is sent for approval.
+  apply_yaml: "Apply YAML",
+  restart_workload: "Restart",
+  rollback_deployment: "Roll back deployment",
+};
 
 const STATUS_COLORS = {
   valid: "var(--ok)",

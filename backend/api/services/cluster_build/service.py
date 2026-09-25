@@ -294,6 +294,93 @@ def _validate_disk_check_path(value: str) -> str:
     return value
 
 
+def _validate_addon_requirements(
+    build: ClusterBuild,
+    selections: List[Dict[str, Any]],
+    nodes: List[Dict[str, Any]],
+) -> None:
+    """What the selected add-ons demand of the machines they will run on.
+
+    Shared by the wizard (the build's own selection) and day two (the add-ons
+    being added to a cluster that already stands), so an add-on is held to the
+    same rules whenever it is installed.
+    """
+    worker_count = sum(1 for n in nodes if n.get("role") == "worker")
+    if worker_count == 0 and selections:
+        labels = []
+        for item in selections:
+            descriptor = addon_registry.get(str(item.get("id") or ""))
+            labels.append(
+                descriptor.display_name if descriptor is not None
+                else str(item.get("id") or "unknown")
+            )
+        names = ", ".join(labels)
+        raise ValueError(
+            f"Selected add-ons ({names}) require at least one worker node; "
+            "kubeadm control planes are tainted against normal workloads."
+        )
+    if any(
+        item.get("id") == "metrics-server"
+        for item in (selections or [])
+    ):
+        missing_hostnames = [
+            str(node.get("address") or "unknown")
+            for node in nodes
+            if node.get("role") != "loadbalancer"
+            and not str(node.get("hostname") or "").strip()
+        ]
+        if missing_hostnames:
+            raise ValueError(
+                "Metrics Server requires an explicit hostname for every "
+                "Kubernetes node so serving certificates can be approved "
+                f"safely (missing: {', '.join(missing_hostnames)})."
+            )
+        invalid_addresses = []
+        for node in nodes:
+            if node.get("role") == "loadbalancer":
+                continue
+            address = str(node.get("address") or "")
+            try:
+                ipaddress.ip_address(address)
+            except ValueError:
+                invalid_addresses.append(address or "unknown")
+        if invalid_addresses:
+            raise ValueError(
+                "Metrics Server's serving-certificate policy requires node "
+                "addresses to be IP literals (invalid: "
+                f"{', '.join(invalid_addresses)})."
+            )
+    metallb = next(
+        (
+            item for item in (selections or [])
+            if item.get("id") == "metallb"
+        ),
+        None,
+    )
+    if metallb is not None:
+        pools = list((metallb.get("config") or {}).get("addressPools") or [])
+        # A pool that swallows the API VIP or a node address hands MetalLB the
+        # power to take the cluster offline the first time someone creates a
+        # LoadBalancer service.
+        reserved = [
+            (str(build.vip_address or ""), "the API VIP"),
+        ] + [
+            (str(node.get("address") or ""),
+             f"node {node.get('hostname') or node.get('address')}")
+            for node in nodes
+        ]
+        collisions = [
+            label for address, label in reserved
+            if address and metallb_addon.pool_contains(pools, address)
+        ]
+        if collisions:
+            raise ValueError(
+                "The MetalLB address pool overlaps "
+                f"{', '.join(dict.fromkeys(collisions))}. Reserve a range that "
+                "no cluster address uses."
+            )
+
+
 def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List[str]:
     """Returns warnings; raises on hard violations."""
     warnings: List[str] = []
@@ -385,79 +472,7 @@ def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List
         raise ValueError(
             f"{build.endpoint_mode} endpoint mode does not use load-balancer nodes."
         )
-    if worker_count == 0 and build.addons_json:
-        labels = []
-        for item in build.addons_json:
-            descriptor = addon_registry.get(str(item.get("id") or ""))
-            labels.append(
-                descriptor.display_name if descriptor is not None
-                else str(item.get("id") or "unknown")
-            )
-        names = ", ".join(labels)
-        raise ValueError(
-            f"Selected add-ons ({names}) require at least one worker node; "
-            "kubeadm control planes are tainted against normal workloads."
-        )
-    if any(
-        item.get("id") == "metrics-server"
-        for item in (build.addons_json or [])
-    ):
-        missing_hostnames = [
-            str(node.get("address") or "unknown")
-            for node in nodes
-            if node.get("role") != "loadbalancer"
-            and not str(node.get("hostname") or "").strip()
-        ]
-        if missing_hostnames:
-            raise ValueError(
-                "Metrics Server requires an explicit hostname for every "
-                "Kubernetes node so serving certificates can be approved "
-                f"safely (missing: {', '.join(missing_hostnames)})."
-            )
-        invalid_addresses = []
-        for node in nodes:
-            if node.get("role") == "loadbalancer":
-                continue
-            address = str(node.get("address") or "")
-            try:
-                ipaddress.ip_address(address)
-            except ValueError:
-                invalid_addresses.append(address or "unknown")
-        if invalid_addresses:
-            raise ValueError(
-                "Metrics Server's serving-certificate policy requires node "
-                "addresses to be IP literals (invalid: "
-                f"{', '.join(invalid_addresses)})."
-            )
-    metallb = next(
-        (
-            item for item in (build.addons_json or [])
-            if item.get("id") == "metallb"
-        ),
-        None,
-    )
-    if metallb is not None:
-        pools = list((metallb.get("config") or {}).get("addressPools") or [])
-        # A pool that swallows the API VIP or a node address hands MetalLB the
-        # power to take the cluster offline the first time someone creates a
-        # LoadBalancer service.
-        reserved = [
-            (str(build.vip_address or ""), "the API VIP"),
-        ] + [
-            (str(node.get("address") or ""),
-             f"node {node.get('hostname') or node.get('address')}")
-            for node in nodes
-        ]
-        collisions = [
-            label for address, label in reserved
-            if address and metallb_addon.pool_contains(pools, address)
-        ]
-        if collisions:
-            raise ValueError(
-                "The MetalLB address pool overlaps "
-                f"{', '.join(dict.fromkeys(collisions))}. Reserve a range that "
-                "no cluster address uses."
-            )
+    _validate_addon_requirements(build, list(build.addons_json or []), nodes)
 
     if worker_count == 0:
         warnings.append("No worker nodes: workloads will need control-plane tolerations.")
@@ -1149,9 +1164,16 @@ def grow_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
 
     # Reopen verification so the cluster is re-checked with the new machines in
     # it. Everything else that already completed stays completed and is skipped.
+    reopen = ["verify"]
+    build.addons_json = _stamp_installed_addons(build)
+    if any(item.get("id") == "metrics-server" for item in build.addons_json):
+        # The kubelet serving-certificate approver names every machine; the
+        # add-ons phase re-renders it (and installs nothing already installed)
+        # so the new workers' certificates are signed too.
+        reopen.append("addons")
     ClusterBuildStep.query.filter(
         ClusterBuildStep.build_id == build.id,
-        ClusterBuildStep.phase == "verify",
+        ClusterBuildStep.phase.in_(reopen),
     ).update(
         {"status": "pending", "error": None, "started_at": None, "finished_at": None},
         synchronize_session=False,
@@ -1263,6 +1285,171 @@ def bring_workloads(build_id: int, *, ack_missing_images: bool = False,
     build.finished_at = None
     db.session.commit()
     executor.start_build_worker(build.id)
+    db.session.refresh(build)
+    return serialize_build(build, include_detail=True)
+
+
+# ---------------------------------------------------------------------------
+# Day two: installing add-ons on a cluster that is already running
+#
+# The wizard's catalog and the wizard's add-ons phase, reopened. Each selection
+# carries an ``installedAt`` stamp once the phase has proven it works, and the
+# phase installs only selections without one — so adding MetalLB to a cluster
+# that already runs Metrics Server applies MetalLB and nothing else, instead of
+# re-applying (and so reverting local edits to) what is already there.
+# ---------------------------------------------------------------------------
+
+def _stamp_installed_addons(build: ClusterBuild) -> List[Dict[str, Any]]:
+    """The build's selections, with ``installedAt`` on everything installed.
+
+    A build finished before selections carried the stamp installed every
+    selection its completed add-ons step ran, so the step's finish time is
+    that stamp.
+    """
+    step = ClusterBuildStep.query.filter_by(
+        build_id=build.id, phase="addons", node_id=None
+    ).first()
+    finished = (
+        step.finished_at
+        if step is not None and step.status == "completed" else None
+    )
+    stamped = []
+    for item in build.addons_json or []:
+        entry = dict(item)
+        if not entry.get("installedAt") and finished is not None:
+            entry["installedAt"] = _iso(finished)
+        stamped.append(entry)
+    return stamped
+
+
+def add_addons(build_id: int, payload: Any, *, actor: str = "") -> Dict[str, Any]:
+    """Install more of the catalog's add-ons on a cluster this build produced."""
+    build = get_build(build_id)
+    _require_growable(build)
+    if growth_nodes(build):
+        raise ValueError(
+            "Machines are queued to join. Finish (or remove) those first — "
+            "one run of the phase machine does one job."
+        )
+    requested = payload.get("addons") if isinstance(payload, dict) else payload
+    if not requested:
+        raise ValueError("Select at least one add-on to install.")
+
+    existing = _stamp_installed_addons(build)
+    installed_ids = {item.get("id") for item in existing}
+    # Same canonicalization as the wizard: versions scoped to the cluster's own
+    # Kubernetes minor, config validated per add-on.
+    additions = addon_registry.normalize_selection(
+        requested, k8s_versions.minor_of(build.k8s_version)
+    )
+    already = [
+        (addon_registry.get(item["id"]).display_name
+         if addon_registry.get(item["id"]) else item["id"])
+        for item in additions if item["id"] in installed_ids
+    ]
+    if already:
+        raise ValueError(
+            f"Already installed on this cluster: {', '.join(already)}."
+        )
+
+    nodes = [
+        {"role": n.role, "hostname": n.hostname, "address": n.address}
+        for n in build.nodes
+    ]
+    _validate_addon_requirements(build, additions, nodes)
+
+    # Resolve every pinned manifest now, while nothing on the cluster has been
+    # touched: an offline profile missing a bundle is a message here, not a
+    # failed phase against a live cluster.
+    profile_row = (
+        db.session.get(BuildProfile, build.build_profile_id)
+        if build.build_profile_id else None
+    )
+    resolved = resolve_profile(profile_row)
+    for item in additions:
+        descriptor = addon_registry.get(item["id"])
+        try:
+            descriptor.render(item["version"], resolved)
+        except addon_registry.AddonRenderError as exc:
+            raise ValueError(
+                f"{descriptor.display_name} {item['version']} cannot be "
+                f"installed: {scrub(str(exc))}"
+            ) from exc
+
+    build.addons_json = existing + [
+        {**item, "requestedBy": actor or None,
+         "requestedAt": datetime.now(timezone.utc).isoformat()}
+        for item in additions
+    ]
+    # Reopen only this phase; every other one is completed and is skipped.
+    ClusterBuildStep.query.filter(
+        ClusterBuildStep.build_id == build.id,
+        ClusterBuildStep.phase == "addons",
+    ).update(
+        {"status": "pending", "error": None, "started_at": None, "finished_at": None},
+        synchronize_session=False,
+    )
+    build.status = "building"
+    build.error = None
+    build.growth_started_at = datetime.now(timezone.utc)
+    build.finished_at = None
+    db.session.commit()
+    executor.start_build_worker(build.id)
+    db.session.refresh(build)
+    return serialize_build(build, include_detail=True)
+
+
+def remove_pending_addon(build_id: int, addon_id: str) -> Dict[str, Any]:
+    """Withdraw an add-on that was requested on day two but never installed.
+
+    The way out of a day-two install that failed: retry keeps trying the same
+    add-on, and without this the only alternative would be to fix it.
+    Installed add-ons are not uninstalled here — that is a change to a live
+    cluster, not the withdrawal of a request.
+    """
+    build = get_build(build_id)
+    if build.status not in ("failed", "cancelled", "completed"):
+        raise ValueError("Wait for the running phase to finish first.")
+    if not build.result_cluster_id:
+        raise ValueError(
+            "This build never registered a cluster; edit the draft instead."
+        )
+    existing = _stamp_installed_addons(build)
+    target = next((item for item in existing if item.get("id") == addon_id), None)
+    if target is None:
+        raise LookupError("That add-on is not on this build.")
+    if target.get("installedAt"):
+        raise ValueError(
+            "That add-on is installed. Removing it from a running cluster is "
+            "not something the Cluster Builder does."
+        )
+    build.addons_json = [item for item in existing if item.get("id") != addon_id]
+    remaining_pending = [
+        item for item in build.addons_json if not item.get("installedAt")
+    ]
+    if build.status == "failed" and not remaining_pending:
+        # Nothing left for the failed phase to do: the cluster is as it was
+        # before the request, and it is still a completed cluster.
+        step = ClusterBuildStep.query.filter_by(
+            build_id=build.id, phase="addons", node_id=None
+        ).first()
+        if step is not None and step.status in ("failed", "running", "pending"):
+            if build.addons_json:
+                step.status = "completed"
+                step.error = None
+                step.finished_at = step.finished_at or datetime.now(timezone.utc)
+            else:
+                db.session.delete(step)
+        failed_elsewhere = ClusterBuildStep.query.filter(
+            ClusterBuildStep.build_id == build.id,
+            ClusterBuildStep.phase != "addons",
+            ClusterBuildStep.status.in_(("failed", "running")),
+        ).count()
+        if not failed_elsewhere:
+            build.status = "completed"
+            build.error = None
+            build.finished_at = datetime.now(timezone.utc)
+    db.session.commit()
     db.session.refresh(build)
     return serialize_build(build, include_detail=True)
 

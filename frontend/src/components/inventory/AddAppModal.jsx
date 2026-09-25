@@ -14,6 +14,7 @@ import SearchableSelect from "../common/SearchableSelect.jsx";
 import { useAuth } from "../../context/AuthContext.jsx";
 import { formatAccessError, isAccessDeniedError } from "../../utils/authz.js";
 import HelmDeployForm from "./HelmDeployForm.jsx";
+import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 import NamespaceSelect from "./NamespaceSelect.jsx";
 import { clusterOptionLabel, normalizeClusterOptions } from "../../utils/clusterOptions.js";
 
@@ -123,6 +124,8 @@ export default function AddAppModal({
   const [deployDiff, setDeployDiff] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Set when the change was sent for approval instead of applied.
+  const [queuedMessage, setQueuedMessage] = useState("");
 
   useEffect(() => {
     if (!open) {
@@ -267,13 +270,17 @@ export default function AddAppModal({
     setBusy(true);
     setError("");
     try {
-      await applyDeployYaml({
+      const result = await applyDeployYaml({
         clusterId: yamlForm.clusterId,
         namespace: yamlForm.namespace,
         yaml: yamlForm.yaml,
         deploymentName: yamlForm.deploymentName,
         description: yamlForm.description,
       });
+      if (isPendingApproval(result)) {
+        setQueuedMessage(pendingApprovalMessage(result));
+        return;
+      }
       onSuccess?.();
       onClose();
     } catch (err) {
@@ -308,11 +315,15 @@ export default function AddAppModal({
     setBusy(true);
     setError("");
     try {
-      await applyDeployImage({
+      const result = await applyDeployImage({
         ...imageForm,
         environmentVariables: parseEnvVars(imageForm.envVars),
         tags: [],
       });
+      if (isPendingApproval(result)) {
+        setQueuedMessage(pendingApprovalMessage(result));
+        return;
+      }
       onSuccess?.();
       onClose();
     } catch (err) {
@@ -351,6 +362,7 @@ export default function AddAppModal({
         </header>
 
         {error ? <p className="banner-message error">{error}</p> : null}
+        {queuedMessage ? <p className="banner-message" role="status">{queuedMessage}</p> : null}
 
         {step === "choose" ? (
           <div className="add-app-choices">
@@ -682,7 +694,7 @@ export default function AddAppModal({
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy}
+                disabled={Boolean(queuedMessage) || busy}
                 onClick={applyYaml}
               >
                 {busy ? "Applying..." : "Apply to Cluster"}
@@ -758,7 +770,7 @@ export default function AddAppModal({
             </ul>
             <div className="modal-actions">
               <button type="button" className="btn-text" onClick={() => setStep("image-form")}>Back</button>
-              <button type="button" className="btn-primary" disabled={busy} onClick={applyImage}>
+              <button type="button" className="btn-primary" disabled={busy || Boolean(queuedMessage)} onClick={applyImage}>
                 {busy ? "Applying..." : "Apply to Cluster"}
               </button>
             </div>

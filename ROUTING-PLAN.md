@@ -77,7 +77,6 @@ only on pages listed in `CLUSTER_CONTEXT_PAGE_KEYS` / `NAMESPACE_CONTEXT_PAGE_KE
 | `clusterOverview` | `/clusters/:clusterId/overview` | — | drill-down, unreachable today |
 | `namespaces` | `/namespaces` | `?cluster&ns` | — |
 | `resources` | `/resources/:tab` | `?cluster&ns` | `App.jsx:161` `resourceActiveTab`; `ResourcesPage.jsx:205` internal fallback |
-| `topology` | `/topology` | `?cluster&ns` | `TopologyPage.jsx:25` `{level, namespace}` |
 | `inventory` | `/inventory/:section` (`templates`\|`helm`) | `?cluster` | `InventoryPage.jsx:53` |
 | `applicationDetails` | `/inventory/app/:appId/:tab` | `?cluster` | `App.jsx:151` + `ApplicationDetailsPage.jsx:105` |
 | `myRequests` | `/my-requests/:tab` (`active`\|`history`) | — | `MyRequestsPage.jsx:15` |
@@ -436,9 +435,8 @@ row of `ROUTES`.
   tab bar marks the active tab with `.resources-tab-bar button.active`, not `role="tab"`.
 - **Click something that is actually clickable.** In the topology graph only namespace nodes
   drill down; `.topo-node` also matches the cluster and node-pool boxes, which do nothing by
-  design. Filter on the `topo-node--click` class. Sidebar links live in `inert` flyouts until
-  their section is hovered, so hover `.sidebar-section-trigger` first — or skip the chrome and
-  `page.goto` the address.
+  design. Filter on the `topo-node--click` class. Sidebar links are always visible
+  (the hover flyouts are gone, 2026-09-25) — or skip the chrome and set the address.
 
 ---
 

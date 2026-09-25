@@ -108,7 +108,7 @@ def inventory_restart():
     data, error, status = restart_deployment(user, _body())
     if error:
         return error_response(error, status)
-    return success_response(data)
+    return success_response(data, status_code=status)
 
 
 @inventory_bp.route("/actions/scale", methods=["POST"])
@@ -118,7 +118,7 @@ def inventory_scale():
     data, error, status = scale_deployment(user, _body())
     if error:
         return error_response(error, status)
-    return success_response(data)
+    return success_response(data, status_code=status)
 
 
 @inventory_bp.route("/actions/rollback", methods=["POST"])
@@ -128,7 +128,7 @@ def inventory_rollback():
     data, error, status = rollback_deployment(user, _body())
     if error:
         return error_response(error, status)
-    return success_response(data)
+    return success_response(data, status_code=status)
 
 
 @inventory_bp.route("/workloads", methods=["GET"])
@@ -181,7 +181,7 @@ def inventory_version_rollback(version_id: int):
     data, error, status = rollback_to_version(user, version_id, confirmation)
     if error:
         return error_response(error, status)
-    return success_response(data)
+    return success_response(data, status_code=status)
 
 
 @inventory_bp.route("/<path:inventory_id>/versions", methods=["GET"])
@@ -331,6 +331,9 @@ def deploy_yaml_apply():
         return error_response(f"Deployment failed unexpectedly: {exc}", 500)
     if error:
         return error_response(error, status)
+    if data and data.get("pendingApproval"):
+        # Sent for approval, not applied: nothing is registered until it runs.
+        return success_response(data, status_code=202)
 
     description = body.get("description") or ""
     deployment_name = body.get("deploymentName") or body.get("deploymentNameOverride") or ""
@@ -406,6 +409,9 @@ def deploy_image_apply():
     data, error, status = apply_yaml(user, cluster_id, namespace, yaml_content, confirmation)
     if error:
         return error_response(error, status)
+    if data and data.get("pendingApproval"):
+        # Sent for approval, not applied: nothing is registered until it runs.
+        return success_response(data, status_code=202)
 
     app_name = summary.get("appName") or body.get("appName") or ""
     create_or_update_from_deployment(
@@ -683,6 +689,9 @@ def deploy_wizard_apply():
     data, error, status = apply_yaml(user, cluster_id, namespace, yaml_content, confirmation)
     if error:
         return error_response(error, status)
+    if data and data.get("pendingApproval"):
+        # Sent for approval, not applied: nothing is registered until it runs.
+        return success_response(data, status_code=202)
 
     app_name = summary.get("appName") or basics.get("appName") or ""
     workload_type = summary.get("workloadType") or body.get("workloadType") or "Deployment"

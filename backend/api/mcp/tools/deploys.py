@@ -4,10 +4,11 @@ This is the domain where "full access" and "safe" have to be the same sentence,
 and the way they are is that **none of these tools implement a deploy**. Each one
 calls the service the UI calls, and the gates live inside those services:
 
-* ``apply_yaml`` asks ``assert_deploy_allowed`` before it touches kubectl. On a
-  cluster configured to require approvals, a deploy without a live approved
-  request fails with the reason, and an agent cannot route around that because
-  there is no second path to kubectl in this server.
+* ``apply_yaml`` checks the cluster's approval rule before it touches kubectl.
+  On a cluster configured to require approvals, a deploy without a live
+  approved request is not applied: it becomes a change bundle, goes to the
+  approvers, and KubeSight applies it once approved. An agent cannot route
+  around that because there is no second path to kubectl in this server.
 * ``install_or_upgrade_release`` demands an exact confirmation phrase, the same
   one a person types into the Helm dialog. It is generated from the release and
   namespace, so producing it means having named the right release in the right
@@ -35,7 +36,15 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from ..protocol import ToolError
-from .common import cluster_name, pick, require_namespace, resolve_cluster, take, unwrap
+from .common import (
+    changed_or_queued,
+    cluster_name,
+    pick,
+    require_namespace,
+    resolve_cluster,
+    take,
+    unwrap,
+)
 from .registry import MAX_ROWS, _limit, tool as _register
 
 
@@ -180,10 +189,10 @@ def _deploy_diff(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "if it does not."
     ),
     approval=(
-        "On a cluster configured to require approvals this fails unless the "
-        "token's user has a live approved deployment request — check "
-        "kubesight_deploy_eligibility first, and use "
-        "kubesight_deployment_request_create to ask."
+        "On a cluster configured to require approvals, without a live approved "
+        "deployment request this does NOT apply: the manifest is sent for "
+        "approval as a change bundle and KubeSight applies it automatically once "
+        "approved. The result says which happened — tell the person."
     ),
     write=True,
     schema={
@@ -213,7 +222,7 @@ def _deploy_apply(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
     data = unwrap(
         apply_yaml(user, cluster_id, namespace, _yaml_of(arguments), ""), what="apply"
     ) or {}
-    return {"changed": f"applied to {cluster_id}/{namespace}", **data}
+    return changed_or_queued(data, f"applied to {cluster_id}/{namespace}")
 
 
 # ---------------------------------------------------------------------------

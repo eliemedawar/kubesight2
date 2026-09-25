@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from ..protocol import ToolError
-from .common import pick, require_namespace, resolve_cluster, take, unwrap
+from .common import changed_or_queued, pick, require_namespace, resolve_cluster, take, unwrap
 from .registry import MAX_ROWS, _limit, tool as _register
 
 
@@ -191,9 +191,10 @@ def _action_body(user, arguments: Dict[str, Any]) -> Dict[str, Any]:
         "connection pool."
     ),
     approval=(
-        "On a cluster configured to require approvals this fails unless the "
-        "token's user has a live approved deployment request — check "
-        "kubesight_deploy_eligibility first."
+        "On a cluster configured to require approvals, without a live approved "
+        "deployment request this is NOT done now: it is sent for approval as a "
+        "change bundle and KubeSight carries it out once approved. The result "
+        "says which happened — tell the person."
     ),
     write=True,
     schema={
@@ -211,7 +212,7 @@ def _workload_restart(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]
 
     body = _action_body(user, arguments)
     data = unwrap(restart_deployment(user, body), what=body["workloadName"]) or {}
-    return {"changed": f"restarted {_where(body)}", **data}
+    return changed_or_queued(data, f"restarted {_where(body)}")
 
 
 @tool(
@@ -223,9 +224,10 @@ def _workload_restart(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]
         "watching it looks exactly like an outage."
     ),
     approval=(
-        "On a cluster configured to require approvals this fails unless the "
-        "token's user has a live approved deployment request — check "
-        "kubesight_deploy_eligibility first."
+        "On a cluster configured to require approvals, without a live approved "
+        "deployment request this is NOT done now: it is sent for approval as a "
+        "change bundle and KubeSight carries it out once approved. The result "
+        "says which happened — tell the person."
     ),
     write=True,
     schema={
@@ -247,7 +249,7 @@ def _workload_scale(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         raise ToolError("'replicas' is required.")
     body["replicas"] = arguments.get("replicas")
     data = unwrap(scale_deployment(user, body), what=body["workloadName"]) or {}
-    return {"changed": f"scaled {_where(body)} to {body['replicas']} replicas", **data}
+    return changed_or_queued(data, f"scaled {_where(body)} to {body['replicas']} replicas")
 
 
 @tool(
@@ -259,9 +261,10 @@ def _workload_scale(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         "is not always the one that worked."
     ),
     approval=(
-        "On a cluster configured to require approvals this fails unless the "
-        "token's user has a live approved deployment request — check "
-        "kubesight_deploy_eligibility first."
+        "On a cluster configured to require approvals, without a live approved "
+        "deployment request this is NOT done now: it is sent for approval as a "
+        "change bundle and KubeSight carries it out once approved. The result "
+        "says which happened — tell the person."
     ),
     write=True,
     schema={
@@ -287,7 +290,7 @@ def _workload_rollback(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any
         body["revision"] = arguments.get("revision")
     target = f"to revision {body['revision']}" if "revision" in body else "to the previous revision"
     data = unwrap(rollback_deployment(user, body), what=body["workloadName"]) or {}
-    return {"changed": f"rolled back {_where(body)} {target}", **data}
+    return changed_or_queued(data, f"rolled back {_where(body)} {target}")
 
 
 @tool(
@@ -299,9 +302,10 @@ def _workload_rollback(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any
         "deployment use kubesight_workload_restart."
     ),
     approval=(
-        "On a cluster configured to require approvals this fails unless the "
-        "token's user has a live approved deployment request — check "
-        "kubesight_deploy_eligibility first."
+        "On a cluster configured to require approvals, without a live approved "
+        "deployment request this is NOT done now: it is sent for approval as a "
+        "change bundle and KubeSight carries it out once approved. The result "
+        "says which happened — tell the person."
     ),
     write=True,
     schema={
@@ -327,7 +331,7 @@ def _resource_restart(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]
     data = unwrap(
         restart_resource(user, cluster_id, namespace, kind, name), what=f"{kind}/{name}"
     ) or {}
-    return {"changed": f"restarted {kind}/{name} in {cluster_id}/{namespace}", **data}
+    return changed_or_queued(data, f"restarted {kind}/{name} in {cluster_id}/{namespace}")
 
 
 @tool(

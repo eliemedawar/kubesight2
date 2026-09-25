@@ -29,12 +29,15 @@ description: Launch KubeSight locally in mock mode and drive it with Playwright 
   `device_scale_factor=2` for crisp screenshots.
 - Login: `admin`/`admin123` (full access) or `viewer`/`viewer123` (non-admin)
   — both seeded, fully onboarded, no MFA. Inputs via `get_by_label("Username"/"Password")`.
-- Sidebar nav items are `<a href="#/...">` links inside a hover flyout per
-  section: `get_by_role("link", name=..., exact=True)` (plain text match
-  collides with section labels). The flyout opens on hovering the section
-  trigger (`.sidebar-section-trigger`), so hover the section first, or skip the
-  chrome entirely and drive the address bar — every view has a URL now
-  (`page.goto(f"{BASE}/#/alerts/history")`). See ROUTING-PLAN.md for the table.
+- Sidebar nav items are always-visible `<a href="#/...">` links grouped under
+  labels (layout in `frontend/src/lib/navigation.js`): scope to the sidebar,
+  `page.locator("aside.sidebar").get_by_role("link", name=..., exact=True)`.
+  Build Center and Architecture are workspaces — their pages are tabs in the
+  `.ws-tabs` strip on top of the page (and nested in the sidebar while open).
+  Ctrl+K opens the jump palette. Every view has a URL
+  (`location.hash = "#/alerts/history"`). See ROUTING-PLAN.md for the table.
+- Seed `kubesight.coachmarks.v1.<userId>` = `{"seen":{},"muted":true}` in an
+  init script, or the tips overlay (`.cm-blocker`) swallows clicks.
 - Topbar cluster/namespace selectors are custom `SearchableSelect`
   (`.ss-wrap` trigger → `.ss-dropdown .ss-option`); namespace selector only
   exists on namespace-scoped pages. Mock fixtures only populate the

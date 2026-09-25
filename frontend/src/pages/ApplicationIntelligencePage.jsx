@@ -2157,8 +2157,14 @@ function ApplicationDetail({
   onAnalyze,
   onOpenAnalysis,
   onCollectRuntime,
+  embedded = false,
 }) {
-  const [tab, setTab] = useRouteParam("tab", "Overview");
+  // Standalone, the results tab is part of the address. Embedded in a CI
+  // service the address's `tab` is the service's own, so this one stays local.
+  const [routedTab, setRoutedTab] = useRouteParam("tab", "Overview");
+  const [localTab, setLocalTab] = useState("Overview");
+  const tab = embedded ? localTab : routedTab;
+  const setTab = embedded ? setLocalTab : setRoutedTab;
   const [rerunMode, setRerunMode] = useState("Quick");
   // The detail view mounts before the analysis resolves, so adopt the last
   // mode used once it is known rather than silently offering Quick.
@@ -2172,10 +2178,12 @@ function ApplicationDetail({
   const active = isAnalysisActive(analysis?.status);
   return (
     <div className="ai-detail">
-      <button type="button" className="btn-ghost ai-back" onClick={onBack}>← All applications</button>
+      {!embedded ? (
+        <button type="button" className="btn-ghost ai-back" onClick={onBack}>← All applications</button>
+      ) : null}
       <header className="ai-detail__head">
         <div>
-          <h2>{application.name}</h2>
+          {embedded ? <h3>Source analysis</h3> : <h2>{application.name}</h2>}
           <p className="ai-detail__sub">
             <code>{application.repositoryWorkspace}/{application.repositoryName}</code>
             <span>·</span>
@@ -2297,16 +2305,22 @@ function ApplicationDetail({
   );
 }
 
-/* ---------------------------------------------------------------------- page */
+/* ----------------------------------------------------------------- workspace */
 
-export default function ApplicationIntelligencePage({ clusters = [], canManage, canAnalyze }) {
-  const [applications, setApplications] = useState([]);
-  const [credentials, setCredentials] = useState([]);
-  // Which application is open is an address, so a refresh of
-  // /application-intelligence/<id> reloads it without a click.
-  const { route, params: routeParams, navigate } = useRouter();
-  const routeAppId =
-    route.key === "applicationIntelligenceDetail" ? routeParams.appId || "" : "";
+/**
+ * One application's analysis results, with everything they need to load and
+ * poll. Standalone on this page, and embedded in a CI service's Intelligence
+ * tab — the repository is the same one, so the analysis lives with it.
+ */
+export function ApplicationIntelligenceWorkspace({
+  applicationId,
+  credentials = [],
+  canManage,
+  canAnalyze,
+  embedded = false,
+  onBack,
+  onChanged,
+}) {
   const [selected, setSelected] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [findings, setFindings] = useState([]);
@@ -2318,6 +2332,173 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
   const [artifacts, setArtifacts] = useState([]);
   const [pullRequests, setPullRequests] = useState([]);
   const [filters, setFilters] = useState({ severity: "", confidence: "", status: "", file: "" });
+  const [error, setError] = useState("");
+
+  const loadDetail = useCallback(async (appId, analysisId) => {
+    const app = await getIntelligenceApplication(appId);
+    const chosenId = analysisId || app.analyses?.[0]?.id;
+    setSelected(app);
+    if (!chosenId) {
+      setAnalysis(null);
+      setFindings([]);
+      setTopology({ nodes: [], edges: [] });
+      setRuntime({ status: "Not Collected" });
+      setRuntimeError("");
+      setConfiguration({ items: [], secretRequirements: [] });
+      setArtifacts([]);
+      setPullRequests([]);
+      return;
+    }
+    const [analysisData, topologyData, configurationData, artifactData, pullRequestData] = await Promise.all([
+      getApplicationAnalysis(chosenId),
+      getApplicationTopology(chosenId),
+      getApplicationConfiguration(chosenId),
+      listApplicationArtifacts(chosenId),
+      listApplicationPullRequests(chosenId),
+    ]);
+    setAnalysis(analysisData);
+    setTopology(topologyData);
+    setConfiguration(configurationData);
+    setArtifacts(artifactData.items || []);
+    setPullRequests(pullRequestData.items || []);
+    try {
+      setRuntime(await getApplicationRuntime(chosenId));
+      setRuntimeError("");
+    } catch (err) {
+      setRuntime({ status: "Unavailable" });
+      setRuntimeError(err.message || "Runtime evidence could not be loaded.");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!applicationId) return;
+    if (selected && String(selected.id) === String(applicationId)) return;
+    loadDetail(applicationId).catch((err) => {
+      setError(err.message || "The application could not be loaded.");
+    });
+  }, [applicationId, selected, loadDetail]);
+
+  useEffect(() => {
+    if (!analysis?.id) return undefined;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const data = await listApplicationFindings(analysis.id, { ...filters, perPage: 100 });
+        if (!cancelled) setFindings(data.items || []);
+      } catch { /* detail error is already surfaced by its analysis state */ }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [analysis?.id, analysis?.status, filters]);
+
+  useEffect(() => {
+    if (!analysis?.id || !isAnalysisActive(analysis.status)) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await getApplicationAnalysis(analysis.id);
+        setAnalysis(next);
+        if (!isAnalysisActive(next.status)) {
+          await loadDetail(next.applicationId, next.id);
+          onChanged?.();
+        }
+      } catch { /* polling resumes on next interval */ }
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [analysis?.id, analysis?.status, loadDetail, onChanged]);
+
+  useEffect(() => {
+    if (!analysis?.id || !pullRequests.some((item) => item.status === "Queued")) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const data = await listApplicationPullRequests(analysis.id);
+        setPullRequests(data.items || []);
+      } catch { /* polling resumes on next interval */ }
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [analysis?.id, pullRequests]);
+
+  if (!selected || String(selected.id) !== String(applicationId)) {
+    return error
+      ? <p className="banner-message error">{error}</p>
+      : <LoadingState label="Loading analysis…" />;
+  }
+  return (
+    <>
+      {error ? <p className="banner-message error">{error}</p> : null}
+      <ApplicationDetail
+        embedded={embedded}
+        application={selected}
+        analysis={analysis}
+        findings={findings}
+        topology={topology}
+        runtime={runtime}
+        runtimeError={runtimeError}
+        runtimeLoading={runtimeLoading}
+        configuration={configuration}
+        artifacts={artifacts}
+        pullRequests={pullRequests}
+        credentials={credentials}
+        filters={filters}
+        onFilters={setFilters}
+        onFindingChanged={(updated) => {
+          setFindings((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+        }}
+        onPullRequestCreated={(created) => {
+          setPullRequests((items) => [created, ...items]);
+        }}
+        onBack={onBack}
+        onCancel={async () => {
+          if (!analysis?.id) return;
+          try {
+            setAnalysis(await cancelApplicationAnalysis(analysis.id));
+            onChanged?.();
+          } catch (err) {
+            setError(err.message || "The analysis could not be cancelled.");
+          }
+        }}
+        canManage={canManage}
+        canAnalyze={canAnalyze}
+        onAnalyze={async (analysisMode, revision) => {
+          try {
+            const next = await requestApplicationAnalysis(selected.id, {
+              analysisMode,
+              revision: revision || selected.defaultBranch,
+            });
+            setError("");
+            onChanged?.();
+            await loadDetail(selected.id, next.id);
+          } catch (err) {
+            setError(err.message || "The analysis could not be started.");
+          }
+        }}
+        onOpenAnalysis={(analysisId) => loadDetail(selected.id, analysisId)}
+        onCollectRuntime={async () => {
+          if (!analysis?.id) return;
+          setRuntimeLoading(true);
+          setRuntimeError("");
+          try {
+            setRuntime(await collectApplicationRuntime(analysis.id));
+          } catch (err) {
+            setRuntimeError(err.message || "Runtime evidence could not be collected.");
+          } finally {
+            setRuntimeLoading(false);
+          }
+        }}
+      />
+    </>
+  );
+}
+
+/* ---------------------------------------------------------------------- page */
+
+export default function ApplicationIntelligencePage({ clusters = [], canManage, canAnalyze }) {
+  const [applications, setApplications] = useState([]);
+  const [credentials, setCredentials] = useState([]);
+  // Which application is open is an address, so a refresh of
+  // /application-intelligence/<id> reloads it without a click.
+  const { route, params: routeParams, navigate } = useRouter();
+  const routeAppId =
+    route.key === "applicationIntelligenceDetail" ? routeParams.appId || "" : "";
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [modal, setModal] = useState(false);
@@ -2353,103 +2534,22 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
       }),
     [navigate]
   );
+  // An application that belongs to a CI service is opened there, where its
+  // repository already lives — this list is only for the ones that do not.
+  const openRow = useCallback(
+    (item) =>
+      item.ciServiceId
+        ? navigate({
+            key: "serviceDetail",
+            params: { serviceId: String(item.ciServiceId), tab: "intelligence" },
+          })
+        : openApplication(item.id),
+    [navigate, openApplication]
+  );
   const closeApplication = useCallback(
     () => navigate({ key: "applicationIntelligence" }),
     [navigate]
   );
-
-  const loadDetail = useCallback(async (applicationId, analysisId) => {
-    const app = await getIntelligenceApplication(applicationId);
-    const chosenId = analysisId || app.analyses?.[0]?.id;
-    setSelected(app);
-    if (!chosenId) {
-      setAnalysis(null);
-      setFindings([]);
-      setTopology({ nodes: [], edges: [] });
-      setRuntime({ status: "Not Collected" });
-      setRuntimeError("");
-      setConfiguration({ items: [], secretRequirements: [] });
-      setArtifacts([]);
-      setPullRequests([]);
-      return;
-    }
-    const [analysisData, topologyData, configurationData, artifactData, pullRequestData] = await Promise.all([
-      getApplicationAnalysis(chosenId),
-      getApplicationTopology(chosenId),
-      getApplicationConfiguration(chosenId),
-      listApplicationArtifacts(chosenId),
-      listApplicationPullRequests(chosenId),
-    ]);
-    setAnalysis(analysisData);
-    setTopology(topologyData);
-    setConfiguration(configurationData);
-    setArtifacts(artifactData.items || []);
-    setPullRequests(pullRequestData.items || []);
-    try {
-      setRuntime(await getApplicationRuntime(chosenId));
-      setRuntimeError("");
-    } catch (err) {
-      setRuntime({ status: "Unavailable" });
-      setRuntimeError(err.message || "Runtime evidence could not be loaded.");
-    }
-  }, []);
-
-  // The address drives the detail, not the click: opening a link straight to
-  // /application-intelligence/<id> loads it with nothing else having happened.
-  useEffect(() => {
-    if (!routeAppId) {
-      if (selected) {
-        setSelected(null);
-        setAnalysis(null);
-      }
-      return;
-    }
-    if (selected && String(selected.id) === String(routeAppId)) {
-      return;
-    }
-    loadDetail(routeAppId).catch((err) => {
-      setError(err.message || "The application could not be loaded.");
-    });
-  }, [routeAppId, selected, loadDetail]);
-
-  useEffect(() => {
-    if (!analysis?.id) return undefined;
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const data = await listApplicationFindings(analysis.id, { ...filters, perPage: 100 });
-        if (!cancelled) setFindings(data.items || []);
-      } catch { /* detail error is already surfaced by its analysis state */ }
-    };
-    load();
-    return () => { cancelled = true; };
-  }, [analysis?.id, analysis?.status, filters]);
-
-  useEffect(() => {
-    if (!analysis?.id || !isAnalysisActive(analysis.status)) return undefined;
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await getApplicationAnalysis(analysis.id);
-        setAnalysis(next);
-        if (!isAnalysisActive(next.status)) {
-          await loadDetail(next.applicationId, next.id);
-          await loadList();
-        }
-      } catch { /* polling resumes on next interval */ }
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [analysis?.id, analysis?.status, loadDetail, loadList]);
-
-  useEffect(() => {
-    if (!analysis?.id || !pullRequests.some((item) => item.status === "Queued")) return undefined;
-    const timer = window.setInterval(async () => {
-      try {
-        const data = await listApplicationPullRequests(analysis.id);
-        setPullRequests(data.items || []);
-      } catch { /* polling resumes on next interval */ }
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [analysis?.id, pullRequests]);
 
   const latestById = useMemo(
     () => Object.fromEntries(applications.map((item) => [item.id, item.latestAnalysis])),
@@ -2459,11 +2559,11 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
   if (loading) return <LoadingState label="Loading Application Intelligence…" />;
   return (
     <div className="ai-page">
-      {!selected ? (
+      {!routeAppId ? (
         <>
           <PageTitle
             title="Application Intelligence"
-            subtitle="Evidence-backed source, container, and deployment analysis for Bitbucket microservices."
+            subtitle="Evidence-backed source, container, and deployment analysis for Bitbucket microservices. For a CI service, run it from the service's Intelligence tab."
             actionLabel={canAnalyze && canManage ? "Analyze application" : undefined}
             onAction={() => setModal(true)}
           />
@@ -2471,7 +2571,7 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
           {!applications.length ? (
             <EmptyState
               title="No applications analyzed yet"
-              description="Register a Bitbucket repository to begin a bounded, read-only analysis."
+              description="Open a CI service and use its Intelligence tab, or register a Bitbucket repository here."
             />
           ) : (
             <div className="card ai-table-wrap">
@@ -2523,7 +2623,11 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
                           </small>
                         </td>
                         <td>{formatTimestamp(latest?.createdAt)}</td>
-                        <td><button type="button" className="btn-outline" onClick={() => openApplication(item.id)}>Open</button></td>
+                        <td>
+                          <button type="button" className="btn-outline" onClick={() => openRow(item)}>
+                            {item.ciServiceId ? "Open in CI" : "Open"}
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -2533,56 +2637,13 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
           )}
         </>
       ) : (
-        <ApplicationDetail
-          application={selected}
-          analysis={analysis}
-          findings={findings}
-          topology={topology}
-          runtime={runtime}
-          runtimeError={runtimeError}
-          runtimeLoading={runtimeLoading}
-          configuration={configuration}
-          artifacts={artifacts}
-          pullRequests={pullRequests}
+        <ApplicationIntelligenceWorkspace
+          applicationId={routeAppId}
           credentials={credentials}
-          filters={filters}
-          onFilters={setFilters}
-          onFindingChanged={(updated) => {
-            setFindings((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-          }}
-          onPullRequestCreated={(created) => {
-            setPullRequests((items) => [created, ...items]);
-          }}
-          onBack={closeApplication}
-          onCancel={async () => {
-            if (!analysis?.id) return;
-            const next = await cancelApplicationAnalysis(analysis.id);
-            setAnalysis(next);
-            loadList();
-          }}
           canManage={canManage}
           canAnalyze={canAnalyze}
-          onAnalyze={async (analysisMode, revision) => {
-            const next = await requestApplicationAnalysis(selected.id, {
-              analysisMode,
-              revision: revision || selected.defaultBranch,
-            });
-            await loadList();
-            await loadDetail(selected.id, next.id);
-          }}
-          onOpenAnalysis={(analysisId) => loadDetail(selected.id, analysisId)}
-          onCollectRuntime={async () => {
-            if (!analysis?.id) return;
-            setRuntimeLoading(true);
-            setRuntimeError("");
-            try {
-              setRuntime(await collectApplicationRuntime(analysis.id));
-            } catch (err) {
-              setRuntimeError(err.message || "Runtime evidence could not be collected.");
-            } finally {
-              setRuntimeLoading(false);
-            }
-          }}
+          onBack={closeApplication}
+          onChanged={loadList}
         />
       )}
       {modal ? (
@@ -2602,10 +2663,10 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
             setCredentials((items) => items.filter((item) => item.id !== credentialId));
           }}
           onClose={() => setModal(false)}
-          onComplete={async (application, createdAnalysis) => {
+          onComplete={async (application) => {
             setModal(false);
             await loadList();
-            await loadDetail(application.id, createdAnalysis.id);
+            openApplication(application.id);
           }}
         />
       ) : null}

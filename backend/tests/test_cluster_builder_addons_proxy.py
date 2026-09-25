@@ -255,6 +255,7 @@ class TestAddonApi:
         )
         assert response.status_code == 201
         data = response.get_json()["data"]
+        # A draft: nothing is installed, so nothing carries installedAt yet.
         assert data["addons"] == payload["addons"]
 
         listed = client.get(
@@ -1072,7 +1073,11 @@ class TestAddonExecution:
             client, admin_token, ssh_profile, fake, payload
         )
         assert data["status"] == "completed", data.get("error")
-        assert data["addons"] == payload["addons"]
+        assert [
+            {k: v for k, v in item.items() if k != "installedAt"}
+            for item in data["addons"]
+        ] == payload["addons"]
+        assert all(item["installedAt"] for item in data["addons"])
 
         phases = {step["phase"]: step for step in data["steps"]}
         assert phases["addons"]["status"] == "completed"

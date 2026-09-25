@@ -642,6 +642,14 @@ button.sg-cb-step:hover { border-color: var(--accent); color: var(--accent-stron
 .sg-cb-addon.is-on {
   border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--bg-panel));
 }
+/* Day two: already on the cluster. Doubled class so it beats .is-on (see the
+   .is-tie note) — an installed card must not read as a fresh selection. */
+.sg-cb-addon.is-installed.is-installed {
+  border-color: var(--border); border-style: dashed; background: var(--bg-panel);
+}
+.sg-cb-addon.is-installed .sg-cb-addon-head { cursor: default; }
+.sg-cb-addon.is-installed .sg-cb-addon-head input { accent-color: var(--ok); }
+.sg-cb-addon.is-installed .sg-cb-tierchip { color: var(--ok); border-color: currentColor; }
 .sg-cb-addon-head { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
 .sg-cb-addon-head input {
   width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); flex: none;
@@ -821,6 +829,8 @@ button.sg-cb-step:hover { border-color: var(--accent); color: var(--accent-stron
 .sg-cb-proof-note { margin: 0; font-size: 12px; line-height: 1.55; }
 
 .sg-cb-addonline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sg-cb-addonline-pending { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sg-cb-addonline-note { flex-basis: 100%; margin: 0; font-size: 12px; line-height: 1.5; }
 
 /* ── Day two ────────────────────────────────────────────────────────── */
 .sg-cb-day2 {

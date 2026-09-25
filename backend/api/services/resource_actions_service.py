@@ -74,6 +74,7 @@ _YAML_KIND_CASING = {
 # Kinds that support the Resources "Restart" action. Pods are restarted by
 # deletion (the owning controller recreates them); workloads use rollout restart.
 RESTART_SUPPORTED_KINDS = {"pod", "deployment", "statefulset", "daemonset"}
+_KIND_LABELS = {"pod": "Pod", "deployment": "Deployment", "statefulset": "StatefulSet", "daemonset": "DaemonSet"}
 
 # Permission gating writes from the Resources page (mirrors the deployment edit action).
 RESTART_PERMISSION = "apps:deploy"
@@ -381,28 +382,6 @@ def _check_resource_restart_access(
     return None
 
 
-def _check_resource_change_allowed(
-    user: Optional[User],
-    cluster_id: str,
-    namespace: str,
-    normalized: str,
-    name: str,
-) -> Optional[Tuple[str, int]]:
-    """Restart access plus the cluster's deployment-approval rule."""
-    denied = _check_resource_restart_access(user, cluster_id, namespace, normalized, name)
-    if denied:
-        return denied
-    from .deployment_request_service import check_cluster_change_allowed
-
-    return check_cluster_change_allowed(
-        user,
-        cluster_id,
-        action="restart",
-        target_type=normalized,
-        target_id=f"{cluster_id}/{namespace}/{name}",
-    )
-
-
 def restart_resource(
     user: Optional[User],
     cluster_id: str,
@@ -417,9 +396,31 @@ def restart_resource(
     if normalized not in RESTART_SUPPORTED_KINDS:
         return None, f"Restart is not supported for {normalized}", 400
 
-    denied = _check_resource_change_allowed(user, cluster_id, namespace, normalized, name)
+    denied = _check_resource_restart_access(user, cluster_id, namespace, normalized, name)
     if denied:
         return None, denied[0], denied[1]
+
+    # The cluster's approval rule: without a live approved request the restart is
+    # sent for approval and carried out automatically once approved (202).
+    if user:
+        from .change_bundle_service import gate_or_queue
+
+        queued = gate_or_queue(
+            user,
+            cluster_id,
+            bundle_payload={
+                "actionType": "restart_workload",
+                "namespace": namespace,
+                "resourceKind": _KIND_LABELS.get(normalized, normalized),
+                "resourceName": name,
+            },
+            what=f"restart {normalized}/{name}",
+            action="restart",
+            target_type=normalized,
+            target_id=f"{cluster_id}/{namespace}/{name}",
+        )
+        if queued is not None:
+            return queued
 
     if normalized == "pod":
         args = ["delete", "pod", name, "-n", namespace]

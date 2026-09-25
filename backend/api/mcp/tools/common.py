@@ -199,3 +199,22 @@ def pick(row: Any, keys: Tuple[str, ...]) -> Dict[str, Any]:
     if not isinstance(row, dict):
         return {}
     return {key: row[key] for key in keys if key in row}
+
+
+def changed_or_queued(data: Dict[str, Any], changed: str) -> Dict[str, Any]:
+    """A write's result, honest about whether it happened yet.
+
+    On a cluster that requires approvals, a write without a live approved request
+    is not refused: it is sent for approval as a change bundle and KubeSight
+    applies it once approved. Saying "applied" then would be the one wrong
+    answer, so the summary names the bundle instead.
+    """
+    if data.get("pendingApproval"):
+        return {
+            "changed": (
+                f"NOT applied yet — sent for approval as change bundle #{data.get('bundleId')}; "
+                "KubeSight applies it automatically once it is approved"
+            ),
+            **data,
+        }
+    return {"changed": changed, **data}

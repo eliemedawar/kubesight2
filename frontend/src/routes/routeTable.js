@@ -52,6 +52,7 @@ export const TAB_VALUES = {
     "overview",
     "source",
     "application",
+    "intelligence",
     "pipeline",
     // Slugifies to "mergechecks" in the URL and resolves back to this. A tab
     // missing from this list is not a tab with an ugly URL — the whole route

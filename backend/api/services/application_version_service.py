@@ -185,6 +185,9 @@ def rollback_to_version(
     )
     if error:
         return None, error, status
+    if data and data.get("pendingApproval"):
+        # Sent for approval; the new version is recorded once it actually runs.
+        return data, None, 202
 
     catalog = get_entry_for_inventory(entry.cluster_id, entry.namespace, entry.app_name)
     new_version = create_deployment_version(

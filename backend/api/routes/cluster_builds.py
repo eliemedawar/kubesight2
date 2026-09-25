@@ -293,6 +293,53 @@ def grow_build(build_id: int):
     return success_response(data)
 
 
+@cluster_builds_bp.route("/<int:build_id>/addons", methods=["POST"])
+@require_permission("cluster_builds:execute")
+def add_build_addons(build_id: int):
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = svc.add_addons(build_id, payload, actor=_actor_name())
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_addons_added",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={
+            "name": data.get("name"),
+            "clusterId": data.get("resultClusterId"),
+            "addons": [
+                {"id": item.get("id"), "version": item.get("version")}
+                for item in (payload.get("addons") or [])
+                if isinstance(item, dict)
+            ],
+        },
+    )
+    return success_response(data)
+
+
+@cluster_builds_bp.route("/<int:build_id>/addons/<addon_id>", methods=["DELETE"])
+@require_permission("cluster_builds:execute")
+def remove_pending_build_addon(build_id: int, addon_id: str):
+    try:
+        data = svc.remove_pending_addon(build_id, addon_id)
+    except LookupError as exc:
+        return error_response(str(exc) or "Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_addon_withdrawn",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={"name": data.get("name"), "addon": addon_id},
+    )
+    return success_response(data)
+
+
 # ---------------------------------------------------------------------------
 # Bringing workloads from an existing cluster
 #

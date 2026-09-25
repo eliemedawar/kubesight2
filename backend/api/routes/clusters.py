@@ -825,7 +825,7 @@ def resource_restart(cluster_id: str, namespace: str, resource_kind: str, resour
     )
     if error:
         return error_response(error, status)
-    return success_response(data)
+    return success_response(data, status_code=status)
 
 
 @clusters_bp.route(
