@@ -9,6 +9,7 @@ const TASK_PILL = {
   awaiting_approval: ["warn", "Needs approval"],
   deciding: ["info", "Deciding…"],
   impediment: ["danger", "Impediment"],
+  on_hold: ["warn", "On hold"],
   done: ["ok", "Done"],
   error: ["danger", "Agent error"],
   superseded: ["muted", "Superseded"],
@@ -41,9 +42,12 @@ function describe(task) {
 
 export default function AgentTaskCard({ task, canManage, deciding, onApprove, onReject }) {
   const change = describe(task);
+  const replied = task.event?.type === "requester_replied";
   const title =
     task.kind === "followup"
       ? `Follow-up · ${EVENT_LABEL[task.event?.type] || "event"}`
+      : replied
+      ? "Requester replied — Hermes continued"
       : "Hermes read the ticket";
   return (
     <div className="sg-zh-run sg-zh-agent">
@@ -58,6 +62,13 @@ export default function AgentTaskCard({ task, canManage, deciding, onApprove, on
         <AgentTaskPill task={task} />
       </div>
 
+      {replied
+        ? (task.event.comments || []).map((c, index) => (
+            <p key={c.id || index} className="sg-zh-agent-line">
+              <span className="muted">{c.author || "Requester"}:</span> {c.text}
+            </p>
+          ))
+        : null}
       {task.understanding ? (
         <p className="sg-zh-agent-line">
           <span className="muted">Understood:</span> {task.understanding}

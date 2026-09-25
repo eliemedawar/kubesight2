@@ -79,12 +79,17 @@ class TicketInterpretation(db.Model):
       executed           Hermes started a deploy run (``run_id``)
       awaiting_approval  Hermes asked for approval (Telegram / UI buttons)
       impediment         Hermes parked the ticket (or an approval was refused)
+      on_hold            Hermes parked it waiting on something (not a defect)
       done               Hermes closed the ticket / wrote the follow-up
       error              Hermes failed or finished without acting (retryable)
       superseded         an operator asked Hermes again; a newer task replaced it
 
     The tools write the outcome columns while Hermes is still running; the
     worker only decides, once Hermes returns, whether anything was recorded.
+
+    A ticket Hermes parked (impediment / on hold) is picked up again when the
+    requester comments: a new ``handle`` task whose ``event`` is
+    ``{"type": "requester_replied", "comments": [...]}``.
     """
 
     __tablename__ = "ticket_interpretations"
@@ -156,3 +161,24 @@ class TicketInterpretation(db.Model):
     requested_by = db.Column(db.String(120), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now, index=True)
     updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+
+
+class TicketAgentPostedComment(db.Model):
+    """A fingerprint of every comment KubeSight posted on a ticket.
+
+    Zoho reports a comment-added event for OUR comments too (they are posted
+    through the same Desk account). Without this, Hermes' own "which
+    environment?" would come straight back as a requester reply and wake it
+    again — forever. A comment whose normalised text matches one of these is
+    ignored.
+    """
+
+    __tablename__ = "ticket_agent_posted_comments"
+    __table_args__ = (db.Index("ix_ticket_agent_posted_ticket", "ticket_record_id"),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    ticket_record_id = db.Column(
+        db.Integer, db.ForeignKey("zoho_inbound_tickets.id", ondelete="CASCADE"), nullable=True
+    )
+    digest = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)

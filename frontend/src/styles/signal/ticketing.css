@@ -1653,3 +1653,9 @@
   gap: 0.5rem;
   margin-top: 0.6rem;
 }
+.sg-zh-tsubject {
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

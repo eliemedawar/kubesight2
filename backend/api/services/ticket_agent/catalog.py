@@ -31,7 +31,35 @@ def _custom_cluster() -> str:
 
 
 def targets(provider: str) -> List[ZohoDeploymentSnapshot]:
-    """Snapshots this provider publishes as deployable, newest identity first."""
+    """What this provider may deploy to: its source cluster's chosen namespaces
+    (and deployments) plus its custom environments.
+
+    Read LIVE from the cluster — the same builder the dropdown sync uses, which
+    also mints the snapshot ids — so it holds even when tickets are free text
+    and the dropdown sync never runs, and a deployment deleted since the last
+    sync is not offered. Falls back to the stored snapshots if the cluster read
+    fails.
+    """
+    try:
+        from ..zoho_sync_service import _source_entries
+
+        entries = _source_entries(None, provider=provider)
+        ids = [e["id"] for e in entries][:MAX_TARGETS]
+        if ids:
+            by_id = {
+                row.id: row
+                for row in ZohoDeploymentSnapshot.query.filter(ZohoDeploymentSnapshot.id.in_(ids)).all()
+            }
+            return [by_id[i] for i in dict.fromkeys(ids) if i in by_id]
+    except Exception:  # noqa: BLE001 — no source / cluster unreachable: use what is stored
+        from ...db import db
+
+        db.session.rollback()
+    return _stored_targets(provider)
+
+
+def _stored_targets(provider: str) -> List[ZohoDeploymentSnapshot]:
+    """The snapshots last seen for this provider's source (no cluster read)."""
     from .. import ticketing_targets as tt
 
     source = (tt.source_cluster_id(provider) or "").strip()

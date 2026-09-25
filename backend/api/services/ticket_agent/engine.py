@@ -24,8 +24,10 @@ never left without its outcome.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -34,7 +36,12 @@ from typing import Any, Dict, List, Optional
 
 from ...audit import log_audit
 from ...db import db
-from ...models import DeployAutomationRun, TicketInterpretation, ZohoInboundTicket
+from ...models import (
+    DeployAutomationRun,
+    TicketAgentPostedComment,
+    TicketInterpretation,
+    ZohoInboundTicket,
+)
 from . import catalog, hermes, schema, settings as agent_settings, telegram, validator
 
 logger = logging.getLogger(__name__)
@@ -218,6 +225,9 @@ def _apply_fallback(ticket: ZohoInboundTicket, event: Optional[Dict[str, Any]]) 
         return
     from .. import ticketing
 
+    if fallback.get("comment"):
+        _remember(ticket, fallback["comment"])
+        db.session.commit()
     ticketing.report_outcome(
         ticket.provider or "zoho",
         ticket.ticket_id,
@@ -314,6 +324,22 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
             "yourEarlierUnderstanding": previous.understanding if previous else None,
         }
     targets = catalog.targets(ticket.provider or "zoho")
+    event = task.event or {}
+    if event.get("type") == "requester_replied":
+        return {
+            **base,
+            "task": "continue_ticket",
+            "instruction": (
+                "You parked this ticket earlier and the requester has replied. Read the "
+                "conversation and the new comments, then handle it again with the "
+                "kubesight_ticket_* tools: execute it, request approval, or set it to "
+                "impediment / on_hold with a comment asking what is still missing."
+            ),
+            "ticket": catalog.ticket_context(ticket),
+            "conversation": _conversation(ticket, before=task.id),
+            "newComments": event.get("comments") or [],
+            "catalog": catalog.catalog_entries(targets),
+        }
     return {
         **base,
         "task": "handle_new_ticket",
@@ -392,6 +418,10 @@ def _fail(task: TicketInterpretation, message: str, commit: bool = True) -> None
         if ticket is not None:
             _apply_fallback(ticket, task.event)
             task.error = f"{message} KubeSight posted its own update instead."
+            outcome = ((task.event or {}).get("fallback") or {}).get("outcome")
+            if outcome in schema.PARKED_STATUSES:
+                # The ticket IS parked now, so a requester reply must resume it.
+                task.route = outcome
     log_audit(
         "ticket_agent_failed",
         actor=None,
@@ -443,6 +473,8 @@ def _current_task(ticket: ZohoInboundTicket, user=None) -> TicketInterpretation:
 def _post(ticket: ZohoInboundTicket, text: str) -> None:
     from .. import ticketing
 
+    _remember(ticket, text)
+    db.session.commit()
     ticketing.post_comment(
         ticket.provider or "zoho", ticket.ticket_id, text, public=agent_settings.comments_public()
     )
@@ -667,13 +699,16 @@ def set_status(record_id: Any, status: str, comment_text: Any, user=None) -> Dic
     ).all():
         _close_approval(waiting, "superseded", f"Superseded — Hermes set the ticket to {status}.")
 
+    _remember(ticket, text)
+    db.session.commit()
     ticketing.report_outcome(
         ticket.provider or "zoho", ticket.ticket_id, outcome,
         comment=text, public=agent_settings.comments_public(),
     )
     task.comment = text
-    if status == "impediment":
-        task.route, task.status = "impediment", "impediment"
+    if status in schema.PARKED_STATUSES:
+        # Parked on the requester: their next comment wakes Hermes again.
+        task.route, task.status = status, status
         task.finished_at = _now()
     elif status in ("done", "failed"):
         task.route = task.route or "status"
@@ -960,6 +995,181 @@ def on_run_finished(run: DeployAutomationRun, outcome: str, comment: Optional[st
 
 
 # ---------------------------------------------------------------------------
+# Requester replies — a comment on a parked ticket wakes Hermes again
+# ---------------------------------------------------------------------------
+
+_WS = re.compile(r"\s+")
+# How many comment fingerprints to keep per ticket.
+_POSTED_KEEP = 50
+
+
+def _max_rounds() -> int:
+    """How many times one ticket may bounce between Hermes and the requester."""
+    return max(1, _int_env("TICKET_AGENT_MAX_ROUNDS", 10))
+
+
+def _digest(text: str) -> str:
+    normalised = _WS.sub(" ", catalog.html_to_text(text or "")).strip().casefold()
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+
+
+def _remember(ticket: ZohoInboundTicket, text: Optional[str]) -> None:
+    """Fingerprint a comment KubeSight is about to post (caller commits)."""
+    if not text:
+        return
+    db.session.add(TicketAgentPostedComment(ticket_record_id=ticket.id, digest=_digest(text)))
+    old = (
+        TicketAgentPostedComment.query.filter_by(ticket_record_id=ticket.id)
+        .order_by(TicketAgentPostedComment.id.desc()).offset(_POSTED_KEEP).all()
+    )
+    for row in old:
+        db.session.delete(row)
+
+
+def _is_ours(ticket: ZohoInboundTicket, text: str) -> bool:
+    return bool(
+        TicketAgentPostedComment.query.filter_by(ticket_record_id=ticket.id, digest=_digest(text)).first()
+    )
+
+
+def _parked_task(ticket: ZohoInboundTicket) -> Optional[TicketInterpretation]:
+    """The task that parked this ticket on the requester, if it is parked now."""
+    for task in (
+        TicketInterpretation.query.filter_by(ticket_record_id=ticket.id)
+        .order_by(TicketInterpretation.id.desc()).all()
+    ):
+        if task.status == "superseded":
+            continue
+        if task.status in (PENDING, RUNNING, "awaiting_approval", "deciding"):
+            return None
+        return task if task.route in schema.PARKED_STATUSES else None
+    return None
+
+
+def _conversation(ticket: ZohoInboundTicket, before: Optional[int] = None) -> List[Dict[str, Any]]:
+    """What has been said so far: Hermes' comments and the requester's replies, in order."""
+    query = TicketInterpretation.query.filter_by(ticket_record_id=ticket.id)
+    if before is not None:
+        query = query.filter(TicketInterpretation.id < before)
+    out: List[Dict[str, Any]] = []
+    for task in query.order_by(TicketInterpretation.id.asc()).all():
+        event = task.event or {}
+        if event.get("type") == "requester_replied":
+            for c in event.get("comments") or []:
+                out.append({"from": c.get("author") or "requester", "text": c.get("text")})
+        if task.comment:
+            out.append({"from": "you (Hermes)", "text": task.comment})
+    return out[-12:]
+
+
+def on_ticket_comment(
+    provider: str,
+    ticket_id: Any,
+    text: Any,
+    *,
+    author: Optional[str] = None,
+    comment_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """A comment was added on a ticket. Wake Hermes if it was waiting on one.
+
+    Returns ``{"handled": bool, "reason": str}`` — the webhook answers 200
+    either way (a ticketing system retrying an ignored comment helps nobody),
+    and the reason says why a comment did or did not wake Hermes.
+    """
+    if not agent_settings.is_active():
+        return {"handled": False, "reason": "The ticket agent is off."}
+    ticket = (
+        ZohoInboundTicket.query.filter_by(ticket_id=str(ticket_id)).first() if ticket_id else None
+    )
+    if ticket is None:
+        return {"handled": False, "reason": "KubeSight has no ticket with that id."}
+    body = catalog.html_to_text(text or "").strip()
+    if not body:
+        return {"handled": False, "reason": "Empty comment."}
+    if _is_ours(ticket, body):
+        return {"handled": False, "reason": "KubeSight's own comment."}
+    entry = {"id": str(comment_id) if comment_id else None, "author": (author or "")[:120] or None,
+             "text": body[:catalog.MAX_COMMENT_CHARS]}
+
+    # Several replies in a row become one task, not one each.
+    queued = (
+        TicketInterpretation.query.filter_by(ticket_record_id=ticket.id, status=PENDING, kind="handle")
+        .order_by(TicketInterpretation.id.desc()).first()
+    )
+    if queued is not None and (queued.event or {}).get("type") == "requester_replied":
+        event = dict(queued.event)
+        comments = list(event.get("comments") or [])
+        if not any(entry["id"] and c.get("id") == entry["id"] for c in comments):
+            comments.append(entry)
+        event["comments"] = comments[-10:]
+        queued.event = event
+        db.session.commit()
+        return {"handled": True, "reason": f"Added to task #{queued.id}, already queued."}
+
+    parked = _parked_task(ticket)
+    if parked is None:
+        return {"handled": False, "reason": "The ticket is not waiting on the requester."}
+    if _open_run(ticket):
+        return {"handled": False, "reason": "A run is going for this ticket."}
+    rounds = TicketInterpretation.query.filter_by(ticket_record_id=ticket.id, kind="handle").count()
+    if rounds >= _max_rounds():
+        log_audit(
+            "ticket_agent_round_limit",
+            actor=None,
+            target_type="ticket_interpretation",
+            target_id=str(parked.id),
+            details={"ticket": parked.ticket_number, "rounds": rounds},
+        )
+        return {"handled": False, "reason": f"This ticket reached {rounds} rounds with Hermes — a person should take it."}
+
+    task = _new_task(
+        ticket, "handle", requested_by="requester reply",
+        event={"type": "requester_replied", "parkedAs": parked.route, "comments": [entry]},
+    )
+    log_audit(
+        "ticket_agent_resumed",
+        actor=None,
+        target_type="ticket_interpretation",
+        target_id=str(task.id),
+        details={"ticket": task.ticket_number, "after": parked.route, "author": entry["author"]},
+    )
+    kick()
+    return {"handled": True, "reason": f"Hermes picked the ticket up again (task #{task.id})."}
+
+
+def parse_comment_webhook(payload: Any) -> List[Dict[str, Any]]:
+    """Comments out of whatever delivered them.
+
+    Two shapes: KubeSight's own ``{ticketId, comment, author, commentId}``
+    (what the Deluge function sends), and a Zoho Desk webhook — a JSON array of
+    ``{eventType: "Ticket_Comment_Add" | "Ticket_Thread_Add", payload: {...}}``.
+    Outgoing threads (an agent's reply) are skipped; incoming ones are the
+    requester answering by email.
+    """
+    out: List[Dict[str, Any]] = []
+    events = payload if isinstance(payload, list) else [payload]
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        body = event.get("payload") if isinstance(event.get("payload"), dict) else event
+        kind = str(event.get("eventType") or "")
+        if kind == "Ticket_Thread_Add" and str(body.get("direction") or "in").lower() == "out":
+            continue
+        who = body.get("commenter") or body.get("author") or {}
+        if isinstance(who, dict):
+            author = who.get("name") or who.get("email") or who.get("emailId")
+        else:
+            author = str(who)
+        out.append({
+            "ticketId": body.get("ticketId") or body.get("ticket_id"),
+            "text": body.get("comment") or body.get("content") or body.get("summary") or body.get("plainText"),
+            "author": author or body.get("authorName"),
+            "commentId": body.get("commentId") or body.get("id"),
+        })
+    return [c for c in out if c.get("ticketId")]
+
+
+# ---------------------------------------------------------------------------
 # Scheduler hook
 # ---------------------------------------------------------------------------
 
@@ -1066,6 +1276,7 @@ def tasks_by_ticket(record_ids: List[int]) -> Dict[int, List[Dict[str, Any]]]:
 def delete_for_ticket(record_id: int) -> None:
     """The inbound log deletes a ticket: its tasks go with it (SQLite has no FK cascade)."""
     TicketInterpretation.query.filter_by(ticket_record_id=record_id).delete(synchronize_session=False)
+    TicketAgentPostedComment.query.filter_by(ticket_record_id=record_id).delete(synchronize_session=False)
 
 
 def ticket_has_open_task(record_id: int) -> bool:

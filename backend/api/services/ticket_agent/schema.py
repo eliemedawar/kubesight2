@@ -21,7 +21,10 @@ TICKET_STATUSES = {
     "done": "deployed",
     "failed": "failed",
     "impediment": "impediment",
+    "on_hold": "on_hold",
 }
+# Statuses that park a ticket on the requester: a comment on it wakes Hermes.
+PARKED_STATUSES = ("impediment", "on_hold")
 
 MAX_UNDERSTANDING = 600
 MAX_COMMENT = 3000

@@ -142,6 +142,7 @@ def serialize(row: JiraIntegration) -> Dict[str, Any]:
         "transitionFailed": row.transition_failed or "",
         "transitionCancelled": row.transition_cancelled or "",
         "transitionImpediment": row.transition_impediment or "",
+        "transitionOnHold": row.transition_on_hold or "",
         "ticketOwnerEmail": row.ticket_owner_email or "",
         "lastSyncAt": _iso(row.last_sync_at),
         "lastSyncStatus": row.last_sync_status,
@@ -210,6 +211,7 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         ("transitionFailed", "transition_failed"),
         ("transitionCancelled", "transition_cancelled"),
         ("transitionImpediment", "transition_impediment"),
+        ("transitionOnHold", "transition_on_hold"),
         ("ticketOwnerEmail", "ticket_owner_email"),
     ):
         if key in payload and payload.get(key) is not None:
@@ -848,6 +850,7 @@ _OUTCOME_TRANSITION_ATTR = {
     "failed": "transition_failed",
     "cancelled": "transition_cancelled",
     "impediment": "transition_impediment",
+    "on_hold": "transition_on_hold",
 }
 
 

@@ -49,6 +49,11 @@ KubeSight can do exactly three things, one per ticket, on one application in one
 - set_env_var: set ONE existing environment variable to a new value.
 - restart: restart the application's pods with no other change.
 
+Tickets are free text: a subject and a description written by a person. Work out the action, the
+application, the environment and the tag/variable/value from what they wrote, and match the
+application and environment to the catalog (people write "payments uat", "the payment service",
+"SIT" — find the one catalog entry they mean, or ask if more than one fits).
+
 How to handle a new ticket:
 1. Read it (it is in the message; kubesight_ticket_get returns the same plus the catalog of deploy
    targets). You may use your read-only KubeSight tools to check it against the live estate — the
@@ -67,6 +72,15 @@ How to handle a new ticket:
    If kubesight_ticket_execute refuses and tells you the request needs approval, call
    kubesight_ticket_request_approval with the same action instead.
 
+Parking a ticket on the requester:
+- "impediment": the ticket is unclear, impossible, or missing information.
+- "on_hold": it is clear but waiting on something the requester must give or confirm (a time
+  window, an approval from their side, a value they will send).
+Either way your comment asks for exactly what you need. When they comment, KubeSight hands you the
+ticket again as "continue_ticket" with the conversation so far and the new comments: pick up where
+you left off — execute, request approval, or park it again asking what is still missing. Do not
+repeat questions they already answered.
+
 How to handle a follow-up (the message says what happened — a deploy finished, an approval was
 rejected or expired): write the requester a comment about it and move the ticket with
 kubesight_ticket_set_status — "done" when the change is live, "failed" when the deploy failed,
@@ -76,7 +90,8 @@ Rules you must not break:
 - environment and application MUST be copied exactly from the catalog. Never invent or "correct"
   one. If the ticket names something not in the catalog, or matches several entries, it is an
   impediment (ask which one).
-- The ticket's structuredFields are what the requester picked from dropdowns: strong evidence.
+- If the ticket carries structuredFields (dropdowns the requester picked), they are strong
+  evidence; most tickets have none.
 - Copy tags and values verbatim. Never guess a tag or a value the ticket does not state.
 - Anything else — scaling, deleting, creating, config maps, secrets, several changes at once,
   several applications, a rollback to an unnamed version — is an impediment.
@@ -199,6 +214,16 @@ def run_task(task_message: Dict[str, Any], session_key: Optional[str] = None) ->
     except HTTPError as exc:
         if exc.code == 429 or 500 <= exc.code < 600:
             raise HermesTransientError(f"Hermes rejected the ticket task ({exc.code}).") from exc
+        if exc.code in (401, 403):
+            raise HermesError(
+                f"Hermes rejected KubeSight's key ({exc.code}). TICKET_AGENT_HERMES_TOKEN (or "
+                "HERMES_API_TOKEN when that is unset) must equal the API_SERVER_KEY of the Hermes "
+                "at TICKET_AGENT_HERMES_URL."
+            ) from exc
+        if exc.code == 404:
+            raise HermesError(
+                "Hermes answered 404 — TICKET_AGENT_HERMES_URL must end in /v1/chat/completions."
+            ) from exc
         raise HermesError(f"Hermes rejected the ticket task ({exc.code}).") from exc
     except (URLError, TimeoutError) as exc:
         raise HermesTransientError("Hermes is unavailable or timed out.") from exc

@@ -862,3 +862,41 @@ def inbound_webhook(provider_key: str):
     # Always 200 so the sender's workflow doesn't retry-storm; the resolution
     # outcome (resolved/error) is in the body and persisted for review.
     return success_response(result)
+
+
+@ticketing_bp.route("/<provider_key>/inbound/comment", methods=["POST"])
+def inbound_comment_webhook(provider_key: str):
+    """A comment was added on a ticket (Hermes ticket agent). Secret-verified.
+
+    Accepts KubeSight's own shape ``{ticketId, comment, author, commentId}`` or a
+    Zoho Desk webhook array (Ticket_Comment_Add / Ticket_Thread_Add). A comment
+    on a ticket Hermes parked (impediment / on hold) wakes Hermes to continue.
+    """
+    provider = _provider(provider_key)
+    legacy_header = _LEGACY_SECRET_HEADERS.get(provider.key)
+    provided = (
+        request.headers.get("X-Ticketing-Secret")
+        or (request.headers.get(legacy_header) if legacy_header else None)
+        or request.args.get("secret")
+    )
+    if not provider.sync.verify_inbound_secret(provided):
+        return error_response("Invalid or missing webhook secret.", 401)
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return error_response("Expected a JSON body.", 400)
+    return success_response({"comments": _handle_comment_webhook(provider.key, payload)})
+
+def _handle_comment_webhook(provider_key: str, payload):
+    """Shared by both comment webhooks: every comment in the delivery, one result each."""
+    from ..services.ticket_agent import engine as ticket_agent
+
+    results = []
+    for comment in ticket_agent.parse_comment_webhook(payload):
+        results.append({
+            "ticketId": str(comment["ticketId"]),
+            **ticket_agent.on_ticket_comment(
+                provider_key, comment["ticketId"], comment.get("text"),
+                author=comment.get("author"), comment_id=comment.get("commentId"),
+            ),
+        })
+    return results

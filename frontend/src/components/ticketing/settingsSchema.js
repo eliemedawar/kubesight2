@@ -248,6 +248,13 @@ const ZOHO_SECTIONS = [
         placeholder: "Impediment",
         default: "Impediment",
       },
+      {
+        key: "ticketStatusOnHold",
+        label: "Status — on hold (Hermes ticket agent)",
+        title: "Where Hermes parks a ticket waiting on the requester — create this status in Desk first",
+        placeholder: "On Hold",
+        default: "On Hold",
+      },
     ],
   },
 ];
@@ -454,6 +461,13 @@ const JIRA_SECTIONS = [
         title: "Where Hermes parks an issue it cannot act on",
         placeholder: "Impediment",
         default: "Impediment",
+      },
+      {
+        key: "transitionOnHold",
+        label: "Transition — on hold (Hermes ticket agent)",
+        title: "Where Hermes parks an issue waiting on the reporter",
+        placeholder: "On Hold",
+        default: "On Hold",
       },
     ],
   },

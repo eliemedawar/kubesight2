@@ -661,6 +661,29 @@ def delete_inbound_ticket(record_id: int):
     return success_response({"deleted": True, **info})
 
 
+@zoho_bp.route("/inbound/comment", methods=["POST"])
+def inbound_comment_webhook():
+    """Zoho -> KubeSight: a comment on a ticket (Hermes ticket agent). Secret-verified."""
+    from ..services.ticket_agent import engine as ticket_agent
+
+    provided = request.headers.get("X-Zoho-Secret") or request.args.get("secret")
+    if not svc.verify_inbound_secret(provided):
+        return error_response("Invalid or missing webhook secret.", 401)
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return error_response("Expected a JSON body.", 400)
+    results = []
+    for comment in ticket_agent.parse_comment_webhook(payload):
+        results.append({
+            "ticketId": str(comment["ticketId"]),
+            **ticket_agent.on_ticket_comment(
+                "zoho", comment["ticketId"], comment.get("text"),
+                author=comment.get("author"), comment_id=comment.get("commentId"),
+            ),
+        })
+    return success_response({"comments": results})
+
+
 @zoho_bp.route("/inbound", methods=["POST"])
 def inbound_webhook():
     """Zoho -> KubeSight: a DevOps Request ticket. Secret-verified, not session auth."""

@@ -140,16 +140,18 @@ def _ticket_request_approval(arguments: Dict[str, Any], *, user=None) -> Dict[st
     permission="ticketing:manage",
     description=(
         "Move a ticket and post your comment with it. impediment = not understandable, not "
-        "possible, or missing information (say what, and ask). done = the change is live (only "
-        "after KubeSight's follow-up says the run succeeded). failed = the run failed. "
-        "in_progress = you are working on it. Status names map to the ticketing system's own labels."
+        "possible, or missing information (say what, and ask). on_hold = clear, but waiting on "
+        "something from the requester. A comment on an impediment / on-hold ticket hands it back "
+        "to you. done = the change is live (only after KubeSight's follow-up says the run "
+        "succeeded). failed = the run failed. in_progress = you are working on it. Status names "
+        "map to the ticketing system's own labels."
     ),
     write=True,
     schema={
         "type": "object",
         "properties": {
             "ticketRecordId": _RECORD,
-            "status": {"type": "string", "enum": ["in_progress", "done", "failed", "impediment"]},
+            "status": {"type": "string", "enum": ["in_progress", "done", "failed", "impediment", "on_hold"]},
             "comment": {"type": "string", "description": "Posted on the ticket for the requester."},
         },
         "required": ["ticketRecordId", "status", "comment"],

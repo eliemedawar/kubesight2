@@ -17,8 +17,20 @@ const FILTERS = [
 // The ticket's first Hermes reading (the handle task) — what the column shows.
 const handleTask = (t) => (t.agentTasks || []).find((task) => task.kind === "handle");
 const agentWaiting = (t) => (t.agentTasks || []).some((task) => task.status === "awaiting_approval");
+// With the agent on, tickets are free text: the target and change are what
+// Hermes worked out (from the task that executed or asked for approval), not
+// dropdown fields.
+const agentAction = (t) =>
+  (t.agentTasks || []).find((task) => task.kind === "handle" && task.deploymentName);
+const agentChangeLabel = (task) => {
+  if (!task) return null;
+  if (task.changeType === "env_var") return `${task.variableName}=${task.variableValue}`;
+  if (task.changeType === "restart") return "restart";
+  return task.tag || null;
+};
+
 // Hermes can be asked again once it has settled on something other than a run.
-const REHANDLE = new Set(["impediment", "error", "superseded", "done"]);
+const REHANDLE = new Set(["impediment", "on_hold", "error", "superseded", "done"]);
 
 // Inbound room: webhook setup strip, triage filters, and one table where each
 // ticket owns its automation runs (expand a row to see the pipeline).
@@ -91,6 +103,7 @@ export default function ZohoTicketsTab({
       t.deploymentName,
       t.targetName,
       t.rawAppValue,
+      t.subject,
       t.namespace,
       t.tag,
       t.variableName,
@@ -170,9 +183,10 @@ export default function ZohoTicketsTab({
                   <th aria-label="Expand" className="sg-zh-thchev" />
                   <th>Ticket</th>
                   <th>Received</th>
+                  {agentActive ? <th>Subject</th> : null}
                   <th>Deployment</th>
                   <th>Change</th>
-                  <th>Resolution</th>
+                  {agentActive ? null : <th>Resolution</th>}
                   <th>Hermes</th>
                   <th>Automation</th>
                   {canManage ? <th aria-label="Actions" /> : null}
@@ -217,8 +231,19 @@ export default function ZohoTicketsTab({
                       <td className="sg-zh-htime">
                         {t.receivedAt ? new Date(t.receivedAt).toLocaleString() : ""}
                       </td>
+                      {agentActive ? (
+                        <td className="sg-zh-tsubject" title={t.subject || ""}>
+                          {t.subject || <span className="muted">—</span>}
+                        </td>
+                      ) : null}
                       <td>
-                        {t.resolved ? (
+                        {agentActive && agentAction(t) ? (
+                          <span className="mono">
+                            {agentAction(t).deploymentName} ({agentAction(t).namespace})
+                          </span>
+                        ) : agentActive && !t.resolved ? (
+                          <span className="muted">—</span>
+                        ) : t.resolved ? (
                           <span className="mono" title={t.targetName || ""}>
                             {t.deploymentName || t.targetName || `#${t.targetId}`}
                             {t.namespace ? ` (${t.namespace})` : ""}
@@ -229,6 +254,16 @@ export default function ZohoTicketsTab({
                       </td>
                       <td>
                         {(() => {
+                          if (agentActive) {
+                            const label = agentChangeLabel(agentAction(t));
+                            return label ? (
+                              <span className="sg-tag mono" title="what Hermes understood">
+                                {label}
+                              </span>
+                            ) : (
+                              "—"
+                            );
+                          }
                           const change = ticketChange(t);
                           if (change) {
                             return (
@@ -249,6 +284,7 @@ export default function ZohoTicketsTab({
                           );
                         })()}
                       </td>
+                      {agentActive ? null : (
                       <td>
                         {t.resolved && t.error ? (
                           <span className="status-pill warn" title={t.error}>
@@ -262,6 +298,7 @@ export default function ZohoTicketsTab({
                           </span>
                         )}
                       </td>
+                      )}
                       <td>
                         <AgentTaskPill task={firstReading} />
                         {agentWaiting(t) && firstReading?.status !== "awaiting_approval" ? (

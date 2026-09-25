@@ -937,6 +937,9 @@ def _migrate_zoho_integration_columns() -> None:
             "zoho_integration", "ticket_status_impediment", "VARCHAR(120) DEFAULT 'Impediment'"
         )
         _add_column_if_missing(
+            "zoho_integration", "ticket_status_on_hold", "VARCHAR(120) DEFAULT 'On Hold'"
+        )
+        _add_column_if_missing(
             "zoho_integration", "ticket_owner_email", "VARCHAR(255) DEFAULT 'zagent@areeba.com'"
         )
         # Variable-change automation (Variable picklist + Value field + App->Variable cascade).
@@ -960,6 +963,9 @@ def _migrate_zoho_integration_columns() -> None:
     if "jira_integration" in inspect(db.engine).get_table_names():
         _add_column_if_missing(
             "jira_integration", "transition_impediment", "VARCHAR(120) DEFAULT 'Impediment'"
+        )
+        _add_column_if_missing(
+            "jira_integration", "transition_on_hold", "VARCHAR(120) DEFAULT 'On Hold'"
         )
 
 

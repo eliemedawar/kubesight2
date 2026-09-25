@@ -120,10 +120,13 @@ def _action(**overrides):
 def test_webhook_hands_every_ticket_to_hermes_which_executes(client, agent, writes, monkeypatch):
     def behaviour(message):
         assert message["task"] == "handle_new_ticket"
-        assert message["catalog"] == [{
+        # Read live from the (mock) cluster's chosen namespace — every
+        # deployment in it, not just the ones a dropdown sync once stored.
+        assert {
             "environment": NAMESPACE, "application": DEPLOYMENT,
             "allowedActions": ["deploy_image", "set_env_var", "restart"],
-        }]
+        } in message["catalog"]
+        assert {e["environment"] for e in message["catalog"]} == {NAMESPACE}
         # The Desk HTML description reaches Hermes as text.
         assert "Please deploy v9.9.9" in message["ticket"]["description"]
         engine.execute(message["ticketRecordId"], _action())
@@ -479,3 +482,102 @@ def test_inbound_list_carries_the_agent_tasks(client, agent, writes, admin_token
     row = next(t for t in response.get_json()["data"]["items"] if t["id"] == ticket.id)
     assert row["agentTasks"][0]["status"] == "impediment"
     assert row["agentTasks"][0]["comment"] == "What tag?"
+
+
+# ---------------------------------------------------------------------------
+# Requester replies wake Hermes on a parked ticket
+# ---------------------------------------------------------------------------
+
+def _park(ticket, status="impediment", text="Which environment should this go to?"):
+    engine.set_status(ticket.id, status, text)
+
+
+def test_a_reply_on_a_parked_ticket_wakes_hermes_with_the_conversation(client, agent, writes, monkeypatch):
+    ticket = _ticket(tag="")
+    _park(ticket)
+    seen = []
+
+    def resume(message):
+        seen.append(message)
+        assert message["task"] == "continue_ticket"
+        assert message["conversation"][-1] == {"from": "you (Hermes)", "text": "Which environment should this go to?"}
+        assert message["newComments"][0]["text"] == "payments, tag v9.9.9 please"
+        engine.execute(message["ticketRecordId"], _action())
+        return {"outcome": "executed", "summary": "continued"}
+
+    _fake_hermes(monkeypatch, resume)
+    response = client.post(
+        "/api/zoho/inbound/comment",
+        json={"ticketId": ticket.ticket_id, "comment": "<p>payments, tag v9.9.9 please</p>", "author": "Rami"},
+    )
+    assert response.status_code == 200
+    result = response.get_json()["data"]["comments"][0]
+    assert result["handled"] is True, result
+    assert len(seen) == 1
+    resumed = TicketInterpretation.query.filter_by(ticket_record_id=ticket.id).order_by(
+        TicketInterpretation.id.desc()).first()
+    assert resumed.status == "executed" and resumed.event["type"] == "requester_replied"
+
+
+def test_on_hold_is_a_parked_status_too(client, agent, writes, monkeypatch):
+    ticket = _ticket(tag="")
+    _park(ticket, "on_hold", "Waiting for your go-ahead on the time window.")
+    assert [w for w in writes if w["kind"] == "status"][-1]["outcome"] == "on_hold"
+    seen = _fake_hermes(monkeypatch, lambda m: None)
+    out = engine.on_ticket_comment("zoho", ticket.ticket_id, "Go ahead now.")
+    assert out["handled"] is True and len(seen) == 1
+
+
+def test_kubesight_own_comment_echo_is_ignored(client, agent, writes, monkeypatch):
+    ticket = _ticket(tag="")
+    _park(ticket, text="Which environment should this go to?")
+    seen = _fake_hermes(monkeypatch, lambda m: None)
+    # Zoho echoes our comment back as HTML with different whitespace.
+    out = engine.on_ticket_comment("zoho", ticket.ticket_id, "<div>Which environment  should this go to?</div>")
+    assert out["handled"] is False and "own comment" in out["reason"]
+    assert seen == []
+
+
+def test_a_comment_on_a_ticket_that_is_not_parked_is_ignored(client, agent, writes, monkeypatch):
+    ticket = _ticket()
+    engine.execute(ticket.id, _action())  # executed, run open
+    seen = _fake_hermes(monkeypatch, lambda m: None)
+    out = engine.on_ticket_comment("zoho", ticket.ticket_id, "any update?")
+    assert out["handled"] is False and seen == []
+    assert engine.on_ticket_comment("zoho", "nope", "hi")["reason"].startswith("KubeSight has no ticket")
+
+
+def test_replies_are_capped_per_ticket(client, agent, writes, monkeypatch):
+    monkeypatch.setenv("TICKET_AGENT_MAX_ROUNDS", "2")
+    ticket = _ticket(tag="")
+    _park(ticket)  # opens handle task #1 (chat-driven)
+    _fake_hermes(monkeypatch, lambda m: engine.set_status(m["ticketRecordId"], "impediment", "Still unclear, which app?"))
+    assert engine.on_ticket_comment("zoho", ticket.ticket_id, "the app")["handled"] is True
+    capped = engine.on_ticket_comment("zoho", ticket.ticket_id, "the payments one")
+    assert capped["handled"] is False and "rounds" in capped["reason"]
+
+
+def test_zoho_desk_webhook_shape_and_outgoing_threads(client, agent, writes, monkeypatch):
+    ticket = _ticket(tag="")
+    _park(ticket)
+    seen = _fake_hermes(monkeypatch, lambda m: None)
+    body = [
+        {"eventType": "Ticket_Thread_Add", "payload": {"ticketId": ticket.ticket_id, "direction": "out",
+                                                         "summary": "agent reply"}},
+        {"eventType": "Ticket_Comment_Add", "payload": {"ticketId": ticket.ticket_id, "id": "c-1",
+                                                          "content": "It is payments.",
+                                                          "commenter": {"name": "Rami"}}},
+    ]
+    response = client.post("/api/ticketing/zoho/inbound/comment", json=body)
+    assert response.status_code == 200
+    comments = response.get_json()["data"]["comments"]
+    assert len(comments) == 1 and comments[0]["handled"] is True
+    assert seen[0]["newComments"][0] == {"id": "c-1", "author": "Rami", "text": "It is payments."}
+
+
+def test_comment_webhook_checks_the_secret(client, app):
+    from api.services import zoho_sync_service
+
+    zoho_sync_service.update_config({"inboundSecret": "s3cret"})
+    response = client.post("/api/zoho/inbound/comment", json={"ticketId": "1", "comment": "x"})
+    assert response.status_code == 401

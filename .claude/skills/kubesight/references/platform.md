@@ -85,6 +85,12 @@ with the same action.
 `kubesight_automation_run_start`, a workload restart or `kubesight_deploy_apply`
 to carry out a ticket: they skip the ticket's status and the approval.
 
+**Parking and picking up again.** `impediment` = unclear or missing information;
+`on_hold` = clear, but waiting on the requester (a time, a confirmation). When
+they comment, you get the ticket back as `continue_ticket` with the conversation
+so far and the new comments — carry on from there, and don't ask again what they
+already answered.
+
 **Follow-ups.** When the run finishes (or an approval is rejected or expires)
 you get a "followup" task describing it. Write the requester a comment and move
 the ticket: `done` when the change is live, `failed` when it failed,

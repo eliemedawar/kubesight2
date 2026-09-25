@@ -129,6 +129,7 @@ def serialize(row: ZohoIntegration) -> Dict[str, Any]:
         "ticketStatusFailed": row.ticket_status_failed or "Failed",
         "ticketStatusCancelled": row.ticket_status_cancelled or "Canceled",
         "ticketStatusImpediment": row.ticket_status_impediment or "Impediment",
+        "ticketStatusOnHold": row.ticket_status_on_hold or "On Hold",
         "ticketOwnerEmail": row.ticket_owner_email or "",
         "lastSyncAt": _iso(row.last_sync_at),
         "lastSyncStatus": row.last_sync_status,
@@ -468,6 +469,7 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         ("ticketStatusFailed", "ticket_status_failed"),
         ("ticketStatusCancelled", "ticket_status_cancelled"),
         ("ticketStatusImpediment", "ticket_status_impediment"),
+        ("ticketStatusOnHold", "ticket_status_on_hold"),
         ("ticketOwnerEmail", "ticket_owner_email"),
     ):
         if key in payload and payload.get(key) is not None:
@@ -1772,6 +1774,7 @@ _OUTCOME_STATUS_ATTR = {
     "cancelled": "ticket_status_cancelled",
     # Hermes ticket agent: not understandable / approval refused.
     "impediment": "ticket_status_impediment",
+    "on_hold": "ticket_status_on_hold",
 }
 
 
