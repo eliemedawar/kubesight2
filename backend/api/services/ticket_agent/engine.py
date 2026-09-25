@@ -1069,8 +1069,15 @@ def on_ticket_comment(
     *,
     author: Optional[str] = None,
     comment_id: Optional[str] = None,
+    ticket_status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """A comment was added on a ticket. Wake Hermes if it was waiting on one.
+
+    "Waiting" is read from the ticket's CURRENT status when the sender includes
+    it (``ticket_status``) — a person may have moved the ticket to On Hold by
+    hand, or back to In Progress to take it over, and the ticketing system is
+    the truth about that. Without a status, it falls back to what Hermes itself
+    last did (the task that parked it).
 
     Returns ``{"handled": bool, "reason": str}`` — the webhook answers 200
     either way (a ticketing system retrying an ignored comment helps nobody),
@@ -1107,7 +1114,19 @@ def on_ticket_comment(
         return {"handled": True, "reason": f"Added to task #{queued.id}, already queued."}
 
     parked = _parked_task(ticket)
-    if parked is None:
+    parked_as = parked.route if parked else None
+    status = (ticket_status or "").strip()
+    if status:
+        by_status = _status_parks(ticket.provider or "zoho", status)
+        if by_status is None:
+            return {
+                "handled": False,
+                "reason": f"The ticket's status '{status}' is not your Impediment or On Hold status.",
+            }
+        if _busy(ticket):
+            return {"handled": False, "reason": "Hermes is already working on this ticket."}
+        parked_as = by_status
+    if parked_as is None:
         return {"handled": False, "reason": "The ticket is not waiting on the requester."}
     if _open_run(ticket):
         return {"handled": False, "reason": "A run is going for this ticket."}
@@ -1117,24 +1136,61 @@ def on_ticket_comment(
             "ticket_agent_round_limit",
             actor=None,
             target_type="ticket_interpretation",
-            target_id=str(parked.id),
-            details={"ticket": parked.ticket_number, "rounds": rounds},
+            target_id=str(parked.id if parked else ""),
+            details={"ticket": ticket.ticket_number, "rounds": rounds},
         )
         return {"handled": False, "reason": f"This ticket reached {rounds} rounds with Hermes — a person should take it."}
 
     task = _new_task(
         ticket, "handle", requested_by="requester reply",
-        event={"type": "requester_replied", "parkedAs": parked.route, "comments": [entry]},
+        event={"type": "requester_replied", "parkedAs": parked_as, "comments": [entry]},
     )
     log_audit(
         "ticket_agent_resumed",
         actor=None,
         target_type="ticket_interpretation",
         target_id=str(task.id),
-        details={"ticket": task.ticket_number, "after": parked.route, "author": entry["author"]},
+        details={"ticket": task.ticket_number, "after": parked_as, "author": entry["author"]},
     )
     kick()
     return {"handled": True, "reason": f"Hermes picked the ticket up again (task #{task.id})."}
+
+
+def _status_parks(provider: str, status: str) -> Optional[str]:
+    """``impediment`` / ``on_hold`` when ``status`` is that provider's label for it."""
+    wanted = status.strip().casefold()
+    try:
+        if provider == "jira":
+            from ...models import JiraIntegration
+
+            row = JiraIntegration.query.get(1)
+            labels = {
+                "impediment": getattr(row, "transition_impediment", None) or "Impediment",
+                "on_hold": getattr(row, "transition_on_hold", None) or "On Hold",
+            }
+        else:
+            from ...models import ZohoIntegration
+
+            row = ZohoIntegration.query.get(1)
+            labels = {
+                "impediment": getattr(row, "ticket_status_impediment", None) or "Impediment",
+                "on_hold": getattr(row, "ticket_status_on_hold", None) or "On Hold",
+            }
+    except Exception:  # noqa: BLE001
+        labels = {"impediment": "Impediment", "on_hold": "On Hold"}
+    for key, label in labels.items():
+        if label.strip().casefold() == wanted:
+            return key
+    return None
+
+
+def _busy(ticket: ZohoInboundTicket) -> bool:
+    return bool(
+        TicketInterpretation.query.filter(
+            TicketInterpretation.ticket_record_id == ticket.id,
+            TicketInterpretation.status.in_((PENDING, RUNNING, "awaiting_approval", "deciding")),
+        ).first()
+    )
 
 
 def parse_comment_webhook(payload: Any) -> List[Dict[str, Any]]:
@@ -1165,6 +1221,7 @@ def parse_comment_webhook(payload: Any) -> List[Dict[str, Any]]:
             "text": body.get("comment") or body.get("content") or body.get("summary") or body.get("plainText"),
             "author": author or body.get("authorName"),
             "commentId": body.get("commentId") or body.get("id"),
+            "status": body.get("status") or body.get("ticketStatus"),
         })
     return [c for c in out if c.get("ticketId")]
 

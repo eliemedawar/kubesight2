@@ -581,3 +581,19 @@ def test_comment_webhook_checks_the_secret(client, app):
     zoho_sync_service.update_config({"inboundSecret": "s3cret"})
     response = client.post("/api/zoho/inbound/comment", json={"ticketId": "1", "comment": "x"})
     assert response.status_code == 401
+
+
+def test_a_ticket_put_on_hold_by_hand_resumes_from_its_zoho_status(client, agent, writes, monkeypatch):
+    """Nobody told KubeSight — a person moved it to On Hold in Desk. The status
+    the Deluge function sends is the truth."""
+    ticket = _ticket(tag="")
+    seen = _fake_hermes(monkeypatch, lambda m: None)
+    response = client.post("/api/zoho/inbound/comment", json={
+        "ticketId": ticket.ticket_id, "comment": "deploy v9.9.9 to payments", "status": "On Hold",
+    })
+    assert response.get_json()["data"]["comments"][0]["handled"] is True
+    assert seen[0]["task"] == "continue_ticket"
+
+    # Moved back to In Progress by a person: their comment must not wake Hermes.
+    out = engine.on_ticket_comment("zoho", ticket.ticket_id, "I'll take this one", ticket_status="In Progress")
+    assert out["handled"] is False and "In Progress" in out["reason"]

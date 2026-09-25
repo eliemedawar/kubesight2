@@ -897,6 +897,7 @@ def _handle_comment_webhook(provider_key: str, payload):
             **ticket_agent.on_ticket_comment(
                 provider_key, comment["ticketId"], comment.get("text"),
                 author=comment.get("author"), comment_id=comment.get("commentId"),
+                ticket_status=comment.get("status"),
             ),
         })
     return results

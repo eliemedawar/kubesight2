@@ -679,6 +679,7 @@ def inbound_comment_webhook():
             **ticket_agent.on_ticket_comment(
                 "zoho", comment["ticketId"], comment.get("text"),
                 author=comment.get("author"), comment_id=comment.get("commentId"),
+                ticket_status=comment.get("status"),
             ),
         })
     return success_response({"comments": results})
