@@ -328,8 +328,8 @@ def resolve(row: Optional[BuildProfile]) -> ResolvedProfile:
     username = row.registry_username or ""
     if row.registry_password_cipher and not secret_encryption_key_configured():
         raise ValueError(
-            "Registry credentials require ALERT_ROUTING_SECRET_KEY or "
-            "JWT_SECRET_KEY to be configured securely."
+            "Registry credentials require KUBESIGHT_SECRET_KEY (or a real "
+            "JWT_SECRET_KEY) to be configured securely."
         )
     password = decrypt_secret(row.registry_password_cipher or "")
     if bool(username) != bool(password):
@@ -486,8 +486,8 @@ def _apply_payload(row: BuildProfile, payload: Dict[str, Any]) -> None:
     if password:
         if not secret_encryption_key_configured():
             raise ValueError(
-                "Registry credentials require ALERT_ROUTING_SECRET_KEY or "
-                "JWT_SECRET_KEY to be configured securely."
+                "Registry credentials require KUBESIGHT_SECRET_KEY (or a real "
+                "JWT_SECRET_KEY) to be configured securely."
             )
         row.registry_password_cipher = encrypt_secret(str(password))
     if payload.get("clearRegistryPassword"):

@@ -1,0 +1,7 @@
+# Bundled upstream manifests are pinned by SHA-256 over their exact bytes
+# (see backend/api/services/cluster_build/{cni,addons}/*.py) and verified at
+# runtime before they are applied to a cluster. A CRLF checkout
+# (core.autocrlf=true on Windows) changes those bytes, fails the integrity
+# check, and would ship broken bundles into any image built from that
+# checkout. Keep them byte-for-byte as committed: no line-ending conversion.
+backend/api/data/** -text

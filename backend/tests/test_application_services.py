@@ -29,6 +29,25 @@ class TestListServices:
         assert data["items"] == []
         assert data["count"] == 0
 
+    def test_demo_catalogue_stands_in_for_an_empty_one_only(self, app, client, admin_token):
+        # Mock mode shows the demo on a fresh install (tests opt out by default).
+        app.config["DEMO_DATA_FALLBACK"] = True
+        res = client.get("/api/application-services", headers=auth_headers(admin_token))
+        assert res.get_json()["data"]["count"] > 0
+        demo_id = res.get_json()["data"]["items"][0]["id"]
+        assert client.get(
+            f"/api/application-services/{demo_id}", headers=auth_headers(admin_token)
+        ).status_code == 200
+
+        created = _create_service(client, admin_token, "Real One").get_json()["data"]
+        res = client.get("/api/application-services", headers=auth_headers(admin_token))
+        assert [s["name"] for s in res.get_json()["data"]["items"]] == ["Real One"]
+        # With real rows present, an unknown id is a real 404, not a demo record.
+        missing = next(i for i in (1, 2, 3, 4, 5) if i != created["id"])  # a demo id
+        assert client.get(
+            f"/api/application-services/{missing}", headers=auth_headers(admin_token)
+        ).status_code == 404
+
     def test_list_requires_auth(self, client):
         res = client.get("/api/application-services")
         assert res.status_code == 401

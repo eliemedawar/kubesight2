@@ -421,26 +421,27 @@ def _grant_ticket_agent_to_ticket_managers() -> None:
 
 
 def _sync_role_permissions() -> None:
-    """Ensure every role has all permissions defined for it in ROLE_DEFINITIONS.
+    """Give every built-in role the ROLE_DEFINITIONS defaults it has never had.
 
-    This is idempotent: it only ever adds missing permissions, never removes existing ones.
-    Called on every startup so that new permissions added to rbac_data.py automatically
-    propagate to existing deployments without manual DB surgery.
+    Called on every startup so that new permissions added to rbac_data.py
+    propagate to existing deployments without manual DB surgery. Only ever
+    adds, and only a default not granted before (see ``RoleDefaultGrant``): a
+    default an admin removed from the role is not forced back on restart.
     """
     from .models import Role, Permission
     from .rbac_data import ROLE_DEFINITIONS
+    from .seed import grant_new_role_defaults, record_role_defaults
 
     for role_name, defn in ROLE_DEFINITIONS.items():
         role = Role.query.filter_by(name=role_name).first()
         if not role:
             continue
-        current_keys = {p.key for p in role.permissions}
-        needed_keys = set(defn["permissions"]) - current_keys
-        if not needed_keys:
-            continue
-        new_perms = Permission.query.filter(Permission.key.in_(needed_keys)).all()
-        for perm in new_perms:
-            role.permissions.append(perm)
+        defaults = Permission.query.filter(Permission.key.in_(defn["permissions"])).all()
+        grant_new_role_defaults(role, role_name, defaults)
+        # Record only defaults that exist as rows. A key introduced by this
+        # release gets its Permission row later, in seed_defaults — recording
+        # it now would mark it granted before it ever was.
+        record_role_defaults(role_name, [perm.key for perm in defaults])
     db.session.commit()
 
 

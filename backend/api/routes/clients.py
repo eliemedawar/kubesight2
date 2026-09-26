@@ -2,7 +2,7 @@ from flask import Blueprint, g, request
 
 from ..auth_utils import get_current_user
 from ..decorators import require_permission
-from ..k8s_provider import should_use_real_k8s
+from ..demo_fallback import demo_fallback_enabled
 from ..response import error_response, success_response
 from ..services.client_service import (
     create_client,
@@ -30,7 +30,15 @@ def _actor_user_id() -> int | None:
 
 
 def _use_mock() -> bool:
-    return not should_use_real_k8s()
+    return demo_fallback_enabled()
+
+
+def _no_real_rows() -> bool:
+    """The demo stands in for an EMPTY catalogue only. Once real clients exist,
+    an unknown id is a real 404 - never a demo record that happens to share it."""
+    from ..models import Client
+
+    return Client.query.first() is None
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +77,7 @@ def create_new_client():
 def get_single_client(client_id: int):
     user = get_current_user()
     data, error, status = get_client(client_id, user=user)
-    if error and status == 404 and _use_mock():
+    if error and status == 404 and _use_mock() and _no_real_rows():
         data, error, status = get_client_mock(client_id)
     if error:
         return error_response(error, status)

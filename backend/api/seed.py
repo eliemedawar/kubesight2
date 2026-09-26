@@ -53,21 +53,57 @@ def _seed_roles(permissions_by_key: dict) -> dict:
             db.session.add(role)
             role.permissions = default_permissions
         elif definition.get("is_system_role", False):
-            # Keep the ORM relationship and the join table in one source of
-            # truth. A direct join-table insert leaves an already-loaded
-            # collection stale; the later exact Hermes-role reconciliation can
-            # then enqueue the same pair again and violate the composite unique
-            # constraint on an existing installation.
-            existing_perm_ids = {permission.id for permission in role.permissions}
-            for permission in default_permissions:
-                if permission.id not in existing_perm_ids:
-                    role.permissions.append(permission)
-                    existing_perm_ids.add(permission.id)
+            grant_new_role_defaults(role, name, default_permissions)
         elif not role.permissions:
             role.permissions = default_permissions
+        record_role_defaults(name, [perm.key for perm in default_permissions])
         roles_by_name[name] = role
     db.session.flush()
     return roles_by_name
+
+
+def _granted_defaults(role_name: str) -> set:
+    from .models import RoleDefaultGrant
+
+    return {
+        row.permission_key
+        for row in RoleDefaultGrant.query.filter_by(role_name=role_name).all()
+    }
+
+
+def record_role_defaults(role_name: str, keys) -> None:
+    """Remember that these built-in defaults have been handed to ``role_name``."""
+    from .models import RoleDefaultGrant
+
+    already = _granted_defaults(role_name)
+    for key in dict.fromkeys(keys):
+        if key not in already:
+            db.session.add(RoleDefaultGrant(role_name=role_name, permission_key=key))
+            already.add(key)
+
+
+def grant_new_role_defaults(role: Role, role_name: str, default_permissions) -> None:
+    """Top a built-in role up with defaults it has NEVER been granted before.
+
+    A default an admin removed stays removed: it is in the ledger, so it is not
+    forced back on the next restart. A role with no ledger yet (an installation
+    from before the ledger existed) gets the previous top-up once — exactly what
+    every earlier boot already did — and is recorded from then on. The caller
+    records the full default list afterwards.
+
+    Appends through the ORM relationship (never a direct join-table insert): a
+    stale loaded collection would let the later exact Hermes-role
+    reconciliation enqueue the same pair again and violate the composite unique
+    constraint.
+    """
+    granted = _granted_defaults(role_name)
+    existing_perm_ids = {permission.id for permission in role.permissions}
+    for permission in default_permissions:
+        if granted and permission.key in granted:
+            continue
+        if permission.id not in existing_perm_ids:
+            role.permissions.append(permission)
+            existing_perm_ids.add(permission.id)
 
 
 def _seed_users(roles_by_name: dict) -> None:

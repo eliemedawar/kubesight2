@@ -2,7 +2,7 @@ from flask import Blueprint, g, request
 
 from ..auth_utils import get_current_user
 from ..decorators import require_any_permission, require_permission
-from ..k8s_provider import should_use_real_k8s
+from ..demo_fallback import demo_fallback_enabled
 from ..response import error_response, success_response
 from ..services.application_service_service import (
     create_service,
@@ -26,7 +26,15 @@ def _actor_user_id() -> int | None:
 
 
 def _use_mock() -> bool:
-    return not should_use_real_k8s()
+    return demo_fallback_enabled()
+
+
+def _no_real_rows() -> bool:
+    """The demo stands in for an EMPTY catalogue only. Once real services exist,
+    an unknown id is a real 404 - never a demo record that happens to share it."""
+    from ..models import ApplicationService
+
+    return ApplicationService.query.first() is None
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +75,7 @@ def get_app_service(service_id: int):
     # Prefer a real DB service; fall back to the demo/mock service only when not
     # found and no live cluster is configured.
     data, error, status = get_service(service_id, user=user)
-    if error and status == 404 and _use_mock():
+    if error and status == 404 and _use_mock() and _no_real_rows():
         data, error, status = get_service_mock(service_id)
     if error:
         return error_response(error, status)

@@ -30,6 +30,26 @@ class Permission(db.Model):
     description = db.Column(db.String(255), nullable=False, default="")
 
 
+class RoleDefaultGrant(db.Model):
+    """Ledger of the built-in default permissions the seed has already granted a role.
+
+    Every boot tops the built-in roles up with the defaults ``rbac_data`` lists
+    for them, so a permission added in a new release reaches existing
+    installations. Without a memory of what was already handed out, that top-up
+    cannot tell "new default" from "default an admin deliberately removed" and
+    silently re-grants revoked permissions on every restart. A default is
+    granted once, recorded here, and never forced back after that.
+
+    Keyed by role *name* (the ``ROLE_DEFINITIONS`` key), not id, so it needs no
+    foreign key and survives a non-system role being deleted and re-seeded.
+    """
+
+    __tablename__ = "role_default_grants"
+
+    role_name = db.Column(db.String(64), primary_key=True)
+    permission_key = db.Column(db.String(120), primary_key=True)
+
+
 class User(db.Model):
     __tablename__ = "users"
 

@@ -86,3 +86,7 @@ class TestingConfig:
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", DEFAULT_TEST_JWT_SECRET)
     # Documented for operators; k8s_provider reads K8S_REAL_MODE from os.environ.
     K8S_REAL_MODE = "false"
+    # Mock mode shows a demo App Services / Clients catalogue when the DB is
+    # empty. Tests assert on the database itself, so they opt out (see
+    # api/demo_fallback.py); a test that wants the demo turns it back on.
+    DEMO_DATA_FALLBACK = False
