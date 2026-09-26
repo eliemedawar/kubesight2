@@ -45,11 +45,12 @@ API_ORIGIN = "https://api.bitbucket.org"
 MAX_RESPONSE_BYTES = 200_000
 TIMEOUT_SECONDS = 20
 
-# Bitbucket's own vocabulary for a build status. KubeSight uses three of the
-# four: STOPPED has no meaning for a verdict that was reached.
+# Bitbucket's own vocabulary for a build status. Merge check verdicts use three
+# of the four; STOPPED is for an ordinary build that was cancelled.
 STATE_SUCCESSFUL = "SUCCESSFUL"
 STATE_FAILED = "FAILED"
 STATE_INPROGRESS = "INPROGRESS"
+STATE_STOPPED = "STOPPED"
 
 
 class StatusWriteError(RuntimeError):

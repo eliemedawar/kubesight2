@@ -55,6 +55,9 @@ class StageRequirements:
     labels: tuple = ()
     image: Optional[str] = None
     resources: Dict[str, Any] = field(default_factory=dict)
+    # Set when the requirements contradict themselves (two stages of one build
+    # pinning different runner types) — no runner can satisfy them.
+    conflict: Optional[str] = None
 
 
 @dataclass

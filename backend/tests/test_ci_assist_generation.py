@@ -229,9 +229,12 @@ def test_java_gradle_spring_boot(service, monkeypatch):
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
 
     assert row.state == "analyzed"
-    # Saved, not merely validated: the review step is deliberately skipped.
-    assert row.pipeline_state == "accepted"
+    # Validated and waiting for a person: a generated pipeline never becomes
+    # the service's pipeline until somebody accepts it.
+    assert row.pipeline_state == "valid"
     assert row.validation["valid"] is True
+    untouched = db.session.get(CiService, service.id).default_pipeline()
+    assert untouched is None or not list(untouched.stages)
 
     profile = row.application_profile
     assert profile["language"] == "java"
@@ -596,8 +599,8 @@ def test_an_unavailable_runner_capability_is_sent_back_and_corrected(service, mo
     row = run(service, monkeypatch, fake, fake_source.JAVA_GRADLE)
 
     assert row.state == "analyzed"
-    # Saved, not merely validated: the review step is deliberately skipped.
-    assert row.pipeline_state == "accepted"
+    # Validated, and left for review rather than saved.
+    assert row.pipeline_state == "valid"
     assert [call["kind"] for call in fake.calls] == ["propose", "repair"]
     # The repair turn carried the objection and nothing else.
     sent = fake.calls[1]["errors"]
@@ -678,10 +681,10 @@ def test_the_loop_stops_when_the_same_objection_comes_back(service, monkeypatch)
     # One propose and one repair, then it stopped — not the full allowance.
     assert [call["kind"] for call in fake.calls] == ["propose", "repair"]
     assert row.attempts[-1]["note"] == "no change in errors"
-    # And the pipeline is saved regardless, carrying the objection as a note.
-    # KubeSight advises; it does not veto.
+    # And the pipeline is still offered for review, carrying the objection as
+    # a note. KubeSight advises; it does not veto — and it does not save.
     assert row.state == "analyzed"
-    assert row.pipeline_state == "accepted"
+    assert row.pipeline_state == "valid"
     assert any(
         item["code"] == "unsatisfiable_runner_labels"
         for item in row.validation["warnings"]

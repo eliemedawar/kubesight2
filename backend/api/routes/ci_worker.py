@@ -87,13 +87,20 @@ def report_meta(build_id: int):
         return err
     payload = request.get_json(silent=True) or {}
     commit_sha = str(payload.get("commitSha") or "").strip()[:64]
+    newly_resolved = False
     if commit_sha and all(c in "0123456789abcdefABCDEF" for c in commit_sha):
+        newly_resolved = build.commit_sha != commit_sha
         build.commit_sha = commit_sha
     message = str(payload.get("commitMessage") or "").strip()
     if message:
         build.commit_message = message[:2000]
     db.session.add(build)
     db.session.commit()
+    if newly_resolved and build.status == "running":
+        # The first moment a branch build has a commit to report against.
+        from ..services.ci import build_status
+
+        build_status.report(build)
     return success_response({"ok": True})
 
 

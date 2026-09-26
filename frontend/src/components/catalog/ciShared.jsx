@@ -25,13 +25,23 @@ export const APPLICATION_TYPES = [
 
 export const CRITICALITIES = ["low", "medium", "high", "critical"];
 
+/** Stage kinds a pipeline can be given. Only these have an executor. */
 export const STAGE_TYPES = [
   { value: "checkout", label: "Checkout" },
   { value: "command", label: "Command" },
   { value: "container_image", label: "Build container image" },
-  { value: "publish_artifact", label: "Publish artifact" },
-  { value: "scan", label: "Security scan" },
 ];
+
+/** Stage kinds that never had an executor. No longer offered and refused on
+ * save; kept only so a pipeline stored with one still opens and names it. */
+export const RETIRED_STAGE_TYPES = [
+  { value: "publish_artifact", label: "Publish artifact (unsupported)" },
+  { value: "scan", label: "Security scan (unsupported)" },
+];
+
+export const stageTypeLabel = (stageType) =>
+  [...STAGE_TYPES, ...RETIRED_STAGE_TYPES].find((type) => type.value === stageType)
+    ?.label || stageType;
 
 /** Stage kinds that only run under specific conditions — the editor says so
  * instead of pretending. container_image executes on the Kubernetes runner
@@ -42,8 +52,13 @@ export const CONDITIONAL_STAGE_TYPES = {
     "(k8s/ci-buildkitd.yaml + CI_BUILDKIT_ADDR). Until then a build records it " +
     "as skipped — it never reports success for work that did not happen.",
   publish_artifact:
-    "No executor yet. A build records it as skipped and says so in the stage log.",
-  scan: "No executor yet. A build records it as skipped and says so in the stage log.",
+    "Publish-artifact stages have no executor and can no longer be saved. A build " +
+    "records this one as skipped. Declare the files as artifacts on the stage " +
+    "that produces them, then remove this stage.",
+  scan:
+    "Scan stages have no executor and can no longer be saved. A build records " +
+    "this one as skipped. Use the image scan gate on a container image stage, or " +
+    "run the scanner in a command stage, then remove this stage.",
 };
 
 export const UNIMPLEMENTED_STAGE_TYPES = new Set(Object.keys(CONDITIONAL_STAGE_TYPES));

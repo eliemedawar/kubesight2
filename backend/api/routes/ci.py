@@ -266,9 +266,10 @@ def create_source_credential():
         credential_type=credential_type,
         principal=principal or None,
         secret_cipher=encrypt_secret(secret),
-        # CI clones and reads only. A write-capable credential is not needed for
-        # any Phase 1 stage, so it is not accepted.
-        read_only=True,
+        # Read-only unless the caller explicitly says otherwise: a clone needs
+        # nothing more. Write is what merge checks and build statuses need —
+        # posting a status and a pull-request comment back to Bitbucket.
+        read_only=payload.get("readOnly") is not False,
         enabled=payload.get("enabled") is not False,
         created_by_user_id=getattr(_actor(), "id", None),
     )
@@ -279,7 +280,11 @@ def create_source_credential():
         actor=_actor(),
         target_type="bitbucket_credential_profile",
         target_id=str(row.id),
-        details={"name": row.name, "credentialType": row.credential_type},
+        details={
+            "name": row.name,
+            "credentialType": row.credential_type,
+            "readOnly": bool(row.read_only),
+        },
     )
     return success_response(credential_profile_to_dict(row), status_code=201)
 
@@ -292,7 +297,32 @@ def update_source_credential(credential_id: int):
         return error_response("Credential profile not found.", 404)
     payload = _payload()
     if payload.get("name"):
-        row.name = " ".join(str(payload["name"]).split())[:120]
+        name = " ".join(str(payload["name"]).split())[:120]
+        duplicate = BitbucketCredentialProfile.query.filter(
+            BitbucketCredentialProfile.name == name,
+            BitbucketCredentialProfile.id != row.id,
+        ).first()
+        if duplicate:
+            return error_response("A credential profile with that name already exists.")
+        row.name = name
+    was_read_only = bool(row.read_only)
+    if "readOnly" in payload:
+        requested_read_only = payload.get("readOnly") is not False
+        if not requested_read_only:
+            # Same rule Application Intelligence applies to this shared store:
+            # an analysed application only ever reads, and must not be moved
+            # onto a credential that can write to its repository.
+            from ..models_application_intelligence import IntelligenceApplication
+
+            if IntelligenceApplication.query.filter_by(
+                credential_profile_id=row.id
+            ).count():
+                return error_response(
+                    "This credential is used by an analysed application, which "
+                    "requires read-only access. Give CI its own write credential.",
+                    409,
+                )
+        row.read_only = requested_read_only
     if "principal" in payload:
         row.principal = " ".join(str(payload.get("principal") or "").split())[:255] or None
     if payload.get("secret"):
@@ -306,7 +336,12 @@ def update_source_credential(credential_id: int):
         actor=_actor(),
         target_type="bitbucket_credential_profile",
         target_id=str(row.id),
-        details={"name": row.name, "secretRotated": bool(payload.get("secret"))},
+        details={
+            "name": row.name,
+            "secretRotated": bool(payload.get("secret")),
+            "readOnly": bool(row.read_only),
+            "accessChanged": was_read_only != bool(row.read_only),
+        },
     )
     return success_response(credential_profile_to_dict(row))
 
@@ -319,17 +354,34 @@ def delete_source_credential(credential_id: int):
         return error_response("Credential profile not found.", 404)
     # This store is shared with Application Intelligence; deleting a profile in
     # use there would silently break its analyses.
-    from ..models_application_intelligence import IntelligenceApplication
+    from ..models_application_intelligence import (
+        ApplicationPullRequest,
+        IntelligenceApplication,
+    )
     from ..models_ci import CiService
 
     in_use_ci = CiService.query.filter_by(credential_profile_id=row.id).count()
     in_use_ai = IntelligenceApplication.query.filter_by(
         credential_profile_id=row.id
     ).count()
-    if in_use_ci or in_use_ai:
+    # Pull requests Application Intelligence opened keep a reference to the
+    # credential that opened them, exactly as its own delete checks.
+    in_use_pr = ApplicationPullRequest.query.filter_by(
+        credential_profile_id=row.id
+    ).count()
+    if in_use_ci or in_use_ai or in_use_pr:
+        usages = [
+            f"{count} {label}{'' if count == 1 else 's'}"
+            for count, label in (
+                (in_use_ci, "CI service"),
+                (in_use_ai, "analysed application"),
+                (in_use_pr, "pull-request record"),
+            )
+            if count
+        ]
         return error_response(
-            f"This credential is used by {in_use_ci} CI service(s) and "
-            f"{in_use_ai} analysed application(s). Reassign them first.",
+            f"This credential is used by {' and '.join(usages)}. "
+            "Reassign them first.",
             409,
         )
     name = row.name
@@ -854,7 +906,8 @@ def purge_artifacts():
         "ci_artifacts_purged",
         actor=_actor(),
         target_type="ci_service" if service_id else "ci_artifacts",
-        target_id=str(service_id or ("all" if all_services else "shared")),
+        # No serviceId means the purge covered every service.
+        target_id=str(service_id or "all"),
         details={
             "deleted": result["deleted"],
             "freedBytes": result["freedBytes"],
@@ -1038,6 +1091,12 @@ def update_runner(runner_id: int):
     payload = _payload()
 
     if "enabled" in payload:
+        if (
+            bool(payload["enabled"])
+            and row.runner_type == scheduler_service.MOCK_RUNNER_TYPE
+            and not scheduler_service.mock_runner_permitted()
+        ):
+            return error_response(scheduler_service.MOCK_RUNNER_REFUSED, 409)
         row.enabled = bool(payload["enabled"])
     if "description" in payload:
         row.description = " ".join(str(payload.get("description") or "").split())[:2000] or None

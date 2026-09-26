@@ -1,11 +1,18 @@
 import { useEffect, useState } from "react";
 import {
   createCiSourceCredential,
+  deleteCiSourceCredential,
   listCiBranches,
   listCiSourceCredentials,
   testCiSource,
   updateCiSource,
+  updateCiSourceCredential,
 } from "../../api/ciApi.js";
+
+const WRITE_ACCESS_HINT =
+  "Write access is needed only for merge checks and build statuses: KubeSight " +
+  "posts the build status and pull-request comments back to Bitbucket. Cloning " +
+  "needs read access alone.";
 
 /**
  * Source tab: which repository, which branch, which credential.
@@ -28,6 +35,8 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
   const [testResult, setTestResult] = useState(null);
   const [error, setError] = useState("");
   const [addingCredential, setAddingCredential] = useState(false);
+  const [editingCredential, setEditingCredential] = useState(null);
+  const [notice, setNotice] = useState("");
 
   const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
@@ -88,10 +97,37 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
   };
 
   const branchOptions = branches.filter((item) => item.type === "branch");
+  const selectedCredential = credentials.find(
+    (item) => String(item.id) === String(form.credentialProfileId)
+  );
+
+  const removeCredential = async () => {
+    if (!selectedCredential) return;
+    if (
+      !window.confirm(
+        `Delete the credential "${selectedCredential.name}"? It is shared across ` +
+          "services; one still in use cannot be deleted."
+      )
+    ) {
+      return;
+    }
+    setError("");
+    setNotice("");
+    try {
+      await deleteCiSourceCredential(selectedCredential.id);
+      set("credentialProfileId", "");
+      setNotice(`Credential "${selectedCredential.name}" was deleted.`);
+      await loadCredentials();
+    } catch (err) {
+      // 409 names what still uses it — reassigning those is the fix.
+      setError(err.message || "Could not delete the credential.");
+    }
+  };
 
   return (
     <div className="sg-ci-panel">
       {error && <p className="banner-message error">{error}</p>}
+      {notice && <p className="banner-message success">{notice}</p>}
 
       <section className="form-section">
         <h4>Repository</h4>
@@ -159,7 +195,7 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
                 <option value="">Select a credential…</option>
                 {credentials.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.name} ({item.credentialType})
+                    {item.name} ({item.credentialType} · {item.readOnly ? "read-only" : "write"})
                   </option>
                 ))}
               </select>
@@ -172,9 +208,31 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
                   Add credential
                 </button>
               )}
+              {canManageSecrets && selectedCredential && (
+                <>
+                  <button
+                    type="button"
+                    className="btn-outline btn-compact"
+                    onClick={() => setEditingCredential(selectedCredential)}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-outline btn-compact"
+                    onClick={removeCredential}
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
             </div>
             <span className="field-hint">
               Stored encrypted and shared across services — the secret is never shown again.
+              {selectedCredential &&
+                (selectedCredential.readOnly
+                  ? " This credential is read-only: builds clone fine, but merge checks and build statuses cannot be reported to Bitbucket."
+                  : " This credential can write: merge checks and build statuses are reported to Bitbucket.")}
             </span>
           </label>
         </div>
@@ -243,16 +301,30 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
           }}
         />
       )}
+      {editingCredential && (
+        <CredentialModal
+          credential={editingCredential}
+          onClose={() => setEditingCredential(null)}
+          onCreated={async () => {
+            setEditingCredential(null);
+            await loadCredentials();
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function CredentialModal({ onClose, onCreated }) {
+/** Add a credential, or edit one when `credential` is passed. Editing never
+ * shows the stored secret: leaving the field empty keeps it, typing rotates it. */
+function CredentialModal({ credential = null, onClose, onCreated }) {
+  const editing = Boolean(credential);
   const [form, setForm] = useState({
-    name: "",
-    credentialType: "repository_access_token",
-    principal: "",
+    name: credential?.name || "",
+    credentialType: credential?.credentialType || "repository_access_token",
+    principal: credential?.principal || "",
     secret: "",
+    readOnly: credential ? credential.readOnly !== false : true,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -263,7 +335,17 @@ function CredentialModal({ onClose, onCreated }) {
     setSaving(true);
     setError("");
     try {
-      onCreated(await createCiSourceCredential(form));
+      if (editing) {
+        const payload = {
+          name: form.name,
+          principal: form.principal,
+          readOnly: form.readOnly,
+        };
+        if (form.secret) payload.secret = form.secret;
+        onCreated(await updateCiSourceCredential(credential.id, payload));
+      } else {
+        onCreated(await createCiSourceCredential(form));
+      }
     } catch (err) {
       setError(err.message || "Could not save the credential.");
       setSaving(false);
@@ -277,13 +359,14 @@ function CredentialModal({ onClose, onCreated }) {
       <div
         className="modal-card"
         role="dialog"
-        aria-label="Add source credential"
+        aria-label={editing ? "Edit source credential" : "Add source credential"}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-card__header">
-          <h3>Add a source credential</h3>
+          <h3>{editing ? "Edit source credential" : "Add a source credential"}</h3>
           <p className="muted">
-            Encrypted at rest and never displayed again. Read access is all CI needs.
+            Encrypted at rest and never displayed again. Read access is all a build
+            needs to clone.
           </p>
         </div>
 
@@ -303,6 +386,7 @@ function CredentialModal({ onClose, onCreated }) {
             Type
             <select
               value={form.credentialType}
+              disabled={editing}
               onChange={(event) => set("credentialType", event.target.value)}
             >
               <option value="repository_access_token">Repository access token</option>
@@ -320,13 +404,25 @@ function CredentialModal({ onClose, onCreated }) {
             </label>
           )}
           <label className="form-grid__full">
-            Secret *
+            {editing ? "New secret" : "Secret *"}
             <input
               type="password"
               value={form.secret}
               autoComplete="new-password"
+              placeholder={editing ? "Leave empty to keep the current secret" : ""}
               onChange={(event) => set("secret", event.target.value)}
             />
+          </label>
+          <label className="form-grid__full">
+            Access
+            <select
+              value={form.readOnly ? "read" : "write"}
+              onChange={(event) => set("readOnly", event.target.value === "read")}
+            >
+              <option value="read">Read-only (clone)</option>
+              <option value="write">Read and write (clone, report statuses)</option>
+            </select>
+            <span className="field-hint">{WRITE_ACCESS_HINT}</span>
           </label>
         </div>
 
@@ -340,12 +436,12 @@ function CredentialModal({ onClose, onCreated }) {
             disabled={
               saving ||
               !form.name.trim() ||
-              !form.secret ||
+              (!editing && !form.secret) ||
               (needsPrincipal && !form.principal.trim())
             }
             onClick={submit}
           >
-            {saving ? "Saving…" : "Add credential"}
+            {saving ? "Saving…" : editing ? "Save credential" : "Add credential"}
           </button>
         </div>
       </div>

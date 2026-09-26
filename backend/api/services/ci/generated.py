@@ -74,7 +74,6 @@ STAGE_KEYS = frozenset(
         "runCondition",
         "timeoutSeconds",
         "continueOnFailure",
-        "parallelGroup",
         "enabled",
         "id",
         "position",
@@ -111,7 +110,6 @@ FIELD_ALIASES = {
     "timeout_seconds": "timeoutSeconds",
     "timeout": "timeoutSeconds",
     "continue_on_failure": "continueOnFailure",
-    "parallel_group": "parallelGroup",
 }
 
 # Fields that are NOT a vocabulary mismatch.
@@ -135,10 +133,10 @@ PRIVILEGE_FIELDS = frozenset(
     }
 )
 
-# Stage types that validate today but have no executor yet. A pipeline may
-# contain them — the engine skips them with an explanation, which is a
-# deliberate product decision — so this is a warning, never an error.
-_NOT_YET_EXECUTABLE = frozenset({"publish_artifact", "scan"})
+# Stage types with no executor (publish_artifact, scan) are refused by
+# ``pipelines.normalize_stage`` like any hand-written save, so a proposal
+# carrying one has that stage dropped (advise) or refused (enforce) — never
+# stored to be skipped forever.
 
 MAX_STAGES = pipelines.MAX_STAGES
 
@@ -261,7 +259,12 @@ def _registered_runners() -> List[CiRunner]:
     So only "nothing in the fleet has ever heard of this capability" is an
     error. The rest is something to tell somebody.
     """
-    return CiRunner.query.all()
+    from .scheduler import runner_usable_here
+
+    # The one runner excluded outright: the simulated one on a real
+    # installation. It "covers" every label and runs nothing, so counting it
+    # would report a pipeline as runnable when no real runner could take it.
+    return [row for row in CiRunner.query.all() if runner_usable_here(row)]
 
 
 def _label_coverage(labels: Iterable[str]) -> Tuple[str, Set[str]]:
@@ -275,12 +278,12 @@ def _label_coverage(labels: Iterable[str]) -> Tuple[str, Set[str]]:
     if not wanted:
         return "online", set()
     runners = _registered_runners()
-    covering = [r for r in runners if capabilities_cover(r.capabilities, wanted)]
+    from .scheduler import runner_provides
+
+    covering = [r for r in runners if capabilities_cover(runner_provides(r), wanted)]
     advertised: Set[str] = set()
     for runner in runners:
-        advertised.update(
-            str(c).strip().lower() for c in (runner.capabilities or []) if str(c).strip()
-        )
+        advertised.update(runner_provides(runner))
     missing = set(wanted) - advertised
     if not covering:
         return "none", missing
@@ -730,16 +733,6 @@ def validate(
             continue
 
         stage_type = str(stage.get("stageType") or "command").strip().lower()
-        if stage_type in _NOT_YET_EXECUTABLE:
-            warnings.append(
-                _issue(
-                    "stage_type_not_executable",
-                    f"Stage '{name}' is a {stage_type.replace('_', ' ')} stage, which has "
-                    "no executor yet. It is skipped with an explanation rather than run.",
-                    stage=name,
-                    field="stageType",
-                )
-            )
         if stage_type == "container_image" and service is not None:
             if not getattr(service, "registry_connection_id", None):
                 warnings.append(

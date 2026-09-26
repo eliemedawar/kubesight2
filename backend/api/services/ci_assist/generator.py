@@ -546,9 +546,8 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
         "valid": verdict["valid"],
         "errors": verdict["errors"],
         "warnings": verdict["warnings"],
-        # Kept whole, secret references included. Auto-saving strips references
-        # to secrets that do not exist yet; this is what they are restored from
-        # when somebody supplies the values.
+        # Kept whole, secret references included: this is what the review
+        # screen shows and what Accept saves once the values are supplied.
         "proposed": verdict["pipeline"] or proposal,
     }
     row.pipeline_state = "valid" if verdict["valid"] else "invalid"
@@ -562,22 +561,11 @@ def _execute(row: CiRepositoryAnalysis, service: CiService) -> None:
     db.session.add(row)
     db.session.commit()
 
-    # Save it. The review step is skipped deliberately — a pipeline in the
-    # editor is reviewable at leisure and editable in place, which is a better
-    # place to disagree with it than a modal standing between somebody and a
-    # registered service. Anything KubeSight cannot supply (a Nexus password) is
-    # recorded as still needed rather than guessed.
-    saved = None
-    if verdict["valid"]:
-        try:
-            from . import accept as accept_service
-
-            saved = accept_service.auto_accept(row, actor=row.requested_by)
-        except Exception:  # noqa: BLE001 — a save failure must not lose the analysis
-            logger.exception("Auto-saving the generated pipeline failed for %s", row.id)
-            db.session.rollback()
-            row = db.session.get(CiRepositoryAnalysis, row.id)
-
+    # NOT saved. A generated pipeline runs arbitrary commands with this
+    # service's secrets, so it waits on the analysis (pipeline_state "valid")
+    # until a person accepts it — POST /api/ci/analyses/<id>/accept — or
+    # discards it. It used to be saved over the service's pipeline the moment
+    # it existed; that made a model's output live without anybody reading it.
     _finish(row, "analyzed" if verdict["valid"] else "partial")
     log_audit(
         "ci_analysis_completed",

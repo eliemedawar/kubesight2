@@ -448,15 +448,29 @@ def test_two_stages_with_the_same_name_are_refused(service):
     assert "duplicate_stage_name" in codes(verdict)
 
 
-def test_a_stage_type_with_no_executor_yet_warns_rather_than_blocks(service):
-    """scan and publish_artifact validate today and skip at run time with an
-    explanation. That is a deliberate product decision, not a defect."""
+def test_a_stage_type_with_no_executor_is_never_stored(service):
+    """scan and publish_artifact have no executor, so a proposal carrying one
+    must not be stored to be skipped forever: advise drops the stage and says
+    so, enforce refuses it."""
     verdict = generated.validate(
         service,
-        pipeline(stage(stageType="scan", commands=[])),
+        pipeline(stage(), stage(name="Scan", stageType="scan", commands=[])),
     )
     assert verdict["valid"], verdict["errors"]
-    assert "stage_type_not_executable" in warning_codes(verdict)
+    assert "stage_dropped" in warning_codes(verdict)
+    assert [s["name"] for s in verdict["pipeline"]["stages"]] != []
+    assert all(s.get("stageType") != "scan" for s in verdict["pipeline"]["stages"])
+
+    refused = strict(service, pipeline(stage(name="Publish", stageType="publish_artifact")))
+    assert not refused["valid"]
+    assert "invalid_stage" in codes(refused)
+
+
+def test_a_parallel_group_is_reported_as_ignored_not_stored(service):
+    verdict = generated.validate(service, pipeline(stage(parallelGroup="Tests")))
+    assert verdict["valid"], verdict["errors"]
+    assert "unsupported_field" in warning_codes(verdict)
+    assert "parallelGroup" not in verdict["pipeline"]["stages"][0]
 
 
 def test_an_image_stage_without_a_registry_warns_about_where_it_would_push(service):

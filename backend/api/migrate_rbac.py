@@ -598,21 +598,33 @@ def _seed_builtin_ci_runners() -> None:
     """Ensure the runners KubeSight manages itself exist.
 
     ``mock`` executes pipelines without touching a cluster — it backs mock mode
-    and the test suite. ``kubernetes`` is the real in-cluster Job executor and
-    ships disabled until its adapter lands, so a build can never silently
-    dispatch to a runner that cannot run it.
+    and the test suite. It runs NO commands and reports every stage green, so
+    on an installation connected to real clusters it is seeded disabled (and an
+    existing enabled row is switched off, below): a fake-green build there is a
+    lie a deploy could act on. The scheduler refuses it in real mode as well.
+
+    ``kubernetes`` is the real in-cluster Job executor. A fresh real-mode
+    installation seeds it enabled so CI works once k8s/ci-runner.yaml is
+    applied (until then its builds FAIL with the runner's error — never pass).
+    In mock mode it ships disabled. Existing rows keep whatever the operator set.
     """
     if "ci_runners" not in inspect(db.engine).get_table_names():
         return
     from .models_ci import CiRunner
+    from .k8s_provider import is_real_mode_enabled
+
+    try:
+        real_mode = bool(is_real_mode_enabled())
+    except Exception:
+        real_mode = True  # Fail closed: never arm the simulated runner by accident.
 
     builtins = [
         {
             "name": "kubesight-mock",
             "runner_type": "mock",
             "description": "Simulated executor. Runs pipelines without a cluster.",
-            "status": "online",
-            "enabled": True,
+            "status": "offline" if real_mode else "online",
+            "enabled": not real_mode,
             "os": "linux",
             "arch": "amd64",
             "labels": ["mock"],
@@ -631,7 +643,7 @@ def _seed_builtin_ci_runners() -> None:
                 "then enable this runner."
             ),
             "status": "offline",
-            "enabled": False,
+            "enabled": real_mode,
             "os": "linux",
             "arch": "amd64",
             "labels": ["kubernetes"],
@@ -653,6 +665,16 @@ def _seed_builtin_ci_runners() -> None:
             # capabilities are union-merged so shipped rows learn new ones.
             if not row.is_builtin:
                 row.is_builtin = True
+                changed = True
+            # The one exception to "operators own enabled": the simulated
+            # runner is a safety hazard on a real installation, whatever it
+            # was set to while the installation was a demo.
+            if real_mode and row.runner_type == "mock" and (
+                row.enabled or row.status != "offline"
+            ):
+                row.enabled = False
+                row.status = "offline"
+                db.session.add(row)
                 changed = True
             merged = sorted(set(row.capabilities or []) | set(spec["capabilities"]))
             if merged != sorted(row.capabilities or []):

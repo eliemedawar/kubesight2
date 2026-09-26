@@ -26,6 +26,8 @@ from ...models_ci import (
     IMAGE_SCANNERS,
     PIPELINE_PURPOSES,
     RUNNER_TYPES,
+    RETIRED_STAGE_TYPES,
+    SAVEABLE_STAGE_TYPES,
     STAGE_TYPES,
     CiPipeline,
     CiPipelineStage,
@@ -544,10 +546,22 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         raise PipelineError(f"Stage {position + 1} needs a name.")
 
     stage_type = _clean(payload.get("stageType"), 32).lower() or "command"
+    if stage_type in RETIRED_STAGE_TYPES:
+        raise PipelineError(
+            f"Stage '{name}' is a '{stage_type}' stage, which KubeSight has no "
+            "executor for — a build would only ever skip it. "
+            + (
+                "Declare the files as artifacts on the stage that produces them "
+                "and remove this stage."
+                if stage_type == "publish_artifact"
+                else "Use the image scan gate on a container image stage, or run "
+                "the scanner in a command stage, and remove this stage."
+            )
+        )
     if stage_type not in STAGE_TYPES:
         raise PipelineError(
             f"Stage '{name}' has an unknown type '{stage_type}'. "
-            f"Supported: {', '.join(STAGE_TYPES)}."
+            f"Supported: {', '.join(SAVEABLE_STAGE_TYPES)}."
         )
 
     runner_type = _clean(payload.get("runnerType"), 24).lower() or None
@@ -592,7 +606,10 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         "image_scan": _image_scan(payload.get("imageScan"), stage_type, name),
         "timeout_seconds": timeout,
         "continue_on_failure": bool(payload.get("continueOnFailure")),
-        "parallel_group": _clean(payload.get("parallelGroup"), 64) or None,
+        # Parallel groups were stored but never executed: stages always run in
+        # order. Accepting one would promise concurrency that does not happen,
+        # so a sent value is dropped (older clients still send the key).
+        "parallel_group": None,
         "enabled": payload.get("enabled") is not False,
     }
 

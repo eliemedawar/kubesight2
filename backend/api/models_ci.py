@@ -46,9 +46,8 @@ APPLICATION_TYPES = (
 SERVICE_STATUSES = ("active", "paused", "archived")
 CRITICALITIES = ("low", "medium", "high", "critical")
 
-# Stage kinds. Only ``checkout`` and ``command`` execute in Phase 1; the rest are
-# recognised and validated now so a pipeline authored today stays valid when
-# their executors land.
+# Stage kinds a stored pipeline may carry. ``checkout`` and ``command`` run on
+# every runner; ``container_image`` on the Kubernetes runner with BuildKit.
 STAGE_TYPES = (
     "checkout",
     "command",
@@ -56,6 +55,12 @@ STAGE_TYPES = (
     "publish_artifact",
     "scan",
 )
+# Recognised so pipelines stored before they were retired still load (and are
+# still skipped, with a reason, by the engine), but refused on every NEW save:
+# no runner ever executed them, so offering them promised work that never ran.
+RETIRED_STAGE_TYPES = ("publish_artifact", "scan")
+# What a pipeline can be given today.
+SAVEABLE_STAGE_TYPES = tuple(t for t in STAGE_TYPES if t not in RETIRED_STAGE_TYPES)
 
 # --- Image scanning ---------------------------------------------------------
 # A container_image stage builds, scans and pushes in ONE stage, in that order.
@@ -413,6 +418,8 @@ class CiPipelineStage(db.Model):
     continue_on_failure = db.Column(db.Boolean, nullable=False, default=False)
     # Reserved for parallel execution. Written and serialized, never read by the
     # sequential executor, so enabling parallelism later needs no migration.
+    # Never executed — stages always run in order. No longer written (every
+    # save stores None); the column stays so existing databases need no drop.
     parallel_group = db.Column(db.String(64), nullable=True)
     enabled = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
