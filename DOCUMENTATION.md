@@ -30,10 +30,12 @@ KubeSight from local development to a production Kubernetes deployment.
 
 **Runtime command (production):**
 ```sh
-gunicorn -w 1 --threads 8 -b 0.0.0.0:5000 --timeout 300 "api:create_app()"
+gunicorn -w "${GUNICORN_WORKERS:-1}" --threads "${GUNICORN_THREADS:-8}" -b 0.0.0.0:5000 --timeout 300 "api:create_app()"
 ```
-Single worker keeps the in-process alert scheduler and caches singular; 8 threads provide
-concurrency for blocking `kubectl`/`helm`/log-stream calls.
+Background loops elect a leader through a Postgres advisory lock, so extra workers/replicas
+are safe for them; the default stays at 1 worker until upgrade jobs stop living in process
+memory (see "Production environment" in §4). Threads provide concurrency for blocking
+`kubectl`/`helm`/log-stream calls.
 
 ### Frontend
 
@@ -167,6 +169,54 @@ Open the Vite URL (usually `http://localhost:5173`).
 | `SMTP_USE_TLS` | `true` / `false` |
 
 ---
+
+### Production environment — what the backend must be given
+The backend Deployment/ConfigMap/Secret/ClusterRole manifests are kept with the
+cluster, not in this repo (only `k8s/ingress.yaml` and the CI/Hermes add-ons
+are here), so check the live objects against this list.
+
+With `APP_ENV=production` the backend **refuses to start** unless the four
+"refuses" rows below hold. Production is detected from any of `KUBESIGHT_ENV`,
+`APP_ENV`, `FLASK_ENV` set to `production`/`prod`; `k8s_entrypoint.sh` defaults
+`APP_ENV` to `production`, so the image is production unless told otherwise.
+
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `KUBESIGHT_SECRET_KEY` | refuses without it | Encrypts stored credentials. Dedicated key, **not** the JWT key; must stay stable (rotate via `KUBESIGHT_PREVIOUS_SECRET_KEYS`). Legacy name `ALERT_ROUTING_SECRET_KEY` still accepted. |
+| `JWT_SECRET_KEY` | refuses without it | `openssl rand -hex 32`; never `kubesight-dev-secret-change-me`. |
+| `DATABASE_URL` | refuses without it | PostgreSQL, reachable at boot. Directly or via a **session-mode** pooler: leader election uses session advisory locks, which a transaction-mode pgbouncer cannot hold. |
+| `AUTH_REQUIRED` | refuses if `false` | Default `true`. |
+| `FLASK_SECRET_KEY` | yes | `openssl rand -hex 32`. |
+| `CORS_ORIGINS` | yes | Real origin(s), comma-separated (default `*`). |
+| `K8S_REAL_MODE` | `true` | Default `auto`. |
+| `CI_WORKER_IMAGE`, `CI_WORKER_CALLBACK_URL` | for native CI | See `k8s/ci-backend-config.yaml`. |
+| `HERMES_API_TOKEN` | for Application Intelligence | Handed to analysis worker Jobs. |
+
+Keep secret values out of git — reference them from a Kubernetes Secret:
+
+```yaml
+env:
+  - name: APP_ENV
+    value: production
+  - name: KUBESIGHT_SECRET_KEY
+    valueFrom: {secretKeyRef: {name: kubesight-secrets, key: KUBESIGHT_SECRET_KEY}}
+  - name: JWT_SECRET_KEY
+    valueFrom: {secretKeyRef: {name: kubesight-secrets, key: JWT_SECRET_KEY}}
+  - name: DATABASE_URL
+    valueFrom: {secretKeyRef: {name: kubesight-secrets, key: DATABASE_URL}}
+```
+
+RBAC: the disk/PVC alerts read kubelet stats, so the backend ServiceAccount's
+ClusterRole needs `get` on `nodes/proxy` (apiGroup `""`).
+
+Process model (all optional):
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `GUNICORN_WORKERS` | `1` | Background loops elect a leader (Postgres advisory lock), so >1 worker or >1 replica no longer double-runs them. Kept at 1 until upgrade jobs are persisted — today they live in process memory and a status poll on another worker 404s. |
+| `GUNICORN_THREADS` / `GUNICORN_TIMEOUT` | `8` / `300` | |
+| `SCHEDULER_LEADER_ELECTION` | `auto` | `off` makes every process act as leader — single-process deployments only. |
+| `STARTUP_LOCK_TIMEOUT_SECONDS` | `600` | How long a booting worker waits for another's migrations. |
 
 ## 5. Building Images
 

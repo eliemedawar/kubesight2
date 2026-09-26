@@ -65,142 +65,163 @@ def _should_start_in_process() -> bool:
 
 
 def _scheduler_loop(app: Flask) -> None:
+    """Every process runs this loop; only the elected leader does the work.
+
+    The others keep asking each tick, so when the leader dies (its database
+    session closes and Postgres drops the lock) a standby takes over within
+    one tick. See :mod:`.leader_election` for why this is an advisory lock.
+    """
+    from .leader_election import SCHEDULER_LOCK, LeaderElector, database_url_for
+
     tick = _scheduler_tick_seconds()
+    elector = LeaderElector(SCHEDULER_LOCK, database_url_for(app))
     while True:
         time.sleep(tick)
-        # Auto-refresh component health first so the policy evaluation below
-        # (and the UI) sees current statuses without manual "Check now" clicks.
-        # Self-gating: only components whose last check is stale are re-checked.
-        if _component_health_refresh_enabled():
-            try:
-                with app.app_context():
-                    from .topology_component_service import refresh_stale_component_healths
+        try:
+            leading = elector.is_leader()
+        except Exception:
+            logger.exception("Scheduler leader election failed")
+            leading = False
+        if not leading:
+            continue
+        run_scheduler_tick(app)
 
-                    refresh_stale_component_healths()
-            except Exception:
-                logger.exception("Component health auto-refresh tick failed")
+
+def run_scheduler_tick(app: Flask) -> None:
+    """One pass of every scheduled job. Call only while holding leadership."""
+    # Auto-refresh component health first so the policy evaluation below
+    # (and the UI) sees current statuses without manual "Check now" clicks.
+    # Self-gating: only components whose last check is stale are re-checked.
+    if _component_health_refresh_enabled():
         try:
             with app.app_context():
-                from .alert_policy_evaluator import evaluate_all_enabled_policies
+                from .topology_component_service import refresh_stale_component_healths
 
-                evaluate_all_enabled_policies(persist=True)
+                refresh_stale_component_healths()
         except Exception:
-            logger.exception("Alert policy scheduler tick failed")
-        try:
-            with app.app_context():
-                from ..alert_notifier import dispatch_active_alert_notifications
+            logger.exception("Component health auto-refresh tick failed")
+    try:
+        with app.app_context():
+            from .alert_policy_evaluator import evaluate_all_enabled_policies
 
-                # Repeat notifications for every still-active policy alert
-                # (metric, log, service, automation), gated per receiver by the
-                # policy's repeat interval. This is the only place repeats are
-                # sent — the alert list API is read-only.
-                dispatch_active_alert_notifications()
-        except Exception:
-            logger.exception("Alert notification sweep tick failed")
-        try:
-            with app.app_context():
-                from .deployment_request_service import auto_decline_overdue_requests
+            evaluate_all_enabled_policies(persist=True)
+    except Exception:
+        logger.exception("Alert policy scheduler tick failed")
+    try:
+        with app.app_context():
+            from ..alert_notifier import dispatch_active_alert_notifications
 
-                auto_decline_overdue_requests()
-        except Exception:
-            logger.exception("Deployment request auto-decline tick failed")
-        try:
-            with app.app_context():
-                from .change_bundle_executor import process_due_bundles
+            # Repeat notifications for every still-active policy alert
+            # (metric, log, service, automation), gated per receiver by the
+            # policy's repeat interval. This is the only place repeats are
+            # sent — the alert list API is read-only.
+            dispatch_active_alert_notifications()
+    except Exception:
+        logger.exception("Alert notification sweep tick failed")
+    try:
+        with app.app_context():
+            from .deployment_request_service import auto_decline_overdue_requests
 
-                process_due_bundles()
-        except Exception:
-            logger.exception("Change bundle execution tick failed")
-        try:
-            with app.app_context():
-                from .change_bundle_executor import watch_bundle_rollouts
+            auto_decline_overdue_requests()
+    except Exception:
+        logger.exception("Deployment request auto-decline tick failed")
+    try:
+        with app.app_context():
+            from .change_bundle_executor import process_due_bundles
 
-                # Post-execution pod-health watches on bundle-applied
-                # deployments (rollback + notify on rollout failure).
-                watch_bundle_rollouts()
-        except Exception:
-            logger.exception("Bundle rollout watch tick failed")
-        try:
-            with app.app_context():
-                from . import ticketing
+            process_due_bundles()
+    except Exception:
+        logger.exception("Change bundle execution tick failed")
+    try:
+        with app.app_context():
+            from .change_bundle_executor import watch_bundle_rollouts
 
-                # Self-gating per provider: each only runs when its integration
-                # is enabled and its configured interval has elapsed.
-                ticketing.run_due_syncs()
-        except Exception:
-            logger.exception("Ticketing field-sync tick failed")
-        try:
-            with app.app_context():
-                from .deploy_automation_service import advance_runs
+            # Post-execution pod-health watches on bundle-applied
+            # deployments (rollback + notify on rollout failure).
+            watch_bundle_rollouts()
+    except Exception:
+        logger.exception("Bundle rollout watch tick failed")
+    try:
+        with app.app_context():
+            from . import ticketing
 
-                # Ticket-driven deploy automation: advance every active run one
-                # step (registry gate → Jenkins build poll → verify → handoff).
-                # No-ops instantly when there are no active runs.
-                advance_runs()
-        except Exception:
-            logger.exception("Deploy automation tick failed")
-        try:
-            with app.app_context():
-                from .ticket_agent.engine import tick as ticket_agent_tick
+            # Self-gating per provider: each only runs when its integration
+            # is enabled and its configured interval has elapsed.
+            ticketing.run_due_syncs()
+    except Exception:
+        logger.exception("Ticketing field-sync tick failed")
+    try:
+        with app.app_context():
+            from .deploy_automation_service import advance_runs
 
-                # Hermes ticket agent: hand pending tickets to Hermes, collect
-                # Telegram approval presses, expire unanswered approvals.
-                ticket_agent_tick()
-        except Exception:
-            logger.exception("Ticket agent tick failed")
-        try:
-            with app.app_context():
-                from .mobile_app_service import (
-                    advance_mobile_builds,
-                    advance_mobile_publishes,
-                    advance_mobile_resigns,
-                )
+            # Ticket-driven deploy automation: advance every active run one
+            # step (registry gate → Jenkins build poll → verify → handoff).
+            # No-ops instantly when there are no active runs.
+            advance_runs()
+    except Exception:
+        logger.exception("Deploy automation tick failed")
+    try:
+        with app.app_context():
+            from .ticket_agent.engine import tick as ticket_agent_tick
 
-                # Mobile Applications: dispatch pending artifact downloads and
-                # store uploads to worker threads (the heavy transfers never run
-                # on this tick thread) and poll App Store processing states.
-                # No-ops instantly when nothing is pending.
-                advance_mobile_builds()
-                advance_mobile_publishes()
-                # Signing jobs launch and report back by callback; this only
-                # launches queued ones and catches the ones that died silently.
-                advance_mobile_resigns()
-        except Exception:
-            logger.exception("Mobile applications tick failed")
-        try:
-            with app.app_context():
-                from .ci import artifacts as ci_artifacts
+            # Hermes ticket agent: hand pending tickets to Hermes, collect
+            # Telegram approval presses, expire unanswered approvals.
+            ticket_agent_tick()
+    except Exception:
+        logger.exception("Ticket agent tick failed")
+    try:
+        with app.app_context():
+            from .mobile_app_service import (
+                advance_mobile_builds,
+                advance_mobile_publishes,
+                advance_mobile_resigns,
+            )
 
-                # Artifact expiry. Cheap to ask: it reads one marker file and
-                # returns immediately unless a day has passed since the last
-                # sweep, so this costs nothing on all but one tick a day.
-                ci_artifacts.run_due_purge()
-        except Exception:
-            logger.exception("CI artifact retention tick failed")
-        try:
-            with app.app_context():
-                from .ci import ticker as ci_ticker
+            # Mobile Applications: dispatch pending artifact downloads and
+            # store uploads to worker threads (the heavy transfers never run
+            # on this tick thread) and poll App Store processing states.
+            # No-ops instantly when nothing is pending.
+            advance_mobile_builds()
+            advance_mobile_publishes()
+            # Signing jobs launch and report back by callback; this only
+            # launches queued ones and catches the ones that died silently.
+            advance_mobile_resigns()
+    except Exception:
+        logger.exception("Mobile applications tick failed")
+    try:
+        with app.app_context():
+            from .ci import artifacts as ci_artifacts
 
-                # Native CI normally runs on its own one-second clock, because
-                # waiting up to 15s behind everything above for a stage to hand
-                # over to the next is what made builds feel slow. This stays as
-                # the fallback for a deployment with that ticker turned off.
-                if not ci_ticker.is_running():
-                    from .ci.engine import advance_ci_builds
+            # Artifact expiry. Cheap to ask: it reads one marker file and
+            # returns immediately unless a day has passed since the last
+            # sweep, so this costs nothing on all but one tick a day.
+            ci_artifacts.run_due_purge()
+    except Exception:
+        logger.exception("CI artifact retention tick failed")
+    try:
+        with app.app_context():
+            from .ci import ticker as ci_ticker
 
-                    advance_ci_builds()
-        except Exception:
-            logger.exception("CI build tick failed")
-        try:
-            with app.app_context():
-                from .cluster_build.executor import advance_cluster_builds
+            # Native CI normally runs on its own one-second clock, because
+            # waiting up to 15s behind everything above for a stage to hand
+            # over to the next is what made builds feel slow. This stays as
+            # the fallback for a deployment with that ticker turned off.
+            if not ci_ticker.is_running():
+                # Same cross-process guard the ticker uses, so a replica that
+                # still runs its ticker never overlaps this fallback pass.
+                ci_ticker.guarded_pass(app)
+    except Exception:
+        logger.exception("CI build tick failed")
+    try:
+        with app.app_context():
+            from .cluster_build.executor import advance_cluster_builds
 
-                # Cluster Builder: resume builds orphaned by a backend restart
-                # (completed steps are skipped — resume, not restart). No-ops
-                # instantly when nothing is in status 'building'.
-                advance_cluster_builds()
-        except Exception:
-            logger.exception("Cluster build tick failed")
+            # Cluster Builder: resume builds orphaned by a backend restart
+            # (completed steps are skipped — resume, not restart). No-ops
+            # instantly when nothing is in status 'building'.
+            advance_cluster_builds()
+    except Exception:
+        logger.exception("Cluster build tick failed")
 
 
 _scheduler_started = False

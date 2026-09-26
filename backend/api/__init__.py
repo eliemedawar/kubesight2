@@ -343,8 +343,13 @@ def create_app(config_object=None) -> Flask:
 
     with app.app_context():
         if not is_testing:
-            run_migrations()
-            seed_defaults()
+            # Several gunicorn workers / replicas boot at once; concurrent
+            # create_all + ALTER TABLE collide on Postgres. Serialise them.
+            from .services.leader_election import startup_lock
+
+            with startup_lock(app.config["SQLALCHEMY_DATABASE_URI"]):
+                run_migrations()
+                seed_defaults()
 
     @app.route("/health", methods=["GET"])
     def health():

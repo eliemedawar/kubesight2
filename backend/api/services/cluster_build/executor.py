@@ -1940,6 +1940,50 @@ def _phase_workloads(build: ClusterBuild, primary: ClusterBuildNode) -> None:
 # The worker
 # ---------------------------------------------------------------------------
 
+# How often a running build proves it is alive. Well under
+# _STALE_BUILD_MINUTES so a single long phase (CNI rollout, node-ready waits run
+# up to 20 minutes) is never mistaken for an orphan.
+_HEARTBEAT_SECONDS = 60
+
+
+def _heartbeat_loop(app, build_id: int, stop: threading.Event) -> None:
+    """Keep ``updated_at`` fresh while this process drives the build.
+
+    ``_active_builds`` only protects a build inside the process that runs it.
+    With more than one backend worker or replica, the scheduler leader may be
+    a different process, and ``advance_cluster_builds`` there sees only the
+    row: without a heartbeat, any phase longer than _STALE_BUILD_MINUTES would
+    look orphaned and be relaunched on top of the live worker. One narrow
+    UPDATE on its own session; the phase-machine thread's objects are never
+    touched from here.
+    """
+    while not stop.wait(_HEARTBEAT_SECONDS):
+        try:
+            with app.app_context():
+                try:
+                    ClusterBuild.query.filter_by(
+                        id=build_id, status="building"
+                    ).update({"updated_at": _utcnow()}, synchronize_session=False)
+                    db.session.commit()
+                finally:
+                    db.session.remove()
+        except Exception:  # noqa: BLE001 — a missed beat is retried next minute
+            logger.debug("Cluster build %s heartbeat failed", build_id, exc_info=True)
+
+
+def _start_heartbeat(app, build_id: int) -> Optional[threading.Event]:
+    if app.config.get("TESTING"):
+        return None
+    stop = threading.Event()
+    threading.Thread(
+        target=_heartbeat_loop,
+        args=(app, build_id, stop),
+        name=f"cluster-build-{build_id}-heartbeat",
+        daemon=True,
+    ).start()
+    return stop
+
+
 def _run_build(app, build_id: int) -> None:
     with app.app_context():
         build = db.session.get(ClusterBuild, build_id)
@@ -1950,6 +1994,7 @@ def _run_build(app, build_id: int) -> None:
             with _active_lock:
                 _active_builds.discard(build_id)
             return
+        heartbeat = _start_heartbeat(app, build_id)
         try:
             profile_row = (
                 db.session.get(BuildProfile, build.build_profile_id)
@@ -2028,6 +2073,8 @@ def _run_build(app, build_id: int) -> None:
             build.finished_at = _utcnow()
             db.session.commit()
         finally:
+            if heartbeat is not None:
+                heartbeat.set()
             with _active_lock:
                 _active_builds.discard(build_id)
             # A retry can land in the narrow interval after this worker commits
