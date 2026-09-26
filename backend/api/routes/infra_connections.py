@@ -268,6 +268,129 @@ def test_ssh_profile(profile_id: int):
 
 
 # ---------------------------------------------------------------------------
+# SSH host keys — what makes the ``strict`` and ``pinned`` policies usable
+# ---------------------------------------------------------------------------
+
+@infra_bp.route("/ssh-host-keys", methods=["GET"])
+@require_permission("ssh_credentials:manage")
+def list_ssh_host_keys():
+    from ..services.ssh import hostkeys
+
+    return success_response({"items": hostkeys.list_host_keys()})
+
+
+@infra_bp.route("/ssh-host-keys/scan", methods=["POST"])
+@require_permission("ssh_credentials:manage")
+def scan_ssh_host_key():
+    """Fetch the fingerprint a host presents right now — trusts nothing."""
+    from ..services.ssh import SshConnectionError, hostkeys
+
+    payload = request.get_json(silent=True) or {}
+    bastion = None
+    profile_id = payload.get("profileId")
+    try:
+        if profile_id not in (None, ""):
+            profile = ssh_profile_service.get_profile(int(profile_id))
+            if profile.route_mode == "bastion" and profile.bastion_host:
+                bastion = ssh_profile_service.build_target(
+                    profile, str(payload.get("host") or "")
+                ).bastion
+        result = hostkeys.scan_host(
+            payload.get("host", ""), payload.get("port", 22), bastion=bastion
+        )
+    except LookupError:
+        return error_response("SSH connection profile not found.", 404)
+    except (TypeError, ValueError) as exc:
+        return error_response(str(exc), 400)
+    except SshConnectionError as exc:
+        return error_response(str(exc), 502)
+    log_audit(
+        "ssh_host_key_scanned",
+        actor=get_current_user(),
+        target_type="ssh_host",
+        target_id=f"{result['host']}:{result['port']}",
+        details={
+            "keyType": result["keyType"],
+            "fingerprint": result["fingerprint"],
+            "status": result["status"],
+        },
+    )
+    return success_response(result)
+
+
+@infra_bp.route("/ssh-host-keys", methods=["POST"])
+@require_permission("ssh_credentials:manage")
+def pin_ssh_host_key():
+    """Pre-approve (pin) a host's fingerprint. Upgrades a TOFU record in place;
+    replacing a DIFFERENT recorded fingerprint needs ``replace: true``."""
+    from ..services.ssh import hostkeys
+
+    payload = request.get_json(silent=True) or {}
+    user = get_current_user()
+    try:
+        host, port = hostkeys.validate_host_port(payload.get("host"), payload.get("port", 22))
+        digest = hostkeys.normalize_fingerprint(payload.get("fingerprint", ""))
+        key_type = str(payload.get("keyType") or "").strip()
+        existing = hostkeys._find(host, port, key_type) if key_type else None
+        if (
+            existing is not None
+            and existing.fingerprint_sha256 != digest
+            and payload.get("replace") is not True
+        ):
+            return error_response(
+                "A different fingerprint is already recorded for this host and key "
+                "type. Confirm the host was legitimately rebuilt, then replace it.",
+                409,
+            )
+        row, previous = hostkeys.pin_host_key(
+            host=host,
+            port=port,
+            key_type=key_type,
+            fingerprint=digest,
+            user_id=getattr(user, "id", None),
+        )
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    replaced = bool(previous and previous["fingerprintSha256"] != row["fingerprintSha256"])
+    log_audit(
+        "ssh_host_key_replaced" if replaced else "ssh_host_key_approved",
+        actor=user,
+        target_type="ssh_host",
+        target_id=f"{row['host']}:{row['port']}",
+        details={
+            "keyType": row["keyType"],
+            "fingerprint": row["fingerprint"],
+            "previousFingerprint": previous["fingerprint"] if previous else None,
+            "previousSource": previous["source"] if previous else None,
+        },
+    )
+    return success_response(row, status_code=201 if previous is None else 200)
+
+
+@infra_bp.route("/ssh-host-keys/<int:key_id>", methods=["DELETE"])
+@require_permission("ssh_credentials:manage")
+def delete_ssh_host_key(key_id: int):
+    from ..services.ssh import hostkeys
+
+    try:
+        removed = hostkeys.delete_host_key(key_id)
+    except LookupError:
+        return error_response("Host key not found.", 404)
+    log_audit(
+        "ssh_host_key_deleted",
+        actor=get_current_user(),
+        target_type="ssh_host",
+        target_id=f"{removed['host']}:{removed['port']}",
+        details={
+            "keyType": removed["keyType"],
+            "fingerprint": removed["fingerprint"],
+            "source": removed["source"],
+        },
+    )
+    return success_response({"deleted": True})
+
+
+# ---------------------------------------------------------------------------
 # Build profiles (repository modes)
 # ---------------------------------------------------------------------------
 

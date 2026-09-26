@@ -1283,6 +1283,39 @@ def _backfill_build_signature_state() -> None:
         logger.info("Backfilled signature_state for %s mobile build(s)", changed)
 
 
+def _encrypt_plaintext_kubeconfigs() -> None:
+    """Encrypt legacy plaintext ``cluster-<id>.yaml`` kubeconfigs at rest.
+
+    Idempotent: once every file is ``.yaml.enc`` this is a directory listing.
+    A failure is logged, never fatal — a cluster whose file could not be
+    converted keeps working from the plaintext copy until the next start.
+    """
+    from .cluster_store import migrate_plaintext_kubeconfigs
+
+    try:
+        converted = migrate_plaintext_kubeconfigs()
+    except Exception:  # noqa: BLE001 — startup must not die on one bad file
+        db.session.rollback()
+        logger.exception("Encrypting stored kubeconfigs failed; will retry next start.")
+        return
+    if converted:
+        logger.info("Encrypted %d stored kubeconfig file(s) at rest.", converted)
+
+
+def _interrupt_orphaned_upgrade_jobs() -> None:
+    """Upgrade jobs left queued/running by a previous process are dead."""
+    from .upgrade_jobs import interrupt_orphaned_jobs
+
+    try:
+        interrupted = interrupt_orphaned_jobs()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        logger.exception("Reconciling interrupted upgrade jobs failed.")
+        return
+    if interrupted:
+        logger.warning("Marked %d interrupted upgrade job(s) as failed.", interrupted)
+
+
 def run_migrations() -> None:
     db.create_all()
     # DDL for columns added to pre-existing tables must run before ANY step that
@@ -1328,3 +1361,7 @@ def run_migrations() -> None:
     _migrate_renamed_permissions()
     _grant_ticket_agent_to_ticket_managers()
     _prune_obsolete_permissions()
+    # Cluster access (Area C): not schema, but one-time data fix-ups that must
+    # run on every start.
+    _encrypt_plaintext_kubeconfigs()
+    _interrupt_orphaned_upgrade_jobs()

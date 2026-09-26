@@ -9,7 +9,7 @@ import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from .cluster_access import ClusterAccess
 from .k8s_provider import K8sCommandError
@@ -258,10 +258,14 @@ def _run_upgrade_kubectl(
     return run_kubectl(access, args)
 
 
-def _kubectl_command(access: ClusterAccess, args: List[str]) -> List[str]:
+def _kubectl_command(
+    access: ClusterAccess, args: List[str], kubeconfig_path: Optional[str] = None
+) -> List[str]:
+    """``kubeconfig_path`` is the materialized (decrypted) path when given."""
+    path = kubeconfig_path if kubeconfig_path is not None else access.kubeconfig_path
     command = ["kubectl"]
-    if access.kubeconfig_path:
-        command += ["--kubeconfig", access.kubeconfig_path]
+    if path:
+        command += ["--kubeconfig", path]
     if access.context_name:
         command += ["--context", access.context_name]
     command += args
@@ -269,21 +273,25 @@ def _kubectl_command(access: ClusterAccess, args: List[str]) -> List[str]:
 
 
 def _kubectl_apply_manifest(access: ClusterAccess, manifest: Dict[str, Any]) -> str:
-    env = os.environ.copy()
-    if access.kubeconfig_path:
-        env["KUBECONFIG"] = access.kubeconfig_path
-    elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
-        env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
+    from .kubeconfig_vault import materialized_kubeconfig
 
-    completed = subprocess.run(
-        _kubectl_command(access, ["apply", "-f", "-"]),
-        input=json.dumps(manifest),
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-        env=env,
-    )
+    # The decrypted copy lives only for this one kubectl call.
+    with materialized_kubeconfig(access.kubeconfig_path) as kubeconfig_path:
+        env = os.environ.copy()
+        if kubeconfig_path:
+            env["KUBECONFIG"] = kubeconfig_path
+        elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
+            env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
+
+        completed = subprocess.run(
+            _kubectl_command(access, ["apply", "-f", "-"], kubeconfig_path or ""),
+            input=json.dumps(manifest),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            env=env,
+        )
     combined = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
     if completed.returncode != 0:
         raise RuntimeError(combined or "Failed to apply upgrade job manifest.")

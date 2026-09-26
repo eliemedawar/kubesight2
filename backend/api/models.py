@@ -2901,3 +2901,6 @@ from .models_ticket_agent import (  # noqa: E402,F401
     TicketAgentSettings,
     TicketInterpretation,
 )
+
+# Upgrade Center jobs — persisted so a restart cannot lose an upgrade's record.
+from .models_upgrade import UpgradeJob  # noqa: E402,F401

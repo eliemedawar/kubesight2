@@ -548,22 +548,30 @@ def _run_kubectl_diff(cluster_id: str, path: str, namespace: str) -> str:
     if not access:
         raise K8sCommandError(f"Cluster not found: {cluster_id}")
 
-    command = ["kubectl"]
-    if access.kubeconfig_path:
-        command += ["--kubeconfig", access.kubeconfig_path]
-    if access.context_name:
-        command += ["--context", access.context_name]
-    command += ["diff", "-f", path, "-n", namespace]
+    from ..kubeconfig_vault import KubeconfigDecryptError, materialized_kubeconfig
 
-    env = os.environ.copy()
-    if access.kubeconfig_path:
-        env["KUBECONFIG"] = access.kubeconfig_path
+    try:
+        with materialized_kubeconfig(access.kubeconfig_path) as kubeconfig_path:
+            command = ["kubectl"]
+            if kubeconfig_path:
+                command += ["--kubeconfig", kubeconfig_path]
+            if access.context_name:
+                command += ["--context", access.context_name]
+            command += ["diff", "-f", path, "-n", namespace]
 
-    diff_executable = resolve_kubectl_external_diff()
-    if diff_executable:
-        env["KUBECTL_EXTERNAL_DIFF"] = kubectl_external_diff_env_value(diff_executable)
+            env = os.environ.copy()
+            if kubeconfig_path:
+                env["KUBECONFIG"] = kubeconfig_path
 
-    completed = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+            diff_executable = resolve_kubectl_external_diff()
+            if diff_executable:
+                env["KUBECTL_EXTERNAL_DIFF"] = kubectl_external_diff_env_value(diff_executable)
+
+            completed = subprocess.run(
+                command, capture_output=True, text=True, check=False, env=env
+            )
+    except KubeconfigDecryptError as exc:
+        raise K8sCommandError(str(exc)) from exc
     if completed.returncode == 0:
         return completed.stdout or "No differences found."
     if completed.returncode == 1:

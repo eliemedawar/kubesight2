@@ -13,6 +13,15 @@ from flask import current_app
 
 from .cluster_access import custom_cluster_public_id, parse_custom_cluster_db_id
 from .db import db
+from .kubeconfig_vault import (
+    ENCRYPTED_SUFFIX,
+    KubeconfigDecryptError,
+    encrypt_plaintext_kubeconfigs,
+    is_encrypted_kubeconfig,
+    kubeconfig_exists,
+    read_kubeconfig_path,
+    write_encrypted_file,
+)
 from .models import Cluster
 
 _HOST_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.\-]*$")
@@ -33,9 +42,11 @@ def get_kubeconfig_storage_dir() -> Path:
     return base.resolve()
 
 
-def _kubeconfig_file_path(cluster_db_id: int) -> Path:
+def _kubeconfig_file_path(cluster_db_id: int, *, encrypted: bool = True) -> Path:
     storage_dir = get_kubeconfig_storage_dir()
-    filename = f"cluster-{cluster_db_id}.yaml"
+    filename = f"cluster-{int(cluster_db_id)}.yaml"
+    if encrypted:
+        filename += ENCRYPTED_SUFFIX
     target = (storage_dir / filename).resolve()
     if not str(target).startswith(str(storage_dir)):
         raise ClusterValidationError("Invalid kubeconfig storage path.")
@@ -154,26 +165,69 @@ def build_cluster_kubeconfig(
 
 
 def write_kubeconfig_file(cluster_db_id: int, content: str) -> str:
+    """Store a cluster kubeconfig encrypted at rest; returns the stored path.
+
+    The stored path is what ``Cluster.kubeconfig_path`` holds. Consumers never
+    hand it to kubectl directly — see ``kubeconfig_vault.materialized_kubeconfig``.
+    """
     path = _kubeconfig_file_path(cluster_db_id)
-    path.write_text(content, encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    write_encrypted_file(path, content)
+    # A legacy plaintext copy must not outlive a rewrite.
+    legacy = _kubeconfig_file_path(cluster_db_id, encrypted=False)
+    if legacy.exists():
+        legacy.unlink()
     return str(path)
 
 
 def read_kubeconfig_file(cluster_db_id: int) -> str:
     path = _kubeconfig_file_path(cluster_db_id)
     if not path.is_file():
+        legacy = _kubeconfig_file_path(cluster_db_id, encrypted=False)
+        if legacy.is_file():
+            return legacy.read_text(encoding="utf-8")
         raise ClusterValidationError("Kubeconfig file is missing for this cluster.")
-    return path.read_text(encoding="utf-8")
+    try:
+        return read_kubeconfig_path(str(path))
+    except KubeconfigDecryptError as exc:
+        raise ClusterValidationError(str(exc)) from exc
 
 
 def delete_kubeconfig_file(cluster_db_id: int) -> None:
-    path = _kubeconfig_file_path(cluster_db_id)
-    if path.exists():
-        path.unlink()
+    """Remove the stored kubeconfig (encrypted and any legacy plaintext copy)."""
+    for encrypted in (True, False):
+        path = _kubeconfig_file_path(cluster_db_id, encrypted=encrypted)
+        if path.exists():
+            path.unlink()
+
+
+def migrate_plaintext_kubeconfigs() -> int:
+    """Encrypt legacy plaintext kubeconfigs and repoint their Cluster rows.
+
+    Runs at startup (``migrate_rbac.run_migrations``). Idempotent. Returns the
+    number of files encrypted.
+    """
+    storage_dir = get_kubeconfig_storage_dir()
+    moved = encrypt_plaintext_kubeconfigs(storage_dir)
+    by_old = {os.path.normcase(old): new for _id, old, new in moved}
+    by_id = {cluster_id: new for cluster_id, _old, new in moved}
+    changed = False
+    for cluster in Cluster.query.filter(Cluster.kubeconfig_path.isnot(None)).all():
+        current = cluster.kubeconfig_path or ""
+        replacement = by_old.get(os.path.normcase(str(Path(current).resolve()))) if current else None
+        if replacement is None and cluster.id in by_id and not is_encrypted_kubeconfig(current):
+            replacement = by_id[cluster.id]
+        if replacement is None and current and not is_encrypted_kubeconfig(current):
+            # Row still points at a plaintext name whose encrypted twin exists
+            # from an earlier run (e.g. the row update was rolled back).
+            twin = _kubeconfig_file_path(cluster.id)
+            if twin.is_file() and not Path(current).is_file():
+                replacement = str(twin)
+        if replacement and replacement != current:
+            cluster.kubeconfig_path = replacement
+            changed = True
+    if changed:
+        db.session.commit()
+    return len(moved)
 
 
 def cluster_to_management_dict(cluster: Cluster) -> Dict[str, Any]:
@@ -226,7 +280,7 @@ def test_cluster_connection(cluster: Cluster) -> Dict[str, Any]:
     from .k8s_provider import K8sCommandError, _run_kubectl
 
     kubeconfig_path = cluster.kubeconfig_path
-    if not kubeconfig_path or not Path(kubeconfig_path).is_file():
+    if not kubeconfig_exists(kubeconfig_path):
         return {
             "success": False,
             "reachable": False,

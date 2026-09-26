@@ -3,6 +3,7 @@ import PageTitle from "../components/common/PageTitle.jsx";
 import StatCard from "../components/common/StatCard.jsx";
 import InfoCard from "../components/common/InfoCard.jsx";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
+import { storageDetail, storageValue, workloadsValue } from "../utils/clusterOverview.js";
 
 export default function ClusterOverviewPage({
   cluster,
@@ -26,6 +27,8 @@ export default function ClusterOverviewPage({
 
   const cpu = overview?.resources?.cpu;
   const memory = overview?.resources?.memory;
+  const storage = overview?.resources?.storage;
+  const workloads = overview?.workloads;
   const namespaceItems = (namespaces || []).filter((ns) => ns?.name);
 
   const overviewContent = cluster ? (
@@ -58,6 +61,16 @@ export default function ClusterOverviewPage({
               : "-"
           }
           detail="Live usage from kubectl top"
+        />
+        <StatCard
+          title="Workloads"
+          value={workloadsValue(workloads)}
+          detail="Deployments / StatefulSets / DaemonSets"
+        />
+        <StatCard
+          title="Storage"
+          value={storageValue(storage)}
+          detail={storageDetail(storage)}
         />
       </section>
       <InfoCard title="Namespaces in Scope">
