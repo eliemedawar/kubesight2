@@ -378,6 +378,19 @@ def test_fetch_latest_without_any_source_names_the_ci_catalog_first(app):
 # ---------------------------------------------------------------------------
 
 def test_trigger_variables_reach_every_stage_environment(app, client, admin_token, runnable_service):
+    # Declare a parameter the way the java starter template does; the default
+    # pipeline a new service gets from repository inspection declares none.
+    pipeline_id = client.get(
+        f"/api/ci/services/{runnable_service}/pipelines", headers=auth_headers(admin_token)
+    ).get_json()["data"]["items"][0]["id"]
+    client.put(
+        f"/api/ci/pipelines/{pipeline_id}",
+        json={"parameters": [{
+            "name": "SKIP_TESTS", "type": "boolean", "label": "Skip tests",
+            "description": "Run the build without its test stage.", "default": "false",
+        }]},
+        headers=auth_headers(admin_token),
+    )
     with app.app_context():
         from api.services.ci import engine
 
@@ -387,8 +400,8 @@ def test_trigger_variables_reach_every_stage_environment(app, client, admin_toke
         )
         build = db.session.get(CiBuild, data["id"])
         # The pinned tag travels untouched, alongside the defaults of whatever
-        # parameters the pipeline declares — the java starter template declares
-        # SKIP_TESTS. IMAGE_TAG is engine metadata rather than a question the
+        # parameters the pipeline declares — here SKIP_TESTS, declared above.
+        # IMAGE_TAG is engine metadata rather than a question the
         # pipeline asks, so it passes through regardless of that parameter list;
         # without that, giving a pipeline its first parameter would stop the
         # automation already driving it.
