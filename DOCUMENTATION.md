@@ -213,7 +213,7 @@ Process model (all optional):
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `GUNICORN_WORKERS` | `1` | Background loops elect a leader (Postgres advisory lock), so >1 worker or >1 replica no longer double-runs them. Kept at 1 until upgrade jobs are persisted — today they live in process memory and a status poll on another worker 404s. |
+| `GUNICORN_WORKERS` | `1` | Background loops elect a leader (Postgres advisory lock), so >1 worker or >1 replica no longer double-runs them. Upgrade jobs are persisted, so polls work on any worker. Kept at 1 because TTL read caches are per process and only the writing worker clears them — with more workers a list can lag a change by up to its TTL (10–30 s). |
 | `GUNICORN_THREADS` / `GUNICORN_TIMEOUT` | `8` / `300` | |
 | `SCHEDULER_LEADER_ELECTION` | `auto` | `off` makes every process act as leader — single-process deployments only. |
 | `STARTUP_LOCK_TIMEOUT_SECONDS` | `600` | How long a booting worker waits for another's migrations. |

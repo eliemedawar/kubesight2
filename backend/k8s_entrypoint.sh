@@ -45,9 +45,10 @@ export FLASK_DEBUG="${FLASK_DEBUG:-false}"
 # Background loops (scheduler tick, CI engine) elect a leader through a
 # Postgres advisory lock and boot-time migrations are serialised, so extra
 # workers or replicas no longer run each tick twice (see
-# api/services/leader_election.py). The default stays 1 while upgrade jobs
-# live in process memory (api/upgrade_jobs.py): a status poll that lands on
-# another worker would 404. Raise GUNICORN_WORKERS once those are persisted.
+# api/services/leader_election.py), and upgrade jobs are persisted. The
+# default stays 1 because the TTL read caches are per process and only the
+# worker that made a change clears them: with more workers a list can lag a
+# write by up to its TTL (10-30s). Raise GUNICORN_WORKERS if that is acceptable.
 # Never add --preload: each worker must start its own loops after fork.
 # Threads provide concurrency for blocking kubectl/helm/log-stream calls.
 exec gunicorn -w "${GUNICORN_WORKERS:-1}" --threads "${GUNICORN_THREADS:-8}" \
