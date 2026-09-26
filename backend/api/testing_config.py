@@ -31,9 +31,9 @@ def resolve_test_database_uri() -> str:
 
 def refuse_production_tests() -> None:
     """Abort pytest if the environment looks like production."""
-    for env_key in ("FLASK_ENV", "APP_ENV"):
+    for env_key in ("KUBESIGHT_ENV", "FLASK_ENV", "APP_ENV"):
         value = os.getenv(env_key, "").strip().lower()
-        if value == "production":
+        if value in ("production", "prod"):
             print(
                 f"Refusing to run tests: {env_key}=production. "
                 "Unset it or use a non-production environment.",

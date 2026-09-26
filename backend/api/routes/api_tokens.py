@@ -13,10 +13,18 @@ from ..access_engine import is_admin
 from ..audit import log_audit
 from ..auth_utils import get_current_user
 from ..db import db
+from ..decorators import require_permission
 from ..models import ApiToken, User
 from ..response import error_response, success_response
 
 api_tokens_bp = Blueprint("api_tokens", __name__, url_prefix="/api/auth")
+
+
+# Every route goes through require_permission, not a bare "is someone logged
+# in" check: that is what applies the first-login gate (a user who still owes a
+# password change + MFA enrolment cannot mint a long-lived credential that skips
+# both) and the AUTH_REQUIRED handling shared by every other endpoint.
+TOKEN_PERMISSION = "api_tokens:manage"
 
 
 def _require_auth():
@@ -44,6 +52,7 @@ def _token_to_dict(token: ApiToken) -> dict:
 # ---------------------------------------------------------------------------
 
 @api_tokens_bp.route("/tokens", methods=["POST"])
+@require_permission(TOKEN_PERMISSION)
 def create_token():
     user, err = _require_auth()
     if err:
@@ -108,6 +117,7 @@ def create_token():
 # ---------------------------------------------------------------------------
 
 @api_tokens_bp.route("/tokens", methods=["GET"])
+@require_permission(TOKEN_PERMISSION)
 def list_tokens():
     user, err = _require_auth()
     if err:
@@ -139,6 +149,7 @@ def list_tokens():
 # ---------------------------------------------------------------------------
 
 @api_tokens_bp.route("/tokens/<int:token_id>", methods=["DELETE"])
+@require_permission(TOKEN_PERMISSION)
 def revoke_token(token_id: int):
     user, err = _require_auth()
     if err:

@@ -67,8 +67,14 @@ class User(db.Model):
     # replaces it, so a temporary password can never authenticate twice.
     temporary_password_used = db.Column(db.Boolean, nullable=False, default=False)
     mfa_enabled = db.Column(db.Boolean, nullable=False, default=False)
-    totp_secret = db.Column(db.String(64), nullable=True)
+    # Fernet-encrypted (secret_encryption); a Fernet token of a 32-char base32
+    # seed is ~140 characters. Rows from before encryption held the plaintext
+    # seed and are encrypted in place by the migration.
+    totp_secret = db.Column(db.String(255), nullable=True)
     first_login_completed = db.Column(db.Boolean, nullable=False, default=True)
+    # Carried in every JWT as ``ver``; bumping it revokes every session the user
+    # has (see auth_utils.revoke_user_sessions). API tokens are not affected.
+    token_version = db.Column(db.Integer, nullable=False, default=0)
 
     # --- Failed-attempt / lockout tracking ------------------------------
     # Password and MFA failures are counted separately. Five consecutive

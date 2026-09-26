@@ -35,6 +35,7 @@ from ..auth_utils import (
     create_access_token,
     create_interim_token,
     current_user_profile,
+    revoke_user_sessions,
 )
 from ..db import db
 from ..email_delivery import (
@@ -44,6 +45,7 @@ from ..email_delivery import (
 )
 from ..models import AuditLog, User
 from ..passwords import hash_password, verify_password
+from ..secret_encryption import decrypt_secret_or_none, encrypt_secret, looks_encrypted
 from .totp_service import build_enrollment, generate_totp_secret, verify_totp
 
 # Onboarding stages surfaced to the client so it can render the right screen.
@@ -606,6 +608,35 @@ def login_user(
 
 
 # ---------------------------------------------------------------------------
+# TOTP seed at rest
+# ---------------------------------------------------------------------------
+
+def _store_totp_secret(user: User, secret: str) -> None:
+    user.totp_secret = encrypt_secret(secret)
+
+
+def _totp_secret(user: User) -> Optional[str]:
+    """The user's plaintext TOTP seed, or ``None`` if there is none usable.
+
+    Seeds are stored Fernet-encrypted. A row written before that holds the bare
+    base32 seed; the migration encrypts those, but one it missed (or one
+    restored from an old backup) must keep working, so a value that is not a
+    ciphertext is taken as the plaintext seed. A value that IS a ciphertext but
+    will not decrypt (the key changed) is unusable — never fed to the verifier
+    as if it were a seed.
+    """
+    stored = (user.totp_secret or "").strip()
+    if not stored:
+        return None
+    plain = decrypt_secret_or_none(stored)
+    if plain:
+        return plain
+    if looks_encrypted(stored):
+        return None
+    return stored
+
+
+# ---------------------------------------------------------------------------
 # First-login onboarding steps (authorized by an onboarding-purpose token)
 # ---------------------------------------------------------------------------
 
@@ -650,7 +681,7 @@ def setup_totp(user: User) -> Tuple[Optional[Dict[str, Any]], Optional[str], int
         return None, "MFA is already enabled for this account.", 400
 
     secret = generate_totp_secret()
-    user.totp_secret = secret
+    _store_totp_secret(user, secret)
     db.session.commit()
     log_audit(
         "mfa_setup_started",
@@ -670,9 +701,10 @@ def verify_first_login_totp(
         return _locked_response(user)
     if user.must_change_password:
         return None, "Change your temporary password before verifying MFA.", 400
-    if not user.totp_secret:
+    secret = _totp_secret(user)
+    if not secret:
         return None, "Start MFA setup before verifying a code.", 400
-    if not verify_totp(user.totp_secret, code):
+    if not verify_totp(secret, code):
         locked = _register_mfa_failure(user)
         if locked:
             return {"lock": _lock_details(user)}, _locked_message(user), 423
@@ -704,9 +736,10 @@ def verify_login_mfa(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     if is_locked(user):
         return _locked_response(user)
-    if not user.mfa_enabled or not user.totp_secret:
+    secret = _totp_secret(user) if user.mfa_enabled else None
+    if not secret:
         return None, "MFA is not configured for this account.", 400
-    if not verify_totp(user.totp_secret, code):
+    if not verify_totp(secret, code):
         locked = _register_mfa_failure(user)
         if locked:
             # Pending MFA session is cancelled: the interim token no longer maps
@@ -724,7 +757,24 @@ def profile_for_user(user: User) -> Dict[str, Any]:
     return current_user_profile(user)
 
 
-def logout_user(user: Optional[User]) -> Dict[str, str]:
+def logout_user(user: Optional[User], *, via_api_token: bool = False) -> Dict[str, str]:
+    """End the user's sessions server-side, not just in the browser.
+
+    JWTs are stateless, so dropping one client-side left it valid until expiry.
+    Logout bumps the user's token version instead, which kills every session
+    token they hold (all browsers — there is no per-session table). Called with
+    a ``ksa_`` API token it only records the logout: an API token is not a
+    session, and using one must not sign the owner out of the UI.
+    """
     if user:
-        log_audit("logout", actor=user, target_type="user", target_id=str(user.id))
+        if not via_api_token:
+            revoke_user_sessions(user)
+            db.session.commit()
+        log_audit(
+            "logout",
+            actor=user,
+            target_type="user",
+            target_id=str(user.id),
+            details={"sessionsRevoked": not via_api_token},
+        )
     return {"message": "Logged out"}

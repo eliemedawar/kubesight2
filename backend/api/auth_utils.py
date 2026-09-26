@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -9,14 +10,33 @@ import jwt
 from flask import g
 
 from .models import ApiToken, User
+from .runtime_config import (
+    INSECURE_DEVELOPMENT_KEY,
+    InsecureConfigurationError,
+    configured_jwt_secret,
+    env_flag,
+    is_production_env,
+)
 from .serializers import user_to_dict
+
+_logger = logging.getLogger(__name__)
 
 
 def _jwt_secret() -> str:
-    secret = os.getenv("JWT_SECRET_KEY", "").strip()
+    secret = configured_jwt_secret()
     if secret:
         return secret
-    return os.getenv("FLASK_SECRET_KEY", "kubesight-dev-secret-change-me")
+    if is_production_env():
+        # create_app refuses to boot without one; this covers anything that
+        # signs a token before (or without) going through it.
+        raise InsecureConfigurationError("JWT_SECRET_KEY must be set in production.")
+    # Development only: honour an explicitly-set value even if it is the
+    # default literal, then fall back to it.
+    return (
+        os.getenv("JWT_SECRET_KEY", "").strip()
+        or os.getenv("FLASK_SECRET_KEY", "").strip()
+        or INSECURE_DEVELOPMENT_KEY
+    )
 
 
 def jwt_expiry_hours() -> int:
@@ -54,6 +74,23 @@ def _encode_token(payload: Dict[str, Any]) -> str:
     return token if isinstance(token, str) else token.decode("utf-8")
 
 
+def _token_version(user: User) -> int:
+    return int(getattr(user, "token_version", 0) or 0)
+
+
+def revoke_user_sessions(user: User) -> None:
+    """Invalidate every JWT issued to ``user`` so far (the caller commits).
+
+    Every session, onboarding and MFA token and download ticket carries the
+    user's ``token_version`` as its ``ver`` claim, and ``_user_from_payload``
+    refuses a token whose ``ver`` is not the current one. Bumping it is the
+    revocation: logout, password change or reset, disable, admin lock and MFA
+    reset all call this. Long-lived API tokens (``ksa_``) are separate
+    credentials with their own revoke, and are deliberately unaffected.
+    """
+    user.token_version = _token_version(user) + 1
+
+
 def create_access_token(user: User) -> str:
     now = datetime.now(timezone.utc)
     return _encode_token(
@@ -61,6 +98,7 @@ def create_access_token(user: User) -> str:
             "sub": str(user.id),
             "username": user.username,
             "purpose": PURPOSE_ACCESS,
+            "ver": _token_version(user),
             "iat": now,
             "exp": now + timedelta(hours=jwt_expiry_hours()),
         }
@@ -75,6 +113,7 @@ def create_interim_token(user: User, purpose: str) -> str:
             "sub": str(user.id),
             "username": user.username,
             "purpose": purpose,
+            "ver": _token_version(user),
             "iat": now,
             "exp": now + timedelta(minutes=_INTERIM_TOKEN_MINUTES),
         }
@@ -111,6 +150,7 @@ def create_download_ticket(user: User, resource: str) -> str:
             "sub": str(user.id),
             "username": user.username,
             "purpose": PURPOSE_DOWNLOAD,
+            "ver": _token_version(user),
             "res": resource,
             "iat": now,
             "exp": now + timedelta(seconds=_DOWNLOAD_TICKET_SECONDS),
@@ -156,6 +196,16 @@ def _user_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[User]:
         return None
     user = User.query.get(uid)
     if not user or not user.is_active:
+        return None
+    # A token minted before the last revocation (logout, password change, lock,
+    # …) is dead even though its signature and expiry are fine. Tokens from
+    # before this claim existed carry no ``ver`` and count as version 0, so an
+    # upgrade does not sign everyone out — only the next revocation does.
+    try:
+        token_version = int(payload.get("ver", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if token_version != _token_version(user):
         return None
     return user
 
@@ -212,8 +262,18 @@ def get_current_user() -> Optional[User]:
         g.auth_token = None
         return None
 
+    from flask import request
+
+    # The cache is only good for the request that filled it. The same token
+    # arriving on a LATER request (an outer app context spanning requests) must
+    # be resolved again, or a logout / revocation in between would not apply.
+    current_request = request._get_current_object()
     cached_token = getattr(g, "auth_token", None)
-    if hasattr(g, "current_user") and cached_token == token:
+    if (
+        hasattr(g, "current_user")
+        and cached_token == token
+        and getattr(g, "auth_request", None) is current_request
+    ):
         return g.current_user
 
     if token.startswith("ksa_"):
@@ -223,12 +283,29 @@ def get_current_user() -> Optional[User]:
 
     g.current_user = user
     g.auth_token = token
+    g.auth_request = current_request
     return user
 
 
+_auth_kill_switch_warned = False
+
+
 def auth_required_enabled() -> bool:
-    value = os.getenv("AUTH_REQUIRED", "true").strip().lower()
-    return value not in ("false", "0", "no", "off")
+    """Whether protected endpoints demand a credential.
+
+    ``AUTH_REQUIRED=false`` is a local-debugging switch. In production it is
+    ignored (and ``create_app`` refuses to boot with it set), so no environment
+    typo can turn every endpoint anonymous.
+    """
+    global _auth_kill_switch_warned
+    if env_flag("AUTH_REQUIRED", default=True):
+        return True
+    if is_production_env():
+        if not _auth_kill_switch_warned:
+            _auth_kill_switch_warned = True
+            _logger.error("AUTH_REQUIRED=false is ignored in production; authentication stays on.")
+        return True
+    return False
 
 
 def current_user_profile(user: User) -> Dict[str, Any]:

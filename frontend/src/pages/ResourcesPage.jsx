@@ -16,6 +16,7 @@ import { RESOURCE_TAB_DEFINITIONS, listKeyForTab } from "../lib/resourceTypes.js
 import { EMPTY_MESSAGES, formatAccessError } from "../utils/authz.js";
 import { usePermission } from "../hooks/usePermission.js";
 import { isPendingApproval, pendingApprovalMessage } from "../utils/pendingApproval.js";
+import { secretValuesHiddenNote } from "../utils/sensitiveResponses.js";
 
 const ResourceInspectModal = lazy(() => import("../components/resources/ResourceInspectModal.jsx"));
 const EditResourceModal = lazy(() => import("../components/resources/EditResourceModal.jsx"));
@@ -175,6 +176,7 @@ const CLOSED_MODAL = {
   error: "",
   content: "",
   rolloutRows: [],
+  note: "",
 };
 
 export default function ResourcesPage({
@@ -315,6 +317,7 @@ export default function ResourcesPage({
         ...prev,
         loading: false,
         content,
+        note: mode === "yaml" ? secretValuesHiddenNote(payload) : "",
       }));
     } catch (err) {
       setInspectModal((prev) => ({
@@ -1064,6 +1067,7 @@ export default function ResourcesPage({
             mode={inspectModal.mode}
             content={inspectModal.content}
             rolloutRows={inspectModal.rolloutRows}
+            note={inspectModal.note}
             onClose={closeInspectModal}
           />
         </Suspense>

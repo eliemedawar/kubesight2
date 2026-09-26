@@ -133,7 +133,7 @@ Open the Vite URL (usually `http://localhost:5173`).
 ### ConfigMap (`k8s/configmap.yaml`) — non-secret settings
 | Variable | Prod value | Description |
 |----------|-----------|-------------|
-| `APP_ENV` | `production` | Application environment |
+| `APP_ENV` | `production` | Application environment. `production` (or `KUBESIGHT_ENV=production`) turns on the boot checks: the backend refuses to start without a real `JWT_SECRET_KEY` and `KUBESIGHT_SECRET_KEY`, with `AUTH_REQUIRED=false`, or with an unset/unreachable `DATABASE_URL` |
 | `FLASK_DEBUG` | `false` | Debug mode off in prod |
 | `AUTH_REQUIRED` | `true` | Enforce JWT auth (only set `false` for local debug) |
 | `JWT_EXPIRY_HOURS` | `8` | JWT token lifetime |
@@ -155,6 +155,8 @@ Open the Vite URL (usually `http://localhost:5173`).
 | `DATABASE_URL` | `postgresql+psycopg2://kubesight:...@postgres-service:5432/kubesight` |
 | `JWT_SECRET_KEY` | **Regenerate** before prod: `openssl rand -hex 32` |
 | `FLASK_SECRET_KEY` | **Regenerate** before prod: `openssl rand -hex 32` |
+| `KUBESIGHT_SECRET_KEY` | **Required in production.** Encrypts stored credentials and TOTP seeds (`openssl rand -hex 32`, different from `JWT_SECRET_KEY`, keep it stable). The older name `ALERT_ROUTING_SECRET_KEY` is still read. Rows encrypted before it was set (with `JWT_SECRET_KEY` or the dev default) still decrypt; `KUBESIGHT_PREVIOUS_SECRET_KEYS` (comma-separated) keeps old keys readable after a rotation |
+| `ALLOW_TEMP_PASSWORD_REVEAL` | Optional, default `false`. In production a temporary password that could not be emailed is not returned to the admin; set `true` only for an install with no mail relay at all |
 
 ### Optional env (SMTP for alert email)
 | Variable | Description |

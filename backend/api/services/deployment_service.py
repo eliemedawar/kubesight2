@@ -200,6 +200,18 @@ def _resource_key(doc: Dict[str, Any]) -> Tuple[str, str, str]:
     return kind, namespace, name
 
 
+def _contains_redacted_secret_value(doc: Dict[str, Any]) -> bool:
+    from .resource_actions_service import REDACTED_SECRET_VALUE
+
+    for section in SECRET_DATA_KEYS:
+        values = doc.get(section)
+        if values == REDACTED_SECRET_VALUE:
+            return True
+        if isinstance(values, dict) and REDACTED_SECRET_VALUE in values.values():
+            return True
+    return False
+
+
 def analyze_resources(
     documents: List[Dict[str, Any]],
     target_namespace: str,
@@ -230,6 +242,15 @@ def analyze_resources(
 
         if kind == "Secret":
             has_secrets = True
+            if _contains_redacted_secret_value(doc):
+                # Seeded from a YAML view that hid the values (no secrets:reveal).
+                # Applying it would overwrite the real values with the marker.
+                blocked.append(
+                    f"Secret/{name} still contains hidden placeholder values — "
+                    "applying it would overwrite the real ones. Replace every "
+                    "hidden value, or edit with the secrets:reveal permission."
+                )
+                continue
             if any(key in doc for key in SECRET_DATA_KEYS):
                 warnings.append(f"Secret/{name} contains secret values — only metadata will be shown in preview")
 

@@ -12,6 +12,7 @@ import { formatAccessError, isAccessDeniedError } from "../../utils/authz.js";
 import YamlPreviewPanel from "../inventory/wizard/YamlPreviewPanel.jsx";
 import AddToBundleButton from "../changes/AddToBundleButton.jsx";
 import { approvalNotice, isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
+import { secretValuesHiddenNote } from "../../utils/sensitiveResponses.js";
 
 // kubectl kind -> human label / YAML Kind casing for the editable resource kinds.
 const KIND_META = {
@@ -64,6 +65,9 @@ export default function EditResourceModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [eligibility, setEligibility] = useState(null);
+  // Set when the backend hid a Secret's values (no secrets:reveal). The YAML
+  // then carries placeholders, and applying it unchanged is refused server-side.
+  const [valuesNote, setValuesNote] = useState("");
 
   // Editing applies through the deploy pipeline, which a cluster may gate on an
   // approved deployment request. Mirror the deploy wizard so non-admins see the
@@ -93,6 +97,7 @@ export default function EditResourceModal({
     if (!open) {
       setStep("edit");
       setYaml("");
+      setValuesNote("");
       setPreview(null);
       setDeployDiff(null);
       setError("");
@@ -113,7 +118,15 @@ export default function EditResourceModal({
       name: resourceName,
     })
       .then((payload) => {
-        if (!cancelled) setYaml(payload.yaml || payload.output || "");
+        if (!cancelled) {
+          setYaml(payload.yaml || payload.output || "");
+          const note = secretValuesHiddenNote(payload);
+          setValuesNote(
+            note
+              ? `${note} Replace every hidden value before applying, or the apply is refused.`
+              : ""
+          );
+        }
       })
       .catch((err) => {
         if (!cancelled) {
@@ -210,6 +223,10 @@ export default function EditResourceModal({
         </header>
 
         {error ? <p className="banner-message error">{error}</p> : null}
+
+        {valuesNote && step === "edit" ? (
+          <p className="banner-message" role="status">{valuesNote}</p>
+        ) : null}
 
         {needsApproval && step !== "queued" ? (
           <p className="banner-message" role="status">{approvalNotice(eligibility)}</p>

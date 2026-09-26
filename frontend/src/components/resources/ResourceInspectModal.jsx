@@ -1,6 +1,6 @@
 ﻿import DataTable from "../common/DataTable.jsx";
 
-export default function ResourceInspectModal({ open, title, loading, error, mode, content, rolloutRows, onClose }) {
+export default function ResourceInspectModal({ open, title, loading, error, mode, content, rolloutRows, note, onClose }) {
   if (!open) {
     return null;
   }
@@ -26,6 +26,9 @@ export default function ResourceInspectModal({ open, title, loading, error, mode
         </header>
         {loading ? <p className="muted">Loading…</p> : null}
         {!loading && error ? <p className="banner-message error">{error}</p> : null}
+        {!loading && !error && note ? (
+          <p className="banner-message" role="status">{note}</p>
+        ) : null}
         {!loading && !error && mode === "rollout" ? (
           rolloutRows?.length ? (
             <DataTable columns={rolloutColumns} rows={rolloutRows} />

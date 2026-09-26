@@ -317,7 +317,9 @@ def _namespace_resources(arguments: Dict[str, Any]) -> Dict[str, Any]:
     description=(
         "One resource in full, as either 'describe' output or its YAML. Describe "
         "is what to read for a pod that will not start — it carries the events "
-        "and the container statuses. YAML is what to read to see spec as applied."
+        "and the container statuses. YAML is what to read to see spec as applied. "
+        "A Secret's values come back hidden (valuesHidden: true) unless the token "
+        "holds secrets:reveal; its key names are always shown."
     ),
     schema={
         "type": "object",

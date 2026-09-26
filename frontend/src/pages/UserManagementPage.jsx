@@ -22,6 +22,7 @@ import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
+import { temporaryPasswordNotice } from "../utils/sensitiveResponses.js";
 import RolesPanel from "../components/user-management/RolesPanel";
 import { isFullAccessRole } from "../lib/rolePresets";
 
@@ -274,27 +275,14 @@ export default function UserManagementPage({ clusters = [] }) {
     }
   };
 
-  // Surface the outcome of a temporary-password action. When SMTP is configured
-  // the password was emailed and never returned; otherwise we show the plaintext
-  // once so the admin can pass it along out of band.
+  // Surface the outcome of a temporary-password action. When SMTP works the
+  // password was emailed and never returned. When it fails, a dev install (or
+  // one with ALLOW_TEMP_PASSWORD_REVEAL) returns the plaintext once; production
+  // returns only the failure, and the admin resends once SMTP is fixed.
   const showTemporaryPasswordNotice = (result, verb) => {
-    if (!result) {
-      return;
-    }
-    const who = result.username ? ` for ${result.username}` : "";
-    if (result.temporaryPassword) {
-      setNotice({
-        tone: "warn",
-        title: `User ${verb}. SMTP is not configured, so share this temporary password securely${who}:`,
-        password: result.temporaryPassword,
-      });
-    } else if (result.temporaryPasswordEmailed) {
-      setNotice({
-        tone: "ok",
-        title: `User ${verb}. A temporary password has been emailed${who}.`,
-      });
-    } else {
-      setNotice({ tone: "ok", title: `User ${verb}.` });
+    const next = temporaryPasswordNotice(result, verb);
+    if (next) {
+      setNotice(next);
     }
   };
 
@@ -708,7 +696,10 @@ export default function UserManagementPage({ clusters = [] }) {
           ) : null}
 
           {notice ? (
-            <div className={`banner-message ${notice.tone === "warn" ? "error" : ""} user-notice`}>
+            <div
+              className={`banner-message ${notice.tone === "warn" || notice.tone === "error" ? "error" : ""} user-notice`}
+              role={notice.tone === "error" ? "alert" : "status"}
+            >
               <div className="user-notice__row">
                 <span>{notice.title}</span>
                 <button type="button" className="btn-link" onClick={() => setNotice(null)}>
@@ -718,6 +709,8 @@ export default function UserManagementPage({ clusters = [] }) {
               {notice.password ? (
                 <code className="user-notice__password">{notice.password}</code>
               ) : null}
+              {notice.detail ? <p className="user-notice__detail">{notice.detail}</p> : null}
+              {notice.error ? <p className="muted user-notice__detail">{notice.error}</p> : null}
             </div>
           ) : null}
 

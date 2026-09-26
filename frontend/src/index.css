@@ -7151,6 +7151,9 @@ kbd {
   gap: var(--space-3);
   align-items: center;
 }
+.user-notice__detail {
+  margin: 0;
+}
 .user-notice__password {
   background: var(--bg-main);
   padding: var(--space-2) var(--space-3);

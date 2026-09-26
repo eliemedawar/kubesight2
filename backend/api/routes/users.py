@@ -5,7 +5,7 @@ from flask import Blueprint, request
 from ..access import is_admin
 from ..audit import log_audit
 from ..db import db
-from ..auth_utils import get_current_user
+from ..auth_utils import get_current_user, revoke_user_sessions
 from ..decorators import require_any_permission, require_permission
 from ..models import Role, User
 from ..passwords import hash_password
@@ -101,9 +101,12 @@ def update_user(user_id: int):
             return error_response("You cannot disable your own account", 400)
         if user.is_active and not new_active and is_admin(user) and user_service.active_admin_count() <= 1:
             return error_response("Cannot disable the last active admin", 400)
+        if user.is_active and not new_active:
+            revoke_user_sessions(user)
         user.is_active = new_active
     if payload.get("password"):
         user.password_hash = hash_password(payload["password"])
+        revoke_user_sessions(user)
 
     if "accessRules" in payload:
         apply_user_access(user, [], [], access_rules=payload.get("accessRules") or [])

@@ -17,6 +17,7 @@ PERMISSIONS = [
     ("overview:view", "View cluster overview"),
     ("namespaces:view", "View namespaces"),
     ("resources:view", "View namespace resources"),
+    ("secrets:reveal", "Reveal Kubernetes Secret values (YAML shows them hidden otherwise)"),
     ("pods:view", "View pods"),
     ("deployments:view", "View deployments"),
     ("replicasets:view", "View ReplicaSets"),
@@ -148,7 +149,7 @@ PERMISSION_GROUPS = [
         "id": "resources",
         "label": "Resources",
         "keys": [
-            "resources:view", "pods:view", "deployments:view", "replicasets:view",
+            "resources:view", "secrets:reveal", "pods:view", "deployments:view", "replicasets:view",
             "statefulsets:view", "daemonsets:view", "jobs:view", "cronjobs:view",
             "services:view", "services:ports:view",
         ],
@@ -249,6 +250,8 @@ DANGEROUS_PERMISSION_KEYS = {
     "settings:manage", "upgrades:start", "apps:deploy", "apps:delete", "inventory:remove",
     "helm:install", "helm:upgrade", "helm:rollback", "helm:uninstall", "helm:values:update",
     "app_services:delete", "clients:delete", "api_tokens:manage",
+    # Secret values are credentials: reading one is as good as holding it.
+    "secrets:reveal",
     "deployment_requests:manage", "change_bundles:manage",
     "service_blueprints:delete", "service_blueprints:deploy",
     "components:delete", "registries:manage", "mobile_apps:manage",
@@ -400,6 +403,10 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "apps:deploy",
     "apps:dryrun",
     "apps:diff",
+    # apps:deploy already lets this role overwrite any Secret and exec into the
+    # pods that mount them, so reading the values grants nothing new. Operators
+    # and viewers cannot write Secrets and do not get it.
+    "secrets:reveal",
     "helm:view",
     "helm:install",
     "helm:upgrade",

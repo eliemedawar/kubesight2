@@ -107,4 +107,5 @@ def me():
 @require_auth
 def logout():
     user = get_current_user()
-    return success_response(logout_user(user))
+    via_api_token = (get_bearer_token() or "").startswith("ksa_")
+    return success_response(logout_user(user, via_api_token=via_api_token))

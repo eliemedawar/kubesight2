@@ -4,11 +4,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..audit import log_audit
-from ..auth_utils import get_current_user
+from ..auth_utils import get_current_user, revoke_user_sessions
 from ..db import db
 from ..email_delivery import EmailDeliveryError, send_temporary_password_email
 from ..models import Role, User
 from ..passwords import generate_temporary_password, hash_password
+from ..runtime_config import env_flag, is_production_env
 from ..serializers import (
     apply_user_access,
     parse_cluster_access_payload,
@@ -47,11 +48,13 @@ def _provision_temporary_password(user: User) -> str:
     user.lock_reason = None
     user.lock_count_24h = 0
     user.requires_admin_unlock = False
+    # The old password is gone, so is every session opened with it.
+    revoke_user_sessions(user)
     return temp_password
 
 
-def _deliver_temporary_password(user: User, temp_password: str) -> bool:
-    """Email the temporary password. Returns True if delivery succeeded."""
+def _deliver_temporary_password(user: User, temp_password: str) -> Tuple[bool, str]:
+    """Email the temporary password. Returns ``(delivered, failure_reason)``."""
     try:
         send_temporary_password_email(
             user.email,
@@ -60,11 +63,50 @@ def _deliver_temporary_password(user: User, temp_password: str) -> bool:
             temporary_password=temp_password,
             expires_hours=_temp_password_expiry_hours(),
         )
+        return True, ""
+    except EmailDeliveryError as exc:
+        return False, str(exc) or "Email delivery failed"
+    except Exception as exc:  # noqa: BLE001 - any SMTP failure is a delivery failure
+        return False, f"Email delivery failed: {exc.__class__.__name__}"
+
+
+def temporary_password_reveal_allowed() -> bool:
+    """Whether a temporary password that could not be emailed may be returned.
+
+    Outside production it always is: a laptop install has no SMTP, and the
+    admin needs the password to sign the new user in. In production the
+    plaintext only ever travels by email, unless the operator explicitly opts
+    in with ``ALLOW_TEMP_PASSWORD_REVEAL=true`` (e.g. an air-gapped install
+    with no mail relay at all).
+    """
+    if not is_production_env():
         return True
-    except EmailDeliveryError:
-        return False
-    except Exception:
-        return False
+    return env_flag("ALLOW_TEMP_PASSWORD_REVEAL", default=False)
+
+
+_DELIVERY_FAILED_HINT = (
+    "The temporary password could not be emailed and was not shown. Fix the SMTP "
+    "settings, then use \"Resend temporary password\" to send a new one."
+)
+
+
+def _temporary_password_outcome(
+    result: Dict[str, Any], temp_password: str, emailed: bool, failure: str
+) -> Dict[str, Any]:
+    """Fill in how the temporary password reached (or failed to reach) the user."""
+    result["temporaryPasswordEmailed"] = emailed
+    if emailed:
+        return result
+    result["temporaryPasswordDeliveryFailed"] = True
+    result["temporaryPasswordDeliveryError"] = failure
+    if temporary_password_reveal_allowed():
+        # SMTP unavailable: surface the plaintext once so the admin can deliver it.
+        result["temporaryPassword"] = temp_password
+        result["temporaryPasswordRevealed"] = True
+    else:
+        result["temporaryPasswordRevealed"] = False
+        result["temporaryPasswordHint"] = _DELIVERY_FAILED_HINT
+    return result
 
 
 def active_admin_count() -> int:
@@ -142,26 +184,28 @@ def create_user(payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Opti
         details={"username": user.username, "email": user.email, "role": role.name},
     )
 
-    emailed = _deliver_temporary_password(user, temp_password)
+    emailed, failure = _deliver_temporary_password(user, temp_password)
     log_audit(
         "temporary_password_sent",
         actor=get_current_user(),
         target_type="user",
         target_id=str(user.id),
-        details={"username": user.username, "email": user.email, "emailed": emailed},
+        details={
+            "username": user.username,
+            "email": user.email,
+            "emailed": emailed,
+            "error": failure or None,
+            "revealed": (not emailed) and temporary_password_reveal_allowed(),
+        },
     )
 
     result = user_to_dict(user, include_access=True)
-    result["temporaryPasswordEmailed"] = emailed
     result["temporaryPasswordExpiresAt"] = (
         user.temporary_password_expires_at.isoformat()
         if user.temporary_password_expires_at
         else None
     )
-    if not emailed:
-        # SMTP unavailable — surface the plaintext so the admin can deliver it.
-        result["temporaryPassword"] = temp_password
-    return result, None, 201
+    return _temporary_password_outcome(result, temp_password, emailed, failure), None, 201
 
 
 def resend_temporary_password(
@@ -179,28 +223,31 @@ def resend_temporary_password(
     temp_password = _provision_temporary_password(user)
     db.session.commit()
 
-    emailed = _deliver_temporary_password(user, temp_password)
+    emailed, failure = _deliver_temporary_password(user, temp_password)
     log_audit(
         "temporary_password_resent",
         actor=get_current_user(),
         target_type="user",
         target_id=str(user.id),
-        details={"username": user.username, "email": user.email, "emailed": emailed},
+        details={
+            "username": user.username,
+            "email": user.email,
+            "emailed": emailed,
+            "error": failure or None,
+            "revealed": (not emailed) and temporary_password_reveal_allowed(),
+        },
     )
 
     result = {
         "id": user.id,
         "username": user.username,
-        "temporaryPasswordEmailed": emailed,
         "temporaryPasswordExpiresAt": (
             user.temporary_password_expires_at.isoformat()
             if user.temporary_password_expires_at
             else None
         ),
     }
-    if not emailed:
-        result["temporaryPassword"] = temp_password
-    return result, None, 200
+    return _temporary_password_outcome(result, temp_password, emailed, failure), None, 200
 
 
 def reset_mfa(user_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
@@ -216,6 +263,9 @@ def reset_mfa(user_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str], in
     user.mfa_enabled = False
     user.totp_secret = None
     user.first_login_completed = False
+    # A reset usually means a lost or compromised authenticator: sessions that
+    # were opened with it end now, not at their expiry.
+    revoke_user_sessions(user)
     db.session.commit()
     log_audit(
         "mfa_reset",
@@ -327,28 +377,31 @@ def force_password_reset(user_id: int) -> Tuple[Optional[Dict[str, Any]], Option
         user.mfa_enabled = True
     db.session.commit()
 
-    emailed = _deliver_temporary_password(user, temp_password)
+    emailed, failure = _deliver_temporary_password(user, temp_password)
     log_audit(
         "password_changed",
         actor=get_current_user(),
         target_type="user",
         target_id=str(user.id),
-        details={"username": user.username, "context": "admin_force_reset", "emailed": emailed},
+        details={
+            "username": user.username,
+            "context": "admin_force_reset",
+            "emailed": emailed,
+            "error": failure or None,
+            "revealed": (not emailed) and temporary_password_reveal_allowed(),
+        },
     )
 
     result = {
         "id": user.id,
         "username": user.username,
-        "temporaryPasswordEmailed": emailed,
         "temporaryPasswordExpiresAt": (
             user.temporary_password_expires_at.isoformat()
             if user.temporary_password_expires_at
             else None
         ),
     }
-    if not emailed:
-        result["temporaryPassword"] = temp_password
-    return result, None, 200
+    return _temporary_password_outcome(result, temp_password, emailed, failure), None, 200
 
 
 def lock_account(user_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
@@ -367,6 +420,7 @@ def lock_account(user_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str],
 
     user.requires_admin_unlock = True
     user.lock_reason = "admin"
+    revoke_user_sessions(user)
     db.session.commit()
     log_audit(
         "account_admin_locked",
@@ -418,6 +472,7 @@ def disable_user(user_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str],
         return None, "Cannot disable the last active admin", 400
 
     user.is_active = False
+    revoke_user_sessions(user)
     db.session.commit()
     log_audit(
         "user_disabled",

@@ -873,8 +873,54 @@ def _migrate_user_onboarding_columns() -> None:
         ("created_by_admin_id", "INTEGER"),
         ("is_service_account", "BOOLEAN DEFAULT false"),
         ("interactive_login_enabled", "BOOLEAN DEFAULT true"),
+        ("token_version", "INTEGER DEFAULT 0 NOT NULL"),
     ]:
         _add_column_if_missing("users", col, sql_type)
+    _migrate_totp_secret_encryption()
+
+
+_TOTP_PLAINTEXT_RE = re.compile(r"^[A-Z2-7]{16,64}=*$")
+
+
+def _migrate_totp_secret_encryption() -> None:
+    """Widen ``users.totp_secret`` and encrypt the plaintext seeds it held.
+
+    TOTP seeds used to be stored as plain base32 in a VARCHAR(64); they are now
+    Fernet ciphertext (~140 chars). PostgreSQL enforces the length, so the
+    column is widened first; SQLite does not, so there is nothing to alter.
+    Then every value that is still a bare base32 seed is encrypted in place.
+    Idempotent: ciphertext never matches the base32 shape (it is mixed-case
+    urlsafe base64), so a second run finds nothing to do. Reading stays tolerant
+    of plaintext too (auth_service), so a row this misses still works.
+    """
+    if "totp_secret" not in _table_columns("users"):
+        return
+    if db.engine.dialect.name != "sqlite":
+        columns = {c["name"]: c for c in inspect(db.engine).get_columns("users")}
+        length = getattr(columns["totp_secret"].get("type"), "length", None)
+        if length is not None and length < 255:
+            with db.engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE users ALTER COLUMN totp_secret TYPE VARCHAR(255)")
+                )
+
+    from .secret_encryption import encrypt_secret
+
+    with db.engine.begin() as conn:
+        rows = conn.execute(
+            text("SELECT id, totp_secret FROM users WHERE totp_secret IS NOT NULL")
+        ).fetchall()
+        converted = 0
+        for user_id, value in rows:
+            if not value or not _TOTP_PLAINTEXT_RE.match(value.strip()):
+                continue
+            conn.execute(
+                text("UPDATE users SET totp_secret = :cipher WHERE id = :id"),
+                {"cipher": encrypt_secret(value.strip()), "id": user_id},
+            )
+            converted += 1
+    if converted:
+        logger.info("Encrypted %s plaintext TOTP secret(s) at rest.", converted)
 
 
 def _migrate_application_intelligence_columns() -> None:

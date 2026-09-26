@@ -20,18 +20,81 @@ from .routes import register_blueprints
 from .frontend_static import frontend_dist_available, register_frontend_static
 from .response import success_response
 from .migrate_rbac import run_migrations
+from .runtime_config import INSECURE_DEVELOPMENT_KEY, enforce_production_config, is_production_env
 from .seed import seed_defaults
 from .services.alert_policy_scheduler import start_alert_policy_scheduler
 
 
 def _is_production_env() -> bool:
-    debug = os.getenv("FLASK_DEBUG", "true").strip().lower()
-    if debug in {"1", "true", "yes", "on"}:
-        return False
-    for key in ("FLASK_ENV", "APP_ENV"):
-        if os.getenv(key, "").strip().lower() == "production":
-            return True
-    return False
+    # Kept for callers of the old name; runtime_config owns the decision.
+    return is_production_env()
+
+
+_FALLBACK_SQLITE_URL = "sqlite:///kubesight.db"
+_db_logger = logging.getLogger("kubesight.db")
+
+
+def _redact_database_url(url: str) -> str:
+    """``scheme://host/db`` with any credentials dropped, for log lines."""
+    if "@" not in url:
+        return url
+    scheme, _, rest = url.partition("://")
+    return f"{scheme}://***@{rest.rsplit('@', 1)[-1]}"
+
+
+def _resolve_database_url() -> str:
+    """Pick the database this process will use.
+
+    * No ``DATABASE_URL``: a local SQLite file — the zero-config dev path. In
+      production that is refused: a pod's SQLite file is lost on every restart.
+    * ``DATABASE_URL`` set and reachable: use it.
+    * Set but unreachable: in production, fail the boot. Silently switching to
+      an empty SQLite file there would come up "healthy" with no users, no
+      clusters and no history, and write new state nobody will find again. In
+      development the SQLite fallback stays (a laptop without the compose
+      Postgres running), but loudly.
+    """
+    raw = os.getenv("DATABASE_URL", "").strip()
+    production = is_production_env()
+    if not raw:
+        if production:
+            raise RuntimeError(
+                "DATABASE_URL is not set. Refusing to start in production on a local SQLite file."
+            )
+        return _FALLBACK_SQLITE_URL
+    database_url = raw
+    # Heroku-style URLs may use `postgres://`; SQLAlchemy expects `postgresql://`.
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+    if database_url.startswith("sqlite"):
+        if production:
+            _db_logger.warning("Production is running on SQLite (%s).", database_url)
+        return database_url
+
+    try:
+        engine = create_engine(database_url)
+        try:
+            with engine.connect():
+                pass
+        finally:
+            engine.dispose()
+    except OperationalError as exc:
+        where = _redact_database_url(database_url)
+        if production:
+            _db_logger.critical("Database %s is unreachable: %s", where, exc)
+            raise RuntimeError(
+                f"DATABASE_URL ({where}) is unreachable; refusing to start in production."
+            ) from exc
+        _db_logger.error(
+            "Database %s is unreachable (%s). FALLING BACK TO LOCAL SQLITE %s — this "
+            "process is NOT using the configured database. Development only; production "
+            "refuses to start instead.",
+            where,
+            exc.__class__.__name__,
+            _FALLBACK_SQLITE_URL,
+        )
+        return _FALLBACK_SQLITE_URL
+    return database_url
 
 
 def _is_logs_fetch_path(path: str) -> bool:
@@ -243,31 +306,24 @@ def create_app(config_object=None) -> Flask:
         is_testing = bool(app.config.get("TESTING"))
         database_url = app.config.get("SQLALCHEMY_DATABASE_URI") or "sqlite:///:memory:"
     else:
-        database_url = os.getenv("DATABASE_URL", "sqlite:///kubesight.db")
-        # Heroku-style URLs may use `postgres://`; SQLAlchemy expects `postgresql://`.
-        if database_url.startswith("postgres://"):
-            database_url = database_url.replace("postgres://", "postgresql://", 1)
+        is_testing = False
 
-        fallback_sqlite_url = "sqlite:///kubesight.db"
-        if database_url != fallback_sqlite_url and not _is_production_env():
-            try:
-                with create_engine(database_url).connect():
-                    pass
-            except OperationalError:
-                database_url = fallback_sqlite_url
+    if not is_testing:
+        # Before anything touches the database or signs a token: a production
+        # process with a dev-default key or the auth kill switch does not start.
+        enforce_production_config()
 
+    if config_object is None:
+        database_url = _resolve_database_url()
         app.config["SQLALCHEMY_DATABASE_URI"] = database_url
         app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-        app.config["JWT_SECRET_KEY"] = os.getenv(
-            "JWT_SECRET_KEY", "kubesight-dev-secret-change-me"
-        )
+        app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", INSECURE_DEVELOPMENT_KEY)
 
     if "SQLALCHEMY_DATABASE_URI" not in app.config:
         app.config["SQLALCHEMY_DATABASE_URI"] = database_url
     if "JWT_SECRET_KEY" not in app.config:
-        app.config["JWT_SECRET_KEY"] = os.getenv(
-            "JWT_SECRET_KEY", "kubesight-dev-secret-change-me"
-        )
+        # Informational only — tokens are signed with auth_utils._jwt_secret().
+        app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", INSECURE_DEVELOPMENT_KEY)
     app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
     app.config.setdefault(
         "SQLALCHEMY_ENGINE_OPTIONS",
