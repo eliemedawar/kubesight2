@@ -650,7 +650,11 @@ def node_modules_wrap(
         f'    echo "{tag} could not write $KS_NM_ARCHIVE; not saved." >&2',
         "    return 0",
         "  fi",
-        f'  ls -1t "$KS_NM_DIR"/*.tar 2>/dev/null | tail -n +{keep + 1}'
+        # Keep the archive just written plus the newest keep-1 others. It is
+        # left out of the listing rather than trusted to sort first: on a
+        # filesystem with coarse mtimes several archives can share a timestamp,
+        # and ls -t would then order them by name and could prune the new one.
+        f'  ls -1t "$KS_NM_DIR"/*.tar 2>/dev/null | grep -vxF "$KS_NM_ARCHIVE" | tail -n +{keep}'
         ' | while read -r KS_OLD; do rm -f "$KS_OLD"; done',
         '  find "$KS_NM_DIR" -name ".*.partial" -mmin +60 -exec rm -f {} + 2>/dev/null',
         "  return 0",
