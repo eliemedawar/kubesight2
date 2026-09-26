@@ -156,6 +156,33 @@ Open the Vite URL (usually `http://localhost:5173`).
 | `JWT_SECRET_KEY` | **Regenerate** before prod: `openssl rand -hex 32` |
 | `FLASK_SECRET_KEY` | **Regenerate** before prod: `openssl rand -hex 32` |
 
+### Production environment — what the backend Deployment must set
+The backend Deployment/ConfigMap/Secret manifests are kept with the cluster, not
+in this repo (only `k8s/ingress.yaml` and the CI/Hermes add-ons are here), so
+check the live objects against this list.
+
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `APP_ENV` | `production` | `k8s_entrypoint.sh` defaults it to `production` (and `FLASK_DEBUG` to `false`). The backend's production checks key off it: no silent SQLite fallback, no dev defaults. |
+| `DATABASE_URL` | yes | PostgreSQL. Must reach Postgres directly or via a **session-mode** pooler — leader election uses session advisory locks, which a transaction-mode pgbouncer cannot hold. |
+| `JWT_SECRET_KEY` | yes | `openssl rand -hex 32`. Never the `kubesight-dev-secret-change-me` default. |
+| `FLASK_SECRET_KEY` | yes | `openssl rand -hex 32`. |
+| `ALERT_ROUTING_SECRET_KEY` | strongly | Encrypts stored credentials (Fernet). Falls back to `JWT_SECRET_KEY` when unset — so rotating the JWT key would make stored secrets unreadable. Set it once and keep it. |
+| `AUTH_REQUIRED` | `true` | Default is already `true`; never `false` in production. |
+| `CORS_ORIGINS` | yes | Your real origin(s), comma-separated. Default is `*`. |
+| `K8S_REAL_MODE` | `true` | Default `auto`. |
+| `CI_WORKER_IMAGE`, `CI_WORKER_CALLBACK_URL` | for native CI | See `k8s/ci-backend-config.yaml`. |
+| `HERMES_API_TOKEN` | for Application Intelligence | Handed to analysis worker Jobs; see `APPLICATION-INTELLIGENCE.md`. |
+
+Process model (all optional):
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `GUNICORN_WORKERS` | `1` | Background loops elect a leader, so >1 worker or >1 replica no longer double-runs them. Kept at 1 until upgrade jobs are persisted (they live in process memory, so a status poll on another worker 404s). |
+| `GUNICORN_THREADS` / `GUNICORN_TIMEOUT` | `8` / `300` | |
+| `SCHEDULER_LEADER_ELECTION` | `auto` | `off` makes every process act as leader — only for a single-process deployment. |
+| `STARTUP_LOCK_TIMEOUT_SECONDS` | `600` | How long a booting worker waits for another's migrations. |
+
 ### Optional env (SMTP for alert email)
 | Variable | Description |
 |----------|-------------|

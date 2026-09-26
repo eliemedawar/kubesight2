@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from flask import Flask
@@ -86,14 +86,85 @@ def wake() -> None:
     _wake.set()
 
 
-def _loop(app: Flask) -> None:
+_pass_lock = None
+_pass_lock_guard = threading.Lock()
+# The advisory lock below is per process, and re-asking for a lock this
+# process already holds says yes. So threads of one process must not share it
+# freely — a request thread's release would pull it out from under the ticker's
+# pass. This mutex makes "one guarded pass per process" explicit; the advisory
+# lock then makes it "one per cluster".
+_pass_mutex = threading.Lock()
+
+
+def _cross_process_lock(app: Flask):
+    """This process's handle on the cluster-wide "one CI pass at a time" lock.
+
+    The engine's own ``_pass_lock`` only serialises threads of one process.
+    With several gunicorn workers or replicas, each runs this ticker (so a
+    trigger landing on any of them is picked up in milliseconds, not at the
+    leader's next idle interval), and this advisory lock makes sure only one
+    of them is inside a pass at any moment. On SQLite it is always granted.
+    """
+    global _pass_lock
+    with _pass_lock_guard:
+        if _pass_lock is None:
+            from ..leader_election import CI_ENGINE_LOCK, AdvisoryLock, database_url_for
+
+            _pass_lock = AdvisoryLock(CI_ENGINE_LOCK, database_url_for(app))
+        return _pass_lock
+
+
+def _guarded(app: Flask, work):
+    """Run ``work()`` holding both locks, or return ``None`` if either is taken."""
+    if not _pass_mutex.acquire(blocking=False):
+        return None
+    try:
+        lock = _cross_process_lock(app)
+        if not lock.try_acquire():
+            return None
+        try:
+            return work()
+        finally:
+            lock.release()
+    finally:
+        _pass_mutex.release()
+
+
+def guarded_pass(app: Flask) -> Optional[bool]:
+    """Run one CI pass if no other thread or process is in one.
+
+    Returns the pass's "busy" answer, or ``None`` when the pass is held
+    elsewhere — the caller should come back soon, because that pass may have
+    started before the work that woke us was committed.
+    Must be called inside an app context.
+    """
     from .engine import advance_ci_builds
 
+    return _guarded(app, lambda: bool(advance_ci_builds()))
+
+
+def guarded_advance_build_now(build_id: int) -> None:
+    """:func:`engine.advance_build_now` under the same cross-process guard.
+
+    Skipping when another pass holds the lock is what advance_build_now
+    already does for its own process: whatever it leaves is the tick's job,
+    and the caller wakes the ticker right after.
+    """
+    from flask import current_app
+
+    from .engine import advance_build_now
+
+    _guarded(current_app._get_current_object(), lambda: advance_build_now(build_id))
+
+
+def _loop(app: Flask) -> None:
     while True:
         busy = False
         try:
             with app.app_context():
-                busy = bool(advance_ci_builds())
+                result = guarded_pass(app)
+                # Another process is mid-pass: retry on the fast interval.
+                busy = True if result is None else result
         except Exception:
             logger.exception("CI engine tick failed")
         # A pass that found work almost certainly has more to do; one that found
