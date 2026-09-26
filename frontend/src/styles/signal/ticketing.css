@@ -674,6 +674,24 @@
   line-height: 1.45;
 }
 
+/* Inbound webhook refused until a secret is saved (fail-closed backend). */
+.sg-zh-webhook-closed {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin: 0.5rem 0;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--warn-border);
+  border-radius: 8px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+.sg-zh-webhook-closed svg {
+  flex: 0 0 auto;
+  margin-top: 0.1rem;
+}
+
 /* ── Webhook URL copy row (Settings) ────────────────────────────── */
 .sg-zh-url {
   display: flex;

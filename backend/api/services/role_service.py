@@ -196,7 +196,7 @@ def update_role(
             if new_keys != set(HERMES_AGENT_PERMISSIONS):
                 return (
                     None,
-                    "The hermes-agent role is fixed to its source-analysis execution permission.",
+                    "The hermes-agent role is fixed to its ticket-agent and source-analysis permissions.",
                     400,
                 )
         lockout_error = _actor_retains_management(actor, role, new_keys)

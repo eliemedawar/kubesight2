@@ -1422,17 +1422,26 @@ def run_due_sync() -> bool:
 # Inbound webhook — verify, parse, resolve, record
 # ---------------------------------------------------------------------------
 
+def inbound_secret_configured() -> bool:
+    """Whether an inbound webhook secret is stored. Without one every delivery is refused."""
+    row = ZohoIntegration.query.get(1)
+    return bool(row and decrypt_secret(row.inbound_secret_encrypted or ""))
+
+
 def verify_inbound_secret(provided: Optional[str]) -> bool:
     """Constant-time compare of the caller's shared secret against the stored one.
 
-    If no inbound secret is configured, the webhook is treated as open (dev/test);
-    configure one for production.
+    Fails CLOSED: with no inbound secret configured nothing is accepted. These
+    webhooks file tickets and wake the Hermes ticket agent (which can start
+    deploys), so an unconfigured installation must not be an open door. The
+    route answers 403 with a "configure a secret" message in that state — see
+    :func:`inbound_secret_configured`.
     """
     row = ZohoIntegration.query.get(1)
     stored = decrypt_secret(row.inbound_secret_encrypted or "") if row else ""
-    if not stored:
-        return True
-    return bool(provided) and hmac.compare_digest(str(provided), stored)
+    if not stored or not provided:
+        return False
+    return hmac.compare_digest(str(provided).encode("utf-8"), stored.encode("utf-8"))
 
 
 def _extract(payload: Dict[str, Any], *keys: str) -> Optional[Any]:

@@ -289,10 +289,12 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
       <section className="form-section">
         <h4>Webhook</h4>
         <p className="muted">
-          Add this in Bitbucket under <strong>Repository settings → Webhooks</strong>,
-          with the secret in a header called <code>X-KubeSight-Secret</code>. If the
-          webhook form cannot set headers, append <code>?secret=…</code> to the URL
-          instead.
+          Add this in Bitbucket under <strong>Repository settings → Webhooks</strong>
+          and paste the secret into the webhook's <strong>Secret</strong> field —
+          Bitbucket then signs every delivery (<code>X-Hub-Signature</code>) and the
+          secret never travels. Senders that cannot sign can put the secret in an{" "}
+          <code>X-KubeSight-Secret</code> header, or append <code>?secret=…</code> to
+          the URL as a last resort.
         </p>
 
         <label className="form-grid__full">
