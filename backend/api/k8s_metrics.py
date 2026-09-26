@@ -82,7 +82,9 @@ def fetch_pod_top_metrics(access: Union[ClusterAccess, str], _bypass_cache: bool
     multiple callers within the same dashboard request share one kubectl top invocation.
     """
     context_name, kubeconfig_path = _access_kwargs(access)
-    cache_key = f"{context_name}:{kubeconfig_path}"
+    from .kubeconfig_vault import kubeconfig_identity
+
+    cache_key = f"{context_name}:{kubeconfig_identity(kubeconfig_path)}"
 
     if not _bypass_cache:
         with _pod_top_cache_lock:

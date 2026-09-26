@@ -138,10 +138,13 @@ def validate_chart_version(version: str) -> Tuple[bool, Optional[str]]:
     return True, None
 
 
-def _helm_env(access: ClusterAccess) -> Dict[str, str]:
+def _helm_env(access: ClusterAccess, kubeconfig_path: Optional[str] = None) -> Dict[str, str]:
+    """Subprocess env for helm. ``kubeconfig_path`` is the materialized
+    (decrypted) path; it defaults to the access path for pass-through configs."""
     env = os.environ.copy()
-    if access.kubeconfig_path:
-        env["KUBECONFIG"] = access.kubeconfig_path
+    path = kubeconfig_path if kubeconfig_path is not None else access.kubeconfig_path
+    if path:
+        env["KUBECONFIG"] = path
     return env
 
 
@@ -151,28 +154,34 @@ def run_helm(
     *,
     extra_env: Optional[Dict[str, str]] = None,
 ) -> str:
+    from ..kubeconfig_vault import KubeconfigDecryptError, materialized_kubeconfig
+
     ensure_helm_installed()
-    command = [_helm_binary()]
-    if access.kubeconfig_path:
-        command += ["--kubeconfig", access.kubeconfig_path]
-    if access.context_name:
-        command += ["--kube-context", access.context_name]
-    command += args
+    try:
+        with materialized_kubeconfig(access.kubeconfig_path) as kubeconfig_path:
+            command = [_helm_binary()]
+            if kubeconfig_path:
+                command += ["--kubeconfig", kubeconfig_path]
+            if access.context_name:
+                command += ["--kube-context", access.context_name]
+            command += args
 
-    env = _helm_env(access)
-    if extra_env:
-        env.update(extra_env)
+            env = _helm_env(access, kubeconfig_path or "")
+            if extra_env:
+                env.update(extra_env)
 
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+    except KubeconfigDecryptError as exc:
+        raise HelmCommandError(str(exc)) from exc
     if completed.returncode != 0:
         stderr = (completed.stderr or completed.stdout or "").strip()
-        raise HelmCommandError(stderr or f"helm command failed: {' '.join(command)}")
+        raise HelmCommandError(stderr or f"helm command failed: helm {' '.join(args)}")
 
     # Helm installs/upgrades/rollbacks change workloads — drop cached namespace
     # resource reads for this cluster so the UI reflects the release right away.

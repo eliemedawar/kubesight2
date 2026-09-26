@@ -9,6 +9,7 @@ from ..cluster_store import (
     ClusterValidationError,
     build_cluster_kubeconfig,
     cluster_to_management_dict,
+    delete_kubeconfig_file,
     list_active_custom_clusters,
     record_connection_test,
     test_cluster_connection,
@@ -293,10 +294,30 @@ def delete_custom_cluster(cluster_ref: str):
     if err:
         return err
 
+    # The row stays (audit history, build results reference its public id),
+    # but nothing that grants access to the cluster may outlive the removal:
+    # the encrypted kubeconfig (and any legacy plaintext copy) is deleted and
+    # the row no longer points at it.
+    try:
+        delete_kubeconfig_file(cluster.id)
+    except (OSError, ClusterValidationError) as exc:
+        return error_response(f"Could not delete the stored kubeconfig: {exc}", 500)
+    cluster.kubeconfig_path = None
     cluster.is_active = False
+    cluster.last_connection_status = None
+    cluster.last_connection_error = None
     cluster.updated_at = datetime.now(timezone.utc)
     db.session.commit()
     invalidate_cluster_list_cache()
+    from ..audit import log_audit
+
+    log_audit(
+        "cluster_removed",
+        actor=get_current_user(),
+        target_type="cluster",
+        target_id=custom_cluster_public_id(cluster.id),
+        details={"name": cluster.name, "kubeconfigDeleted": True},
+    )
     return success_response(
         {
             "publicId": custom_cluster_public_id(cluster.id),

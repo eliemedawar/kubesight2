@@ -12,6 +12,7 @@
 
 import { useState } from "react";
 import { Field, StatusPill } from "./common.jsx";
+import HostKeysPanel from "./HostKeysPanel.jsx";
 import {
   bundleCoverage,
   freshness,
@@ -633,7 +634,7 @@ export default function SourcesTab({
             <Field
               label="Host-key policy"
               htmlFor="rt-policy"
-              hint="Production should pin pre-approved fingerprints; trust-on-first-use records whatever answers the first time."
+              hint="Production should pin pre-approved fingerprints (Host keys, below); trust-on-first-use records whatever answers the first time."
             >
               <select id="rt-policy" className="sg-cb-input" value={routeForm.hostKeyPolicy}
                       onChange={(e) => setRouteForm({ ...routeForm, hostKeyPolicy: e.target.value })}>
@@ -730,6 +731,8 @@ export default function SourcesTab({
             </div>
           </details>
         ) : null}
+
+        <HostKeysPanel profiles={profiles} notify={notify} />
       </Group>
       ) : null}
 
