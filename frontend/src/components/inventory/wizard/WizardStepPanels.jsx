@@ -1006,6 +1006,9 @@ export function StepNetworking({ state, setState }) {
         <div className="wizard-form-grid">
           <Field label="Host"><input value={ing.host} onChange={(e) => setNet({ ingress: { ...ing, host: e.target.value } })} placeholder="app.example.com" /></Field>
           <Field label="Path"><input value={ing.path} onChange={(e) => setNet({ ingress: { ...ing, path: e.target.value } })} /></Field>
+          <Field label="Ingress class" hint="Leave empty to use the cluster's default IngressClass. Set it (e.g. nginx) when the cluster has no default or several controllers.">
+            <input value={ing.ingressClassName || ""} onChange={(e) => setNet({ ingress: { ...ing, ingressClassName: e.target.value.trim() } })} placeholder="cluster default" />
+          </Field>
           <label className="wizard-checkbox">
             <input type="checkbox" checked={ing.tlsEnabled} onChange={(e) => setNet({ ingress: { ...ing, tlsEnabled: e.target.checked } })} />
             TLS Enabled

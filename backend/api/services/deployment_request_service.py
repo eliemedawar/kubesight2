@@ -1083,16 +1083,47 @@ def check_cluster_change_allowed(
     action: str,
     target_type: str,
     target_id: str,
+    approval_context: Optional[str] = None,
 ) -> Optional[Tuple[str, int]]:
-    """Approval gate for any user-driven change to a cluster.
+    """Approval gate for any change to a cluster.
 
     Returns ``(message, status)`` when the change must be refused, else None.
     Shared by YAML apply, Helm install/upgrade/rollback/uninstall and workload
     restart/scale/rollback so every path — UI and MCP alike — enforces the same
     per-cluster rule. Fails closed if the check itself errors.
+
+    ``approval_context`` is how an internal caller says *why* no further
+    approval is needed — e.g. ``"change_bundle:12"`` when the bundle executor
+    runs a change that was already approved. It is the only way through
+    without a user: a call with neither a user nor a context is no longer
+    waved through silently; it is held to the cluster's rule like anybody else
+    (and refused, since there is nobody to queue it for).
     """
-    if not user:
+    if approval_context:
         return None
+    if not user:
+        try:
+            required = cluster_required_approvals(cluster_id)
+        except Exception:  # noqa: BLE001 — fail closed
+            required = 1
+        if required <= 0:
+            return None
+        log_audit(
+            "unauthorized_deployment_attempt",
+            actor=None,
+            target_type=target_type,
+            target_id=target_id,
+            details={
+                "action": action,
+                "cluster": cluster_id,
+                "reason": "approval_required_no_actor",
+            },
+        )
+        return (
+            "This cluster requires an approved deployment request before deploying, and "
+            "this change has neither a user nor an approval context.",
+            403,
+        )
     try:
         assert_deploy_allowed(user, cluster_id)
         return None

@@ -44,7 +44,7 @@ Answer reference::
       "overrides": {"tag", "replicas", "resources", "storageSize", "serviceType"},
       "env": {"<KEY>": {"source", "value", "configMapName"|"secretName", "key"}},
       "dependencies": {"<name>": {"mode": "create"|"existing", ...}},
-      "ingress": {"host", "tls": {"mode": "create"|"existing", "secret"}},
+      "ingress": {"host", "path", "ingressClassName", "tls": {"mode": "create"|"existing", "secret"}},
       "changeSummary": str,
     }
 """
@@ -784,7 +784,13 @@ def resolve_template(template: Dict[str, Any], answers: Dict[str, Any]) -> Resol
             ingress["host"] = str(ingress_answer["host"]).strip()
         if ingress_answer.get("path"):
             ingress["path"] = str(ingress_answer["path"]).strip()
-        tls = ingress_answer.get("tls") or {}
+        # Empty = the cluster's default IngressClass; the generator validates it.
+        ingress_class = str(
+            ingress_answer.get("ingressClassName") or ingress_answer.get("className") or ""
+        ).strip()
+        if ingress_class:
+            ingress["ingressClassName"] = ingress_class
+        tls =ingress_answer.get("tls") or {}
         tls_mode = (tls.get("mode") or "").strip()
         if tls_mode == "existing":
             if not tls.get("secret"):

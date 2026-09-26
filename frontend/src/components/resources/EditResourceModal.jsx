@@ -68,6 +68,9 @@ export default function EditResourceModal({
   // Set when the backend hid a Secret's values (no secrets:reveal). The YAML
   // then carries placeholders, and applying it unchanged is refused server-side.
   const [valuesNote, setValuesNote] = useState("");
+  // Typed "APPLY <namespace>" — the server checks the same phrase.
+  const [confirmation, setConfirmation] = useState("");
+  const confirmationPhrase = namespace ? `APPLY ${namespace}` : "";
 
   // Editing applies through the deploy pipeline, which a cluster may gate on an
   // approved deployment request. Mirror the deploy wizard so non-admins see the
@@ -103,6 +106,7 @@ export default function EditResourceModal({
       setError("");
       setBusy(false);
       setLoading(false);
+      setConfirmation("");
       return undefined;
     }
     if (!clusterId || !namespace || !resourceName) {
@@ -168,6 +172,7 @@ export default function EditResourceModal({
         }
       }
       setPreview({ validation, dryRun });
+      setConfirmation("");
       setStep("confirm");
     } catch (err) {
       setError(formatAccessError(err.message) || err.message || "Validation failed");
@@ -187,6 +192,7 @@ export default function EditResourceModal({
         // Only Deployments register an inventory app; the backend ignores this
         // for other kinds, but we leave it unset to keep intent clear.
         deploymentName: kind === "deployment" ? resourceName : "",
+        confirmation,
       });
       if (isPendingApproval(result)) {
         setQueuedMessage(pendingApprovalMessage(result));
@@ -312,6 +318,15 @@ export default function EditResourceModal({
             {deployDiff?.hint ? (
               <p className="muted deploy-diff-hint">{deployDiff.hint}</p>
             ) : null}
+            <label className="deploy-confirmation">
+              Type <strong>{confirmationPhrase}</strong> to confirm
+              <input
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
+                placeholder={confirmationPhrase}
+                autoComplete="off"
+              />
+            </label>
             <div className="modal-actions">
               <button type="button" className="btn-text" onClick={() => setStep("edit")}>
                 Back
@@ -319,7 +334,7 @@ export default function EditResourceModal({
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy}
+                disabled={busy || confirmation !== confirmationPhrase}
                 onClick={applyYaml}
               >
                 {busy

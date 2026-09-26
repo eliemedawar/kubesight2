@@ -3,7 +3,6 @@ from flask import Blueprint, request
 from ..auth_utils import get_current_user
 from ..decorators import require_permission
 from ..response import error_response, success_response
-from ..services.app_catalog_service import create_or_update_from_helm
 from ..services.helm_service import (
     add_repository,
     check_helm_available,
@@ -13,6 +12,7 @@ from ..services.helm_service import (
     install_or_upgrade_release,
     list_releases,
     list_repositories,
+    record_helm_catalog_entry,
     release_exists_from_payload,
     render_template,
     rollback_release,
@@ -53,19 +53,6 @@ def _cluster_id() -> str:
 
 def _namespace() -> str:
     return request.args.get("namespace") or ""
-
-
-def _catalog_chart_metadata(body: dict) -> tuple:
-    template_id = body.get("chartTemplateId") or body.get("chart_template_id")
-    template = get_chart_template(str(template_id)) if template_id else None
-    return (
-        body.get("chartName")
-        or body.get("chart_name")
-        or (template or {}).get("name"),
-        body.get("chartVersion")
-        or body.get("chart_version")
-        or (template or {}).get("version"),
-    )
 
 
 @helm_bp.route("/status", methods=["GET"])
@@ -316,20 +303,12 @@ def helm_install():
     data, err, status = install_or_upgrade_release(user, body, confirmation)
     if err:
         return error_response(err, status)
+    if data and data.get("pendingApproval"):
+        # Queued for approval, not installed: the catalog entry is recorded by
+        # the bundle executor once the release actually runs.
+        return success_response(data, status_code=202)
 
-    chart_name, chart_version = _catalog_chart_metadata(body)
-    create_or_update_from_helm(
-        user,
-        cluster_id=body.get("clusterId") or body.get("cluster"),
-        namespace=body.get("namespace"),
-        release_name=body.get("releaseName") or body.get("release_name"),
-        chart_name=chart_name,
-        chart_version=chart_version,
-        owner_team=body.get("ownerTeam") or body.get("owner_team"),
-        environment=body.get("environment"),
-        criticality=body.get("criticality"),
-        description=body.get("description"),
-    )
+    record_helm_catalog_entry(user, body)
     return success_response(data)
 
 
@@ -343,20 +322,12 @@ def helm_upgrade():
     data, err, status = install_or_upgrade_release(user, body, confirmation)
     if err:
         return error_response(err, status)
+    if data and data.get("pendingApproval"):
+        # Queued for approval, not installed: the catalog entry is recorded by
+        # the bundle executor once the release actually runs.
+        return success_response(data, status_code=202)
 
-    chart_name, chart_version = _catalog_chart_metadata(body)
-    create_or_update_from_helm(
-        user,
-        cluster_id=body.get("clusterId") or body.get("cluster"),
-        namespace=body.get("namespace"),
-        release_name=body.get("releaseName") or body.get("release_name"),
-        chart_name=chart_name,
-        chart_version=chart_version,
-        owner_team=body.get("ownerTeam") or body.get("owner_team"),
-        environment=body.get("environment"),
-        criticality=body.get("criticality"),
-        description=body.get("description"),
-    )
+    record_helm_catalog_entry(user, body)
     return success_response(data)
 
 
@@ -372,7 +343,7 @@ def helm_rollback():
     data, err, status = rollback_release(user, cluster_id, namespace, release_name, revision)
     if err:
         return error_response(err, status)
-    return success_response(data)
+    return success_response(data, status_code=202 if status == 202 else 200)
 
 
 @helm_bp.route("/uninstall", methods=["POST"])
@@ -386,7 +357,7 @@ def helm_uninstall():
     data, err, status = uninstall_release(user, cluster_id, namespace, release_name)
     if err:
         return error_response(err, status)
-    return success_response(data)
+    return success_response(data, status_code=202 if status == 202 else 200)
 
 
 @helm_bp.route("/confirmation-phrase", methods=["POST"])

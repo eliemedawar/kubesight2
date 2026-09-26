@@ -324,7 +324,9 @@ def deploy_yaml_apply():
     if not cluster_id or not namespace:
         return error_response("clusterId and namespace are required", 400)
     try:
-        data, error, status = apply_yaml(user, cluster_id, namespace, yaml_content, confirmation)
+        data, error, status = apply_yaml(
+            user, cluster_id, namespace, yaml_content, confirmation, enforce_confirmation=True
+        )
     except K8sCommandError as exc:
         return error_response(str(exc), 503)
     except Exception as exc:  # noqa: BLE001 — surface a clean error, not a raw 500
@@ -406,7 +408,9 @@ def deploy_image_apply():
         return error_response(gen_error, 400)
     if not cluster_id or not namespace:
         return error_response("clusterId and namespace are required", 400)
-    data, error, status = apply_yaml(user, cluster_id, namespace, yaml_content, confirmation)
+    data, error, status = apply_yaml(
+        user, cluster_id, namespace, yaml_content, confirmation, enforce_confirmation=True
+    )
     if error:
         return error_response(error, status)
     if data and data.get("pendingApproval"):
@@ -686,7 +690,9 @@ def deploy_wizard_apply():
     if not cluster_id or not namespace:
         return error_response("clusterId and namespace are required", 400)
 
-    data, error, status = apply_yaml(user, cluster_id, namespace, yaml_content, confirmation)
+    data, error, status = apply_yaml(
+        user, cluster_id, namespace, yaml_content, confirmation, enforce_confirmation=True
+    )
     if error:
         return error_response(error, status)
     if data and data.get("pendingApproval"):

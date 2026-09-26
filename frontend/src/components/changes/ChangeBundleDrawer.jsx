@@ -20,6 +20,14 @@ const ACTION_LABEL = {
   apply_yaml: "Apply YAML",
   restart_workload: "Restart",
   rollback_deployment: "Roll back deployment",
+  edit_configmap: "Edit config map (YAML)",
+  edit_secret: "Edit secret (YAML)",
+  edit_ingress: "Edit ingress (YAML)",
+  edit_resource: "Edit resource (YAML)",
+  helm_install: "Helm install",
+  helm_upgrade: "Helm upgrade",
+  helm_rollback: "Helm rollback",
+  helm_uninstall: "Helm uninstall",
 };
 
 const STATUS_COLORS = {

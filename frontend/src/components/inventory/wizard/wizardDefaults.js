@@ -319,7 +319,7 @@ export function createEmptyWizardState(defaultClusterId = "") {
     },
     networking: {
       service: { enabled: true, name: "", type: "ClusterIP", port: 80, targetPort: 80, protocol: "TCP" },
-      ingress: { enabled: false, name: "", host: "", path: "/", tlsEnabled: false, tlsSecret: "" },
+      ingress: { enabled: false, name: "", host: "", path: "/", ingressClassName: "", tlsEnabled: false, tlsSecret: "" },
     },
     healthChecks: {
       readiness: { enabled: false, type: "http", path: "/", port: 80, command: "", initialDelaySeconds: 5, periodSeconds: 10 },

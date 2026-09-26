@@ -515,6 +515,120 @@ def test_rollout_failure_rolls_back_and_emails_admins(client, admin_token, app, 
     assert sent[0][0] == "admins@areeba.com"
     assert "rollout failed" in sent[0][1]
     assert "DR-9002" in sent[0][1]
+    # The rollout path sends its own email — not a second generic failure one.
+    assert len(sent) == 1
+    assert "Rolled back to the previous version" in sent[0][2]
+
+
+def _capture_outcome_mail(monkeypatch, configured=True):
+    from api.models import User
+
+    admin = User.query.filter_by(username="admin").first()
+    admin.email = "admins@areeba.com"
+    db.session.commit()
+    sent = []
+    monkeypatch.setattr("api.email_delivery.smtp_is_configured", lambda: configured)
+    monkeypatch.setattr(
+        "api.email_delivery.send_email",
+        lambda to, subject, body, **kw: sent.append((to, subject, body)),
+    )
+    return sent
+
+
+def test_successful_run_emails_admins_once(client, admin_token, app, monkeypatch):
+    from api.services import deploy_automation_service as svc
+
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "found", "image": image},
+    )
+    _set_cluster_approvals(0)
+    sent = _capture_outcome_mail(monkeypatch)
+    ticket = _make_ticket(tag="8.1.0")
+
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "deployed", run
+    assert [m[0] for m in sent] == ["admins@areeba.com"]
+    to, subject, body = sent[0]
+    assert "automation succeeded" in subject and DEPLOYMENT in subject and "DR-9001" in subject
+    assert f"Run:          #{run['id']}" in body and NAMESPACE in body
+
+    # A re-hit of the terminal path must not mail the same outcome twice.
+    row = db.session.get(DeployAutomationRun, run["id"])
+    svc._notify_run_outcome(row, "deployed", "3/3 ready")
+    assert len(sent) == 1
+
+
+def test_failed_run_emails_admins(client, admin_token, app, monkeypatch):
+    sent = _capture_outcome_mail(monkeypatch)
+    ticket = _make_ticket()  # no registry + Jenkins off ⇒ build step fails
+
+    run = _start(client, admin_token, ticket.id)
+    assert run["status"] == "failed"
+    assert [m[0] for m in sent] == ["admins@areeba.com"]
+    to, subject, body = sent[0]
+    assert "automation failed" in subject and "DR-9001" in subject
+    assert "Failed step:  build" in body
+    assert "Register a CI service" in body
+
+
+def test_no_outcome_email_without_smtp(client, admin_token, app, monkeypatch):
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "found", "image": image},
+    )
+    _set_cluster_approvals(0)
+    from api.services import deploy_automation_service as svc
+
+    sent = _capture_outcome_mail(monkeypatch, configured=False)
+    run = _start(client, admin_token, _make_ticket(tag="8.2.0").id)
+    assert run["status"] == "deployed"
+    row = db.session.get(DeployAutomationRun, run["id"])
+    svc._fail(row, "pods", "synthetic failure")
+    assert sent == []
+    # No mail marker is written when nothing was sent.
+    assert all("outcomeMailed" not in s for s in row.steps)
+
+
+def test_mcp_origin_runs_the_ticket_validator(client, admin_token, app, monkeypatch):
+    """start_run(origin="mcp") goes through the ticket agent's validator: a
+    target outside the published catalog, or a confidence under the bar, is
+    refused; the operator (UI) path is unchanged."""
+    from api.services import deploy_automation_service as svc
+    from api.services.ticket_agent import catalog
+
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "found", "image": image},
+    )
+    _set_cluster_approvals(0)
+    ticket = _make_ticket(tag="8.3.0")
+    snapshot = db.session.get(ZohoDeploymentSnapshot, ticket.app_service_id)
+
+    # Not in the published catalog.
+    monkeypatch.setattr(catalog, "targets", lambda provider: [])
+    with pytest.raises(svc.AutomationError) as exc:
+        svc.start_run(ticket.id, origin="mcp", decision={"confidence": "High"})
+    assert exc.value.status == 422 and "not in the catalog" in str(exc.value)
+
+    # In the catalog, but no confidence stated ⇒ counted as Low ⇒ needs approval.
+    monkeypatch.setattr(catalog, "targets", lambda provider: [snapshot])
+    with pytest.raises(svc.AutomationError) as exc:
+        svc.start_run(ticket.id, origin="mcp", decision={})
+    assert exc.value.status == 409 and "confidence is Low" in str(exc.value)
+    assert DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).count() == 0
+
+    # High confidence on a clean ticket passes.
+    run = svc.start_run(ticket.id, origin="mcp", decision={"confidence": "High"})
+    assert run["status"] == "deployed", run
+
+    # The operator path is not re-validated (empty catalog does not matter).
+    monkeypatch.setattr(catalog, "targets", lambda provider: [])
+    other = _start(client, admin_token, _make_ticket(tag="8.4.0").id)
+    assert other["status"] == "deployed", other
+
+    with pytest.raises(svc.AutomationError):
+        svc.start_run(ticket.id, origin="bogus")
 
 
 def test_rollout_watch_ignores_stale_status(client, admin_token, app, monkeypatch):

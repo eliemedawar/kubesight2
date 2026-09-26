@@ -340,7 +340,7 @@ const PAGE_TOURS = {
       title: "Blueprint cards",
       body: (ctx) =>
         ctx.hasPermission("service_blueprints:deploy")
-          ? "Open a card for details — or hit Deploy to launch the blueprint through the wizard."
+          ? "Open a card for details — or hit Register instance to record an instance of the blueprint (nothing is applied to the cluster)."
           : "Open a card to inspect the blueprint's components and versions.",
     },
   ],

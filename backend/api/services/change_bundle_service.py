@@ -70,7 +70,25 @@ ACTION_TYPES: Dict[str, Dict[str, str]] = {
     "restart_workload": {"mode": "restart", "permission": "apps:deploy"},
     "rollback_deployment": {"mode": "rollback", "permission": "apps:deploy"},
     "delete_deployment": {"mode": "delete", "permission": "apps:delete"},
+    # Edit & apply of any other editable kind (the Edit YAML modal's fallback).
+    "edit_resource": {"mode": "apply", "permission": "apps:deploy"},
+    # Helm, queued when a direct Helm change hits a cluster that needs approval.
+    # Carried out through helm_service (same checks) by the bundle executor.
+    "helm_install": {"mode": "helm", "permission": "helm:install"},
+    "helm_upgrade": {"mode": "helm", "permission": "helm:upgrade"},
+    "helm_rollback": {"mode": "helm", "permission": "helm:rollback"},
+    "helm_uninstall": {"mode": "helm", "permission": "helm:uninstall"},
 }
+
+HELM_ACTIONS = ("helm_install", "helm_upgrade", "helm_rollback", "helm_uninstall")
+
+# Staging these requires the action's own permission: a Helm change carries a
+# whole chart + values, so unlike a YAML edit it cannot be proposed by someone
+# who could not run it themselves.
+_STAGING_REQUIRES_PERMISSION = set(HELM_ACTIONS)
+
+# Payload keys used to build the preview that are not kept in the item input.
+_PREVIEW_ONLY_KEYS = ("oldPayload", "old_payload", "helmPreview")
 
 # Bundles in these statuses are immutable to the requester.
 LOCKED_STATUSES = {
@@ -175,6 +193,25 @@ def _format_window(
     return f"{span} ({label})"
 
 
+def _payload_for_display(payload: Any) -> Any:
+    """The stored payload, minus an uploaded Helm chart archive (it can be
+    megabytes of base64; the executor reads it from the row, a client never
+    needs it)."""
+    if not isinstance(payload, dict):
+        return payload
+    helm = ((payload.get("input") or {}).get("helm")) if isinstance(payload.get("input"), dict) else None
+    if not isinstance(helm, dict) or not helm.get("chartArchiveBase64"):
+        return payload
+    size = len(str(helm.get("chartArchiveBase64") or "")) * 3 // 4
+    return {
+        **payload,
+        "input": {
+            **payload["input"],
+            "helm": {**helm, "chartArchiveBase64": f"<uploaded chart archive, ~{size} bytes>"},
+        },
+    }
+
+
 def serialize_item(item: ChangeBundleItem) -> Dict[str, Any]:
     return {
         "id": item.id,
@@ -186,7 +223,7 @@ def serialize_item(item: ChangeBundleItem) -> Dict[str, Any]:
         "resourceKind": item.resource_kind,
         "resourceName": item.resource_name,
         "oldPayload": item.old_payload_json,
-        "newPayload": item.new_payload_json,
+        "newPayload": _payload_for_display(item.new_payload_json),
         "yamlPreview": item.yaml_preview,
         "validationStatus": item.validation_status,
         "validationMessage": item.validation_message,
@@ -427,6 +464,7 @@ def build_item_preview(action_type: str, payload: Dict[str, Any]) -> Dict[str, A
         "edit_configmap",
         "edit_secret",
         "edit_ingress",
+        "edit_resource",
         "update_env",
         "update_resources",
         "update_hpa",
@@ -497,6 +535,9 @@ def build_item_preview(action_type: str, payload: Dict[str, Any]) -> Dict[str, A
             "namespace": namespace,
         }
 
+    if action_type in HELM_ACTIONS:
+        return _build_helm_preview(action_type, payload, namespace, resource_name)
+
     if action_type == "delete_deployment":
         if not resource_name:
             raise ChangeBundleError("A target resource name is required to delete.", 400)
@@ -510,6 +551,52 @@ def build_item_preview(action_type: str, payload: Dict[str, Any]) -> Dict[str, A
         }
 
     raise ChangeBundleError(f"Unsupported action type: {action_type}", 400)
+
+
+def _build_helm_preview(
+    action_type: str, payload: Dict[str, Any], namespace: str, release_name: str
+) -> Dict[str, Any]:
+    """Preview + execution descriptor for a queued Helm change.
+
+    ``helmPreview`` (the rendered manifest, or the values) is supplied by
+    helm_service when it queues the change; a Helm item staged some other way
+    gets a plain summary of what will run.
+    """
+    helm = payload.get("helm") or {}
+    release_name = release_name or str(helm.get("releaseName") or helm.get("release_name") or "").strip()
+    namespace = namespace or str(helm.get("namespace") or "").strip()
+    if not release_name:
+        raise ChangeBundleError("A Helm release name is required.", 400)
+    if not namespace:
+        raise ChangeBundleError("A namespace is required for a Helm change.", 400)
+    execution: Dict[str, Any] = {"mode": "helm", "helmAction": action_type}
+    preview = str(payload.get("helmPreview") or "")
+    if action_type in ("helm_install", "helm_upgrade"):
+        if not helm:
+            raise ChangeBundleError("The Helm chart parameters are required.", 400)
+        if not preview:
+            chart = helm.get("chartName") or helm.get("chartTemplateId") or "uploaded chart"
+            label = f"{chart} {helm.get('chartVersion') or ''}".strip()
+            preview = (
+                f"# helm {action_type.split('_', 1)[1]} {release_name} ({label}) "
+                f"in namespace {namespace}\n# Values:\n"
+                + str(helm.get("valuesYaml") or helm.get("values_yaml") or "# (chart defaults)\n")
+            )
+    elif action_type == "helm_rollback":
+        revision = payload.get("revision")
+        execution["revision"] = revision
+        if not preview:
+            target = f"revision {revision}" if revision else "the previous revision"
+            preview = f"# helm rollback {release_name} in namespace {namespace} to {target}\n"
+    elif not preview:
+        preview = f"# helm uninstall {release_name} in namespace {namespace}\n"
+    return {
+        "yamlPreview": preview,
+        "execution": execution,
+        "resourceKind": "HelmRelease",
+        "resourceName": release_name,
+        "namespace": namespace,
+    }
 
 
 def _revalidate_draft_items(bundle: ChangeBundle) -> None:
@@ -543,6 +630,12 @@ def _validate_item_now(item: ChangeBundleItem) -> None:
         else:
             item.validation_status = "valid"
             item.validation_message = None
+    elif mode == "helm" and item.action_type in ("helm_install", "helm_upgrade"):
+        # The rendered manifest (when helm could render it) is checked against
+        # the linked registries like a YAML apply; execution re-checks too.
+        _checks, blocking, image_err = check_registry_images(item.yaml_preview or "")
+        item.validation_status = "invalid" if blocking else "valid"
+        item.validation_message = image_err if blocking else None
     else:
         # scale / delete: identifiers already checked when building the preview.
         item.validation_status = "valid"
@@ -552,6 +645,16 @@ def _validate_item_now(item: ChangeBundleItem) -> None:
 # ---------------------------------------------------------------------------
 # Item CRUD
 # ---------------------------------------------------------------------------
+
+def _assert_may_stage(user: Optional[User], action_type: str) -> None:
+    if user is None or action_type not in _STAGING_REQUIRES_PERMISSION:
+        return
+    from ..access_engine import user_has_permission
+
+    needed = ACTION_TYPES[action_type]["permission"]
+    if not user_has_permission(user, needed):
+        raise ChangeBundleError(f"Staging this change requires the {needed} permission.", 403)
+
 
 def add_item(user: Optional[User], bundle_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     bundle = get_bundle_or_error(bundle_id)
@@ -589,6 +692,7 @@ def add_item(user: Optional[User], bundle_id: int, payload: Dict[str, Any]) -> D
             f"You do not have access to {namespace} in this cluster.", 403
         )
 
+    _assert_may_stage(user, action_type)
     built = build_item_preview(action_type, payload)
     resolved_namespace = built.get("namespace") or namespace
     if user is not None and resolved_namespace and not can_access_namespace(
@@ -610,7 +714,7 @@ def add_item(user: Optional[User], bundle_id: int, payload: Dict[str, Any]) -> D
         resource_name=built.get("resourceName") or "",
         old_payload_json=payload.get("oldPayload") or payload.get("old_payload"),
         new_payload_json={
-            "input": {k: v for k, v in payload.items() if k not in ("oldPayload", "old_payload")},
+            "input": {k: v for k, v in payload.items() if k not in _PREVIEW_ONLY_KEYS},
             "execution": built.get("execution") or {"mode": "apply"},
         },
         yaml_preview=built.get("yamlPreview"),
@@ -668,6 +772,7 @@ def update_item(user: Optional[User], bundle_id: int, item_id: int, payload: Dic
 
     if user is not None and namespace and not can_access_namespace(user, cluster_id, namespace):
         raise ChangeBundleError(f"You do not have access to {namespace} in this cluster.", 403)
+    _assert_may_stage(user, action_type)
 
     built = build_item_preview(action_type, {**payload, "namespace": namespace})
     item.action_type = action_type
@@ -677,7 +782,7 @@ def update_item(user: Optional[User], bundle_id: int, item_id: int, payload: Dic
     item.resource_name = built.get("resourceName") or item.resource_name
     item.yaml_preview = built.get("yamlPreview")
     item.new_payload_json = {
-        "input": {k: v for k, v in payload.items() if k not in ("oldPayload", "old_payload")},
+        "input": {k: v for k, v in payload.items() if k not in _PREVIEW_ONLY_KEYS},
         "execution": built.get("execution") or {"mode": "apply"},
     }
     _validate_item_now(item)
@@ -714,6 +819,9 @@ def diff_item(user: Optional[User], bundle_id: int, item_id: int) -> Dict[str, A
                 "The applied manifest is available under \"View preview\".",
             }
 
+    if mode == "helm":
+        return {"mode": mode, "diff": _helm_item_diff(item)}
+
     if mode != "apply":
         return {"mode": mode, "diff": (item.yaml_preview or "").strip() or "No diff available."}
 
@@ -727,6 +835,50 @@ def diff_item(user: Optional[User], bundle_id: int, item_id: int) -> Dict[str, A
         raise ChangeBundleError(err, code)
     diff_text = (data or {}).get("diff", "") or "No differences from the current cluster state."
     return {"mode": "apply", "diff": diff_text}
+
+
+def _helm_item_diff(item: ChangeBundleItem) -> str:
+    """Diff for a queued Helm install/upgrade: the release's current manifest
+    (``helm get manifest``) against the rendered one staged in the item, both
+    with Secret values redacted. Other Helm actions (and any case where the
+    live release cannot be read) show the staged preview itself."""
+    import difflib
+
+    from ..k8s_provider import should_use_real_k8s
+
+    preview = (item.yaml_preview or "").strip()
+    marker = "# Rendered manifest"
+    if item.action_type not in ("helm_install", "helm_upgrade") or marker not in preview:
+        return preview or "No diff available."
+    if not should_use_real_k8s(item.cluster_id):
+        return preview
+    try:
+        from .deployment_service import sanitize_yaml_preview
+        from .helm_service import _resolve_access, is_helm_installed, run_helm
+
+        if not is_helm_installed():
+            return preview
+        try:
+            current = run_helm(
+                _resolve_access(item.cluster_id),
+                ["get", "manifest", item.resource_name, "-n", item.namespace],
+            )
+        except Exception:  # noqa: BLE001 — no release yet: a fresh install
+            current = ""
+        current = sanitize_yaml_preview(current) if current.strip() else ""
+        staged = preview.split(marker, 1)[1].split("\n", 1)[-1]
+        lines = list(
+            difflib.unified_diff(
+                current.splitlines(),
+                staged.splitlines(),
+                fromfile=f"{item.resource_name} (running)" if current else "(not installed)",
+                tofile=f"{item.resource_name} (staged)",
+                lineterm="",
+            )
+        )
+        return "\n".join(lines) or "No differences from the running release."
+    except Exception:  # noqa: BLE001 — a diff problem falls back to the preview
+        return preview
 
 
 def delete_bundle(user: Optional[User], bundle_id: int) -> None:
@@ -1258,23 +1410,31 @@ def gate_or_queue(
     action: str,
     target_type: str,
     target_id: str,
+    approval_context: Optional[str] = None,
 ) -> Optional[Tuple[Optional[Dict[str, Any]], Optional[str], int]]:
     """The approval rule for a direct change, as the write paths use it.
 
-    ``None`` → go ahead (the cluster needs no approval, or the user holds a live
-    approved deployment request). Otherwise a ``(data, error, status)`` triple to
+    ``None`` → go ahead (the cluster needs no approval, the user holds a live
+    approved deployment request, or ``approval_context`` names the approval
+    this change already has). Otherwise a ``(data, error, status)`` triple to
     return as-is: 202 with a pending-approval payload when the change was queued
-    as a change bundle, or the refusal when it could not be.
+    as a change bundle, or the refusal when it could not be. A change with no
+    user is never queued (nobody would own the bundle) — it is refused.
     """
     from .deployment_request_service import check_cluster_change_allowed
 
     denied = check_cluster_change_allowed(
-        user, cluster_id, action=action, target_type=target_type, target_id=target_id
+        user,
+        cluster_id,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        approval_context=approval_context,
     )
     if not denied:
         return None
     message, status = denied
-    if status != 403:
+    if status != 403 or user is None:
         return None, message, status
     try:
         bundle = queue_for_approval(

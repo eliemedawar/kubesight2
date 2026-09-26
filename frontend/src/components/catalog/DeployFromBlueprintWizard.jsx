@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { listClients } from "../../api";
 import {
   buildBlueprintDeployPlan,
-  deployFromBlueprint,
+  registerFromBlueprint,
   getServiceBlueprint,
   pickClusterResources,
   pickNamespaces,
@@ -27,7 +27,7 @@ const MAPPING_LABEL = {
   skip: "Skip",
 };
 
-const STEPS = ["Target", "Mapping", "Values", "Review", "Deploy"];
+const STEPS = ["Target", "Mapping", "Values", "Review", "Register"];
 
 function StepHeader({ step }) {
   return (
@@ -142,7 +142,7 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
 
       setStep(1);
     } catch (err) {
-      setError(err.message || "Failed to build deploy plan.");
+      setError(err.message || "Failed to build the registration plan.");
     } finally {
       setBusy(false);
     }
@@ -256,7 +256,7 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
     setBusy(true);
     setError("");
     try {
-      const appService = await deployFromBlueprint(blueprintId, {
+      const appService = await registerFromBlueprint(blueprintId, {
         name: target.name || undefined,
         clientId: target.clientId || undefined,
         environment: effectiveEnv,
@@ -269,7 +269,7 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
       setStep(4);
       onDeployed?.(appService);
     } catch (err) {
-      setError(err.message || "Deploy failed.");
+      setError(err.message || "Registering the instance failed.");
     } finally {
       setBusy(false);
     }
@@ -279,7 +279,7 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
 
   const renderTarget = () => (
     <section className="form-section">
-      <h4>Deployment target</h4>
+      <h4>Target</h4>
       <div className="form-grid">
         <label className="form-grid__full">
           App service name
@@ -645,9 +645,10 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
 
   const renderDone = () => (
     <section className="form-section">
-      <h4>Deployed</h4>
+      <h4>Registered</h4>
       <p>
-        App service <strong>{result?.name}</strong> created with {result?.componentCount} component mapping(s).
+        Instance <strong>{result?.name}</strong> registered with {result?.componentCount} component mapping(s).
+        Nothing was applied to the cluster.
       </p>
       {result?.topology?.nodes?.length > 0 && (
         <div>
@@ -670,8 +671,11 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
       <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}
         style={{ maxHeight: "90vh", overflowY: "auto" }}>
         <div className="modal-card__header">
-          <h3>Deploy From Blueprint</h3>
+          <h3>Register instance</h3>
           <p className="muted">{blueprintName}</p>
+          <p className="muted" style={{ fontSize: "0.78rem" }}>
+            Registering records the instance and its components in KubeSight. It does not apply anything to the cluster.
+          </p>
         </div>
 
         <StepHeader step={step} />
@@ -706,7 +710,7 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
               )}
               {step === 3 && (
                 <button type="button" className="primary" onClick={deploy} disabled={busy}>
-                  {busy ? "Deploying…" : "Deploy now"}
+                  {busy ? "Registering…" : "Register instance"}
                 </button>
               )}
             </>

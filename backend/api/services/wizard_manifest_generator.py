@@ -451,6 +451,69 @@ def _primary_service_port(svc_cfg: Dict[str, Any]) -> int:
     return int(svc_cfg.get("port") or 80)
 
 
+def _headless_service_document(
+    app_name: str,
+    namespace: str,
+    labels: Dict[str, str],
+    svc_cfg: Dict[str, Any],
+    containers: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """The governing headless Service a StatefulSet's ``serviceName`` points at.
+
+    Ports mirror the regular Service when one is enabled (minus nodePort, which is
+    meaningless on a headless Service); otherwise they come from the container
+    ports. A headless Service with no ports is valid, so a portless StatefulSet
+    still gets its stable per-pod DNS.
+    """
+    ports: List[Dict[str, Any]] = []
+    if svc_cfg.get("enabled"):
+        for spec in _service_port_specs({**svc_cfg, "type": "ClusterIP"}):
+            spec.pop("nodePort", None)
+            ports.append(spec)
+    else:
+        seen = set()
+        for container in containers:
+            for raw in container.get("ports") or []:
+                try:
+                    port = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if port <= 0 or port in seen:
+                    continue
+                seen.add(port)
+                ports.append({"name": f"port-{port}", "protocol": "TCP", "port": port, "targetPort": port})
+
+    spec: Dict[str, Any] = {"clusterIP": "None", "selector": labels}
+    if ports:
+        spec["ports"] = ports
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": f"{app_name}-headless", "namespace": namespace, "labels": labels},
+        "spec": spec,
+    }
+
+
+# IngressClass names are DNS-1123 subdomains.
+INGRESS_CLASS_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+
+
+def _ingress_class_name(ing_cfg: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """Return (class_name_or_None, error). Empty means "use the cluster default"."""
+    raw = ing_cfg.get("ingressClassName")
+    if raw in (None, ""):
+        raw = ing_cfg.get("className")
+    value = _coerce_str(raw)
+    if not value:
+        return None, None
+    if len(value) > 253 or not INGRESS_CLASS_RE.match(value):
+        return None, (
+            f"Invalid ingress class '{value}': use lowercase letters, numbers, '-' and '.' "
+            "(Kubernetes DNS-1123 subdomain)"
+        )
+    return value, None
+
+
 def _build_probe(probe: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     probe_type = probe.get("type") or "http"
     initial_delay = int(probe.get("initialDelaySeconds") or 5)
@@ -701,6 +764,10 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
         })
 
     svc_cfg = networking.get("service") or {}
+    if workload_type == "StatefulSet":
+        # spec.serviceName references this governing Service; without it the pods
+        # get no stable network identity.
+        documents.append(_headless_service_document(app_name, namespace, labels, svc_cfg, containers))
     if svc_cfg.get("enabled") and workload_type in WORKLOAD_KINDS:
         svc_name = _sanitize_name(svc_cfg.get("name") or f"{app_name}-service")
         # The selector pins to the workload's pod template labels so routing
@@ -718,7 +785,10 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
 
     ing_cfg = networking.get("ingress") or {}
     if ing_cfg.get("enabled"):
-        ing_name = _sanitize_name(ing_cfg.get("name") or f"{app_name}-ingress")
+        ingress_class, class_err = _ingress_class_name(ing_cfg)
+        if class_err:
+            return "", {}, class_err
+        ing_name =_sanitize_name(ing_cfg.get("name") or f"{app_name}-ingress")
         svc_port = _primary_service_port(networking.get("service") or {})
         rules = [{
             "host": ing_cfg.get("host") or f"{app_name}.local",
@@ -741,6 +811,9 @@ def generate_wizard_manifests(payload: Dict[str, Any]) -> Tuple[str, Dict[str, A
             "metadata": {"name": ing_name, "namespace": namespace, "labels": labels},
             "spec": {"rules": rules},
         }
+        if ingress_class:
+            # Unset = the cluster's default IngressClass applies.
+            ing_doc["spec"] = {"ingressClassName": ingress_class, **ing_doc["spec"]}
         if ing_cfg.get("tlsEnabled") and ing_cfg.get("tlsSecret"):
             ing_doc["spec"]["tls"] = [{"hosts": [ing_cfg.get("host")], "secretName": ing_cfg["tlsSecret"]}]
         documents.append(ing_doc)

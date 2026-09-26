@@ -38,6 +38,13 @@ GROWN_HOSTS = {
 NEW_WORKER = {"role": "worker", "hostname": "w-2", "address": "10.0.0.22"}
 
 
+
+@pytest.fixture(autouse=True)
+def _cluster_needs_no_approval(no_cluster_approvals):
+    """Day-two changes are held to the built cluster's approval rule (see
+    test_cluster_approval_gate); these tests are about the changes themselves."""
+    yield
+
 @pytest.fixture()
 def finished_build(client, admin_token, ssh_profile, fake_ssh, app):
     """A completed single-CP build with a registered cluster."""

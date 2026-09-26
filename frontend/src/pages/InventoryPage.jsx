@@ -154,23 +154,12 @@ export default function InventoryPage({
             ? "Import reusable charts and deploy them by supplying only target details and exposed values."
             : "Choose a template or start from scratch to deploy workloads to your clusters. View deployed applications in Resources."
         }
-        actionLabel={
-          activeSection === "templates"
-            ? canDeploy
-              ? "Start From Scratch"
-              : canAddApp
-                ? "Add Application"
-                : undefined
-            : undefined
-        }
+        // One entry for everyone who can add an app: the modal offers Register,
+        // the Application Builder, and YAML / image / Helm deploys, each shown
+        // per permission. ("Start From Scratch" stays as the card below.)
+        actionLabel={activeSection === "templates" && canAddApp ? "Add Application" : undefined}
         onAction={
-          activeSection === "templates"
-            ? canDeploy
-              ? openWizardFromScratch
-              : canAddApp
-                ? () => setAddModalOpen(true)
-                : undefined
-            : undefined
+          activeSection === "templates" && canAddApp ? () => setAddModalOpen(true) : undefined
         }
       />
 
