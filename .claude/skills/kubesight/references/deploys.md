@@ -135,6 +135,12 @@ means having named the right release in the right namespace, which is the check
 it exists for. If you get it wrong, the refusal tells you the exact string;
 do not guess a second time, use the one it gave you.
 
+**On a cluster that requires approvals, Helm is queued, not refused.** Without a
+live approved request, install / upgrade / rollback / uninstall come back with
+`pendingApproval: true` and a change bundle id: the release (chart, version,
+values) waits for an approver and KubeSight runs it automatically once approved.
+Report it as "sent for approval as bundle #N", never as installed.
+
 **Uninstall deletes everything the chart created**, and depending on the chart
 that includes PersistentVolumeClaims — which a rollback does not bring back.
 Confirm with a person before calling it, every time, even when the request

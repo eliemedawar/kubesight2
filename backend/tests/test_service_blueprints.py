@@ -126,6 +126,10 @@ def test_deploy_from_blueprint_creates_app_service(client, admin_token):
     assert deploy_resp.status_code == 201, deploy_resp.get_json()
     app_service = deploy_resp.get_json()["data"]
     assert app_service["status"] == "active"  # bridged into the App Services tab
+    # Honest fields: this registers records, it never touches the cluster.
+    assert app_service["registered"] is True
+    assert app_service["appliedToCluster"] is False
+    assert "Nothing was applied to the cluster" in app_service["message"]
     assert app_service["namespace"] == "qr-prod"
     assert app_service["blueprintName"] == "QR Code Service"
 
@@ -163,6 +167,45 @@ def test_deploy_from_blueprint_creates_app_service(client, admin_token):
         f"/api/service-blueprints/{bp['id']}/app-services", headers=auth_headers(admin_token)
     ).get_json()["data"]
     assert by_bp["count"] == 1
+
+
+def test_register_alias_route_registers_instance(client, admin_token):
+    # /register is the honest alias of /deploy: same handler, DB records only.
+    bp = _create_blueprint(client, admin_token)
+    resp = client.post(
+        f"/api/service-blueprints/{bp['id']}/register",
+        json={"environment": "staging", "clusterId": "stage-cluster-1", "namespace": "qr-stage"},
+        headers=auth_headers(admin_token),
+    )
+    assert resp.status_code == 201, resp.get_json()
+    data = resp.get_json()["data"]
+    assert data["registered"] is True
+    assert data["appliedToCluster"] is False
+    assert data["namespace"] == "qr-stage"
+    # create_new components stay planned: nothing was materialized in Kubernetes.
+    assert all(m["status"] in ("planned", "linked", "skipped") for m in data["mappings"])
+    assert any(m["mappingType"] == "create_new" and m["status"] == "planned" for m in data["mappings"])
+
+    from api.models import ApplicationService
+    mirror = ApplicationService.query.get(data["applicationServiceId"])
+    assert mirror is not None
+    assert (mirror.description or "").startswith("Registered from blueprint")
+
+    # Audit keeps the stable action name, with the honest detail flags.
+    from api.models import AuditLog
+    entry = (
+        AuditLog.query.filter_by(action="app_service_created_from_blueprint", target_id=str(data["id"]))
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    assert entry is not None
+    assert entry.details["appliedToCluster"] is False
+    assert entry.details["registeredOnly"] is True
+
+
+def test_register_alias_requires_permission(client):
+    resp = client.post("/api/service-blueprints/1/register", json={})
+    assert resp.status_code in (401, 403)
 
 
 def test_deploy_links_client_to_app_service(client, admin_token):

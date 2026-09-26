@@ -240,7 +240,7 @@ export default function BlueprintEditorModal({ blueprint, categories = [], onClo
           <h3>{isEdit ? "Edit Service Blueprint" : "New Service Blueprint"}</h3>
           <p className="muted">
             Define the logical service design — components, topology, and requirements.
-            Real Kubernetes resources are chosen later at Deploy From Blueprint time.
+            Real Kubernetes resources are chosen later when you register an instance.
           </p>
         </div>
 

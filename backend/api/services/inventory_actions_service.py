@@ -113,8 +113,6 @@ def _approval_or_queue(
     ``None`` → go ahead. Otherwise the change was sent for approval as a change
     bundle (202, applied automatically once approved) or refused.
     """
-    if not user:
-        return None
     from .change_bundle_service import gate_or_queue
 
     action_type, verb = _QUEUE_AS[action]

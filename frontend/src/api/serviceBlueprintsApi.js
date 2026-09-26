@@ -19,7 +19,7 @@ export const deleteServiceBlueprint = (id) =>
   request(`/api/service-blueprints/${encodeURIComponent(id)}`, { method: "DELETE" });
 
 // ---------------------------------------------------------------------------
-// Deploy From Blueprint
+// Register instance from blueprint (DB records only — nothing is applied to the cluster)
 // ---------------------------------------------------------------------------
 
 // Pre-fill data for the deploy wizard: generated names, suggested namespace,
@@ -30,9 +30,10 @@ export const buildBlueprintDeployPlan = (id, target) =>
     body: target,
   });
 
-// Persist the resolved choices -> creates an AppService + component mappings.
-export const deployFromBlueprint = (id, payload) =>
-  request(`/api/service-blueprints/${encodeURIComponent(id)}/deploy`, {
+// Persist the resolved choices -> registers an AppService + component mappings.
+// Uses the /register alias (same handler as the legacy /deploy route).
+export const registerFromBlueprint = (id, payload) =>
+  request(`/api/service-blueprints/${encodeURIComponent(id)}/register`, {
     method: "POST",
     body: payload,
   });

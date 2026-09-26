@@ -224,7 +224,7 @@ function initAnswers(template, defaultClusterId) {
     },
     serviceExposure: initServiceExposure(template),
     ingress: schema.ingress?.supported
-      ? { host: "", path: "/", tls: { mode: "none", secret: "", cert: "", key: "" } }
+      ? { host: "", path: "/", ingressClassName: "", tls:{ mode: "none", secret: "", cert: "", key: "" } }
       : null,
     changeSummary: "",
   };
@@ -1582,6 +1582,10 @@ export default function SchemaDeployWizard({
               </Field>
               <Field label="Path">
                 <input value={answers.ingress?.path || ""} onChange={(e) => setIngress({ path: e.target.value })} placeholder="/" />
+              </Field>
+              <Field label="Ingress class">
+                <input value={answers.ingress?.ingressClassName || ""} onChange={(e) => setIngress({ ingressClassName: e.target.value.trim() })} placeholder="cluster default" />
+                <span className="wizard-field__hint muted">Leave empty to use the cluster's default IngressClass. Set it (e.g. nginx) when the cluster has no default or several controllers.</span>
               </Field>
               {schema.ingress?.tls ? (
                 <>

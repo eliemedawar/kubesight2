@@ -181,7 +181,12 @@ def _automation_runs_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "Run the deploy automation for one inbound ticket. This deploys what the "
         "ticket asks for, into the cluster the ticket names — it is a deploy, "
         "not a dry run, and it obeys that cluster's approval rules the same way "
-        "a manual deploy does. Read the ticket with kubesight_tickets_list first."
+        "a manual deploy does. Read the ticket with kubesight_tickets_list first. "
+        "It is checked by the same validator as kubesight_ticket_execute: the "
+        "ticket's target must be in the published catalog, and `confidence` "
+        "(your confidence in the ticket's fields; missing counts as Low) must "
+        "meet the ticket agent's bar — otherwise it is refused and the action "
+        "belongs in kubesight_ticket_request_approval."
     ),
     approval="Runs through the ordinary deploy path, so an approval-gated cluster still gates it.",
     write=True,
@@ -190,6 +195,8 @@ def _automation_runs_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "properties": {
             "provider": {"type": "string"},
             "ticketRecordId": {"type": "integer", "description": "From kubesight_tickets_list."},
+            "confidence": {"type": "string", "enum": ["High", "Medium", "Low"]},
+            "concerns": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
         },
         "required": ["provider", "ticketRecordId"],
     },
@@ -202,7 +209,16 @@ def _automation_run_start(arguments: Dict[str, Any], *, user=None) -> Dict[str, 
     if record_id is None:
         raise ToolError("A ticketRecordId is required — kubesight_tickets_list has them.")
     try:
-        data = start_run(int(record_id), user=user, auto=False)
+        data = start_run(
+            int(record_id),
+            user=user,
+            auto=False,
+            origin="mcp",
+            decision={
+                "confidence": arguments.get("confidence"),
+                "concerns": arguments.get("concerns") if isinstance(arguments.get("concerns"), list) else [],
+            },
+        )
     except (TypeError, ValueError):
         raise ToolError("ticketRecordId must be a number.")
     except AutomationError as exc:

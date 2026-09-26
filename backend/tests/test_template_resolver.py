@@ -490,6 +490,29 @@ def test_ingress_create_tls_provisions_secret():
     assert yaml_text.index("kubernetes.io/tls") < yaml_text.index("kind: Ingress")
 
 
+def test_ingress_class_passes_through_to_manifest():
+    payload, err = resolve_template(
+        _base_template(),
+        _answers(ingress={"host": "orders.example.com", "ingressClassName": "nginx"}),
+    )
+    assert err is None
+    assert payload["networking"]["ingress"]["ingressClassName"] == "nginx"
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert "ingressClassName: nginx" in yaml_text
+
+
+def test_ingress_without_class_leaves_cluster_default():
+    payload, err = resolve_template(
+        _base_template(),
+        _answers(ingress={"host": "orders.example.com", "ingressClassName": ""}),
+    )
+    assert err is None
+    yaml_text, _, gen_err = generate_wizard_manifests(payload)
+    assert gen_err is None
+    assert "ingressClassName" not in yaml_text
+
+
 def test_ingress_create_tls_requires_cert_and_key():
     payload, err = resolve_template(
         _base_template(),

@@ -9,8 +9,9 @@ the cluster to 0.
 
 A gated YAML apply, restart, scale or rollback is not refused: it is sent for
 approval as a one-item change bundle (202, ``pendingApproval``) and the bundle
-executor applies it once another approver approves. Helm has no bundle form and
-is still refused.
+executor applies it once another approver approves. Helm install / upgrade /
+rollback / uninstall are queued the same way (with the chart, version and
+values) and run through helm_service by the executor.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -111,18 +112,29 @@ def test_admin_workload_action_allowed_with_an_approved_request(client, admin_to
     assert response.status_code == 200
 
 
-def test_admin_helm_rollback_and_uninstall_are_gated(app):
+def test_admin_helm_rollback_and_uninstall_are_queued(app):
+    from api.models import ChangeBundle
     from api.services.helm_service import rollback_release, uninstall_release
 
     _require(1)
     admin = _admin()
-    for call in (
-        lambda: rollback_release(admin, CLUSTER, NAMESPACE, "demo", run_helm_fn=_never),
-        lambda: uninstall_release(admin, CLUSTER, NAMESPACE, "demo", run_helm_fn=_never),
+    items = {}
+    for call, action in (
+        (lambda: rollback_release(admin, CLUSTER, NAMESPACE, "demo", 3, run_helm_fn=_never),
+         "helm_rollback"),
+        (lambda: uninstall_release(admin, CLUSTER, NAMESPACE, "demo", run_helm_fn=_never),
+         "helm_uninstall"),
     ):
         data, err, status = call()
-        assert status == 403 and data is None
-        assert "approved deployment request" in err
+        assert err is None and status == 202, err
+        assert data["pendingApproval"] is True and data["applied"] is False
+        bundle = ChangeBundle.query.get(data["bundleId"])
+        assert bundle.status == "pending_approval"
+        item = bundle.items[0]
+        assert item.action_type == action
+        assert item.resource_name == "demo" and item.namespace == NAMESPACE
+        items[action] = item
+    assert items["helm_rollback"].new_payload_json["execution"]["revision"] == 3
 
 
 def _never(*_args, **_kwargs):
@@ -342,3 +354,291 @@ def test_requester_may_still_decline_their_own_request(app):
     req = _pending_request_by(_admin())
     data = svc.decide_request(req.id, "decline", actor=_admin())
     assert data["declines"] == 1 or data["status"] == "declined"
+
+
+# ---------------------------------------------------------------------------
+# Helm install/upgrade queued with its parameters, then run on approval
+# ---------------------------------------------------------------------------
+
+HELM_MANIFEST = (
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: demo\nspec:\n"
+    "  template:\n    spec:\n      containers:\n        - name: web\n"
+    "          image: registry.example.com/demo:1.0\n"
+)
+HELM_PAYLOAD = {
+    "clusterId": CLUSTER,
+    "namespace": NAMESPACE,
+    "releaseName": "demo",
+    "chartSource": "repository",
+    "chartName": "nginx",
+    "chartVersion": "1.0.0",
+    "valuesYaml": "replicaCount: 2\n",
+    "confirmation": "INSTALL demo IN payments",
+}
+
+
+def _fake_helm(calls):
+    def run(access, args, extra_env=None):
+        calls.append(list(args))
+        if args[0] == "template":
+            return HELM_MANIFEST
+        if args[0] == "list":
+            return "[]"
+        return "release installed"
+
+    return run
+
+
+def test_helm_install_is_queued_with_its_parameters_and_runs_once_approved(app):
+    from unittest.mock import patch
+
+    from api.models import ChangeBundle
+    from api.services.change_bundle_executor import process_due_bundles
+    from api.services.change_bundle_service import decide_bundle, diff_item
+    from api.services.helm_service import install_or_upgrade_release
+
+    _require(1)
+    queued_calls = []
+    with patch("api.services.helm_service.is_helm_installed", return_value=True), \
+            patch("api.services.helm_service.run_helm", side_effect=_fake_helm(queued_calls)):
+        data, err, status = install_or_upgrade_release(
+            _admin(), dict(HELM_PAYLOAD), HELM_PAYLOAD["confirmation"]
+        )
+    assert err is None and status == 202, err
+    assert data["pendingApproval"] is True
+    # Only rendered for the preview + image check; nothing installed yet.
+    assert not any(c[0] == "upgrade" for c in queued_calls)
+
+    bundle = ChangeBundle.query.get(data["bundleId"])
+    item = bundle.items[0]
+    assert item.action_type == "helm_install"
+    assert item.resource_kind == "HelmRelease" and item.resource_name == "demo"
+    helm = item.new_payload_json["input"]["helm"]
+    assert helm["chartName"] == "nginx" and helm["chartVersion"] == "1.0.0"
+    assert helm["valuesYaml"] == "replicaCount: 2\n"
+    assert "confirmation" not in helm  # the approval replaces the typed phrase
+    assert "helmPreview" not in item.new_payload_json["input"]
+    assert "Rendered manifest" in item.yaml_preview
+    assert "registry.example.com/demo:1.0" in item.yaml_preview
+    assert "registry.example.com/demo:1.0" in diff_item(None, bundle.id, item.id)["diff"]
+
+    decide_bundle(bundle.id, "approve", actor=_operator_approver())
+    run_calls = []
+    with patch("api.services.change_bundle_executor.should_use_real_k8s", return_value=True), \
+            patch("api.services.helm_service.is_helm_installed", return_value=True), \
+            patch("api.services.helm_service.run_helm", side_effect=_fake_helm(run_calls)):
+        process_due_bundles()
+    db.session.refresh(bundle)
+    assert bundle.status == "completed", bundle.items[0].execution_result
+    installs = [c for c in run_calls if c[0] == "upgrade"]
+    assert len(installs) == 1 and "--install" in installs[0]
+    assert "demo" in installs[0] and "nginx" in installs[0]
+    assert bundle.items[0].execution_result["mode"] == "helm"
+
+
+def test_helm_install_with_a_blocked_image_is_refused_not_queued(app):
+    from unittest.mock import patch
+
+    from api.models import ChangeBundle
+    from api.services.helm_service import install_or_upgrade_release
+
+    _require(1)
+    with patch("api.services.helm_service.is_helm_installed", return_value=True), \
+            patch("api.services.helm_service.run_helm", side_effect=_fake_helm([])), \
+            patch(
+                "api.services.helm_service.check_registry_images",
+                return_value=([], True, "Deployment blocked: image missing"),
+            ) as checked:
+        data, err, status = install_or_upgrade_release(
+            _admin(), dict(HELM_PAYLOAD), HELM_PAYLOAD["confirmation"]
+        )
+    assert data is None and status == 422 and "blocked" in err
+    assert "registry.example.com/demo:1.0" in checked.call_args[0][0]
+    assert ChangeBundle.query.count() == 0
+
+
+def test_helm_install_image_check_runs_on_ungated_clusters_too(app):
+    from unittest.mock import patch
+
+    from api.services.helm_service import install_or_upgrade_release
+
+    _require(0)
+    calls = []
+    with patch("api.services.helm_service.is_helm_installed", return_value=True), \
+            patch("api.services.helm_service.run_helm", side_effect=_fake_helm(calls)), \
+            patch(
+                "api.services.helm_service.check_registry_images",
+                return_value=([], True, "Deployment blocked: image missing"),
+            ):
+        _data, _err, status = install_or_upgrade_release(
+            _admin(), dict(HELM_PAYLOAD), HELM_PAYLOAD["confirmation"]
+        )
+    assert status == 422
+    assert not any(c[0] == "upgrade" for c in calls)
+
+
+def test_helm_staging_needs_the_helm_permission(app):
+    from api.services import change_bundle_service as bundles
+
+    viewer = User.query.filter_by(username="viewer").first()
+    draft = bundles.get_or_create_draft(viewer)
+    with pytest.raises(bundles.ChangeBundleError) as exc:
+        bundles.add_item(
+            viewer,
+            draft.id,
+            {
+                "actionType": "helm_uninstall",
+                "clusterId": CLUSTER,
+                "namespace": "default",
+                "resourceName": "demo",
+            },
+        )
+    assert exc.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# No user, no silent pass
+# ---------------------------------------------------------------------------
+
+def test_a_change_without_a_user_is_refused_unless_it_names_its_approval(app):
+    _require(1)
+    target = {"action": "apply", "target_type": "namespace", "target_id": f"{CLUSTER}/x"}
+    denied = svc.check_cluster_change_allowed(None, CLUSTER, **target)
+    assert denied is not None and denied[1] == 403
+    assert svc.check_cluster_change_allowed(
+        None, CLUSTER, approval_context="change_bundle:1", **target
+    ) is None
+    _require(0)
+    assert svc.check_cluster_change_allowed(None, CLUSTER, **target) is None
+
+
+def test_apply_without_a_user_is_refused_not_queued(app):
+    from api.models import ChangeBundle
+    from api.services.deployment_service import apply_yaml
+
+    _require(1)
+    data, err, status = apply_yaml(None, CLUSTER, NAMESPACE, MANIFEST, "")
+    assert data is None and status == 403 and err
+    assert ChangeBundle.query.count() == 0
+    # An internal caller holding an approval goes through.
+    data, err, status = apply_yaml(
+        None, CLUSTER, NAMESPACE, MANIFEST, "", run_kubectl=_kubectl_ok,
+        approval_context="change_bundle:1",
+    )
+    assert err is None and status == 200 and data["applied"] is True
+
+
+def _kubectl_ok(*_args, **_kwargs):
+    return "applied"
+
+
+# ---------------------------------------------------------------------------
+# Typed confirmation, checked on the server for the Deploy screens
+# ---------------------------------------------------------------------------
+
+def test_image_apply_route_checks_the_typed_phrase(client, admin_token):
+    _require(0)
+    body = {
+        "clusterId": CLUSTER,
+        "namespace": NAMESPACE,
+        "appName": "demo",
+        "dockerImage": "nginx",
+        "imageTag": "1.25",
+    }
+    wrong = client.post(
+        "/api/inventory/deploy/image/apply",
+        headers=auth_headers(admin_token),
+        json={**body, "confirmation": "APPLY default"},
+    )
+    assert wrong.status_code == 400
+    assert "APPLY payments" in wrong.get_json()["error"]
+    from unittest.mock import patch
+
+    with patch("api.services.deployment_service._run_kubectl_for_cluster", side_effect=_kubectl_ok):
+        right = client.post(
+            "/api/inventory/deploy/image/apply",
+            headers=auth_headers(admin_token),
+            json={**body, "confirmation": "APPLY payments"},
+        )
+    assert right.status_code == 200, right.get_json()
+
+
+def test_mcp_apply_needs_no_typed_phrase(client, admin_token):
+    from unittest.mock import patch
+
+    _require(0)
+    with patch("api.services.deployment_service._run_kubectl_for_cluster", side_effect=_kubectl_ok):
+        applied = call_tool(
+            client,
+            admin_token,
+            "kubesight_deploy_apply",
+            {"cluster": CLUSTER, "namespace": NAMESPACE, "yaml": MANIFEST},
+        )
+    assert not applied.get("isError"), applied
+
+
+# ---------------------------------------------------------------------------
+# edit_resource: the Edit YAML modal's fallback action type
+# ---------------------------------------------------------------------------
+
+def test_edit_resource_can_be_staged(app):
+    from api.services import change_bundle_service as bundles
+
+    admin = _admin()
+    draft = bundles.get_or_create_draft(admin)
+    result = bundles.add_item(
+        admin,
+        draft.id,
+        {
+            "actionType": "edit_resource",
+            "clusterId": CLUSTER,
+            "namespace": NAMESPACE,
+            "resourceKind": "ConfigMap",
+            "resourceName": "x",
+            "yaml": MANIFEST,
+        },
+    )
+    item = result["items"][0]
+    assert item["actionType"] == "edit_resource"
+    assert item["validationStatus"] == "valid"
+    assert item["newPayload"]["execution"]["mode"] == "apply"
+
+
+# ---------------------------------------------------------------------------
+# Cluster Builder day two on an onboarded cluster that needs approval
+# ---------------------------------------------------------------------------
+
+def _built_cluster_build():
+    from api.models import ClusterBuild
+
+    build = ClusterBuild(name="built", status="completed", result_cluster_id=CLUSTER)
+    db.session.add(build)
+    db.session.commit()
+    return build
+
+
+@pytest.mark.parametrize("suffix", ["addons", "grow", "bring-workloads"])
+def test_cluster_builder_day_two_is_refused_without_an_approval(client, admin_token, suffix):
+    build = _built_cluster_build()
+    _require(1)
+    response = client.post(
+        f"/api/cluster-builds/{build.id}/{suffix}",
+        headers=auth_headers(admin_token),
+        json={"addons": [{"id": "metrics-server"}]},
+    )
+    assert response.status_code == 403
+    assert "cannot be queued" in response.get_json()["error"]
+
+
+def test_cluster_builder_day_two_passes_the_gate_with_an_approved_request(client, admin_token):
+    build = _built_cluster_build()
+    _require(1)
+    _approved_request_for(_admin())
+    response = client.post(
+        f"/api/cluster-builds/{build.id}/addons",
+        headers=auth_headers(admin_token),
+        json={"addons": []},
+    )
+    # Past the gate: the service's own validation answers now.
+    assert response.status_code == 400
+    assert "cannot be queued" not in response.get_json()["error"]

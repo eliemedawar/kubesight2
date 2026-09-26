@@ -570,6 +570,14 @@ def _ensure_namespace(runner: RunKubectlFn, cluster_id: str, namespace: str) -> 
             raise
 
 
+def expected_apply_confirmation(namespace: str) -> str:
+    """The phrase a person types to confirm a YAML / image / wizard apply.
+
+    Must match what the UI shows ("Type APPLY <namespace>").
+    """
+    return f"APPLY {(namespace or '').strip()}"
+
+
 def apply_yaml(
     user: Optional[User],
     cluster_id: str,
@@ -577,7 +585,19 @@ def apply_yaml(
     yaml_content: str,
     confirmation: str,
     run_kubectl: Optional[RunKubectlFn] = None,
+    *,
+    enforce_confirmation: bool = False,
+    approval_context: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Validate and ``kubectl apply`` a manifest, honouring the approval gate.
+
+    ``enforce_confirmation`` is set by the user-facing routes: the typed phrase
+    (``APPLY <namespace>``) is then checked here on the server, not only in the
+    browser. Internal callers (bundle executor, automation, a version rollback
+    that checks its own phrase) and MCP tools leave it off. ``approval_context``
+    lets an internal caller that already holds an approval skip the gate
+    explicitly (see ``check_cluster_change_allowed``).
+    """
     if user and not user_has_permission(user, "apps:deploy"):
         log_audit(
             "unauthorized_deployment_attempt",
@@ -596,6 +616,11 @@ def apply_yaml(
             details={"action": "apply"},
         )
         return None, "Forbidden", 403
+
+    if enforce_confirmation:
+        expected = expected_apply_confirmation(namespace)
+        if (confirmation or "").strip() != expected:
+            return None, f'Confirmation must be exactly "{expected}"', 400
 
     validation, err, code = validate_yaml(yaml_content, namespace, user=user)
     if err:
@@ -616,20 +641,20 @@ def apply_yaml(
     # this user could apply is ever queued: without a live approved request, the
     # change is sent for approval as a change bundle and applied automatically
     # once approved (202, ``pendingApproval``). Local import avoids a cycle.
-    if user:
-        from .change_bundle_service import gate_or_queue
+    from .change_bundle_service import gate_or_queue
 
-        queued = gate_or_queue(
-            user,
-            cluster_id,
-            bundle_payload={"actionType": "apply_yaml", "namespace": namespace, "yaml": yaml_content},
-            what=f"apply YAML to {namespace}",
-            action="apply",
-            target_type="namespace",
-            target_id=f"{cluster_id}/{namespace}",
-        )
-        if queued is not None:
-            return queued
+    queued = gate_or_queue(
+        user,
+        cluster_id,
+        bundle_payload={"actionType": "apply_yaml", "namespace": namespace, "yaml": yaml_content},
+        what=f"apply YAML to {namespace}",
+        action="apply",
+        target_type="namespace",
+        target_id=f"{cluster_id}/{namespace}",
+        approval_context=approval_context,
+    )
+    if queued is not None:
+        return queued
 
     path = _write_temp_yaml(sanitize_for_apply(yaml_content))
     try:

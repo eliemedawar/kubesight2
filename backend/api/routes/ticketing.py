@@ -799,7 +799,9 @@ def start_automation_run(provider_key: str):
     if not ticket_record_id:
         return error_response("ticketRecordId is required.", 400)
     try:
-        data = automation_svc.start_run(int(ticket_record_id), user=get_current_user(), auto=False)
+        data = automation_svc.start_run(
+            int(ticket_record_id), user=get_current_user(), auto=False, origin="operator"
+        )
     except (TypeError, ValueError):
         return error_response("ticketRecordId must be a number.", 400)
     except AutomationError as exc:

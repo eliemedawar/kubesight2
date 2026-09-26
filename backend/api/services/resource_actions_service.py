@@ -402,25 +402,25 @@ def restart_resource(
 
     # The cluster's approval rule: without a live approved request the restart is
     # sent for approval and carried out automatically once approved (202).
-    if user:
-        from .change_bundle_service import gate_or_queue
+    # A call without a user is held to the rule too (refused, not queued).
+    from .change_bundle_service import gate_or_queue
 
-        queued = gate_or_queue(
-            user,
-            cluster_id,
-            bundle_payload={
-                "actionType": "restart_workload",
-                "namespace": namespace,
-                "resourceKind": _KIND_LABELS.get(normalized, normalized),
-                "resourceName": name,
-            },
-            what=f"restart {normalized}/{name}",
-            action="restart",
-            target_type=normalized,
-            target_id=f"{cluster_id}/{namespace}/{name}",
-        )
-        if queued is not None:
-            return queued
+    queued = gate_or_queue(
+        user,
+        cluster_id,
+        bundle_payload={
+            "actionType": "restart_workload",
+            "namespace": namespace,
+            "resourceKind": _KIND_LABELS.get(normalized, normalized),
+            "resourceName": name,
+        },
+        what=f"restart {normalized}/{name}",
+        action="restart",
+        target_type=normalized,
+        target_id=f"{cluster_id}/{namespace}/{name}",
+    )
+    if queued is not None:
+        return queued
 
     if normalized == "pod":
         args = ["delete", "pod", name, "-n", namespace]

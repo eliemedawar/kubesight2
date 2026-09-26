@@ -1,4 +1,9 @@
-"""Deploy From Blueprint — turn a logical blueprint into a real AppService.
+"""Register From Blueprint — record a logical blueprint as an AppService instance.
+
+Historically called "deploy"; the function/route names keep that word for
+compatibility, but NOTHING here talks to Kubernetes. Registering only writes
+KubeSight database rows (the instance, its component mappings and an App
+Services mirror). No manifest is rendered or applied to any cluster.
 
 Two phases:
 
@@ -8,12 +13,13 @@ Two phases:
    smart defaults (ports/resources/health/HPA/template), and the list of
    requirement values the deployer still has to supply.
 
-2. ``deploy_from_blueprint`` persists the resolved choices: it creates an
-   :class:`AppService` and one :class:`AppServiceComponentMapping` per logical
-   component (create_new / existing_resource / external_dependency / skip), links
-   the client, and audits the action. Actual materialization of new Kubernetes
-   objects is performed later by the deployment pipeline; mappings created here
-   carry the generated names + labels needed to do so.
+2. ``deploy_from_blueprint`` (alias ``register_from_blueprint``) persists the
+   resolved choices: it creates an :class:`AppService` and one
+   :class:`AppServiceComponentMapping` per logical component (create_new /
+   existing_resource / external_dependency / skip), links the client, and
+   audits the action. It does not create any Kubernetes object: ``create_new``
+   mappings stay ``planned`` and only carry the generated names + labels a
+   later, separate deployment step would need.
 
 Runtime topology (``get_app_service``) is resolved from the blueprint + mappings
 and the kubesight.io/* labels — never from hardcoded object names.
@@ -327,7 +333,7 @@ def _app_service_to_dict(app_service: AppService, *, detailed: bool = False) -> 
 
 
 # ---------------------------------------------------------------------------
-# Deploy
+# Register (legacy name: deploy)
 # ---------------------------------------------------------------------------
 
 def deploy_from_blueprint(
@@ -335,6 +341,11 @@ def deploy_from_blueprint(
     payload: Dict[str, Any],
     actor_user_id: Optional[int] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Register an instance of a blueprint: DB records only, no cluster change.
+
+    The response carries ``registered: True`` and ``appliedToCluster: False`` so
+    callers cannot mistake it for a Kubernetes deploy.
+    """
     bp = ServiceBlueprint.query.get(blueprint_id)
     if not bp:
         return None, "Service blueprint not found", 404
@@ -452,11 +463,23 @@ def deploy_from_blueprint(
             "clusterId": cluster_id,
             "namespace": namespace,
             "componentMappings": created,
+            "registeredOnly": True,
+            "appliedToCluster": False,
         },
     )
 
     data = _app_service_to_dict(app_service, detailed=True)
+    data["registered"] = True
+    data["appliedToCluster"] = False
+    data["message"] = (
+        f"Registered instance '{name}' with {created} component mapping(s). "
+        "Nothing was applied to the cluster."
+    )
     return data, None, 201
+
+
+# Honest name for the same operation; ``deploy_from_blueprint`` stays for callers.
+register_from_blueprint = deploy_from_blueprint
 
 
 # Workload kinds that map to an ApplicationServiceDeployment row (health/replicas).
@@ -469,10 +492,10 @@ def _link_application_service(
     client: Optional[Client],
     actor_user_id: Optional[int],
 ) -> None:
-    """Create an ApplicationService mirror of this deploy so it appears in the
-    App Services tab (workloads, health, runtime topology) and is linked to the
-    client. Best-effort: never fails the deploy. Idempotent enough — only runs
-    once per deploy and skips if already linked.
+    """Create an ApplicationService mirror of this registration so it appears in
+    the App Services tab (workloads, health, runtime topology) and is linked to
+    the client. Best-effort: never fails the registration. Idempotent enough —
+    only runs once per registration and skips if already linked.
     """
     from ..models import ApplicationService, ClientApplicationService
     from .application_service_service import create_service
@@ -525,7 +548,7 @@ def _link_application_service(
         for conn in bp.connections
     ]
 
-    description = f"Deployed from blueprint '{bp.name}'"
+    description = f"Registered from blueprint '{bp.name}'"
     if app_service.environment:
         description += f" ({app_service.environment})"
 
@@ -563,7 +586,7 @@ def _link_application_service(
 def prune_orphaned_app_services() -> int:
     """Delete blueprint instances whose ApplicationService mirror was removed
     (e.g. deleted from the App Services tab). Keeps the Service Catalog's
-    "deployed" counts accurate. Returns the number pruned.
+    "registered instance" counts accurate. Returns the number pruned.
     """
     from ..models import ApplicationService
 
