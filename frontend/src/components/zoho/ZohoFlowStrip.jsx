@@ -91,7 +91,7 @@ export default function ZohoFlowStrip({
   const secretSet = Boolean(config?.inboundSecretConfigured);
   const inboundTone = unresolved > 0 ? "danger" : secretSet ? "ok" : "warn";
   const inboundPill =
-    unresolved > 0 ? `${unresolved} unresolved` : secretSet ? "OK" : "No secret";
+    unresolved > 0 ? `${unresolved} unresolved` : secretSet ? "OK" : "Rejecting — no secret";
 
   // Deploy automation
   const activeRuns = runs.filter((r) => ACTIVE_RUN_STATUSES.has(r.status));

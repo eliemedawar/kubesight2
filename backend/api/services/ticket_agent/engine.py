@@ -937,6 +937,17 @@ def poll_telegram() -> int:
             _, task_id, verb, nonce = data.split(":", 3)
             if row.telegram_chat_id and not row.telegram_chat_id.startswith("@") and chat != row.telegram_chat_id:
                 raise AgentError("Wrong chat.", 403)
+            # An @handle cannot be matched against the numeric chat id Telegram
+            # reports, so the chat check above is skipped for it. With no
+            # approver list either, anyone who can see the button (a public
+            # channel's subscribers) could approve a deploy — fail closed.
+            if (row.telegram_chat_id or "").startswith("@") and not allow:
+                raise AgentError(
+                    "Approvals are refused: the chat is set by @name, so KubeSight cannot "
+                    "check where this press came from. Add an approver list, or use the "
+                    "numeric chat id.",
+                    403,
+                )
             if not _allowed(sender, allow):
                 raise AgentError("You are not on the approver list.", 403)
             who = f"@{sender['username']}" if sender.get("username") else (sender.get("first_name") or "Telegram user")

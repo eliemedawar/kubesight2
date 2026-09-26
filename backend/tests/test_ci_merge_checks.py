@@ -362,6 +362,83 @@ def test_the_webhook_refuses_a_wrong_or_missing_secret(
     )
 
 
+def _signed_post(client, slug, key, body, event="pullrequest:created"):
+    """Exactly what Bitbucket sends when the webhook's Secret field is set."""
+    import hashlib
+    import hmac as hmac_module
+    import json as json_module
+
+    raw = json_module.dumps(body).encode("utf-8")
+    signature = hmac_module.new(key.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+    return client.post(
+        f"/api/ci/merge-checks/inbound/{slug}",
+        data=raw,
+        content_type="application/json",
+        headers={"X-Hub-Signature": f"sha256={signature}", "X-Event-Key": event},
+    )
+
+
+def test_the_webhook_accepts_bitbuckets_real_hmac_signature(
+    app, client, admin_token, service_id
+):
+    _enable(client, admin_token, service_id)
+    slug = _slug(app, service_id)
+    secret = _secret(client, admin_token, service_id)
+
+    response = _signed_post(client, slug, secret, _pull_request_body())
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["data"]["state"] == "running"
+
+
+def test_the_webhook_refuses_a_bad_or_literal_signature(
+    app, client, admin_token, service_id
+):
+    _enable(client, admin_token, service_id)
+    slug = _slug(app, service_id)
+    secret = _secret(client, admin_token, service_id)
+
+    # Signed with the wrong key.
+    assert _signed_post(client, slug, "not-the-secret", _pull_request_body()).status_code == 401
+
+    # A valid signature over a DIFFERENT body than the one delivered.
+    import hashlib
+    import hmac as hmac_module
+
+    forged = hmac_module.new(secret.encode(), b'{"other": true}', hashlib.sha256).hexdigest()
+    assert (
+        client.post(
+            f"/api/ci/merge-checks/inbound/{slug}",
+            json=_pull_request_body(),
+            headers={"X-Hub-Signature": f"sha256={forged}"},
+        ).status_code
+        == 401
+    )
+
+    # The old behaviour compared X-Hub-Signature to the secret literally; the
+    # header is a signature now, so the raw secret in it is not a proof.
+    assert (
+        client.post(
+            f"/api/ci/merge-checks/inbound/{slug}",
+            json=_pull_request_body(),
+            headers={"X-Hub-Signature": secret},
+        ).status_code
+        == 401
+    )
+
+
+def test_the_webhook_still_takes_the_secret_in_the_query_string(
+    app, client, admin_token, service_id
+):
+    _enable(client, admin_token, service_id)
+    slug = _slug(app, service_id)
+    secret = _secret(client, admin_token, service_id)
+
+    response = client.post(
+        f"/api/ci/merge-checks/inbound/{slug}?secret={secret}", json=_pull_request_body()
+    )
+    assert response.status_code == 200
+
+
 def test_the_webhook_starts_a_build_pinned_to_the_pull_request_commit(
     app, client, admin_token, service_id
 ):

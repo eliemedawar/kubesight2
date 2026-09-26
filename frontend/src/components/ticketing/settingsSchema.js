@@ -204,7 +204,7 @@ const ZOHO_SECTIONS = [
     render: "webhook",
     pill: "secret",
     intro:
-      "Configure a Zoho Desk workflow rule to POST new DevOps Request tickets to this URL, sending the shared secret in the X-Ticketing-Secret header (X-Zoho-Secret is also accepted).",
+      "Configure a Zoho Desk workflow rule to POST new DevOps Request tickets to this URL, sending the shared secret in the X-Ticketing-Secret header (X-Zoho-Secret is also accepted). Until a secret is saved, every delivery is rejected.",
     done: (config) => Boolean(config?.inboundSecretConfigured),
     fields: [
       {
@@ -212,6 +212,7 @@ const ZOHO_SECTIONS = [
         type: "password",
         label: "Shared secret (X-Ticketing-Secret header)",
         secretOf: "inboundSecretConfigured",
+        generate: true,
         default: "",
       },
     ],
@@ -418,7 +419,7 @@ const JIRA_SECTIONS = [
     render: "webhook",
     pill: "secret",
     intro:
-      "Add a Jira webhook (or an Automation rule) that POSTs created/updated issues to this URL, sending the shared secret in the X-Ticketing-Secret header. The webhook must include the custom fields above in its payload.",
+      "Add a Jira webhook (or an Automation rule) that POSTs created/updated issues to this URL, sending the shared secret in the X-Ticketing-Secret header. The webhook must include the custom fields above in its payload. Until a secret is saved, every delivery is rejected.",
     done: (config) => Boolean(config?.inboundSecretConfigured),
     fields: [
       {
@@ -426,6 +427,7 @@ const JIRA_SECTIONS = [
         type: "password",
         label: "Shared secret (X-Ticketing-Secret header)",
         secretOf: "inboundSecretConfigured",
+        generate: true,
         default: "",
       },
     ],

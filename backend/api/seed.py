@@ -434,7 +434,7 @@ def seed_defaults() -> None:
     cluster_ids = ("prod-us-east", "staging-eu-west")
     _seed_role_cluster_access("viewer", cluster_ids)
     _seed_role_cluster_access("operator", cluster_ids)
-    # Hermes is source-analysis-only. It deliberately receives neither runtime
+    # Hermes holds exactly HERMES_AGENT_PERMISSIONS (ticket agent + analysis executor). It deliberately receives neither runtime
     # cluster grants nor any interactive session capability.
     hermes = User.query.filter_by(username="hermes-agent").first()
     if hermes and hermes.role:

@@ -388,6 +388,38 @@ def _migrate_renamed_permissions() -> None:
         logger.info("Carried %s role grant(s) from zoho:* to ticketing:*.", carried)
 
 
+def _grant_ticket_agent_to_ticket_managers() -> None:
+    """Introduce ``ticketing:agent`` without taking anything away.
+
+    The Hermes ticket-agent MCP tools used to answer under ``ticketing:manage``;
+    they now answer under the narrower ``ticketing:agent`` so the hermes-agent
+    service account can hold them without holding integration management. Every
+    role that held ``ticketing:manage`` when the new key appeared keeps the
+    tools by being granted ``ticketing:agent`` once.
+
+    Runs only while the permission row does not exist yet, i.e. once per
+    installation: an admin who later removes ``ticketing:agent`` from a custom
+    role is not overridden on the next restart.
+    """
+    from .models import Permission, Role
+    from .rbac_data import PERMISSIONS
+
+    if Permission.query.filter_by(key="ticketing:agent").first() is not None:
+        return
+    agent = Permission(key="ticketing:agent", description=dict(PERMISSIONS).get("ticketing:agent", ""))
+    db.session.add(agent)
+    db.session.flush()
+    granted = 0
+    for role in Role.query.all():
+        held = {perm.key for perm in role.permissions}
+        if "ticketing:manage" in held:
+            role.permissions.append(agent)
+            granted += 1
+    db.session.commit()
+    if granted:
+        logger.info("Granted ticketing:agent to %s role(s) holding ticketing:manage.", granted)
+
+
 def _sync_role_permissions() -> None:
     """Ensure every role has all permissions defined for it in ROLE_DEFINITIONS.
 
@@ -1242,4 +1274,5 @@ def run_migrations() -> None:
     _sync_role_permissions()
     # Must run BEFORE the prune: it reads the old rows the prune is about to drop.
     _migrate_renamed_permissions()
+    _grant_ticket_agent_to_ticket_managers()
     _prune_obsolete_permissions()

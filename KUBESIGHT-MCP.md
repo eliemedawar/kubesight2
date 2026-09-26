@@ -36,6 +36,7 @@ worth a minute:
 | operate workloads | + `apps:deploy` |
 | deploy | + `apps:dryrun`, `apps:diff`, and `deployment_requests:request` so it can ask |
 | manage Helm | + `helm:upgrade`, `helm:rollback`; add `helm:uninstall` only deliberately |
+| run the Hermes ticket agent (and nothing else) | mint the token **for the `hermes-agent` user** (API Tokens → create for another user). That role is fixed to `ticketing:view` + `ticketing:agent` + `applications:execute`: it sees the `kubesight_ticket_*` tools and cannot touch integration settings, clusters or users |
 
 `ci_merge_checks:manage` deserves its own moment. It is the only permission here
 that changes what is *allowed to be merged*, across every service that inherits

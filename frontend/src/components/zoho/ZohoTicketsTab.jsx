@@ -138,7 +138,12 @@ export default function ZohoTicketsTab({
         {inboundSecretConfigured ? (
           <span className="status-pill ok">Webhook secret set</span>
         ) : (
-          <span className="status-pill warn">Webhook open — no secret</span>
+          <span
+            className="status-pill warn"
+            title="Inbound secret not configured — webhooks are rejected. Set one in Settings → Inbound webhook."
+          >
+            Webhooks rejected — no secret
+          </span>
         )}
         <span className="sg-zh-hookstrip-text">{providerName} posts new tickets to</span>
         <span className="sg-zh-hookurl mono">{webhookUrl}</span>

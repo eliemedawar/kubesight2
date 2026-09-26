@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { generateWebhookSecret, inboundWebhookState } from "../../utils/webhookSecret.js";
 import { CopyButton } from "../zoho/common.jsx";
 import { IconAlert, IconCheck } from "../zoho/icons.jsx";
 import JenkinsSection from "./JenkinsSection.jsx";
@@ -41,12 +42,10 @@ function sectionPill(kind, config) {
           {config?.ticketWritebackEnabled ? "On" : "Off"}
         </span>
       );
-    case "secret":
-      return config?.inboundSecretConfigured ? (
-        <span className="status-pill ok">Secret configured</span>
-      ) : (
-        <span className="status-pill warn">Open — no secret set</span>
-      );
+    case "secret": {
+      const state = inboundWebhookState(Boolean(config?.inboundSecretConfigured));
+      return <span className={`status-pill ${state.tone}`}>{state.label}</span>;
+    }
     default:
       // A literal string is a plain informational chip.
       return <span className="sg-zh-count">{kind}</span>;
@@ -56,6 +55,9 @@ function sectionPill(kind, config) {
 function Field({ field, form, config, setField, readOnly }) {
   const value = form[field.key];
   const disabled = readOnly;
+  // A generated secret is shown in clear until saved: the operator has to copy
+  // it into the sender, and the API never returns it afterwards.
+  const [revealed, setRevealed] = useState(false);
 
   if (field.type === "checkbox") {
     return (
@@ -99,18 +101,51 @@ function Field({ field, form, config, setField, readOnly }) {
       : ""
     : field.placeholder;
 
+  const inputType =
+    field.type === "password" && !revealed
+      ? "password"
+      : field.type === "number"
+      ? "number"
+      : "text";
+  const input = (
+    <input
+      type={inputType}
+      min={field.min}
+      value={value ?? ""}
+      onChange={(e) => setField(field.key, e.target.value)}
+      placeholder={placeholder}
+      autoComplete={field.type === "password" ? "new-password" : "off"}
+      disabled={disabled}
+      className={revealed ? "mono" : undefined}
+    />
+  );
+
   return (
     <label title={field.title}>
       {field.label}
-      <input
-        type={field.type === "password" ? "password" : field.type === "number" ? "number" : "text"}
-        min={field.min}
-        value={value ?? ""}
-        onChange={(e) => setField(field.key, e.target.value)}
-        placeholder={placeholder}
-        autoComplete={field.type === "password" ? "new-password" : "off"}
-        disabled={disabled}
-      />
+      {field.generate && !disabled ? (
+        <div className="sg-zh-url">
+          {input}
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => {
+              setField(field.key, generateWebhookSecret());
+              setRevealed(true);
+            }}
+          >
+            Generate
+          </button>
+          {revealed && value ? <CopyButton text={value} /> : null}
+        </div>
+      ) : (
+        input
+      )}
+      {revealed && value ? (
+        <span className="field-hint">
+          Copy this into the sender now, then save — it is not shown again.
+        </span>
+      ) : null}
       {field.hint ? <span className="field-hint">{field.hint}</span> : null}
     </label>
   );
@@ -223,6 +258,12 @@ export default function TicketingSettingsTab({
               pill={sectionPill(section.pill, config)}
             >
               {section.intro ? <p className="muted">{section.intro}</p> : null}
+
+              {section.render === "webhook" && !config?.inboundSecretConfigured ? (
+                <p className="sg-zh-webhook-closed" role="alert">
+                  <IconAlert /> {inboundWebhookState(false).detail}
+                </p>
+              ) : null}
 
               {section.render === "webhook" ? (
                 <div className="sg-zh-url">
