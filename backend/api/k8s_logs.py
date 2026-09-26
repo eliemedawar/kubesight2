@@ -38,8 +38,14 @@ def fetch_pod_logs(
     pod_name: str,
     container_name: str,
     since_seconds: int,
+    *,
+    raise_errors: bool = False,
 ) -> str:
-    """Return pod log text with timestamps from kubectl logs --since."""
+    """Return pod log text with timestamps from kubectl logs --since.
+
+    By default a kubectl failure reads as empty logs; ``raise_errors`` lets a
+    caller that must tell "quiet" from "unreadable" see the error.
+    """
     args = [
         "logs",
         pod_name,
@@ -53,6 +59,8 @@ def fetch_pod_logs(
     try:
         return _run_for_access(access, args)
     except K8sCommandError:
+        if raise_errors:
+            raise
         return ""
 
 
@@ -183,7 +191,11 @@ def scan_pod_logs_for_matches(
     context_before: int,
     context_after: int,
     max_lines: int,
+    failed_containers: Optional[List[str]] = None,
 ) -> List[PodLogMatch]:
+    """Scan every container of ``pod``. When ``failed_containers`` is given,
+    containers whose logs could not be read are appended to it (and skipped)
+    instead of silently reading as "no matches"."""
     meta = pod.get("metadata", {}) or {}
     pod_name = meta.get("name")
     if not pod_name:
@@ -191,7 +203,16 @@ def scan_pod_logs_for_matches(
 
     results: List[PodLogMatch] = []
     for container_name in pod_container_names(pod):
-        log_text = fetch_pod_logs(access, namespace, pod_name, container_name, since_seconds)
+        if failed_containers is None:
+            log_text = fetch_pod_logs(access, namespace, pod_name, container_name, since_seconds)
+        else:
+            try:
+                log_text = fetch_pod_logs(
+                    access, namespace, pod_name, container_name, since_seconds, raise_errors=True
+                )
+            except K8sCommandError:
+                failed_containers.append(container_name)
+                continue
         for match in find_log_matches(
             log_text,
             match_type=match_type,

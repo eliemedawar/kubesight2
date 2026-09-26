@@ -815,6 +815,12 @@ def _migrate_alert_routing_user_receivers() -> None:
         return
     _add_column_if_missing("alert_routing_receivers", "user_id", "INTEGER")
     _add_column_if_missing("alert_routing_receivers", "role_id", "INTEGER")
+    # Receiver filters (severity list / namespace + cluster globs). Declared on
+    # the model from the start but never read until dispatch honoured them;
+    # make sure older databases have them.
+    _add_column_if_missing("alert_routing_receivers", "severity_filter", "JSON")
+    _add_column_if_missing("alert_routing_receivers", "namespace_filter", "VARCHAR(253)")
+    _add_column_if_missing("alert_routing_receivers", "cluster_filter", "VARCHAR(120)")
 
     # Backfill: link existing static-email receivers to a matching active user by
     # email and promote them to 'user' receivers. Unmatched ones stay as legacy.
