@@ -159,7 +159,6 @@ def pipeline_stage_to_dict(row: CiPipelineStage) -> Dict[str, Any]:
         "imageScan": row.image_scan if isinstance(row.image_scan, dict) else None,
         "timeoutSeconds": row.timeout_seconds,
         "continueOnFailure": bool(row.continue_on_failure),
-        "parallelGroup": row.parallel_group,
         "enabled": bool(row.enabled),
     }
 

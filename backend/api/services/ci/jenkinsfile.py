@@ -1621,8 +1621,10 @@ def _read_stages(
 
         if parallel is not None and parallel.has_body and steps is None:
             # The parent is a container, not a stage. Its branches become
-            # consecutive stages tagged with its name, which is what the build
-            # engine reads today and what a parallel executor would read later.
+            # consecutive stages, because that is what the build engine does:
+            # it runs stages one after another. No group tag is emitted — a
+            # field that promised concurrency the engine never delivers would
+            # be the dishonest part of the import.
             group = raw_name or "parallel"
             draft.note(
                 INFO,
@@ -1673,8 +1675,6 @@ def _read_stages(
             "continueOnFailure": False,
             "enabled": True,
         }
-        if parallel_group:
-            stage["parallelGroup"] = parallel_group
 
         agent_stmt = _named(inner, "agent")
         if agent_stmt is not None:

@@ -26,6 +26,37 @@ from .runners.base import StageRequirements, available_runner_types, capabilitie
 HEARTBEAT_GRACE_SECONDS = 120
 _SELF_MANAGED_TYPES = frozenset({"mock", "kubernetes"})
 
+# The simulated runner executes no command and reports every stage green. That
+# is exactly right for mock mode (demos, the test suite) and exactly wrong for
+# an installation that talks to real clusters, where a "successful" build it ran
+# would be a lie a deploy could act on.
+MOCK_RUNNER_TYPE = "mock"
+MOCK_RUNNER_REFUSED = (
+    "The simulated 'mock' runner runs no commands, so it is never used while "
+    "KubeSight is connected to real clusters."
+)
+
+
+def mock_runner_permitted() -> bool:
+    """Whether the simulated runner may take work in this installation.
+
+    Only in mock mode. Fails closed: if the mode cannot be determined, a build
+    queues with an honest reason rather than going fake-green.
+    """
+    try:
+        from ...k8s_provider import is_real_mode_enabled
+
+        return not is_real_mode_enabled()
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def runner_usable_here(runner: CiRunner) -> bool:
+    """False for a runner this installation must never dispatch to."""
+    if runner.runner_type == MOCK_RUNNER_TYPE:
+        return mock_runner_permitted()
+    return True
+
 
 @dataclass
 class Selection:
@@ -67,12 +98,27 @@ def eligible_runners() -> List[CiRunner]:
         for row in rows
         # A runner whose adapter has not shipped yet must never be assigned to;
         # the build would be accepted and then stall with nothing driving it.
-        if row.runner_type in shipped and heartbeat_fresh(row)
+        if row.runner_type in shipped
+        and heartbeat_fresh(row)
+        and runner_usable_here(row)
     ]
 
 
 def _has_capacity(runner: CiRunner) -> bool:
     return int(runner.current_load or 0) < max(1, int(runner.max_concurrent or 1))
+
+
+def runner_provides(runner: CiRunner) -> set:
+    """What a runner offers a stage: its capabilities AND its routing labels.
+
+    Operators tag agents with labels ("mac-mini-2", "gpu") precisely so a stage
+    can route to them; matching capabilities alone made those labels dead.
+    """
+    return {
+        str(item).strip().lower()
+        for item in list(runner.capabilities or []) + list(runner.labels or [])
+        if str(item).strip()
+    }
 
 
 def select_runner(requirements: StageRequirements) -> Selection:
@@ -81,9 +127,18 @@ def select_runner(requirements: StageRequirements) -> Selection:
     Ordering is by load ratio, then by least-recently-assigned, so work spreads
     across a fleet instead of piling onto whichever runner sorts first.
     """
+    if requirements.conflict:
+        return Selection(None, requirements.conflict)
     candidates = eligible_runners()
     if not candidates:
-        return Selection(None, "No CI runner is online.")
+        reason = "No CI runner is online."
+        if not mock_runner_permitted():
+            reason += (
+                " The simulated mock runner is never used while KubeSight is "
+                "connected to real clusters: enable the Kubernetes runner or "
+                "register an agent."
+            )
+        return Selection(None, reason)
 
     typed = [
         runner
@@ -99,12 +154,21 @@ def select_runner(requirements: StageRequirements) -> Selection:
     capable = [
         runner
         for runner in typed
-        if capabilities_cover(runner.capabilities, requirements.labels)
+        if capabilities_cover(runner_provides(runner), requirements.labels)
     ]
     if not capable:
         missing = _missing_capabilities(typed, requirements.labels)
         detail = ", ".join(sorted(missing)) if missing else "the required capabilities"
-        return Selection(None, f"No online runner provides: {detail}.")
+        if missing:
+            return Selection(None, f"No online runner provides: {detail}.")
+        needed = ", ".join(
+            sorted({str(l).strip().lower() for l in requirements.labels if str(l).strip()})
+        )
+        return Selection(
+            None,
+            f"No single online runner provides everything this build's stages "
+            f"need together: {needed}.",
+        )
 
     free = [runner for runner in capable if _has_capacity(runner)]
     if not free:
@@ -125,9 +189,7 @@ def _missing_capabilities(runners: List[CiRunner], labels) -> set:
     needed = {str(l).strip().lower() for l in (labels or []) if str(l).strip()}
     provided = set()
     for runner in runners:
-        provided.update(
-            str(c).strip().lower() for c in (runner.capabilities or []) if str(c).strip()
-        )
+        provided.update(runner_provides(runner))
     return needed - provided
 
 
@@ -166,7 +228,9 @@ def sync_builtin_runner_statuses(*, commit: bool = True) -> None:
             continue
         desired = (
             "online"
-            if runner.enabled and get_adapter(runner.runner_type) is not None
+            if runner.enabled
+            and get_adapter(runner.runner_type) is not None
+            and runner_usable_here(runner)
             else "offline"
         )
         if runner.status != desired:
@@ -201,6 +265,58 @@ def recompute_loads(*, commit: bool = True) -> None:
             changed = True
     if changed and commit:
         db.session.commit()
+
+
+def requirements_for_build(
+    stage_definitions: List[dict], stage_is_skipped=None
+) -> StageRequirements:
+    """What the WHOLE build needs from the one runner it is assigned.
+
+    A build runs on a single runner (``build.runner_id`` is set once, at
+    dispatch), so choosing from the first stage alone let a checkout stage with
+    no labels land an Android build on a box without the Android SDK. The union
+    of every stage that will actually run is the honest requirement.
+
+    ``stage_is_skipped(definition)`` lets the engine drop stages it already
+    knows will not run (a ``when`` clause that is false for this build, a type
+    nothing executes), so their labels do not block the build.
+    """
+    labels: List[str] = []
+    seen = set()
+    runner_types = []
+    resources: dict = {}
+    image = None
+    for definition in stage_definitions or []:
+        definition = definition or {}
+        if stage_is_skipped is not None and stage_is_skipped(definition):
+            continue
+        for label in definition.get("runnerLabels") or ():
+            key = str(label).strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                labels.append(key)
+        pinned = definition.get("runnerType") or None
+        if pinned and pinned not in runner_types:
+            runner_types.append(pinned)
+        if image is None and definition.get("image"):
+            image = definition.get("image")
+        if not resources and definition.get("resources"):
+            resources = definition.get("resources") or {}
+    conflict = None
+    if len(runner_types) > 1:
+        conflict = (
+            "This build's stages pin different runner types ("
+            + ", ".join(sorted(runner_types))
+            + "), but a build runs on one runner. Pin them to the same type, "
+            "or use labels instead."
+        )
+    return StageRequirements(
+        runner_type=runner_types[0] if len(runner_types) == 1 else None,
+        labels=tuple(labels),
+        image=image,
+        resources=resources,
+        conflict=conflict,
+    )
 
 
 def requirements_for(stage_definition: dict) -> StageRequirements:

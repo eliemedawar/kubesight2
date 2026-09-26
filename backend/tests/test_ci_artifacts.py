@@ -290,3 +290,35 @@ def test_purge_route_can_clean_everything_for_one_service(app, client, admin_tok
     ).get_json()["data"]
     assert body["deleted"] == 2
     assert body["usage"]["count"] == 0
+
+
+def test_purge_route_without_a_service_cleans_every_service_and_audits_it(
+    app, client, admin_token, store
+):
+    """No serviceId used to reach an undefined name AFTER the purge had run —
+    the files were gone and the caller got a 500 saying nothing happened."""
+    from api.models import AuditLog
+
+    with app.app_context():
+        first = _service()
+        second = _service(name="Wallet Service", slug="wallet-service")
+        _artifact(first, build_id=1, name="a.jar", age_days=0)
+        _artifact(second, build_id=2, name="b.jar", age_days=0)
+
+    response = client.post(
+        "/api/ci/artifacts/purge",
+        json={"olderThanDays": 0, "keepLast": 0},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["data"]["deleted"] == 2
+
+    with app.app_context():
+        entry = (
+            AuditLog.query.filter_by(action="ci_artifacts_purged")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert entry is not None
+        assert entry.target_type == "ci_artifacts"
+        assert entry.target_id == "all"

@@ -39,6 +39,7 @@ from ...db import db
 from ...models_ci import CiBuild, CiBuildStage, CiService
 from . import agents as agents_service
 from . import artifacts as artifacts_service
+from . import build_status as build_status_service
 from . import logs as logs_service
 from . import pipelines as pipelines_service
 from . import queue as queue_service
@@ -66,8 +67,17 @@ logger = logging.getLogger(__name__)
 # How many queued builds one tick will try to start. Keeps a flood of triggers
 # from monopolising the shared scheduler thread.
 _DISPATCH_PER_TICK = int(os.getenv("CI_DISPATCH_PER_TICK", "5"))
-# A running build with no progress for this long is presumed lost.
+# A running build with no PROGRESS for this long is presumed lost. Progress is
+# the latest of: a stage starting or ending, a log line arriving, and — for an
+# external agent — the agent heartbeating. A long build that keeps doing things
+# is never reaped by this; one whose runner went silent is.
 _STALE_BUILD_MINUTES = int(os.getenv("CI_STALE_BUILD_MINUTES", "60"))
+# The overall deadline is the sum of the snapshot's stage timeouts plus this
+# grace (dispatch, image pulls, artifact upload), never more than the hard cap.
+# The cap exists for a snapshot whose timeouts add up to something absurd.
+_BUILD_DEADLINE_GRACE_MINUTES = int(os.getenv("CI_BUILD_DEADLINE_GRACE_MINUTES", "30"))
+_BUILD_HARD_CAP_MINUTES = int(os.getenv("CI_BUILD_HARD_CAP_MINUTES", str(24 * 60)))
+_DEFAULT_STAGE_TIMEOUT_SECONDS = 1800
 
 # One pass at a time in this process. The dedicated CI ticker and the shared
 # scheduler can both ask, and a pass that overlapped its own previous run would
@@ -90,10 +100,21 @@ _last_bookkeeping = 0.0
 # claiming it pushed an image that does not exist. Skipping says the true thing.
 _DEFAULT_SUPPORTED_STAGE_TYPES = frozenset({"checkout", "command"})
 
+# Stage types no runner executes. They are no longer accepted on save (see
+# pipelines.RETIRED_STAGE_TYPES), but snapshots and pipelines stored before that
+# still carry them, and they must keep loading — and keep being skipped.
+_NEVER_EXECUTED_STAGE_TYPES = frozenset({"publish_artifact", "scan"})
+
 _STAGE_TYPE_PENDING_REASON = {
     "container_image": "Container image builds arrive with BuildKit.",
-    "publish_artifact": "Artifact publishing arrives with the registry integration.",
-    "scan": "Security scanning arrives with the scanner integration.",
+    "publish_artifact": (
+        "Publish-artifact stages have no executor. Declare the files as "
+        "artifacts on the stage that produces them, and remove this stage."
+    ),
+    "scan": (
+        "Scan stages have no executor. Use the image scan gate on the container "
+        "image stage, or run the scanner in a command stage, and remove this stage."
+    ),
 }
 
 # `backend-service` is the Service name k8s/ingress.yaml ships, so it is what a
@@ -515,22 +536,84 @@ def advance_build_now(build_id: int) -> None:
         _pass_lock.release()
 
 
+def _last_progress_at(build: CiBuild) -> Optional[datetime]:
+    """When this build last visibly did something."""
+    from ...models_ci import CiLogChunk
+
+    moments: List[Optional[datetime]] = [
+        _aware(build.started_at),
+        _aware(build.queued_at),
+    ]
+    stage_ids = []
+    for stage in build.stages:
+        stage_ids.append(stage.id)
+        moments.append(_aware(stage.started_at))
+        moments.append(_aware(stage.finished_at))
+    if stage_ids:
+        latest_log = (
+            db.session.query(db.func.max(CiLogChunk.created_at))
+            .filter(CiLogChunk.build_stage_id.in_(stage_ids))
+            .scalar()
+        )
+        moments.append(_aware(latest_log))
+    runner = build.runner
+    # Only an external agent's heartbeat says anything about this build: it is
+    # the agent executing it. Self-managed runners have no heartbeat at all.
+    if runner is not None and runner.runner_type not in ("mock", "kubernetes"):
+        moments.append(_aware(runner.last_heartbeat_at))
+    present = [moment for moment in moments if moment is not None]
+    return max(present) if present else None
+
+
+def _build_deadline_minutes(build: CiBuild) -> int:
+    """The overall budget: every stage's own timeout, plus grace, capped."""
+    stages = (build.pipeline_snapshot or {}).get("stages") or []
+    total_seconds = 0
+    for definition in stages:
+        try:
+            total_seconds += int(
+                (definition or {}).get("timeoutSeconds") or _DEFAULT_STAGE_TIMEOUT_SECONDS
+            )
+        except (TypeError, ValueError):
+            total_seconds += _DEFAULT_STAGE_TIMEOUT_SECONDS
+    budget = total_seconds // 60 + _BUILD_DEADLINE_GRACE_MINUTES
+    return max(1, min(budget, _BUILD_HARD_CAP_MINUTES))
+
+
 def _reap_stale_builds() -> None:
-    """Fail builds whose runner is no longer reporting.
+    """Fail builds whose runner is no longer reporting, or that ran out of time.
 
     Without this, a build orphaned by a backend restart or a deleted Job stays
-    'running' forever and holds a runner slot.
+    'running' forever and holds a runner slot. Two separate questions:
+
+    * **Idle** — nothing has happened for ``CI_STALE_BUILD_MINUTES``. Anchored to
+      the last progress, not to when the build started: a two-hour release
+      build that is still printing is healthy.
+    * **Overall** — the build outlived the sum of its stages' timeouts (plus
+      grace, never beyond ``CI_BUILD_HARD_CAP_MINUTES``).
     """
-    cutoff = _now() - timedelta(minutes=_STALE_BUILD_MINUTES)
+    now = _now()
+    idle_cutoff = now - timedelta(minutes=_STALE_BUILD_MINUTES)
     for build in CiBuild.query.filter(CiBuild.status == "running").all():
-        anchor = _aware(build.started_at) or _aware(build.queued_at)
-        if anchor and anchor < cutoff:
-            _fail_current_stage(
-                build,
-                f"No progress for {_STALE_BUILD_MINUTES} minutes; the runner stopped reporting.",
-                status="timeout",
+        started = _aware(build.started_at) or _aware(build.queued_at)
+        deadline = _build_deadline_minutes(build)
+        if started and started < now - timedelta(minutes=deadline):
+            message = (
+                f"The build exceeded its overall deadline of {deadline} minutes "
+                "(the sum of its stage timeouts plus grace)."
             )
-            _finish_build(build, "timeout", "The build exceeded its overall deadline.")
+            _fail_current_stage(build, message, status="timeout")
+            _finish_build(build, "timeout", message)
+            db.session.commit()
+            continue
+        last = _last_progress_at(build)
+        if last and last < idle_cutoff:
+            message = (
+                f"No progress for {_STALE_BUILD_MINUTES} minutes: no stage changed, "
+                "no log output arrived and the runner stopped reporting."
+            )
+            _fail_current_stage(build, message, status="timeout")
+            _finish_build(build, "timeout", message)
             db.session.commit()
 
 
@@ -719,10 +802,10 @@ def _dispatch_queued() -> None:
             db.session.commit()
             continue
 
-        definition = _definition_for(build, stage)
-        selection = scheduler_service.select_runner(
-            scheduler_service.requirements_for(definition)
-        )
+        # A build runs on ONE runner, so that runner has to satisfy every stage
+        # that will actually run — not only the first, which is usually a
+        # label-less checkout.
+        selection = scheduler_service.select_runner(_build_requirements(build))
         if not selection.ok:
             queue_service.requeue(build, selection.reason)
             continue
@@ -735,6 +818,9 @@ def _dispatch_queued() -> None:
         scheduler_service.acquire_slot(selection.runner)
         db.session.add(build)
         db.session.commit()
+        # INPROGRESS now when the commit is already known; otherwise when the
+        # checkout reports it (routes/ci_worker.report_meta).
+        build_status_service.report(build)
 
         _start_stage(build, stage)
         db.session.commit()
@@ -746,6 +832,22 @@ def _dispatch_queued() -> None:
         if build.status == "running" and (current is None or current.status == "pending"):
             _advance_one(build)
             db.session.commit()
+
+
+def _build_requirements(build: CiBuild):
+    """The union of what every stage that will run needs from the runner."""
+    definitions = [
+        _definition_for(build, stage)
+        for stage in sorted(build.stages, key=lambda s: s.position)
+    ]
+
+    def will_not_run(definition: Dict[str, Any]) -> bool:
+        stage_type = definition.get("stageType") or "command"
+        if stage_type in _NEVER_EXECUTED_STAGE_TYPES:
+            return True
+        return _condition_reason(build, definition) is not None
+
+    return scheduler_service.requirements_for_build(definitions, will_not_run)
 
 
 # ---------------------------------------------------------------------------
@@ -938,6 +1040,10 @@ def _finish_build(build: CiBuild, status: str, error: Optional[str]) -> None:
         build.error = error[:2000]
     scheduler_service.release_slot(build.runner_id)
     db.session.add(build)
+    # Only a build that actually ran is reported: one cancelled in the queue
+    # never posted INPROGRESS, so a STOPPED would be the first thing said.
+    if build.started_at is not None:
+        build_status_service.report(build)
 
 
 # ---------------------------------------------------------------------------

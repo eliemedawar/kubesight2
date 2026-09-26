@@ -40,11 +40,25 @@ export const cancelCiAnalysis = (analysisId) =>
  * `inputs` carries the answers to the proposal's required inputs, including
  * secret values — which is why this is the one call in the file that must never
  * be logged or retried blindly.
+ *
+ * A proposal is never saved until this is called. When the service's pipeline
+ * has been configured by hand the backend answers 409 (code
+ * "pipeline_customized") unless `replaceExisting` is true.
  */
-export const acceptCiAnalysis = (analysisId, { pipeline, applicationProfile, inputs } = {}) =>
+export const acceptCiAnalysis = (
+  analysisId,
+  { pipeline, applicationProfile, inputs, replaceExisting } = {}
+) =>
   request(`/api/ci/analyses/${encodeURIComponent(analysisId)}/accept`, {
     method: "POST",
-    body: { pipeline, applicationProfile, inputs },
+    body: { pipeline, applicationProfile, inputs, replaceExisting: Boolean(replaceExisting) },
+  });
+
+/** Discard a proposal. The service and its pipeline are left untouched. */
+export const rejectCiAnalysis = (analysisId, reason = "") =>
+  request(`/api/ci/analyses/${encodeURIComponent(analysisId)}/reject`, {
+    method: "POST",
+    body: { reason },
   });
 
 /** Correct what KubeSight believes the application is. */

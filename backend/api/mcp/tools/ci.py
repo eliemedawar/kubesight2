@@ -311,7 +311,7 @@ STAGE_FIELDS = {
     "name", "stageType", "runnerType", "runnerLabels", "image", "workingDirectory",
     "commands", "env", "secretRefs", "artifacts", "resources", "hostAliases",
     "runCondition", "imageScan", "timeoutSeconds", "continueOnFailure",
-    "parallelGroup", "enabled",
+    "enabled",
 }
 
 
@@ -511,7 +511,8 @@ _STAGE_SCHEMA = {
         "Other fields: image, runnerType, runnerLabels, workingDirectory, env, "
         "secretRefs [{name, envVar}], artifacts [{path, type, name}], "
         "hostAliases, runCondition, resources, timeoutSeconds, "
-        "continueOnFailure, parallelGroup, enabled. On a container_image stage, "
+        "continueOnFailure, enabled. Stages always run one after another, in "
+        "order. On a container_image stage, "
         "imageScan {enabled, scanner: trivy, threshold: critical|high|medium|low, "
         "onFail: block|warn, ignoreUnfixed} gates the push on a vulnerability "
         "scan of the image the stage just built — enabled=true means a "
