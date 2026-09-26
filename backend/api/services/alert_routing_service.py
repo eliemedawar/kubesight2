@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 import urllib.error
 import urllib.request
@@ -59,6 +60,107 @@ def resolve_receiver_emails(receiver: AlertRoutingReceiver) -> List[str]:
         _add(receiver.email_address)
     return out
 ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+
+# ── Receiver filters ────────────────────────────────────────────────────────
+# A receiver may narrow which alerts it gets. Semantics (all must match):
+#   severity_filter  JSON list of severities (info/warning/critical); the alert's
+#                    severity must be in the list. Empty list = every severity.
+#   namespace_filter comma-separated list of names or globs (*, ?), e.g.
+#                    "payments, prod-*". Empty = every namespace.
+#   cluster_filter   same, matched against the alert's cluster id (and the
+#                    cluster's display name when it is a registered cluster).
+# With a namespace/cluster filter set, an alert that has no namespace/cluster
+# (node-level, service or operational alerts) does not match — the filter is
+# an allow-list, like Alertmanager matchers on a missing label.
+RECEIVER_SEVERITY_LEVELS = ("info", "warning", "critical")
+NAMESPACE_FILTER_MAX_LENGTH = 253
+CLUSTER_FILTER_MAX_LENGTH = 120
+
+
+def _filter_patterns(raw: Optional[str]) -> List[str]:
+    return [part.strip() for part in str(raw or "").split(",") if part.strip()]
+
+
+def _normalize_severity_filter(raw: Any) -> List[str]:
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        items = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        raise ValueError("severityFilter must be a list of severities.")
+    out: List[str] = []
+    for item in items:
+        value = str(item or "").strip().lower()
+        if not value:
+            continue
+        if value not in RECEIVER_SEVERITY_LEVELS:
+            raise ValueError(
+                f"Unknown severity '{value}' in severityFilter (use info, warning, or critical)."
+            )
+        if value not in out:
+            out.append(value)
+    # Stable, severity-ordered output.
+    return [level for level in RECEIVER_SEVERITY_LEVELS if level in out]
+
+
+def _normalize_pattern_filter(raw: Any, *, label: str, max_length: int) -> Optional[str]:
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        raw = ",".join(str(item) for item in raw)
+    patterns = _filter_patterns(str(raw))
+    value = ", ".join(dict.fromkeys(patterns))
+    if len(value) > max_length:
+        raise ValueError(f"{label} filter is too long (max {max_length} characters).")
+    return value or None
+
+
+def _matches_any(value: Optional[str], patterns: List[str]) -> bool:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return False
+    return any(fnmatch.fnmatchcase(candidate, pattern) for pattern in patterns)
+
+
+def _cluster_display_name(cluster_id: str) -> Optional[str]:
+    try:
+        from ..cluster_store import get_active_cluster_by_public_id
+
+        cluster = get_active_cluster_by_public_id(cluster_id)
+    except Exception:
+        return None
+    if cluster is None:
+        return None
+    name = getattr(cluster, "name", None)
+    if name is None and isinstance(cluster, dict):
+        name = cluster.get("name")
+    return str(name) if name else None
+
+
+def receiver_matches_alert(receiver: AlertRoutingReceiver, alert: Dict[str, Any]) -> bool:
+    """True when the alert passes the receiver's severity/namespace/cluster filters."""
+    severities = receiver.severity_filter if isinstance(receiver.severity_filter, list) else []
+    severities = [str(item).strip().lower() for item in severities if str(item).strip()]
+    if severities:
+        if str(alert.get("severity") or "").strip().lower() not in severities:
+            return False
+
+    namespace_patterns = _filter_patterns(receiver.namespace_filter)
+    if namespace_patterns and not _matches_any(alert.get("namespace"), namespace_patterns):
+        return False
+
+    cluster_patterns = _filter_patterns(receiver.cluster_filter)
+    if cluster_patterns:
+        cluster_id = str(alert.get("clusterId") or "").strip()
+        if not _matches_any(cluster_id, cluster_patterns):
+            names = [alert.get("clusterName")]
+            if cluster_id:
+                names.append(_cluster_display_name(cluster_id))
+            if not any(_matches_any(name, cluster_patterns) for name in names if name):
+                return False
+    return True
 METHODS_WITHOUT_BODY = {"GET", "HEAD", "OPTIONS"}
 WEBHOOK_TIMEOUT_SECONDS = 10
 
@@ -187,6 +289,11 @@ def _serialize_receiver(row: AlertRoutingReceiver) -> Dict[str, Any]:
         "headers": row.headers if isinstance(row.headers, dict) else {},
         "secretConfigured": bool(row.secret_encrypted),
         "enabled": bool(row.enabled),
+        "severityFilter": [
+            str(item) for item in (row.severity_filter if isinstance(row.severity_filter, list) else [])
+        ],
+        "namespaceFilter": row.namespace_filter or "",
+        "clusterFilter": row.cluster_filter or "",
         "groupNames": group_names,
         "assignedPolicies": assigned,
         "assignedPolicyNames": [policy["name"] for policy in assigned],
@@ -244,6 +351,33 @@ def _validate_receiver_payload(payload: Dict[str, Any], *, existing: Optional[Al
                 "HTTP method must be one of GET, POST, PUT, PATCH, DELETE, HEAD, or OPTIONS for webhook receivers."
             )
 
+    # Raises ValueError on bad input; values are applied by create/update.
+    if "severityFilter" in payload:
+        _normalize_severity_filter(payload.get("severityFilter"))
+    if "namespaceFilter" in payload:
+        _normalize_pattern_filter(
+            payload.get("namespaceFilter"), label="Namespace", max_length=NAMESPACE_FILTER_MAX_LENGTH
+        )
+    if "clusterFilter" in payload:
+        _normalize_pattern_filter(
+            payload.get("clusterFilter"), label="Cluster", max_length=CLUSTER_FILTER_MAX_LENGTH
+        )
+
+
+def _apply_receiver_filters(row: AlertRoutingReceiver, payload: Dict[str, Any]) -> None:
+    if "severityFilter" in payload:
+        row.severity_filter = _normalize_severity_filter(payload.get("severityFilter"))
+    elif row.severity_filter is None:
+        row.severity_filter = []
+    if "namespaceFilter" in payload:
+        row.namespace_filter = _normalize_pattern_filter(
+            payload.get("namespaceFilter"), label="Namespace", max_length=NAMESPACE_FILTER_MAX_LENGTH
+        )
+    if "clusterFilter" in payload:
+        row.cluster_filter = _normalize_pattern_filter(
+            payload.get("clusterFilter"), label="Cluster", max_length=CLUSTER_FILTER_MAX_LENGTH
+        )
+
 
 def create_receiver(payload: Dict[str, Any]) -> Dict[str, Any]:
     _validate_receiver_payload(payload)
@@ -263,6 +397,7 @@ def create_receiver(payload: Dict[str, Any]) -> Dict[str, Any]:
         headers=payload.get("headers") if isinstance(payload.get("headers"), dict) else {},
         enabled=bool(payload.get("enabled", True)),
     )
+    _apply_receiver_filters(row, payload)
     secret = payload.get("secret")
     if secret is not None and str(secret).strip():
         row.secret_encrypted = encrypt_secret(str(secret).strip())
@@ -303,6 +438,7 @@ def update_receiver(receiver_id: int, payload: Dict[str, Any]) -> Dict[str, Any]
         row.headers = payload["headers"]
     if "enabled" in payload:
         row.enabled = bool(payload["enabled"])
+    _apply_receiver_filters(row, payload)
 
     secret = payload.get("secret")
     if secret is not None and str(secret).strip():
@@ -878,8 +1014,13 @@ def _dispatch_to_destinations(
     if repeat_interval_seconds is not None:
         interval_seconds = max(1, int(repeat_interval_seconds))
 
-    summary: Dict[str, Any] = {"sent": 0, "skipped": 0, "errors": []}
+    summary: Dict[str, Any] = {"sent": 0, "skipped": 0, "filtered": 0, "errors": []}
     for receiver, group_name in destinations:
+        # Receiver filters apply on every path (policy alerts, groups,
+        # operational alerts) because they all funnel through here.
+        if not receiver_matches_alert(receiver, alert):
+            summary["filtered"] += 1
+            continue
         if not _due_for_repeat_delivery(alert_id, receiver.id, alert_status, interval_seconds):
             summary["skipped"] += 1
             continue
@@ -946,43 +1087,16 @@ def dispatch_policy_alert_notifications(alert: Dict[str, Any]) -> Dict[str, Any]
     )
 
 
-def dispatch_firing_alerts(alerts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    summary: Dict[str, Any] = {
-        "sent": 0,
-        "skipped": 0,
-        "failed": 0,
-        "errors": [],
-    }
+def prune_delivery_markers(active_alert_ids: List[str]) -> int:
+    """Delete delivery markers for alerts that are no longer active.
 
-    firing_ids = {
-        str(alert.get("id"))
-        for alert in alerts
-        if alert.get("status") in {"firing", "active"} and alert.get("id")
-    }
-
-    if firing_ids:
-        AlertRoutingDeliverySent.query.filter(
-            AlertRoutingDeliverySent.alert_id.notin_(list(firing_ids)),
-        ).delete(synchronize_session=False)
-        db.session.commit()
-
-    for alert in alerts:
-        if alert.get("status") not in {"firing", "active"}:
-            continue
-        if not alert.get("policyId"):
-            continue
-        result = dispatch_policy_alert_notifications(alert)
-        summary["sent"] += result.get("sent", 0)
-        summary["skipped"] += result.get("skipped", 0)
-        summary["errors"].extend(result.get("errors") or [])
-
-    summary["failed"] = len(summary["errors"])
-    if summary["sent"]:
-        summary["message"] = f"Delivered {summary['sent']} notification(s)."
-    elif summary["errors"]:
-        summary["message"] = summary["errors"][0]
-    elif summary["skipped"]:
-        summary["message"] = "Notifications already delivered for current alert state."
-    else:
-        summary["message"] = "No policy alerts with assigned receivers."
-    return summary
+    Called from the scheduler sweep (never from a read path). With no active
+    alerts at all every marker is stale.
+    """
+    query = AlertRoutingDeliverySent.query
+    ids = [str(alert_id) for alert_id in active_alert_ids if alert_id]
+    if ids:
+        query = query.filter(AlertRoutingDeliverySent.alert_id.notin_(ids))
+    removed = query.delete(synchronize_session=False)
+    db.session.commit()
+    return int(removed or 0)

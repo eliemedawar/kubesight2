@@ -88,6 +88,17 @@ def _scheduler_loop(app: Flask) -> None:
             logger.exception("Alert policy scheduler tick failed")
         try:
             with app.app_context():
+                from ..alert_notifier import dispatch_active_alert_notifications
+
+                # Repeat notifications for every still-active policy alert
+                # (metric, log, service, automation), gated per receiver by the
+                # policy's repeat interval. This is the only place repeats are
+                # sent — the alert list API is read-only.
+                dispatch_active_alert_notifications()
+        except Exception:
+            logger.exception("Alert notification sweep tick failed")
+        try:
+            with app.app_context():
                 from .deployment_request_service import auto_decline_overdue_requests
 
                 auto_decline_overdue_requests()

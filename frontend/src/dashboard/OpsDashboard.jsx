@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import ChartCanvas from "./charts/ChartCanvas.jsx";
 import Sparkline from "./charts/Sparkline.jsx";
-import { cssVar, drawArea, drawLines, drawStacked } from "./charts/chartDraw.js";
+import { cssVar, drawArea, drawStacked } from "./charts/chartDraw.js";
 import { TIME_RANGES } from "./useDashboardSeries.js";
 import { formatDashboardTime, formatLatestVersion } from "../utils/dashboardStatus.js";
 
@@ -25,13 +25,6 @@ function dotTone(status) {
 function statusLabel(status) {
   const s = String(status || "unknown").toLowerCase();
   return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-// Format a KB/s throughput figure the way the reference does.
-function fmtThroughput(value) {
-  const v = Number(value) || 0;
-  if (v >= 1000) return `${(v / 1000).toFixed(1)} MB/s`;
-  return `${Math.round(v)} KB/s`;
 }
 
 // Format a memory figure given in MiB as GiB (e.g. 31744 -> "31.0 GiB").
@@ -221,8 +214,10 @@ export default function OpsDashboard({
   // Same palette as var() names for DOM legend dots (no resolved hex in JSX).
   const bandTokens = ["--accent", "--chart-8", "--chart-3"];
   const cpuPeak = series?.cpu?.length ? Math.round(Math.max(...series.cpu)) : null;
-  const netIn = series?.netIn || [];
-  const netOut = series?.netOut || [];
+  // Charts need two real samples to draw a line; until then they say so rather
+  // than showing anything made up.
+  const cpuSamples = series?.cpu?.length || 0;
+  const memSamples = series?.mem?.length || 0;
 
   const cpuTrend = trend(series?.cpu);
   const memTrend = trend(series?.mem);
@@ -414,18 +409,30 @@ export default function OpsDashboard({
                   </i>
                 ))}
               </div>
-              {!series?.cpuReal ? <span className="ov-sample">sample split</span> : null}
+              {bands.length > 1 ? (
+                <span className="ov-sample" title="The cluster total is measured; the per-namespace split is estimated from each namespace's pod count.">
+                  split est. by pods
+                </span>
+              ) : null}
             </div>
           </div>
           <div className="ov-chart-wrap">
-            <ChartCanvas
-              className="ov-chart ov-chart--tall"
-              draw={(ctx, { width, height }) => {
-                if (!bands.length) return;
-                drawStacked(ctx, width, height, bands.map((b) => b.data), bandColors, 100, "%");
-              }}
-              deps={[bands, accent]}
-            />
+            {cpuSamples >= 2 ? (
+              <ChartCanvas
+                className="ov-chart ov-chart--tall"
+                draw={(ctx, { width, height }) => {
+                  if (!bands.length || (bands[0]?.data?.length || 0) < 2) return;
+                  drawStacked(ctx, width, height, bands.map((b) => b.data), bandColors, 100, "%");
+                }}
+                deps={[bands, accent]}
+              />
+            ) : (
+              <div className="ov-empty">
+                {series?.cpuReal
+                  ? "Collecting CPU samples — the chart fills in as the dashboard refreshes."
+                  : "No CPU metrics source (Metrics Server not available)."}
+              </div>
+            )}
           </div>
         </section>
 
@@ -480,14 +487,22 @@ export default function OpsDashboard({
             </div>
           </div>
           <div className="ov-chart-wrap">
-            <ChartCanvas
-              className="ov-chart"
-              draw={(ctx, { width, height }) => {
-                if (!series?.mem?.length) return;
-                drawArea(ctx, width, height, series.mem, PURPLE, 100, series.memLimit || 85, "%");
-              }}
-              deps={[series?.mem, series?.memLimit]}
-            />
+            {memSamples >= 2 ? (
+              <ChartCanvas
+                className="ov-chart"
+                draw={(ctx, { width, height }) => {
+                  if ((series?.mem?.length || 0) < 2) return;
+                  drawArea(ctx, width, height, series.mem, PURPLE, 100, series.memLimit || 85, "%");
+                }}
+                deps={[series?.mem, series?.memLimit]}
+              />
+            ) : (
+              <div className="ov-empty">
+                {series?.memReal
+                  ? "Collecting memory samples — the chart fills in as the dashboard refreshes."
+                  : "No memory metrics source (Metrics Server not available)."}
+              </div>
+            )}
           </div>
         </section>
 
@@ -495,29 +510,11 @@ export default function OpsDashboard({
           <div className="ov-card-h">
             <h3>Network I/O</h3>
             <span className="ov-card-sub">Cluster-wide throughput</span>
-            <div className="ov-card-r">
-              <div className="ov-legend">
-                <i>
-                  <span className="ov-sq" style={{ background: "var(--accent)" }} />
-                  Ingress <b className="ov-mono">{fmtThroughput(netIn[netIn.length - 1])}</b>
-                </i>
-                <i>
-                  <span className="ov-sq" style={{ background: "var(--chart-8)" }} />
-                  Egress <b className="ov-mono">{fmtThroughput(netOut[netOut.length - 1])}</b>
-                </i>
-              </div>
-              {!series?.netReal ? <span className="ov-sample">sample</span> : null}
-            </div>
           </div>
           <div className="ov-chart-wrap">
-            <ChartCanvas
-              className="ov-chart"
-              draw={(ctx, { width, height }) => {
-                if (!netIn.length || !netOut.length) return;
-                drawLines(ctx, width, height, [netIn, netOut], [accent, TEAL], 1600, " KB");
-              }}
-              deps={[netIn, netOut, accent]}
-            />
+            {/* KubeSight has no network metrics source yet (no CNI / Prometheus
+                integration). Show that plainly — never sample numbers. */}
+            <div className="ov-empty">No network metrics source.</div>
           </div>
         </section>
       </div>

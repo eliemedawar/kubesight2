@@ -359,15 +359,9 @@ def _validate_payload(
 
 
 def list_policies(user: Optional[User], cluster_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    if cluster_id:
-        from .alert_policy_evaluator import evaluate_policies_for_cluster
-
-        evaluate_policies_for_cluster(cluster_id, user=user, persist=True)
-        # Service policies are cluster-agnostic; keep them fresh and visible in
-        # cluster-filtered views too (evaluation is due-gated, so this is cheap).
-        if cluster_id != SERVICE_ALERT_CLUSTER_ID:
-            evaluate_policies_for_cluster(SERVICE_ALERT_CLUSTER_ID, user=user, persist=True)
-
+    # Read-only. Evaluation (which can fire alerts and send notifications) runs
+    # on the background scheduler, on create/update, and on the explicit
+    # POST /alert-policies/evaluate — never as a side effect of listing.
     query = AlertPolicy.query.order_by(AlertPolicy.name.asc())
     if cluster_id:
         query = query.filter(

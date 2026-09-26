@@ -10,6 +10,7 @@ from ..access_engine import can_view_alert, is_admin
 from ..alert_policy_catalog import normalize_log_config
 from ..db import db
 from ..k8s_logs import find_log_matches, scan_pod_logs_for_matches
+from ..k8s_provider import K8sCommandError
 from ..models import AlertHistory, AlertPolicy, LogAlertSeen, User
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,84 @@ def _history_to_log_alert_dict(row: AlertHistory) -> Dict[str, Any]:
     }
 
 
+def log_resolve_after_seconds(policy: AlertPolicy, log_config: Dict[str, Any]) -> int:
+    """Quiet period after which an active log alert auto-resolves.
+
+    ``logConfig.resolveAfterSeconds`` when set; otherwise the longer of the
+    scan window and the evaluation interval (a shorter quiet period could be
+    shorter than the gap between two scans).
+    """
+    from ..alert_policy_catalog import DEFAULT_EVALUATION_INTERVAL_SECONDS
+
+    configured = log_config.get("resolveAfterSeconds")
+    if configured:
+        return int(configured)
+    interval = int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS)
+    return max(int(log_config.get("logWindowSeconds") or 60), interval)
+
+
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _parse_iso(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _resolve_quiet_log_alerts(
+    policy: AlertPolicy,
+    cluster_id: str,
+    *,
+    now: datetime,
+    quiet_seconds: int,
+    matched: set,
+    unreadable_containers: set,
+) -> List[AlertHistory]:
+    """Resolve active log alerts whose pod/container has gone quiet.
+
+    A row stays active while its pod/container keeps logging matching lines
+    (its ``lastMatchAt`` is refreshed). It resolves once nothing matching has
+    been seen for ``quiet_seconds`` — including when the pod no longer exists.
+    Pods/containers whose logs could not be read this scan are "unknown" and
+    are left untouched. Resolution mirrors metric alerts: status="resolved",
+    resolved_at=now. No notification is sent (there is no resolved
+    notification for any alert type).
+    """
+    resolved: List[AlertHistory] = []
+    rows = AlertHistory.query.filter_by(
+        policy_id=policy.id,
+        cluster_id=cluster_id,
+        alert_type="log",
+        status="active",
+    ).all()
+    now_iso = now.isoformat()
+    for row in rows:
+        snapshot = dict(row.log_snapshot) if isinstance(row.log_snapshot, dict) else {}
+        pod_name = snapshot.get("podName") or row.resource_name or ""
+        container_name = snapshot.get("containerName") or ""
+        key = (pod_name, container_name)
+        if key in matched:
+            snapshot["lastMatchAt"] = now_iso
+            row.log_snapshot = snapshot
+            continue
+        if key in unreadable_containers:
+            continue
+        last_seen = _parse_iso(snapshot.get("lastMatchAt")) or _as_utc(row.fired_at)
+        if last_seen is not None and (now - last_seen).total_seconds() < quiet_seconds:
+            continue
+        row.status = "resolved"
+        row.resolved_at = now
+        resolved.append(row)
+    return resolved
+
+
 def evaluate_log_policy(
     policy: AlertPolicy,
     cluster_id: str,
@@ -177,6 +256,11 @@ def evaluate_log_policy(
     new_rows: List[AlertHistory] = []
     match_count = 0
     now = datetime.now(timezone.utc)
+    # Auto-resolve bookkeeping: which pod/containers matched this scan (new or
+    # already-seen lines), and which could not be read at all.
+    matched_keys: set = set()
+    unreadable_containers: set = set()
+    listing_ok = True
 
     for target in targets:
         namespace = target.get("namespace") or ""
@@ -184,7 +268,12 @@ def evaluate_log_policy(
         resource_name = target.get("resourceName")
 
         if access:
-            pods = _list_pods_for_scope(access, namespace, resource_type, resource_name)
+            try:
+                pods = _list_pods_for_scope(access, namespace, resource_type, resource_name, strict=True)
+            except K8sCommandError:
+                # Pod list unknown: scan nothing and resolve nothing this tick.
+                listing_ok = False
+                pods = []
         else:
             pod_name = resource_name or "mock-pod-1"
             if resource_type == "deployment" and resource_name:
@@ -199,6 +288,7 @@ def evaluate_log_policy(
             pod_ns = meta.get("namespace") or namespace
 
             if access:
+                failed_containers: List[str] = []
                 matches = scan_pod_logs_for_matches(
                     access,
                     namespace=pod_ns,
@@ -210,7 +300,10 @@ def evaluate_log_policy(
                     context_before=log_config["contextLinesBefore"],
                     context_after=log_config["contextLinesAfter"],
                     max_lines=log_config["maxLines"],
+                    failed_containers=failed_containers,
                 )
+                for failed in failed_containers:
+                    unreadable_containers.add((pod_name, failed))
                 for match in matches:
                     if deployment_name:
                         match["deploymentName"] = deployment_name
@@ -231,6 +324,7 @@ def evaluate_log_policy(
             for match in matches:
                 log_hash = match["logHash"]
                 container_name = match.get("containerName") or ""
+                matched_keys.add((pod_name, container_name))
                 if _is_log_seen(policy.id, pod_name, container_name, log_hash):
                     continue
 
@@ -263,6 +357,7 @@ def evaluate_log_policy(
                     "matchingLine": match.get("matchingLine"),
                     "logLines": match.get("logLines") or [],
                     "logSnippet": match.get("logSnippet") or "",
+                    "lastMatchAt": now.isoformat(),
                 }
 
                 title = "Error detected in logs"
@@ -295,5 +390,20 @@ def evaluate_log_policy(
                 new_rows.append(row)
                 match_count += 1
 
+    resolved_count = 0
+    if listing_ok:
+        resolved_count = len(
+            _resolve_quiet_log_alerts(
+                policy,
+                cluster_id,
+                now=now,
+                quiet_seconds=log_resolve_after_seconds(policy, log_config),
+                matched=matched_keys,
+                unreadable_containers=unreadable_containers,
+            )
+        )
+
     measured = f"{match_count} new log match(es)" if match_count else "No new log matches"
+    if resolved_count:
+        measured += f"; {resolved_count} resolved after quiet period"
     return new_rows, measured, None

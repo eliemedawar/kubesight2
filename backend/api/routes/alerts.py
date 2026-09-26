@@ -1,6 +1,6 @@
 from flask import Blueprint, request
 
-from ..alert_notifier import dispatch_firing_alert_emails, send_test_alert_email
+from ..alert_notifier import alert_delivery_status, send_test_alert_email
 from ..services.alert_policy_evaluator import list_active_policy_alerts
 from ..email_delivery import EmailDeliveryError
 from ..k8s_provider import K8sCommandError, list_alerts_from_k8s, should_use_real_k8s
@@ -20,10 +20,12 @@ def _filter_mock_alerts(cluster_id):
 
 
 def _merge_policy_alerts(items: list, user, cluster_id) -> list:
+    # Read-only: evaluation and notification delivery belong to the background
+    # scheduler (alert_policy_scheduler), never to a page load.
     if cluster_id:
-        policy_alerts = list_active_policy_alerts(cluster_id=cluster_id, user=user)
+        policy_alerts = list_active_policy_alerts(cluster_id=cluster_id, user=user, evaluate=False)
     else:
-        policy_alerts = list_active_policy_alerts(user=user)
+        policy_alerts = list_active_policy_alerts(user=user, evaluate=False)
     if not policy_alerts:
         return items
     existing_ids = {item.get("id") for item in items}
@@ -35,9 +37,9 @@ def _merge_policy_alerts(items: list, user, cluster_id) -> list:
 
 
 def _attach_email_delivery(payload: dict) -> dict:
-    items = payload.get("items") or []
+    """Attach read-only notification status. Sends nothing, writes nothing."""
     metadata = dict(payload.get("metadata") or {})
-    metadata["emailDelivery"] = dispatch_firing_alert_emails(items)
+    metadata["emailDelivery"] = alert_delivery_status()
     payload["metadata"] = metadata
     return payload
 
