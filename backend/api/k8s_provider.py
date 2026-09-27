@@ -25,6 +25,26 @@ class K8sCommandError(RuntimeError):
     pass
 
 
+class K8sInvalidNameError(K8sCommandError):
+    """A user-supplied Kubernetes name failed validation; no kubectl was run."""
+
+
+def require_valid_k8s_names(
+    *,
+    namespace: Optional[str] = None,
+    names: tuple = (),
+    containers: tuple = (),
+) -> None:
+    """Raise ``K8sInvalidNameError`` unless every given name is a valid K8s name.
+
+    See ``k8s_names``: stops kubectl flag injection through names."""
+    from .k8s_names import name_error
+
+    message = name_error(namespace=namespace, names=names, containers=containers)
+    if message:
+        raise K8sInvalidNameError(message)
+
+
 # Absorbs repeated kubectl subprocess work across concurrent requests and
 # users. Short TTLs keep data near-live; single-flight means a burst of
 # identical requests spawns one kubectl process instead of one per request.
@@ -148,6 +168,20 @@ def _request_timeout_flag(args: List[str], effective_timeout: int) -> List[str]:
     return [f"--request-timeout={seconds}s"]
 
 
+def _refuse_unsafe_kubectl_args(args: List[str]) -> None:
+    """Defence in depth against flag injection through user-supplied names.
+
+    Connection/identity flags are only ever added by the runners themselves;
+    one in the caller-built args means a "name" smuggled a flag in."""
+    from .k8s_names import unsafe_kubectl_arg
+
+    bad = unsafe_kubectl_arg(args)
+    if bad is not None:
+        raise K8sCommandError(
+            f"Refusing to run kubectl: argument {bad[:80]!r} is not allowed."
+        )
+
+
 def _run_kubectl(
     args: List[str],
     context: Optional[str] = None,
@@ -167,6 +201,7 @@ def _run_kubectl(
             f"Retrying automatically within {_UNREACHABLE_BACKOFF_SECONDS}s."
         )
 
+    _refuse_unsafe_kubectl_args(args)
     effective_timeout = timeout if timeout is not None else _KUBECTL_DEFAULT_TIMEOUT
     try:
         with materialized_kubeconfig(kubeconfig_path) as plain_kubeconfig:
@@ -1301,6 +1336,10 @@ def read_namespaced_resource_json(
     transport helper. kubectl receives the resolved server credential only in
     its isolated subprocess; the returned object contains Kubernetes data only.
     """
+    require_valid_k8s_names(
+        namespace=namespace,
+        names=((resource_kind, "resource kind"), (resource_name, "resource name")),
+    )
     output = _run_for_access(
         access,
         ["get", resource_kind, resource_name, "-n", namespace, "-o", "json"],
@@ -1317,6 +1356,7 @@ def list_namespaced_resources_json(
     namespace: str,
 ) -> List[Dict[str, Any]]:
     """List raw resource documents for a permission-checked namespace."""
+    require_valid_k8s_names(namespace=namespace, names=((resource_kind, "resource kind"),))
     output = _run_for_access(
         access, ["get", resource_kind, "-n", namespace, "-o", "json"]
     )
@@ -2091,6 +2131,7 @@ def namespace_events_from_k8s(
     involved_name: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> Dict[str, Any]:
+    require_valid_k8s_names(namespace=namespace)
     output = _run_for_access(access, ["get", "events", "-n", namespace, "-o", "json"])
     raw_items = json.loads(output).get("items", [])
 
@@ -2150,6 +2191,7 @@ def list_namespace_pods_for_logs(access: ClusterAccess, namespace: str) -> Dict[
 def list_pod_containers_from_k8s(
     access: ClusterAccess, namespace: str, pod_name: str
 ) -> Dict[str, Any]:
+    require_valid_k8s_names(namespace=namespace, names=((pod_name, "pod name"),))
     output = _run_for_access(
         access,
         ["get", "pod", pod_name, "-n", namespace, "-o", "json"],
@@ -2208,6 +2250,11 @@ def pod_logs_from_k8s(
         tail = 500
     else:
         tail = 200
+    require_valid_k8s_names(
+        namespace=namespace,
+        names=((pod, "pod name"),),
+        containers=((container, "container name"),),
+    )
     args = ["logs", pod, "-n", namespace, f"--tail={tail}"]
     if timestamps:
         args.append("--timestamps")
@@ -2267,6 +2314,7 @@ def _popen_kubectl(
 
     ``kubeconfig_path`` must already be a readable plaintext path — the caller
     owns the ``kubeconfig_vault`` lease for the lifetime of the process."""
+    _refuse_unsafe_kubectl_args(args)
     command = ["kubectl"]
     if kubeconfig_path:
         command += ["--kubeconfig", kubeconfig_path]
@@ -2316,6 +2364,11 @@ def stream_pod_log_lines(
     """
     from .log_time_filters import format_rfc3339_z
 
+    require_valid_k8s_names(
+        namespace=namespace,
+        names=((pod, "pod name"),),
+        containers=((container, "container name"),),
+    )
     tail = tail_lines if tail_lines is not None else 200
     args = ["logs", pod, "-n", namespace, "-f", f"--tail={tail}"]
     if timestamps:

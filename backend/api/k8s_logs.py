@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .cluster_access import ClusterAccess
-from .k8s_provider import K8sCommandError, _run_for_access
+from .k8s_provider import K8sCommandError, _run_for_access, require_valid_k8s_names
 
 PodLogMatch = Dict[str, Any]
 
@@ -57,6 +57,11 @@ def fetch_pod_logs(
         "--timestamps=true",
     ]
     try:
+        require_valid_k8s_names(
+            namespace=namespace,
+            names=((pod_name, "pod name"),),
+            containers=((container_name, "container name"),),
+        )
         return _run_for_access(access, args)
     except K8sCommandError:
         if raise_errors:
