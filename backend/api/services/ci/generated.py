@@ -720,7 +720,7 @@ def validate(
             pipelines.normalize_stage(stage, index, known_keys | declared)
         except pipelines.PipelineError as exc:
             if strict:
-                errors.append(_issue("invalid_stage", str(exc), stage=name))
+                errors.append(_issue(exc.code or "invalid_stage", str(exc), stage=name))
             else:
                 warnings.append(
                     _issue(

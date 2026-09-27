@@ -46,7 +46,16 @@ MAX_TIMEOUT_SECONDS = 24 * 3600
 
 
 class PipelineError(ValueError):
-    """A pipeline definition was rejected. Message is user-facing."""
+    """A pipeline definition was rejected. Message is user-facing.
+
+    ``code`` optionally names the rule, so the generated-pipeline validator can
+    report it (and Hermes' repair loop act on it) instead of a generic
+    ``invalid_stage``.
+    """
+
+    def __init__(self, message: str, *, code: Optional[str] = None):
+        super().__init__(message)
+        self.code = code
 
 
 def _clean(value: Any, limit: int) -> str:
@@ -476,10 +485,10 @@ def _check_stage_build_inputs(
     if dockerfile:
         problem = build_inputs.dockerfile_path_problem(dockerfile)
         if problem:
-            raise PipelineError(f"Stage '{stage_name}': {problem}")
+            raise PipelineError(f"Stage '{stage_name}': {problem}", code="path_escape")
     problem = build_inputs.working_directory_problem(working_directory)
     if problem:
-        raise PipelineError(f"Stage '{stage_name}': {problem}")
+        raise PipelineError(f"Stage '{stage_name}': {problem}", code="path_escape")
 
 
 def _image_scan(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, Any]]:
