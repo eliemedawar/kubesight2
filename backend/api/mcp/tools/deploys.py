@@ -415,7 +415,7 @@ def _helm_releases(arguments: Dict[str, Any]) -> Dict[str, Any]:
     namespace = str(arguments.get("namespace") or "").strip()
     if namespace:
         namespace = require_namespace(user, cluster_id, namespace)
-    rows = list_releases(cluster_id, namespace or None) or []
+    rows = list_releases(cluster_id, namespace or None, user=user) or []
     total = len(rows)
     rows = [pick(row, _RELEASE_FIELDS) for row in take(rows, _limit(arguments, MAX_ROWS))]
     return {"clusterId": cluster_id, "totalMatching": total, "count": len(rows), "releases": rows}

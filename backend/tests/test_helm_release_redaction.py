@@ -45,6 +45,9 @@ def _detail(perms):
     user = SimpleNamespace(id=1) if perms is not None else None
     with patch.object(helm_service, "is_helm_installed", return_value=True), \
          patch.object(helm_service, "_resolve_access", return_value=None), \
+         patch.object(helm_service, "is_admin", return_value=False), \
+         patch.object(helm_service, "can_access_cluster", return_value=True), \
+         patch.object(helm_service, "can_access_namespace", return_value=True), \
          patch.object(helm_service, "user_has_permission", side_effect=lambda u, k: k in (perms or ())):
         return get_release_detail("c1", "payments", "api", user=user, run_helm_fn=_runner)
 

@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from ..access_engine import can_access_namespace, is_admin, user_has_permission
+from ..access_engine import can_access_cluster, can_access_namespace, is_admin, user_has_permission
 from ..audit import log_audit
 from ..cluster_access import ClusterAccess
 from ..k8s_provider import resolve_cluster_access
@@ -982,12 +982,48 @@ def record_helm_catalog_entry(user: Optional[User], body: Dict[str, Any]) -> Non
     )
 
 
+def filter_releases_for_user(
+    user: Optional[User], cluster_id: str, releases: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Keep only the releases in namespaces ``user`` may see on ``cluster_id``.
+
+    ``user=None`` is an internal caller and gets everything; admins see all; a
+    user without access to the cluster sees nothing.
+    """
+    if user is None or is_admin(user):
+        return releases
+    if not can_access_cluster(user, cluster_id):
+        return []
+    verdicts: Dict[str, bool] = {}
+    kept: List[Dict[str, Any]] = []
+    for release in releases:
+        namespace = str((release or {}).get("namespace") or "")
+        if namespace not in verdicts:
+            verdicts[namespace] = bool(namespace) and can_access_namespace(user, cluster_id, namespace)
+        if verdicts[namespace]:
+            kept.append(release)
+    return kept
+
+
 def list_releases(
     cluster_id: str,
     namespace: Optional[str] = None,
     *,
+    user: Optional[User] = None,
     run_helm_fn: Optional[RunHelmFn] = None,
 ) -> List[Dict[str, Any]]:
+    """Helm releases on a cluster, in one namespace or across all (``-A``).
+
+    With a ``user`` the result is scoped to what that user may see: a namespace
+    they cannot access yields nothing, and the all-namespaces listing is
+    filtered to their namespaces. ``user=None`` is for internal callers only
+    (e.g. inventory discovery, which filters its own rows per user).
+    """
+    if user is not None and not is_admin(user):
+        if not can_access_cluster(user, cluster_id):
+            return []
+        if namespace and not can_access_namespace(user, cluster_id, namespace):
+            return []
     if not is_helm_installed():
         return []
     access = _resolve_access(cluster_id)
@@ -999,9 +1035,12 @@ def list_releases(
         args.append("-A")
     try:
         output = runner(access, args)
-        return json.loads(output or "[]")
+        releases = json.loads(output or "[]")
     except (HelmCommandError, json.JSONDecodeError):
         return []
+    if not isinstance(releases, list):
+        return []
+    return filter_releases_for_user(user, cluster_id, releases)
 
 
 def _parse_chart_label(chart_label: str) -> Tuple[str, str]:
@@ -1124,6 +1163,9 @@ def get_release_detail(
     values are not returned at all. ``user=None`` (internal callers) gets the
     fully redacted form.
     """
+    if user is not None and not is_admin(user):
+        if not can_access_cluster(user, cluster_id) or not can_access_namespace(user, cluster_id, namespace):
+            return None
     reveal = bool(user) and user_has_permission(user, "secrets:reveal")
     show_values = bool(user) and user_has_permission(user, "helm:values:view")
     if not is_helm_installed():

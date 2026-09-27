@@ -1,7 +1,7 @@
 from flask import Blueprint, request
 
 from ..auth_utils import get_current_user
-from ..decorators import require_permission
+from ..decorators import require_cluster_access, require_namespace_access, require_permission
 from ..response import error_response, success_response
 from ..services.helm_service import (
     add_repository,
@@ -63,17 +63,22 @@ def helm_status():
 
 @helm_bp.route("/releases", methods=["GET"])
 @require_permission("helm:view")
+@require_cluster_access
+@require_namespace_access
 def helm_list_releases():
     cluster_id = _cluster_id()
     namespace = _namespace() or None
     if not cluster_id:
         return error_response("cluster query parameter is required", 400)
-    releases = list_releases(cluster_id, namespace)
+    # Scoped to the caller: -A (no namespace) is filtered to their namespaces.
+    releases = list_releases(cluster_id, namespace, user=get_current_user())
     return success_response(releases)
 
 
 @helm_bp.route("/releases/<release_name>", methods=["GET"])
 @require_permission("helm:view")
+@require_cluster_access
+@require_namespace_access
 def helm_get_release(release_name: str):
     cluster_id = _cluster_id()
     namespace = _namespace()
@@ -87,6 +92,7 @@ def helm_get_release(release_name: str):
 
 @helm_bp.route("/repos", methods=["GET"])
 @require_permission("helm:view")
+@require_cluster_access
 def helm_list_repos():
     cluster_id = _cluster_id()
     if not cluster_id:
@@ -101,6 +107,7 @@ def helm_list_repos():
 
 @helm_bp.route("/repos", methods=["POST"])
 @require_permission("helm:install")
+@require_cluster_access
 def helm_add_repo():
     body = _body()
     cluster_id = body.get("clusterId") or body.get("cluster") or ""
@@ -119,6 +126,7 @@ def helm_add_repo():
 
 @helm_bp.route("/charts", methods=["GET"])
 @require_permission("helm:view")
+@require_cluster_access
 def helm_search_charts():
     cluster_id = _cluster_id()
     repo_name = request.args.get("repo") or request.args.get("repoName") or ""
