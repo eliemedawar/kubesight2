@@ -44,10 +44,11 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from .. import build_environments, cache_layout
+from .. import build_environments, build_inputs, cache_layout
 from .. import resources as ci_resources
 from .base import (
     FAILED,
@@ -448,7 +449,7 @@ def _command_stage_script(execution: StageExecution) -> str:
             keep=_node_modules_keep(),
         )
     return _wrap_stage_script(
-        f"cd {workdir}\n{commands}",
+        f"cd {_q(workdir)}\n{commands}",
         continue_on_failure=bool(execution.continue_on_failure),
     )
 
@@ -456,12 +457,53 @@ def _command_stage_script(execution: StageExecution) -> str:
 INLINE_DOCKERFILE_DIR = "/kubesight-dockerfile"
 
 
-def _buildctl_output(registry: Dict[str, Any], image_ref: str) -> str:
+def _q(value: Any) -> str:
+    """One shell word. Leaves an already-safe value byte-for-byte unchanged."""
+    return shlex.quote(str(value))
+
+
+def _checked_registry(registry: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-check every registry value the image script splices in.
+
+    The trigger and the pipeline save already hold these to their grammar;
+    this is the last line, for a snapshot that outlived those checks. The
+    image stage is the one container with the push credentials mounted, so a
+    value that is not what it claims to be fails the stage rather than being
+    tidied into something nobody asked for.
+    """
+    problems = [
+        build_inputs.registry_host_problem(registry.get("host") or ""),
+        build_inputs.image_name_problem(registry.get("repository") or ""),
+        build_inputs.image_tag_problem(
+            registry.get("tag") or "", allow_template=bool(registry.get("tagIsTemplate"))
+        ),
+        build_inputs.dockerfile_path_problem(registry.get("dockerfile") or "Dockerfile"),
+    ]
+    for problem in problems:
+        if problem:
+            raise RunnerError(problem)
+    return registry
+
+
+def _image_ref_word(registry: Dict[str, Any], prefix: str = "", suffix: str = "") -> str:
+    """``prefix + host/repo:tag + suffix`` as one shell word.
+
+    A templated tag is left as ``$KS_TAG`` - unquoted, exactly as before - for
+    the pod's shell to finish. That is safe: the resolver forces it through
+    ``tr`` to the tag alphabet, so its expansion cannot split or glob.
+    """
+    base = f"{prefix}{registry['host']}/{registry['repository']}:"
+    if registry.get("tagIsTemplate"):
+        return _q(base) + "$KS_TAG" + (_q(suffix) if suffix else "")
+    return _q(f"{base}{registry['tag']}{suffix}")
+
+
+def _buildctl_output(registry: Dict[str, Any]) -> str:
     """Where buildkitd sends the finished image: straight to the registry."""
-    output = f"type=image,name={image_ref},push=true"
+    suffix = ",push=true"
     if registry.get("verifyTls") is False:
-        output += ",registry.insecure=true"
-    return output
+        suffix += ",registry.insecure=true"
+    return _image_ref_word(registry, "type=image,name=", suffix)
 
 
 def _buildctl_add_hosts(execution: StageExecution) -> str:
@@ -489,7 +531,7 @@ def _buildctl_add_hosts(execution: StageExecution) -> str:
             name = str(name).strip()
             if name:
                 pairs.append(f"{name}={ip}")
-    return f"--opt add-hosts={','.join(pairs)} " if pairs else ""
+    return f"--opt {_q('add-hosts=' + ','.join(pairs))} " if pairs else ""
 
 
 _ON = ("1", "true", "yes", "on")
@@ -531,10 +573,10 @@ def _buildctl_registry_cache(execution: StageExecution) -> str:
     registry = execution.registry or {}
     insecure = ",registry.insecure=true" if registry.get("verifyTls") is False else ""
     return (
-        f"--import-cache type=registry,ref={ref}{insecure} "
+        f"--import-cache {_q(f'type=registry,ref={ref}{insecure}')} "
         # mode=max caches intermediate layers too, which is what makes a
         # dependency-heavy build cheap on the second run.
-        f"--export-cache type=registry,ref={ref},mode=max{insecure} "
+        f"--export-cache {_q(f'type=registry,ref={ref},mode=max{insecure}')} "
     )
 
 
@@ -613,6 +655,11 @@ def _image_ref_prelude(registry: Dict[str, Any]) -> str:
     """
     if not registry.get("tagIsTemplate"):
         return ""
+    # Lands inside double quotes so its ${...} expands; the template grammar has
+    # nothing that could close the quotes or start a command substitution.
+    problem = build_inputs.image_tag_problem(registry["tag"], allow_template=True)
+    if problem:
+        raise RunnerError(problem)
     return _TAG_RESOLVE_TEMPLATE.format(template=registry["tag"])
 
 
@@ -632,13 +679,12 @@ def _buildctl_args(
     ``$KS_TAG`` and the scanned script needs the resolved tag before the build
     in order to name the archive and the push after it.
     """
-    registry = execution.registry or {}
+    registry = _checked_registry(execution.registry or {})
     cache_prelude, cache_flags = _buildctl_cache(execution)
     # The cache prelude runs BEFORE the tag prelude only because neither reads
     # the other; keeping the order fixed keeps the generated script diffable.
     prelude = (cache_prelude + _image_ref_prelude(registry)) if with_prelude else ""
-    tag = '$KS_TAG' if registry.get("tagIsTemplate") else registry["tag"]
-    image_ref = f"{registry['host']}/{registry['repository']}:{tag}"
+    output_word = output or _buildctl_output(registry)
     context = "/workspace/source"
     if execution.working_directory:
         context = f"/workspace/source/{execution.working_directory}"
@@ -649,26 +695,26 @@ def _buildctl_args(
         # an inline Dockerfile needs no copy into the context: point the
         # dockerfile local at the mounted file and leave the context alone.
         return prelude + (
-            f"buildctl --addr {buildkit_addr()} build "
+            f"buildctl --addr {_q(buildkit_addr())} build "
             f"--frontend dockerfile.v0 "
-            f"--local context={context} "
+            f"--local {_q(f'context={context}')} "
             f"--local dockerfile={INLINE_DOCKERFILE_DIR} "
             f"--opt filename=Dockerfile "
             f"{_buildctl_add_hosts(execution)}"
             f"{cache_flags}"
-            f"--output {output or _buildctl_output(registry, image_ref)} "
-            f"--metadata-file {meta_file}"
+            f"--output {output_word} "
+            f"--metadata-file {_q(meta_file)}"
         )
     return prelude + (
-        f"buildctl --addr {buildkit_addr()} build "
+        f"buildctl --addr {_q(buildkit_addr())} build "
         f"--frontend dockerfile.v0 "
-        f"--local context={context} "
-        f"--local dockerfile={context}/{dockerfile_dir} "
-        f"--opt filename={os.path.basename(dockerfile)} "
+        f"--local {_q(f'context={context}')} "
+        f"--local {_q(f'dockerfile={context}/{dockerfile_dir}')} "
+        f"--opt {_q(f'filename={os.path.basename(dockerfile)}')} "
         f"{_buildctl_add_hosts(execution)}"
         f"{cache_flags}"
-        f"--output {output or _buildctl_output(registry, image_ref)} "
-        f"--metadata-file {meta_file}"
+        f"--output {output_word} "
+        f"--metadata-file {_q(meta_file)}"
     )
 
 
@@ -761,7 +807,7 @@ _TOOL_GUARD = """for KS_TOOL in buildctl trivy crane; do
   if ! command -v "$KS_TOOL" >/dev/null 2>&1; then
     echo "[kubesight] This stage scans the image before pushing it, which needs" >&2
     echo "[kubesight] buildctl, trivy and crane in one image. '$KS_TOOL' is not in" >&2
-    echo "[kubesight] {tools_image}" >&2
+    echo "[kubesight] "{tools_image} >&2
     echo "[kubesight] Build and mirror Dockerfile.ci-imagetools, then point" >&2
     echo "[kubesight] CI_IMAGE_TOOLS_IMAGE at it. Nothing was built and nothing" >&2
     echo "[kubesight] was pushed: an unscanned image is never the fallback." >&2
@@ -779,23 +825,29 @@ def _scan_and_push_script(execution: StageExecution, meta_file: str) -> str:
     unhandled failure anywhere above stops short of the push by construction
     rather than by a check somebody has to remember to write.
     """
-    registry = execution.registry or {}
+    registry = _checked_registry(execution.registry or {})
     scan = execution.image_scan or {}
     position = execution.position
-    archive = image_archive_path(position)
-    report = scan_report_path(position)
+    archive = _q(image_archive_path(position))
+    report = _q(scan_report_path(position))
 
-    tag = "$KS_TAG" if registry.get("tagIsTemplate") else registry["tag"]
-    image_ref = f"{registry['host']}/{registry['repository']}:{tag}"
+    # One shell word for the argv; the echo lines read $KS_IMAGE_REF instead.
+    image_ref = _image_ref_word(registry)
     insecure = " --insecure" if registry.get("verifyTls") is False else ""
 
+    # Both echoed into the script: held to their closed sets here as well as on
+    # save, so a hand-edited snapshot cannot put text into those lines.
     threshold = str(scan.get("threshold") or "critical").lower()
+    if threshold not in _SEVERITY_ORDER:
+        threshold = "critical"
     on_fail = str(scan.get("onFail") or "block").lower()
+    if on_fail not in ("block", "warn"):
+        on_fail = "block"
     gated = _gated_severities(threshold)
     ignore_unfixed = " --ignore-unfixed" if scan.get("ignoreUnfixed") else ""
 
     db_repo = _env("CI_TRIVY_DB_REPOSITORY", "").strip()
-    db_flag = f" --db-repository {db_repo}" if db_repo else ""
+    db_flag = f" --db-repository {_q(db_repo)}" if db_repo else ""
 
     # The prelude is emitted here rather than left inside _buildctl_args because
     # the archive name, the scan and the push all need $KS_TAG, and a templated
@@ -809,7 +861,9 @@ def _scan_and_push_script(execution: StageExecution, meta_file: str) -> str:
     build = _buildctl_args(
         execution,
         f"/workspace/.kubesight/buildkit-meta-{position}.json",
-        output=f"type=docker,name={image_ref},dest={archive}",
+        output=_image_ref_word(
+            registry, "type=docker,name=", f",dest={image_archive_path(position)}"
+        ),
         with_prelude=False,
     )
 
@@ -829,9 +883,10 @@ def _scan_and_push_script(execution: StageExecution, meta_file: str) -> str:
 
     return (
         "mkdir -p /workspace/.kubesight\n"
-        + _TOOL_GUARD.format(tools_image=image_tools_image())
+        + _TOOL_GUARD.format(tools_image=_q(image_tools_image()))
         + prelude
-        + f'echo "[kubesight] == build == {image_ref}"\n'
+        + f"KS_IMAGE_REF={image_ref}\n"
+        + 'echo "[kubesight] == build == $KS_IMAGE_REF"\n'
         + build
         + "\n"
         + f'echo "[kubesight] == scan == trivy, gate at {threshold.upper()} ({on_fail})"\n'
@@ -852,20 +907,20 @@ def _scan_and_push_script(execution: StageExecution, meta_file: str) -> str:
         + 'if [ "$KS_SCAN_RC" -ne 0 ]; then\n'
         + verdict
         + "fi\n"
-        + f'echo "[kubesight] == push == {image_ref}"\n'
+        + 'echo "[kubesight] == push == $KS_IMAGE_REF"\n'
         + f"crane push{insecure} {archive} {image_ref}\n"
         # The digest comes from the registry rather than from the build, so the
         # artifact record names the manifest that is actually pullable.
         + f"KS_DIGEST=$(crane digest{insecure} {image_ref})\n"
         + (
             "printf '{\"image.name\":\"%s\",\"containerimage.digest\":\"%s\"}\\n' "
-            f'"{image_ref}" "$KS_DIGEST" > {meta_file}\n'
+            f'"$KS_IMAGE_REF" "$KS_DIGEST" > {_q(meta_file)}\n'
         )
         # A multi-gigabyte archive on a shared emptyDir would otherwise sit
         # there for the rest of the build, against the same workspace size limit
         # every later stage has to fit inside.
         + f"rm -f {archive}\n"
-        + f'echo "[kubesight] Pushed {image_ref} ($KS_DIGEST)"\n'
+        + 'echo "[kubesight] Pushed $KS_IMAGE_REF ($KS_DIGEST)"\n'
     )
 
 
@@ -1805,7 +1860,7 @@ class KubernetesJobRunnerAdapter:
         # is excluded by needing a shell at all): no find -printf, no stat.
         # Field 5 of `ls -ldn` is the size on both GNU coreutils and busybox.
         script = (
-            f"cd '{path}' 2>/dev/null || {{ echo '__KS_NO_PATH__'; exit 0; }}\n"
+            f"cd {_q(path)} 2>/dev/null || {{ echo '__KS_NO_PATH__'; exit 0; }}\n"
             "for e in * .*; do\n"
             '  [ "$e" = "." ] && continue\n'
             '  [ "$e" = ".." ] && continue\n'
