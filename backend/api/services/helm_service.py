@@ -156,6 +156,12 @@ def run_helm(
 ) -> str:
     from ..kubeconfig_vault import KubeconfigDecryptError, materialized_kubeconfig
 
+    from ..k8s_names import unsafe_helm_arg
+
+    bad = unsafe_helm_arg(args)
+    if bad is not None:
+        # A flag-shaped release/namespace/chart value smuggled into the argv.
+        raise HelmCommandError(f"Refusing to run helm: argument {bad[:80]!r} is not allowed.")
     ensure_helm_installed()
     try:
         with materialized_kubeconfig(access.kubeconfig_path) as kubeconfig_path:

@@ -164,6 +164,9 @@ def rollout_health(cluster_id: str, namespace: str, name: str) -> Dict[str, Any]
     access = _resolve(cluster_id)
     if not access:
         raise K8sCommandError(f"Cluster '{cluster_id}' was not found.")
+    from ..k8s_provider import require_valid_k8s_names
+
+    require_valid_k8s_names(namespace=namespace, names=((name, "deployment name"),))
     raw = _run_for_access(access, ["get", "deployment", name, "-n", namespace, "-o", "json"])
     doc = json.loads(raw)
     status = doc.get("status") or {}
@@ -557,7 +560,11 @@ def _run_kubectl_diff(cluster_id: str, path: str, namespace: str) -> str:
                 command += ["--kubeconfig", kubeconfig_path]
             if access.context_name:
                 command += ["--context", access.context_name]
-            command += ["diff", "-f", path, "-n", namespace]
+            diff_args = ["diff", "-f", path, "-n", namespace]
+            from ..k8s_provider import _refuse_unsafe_kubectl_args
+
+            _refuse_unsafe_kubectl_args(diff_args)
+            command += diff_args
 
             env = os.environ.copy()
             if kubeconfig_path:

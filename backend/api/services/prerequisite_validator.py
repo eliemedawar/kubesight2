@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..k8s_metrics import metrics_server_available
+from ..k8s_names import name_error
 from ..k8s_provider import K8sCommandError, resolve_cluster_access, _run_for_access
 from ..models import User
 from ..access_engine import can_access_namespace
@@ -20,6 +21,10 @@ def _check(status: str, category: str, message: str, detail: str = "") -> Dict[s
 
 
 def _resource_exists(access, kind: str, name: str, namespace: str) -> bool:
+    # Names are positional kubectl args: refuse anything that is not a valid
+    # Kubernetes name (a flag-shaped one could redirect kubectl).
+    if name_error(namespace=namespace, names=((kind, "kind"), (name, "name"))):
+        return False
     try:
         _run_for_access(access, ["get", kind, name, "-n", namespace])
         return True
@@ -28,6 +33,8 @@ def _resource_exists(access, kind: str, name: str, namespace: str) -> bool:
 
 
 def _namespace_exists(access, namespace: str) -> bool:
+    if name_error(namespace=namespace):
+        return False
     try:
         _run_for_access(access, ["get", "namespace", namespace])
         return True
@@ -52,6 +59,8 @@ def _ingress_controller_available(access) -> Tuple[bool, str]:
 
 
 def _storage_class_exists(access, name: str) -> bool:
+    if name_error(names=((name, "storage class"),)):
+        return False
     try:
         _run_for_access(access, ["get", "storageclass", name])
         return True

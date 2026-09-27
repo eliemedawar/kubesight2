@@ -556,6 +556,19 @@ def start_run(
         raise AutomationError("The ticket's deployment snapshot no longer exists.", 404)
     from .zoho_sync_service import CUSTOM_SOURCE_CLUSTER
 
+    if snapshot.cluster_id != CUSTOM_SOURCE_CLUSTER:
+        # Namespace, deployment and variable all land in a kubectl argv.
+        from ..k8s_names import name_error
+
+        invalid = name_error(
+            namespace=snapshot.namespace or "",
+            names=((snapshot.deployment_name or "", "deployment name"),),
+        )
+        if invalid:
+            raise AutomationError(invalid, 400)
+    if variable and (variable.startswith("-") or "=" in variable or any(c.isspace() for c in variable)):
+        raise AutomationError(f"Invalid variable name {variable[:80]!r}.", 400)
+
     if snapshot.cluster_id == CUSTOM_SOURCE_CLUSTER and (variable or restart):
         raise AutomationError(
             f"'{snapshot.namespace}' is a custom environment — variable changes and restarts need "

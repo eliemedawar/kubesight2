@@ -33,7 +33,22 @@ from ..log_time_filters import (
     parse_log_time_filters,
 )
 from ..mock_data import NAMESPACE_RESOURCES, NAMESPACES
+from ..k8s_names import name_error
 from ..response import error_response
+
+
+def _invalid_names_response(namespace, pod_name=None, container_name=None):
+    """400 for a namespace/pod/container that is not a valid Kubernetes name.
+
+    Checked before anything else so a flag-shaped "name" (``--server=...``)
+    never reaches a kubectl argv."""
+    names = ((pod_name, "pod name"),) if pod_name is not None else ()
+    message = name_error(
+        namespace=namespace,
+        names=names,
+        containers=((container_name, "container name"),),
+    )
+    return error_response(message, 400) if message else None
 
 
 def _parse_bool(value: str, default: bool = False) -> bool:
@@ -172,6 +187,9 @@ def fetch_pod_logs(
     container_name: Optional[str],
     params: Dict[str, Any],
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Any]]:
+    invalid = _invalid_names_response(namespace, pod_name, container_name)
+    if invalid is not None:
+        return None, invalid
     user = get_current_user()
     if user and not can_view_logs(user, cluster_id, namespace, pod_name, container_name):
         log_audit(
@@ -263,6 +281,9 @@ def stream_pod_logs(
     ``event: line`` for each log line, ``: hb`` comment heartbeats while idle, and
     a final ``event: end`` when the stream closes.
     """
+    invalid = _invalid_names_response(namespace, pod_name, container_name)
+    if invalid is not None:
+        return None, invalid
     user = get_current_user()
     if user and not can_view_logs(user, cluster_id, namespace, pod_name, container_name):
         log_audit(
@@ -366,6 +387,9 @@ def _mock_namespace_pods(cluster_id: str, namespace: str) -> Optional[list]:
 
 
 def list_pods_for_logs(cluster_id: str, namespace: str) -> Tuple[Optional[Dict[str, Any]], Optional[Any]]:
+    invalid = _invalid_names_response(namespace)
+    if invalid is not None:
+        return None, invalid
     user = get_current_user()
 
     if should_use_real_k8s(cluster_id):
@@ -400,6 +424,9 @@ def list_pods_for_logs(cluster_id: str, namespace: str) -> Tuple[Optional[Dict[s
 def list_containers_for_pod(
     cluster_id: str, namespace: str, pod_name: str
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Any]]:
+    invalid = _invalid_names_response(namespace, pod_name)
+    if invalid is not None:
+        return None, invalid
     user = get_current_user()
     if user and not can_view_logs(user, cluster_id, namespace, pod_name):
         log_audit(

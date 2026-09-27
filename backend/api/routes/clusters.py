@@ -77,6 +77,39 @@ from ..services.topology_service import build_cluster_topology, build_namespace_
 clusters_bp = Blueprint("clusters", __name__, url_prefix="/api/clusters")
 
 
+# Path segments that end up as kubectl arguments. kubectl parses flags even
+# after positionals, so a segment like ``--server=https://evil`` must be
+# refused before any handler (or its access checks) sees it.
+_K8S_LABEL_SEGMENTS = {"namespace": "namespace", "container_name": "container name"}
+_K8S_NAME_SEGMENTS = {
+    "pod_name": "pod name",
+    "resource_name": "resource name",
+    "deployment_name": "deployment name",
+}
+
+
+@clusters_bp.before_request
+def _reject_invalid_k8s_name_segments():
+    from ..k8s_names import name_error
+
+    view_args = request.view_args or {}
+    namespace = view_args.get("namespace")
+    message = name_error(
+        namespace=namespace,
+        names=tuple(
+            (view_args[key], what) for key, what in _K8S_NAME_SEGMENTS.items() if key in view_args
+        ),
+        containers=tuple(
+            (view_args[key], what)
+            for key, what in _K8S_LABEL_SEGMENTS.items()
+            if key in view_args and key != "namespace"
+        ),
+    )
+    if message:
+        return error_response(message, 400)
+    return None
+
+
 def _list_clusters_payload():
     if should_use_real_k8s():
         try:

@@ -59,6 +59,27 @@ def _resource_arg(item: ChangeBundleItem) -> str:
     return f"{(item.resource_kind or 'deployment').lower()}/{item.resource_name}"
 
 
+_NAMED_TARGET_MODES = ("scale", "delete", "restart", "rollback")
+
+
+def _target_name_error(item: ChangeBundleItem, mode: str) -> Optional[str]:
+    """Kind/name/namespace of a named-target item must be valid K8s names.
+
+    They are positional kubectl args; a flag-shaped value (``--all``,
+    ``--server=...``) must be refused, not executed."""
+    if mode not in _NAMED_TARGET_MODES:
+        return None
+    from ..k8s_names import name_error
+
+    return name_error(
+        namespace=item.namespace or "",
+        names=(
+            ((item.resource_kind or "deployment").lower(), "resource kind"),
+            (item.resource_name or "", "resource name"),
+        ),
+    )
+
+
 def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optional[str]]:
     """Re-check the item against live cluster state at execution time.
 
@@ -83,6 +104,10 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optio
         _checks, blocking, image_err = check_registry_images(item.yaml_preview or "")
         if blocking:
             return image_err, "image"
+
+    invalid = _target_name_error(item, mode)
+    if invalid:
+        return invalid, "validation"
 
     # Helm items are re-checked by helm_service itself when they run (chart,
     # namespace, rendered images), so there is nothing to pre-check here.
@@ -141,6 +166,9 @@ def approval_context_for(item: ChangeBundleItem) -> str:
 
 def _apply_item(item: ChangeBundleItem, mode: str) -> str:
     """Execute one item against the cluster. Returns kubectl output (or mock note)."""
+    invalid = _target_name_error(item, mode)
+    if invalid:
+        raise K8sCommandError(invalid)
     if not should_use_real_k8s(item.cluster_id):
         return f"[mock] {mode} {_resource_arg(item)} in {item.namespace}"
 

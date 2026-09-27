@@ -268,6 +268,9 @@ def _kubectl_command(
         command += ["--kubeconfig", path]
     if access.context_name:
         command += ["--context", access.context_name]
+    from .k8s_provider import _refuse_unsafe_kubectl_args
+
+    _refuse_unsafe_kubectl_args(args)
     command += args
     return command
 

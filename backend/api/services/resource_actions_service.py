@@ -15,6 +15,7 @@ from ..k8s_provider import (
     should_use_real_k8s,
 )
 from ..k8s_provider import _run_for_access
+from ..k8s_names import name_error
 from ..models import User
 from .deployment_service import _run_kubectl_for_cluster
 from .inventory_actions_service import _mock_rollout_history, parse_rollout_history
@@ -117,6 +118,9 @@ def _check_resource_read_access(
     normalized = _normalize_kind(kind)
     if not normalized or not name.strip():
         return "Invalid resource kind or name", 400
+    invalid = name_error(namespace=namespace, names=((name, "resource name"),))
+    if invalid:
+        return invalid, 400
 
     permission = KIND_PERMISSION[normalized]
     if user and not user_has_permission(user, permission) and not user_has_permission(user, "resources:view"):
@@ -490,6 +494,9 @@ def restart_resource(
         return None, "Invalid resource kind or name", 400
     if normalized not in RESTART_SUPPORTED_KINDS:
         return None, f"Restart is not supported for {normalized}", 400
+    invalid = name_error(namespace=namespace, names=((name, "resource name"),))
+    if invalid:
+        return None, invalid, 400
 
     denied = _check_resource_restart_access(user, cluster_id, namespace, normalized, name)
     if denied:
@@ -617,6 +624,13 @@ def exec_in_pod(
         return None, f"Command exceeds {_MAX_EXEC_COMMAND_LENGTH} characters", 400
 
     container = (container or "").strip() or None
+    invalid = name_error(
+        namespace=namespace,
+        names=((pod_name, "pod name"),),
+        containers=((container, "container name"),),
+    )
+    if invalid:
+        return None, invalid, 400
 
     # Reuse the restart access checks: exec is a write-level pod action.
     denied = _check_resource_restart_access(user, cluster_id, namespace, "pod", pod_name)

@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from ..access_engine import can_access_cluster, can_view_alert, is_admin
 from ..alert_policy_catalog import METRIC_BY_KEY, evaluate_conditions
 from ..db import db
+from ..k8s_names import name_error
 from ..k8s_provider import K8sCommandError, _run_for_access, resolve_cluster_access, should_use_real_k8s
 from ..mock_data import ALERTS, CLUSTER_OVERVIEWS
 from ..models import AlertHistory, AlertPolicy, User
@@ -117,6 +118,8 @@ def _is_not_found(exc: Exception) -> bool:
 
 
 def _deployment_selector(access, namespace: str, deployment_name: str, *, strict: bool = False) -> Dict[str, Any]:
+    if name_error(namespace=namespace, names=((deployment_name, "deployment name"),)):
+        return {}  # not a valid K8s name: no such deployment (and never an argv)
     try:
         dep_output = _run_for_access(
             access,
@@ -156,6 +159,8 @@ def _list_pods_for_scope(
     exist still returns [])."""
     if resource_type == "pod":
         if resource_name:
+            if name_error(namespace=namespace, names=((resource_name, "pod name"),)):
+                return []  # not a valid K8s name: no such pod (and never an argv)
             try:
                 pod_output = _run_for_access(
                     access,
