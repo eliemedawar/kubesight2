@@ -1073,13 +1073,59 @@ def make_inventory_id(cluster_id: str, namespace: str, name: str) -> str:
     return quote(f"{cluster_id}|{namespace}|{name}", safe="")
 
 
+# Values keys that commonly hold credentials. Chart values are free-form, so
+# this is a name heuristic: it hides `postgresql.auth.password`, `apiKey`,
+# `tls.privateKey`, `smtp.secret` and the like from anyone without
+# secrets:reveal, the same bar the Secret YAML view applies.
+_SENSITIVE_VALUE_WORD = re.compile(
+    r"pass(word|wd|phrase)?|secret|token|api[-_]?key|access[-_]?key|private[-_]?key"
+    r"|credential|dsn|connection[-_]?string|^key$|[-_]key$",
+    re.IGNORECASE,
+)
+# camelCase `...Key` (apiKey, encryptionKey) without catching "monkey".
+_SENSITIVE_VALUE_CAMEL = re.compile(r"[a-z0-9]Key$")
+HIDDEN_HELM_VALUE = "<hidden: secrets:reveal required>"
+
+
+def _is_sensitive_value_key(key: str) -> bool:
+    return bool(_SENSITIVE_VALUE_WORD.search(key) or _SENSITIVE_VALUE_CAMEL.search(key))
+
+
+def _mask_sensitive_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        masked: Dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(item, (dict, list)):
+                masked[key] = _mask_sensitive_values(item)
+            elif item not in (None, "") and _is_sensitive_value_key(str(key)):
+                masked[key] = HIDDEN_HELM_VALUE
+            else:
+                masked[key] = item
+        return masked
+    if isinstance(value, list):
+        return [_mask_sensitive_values(item) for item in value]
+    return value
+
+
 def get_release_detail(
     cluster_id: str,
     namespace: str,
     release_name: str,
     *,
+    user: Optional[User] = None,
     run_helm_fn: Optional[RunHelmFn] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Release status, manifest and values, redacted to what ``user`` may see.
+
+    ``helm get manifest`` carries every Secret the chart renders and ``helm get
+    values`` the chart's credentials, so neither goes out raw by default:
+    without ``secrets:reveal`` Secret data is stripped from the manifest and
+    credential-looking values are masked; without ``helm:values:view`` the
+    values are not returned at all. ``user=None`` (internal callers) gets the
+    fully redacted form.
+    """
+    reveal = bool(user) and user_has_permission(user, "secrets:reveal")
+    show_values = bool(user) and user_has_permission(user, "helm:values:view")
     if not is_helm_installed():
         return None
     access = _resolve_access(cluster_id)
@@ -1111,6 +1157,11 @@ def get_release_detail(
         chart_name, chart_version = _parse_chart_label(str(chart_label))
 
     info = status_data.get("info") or {}
+    rendered = sanitize_yaml_preview(manifest) if manifest else ""
+    if not show_values:
+        values_summary = {}
+    elif not reveal:
+        values_summary = _mask_sensitive_values(values_summary)
     return {
         "releaseName": release_name,
         "namespace": namespace,
@@ -1122,8 +1173,10 @@ def get_release_detail(
         "status": info.get("status") or status_data.get("status") or "unknown",
         "lastDeployed": info.get("last_deployed") or info.get("lastDeployed"),
         "valuesSummary": values_summary,
-        "renderedManifest": sanitize_yaml_preview(manifest) if manifest else "",
-        "manifest": manifest,
+        "valuesHidden": not show_values,
+        "secretValuesHidden": not reveal,
+        "renderedManifest": rendered,
+        "manifest": manifest if reveal else rendered,
     }
 
 

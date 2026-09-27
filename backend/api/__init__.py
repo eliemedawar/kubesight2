@@ -18,7 +18,7 @@ from .k8s_provider import is_real_mode_enabled
 from .models import AppSettings, User
 from .routes import register_blueprints
 from .frontend_static import frontend_dist_available, register_frontend_static
-from .response import success_response
+from .response import error_response, success_response
 from .migrate_rbac import run_migrations
 from .runtime_config import INSECURE_DEVELOPMENT_KEY, enforce_production_config, is_production_env
 from .seed import seed_defaults
@@ -353,16 +353,22 @@ def create_app(config_object=None) -> Flask:
 
     @app.route("/health", methods=["GET"])
     def health():
-        return success_response(
-            {
-                "status": "ok",
-                "database": {
-                    "users": User.query.count(),
-                    "settingsRows": AppSettings.query.count(),
-                },
-                "kubernetesMode": "real" if is_real_mode_enabled() else "mock",
-            }
-        )
+        # Unauthenticated (probes call it), so it reports liveness only — no
+        # counts or other facts about the installation.
+        try:
+            db.session.execute(db.text("SELECT 1"))
+            database = "ok"
+        except Exception:
+            db.session.rollback()
+            database = "unavailable"
+        payload = {
+            "status": "ok" if database == "ok" else "degraded",
+            "database": database,
+            "kubernetesMode": "real" if is_real_mode_enabled() else "mock",
+        }
+        if database != "ok":
+            return error_response("Database unavailable", 503, data=payload)
+        return success_response(payload)
 
     if not frontend_dist_available():
 

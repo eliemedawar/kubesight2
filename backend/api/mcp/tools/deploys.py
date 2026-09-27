@@ -447,7 +447,7 @@ def _helm_release_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
     release = str(arguments.get("release") or "").strip()
     if not release:
         raise ToolError("Name the release.")
-    detail = get_release_detail(cluster_id, namespace, release)
+    detail = get_release_detail(cluster_id, namespace, release, user=user)
     if not detail:
         raise ToolError(f"No release '{release}' in {cluster_id}/{namespace}, or Helm is unavailable.")
     return {"clusterId": cluster_id, "namespace": namespace, **detail}
