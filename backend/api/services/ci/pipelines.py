@@ -34,7 +34,7 @@ from ...models_ci import (
     CiSecret,
     CiService,
 )
-from . import default_pipelines, jenkinsfile, templates
+from . import build_inputs, default_pipelines, jenkinsfile, templates
 from . import resources as ci_resources
 from .serializers import pipeline_to_dict
 
@@ -463,6 +463,25 @@ def _check_image_tag_template(env: Dict[str, str], stage_name: str) -> None:
         )
 
 
+def _check_stage_build_inputs(
+    env: Dict[str, str], working_directory: Any, stage_name: str
+) -> None:
+    """The engine-read values a stage's own env sets, checked on save.
+
+    A literal IMAGE_TAG / IMAGE_NAME here is still tidied by the engine (it has
+    always been), so only the values that reach the build line verbatim —
+    the Dockerfile path and the working directory — are held to a grammar.
+    """
+    dockerfile = env.get("DOCKERFILE_PATH") or ""
+    if dockerfile:
+        problem = build_inputs.dockerfile_path_problem(dockerfile)
+        if problem:
+            raise PipelineError(f"Stage '{stage_name}': {problem}")
+    problem = build_inputs.working_directory_problem(working_directory)
+    if problem:
+        raise PipelineError(f"Stage '{stage_name}': {problem}")
+
+
 def _image_scan(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, Any]]:
     """Normalize a container_image stage's scan gate, or None.
 
@@ -587,6 +606,7 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
 
     env = _env_map(payload.get("env"))
     _check_image_tag_template(env, name)
+    _check_stage_build_inputs(env, payload.get("workingDirectory"), name)
 
     return {
         "position": position,
@@ -1093,8 +1113,29 @@ def validate_parameter_values(
 
     # Values a pipeline without parameters was given still travel through.
     if not definitions:
-        return {str(k): str(v)[:MAX_MULTILINE_CHARS] for k, v in submitted.items()}
+        accepted = {str(k): str(v)[:MAX_MULTILINE_CHARS] for k, v in submitted.items()}
+    _check_trigger_values(accepted, known)
     return accepted
+
+
+def _check_trigger_values(values: Dict[str, str], declared) -> None:
+    """Refuse trigger values that would reach generated shell or the loader.
+
+    The engine splices DOCKERFILE_PATH / IMAGE_TAG / IMAGE_NAME into the image
+    stage's buildctl line, next to the registry push credentials — whoever may
+    RUN a build must not thereby be able to rewrite that line. Checked on the
+    final values whether or not the pipeline declares the name, because a
+    declared parameter is a free-text field too. Undeclared names must also be
+    real variable names and not ones that redirect the shell (PATH, LD_*...).
+    """
+    for name, value in values.items():
+        if name not in declared and name not in RESERVED_VARIABLES:
+            problem = build_inputs.env_name_problem(name)
+            if problem:
+                raise PipelineError(problem)
+        problem = build_inputs.reserved_value_problem(name, value)
+        if problem:
+            raise PipelineError(problem)
 
 
 def resolve_for_build(
