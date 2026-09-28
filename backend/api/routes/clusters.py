@@ -368,8 +368,20 @@ def test_custom_cluster(cluster_ref: str):
     if not cluster.is_active:
         return error_response("Cluster is not active.", 400)
 
-    result = test_cluster_connection(cluster)
+    from ..services.cluster_build.recovery import restore_missing_kubeconfig
+
+    try:
+        restored = restore_missing_kubeconfig(cluster, get_current_user())
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
+    except ValueError as exc:
+        result = {"success": False, "reachable": False, "error": str(exc)}
+    else:
+        result = test_cluster_connection(cluster)
+        if restored:
+            result["kubeconfigRestored"] = True
     record_connection_test(cluster, result)
+    invalidate_cluster_list_cache()
     return success_response(result)
 
 

@@ -466,6 +466,12 @@ retention, AI limitations, security controls, and troubleshooting.
 - **Custom clusters:** registered via the UI with kubeconfig auth; stored under
   `KUBESIGHT_KUBECONFIG_DIR` (`/data/kubeconfigs`, backed by `kubeconfig-pvc`). Never commit
   kubeconfigs.
+- **Missing kubeconfig for a builder-created cluster:** an authorized **Test connection**
+  recovers `/etc/kubernetes/admin.conf` over the build's saved SSH profile and stores it
+  encrypted under the existing cluster ID. Recovery requires cluster access,
+  `clusters:update` and `cluster_builds:execute`, in addition to `clusters:test`.
+  It does not rebuild the cluster. Keep the configured kubeconfig directory on persistent
+  storage (shared by backend replicas) so pod replacement does not lose the file again.
 - **Audit logs:** `GET /api/audit-logs` (admin) — logins, user changes, forbidden attempts.
 
 ### Troubleshooting

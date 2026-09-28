@@ -625,10 +625,14 @@ export default function ClusterManagementPage({
       const result = await testCustomCluster(cluster.publicId);
       if (result.success && result.reachable) {
         setMessage(
-          `Connection OK for ${cluster.name}: ${result.serverVersion || "unknown"} · ${result.latencyMs ?? "-"} ms`
+          `${result.kubeconfigRestored ? "Kubeconfig recovered from the control plane. " : ""}`
+          + `Connection OK for ${cluster.name}: ${result.serverVersion || "unknown"} · ${result.latencyMs ?? "-"} ms`
         );
       } else {
-        setMessage(`Connection failed for ${cluster.name}: ${result.error || "unknown error"}`);
+        setMessage(
+          `${result.kubeconfigRestored ? "Kubeconfig recovered, but the API connection still failed. " : ""}`
+          + `Connection failed for ${cluster.name}: ${result.error || "unknown error"}`
+        );
       }
       await loadClusters();
       if (onClustersChanged) {
