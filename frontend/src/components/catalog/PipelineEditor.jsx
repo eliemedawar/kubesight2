@@ -19,7 +19,9 @@ import {
   IMAGE_SCAN_THRESHOLDS,
   PlusIcon,
   RUNNER_TYPES,
+  RETIRED_STAGE_TYPES,
   STAGE_TYPES,
+  stageTypeLabel,
   TrashIcon,
   UNIMPLEMENTED_STAGE_TYPES,
   UpIcon,
@@ -105,8 +107,6 @@ const conditionSummary = (condition) => {
 const scanArmed = (stage) =>
   Boolean(stage.imageScan && stage.imageScan.enabled !== false);
 
-const stageTypeLabel = (stageType) =>
-  STAGE_TYPES.find((type) => type.value === stageType)?.label || stageType;
 
 const stageSummary = (stage) => {
   if (stage.stageType === "checkout") return "Repository source";
@@ -812,6 +812,15 @@ function StageFields({ stage, secretKeys, parameters, canEdit, onChange }) {
                 {type.label}
               </option>
             ))}
+            {/* A stored retired type must still show as selected, not as a
+                blank select that silently becomes something else. */}
+            {RETIRED_STAGE_TYPES.filter((type) => type.value === stage.stageType).map(
+              (type) => (
+                <option key={type.value} value={type.value} disabled>
+                  {type.label}
+                </option>
+              ),
+            )}
           </select>
         </label>
 

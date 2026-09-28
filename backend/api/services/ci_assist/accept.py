@@ -26,7 +26,6 @@ an audit entry, or sent anywhere near Hermes again.
 
 from __future__ import annotations
 
-import copy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -151,99 +150,75 @@ def _merge_parameters(
     return merged
 
 
-def auto_accept(analysis: CiRepositoryAnalysis, *, actor=None) -> Optional[Dict[str, Any]]:
-    """Save a proposal the moment it exists, without waiting to be asked.
+class AcceptConflict(AcceptError):
+    """Accepting would replace a pipeline somebody configured by hand.
 
-    The review step is skipped by choice: a pipeline in the editor is reviewable
-    at leisure and editable in place, which is a better place to disagree with
-    it than a modal that blocks registration.
-
-    The one thing that cannot be skipped is a value KubeSight does not have.
-    A stage may not reference a secret that does not exist, so a proposal that
-    needs ``NEXUS_PASSWORD`` is saved with that reference REMOVED and the
-    requirement recorded. Nothing silently half-works: the service shows what is
-    still needed, and supplying it re-attaches the reference. Guessing a
-    password is not an option, and neither is refusing to save the other four
-    stages because of one.
-
-    Returns None when there was nothing to save; never raises.
+    Refused unless the caller confirms with ``replaceExisting: true``; the
+    route answers 409 so the UI can ask the question instead of failing.
     """
-    service: CiService = analysis.service
-    proposal = analysis.generated_pipeline
-    if service is None or not isinstance(proposal, dict) or not proposal.get("stages"):
-        return None
 
-    required = analysis.required_inputs or []
-    known = _existing_secret_keys(service.id)
-    wanted = {
-        str(item.get("name"))
-        for item in required
-        if isinstance(item, dict) and str(item.get("kind")) == "secret"
-    }
-    pending = sorted(name for name in wanted if name not in known)
+    code = "pipeline_customized"
 
-    stripped = copy.deepcopy(proposal)
-    detached: List[str] = []
-    if pending:
-        for stage in stripped.get("stages") or []:
-            if not isinstance(stage, dict):
-                continue
-            kept = []
-            for ref in stage.get("secretRefs") or []:
-                name = ref.get("name") if isinstance(ref, dict) else str(ref)
-                if name in pending:
-                    detached.append(f"{stage.get('name')}:{name}")
-                else:
-                    kept.append(ref)
-            stage["secretRefs"] = kept
 
-    verdict = generated.validate(service, stripped, declared_inputs=required)
-    if not verdict["valid"]:
-        # Nothing storable came out. The proposal stays on the analysis for the
-        # user to look at; it simply does not become the service's pipeline.
-        return None
-
-    existing_pipeline: Optional[CiPipeline] = service.default_pipeline()
-    if existing_pipeline is not None:
-        saved = pipelines_service.update_pipeline(
-            existing_pipeline, verdict["pipeline"], actor=actor
+def _written_by_an_accept(service: CiService, pipeline: CiPipeline) -> bool:
+    """Whether the pipeline is exactly as an earlier accept left it."""
+    rows = (
+        CiRepositoryAnalysis.query.filter_by(
+            service_id=service.id, pipeline_state="accepted"
         )
-    else:
-        saved = pipelines_service.create_pipeline(service, verdict["pipeline"], actor=actor)
+        .order_by(CiRepositoryAnalysis.id.desc())
+        .limit(20)
+        .all()
+    )
+    for row in rows:
+        stamp = (row.validation or {}).get("acceptedPipeline") or {}
+        if stamp.get("id") == pipeline.id and stamp.get("version") == pipeline.version:
+            return True
+    return False
 
-    resolved_profile = analysis.application_profile
-    if resolved_profile:
-        service.application_profile = resolved_profile
-        service.profile_source = resolved_profile.get("source") or "hermes"
-        derived = resolved_profile.get("derivedApplicationType")
-        if derived:
-            service.application_type = derived
-    service.analysis_state = "analyzed"
-    service.updated_at = _now()
-    db.session.add(service)
 
-    analysis.pipeline_state = "accepted"
-    analysis.generated_pipeline = verdict["pipeline"]
+def replaces_custom_pipeline(service: Optional[CiService]) -> bool:
+    """Whether accepting a proposal now would overwrite hand-made stages.
+
+    A service whose default pipeline has no saved stages builds from the
+    KubeSight generated default, and replacing that loses nothing. Saved stages
+    that an earlier accept wrote, untouched since, are likewise the model's.
+    Anything else is somebody's work.
+    """
+    if service is None:
+        return False
+    existing = service.default_pipeline()
+    if existing is None or not list(existing.stages or []):
+        return False
+    return not _written_by_an_accept(service, existing)
+
+
+def reject(analysis: CiRepositoryAnalysis, *, actor=None, reason: str = "") -> None:
+    """Discard a proposal. Nothing about the service changes."""
+    if analysis.pipeline_state == "accepted":
+        raise AcceptError(
+            "This proposal was already accepted and is the service's pipeline. "
+            "Edit the pipeline instead."
+        )
+    if analysis.pipeline_state == "rejected":
+        return
+    if analysis.state not in ("analyzed", "partial"):
+        raise AcceptError("This analysis has no proposal to discard.")
+    analysis.pipeline_state = "rejected"
     db.session.add(analysis)
     db.session.commit()
-
+    service = analysis.service
     log_audit(
-        "ci_generated_pipeline_accepted",
+        "ci_generated_pipeline_rejected",
         actor=actor,
         target_type="ci_service",
-        target_id=str(service.id),
+        target_id=str(analysis.service_id),
         details={
-            "service": service.slug,
+            "service": service.slug if service else None,
             "analysisId": analysis.id,
-            "pipelineId": saved.get("id"),
-            "stageCount": len(verdict["pipeline"].get("stages") or []),
-            "applicationType": service.application_type,
-            "automatic": True,
-            "pendingSecrets": pending,
-            "secretRefsDetached": detached,
+            "reason": " ".join(str(reason or "").split())[:500],
         },
     )
-    return {"pipeline": saved, "pendingSecrets": pending, "detached": detached}
 
 
 def accept(
@@ -265,6 +240,17 @@ def accept(
         raise AcceptError(
             "This analysis has not produced a pipeline to accept. Run it again, or "
             "configure the service manually."
+        )
+    if analysis.pipeline_state == "rejected":
+        raise AcceptError(
+            "This proposal was discarded. Run the analysis again for a new one."
+        )
+    # The one write a person must see coming: replacing stages somebody set up
+    # by hand. Everything else about accepting is the point of accepting.
+    if not payload.get("replaceExisting") and replaces_custom_pipeline(service):
+        raise AcceptConflict(
+            "This service's pipeline has been configured by hand. Accepting the "
+            "proposal replaces those stages; confirm to replace them."
         )
 
     # The proposal as Hermes wrote it, secret references and all — NOT the
@@ -374,6 +360,12 @@ def accept(
     analysis.pipeline_state = "accepted"
     analysis.generated_pipeline = pipeline_payload
     analysis.application_profile = resolved_profile or analysis.application_profile
+    # Which revision this accept wrote, so a later proposal can tell "still the
+    # model's pipeline" from "somebody has edited it since".
+    analysis.validation = {
+        **(analysis.validation or {}),
+        "acceptedPipeline": {"id": saved.get("id"), "version": saved.get("version")},
+    }
     db.session.add(analysis)
     db.session.commit()
 
@@ -393,6 +385,7 @@ def accept(
             "secretsCreated": sorted(created_secrets),
             "registryLinked": bool(registry_id),
             "editedBeforeAccepting": bool(payload.get("pipeline")),
+            "replacedCustomPipeline": bool(payload.get("replaceExisting")),
         },
     )
     return {"pipeline": saved, "service": service}

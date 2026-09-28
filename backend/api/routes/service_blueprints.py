@@ -80,7 +80,8 @@ def delete_existing_blueprint(blueprint_id: int):
 
 
 # ---------------------------------------------------------------------------
-# Deploy From Blueprint
+# Register From Blueprint (legacy "deploy" paths kept for callers).
+# These write KubeSight records only; nothing is applied to Kubernetes.
 # ---------------------------------------------------------------------------
 
 @service_blueprints_bp.route("/<int:blueprint_id>/deploy-plan", methods=["POST"])
@@ -95,8 +96,13 @@ def blueprint_deploy_plan(blueprint_id: int):
 
 
 @service_blueprints_bp.route("/<int:blueprint_id>/deploy", methods=["POST"])
+@service_blueprints_bp.route("/<int:blueprint_id>/register", methods=["POST"])
 @require_permission("service_blueprints:deploy")
 def blueprint_deploy(blueprint_id: int):
+    """Register an instance of the blueprint (DB records only, no cluster change).
+
+    ``/register`` is the honest alias; ``/deploy`` is kept for existing callers.
+    """
     payload = request.get_json(silent=True) or {}
     data, error, status = deploy_from_blueprint(blueprint_id, payload, actor_user_id=_actor_user_id())
     if error:

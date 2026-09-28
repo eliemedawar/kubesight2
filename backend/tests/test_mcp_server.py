@@ -1533,3 +1533,57 @@ def test_build_failure_explains_in_one_call_and_says_so_when_nothing_failed(
     assert [stage["name"] for stage in found["failedStages"]] == ["Build"]
     # The whole point: the reason arrives without a second call for a stage id.
     assert "cannot find symbol" in "\n".join(found["failedStages"][0]["tail"])
+
+
+# ---------------------------------------------------------------------------
+# kubesight_automation_run_start goes through the ticket agent's validator
+# ---------------------------------------------------------------------------
+
+
+def test_automation_run_start_is_checked_by_the_ticket_validator(client, admin_token, app, monkeypatch):
+    """The MCP start is refused (as a tool error carrying the validator's
+    reason) when the target is not in the published catalog or the stated
+    confidence is under the bar; with a clean check it starts as before."""
+    from datetime import datetime, timezone
+
+    from api.models import DeployAutomationRun, ZohoDeploymentSnapshot, ZohoInboundTicket
+    from api.services.ticket_agent import catalog
+
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "found", "image": image},
+    )
+    snapshot = ZohoDeploymentSnapshot(
+        cluster_id="prod-us-east", namespace="payments", deployment_name="payments-api"
+    )
+    db.session.add(snapshot)
+    db.session.flush()
+    ticket = ZohoInboundTicket(
+        ticket_id="zt-mcp-1",
+        ticket_number="DR-7001",
+        resolved=True,
+        app_service_id=snapshot.id,
+        tag="7.0.1",
+        received_at=datetime.now(timezone.utc),
+    )
+    db.session.add(ticket)
+    db.session.commit()
+    args = {"provider": "zoho", "ticketRecordId": ticket.id, "confidence": "High"}
+
+    monkeypatch.setattr(catalog, "targets", lambda provider: [])
+    result = call_tool(client, admin_token, "kubesight_automation_run_start", args)
+    assert result["isError"] is True
+    assert "not in the catalog" in result["content"][0]["text"]
+
+    monkeypatch.setattr(catalog, "targets", lambda provider: [snapshot])
+    result = call_tool(
+        client, admin_token, "kubesight_automation_run_start", {**args, "confidence": "Medium"}
+    )
+    assert result["isError"] is True
+    assert "needs a human approval" in result["content"][0]["text"]
+    assert DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).count() == 0
+
+    result = call_tool(client, admin_token, "kubesight_automation_run_start", args)
+    assert not result.get("isError"), result["content"][0]["text"]
+    assert result["structuredContent"]["id"]
+    assert DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).count() == 1

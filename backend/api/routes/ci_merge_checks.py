@@ -259,23 +259,30 @@ def redeliver(check_id: int):
 def inbound(slug: str):
     """A source host announcing a pull request.
 
-    The secret travels in a header by preference and in the query string as a
-    fallback, because some webhook UIs cannot set headers. The event key comes
+    Bitbucket's own ``X-Hub-Signature`` (an HMAC of the body keyed with the
+    secret) is preferred; the secret itself is also accepted in the
+    ``X-KubeSight-Secret`` header, or in the query string as a last resort,
+    because some webhook UIs can neither sign nor set headers. The event key comes
     from Bitbucket's own ``X-Event-Key``; a body with no header is treated as a
     creation, which is the conservative reading — it runs the checks.
     """
-    provided = (
-        request.headers.get("X-KubeSight-Secret")
-        or request.headers.get("X-Hub-Signature")
-        or request.args.get("secret", "")
-    )
+    provided = request.headers.get("X-KubeSight-Secret") or request.args.get("secret", "")
+    # Bitbucket signs the raw body (``sha256=<hex hmac>``); the signature is
+    # verified over exactly these bytes, so read them before any JSON parsing.
+    signature = request.headers.get("X-Hub-Signature", "")
+    raw_body = request.get_data(cache=True) or b""
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return error_response("Expected a JSON object body.", 400)
     event = request.headers.get("X-Event-Key", "") or str(payload.get("eventKey") or "")
     try:
         result = merge_checks_service.ingest(
-            slug, payload, event=event, provided_secret=provided
+            slug,
+            payload,
+            event=event,
+            provided_secret=provided,
+            signature=signature,
+            raw_body=raw_body,
         )
     except PermissionError as exc:
         return error_response(str(exc), 401)

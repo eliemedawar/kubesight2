@@ -388,27 +388,60 @@ def _migrate_renamed_permissions() -> None:
         logger.info("Carried %s role grant(s) from zoho:* to ticketing:*.", carried)
 
 
-def _sync_role_permissions() -> None:
-    """Ensure every role has all permissions defined for it in ROLE_DEFINITIONS.
+def _grant_ticket_agent_to_ticket_managers() -> None:
+    """Introduce ``ticketing:agent`` without taking anything away.
 
-    This is idempotent: it only ever adds missing permissions, never removes existing ones.
-    Called on every startup so that new permissions added to rbac_data.py automatically
-    propagate to existing deployments without manual DB surgery.
+    The Hermes ticket-agent MCP tools used to answer under ``ticketing:manage``;
+    they now answer under the narrower ``ticketing:agent`` so the hermes-agent
+    service account can hold them without holding integration management. Every
+    role that held ``ticketing:manage`` when the new key appeared keeps the
+    tools by being granted ``ticketing:agent`` once.
+
+    Runs only while the permission row does not exist yet, i.e. once per
+    installation: an admin who later removes ``ticketing:agent`` from a custom
+    role is not overridden on the next restart.
+    """
+    from .models import Permission, Role
+    from .rbac_data import PERMISSIONS
+
+    if Permission.query.filter_by(key="ticketing:agent").first() is not None:
+        return
+    agent = Permission(key="ticketing:agent", description=dict(PERMISSIONS).get("ticketing:agent", ""))
+    db.session.add(agent)
+    db.session.flush()
+    granted = 0
+    for role in Role.query.all():
+        held = {perm.key for perm in role.permissions}
+        if "ticketing:manage" in held:
+            role.permissions.append(agent)
+            granted += 1
+    db.session.commit()
+    if granted:
+        logger.info("Granted ticketing:agent to %s role(s) holding ticketing:manage.", granted)
+
+
+def _sync_role_permissions() -> None:
+    """Give every built-in role the ROLE_DEFINITIONS defaults it has never had.
+
+    Called on every startup so that new permissions added to rbac_data.py
+    propagate to existing deployments without manual DB surgery. Only ever
+    adds, and only a default not granted before (see ``RoleDefaultGrant``): a
+    default an admin removed from the role is not forced back on restart.
     """
     from .models import Role, Permission
     from .rbac_data import ROLE_DEFINITIONS
+    from .seed import grant_new_role_defaults, record_role_defaults
 
     for role_name, defn in ROLE_DEFINITIONS.items():
         role = Role.query.filter_by(name=role_name).first()
         if not role:
             continue
-        current_keys = {p.key for p in role.permissions}
-        needed_keys = set(defn["permissions"]) - current_keys
-        if not needed_keys:
-            continue
-        new_perms = Permission.query.filter(Permission.key.in_(needed_keys)).all()
-        for perm in new_perms:
-            role.permissions.append(perm)
+        defaults = Permission.query.filter(Permission.key.in_(defn["permissions"])).all()
+        grant_new_role_defaults(role, role_name, defaults)
+        # Record only defaults that exist as rows. A key introduced by this
+        # release gets its Permission row later, in seed_defaults — recording
+        # it now would mark it granted before it ever was.
+        record_role_defaults(role_name, [perm.key for perm in defaults])
     db.session.commit()
 
 
@@ -598,21 +631,33 @@ def _seed_builtin_ci_runners() -> None:
     """Ensure the runners KubeSight manages itself exist.
 
     ``mock`` executes pipelines without touching a cluster — it backs mock mode
-    and the test suite. ``kubernetes`` is the real in-cluster Job executor and
-    ships disabled until its adapter lands, so a build can never silently
-    dispatch to a runner that cannot run it.
+    and the test suite. It runs NO commands and reports every stage green, so
+    on an installation connected to real clusters it is seeded disabled (and an
+    existing enabled row is switched off, below): a fake-green build there is a
+    lie a deploy could act on. The scheduler refuses it in real mode as well.
+
+    ``kubernetes`` is the real in-cluster Job executor. A fresh real-mode
+    installation seeds it enabled so CI works once k8s/ci-runner.yaml is
+    applied (until then its builds FAIL with the runner's error — never pass).
+    In mock mode it ships disabled. Existing rows keep whatever the operator set.
     """
     if "ci_runners" not in inspect(db.engine).get_table_names():
         return
     from .models_ci import CiRunner
+    from .k8s_provider import is_real_mode_enabled
+
+    try:
+        real_mode = bool(is_real_mode_enabled())
+    except Exception:
+        real_mode = True  # Fail closed: never arm the simulated runner by accident.
 
     builtins = [
         {
             "name": "kubesight-mock",
             "runner_type": "mock",
             "description": "Simulated executor. Runs pipelines without a cluster.",
-            "status": "online",
-            "enabled": True,
+            "status": "offline" if real_mode else "online",
+            "enabled": not real_mode,
             "os": "linux",
             "arch": "amd64",
             "labels": ["mock"],
@@ -631,7 +676,7 @@ def _seed_builtin_ci_runners() -> None:
                 "then enable this runner."
             ),
             "status": "offline",
-            "enabled": False,
+            "enabled": real_mode,
             "os": "linux",
             "arch": "amd64",
             "labels": ["kubernetes"],
@@ -653,6 +698,16 @@ def _seed_builtin_ci_runners() -> None:
             # capabilities are union-merged so shipped rows learn new ones.
             if not row.is_builtin:
                 row.is_builtin = True
+                changed = True
+            # The one exception to "operators own enabled": the simulated
+            # runner is a safety hazard on a real installation, whatever it
+            # was set to while the installation was a demo.
+            if real_mode and row.runner_type == "mock" and (
+                row.enabled or row.status != "offline"
+            ):
+                row.enabled = False
+                row.status = "offline"
+                db.session.add(row)
                 changed = True
             merged = sorted(set(row.capabilities or []) | set(spec["capabilities"]))
             if merged != sorted(row.capabilities or []):
@@ -815,6 +870,12 @@ def _migrate_alert_routing_user_receivers() -> None:
         return
     _add_column_if_missing("alert_routing_receivers", "user_id", "INTEGER")
     _add_column_if_missing("alert_routing_receivers", "role_id", "INTEGER")
+    # Receiver filters (severity list / namespace + cluster globs). Declared on
+    # the model from the start but never read until dispatch honoured them;
+    # make sure older databases have them.
+    _add_column_if_missing("alert_routing_receivers", "severity_filter", "JSON")
+    _add_column_if_missing("alert_routing_receivers", "namespace_filter", "VARCHAR(253)")
+    _add_column_if_missing("alert_routing_receivers", "cluster_filter", "VARCHAR(120)")
 
     # Backfill: link existing static-email receivers to a matching active user by
     # email and promote them to 'user' receivers. Unmatched ones stay as legacy.
@@ -873,8 +934,54 @@ def _migrate_user_onboarding_columns() -> None:
         ("created_by_admin_id", "INTEGER"),
         ("is_service_account", "BOOLEAN DEFAULT false"),
         ("interactive_login_enabled", "BOOLEAN DEFAULT true"),
+        ("token_version", "INTEGER DEFAULT 0 NOT NULL"),
     ]:
         _add_column_if_missing("users", col, sql_type)
+    _migrate_totp_secret_encryption()
+
+
+_TOTP_PLAINTEXT_RE = re.compile(r"^[A-Z2-7]{16,64}=*$")
+
+
+def _migrate_totp_secret_encryption() -> None:
+    """Widen ``users.totp_secret`` and encrypt the plaintext seeds it held.
+
+    TOTP seeds used to be stored as plain base32 in a VARCHAR(64); they are now
+    Fernet ciphertext (~140 chars). PostgreSQL enforces the length, so the
+    column is widened first; SQLite does not, so there is nothing to alter.
+    Then every value that is still a bare base32 seed is encrypted in place.
+    Idempotent: ciphertext never matches the base32 shape (it is mixed-case
+    urlsafe base64), so a second run finds nothing to do. Reading stays tolerant
+    of plaintext too (auth_service), so a row this misses still works.
+    """
+    if "totp_secret" not in _table_columns("users"):
+        return
+    if db.engine.dialect.name != "sqlite":
+        columns = {c["name"]: c for c in inspect(db.engine).get_columns("users")}
+        length = getattr(columns["totp_secret"].get("type"), "length", None)
+        if length is not None and length < 255:
+            with db.engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE users ALTER COLUMN totp_secret TYPE VARCHAR(255)")
+                )
+
+    from .secret_encryption import encrypt_secret
+
+    with db.engine.begin() as conn:
+        rows = conn.execute(
+            text("SELECT id, totp_secret FROM users WHERE totp_secret IS NOT NULL")
+        ).fetchall()
+        converted = 0
+        for user_id, value in rows:
+            if not value or not _TOTP_PLAINTEXT_RE.match(value.strip()):
+                continue
+            conn.execute(
+                text("UPDATE users SET totp_secret = :cipher WHERE id = :id"),
+                {"cipher": encrypt_secret(value.strip()), "id": user_id},
+            )
+            converted += 1
+    if converted:
+        logger.info("Encrypted %s plaintext TOTP secret(s) at rest.", converted)
 
 
 def _migrate_application_intelligence_columns() -> None:
@@ -1199,6 +1306,39 @@ def _backfill_build_signature_state() -> None:
         logger.info("Backfilled signature_state for %s mobile build(s)", changed)
 
 
+def _encrypt_plaintext_kubeconfigs() -> None:
+    """Encrypt legacy plaintext ``cluster-<id>.yaml`` kubeconfigs at rest.
+
+    Idempotent: once every file is ``.yaml.enc`` this is a directory listing.
+    A failure is logged, never fatal — a cluster whose file could not be
+    converted keeps working from the plaintext copy until the next start.
+    """
+    from .cluster_store import migrate_plaintext_kubeconfigs
+
+    try:
+        converted = migrate_plaintext_kubeconfigs()
+    except Exception:  # noqa: BLE001 — startup must not die on one bad file
+        db.session.rollback()
+        logger.exception("Encrypting stored kubeconfigs failed; will retry next start.")
+        return
+    if converted:
+        logger.info("Encrypted %d stored kubeconfig file(s) at rest.", converted)
+
+
+def _interrupt_orphaned_upgrade_jobs() -> None:
+    """Upgrade jobs left queued/running by a previous process are dead."""
+    from .upgrade_jobs import interrupt_orphaned_jobs
+
+    try:
+        interrupted = interrupt_orphaned_jobs()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        logger.exception("Reconciling interrupted upgrade jobs failed.")
+        return
+    if interrupted:
+        logger.warning("Marked %d interrupted upgrade job(s) as failed.", interrupted)
+
+
 def run_migrations() -> None:
     db.create_all()
     # DDL for columns added to pre-existing tables must run before ANY step that
@@ -1242,4 +1382,9 @@ def run_migrations() -> None:
     _sync_role_permissions()
     # Must run BEFORE the prune: it reads the old rows the prune is about to drop.
     _migrate_renamed_permissions()
+    _grant_ticket_agent_to_ticket_managers()
     _prune_obsolete_permissions()
+    # Cluster access (Area C): not schema, but one-time data fix-ups that must
+    # run on every start.
+    _encrypt_plaintext_kubeconfigs()
+    _interrupt_orphaned_upgrade_jobs()

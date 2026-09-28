@@ -57,6 +57,8 @@ Custom clusters appear in `GET /api/clusters` with IDs like `custom-1`, `custom-
 
 Kubeconfig files are written under `backend/data/kubeconfigs/` by default (override with `KUBESIGHT_KUBECONFIG_DIR`). This directory is gitignored — do not commit credentials.
 
+They are stored Fernet-encrypted as `cluster-<id>.yaml.enc` with the same key as the other at-rest secrets (`secret_encryption`), so that key must stay stable: rotating it without re-uploading the kubeconfigs makes every registered cluster unreachable ("could not be decrypted"). Legacy plaintext `cluster-<id>.yaml` files are encrypted and removed on startup. kubectl/helm get a decrypted 0600 copy only for the duration of each call (shared by concurrent calls, deleted when the last one ends; a `logs -f` stream holds it until the stream closes) in a per-process 0700 directory under `/dev/shm` when available, else the system temp dir, or `KUBESIGH_KUBECONFIG_RUNTIME_DIR` if set. Removing a registered cluster deletes its kubeconfig file.
+
 ## Authentication & access control
 
 The API uses JWT Bearer authentication. Sign in via the UI or `POST /api/auth/login`.

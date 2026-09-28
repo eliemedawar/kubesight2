@@ -7,15 +7,42 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .cluster_access import ClusterAccess, custom_cluster_public_id, is_custom_cluster_id, parse_custom_cluster_db_id
+from .kubeconfig_vault import (
+    KubeconfigDecryptError,
+    acquire_kubeconfig,
+    kubeconfig_exists,
+    kubeconfig_identity,
+    materialized_kubeconfig,
+    release_kubeconfig,
+)
 from .ttl_cache import TTLCache, caching_disabled
 
 
 class K8sCommandError(RuntimeError):
     pass
+
+
+class K8sInvalidNameError(K8sCommandError):
+    """A user-supplied Kubernetes name failed validation; no kubectl was run."""
+
+
+def require_valid_k8s_names(
+    *,
+    namespace: Optional[str] = None,
+    names: tuple = (),
+    containers: tuple = (),
+) -> None:
+    """Raise ``K8sInvalidNameError`` unless every given name is a valid K8s name.
+
+    See ``k8s_names``: stops kubectl flag injection through names."""
+    from .k8s_names import name_error
+
+    message = name_error(namespace=namespace, names=names, containers=containers)
+    if message:
+        raise K8sInvalidNameError(message)
 
 
 # Absorbs repeated kubectl subprocess work across concurrent requests and
@@ -141,13 +168,28 @@ def _request_timeout_flag(args: List[str], effective_timeout: int) -> List[str]:
     return [f"--request-timeout={seconds}s"]
 
 
+def _refuse_unsafe_kubectl_args(args: List[str]) -> None:
+    """Defence in depth against flag injection through user-supplied names.
+
+    Connection/identity flags are only ever added by the runners themselves;
+    one in the caller-built args means a "name" smuggled a flag in."""
+    from .k8s_names import unsafe_kubectl_arg
+
+    bad = unsafe_kubectl_arg(args)
+    if bad is not None:
+        raise K8sCommandError(
+            f"Refusing to run kubectl: argument {bad[:80]!r} is not allowed."
+        )
+
+
 def _run_kubectl(
     args: List[str],
     context: Optional[str] = None,
     kubeconfig_path: Optional[str] = None,
     timeout: Optional[int] = None,
 ) -> str:
-    breaker_key = f"down:{kubeconfig_path or ''}:{context or ''}"
+    # Keyed by cluster identity (custom-<id>), never by a decrypted temp path.
+    breaker_key = f"down:{kubeconfig_identity(kubeconfig_path)}:{context or ''}"
     breaker_enabled = (
         bool(args)
         and args[0] != "config"  # local kubeconfig ops never touch the API
@@ -159,30 +201,34 @@ def _run_kubectl(
             f"Retrying automatically within {_UNREACHABLE_BACKOFF_SECONDS}s."
         )
 
-    command = ["kubectl"]
-    if kubeconfig_path:
-        command += ["--kubeconfig", kubeconfig_path]
-    if context:
-        command += ["--context", context]
+    _refuse_unsafe_kubectl_args(args)
     effective_timeout = timeout if timeout is not None else _KUBECTL_DEFAULT_TIMEOUT
-    command += _request_timeout_flag(args, effective_timeout)
-    command += args
-
-    env = os.environ.copy()
-    if kubeconfig_path:
-        env["KUBECONFIG"] = kubeconfig_path
-    elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
-        env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
-
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-            env=env,
-            timeout=effective_timeout,
-        )
+        with materialized_kubeconfig(kubeconfig_path) as plain_kubeconfig:
+            command = ["kubectl"]
+            if plain_kubeconfig:
+                command += ["--kubeconfig", plain_kubeconfig]
+            if context:
+                command += ["--context", context]
+            command += _request_timeout_flag(args, effective_timeout)
+            command += args
+
+            env = os.environ.copy()
+            if plain_kubeconfig:
+                env["KUBECONFIG"] = plain_kubeconfig
+            elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
+                env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
+
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                timeout=effective_timeout,
+            )
+    except KubeconfigDecryptError as exc:
+        raise K8sCommandError(str(exc)) from exc
     except FileNotFoundError:
         raise K8sCommandError(
             "kubectl not found. Please install kubectl and ensure it is on your PATH."
@@ -209,7 +255,7 @@ def _run_kubectl(
             )
         ):
             _K8S_READ_CACHE.set(breaker_key, True, _UNREACHABLE_BACKOFF_SECONDS)
-        raise K8sCommandError(stderr or f"kubectl command failed: {' '.join(command)}")
+        raise K8sCommandError(stderr or f"kubectl command failed: kubectl {' '.join(args)}")
     return completed.stdout
 
 
@@ -381,7 +427,7 @@ def _custom_cluster_item(cluster_snapshot: Dict[str, Any], now: str) -> Dict[str
     cpu_usage_percent: Optional[float] = None
     memory_usage_percent: Optional[float] = None
     kubeconfig_path = cluster_snapshot["kubeconfig_path"]
-    if kubeconfig_path and Path(kubeconfig_path).is_file():
+    if kubeconfig_exists(kubeconfig_path):
         access = ClusterAccess(
             cluster_id=public_id,
             context_name=cluster_snapshot["context_name"],
@@ -583,13 +629,21 @@ def cluster_overview_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
 def _cluster_overview_from_k8s_uncached(access: ClusterAccess) -> Dict[str, Any]:
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         nodes_future = pool.submit(_run_for_access, access, ["get", "nodes", "-o", "json"])
         pods_future = pool.submit(
             _run_for_access, access, ["get", "pods", "--all-namespaces", "-o", "json"]
         )
+        # Workload counts and storage are best-effort extras: a token that may
+        # not list PVs (cluster-scoped) must not take the whole overview down.
+        workloads_future = pool.submit(_overview_workload_counts, access)
+        pv_future = pool.submit(_overview_pv_capacity_gib, access)
+        pvc_future = pool.submit(_overview_pvc_claimed_gib, access)
         nodes_data = json.loads(nodes_future.result())
         pods_data = json.loads(pods_future.result())
+        workloads = workloads_future.result()
+        pv_capacity_gib = pv_future.result()
+        pvc_claimed_gib = pvc_future.result()
 
     node_items = nodes_data.get("items", [])
     pod_items = pods_data.get("items", [])
@@ -608,15 +662,122 @@ def _cluster_overview_from_k8s_uncached(access: ClusterAccess) -> Dict[str, Any]
     return {
         "clusterId": access.cluster_id,
         "healthScore": 100 if failed == 0 else max(65, 100 - failed * 5),
-        "workloads": {"deployments": 0, "statefulsets": 0, "daemonsets": 0},
+        "workloads": workloads,
         "resources": {
             "cpu": {"usedCores": used_cpu, "capacityCores": round(cpu_capacity, 2)},
             "memory": {"usedGiB": used_mem, "capacityGiB": round(mem_capacity, 2)},
-            "storage": {"usedGiB": 0, "capacityGiB": 0},
+            # capacityGiB: provisioned PersistentVolumes; claimedGiB: bound
+            # PVC capacity. Actual bytes used on the volumes would need the
+            # kubelet stats API per node, so usedGiB is null ("—"), not 0.
+            "storage": {
+                "usedGiB": None,
+                "capacityGiB": pv_capacity_gib,
+                "claimedGiB": pvc_claimed_gib,
+            },
         },
         "pods": {"running": running, "pending": pending, "failed": failed},
         "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
+
+
+_WORKLOAD_KIND_KEYS = {
+    "Deployment": "deployments",
+    "StatefulSet": "statefulsets",
+    "DaemonSet": "daemonsets",
+}
+
+_QUANTITY_FACTORS_GIB = {
+    "Ki": 1 / (1024 ** 2),
+    "Mi": 1 / 1024,
+    "Gi": 1.0,
+    "Ti": 1024.0,
+    "Pi": 1024.0 ** 2,
+    "Ei": 1024.0 ** 3,
+    "k": 1e3 / 1024 ** 3,
+    "M": 1e6 / 1024 ** 3,
+    "G": 1e9 / 1024 ** 3,
+    "T": 1e12 / 1024 ** 3,
+    "P": 1e15 / 1024 ** 3,
+    "E": 1e18 / 1024 ** 3,
+}
+
+
+def _quantity_to_gib(value: Any) -> Optional[float]:
+    """Kubernetes storage quantity ("10Gi", "500M", "1073741824") → GiB."""
+    text = str(value or "").strip()
+    if not text or text == "<none>":
+        return None
+    for suffix in ("Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "k", "M", "G", "T", "P", "E"):
+        if text.endswith(suffix):
+            try:
+                return float(text[: -len(suffix)]) * _QUANTITY_FACTORS_GIB[suffix]
+            except ValueError:
+                return None
+    try:
+        return float(text) / 1024 ** 3
+    except ValueError:
+        return None
+
+
+def _custom_column_lines(output: str) -> List[str]:
+    return [line.strip() for line in (output or "").splitlines() if line.strip()]
+
+
+def _overview_workload_counts(access: ClusterAccess) -> Dict[str, Optional[int]]:
+    """Deployments / StatefulSets / DaemonSets across all namespaces.
+
+    One kubectl call, kind column only — listing full objects cluster-wide just
+    to count them is the expensive way. Null counts when kubectl cannot list."""
+    try:
+        output = _run_for_access(
+            access,
+            [
+                "get", "deployments,statefulsets,daemonsets", "-A",
+                "-o", "custom-columns=KIND:.kind", "--no-headers",
+            ],
+        )
+    except K8sCommandError:
+        return {"deployments": None, "statefulsets": None, "daemonsets": None}
+    counts: Dict[str, Optional[int]] = {"deployments": 0, "statefulsets": 0, "daemonsets": 0}
+    for kind in _custom_column_lines(output):
+        key = _WORKLOAD_KIND_KEYS.get(kind)
+        if key:
+            counts[key] = int(counts[key] or 0) + 1
+    return counts
+
+
+def _sum_quantity_lines(output: str) -> float:
+    total = 0.0
+    for line in _custom_column_lines(output):
+        gib = _quantity_to_gib(line.split()[0])
+        if gib:
+            total += gib
+    return round(total, 2)
+
+
+def _overview_pv_capacity_gib(access: ClusterAccess) -> Optional[float]:
+    try:
+        output = _run_for_access(
+            access,
+            ["get", "pv", "-o", "custom-columns=CAP:.spec.capacity.storage", "--no-headers"],
+        )
+    except K8sCommandError:
+        return None
+    return _sum_quantity_lines(output)
+
+
+def _overview_pvc_claimed_gib(access: ClusterAccess) -> Optional[float]:
+    try:
+        output = _run_for_access(
+            access,
+            [
+                "get", "pvc", "-A",
+                "-o", "custom-columns=CAP:.status.capacity.storage", "--no-headers",
+            ],
+        )
+    except K8sCommandError:
+        return None
+    return _sum_quantity_lines(output)
 
 
 def _resource_counts_by_namespace(access: ClusterAccess) -> Dict[str, Dict[str, int]]:
@@ -1175,6 +1336,10 @@ def read_namespaced_resource_json(
     transport helper. kubectl receives the resolved server credential only in
     its isolated subprocess; the returned object contains Kubernetes data only.
     """
+    require_valid_k8s_names(
+        namespace=namespace,
+        names=((resource_kind, "resource kind"), (resource_name, "resource name")),
+    )
     output = _run_for_access(
         access,
         ["get", resource_kind, resource_name, "-n", namespace, "-o", "json"],
@@ -1191,6 +1356,7 @@ def list_namespaced_resources_json(
     namespace: str,
 ) -> List[Dict[str, Any]]:
     """List raw resource documents for a permission-checked namespace."""
+    require_valid_k8s_names(namespace=namespace, names=((resource_kind, "resource kind"),))
     output = _run_for_access(
         access, ["get", resource_kind, "-n", namespace, "-o", "json"]
     )
@@ -1965,6 +2131,7 @@ def namespace_events_from_k8s(
     involved_name: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> Dict[str, Any]:
+    require_valid_k8s_names(namespace=namespace)
     output = _run_for_access(access, ["get", "events", "-n", namespace, "-o", "json"])
     raw_items = json.loads(output).get("items", [])
 
@@ -2024,6 +2191,7 @@ def list_namespace_pods_for_logs(access: ClusterAccess, namespace: str) -> Dict[
 def list_pod_containers_from_k8s(
     access: ClusterAccess, namespace: str, pod_name: str
 ) -> Dict[str, Any]:
+    require_valid_k8s_names(namespace=namespace, names=((pod_name, "pod name"),))
     output = _run_for_access(
         access,
         ["get", "pod", pod_name, "-n", namespace, "-o", "json"],
@@ -2082,6 +2250,11 @@ def pod_logs_from_k8s(
         tail = 500
     else:
         tail = 200
+    require_valid_k8s_names(
+        namespace=namespace,
+        names=((pod, "pod name"),),
+        containers=((container, "container name"),),
+    )
     args = ["logs", pod, "-n", namespace, f"--tail={tail}"]
     if timestamps:
         args.append("--timestamps")
@@ -2137,7 +2310,11 @@ def _popen_kubectl(
     context: Optional[str] = None,
     kubeconfig_path: Optional[str] = None,
 ) -> subprocess.Popen:
-    """Spawn a long-lived kubectl process (used for ``logs -f`` streaming)."""
+    """Spawn a long-lived kubectl process (used for ``logs -f`` streaming).
+
+    ``kubeconfig_path`` must already be a readable plaintext path — the caller
+    owns the ``kubeconfig_vault`` lease for the lifetime of the process."""
+    _refuse_unsafe_kubectl_args(args)
     command = ["kubectl"]
     if kubeconfig_path:
         command += ["--kubeconfig", kubeconfig_path]
@@ -2187,6 +2364,11 @@ def stream_pod_log_lines(
     """
     from .log_time_filters import format_rfc3339_z
 
+    require_valid_k8s_names(
+        namespace=namespace,
+        names=((pod, "pod name"),),
+        containers=((container, "container name"),),
+    )
     tail = tail_lines if tail_lines is not None else 200
     args = ["logs", pod, "-n", namespace, "-f", f"--tail={tail}"]
     if timestamps:
@@ -2201,11 +2383,22 @@ def stream_pod_log_lines(
         seconds = max(1, int(since_seconds))
         args += [f"--since={seconds}s"]
 
-    process = _popen_kubectl(
-        args,
-        context=access.context_name,
-        kubeconfig_path=access.kubeconfig_path,
-    )
+    # The decrypted kubeconfig must outlive the kubectl process: it is leased
+    # here and released in the finally below, when the stream ends (client
+    # disconnect closes the generator, which runs that finally).
+    try:
+        plain_kubeconfig, lease = acquire_kubeconfig(access.kubeconfig_path)
+    except KubeconfigDecryptError as exc:
+        raise K8sCommandError(str(exc)) from exc
+    try:
+        process = _popen_kubectl(
+            args,
+            context=access.context_name,
+            kubeconfig_path=plain_kubeconfig,
+        )
+    except Exception:
+        release_kubeconfig(lease)
+        raise
 
     line_queue: "queue.Queue[Optional[str]]" = queue.Queue(maxsize=1000)
 
@@ -2245,6 +2438,7 @@ def stream_pod_log_lines(
                     stream.close()
             except Exception:
                 pass
+        release_kubeconfig(lease)
 
 
 def _parse_k8s_version(version: str) -> tuple:

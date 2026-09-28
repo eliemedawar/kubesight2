@@ -622,15 +622,30 @@ def get_check(check_id: int) -> CiMergeCheck:
 # Inbound
 # ---------------------------------------------------------------------------
 
-def verify_secret(config: Optional[CiMergeCheckConfig], provided: Optional[str]) -> bool:
-    """Constant-time compare against the stored secret.
+def verify_secret(
+    config: Optional[CiMergeCheckConfig],
+    provided: Optional[str],
+    *,
+    signature: Optional[str] = None,
+    raw_body: Optional[bytes] = None,
+) -> bool:
+    """Is this delivery really from the source host? Constant-time throughout.
+
+    Two proofs are accepted:
+
+    * ``signature`` — Bitbucket's ``X-Hub-Signature: sha256=<hex>``, an
+      HMAC-SHA256 of the exact raw request body keyed with the stored secret.
+      This is what Bitbucket sends when the webhook's "Secret" field is set, and
+      it never carries the secret itself.
+    * ``provided`` — the secret verbatim (``X-KubeSight-Secret`` header or the
+      ``?secret=`` fallback), for senders that cannot sign.
 
     A service with no secret stored rejects everything rather than accepting
-    everything. The opposite convention (open when unconfigured) is what the
-    ticketing webhook does, and it is defensible there because that webhook
-    only files tickets. This one triggers builds and writes to a source host,
-    so the unconfigured state is closed.
+    everything. This webhook triggers builds and writes to a source host, so the
+    unconfigured state is closed (the ticketing webhooks now follow the same
+    convention).
     """
+    import hashlib
     import hmac
 
     if config is None:
@@ -638,7 +653,17 @@ def verify_secret(config: Optional[CiMergeCheckConfig], provided: Optional[str])
     stored = decrypt_secret(config.inbound_secret_encrypted or "")
     if not stored:
         return False
-    return bool(provided) and hmac.compare_digest(str(provided), stored)
+    if signature:
+        algorithm, _, digest = str(signature).strip().partition("=")
+        if algorithm.strip().lower() == "sha256" and digest and raw_body is not None:
+            expected = hmac.new(
+                stored.encode("utf-8"), raw_body, hashlib.sha256
+            ).hexdigest()
+            if hmac.compare_digest(digest.strip().lower().encode("utf-8"), expected.encode("utf-8")):
+                return True
+    if provided:
+        return hmac.compare_digest(str(provided).encode("utf-8"), stored.encode("utf-8"))
+    return False
 
 
 def _text(value: Any, limit: int = 255) -> str:
@@ -691,7 +716,13 @@ def branch_matches(patterns: List[str], branch: str) -> bool:
 
 
 def ingest(
-    slug: str, payload: Dict[str, Any], *, event: str = "", provided_secret: str = ""
+    slug: str,
+    payload: Dict[str, Any],
+    *,
+    event: str = "",
+    provided_secret: str = "",
+    signature: str = "",
+    raw_body: Optional[bytes] = None,
 ) -> Dict[str, Any]:
     """One webhook delivery, from verification to a queued build.
 
@@ -707,7 +738,7 @@ def ingest(
     if service is None:
         raise LookupError("No service with that slug.")
     config = get_config(service)
-    if not verify_secret(config, provided_secret):
+    if not verify_secret(config, provided_secret, signature=signature, raw_body=raw_body):
         raise PermissionError("Invalid or missing webhook secret.")
 
     config.last_event_at = _now()

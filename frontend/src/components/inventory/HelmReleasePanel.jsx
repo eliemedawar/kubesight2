@@ -2,6 +2,7 @@ import { useState } from "react";
 import InfoCard from "../common/InfoCard.jsx";
 import ConfirmActionModal from "./ConfirmActionModal.jsx";
 import { rollbackHelmRelease, uninstallHelmRelease } from "../../api/helmApi.js";
+import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 
 function DetailRow({ label, value }) {
   return (
@@ -26,6 +27,8 @@ export default function HelmReleasePanel({
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
   const [rollbackError, setRollbackError] = useState("");
+  // Set when a rollback/uninstall was sent for approval instead of run.
+  const [queuedMessage, setQueuedMessage] = useState("");
 
   if (!helm && summary?.source !== "Helm") {
     return null;
@@ -38,12 +41,16 @@ export default function HelmReleasePanel({
     setRollbackBusy(true);
     setRollbackError("");
     try {
-      await rollbackHelmRelease({
+      const result = await rollbackHelmRelease({
         clusterId: summary.cluster,
         namespace: summary.namespace,
         releaseName: data.releaseName || summary.applicationName,
       });
       setRollbackOpen(false);
+      if (isPendingApproval(result)) {
+        setQueuedMessage(pendingApprovalMessage(result));
+        return;
+      }
       onActionComplete?.();
     } catch (err) {
       setRollbackError(err.message || "Rollback failed");
@@ -61,11 +68,15 @@ export default function HelmReleasePanel({
       return;
     }
     try {
-      await uninstallHelmRelease({
+      const result = await uninstallHelmRelease({
         clusterId: summary.cluster,
         namespace: summary.namespace,
         releaseName: data.releaseName || summary.applicationName,
       });
+      if (isPendingApproval(result)) {
+        setQueuedMessage(pendingApprovalMessage(result));
+        return;
+      }
       onActionComplete?.();
     } catch (err) {
       window.alert(err.message || "Uninstall failed");
@@ -74,6 +85,7 @@ export default function HelmReleasePanel({
 
   return (
     <InfoCard title="Helm Release">
+      {queuedMessage ? <p className="banner-message" role="status">{queuedMessage}</p> : null}
       <DetailRow label="Release Name" value={data.releaseName || summary?.releaseName} />
       <DetailRow label="Chart" value={`${data.chartName || summary?.chartName || "—"} ${data.chartVersion || summary?.chartVersion || ""}`.trim()} />
       <DetailRow label="App Version" value={data.appVersion || summary?.appVersion} />

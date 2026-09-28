@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from ..access_engine import can_access_cluster, can_view_alert, is_admin
 from ..alert_policy_catalog import METRIC_BY_KEY, evaluate_conditions
 from ..db import db
+from ..k8s_names import name_error
 from ..k8s_provider import K8sCommandError, _run_for_access, resolve_cluster_access, should_use_real_k8s
 from ..mock_data import ALERTS, CLUSTER_OVERVIEWS
 from ..models import AlertHistory, AlertPolicy, User
@@ -51,14 +52,29 @@ def _alert_key(policy_id: int, cluster_id: str, target: Dict[str, Optional[str]]
     )
 
 
-def _collect_cluster_cpu_memory(access, namespace: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
+def _cluster_utilization(access) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     from ..k8s_metrics import cluster_utilization_metrics
 
     try:
-        metrics = cluster_utilization_metrics(access)
-        return metrics.get("cpuPercent"), metrics.get("memoryPercent")
+        cpu_metric, mem_metric = cluster_utilization_metrics(access)
     except Exception:
-        return None, None
+        return {}, {}
+    return (
+        cpu_metric if isinstance(cpu_metric, dict) else {},
+        mem_metric if isinstance(mem_metric, dict) else {},
+    )
+
+
+def _collect_cluster_cpu_memory(access, namespace: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
+    """Cluster-wide CPU% / memory% (None = no data, never 0).
+
+    ``cluster_utilization_metrics`` returns a (cpu, memory) tuple of payloads;
+    the percent lives under ``percent`` only when ``available`` is true.
+    """
+    cpu_metric, mem_metric = _cluster_utilization(access)
+    cpu_pct = cpu_metric.get("percent") if cpu_metric.get("available") else None
+    mem_pct = mem_metric.get("percent") if mem_metric.get("available") else None
+    return cpu_pct, mem_pct
 
 
 def _pod_matches_labels(pod: Dict[str, Any], match_labels: Dict[str, str]) -> bool:
@@ -96,7 +112,14 @@ def _pod_matches_deployment_selector(pod: Dict[str, Any], selector: Dict[str, An
     return bool(match_labels or selector.get("matchExpressions"))
 
 
-def _deployment_selector(access, namespace: str, deployment_name: str) -> Dict[str, Any]:
+def _is_not_found(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "notfound" in text or "not found" in text
+
+
+def _deployment_selector(access, namespace: str, deployment_name: str, *, strict: bool = False) -> Dict[str, Any]:
+    if name_error(namespace=namespace, names=((deployment_name, "deployment name"),)):
+        return {}  # not a valid K8s name: no such deployment (and never an argv)
     try:
         dep_output = _run_for_access(
             access,
@@ -104,7 +127,11 @@ def _deployment_selector(access, namespace: str, deployment_name: str) -> Dict[s
         )
         deployment = json.loads(dep_output)
         return (deployment.get("spec", {}).get("selector") or {}).copy()
-    except K8sCommandError:
+    except K8sCommandError as exc:
+        # strict: a missing deployment genuinely has no pods, but any other
+        # failure is "unknown" and must reach the caller.
+        if strict and not _is_not_found(exc):
+            raise
         return {}
 
 
@@ -124,9 +151,16 @@ def _list_pods_for_scope(
     namespace: str,
     resource_type: str,
     resource_name: Optional[str],
+    *,
+    strict: bool = False,
 ) -> List[Dict[str, Any]]:
+    """Pods in scope. With ``strict`` a kubectl failure raises K8sCommandError
+    instead of looking like "no pods" (a named pod or deployment that does not
+    exist still returns [])."""
     if resource_type == "pod":
         if resource_name:
+            if name_error(namespace=namespace, names=((resource_name, "pod name"),)):
+                return []  # not a valid K8s name: no such pod (and never an argv)
             try:
                 pod_output = _run_for_access(
                     access,
@@ -134,17 +168,21 @@ def _list_pods_for_scope(
                 )
                 pod = json.loads(pod_output)
                 return [pod] if pod.get("metadata", {}).get("name") else []
-            except K8sCommandError:
+            except K8sCommandError as exc:
+                if strict and not _is_not_found(exc):
+                    raise
                 return []
         try:
             pods_output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
             return json.loads(pods_output).get("items", [])
         except K8sCommandError:
+            if strict:
+                raise
             return []
 
     if resource_type == "deployment":
         if resource_name:
-            selector = _deployment_selector(access, namespace, resource_name)
+            selector = _deployment_selector(access, namespace, resource_name, strict=strict)
             if not selector:
                 return []
             label_selector = _label_selector_string(selector)
@@ -163,12 +201,16 @@ def _list_pods_for_scope(
                 pods_output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
                 pod_items = json.loads(pods_output).get("items", [])
             except K8sCommandError:
+                if strict:
+                    raise
                 return []
             return [pod for pod in pod_items if _pod_matches_deployment_selector(pod, selector)]
         try:
             pods_output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
             return json.loads(pods_output).get("items", [])
         except K8sCommandError:
+            if strict:
+                raise
             return []
 
     return []
@@ -239,7 +281,16 @@ def _collect_real_observations(
     cluster_id: str,
     target: Dict[str, Optional[str]],
     metric_keys: List[str],
+    data_gaps: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
+    """Observations for the policy's metrics.
+
+    A metric that cannot be measured produces no observation (never a made-up
+    value) and, when ``data_gaps`` is given, a ``{metricKey: reason}`` entry so
+    the evaluation can be recorded as "no data" instead of "not met".
+    """
+    if data_gaps is None:
+        data_gaps = {}
     namespace = target.get("namespace")
     resource_type = target.get("resourceType")
     resource_name = target.get("resourceName")
@@ -261,18 +312,18 @@ def _collect_real_observations(
             if resource_type == "cluster":
                 cpu_pct, mem_pct = _collect_cluster_cpu_memory(access, None)
             elif resource_type == "namespace" and namespace:
-                from ..k8s_metrics import aggregate_pod_top_by_namespace, cluster_utilization_metrics
+                from ..k8s_metrics import aggregate_pod_top_by_namespace
 
-                cluster_cpu, cluster_mem = _collect_cluster_cpu_memory(access, None)
+                # Namespace share of cluster allocatable: summed pod usage
+                # (kubectl top) over node allocatable cores / GiB.
+                cpu_metric, mem_metric = _cluster_utilization(access)
+                alloc_cores = cpu_metric.get("allocatable") if cpu_metric.get("available") else None
+                alloc_gib = mem_metric.get("allocatable") if mem_metric.get("available") else None
                 ns_usage = aggregate_pod_top_by_namespace(access).get(namespace, {})
-                if cluster_cpu and ns_usage.get("cpu") is not None:
-                    cpu_pct = min(100.0, (float(ns_usage["cpu"]) / float(cluster_cpu)) * 100.0)
-                if cluster_mem and ns_usage.get("memory_mib") is not None:
-                    mem_pct = min(100.0, (float(ns_usage["memory_mib"]) / float(cluster_mem)) * 100.0)
-                if cpu_pct is None and mem_pct is None:
-                    cpu_metric, mem_metric = cluster_utilization_metrics(access)
-                    cpu_pct = cpu_metric.get("percent") if isinstance(cpu_metric, dict) else None
-                    mem_pct = mem_metric.get("percent") if isinstance(mem_metric, dict) else None
+                if alloc_cores and ns_usage.get("cpu") is not None:
+                    cpu_pct = min(100.0, (float(ns_usage["cpu"]) / float(alloc_cores)) * 100.0)
+                if alloc_gib and ns_usage.get("memory_mib") is not None:
+                    mem_pct = min(100.0, (float(ns_usage["memory_mib"]) / (float(alloc_gib) * 1024.0)) * 100.0)
 
             if "cpu_usage_percent" in metric_keys and cpu_pct is not None:
                 observations.append({"metricKey": "cpu_usage_percent", "value": round(float(cpu_pct), 2)})
@@ -354,16 +405,22 @@ def _collect_real_observations(
         try:
             nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
             node_items = json.loads(nodes_output).get("items", [])
-        except K8sCommandError:
+        except K8sCommandError as exc:
             node_items = []
+            for key in ("node_not_ready", "disk_usage_percent"):
+                if key in metric_keys:
+                    data_gaps.setdefault(key, f"Could not list nodes: {exc}")
+        disk_stats: Dict[str, Any] = {}
+        if "disk_usage_percent" in metric_keys and node_items:
+            from ..k8s_volume_stats import fetch_cluster_volume_stats, ready_node_names
+
+            disk_stats = fetch_cluster_volume_stats(access, ready_node_names(node_items))
+            if not disk_stats.get("available"):
+                data_gaps["disk_usage_percent"] = disk_stats.get("reason") or "Kubelet stats unavailable."
         for node in node_items:
             name = node.get("metadata", {}).get("name")
             ready = any(
                 c.get("type") == "Ready" and c.get("status") == "True"
-                for c in node.get("status", {}).get("conditions") or []
-            )
-            disk_pressure = any(
-                c.get("type") == "DiskPressure" and c.get("status") == "True"
                 for c in node.get("status", {}).get("conditions") or []
             )
             if "node_not_ready" in metric_keys:
@@ -375,13 +432,18 @@ def _collect_real_observations(
                         "resourceName": name,
                     }
                 )
-            if "disk_usage_percent" in metric_keys and disk_pressure:
+            # Real node filesystem usage from the kubelet Summary API. A node
+            # whose stats could not be read has no observation (unknown != 0).
+            node_fs = (disk_stats.get("nodes") or {}).get(name)
+            if "disk_usage_percent" in metric_keys and node_fs:
                 observations.append(
                     {
                         "metricKey": "disk_usage_percent",
-                        "value": 90.0,
+                        "value": node_fs["percent"],
                         "resourceType": "node",
                         "resourceName": name,
+                        "usedBytes": node_fs["usedBytes"],
+                        "capacityBytes": node_fs["capacityBytes"],
                     }
                 )
 
@@ -414,28 +476,49 @@ def _collect_real_observations(
         try:
             pvc_output = _run_for_access(access, ["get", "pvc", *ns_flag, "-o", "json"])
             pvc_items = json.loads(pvc_output).get("items", [])
-        except K8sCommandError:
+        except K8sCommandError as exc:
             pvc_items = []
-        for pvc in pvc_items:
-            meta = pvc.get("metadata", {})
-            pvc_name = meta.get("name")
-            pvc_ns = meta.get("namespace")
-            status = pvc.get("status", {}) or {}
-            capacity = status.get("capacity", {}).get("storage", "")
-            # Without volume metrics, treat Bound PVC without capacity signal as 0; Pending as high usage.
-            phase = status.get("phase", "")
-            value = 85.0 if phase == "Pending" else 0.0
-            if capacity:
-                value = 50.0
-            observations.append(
-                {
-                    "metricKey": "pvc_usage_percent",
-                    "value": value,
-                    "namespace": pvc_ns,
-                    "resourceType": "pvc",
-                    "resourceName": pvc_name,
-                }
-            )
+            data_gaps["pvc_usage_percent"] = f"Could not list PVCs: {exc}"
+        # Only Bound claims have usage; a Pending claim is not "85% full".
+        bound = [pvc for pvc in pvc_items if (pvc.get("status") or {}).get("phase") == "Bound"]
+        if resource_type == "pvc" and resource_name:
+            bound = [pvc for pvc in bound if (pvc.get("metadata") or {}).get("name") == resource_name]
+        if bound:
+            from ..k8s_volume_stats import fetch_cluster_volume_stats
+
+            volume_stats = fetch_cluster_volume_stats(access)
+            if not volume_stats.get("available"):
+                data_gaps["pvc_usage_percent"] = volume_stats.get("reason") or "Kubelet stats unavailable."
+            pvc_usage = volume_stats.get("pvcs") or {}
+            measured = 0
+            for pvc in bound:
+                meta = pvc.get("metadata", {})
+                pvc_name = meta.get("name")
+                pvc_ns = meta.get("namespace")
+                # The kubelet reports only volumes mounted by a running pod.
+                # Unmounted / unreadable claims get no observation rather than
+                # a guessed value.
+                usage = pvc_usage.get((pvc_ns or "", pvc_name or ""))
+                if not usage:
+                    continue
+                measured += 1
+                observations.append(
+                    {
+                        "metricKey": "pvc_usage_percent",
+                        "value": usage["percent"],
+                        "namespace": pvc_ns,
+                        "resourceType": "pvc",
+                        "resourceName": pvc_name,
+                        "usedBytes": usage["usedBytes"],
+                        "capacityBytes": usage["capacityBytes"],
+                    }
+                )
+            if not measured and "pvc_usage_percent" not in data_gaps:
+                data_gaps["pvc_usage_percent"] = (
+                    "No kubelet volume stats for the claims in scope (not mounted by a running pod?)."
+                )
+        elif "pvc_usage_percent" not in data_gaps:
+            data_gaps["pvc_usage_percent"] = "No bound PVCs in scope."
 
     return observations
 
@@ -755,15 +838,33 @@ def evaluate_policies_for_cluster(
         any_matched = False
         snapshot_details: List[Dict[str, Any]] = []
         eval_error: Optional[str] = None
+        no_data_reason: Optional[str] = None
 
         try:
             for target in _scope_targets(policy.scope or {}):
+                data_gaps: Dict[str, str] = {}
                 if access:
-                    observations = _collect_real_observations(access, cluster_id, target, metric_keys)
+                    observations = _collect_real_observations(access, cluster_id, target, metric_keys, data_gaps)
                 else:
                     observations = _mock_observations(cluster_id, target, metric_keys)
 
                 matched, details, sample = _pick_evaluation_observations(observations, conditions, logic)
+                # "No data": every metric the policy needs came back unmeasured.
+                # Nothing fires, and an already-active alert is left as is
+                # (unknown is not the same as recovered).
+                observed_keys = {o.get("metricKey") for o in observations}
+                if (
+                    not matched
+                    and data_gaps
+                    and metric_keys
+                    and not any(key in observed_keys for key in metric_keys)
+                ):
+                    no_data_reason = "; ".join(
+                        f"{METRIC_BY_KEY.get(key, {}).get('label', key)}: {reason}"
+                        for key, reason in data_gaps.items()
+                        if key in metric_keys
+                    ) or "No data"
+                    continue
                 if details and not snapshot_details:
                     snapshot_details = details
                 if matched:
@@ -844,6 +945,8 @@ def evaluate_policies_for_cluster(
 
         if eval_error:
             _record_policy_evaluation(policy, now, "error", None, None, eval_error)
+        elif no_data_reason and not any_matched:
+            _record_policy_evaluation(policy, now, "no_data", None, None, no_data_reason)
         else:
             measured_value, threshold = _summarize_evaluation_details(snapshot_details)
             result = "met" if any_matched else "not_met"

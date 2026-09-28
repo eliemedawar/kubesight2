@@ -627,7 +627,9 @@ def start_automation_run():
     if not ticket_record_id:
         return error_response("ticketRecordId is required.", 400)
     try:
-        data = automation_svc.start_run(int(ticket_record_id), user=get_current_user(), auto=False)
+        data = automation_svc.start_run(
+            int(ticket_record_id), user=get_current_user(), auto=False, origin="operator"
+        )
     except (TypeError, ValueError):
         return error_response("ticketRecordId must be a number.", 400)
     except AutomationError as exc:
@@ -661,14 +663,26 @@ def delete_inbound_ticket(record_id: int):
     return success_response({"deleted": True, **info})
 
 
+def _refuse_unverified_inbound():
+    """Legacy Zoho path: same fail-closed check as /api/ticketing/zoho/inbound."""
+    from .ticketing import inbound_secret_refusal
+
+    provided = (
+        request.headers.get("X-Zoho-Secret")
+        or request.headers.get("X-Ticketing-Secret")
+        or request.args.get("secret")
+    )
+    return inbound_secret_refusal(svc, "Zoho Desk", provided)
+
+
 @zoho_bp.route("/inbound/comment", methods=["POST"])
 def inbound_comment_webhook():
     """Zoho -> KubeSight: a comment on a ticket (Hermes ticket agent). Secret-verified."""
     from ..services.ticket_agent import engine as ticket_agent
 
-    provided = request.headers.get("X-Zoho-Secret") or request.args.get("secret")
-    if not svc.verify_inbound_secret(provided):
-        return error_response("Invalid or missing webhook secret.", 401)
+    refused = _refuse_unverified_inbound()
+    if refused is not None:
+        return refused
     payload = request.get_json(silent=True)
     if payload is None:
         return error_response("Expected a JSON body.", 400)
@@ -688,9 +702,9 @@ def inbound_comment_webhook():
 @zoho_bp.route("/inbound", methods=["POST"])
 def inbound_webhook():
     """Zoho -> KubeSight: a DevOps Request ticket. Secret-verified, not session auth."""
-    provided = request.headers.get("X-Zoho-Secret") or request.args.get("secret")
-    if not svc.verify_inbound_secret(provided):
-        return error_response("Invalid or missing webhook secret.", 401)
+    refused = _refuse_unverified_inbound()
+    if refused is not None:
+        return refused
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         return error_response("Expected a JSON object body.", 400)

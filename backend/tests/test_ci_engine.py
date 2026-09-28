@@ -97,6 +97,35 @@ def runnable_service(app, client, admin_token):
     return service_id
 
 
+def _store_legacy_stage(app, pipeline_id, *, name, stage_type):
+    """Append a stage row the way a pipeline saved before a type was retired
+    left it — straight to the table, past today's save validation."""
+    from api.models_ci import CiPipeline, CiPipelineStage
+
+    with app.app_context():
+        pipeline = db.session.get(CiPipeline, pipeline_id)
+        position = len(pipeline.stages)
+        db.session.add(
+            CiPipelineStage(
+                pipeline_id=pipeline_id,
+                position=position,
+                name=name,
+                stage_type=stage_type,
+                runner_labels=["mock"],
+                commands=[],
+                env={},
+                secret_refs=[],
+                artifacts=[],
+                timeout_seconds=1800,
+                enabled=True,
+            )
+        )
+        db.session.commit()
+    # Requests share the fixture's session, which still holds the pipeline's
+    # stage list as it was before this insert.
+    db.session.expire_all()
+
+
 def _drain(app, max_passes: int = 40):
     """Run the scheduler tick until every build reaches a terminal state.
 
@@ -590,11 +619,13 @@ def test_a_stage_type_with_no_executor_is_skipped_not_succeeded(
                     "runnerLabels": ["mock"],
                 },
                 {"name": "Build Image", "stageType": "container_image", "runnerLabels": ["mock"]},
-                {"name": "Scan", "stageType": "scan", "runnerLabels": ["mock"]},
             ]
         },
         headers=auth_headers(admin_token),
     )
+    # Scan stages can no longer be SAVED, but one stored before that still has
+    # to load, and still has to skip rather than pass.
+    _store_legacy_stage(app, pipeline_id, name="Scan", stage_type="scan")
 
     build_id = client.post(
         f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
@@ -640,11 +671,11 @@ def test_a_pipeline_of_only_unimplemented_stages_still_completes(
         json={
             "stages": [
                 {"name": "Image", "stageType": "container_image", "runnerLabels": ["mock"]},
-                {"name": "Publish", "stageType": "publish_artifact", "runnerLabels": ["mock"]},
             ]
         },
         headers=auth_headers(admin_token),
     )
+    _store_legacy_stage(app, pipeline_id, name="Publish", stage_type="publish_artifact")
     build_id = client.post(
         f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
     ).get_json()["data"]["id"]
@@ -910,17 +941,113 @@ def test_a_lost_running_build_is_reaped(app, client, admin_token, runnable_servi
             engine.advance_ci_builds()
             build = db.session.get(CiBuild, build_id)
             assert build.status == "running"
-            # Backdate it past the stale window, as a restart would leave it.
-            build.started_at = datetime.now(timezone.utc) - timedelta(
-                minutes=engine._STALE_BUILD_MINUTES + 5
-            )
-            db.session.add(build)
-            db.session.commit()
+            # Backdate every sign of progress past the stale window, as a
+            # restart would leave it: nothing has happened since.
+            _backdate_progress(build, minutes=engine._STALE_BUILD_MINUTES + 5)
 
             engine.advance_ci_builds()
             assert db.session.get(CiBuild, build_id).status == "timeout"
     finally:
         mock_runner._STAGE_SECONDS = original
+
+
+def _backdate_progress(build, *, minutes, logs_minutes=None):
+    """Move the build, its stages and (unless told otherwise) its log lines back."""
+    from datetime import datetime, timedelta, timezone
+
+    from api.models_ci import CiLogChunk
+
+    then = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    build.started_at = then
+    build.queued_at = then
+    for stage in build.stages:
+        if stage.started_at is not None:
+            stage.started_at = then
+        if stage.finished_at is not None:
+            stage.finished_at = then
+        db.session.add(stage)
+    log_then = datetime.now(timezone.utc) - timedelta(
+        minutes=minutes if logs_minutes is None else logs_minutes
+    )
+    for chunk in CiLogChunk.query.filter(
+        CiLogChunk.build_stage_id.in_([stage.id for stage in build.stages])
+    ).all():
+        chunk.created_at = log_then
+        db.session.add(chunk)
+    db.session.add(build)
+    db.session.commit()
+
+
+def test_a_long_build_that_is_still_logging_is_not_reaped(
+    app, client, admin_token, runnable_service
+):
+    """The reaper used to anchor on started_at, so a release build still
+    printing after an hour was killed as 'lost'. Progress is the anchor now."""
+    from api.services.ci import engine
+    from api.services.ci.runners import mock as mock_runner
+
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
+    ).get_json()["data"]["id"]
+
+    original = mock_runner._STAGE_SECONDS
+    mock_runner._STAGE_SECONDS = 600.0
+    try:
+        with app.app_context():
+            engine.advance_ci_builds()
+            build = db.session.get(CiBuild, build_id)
+            assert build.status == "running"
+            # Started well past the idle window (but inside its overall
+            # deadline), and a log line has just arrived.
+            assert engine._STALE_BUILD_MINUTES + 10 < engine._build_deadline_minutes(build)
+            _backdate_progress(build, minutes=engine._STALE_BUILD_MINUTES + 10)
+            from api.services.ci import logs as logs_service
+
+            running = next(s for s in build.stages if s.status == "running")
+            logs_service.append_system(running, "still compiling")
+            db.session.commit()
+            engine._reap_stale_builds()
+            assert db.session.get(CiBuild, build_id).status == "running"
+    finally:
+        mock_runner._STAGE_SECONDS = original
+
+
+def test_a_build_past_the_sum_of_its_stage_timeouts_is_reaped_even_if_busy(
+    app, client, admin_token, runnable_service
+):
+    from api.services.ci import engine
+    from api.services.ci.runners import mock as mock_runner
+
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
+    ).get_json()["data"]["id"]
+
+    original = mock_runner._STAGE_SECONDS
+    mock_runner._STAGE_SECONDS = 600.0
+    try:
+        with app.app_context():
+            engine.advance_ci_builds()
+            build = db.session.get(CiBuild, build_id)
+            deadline = engine._build_deadline_minutes(build)
+            # Two stages at the default 1800s, plus the grace.
+            assert deadline == 60 + engine._BUILD_DEADLINE_GRACE_MINUTES
+            _backdate_progress(build, minutes=deadline + 5, logs_minutes=1)
+            engine._reap_stale_builds()
+            reaped = db.session.get(CiBuild, build_id)
+            assert reaped.status == "timeout"
+            assert "overall deadline" in reaped.error
+    finally:
+        mock_runner._STAGE_SECONDS = original
+
+
+def test_the_overall_deadline_never_exceeds_the_hard_cap(app, monkeypatch):
+    from api.services.ci import engine
+
+    monkeypatch.setattr(engine, "_BUILD_HARD_CAP_MINUTES", 90)
+    build = CiBuild(
+        pipeline_snapshot={"stages": [{"timeoutSeconds": 86400}, {"timeoutSeconds": 86400}]}
+    )
+    assert engine._build_deadline_minutes(build) == 90
 
 
 def test_queue_depth_is_reported(client, admin_token, runnable_service):
@@ -1046,3 +1173,420 @@ def test_an_agent_reporting_a_result_can_claim_the_next_stage_at_once(
         headers=agent_headers,
     )
     assert final_result.get_json()["data"]["cleanupWorkspace"] is True
+
+
+# ---------------------------------------------------------------------------
+# The simulated runner never runs on a real installation
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def real_mode(monkeypatch):
+    from api import k8s_provider
+
+    monkeypatch.setattr(k8s_provider, "is_real_mode_enabled", lambda: True)
+
+
+def test_the_mock_runner_is_never_eligible_in_real_mode(
+    app, client, admin_token, runnable_service, real_mode
+):
+    """It runs no commands and reports green. On a real installation a build
+    it 'ran' would be a lie a deploy could act on — so the build waits, and
+    says why, instead of succeeding."""
+    from api.services.ci import engine, scheduler
+
+    with app.app_context():
+        assert [r.name for r in scheduler.eligible_runners()] == []
+
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
+    ).get_json()["data"]["id"]
+    with app.app_context():
+        engine.advance_ci_builds()
+        mock = CiRunner.query.filter_by(name="kubesight-mock").one()
+        # Status derivation agrees: it shows offline, not online-and-unused.
+        assert mock.status == "offline"
+
+    data = client.get(
+        f"/api/ci/builds/{build_id}", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert data["status"] == "queued"
+    assert "mock runner is never used" in data["queueReason"]
+
+
+def test_the_mock_runner_cannot_be_enabled_in_real_mode(
+    app, client, admin_token, real_mode
+):
+    with app.app_context():
+        mock_id = CiRunner.query.filter_by(name="kubesight-mock").one().id
+    refused = client.put(
+        f"/api/ci/runners/{mock_id}", json={"enabled": True}, headers=auth_headers(admin_token)
+    )
+    assert refused.status_code == 409
+
+
+def test_the_seeder_disarms_the_mock_runner_in_real_mode(app, real_mode):
+    """An installation that started as a demo keeps no armed simulator once it
+    is connected to real clusters. A fresh real install also gets the
+    Kubernetes runner enabled; an existing one keeps what its operator set."""
+    from api.migrate_rbac import _seed_builtin_ci_runners
+
+    with app.app_context():
+        mock = CiRunner.query.filter_by(name="kubesight-mock").one()
+        mock.enabled = True
+        mock.status = "online"
+        kubernetes = CiRunner.query.filter_by(name="kubesight-kubernetes").one()
+        assert kubernetes.enabled is False  # seeded in mock mode by the fixture
+        db.session.commit()
+
+        _seed_builtin_ci_runners()
+        assert db.session.get(CiRunner, mock.id).enabled is False
+        assert db.session.get(CiRunner, mock.id).status == "offline"
+        # Operators own enabled on rows that exist.
+        assert db.session.get(CiRunner, kubernetes.id).enabled is False
+
+        db.session.delete(db.session.get(CiRunner, kubernetes.id))
+        db.session.delete(db.session.get(CiRunner, mock.id))
+        db.session.commit()
+        _seed_builtin_ci_runners()
+        fresh_mock = CiRunner.query.filter_by(name="kubesight-mock").one()
+        fresh_kubernetes = CiRunner.query.filter_by(name="kubesight-kubernetes").one()
+        assert fresh_mock.enabled is False
+        assert fresh_kubernetes.enabled is True
+
+
+def test_mock_mode_still_uses_the_mock_runner(app, client, admin_token, runnable_service):
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
+    ).get_json()["data"]["id"]
+    _drain(app)
+    data = client.get(
+        f"/api/ci/builds/{build_id}", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert data["status"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# One runner must satisfy every stage of the build
+# ---------------------------------------------------------------------------
+
+def _runner(name, *, capabilities=(), labels=(), runner_type="mock"):
+    row = CiRunner(
+        name=name,
+        runner_type=runner_type,
+        status="online",
+        enabled=True,
+        capabilities=list(capabilities),
+        labels=list(labels),
+        max_concurrent=2,
+    )
+    db.session.add(row)
+    return row
+
+
+def test_runner_selection_uses_the_union_of_every_stage(app):
+    """The first stage is usually a label-less checkout. Choosing from it alone
+    put an Android build on a box without the Android SDK."""
+    from api.services.ci import scheduler
+
+    with app.app_context():
+        for existing in CiRunner.query.all():
+            existing.enabled = False
+        _runner("plain-linux", capabilities=["linux"])
+        _runner("android-box", capabilities=["linux", "android"])
+        db.session.commit()
+
+        stages = [
+            {"stageType": "checkout", "runnerLabels": []},
+            {"stageType": "command", "runnerLabels": ["linux"]},
+            {"stageType": "command", "runnerLabels": ["android"]},
+        ]
+        requirements = scheduler.requirements_for_build(stages)
+        assert set(requirements.labels) == {"linux", "android"}
+        assert scheduler.select_runner(requirements).runner.name == "android-box"
+
+
+def test_stages_that_will_not_run_do_not_constrain_the_runner(app):
+    from api.services.ci import scheduler
+
+    with app.app_context():
+        for existing in CiRunner.query.all():
+            existing.enabled = False
+        _runner("plain-linux", capabilities=["linux"])
+        db.session.commit()
+        stages = [
+            {"stageType": "command", "runnerLabels": ["linux"]},
+            {"stageType": "command", "runnerLabels": ["macos"], "skip": True},
+        ]
+        requirements = scheduler.requirements_for_build(
+            stages, lambda definition: bool(definition.get("skip"))
+        )
+        assert scheduler.select_runner(requirements).ok
+
+
+def test_routing_labels_count_as_well_as_capabilities(app):
+    """An operator labels an agent so a stage can route to it by that label."""
+    from api.services.ci import scheduler
+    from api.services.ci.runners.base import StageRequirements
+
+    with app.app_context():
+        for existing in CiRunner.query.all():
+            existing.enabled = False
+        _runner("gpu-box", capabilities=["linux"], labels=["gpu"])
+        db.session.commit()
+        chosen = scheduler.select_runner(StageRequirements(labels=("linux", "gpu")))
+        assert chosen.ok and chosen.runner.name == "gpu-box"
+
+
+def test_no_single_runner_covering_the_union_is_said_clearly(app):
+    from api.services.ci import scheduler
+
+    with app.app_context():
+        for existing in CiRunner.query.all():
+            existing.enabled = False
+        _runner("android-box", capabilities=["linux", "android"])
+        _runner("mac", capabilities=["macos", "xcode"])
+        db.session.commit()
+        requirements = scheduler.requirements_for_build(
+            [{"runnerLabels": ["android"]}, {"runnerLabels": ["xcode"]}]
+        )
+        refused = scheduler.select_runner(requirements)
+        assert not refused.ok
+        assert "No single online runner" in refused.reason
+        assert "android" in refused.reason and "xcode" in refused.reason
+
+
+def test_stages_pinning_different_runner_types_are_refused(app):
+    from api.services.ci import scheduler
+
+    with app.app_context():
+        requirements = scheduler.requirements_for_build(
+            [{"runnerType": "kubernetes"}, {"runnerType": "agent_macos"}]
+        )
+        refused = scheduler.select_runner(requirements)
+        assert not refused.ok
+        assert "different runner types" in refused.reason
+
+
+def test_a_build_needing_a_label_no_runner_has_waits_with_the_reason(
+    app, client, admin_token, runnable_service
+):
+    """End to end: the label on the SECOND stage decides, not the first."""
+    pipeline_id = client.get(
+        f"/api/ci/services/{runnable_service}/pipelines", headers=auth_headers(admin_token)
+    ).get_json()["data"]["items"][0]["id"]
+    saved = client.put(
+        f"/api/ci/pipelines/{pipeline_id}",
+        json={
+            "stages": [
+                {"name": "Checkout", "stageType": "checkout"},
+                {
+                    "name": "Build",
+                    "stageType": "command",
+                    "commands": ["make"],
+                    "runnerLabels": ["quantum"],
+                },
+            ]
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert saved.status_code == 200, saved.get_json()
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
+    ).get_json()["data"]["id"]
+
+    from api.services.ci import engine
+
+    with app.app_context():
+        engine.advance_ci_builds()
+    data = client.get(
+        f"/api/ci/builds/{build_id}", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert data["status"] == "queued"
+    assert "quantum" in data["queueReason"]
+
+
+# ---------------------------------------------------------------------------
+# Retired stage types and parallel groups are refused on save
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("stage_type", ["publish_artifact", "scan"])
+def test_a_stage_type_with_no_executor_cannot_be_saved(
+    client, admin_token, runnable_service, stage_type
+):
+    pipeline_id = client.get(
+        f"/api/ci/services/{runnable_service}/pipelines", headers=auth_headers(admin_token)
+    ).get_json()["data"]["items"][0]["id"]
+    refused = client.put(
+        f"/api/ci/pipelines/{pipeline_id}",
+        json={"stages": [{"name": "Extra", "stageType": stage_type}]},
+        headers=auth_headers(admin_token),
+    )
+    assert refused.status_code == 400
+    assert "no executor" in refused.get_json()["error"]
+
+
+def test_a_parallel_group_is_not_stored(client, admin_token, runnable_service):
+    """Stages always run in order; storing a group promised otherwise."""
+    pipeline_id = client.get(
+        f"/api/ci/services/{runnable_service}/pipelines", headers=auth_headers(admin_token)
+    ).get_json()["data"]["items"][0]["id"]
+    saved = client.put(
+        f"/api/ci/pipelines/{pipeline_id}",
+        json={
+            "stages": [
+                {
+                    "name": "Build",
+                    "stageType": "command",
+                    "commands": ["make"],
+                    "parallelGroup": "Tests",
+                }
+            ]
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert saved.status_code == 200
+    stage = saved.get_json()["data"]["stages"][0]
+    assert "parallelGroup" not in stage
+
+    from api.models_ci import CiPipelineStage
+
+    assert CiPipelineStage.query.filter(CiPipelineStage.parallel_group.isnot(None)).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Build statuses reported back to the source host
+# ---------------------------------------------------------------------------
+
+class _FakeStatusHandler:
+    def __init__(self, delegate, *, fail=False):
+        self._delegate = delegate
+        self.fail = fail
+        self.posts = []
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+    def post_check_verdict(self, ref, credential, **kwargs):
+        self.posts.append(kwargs)
+        if self.fail:
+            raise RuntimeError("bitbucket is down")
+
+
+@pytest.fixture()
+def status_handler(app, monkeypatch):
+    from api.services.ci import build_status
+    from api.services.ci import source as source_port
+
+    real_get = source_port.get_provider
+    handler = _FakeStatusHandler(real_get("bitbucket"))
+    monkeypatch.setattr(
+        source_port,
+        "get_provider",
+        lambda name: handler if name == "bitbucket" else real_get(name),
+    )
+    monkeypatch.setattr(build_status, "_dispatch", lambda job: job())
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://kubesight.example")
+    return handler
+
+
+def _make_writable(app, service_id):
+    with app.app_context():
+        service = db.session.get(CiService, service_id)
+        service.credential_profile.read_only = False
+        db.session.commit()
+
+
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_a_build_reports_inprogress_then_its_outcome_under_its_own_key(
+    app, client, admin_token, runnable_service, status_handler
+):
+    _make_writable(app, runnable_service)
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds",
+        json={"commitSha": SHA},
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]["id"]
+    _drain(app)
+
+    states = [post["state"] for post in status_handler.posts]
+    assert states[0] == "running"
+    assert states[-1] == "passed"
+    assert {post["status_key"] for post in status_handler.posts} == {"KUBESIGHT-BUILD"}
+    assert all(post["commit_sha"] == SHA for post in status_handler.posts)
+    assert status_handler.posts[-1]["url"].endswith(
+        f"/#/service-catalog/{runnable_service}/builds?build={build_id}"
+    )
+
+
+def test_a_cancelled_build_reports_stopped(
+    app, client, admin_token, runnable_service, status_handler
+):
+    from api.services.ci import engine
+    from api.services.ci.runners import mock as mock_runner
+
+    _make_writable(app, runnable_service)
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds",
+        json={"commitSha": SHA},
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]["id"]
+    original = mock_runner._STAGE_SECONDS
+    mock_runner._STAGE_SECONDS = 600.0
+    try:
+        with app.app_context():
+            engine.advance_ci_builds()
+        client.post(f"/api/ci/builds/{build_id}/cancel", headers=auth_headers(admin_token))
+        with app.app_context():
+            engine.advance_ci_builds()
+    finally:
+        mock_runner._STAGE_SECONDS = original
+    assert status_handler.posts[-1]["state"] == "stopped"
+
+
+def test_a_read_only_credential_reports_nothing(
+    app, client, admin_token, runnable_service, status_handler
+):
+    client.post(
+        f"/api/ci/services/{runnable_service}/builds",
+        json={"commitSha": SHA},
+        headers=auth_headers(admin_token),
+    )
+    _drain(app)
+    assert status_handler.posts == []
+
+
+def test_a_failing_status_post_never_fails_the_build(
+    app, client, admin_token, runnable_service, status_handler
+):
+    _make_writable(app, runnable_service)
+    status_handler.fail = True
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds",
+        json={"commitSha": SHA},
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]["id"]
+    _drain(app)
+    data = client.get(
+        f"/api/ci/builds/{build_id}", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert data["status"] == "success"
+    assert status_handler.posts  # it did try
+
+
+def test_merge_check_builds_leave_reporting_to_the_merge_check(
+    app, client, admin_token, runnable_service, status_handler
+):
+    from api.services.ci import engine
+
+    _make_writable(app, runnable_service)
+    with app.app_context():
+        engine.trigger_build(
+            db.session.get(CiService, runnable_service),
+            commit_sha=SHA,
+            trigger_type="webhook",
+            variables={"KUBESIGHT_MERGE_CHECK": "true"},
+        )
+    _drain(app)
+    assert status_handler.posts == []

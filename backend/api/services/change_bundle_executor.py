@@ -59,6 +59,27 @@ def _resource_arg(item: ChangeBundleItem) -> str:
     return f"{(item.resource_kind or 'deployment').lower()}/{item.resource_name}"
 
 
+_NAMED_TARGET_MODES = ("scale", "delete", "restart", "rollback")
+
+
+def _target_name_error(item: ChangeBundleItem, mode: str) -> Optional[str]:
+    """Kind/name/namespace of a named-target item must be valid K8s names.
+
+    They are positional kubectl args; a flag-shaped value (``--all``,
+    ``--server=...``) must be refused, not executed."""
+    if mode not in _NAMED_TARGET_MODES:
+        return None
+    from ..k8s_names import name_error
+
+    return name_error(
+        namespace=item.namespace or "",
+        names=(
+            ((item.resource_kind or "deployment").lower(), "resource kind"),
+            (item.resource_name or "", "resource name"),
+        ),
+    )
+
+
 def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optional[str]]:
     """Re-check the item against live cluster state at execution time.
 
@@ -84,7 +105,13 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optio
         if blocking:
             return image_err, "image"
 
-    if not should_use_real_k8s(item.cluster_id):
+    invalid = _target_name_error(item, mode)
+    if invalid:
+        return invalid, "validation"
+
+    # Helm items are re-checked by helm_service itself when they run (chart,
+    # namespace, rendered images), so there is nothing to pre-check here.
+    if mode == "helm" or not should_use_real_k8s(item.cluster_id):
         return None, None
 
     # For changes to an existing object, confirm the target still exists.
@@ -116,6 +143,10 @@ def _capture_diff(item: ChangeBundleItem, mode: str) -> Optional[str]:
             if err:
                 return None
             return (data or {}).get("diff") or "No differences from the cluster state at execution time."
+        if mode == "helm":
+            from .change_bundle_service import _helm_item_diff
+
+            return _helm_item_diff(item)
         if mode == "scale":
             current = _run_kubectl_for_cluster(
                 item.cluster_id,
@@ -128,10 +159,35 @@ def _capture_diff(item: ChangeBundleItem, mode: str) -> Optional[str]:
     return None
 
 
+def approval_context_for(item: ChangeBundleItem) -> str:
+    """The explicit approval an executed item carries into the gated services."""
+    return f"change_bundle:{item.bundle_id}"
+
+
 def _apply_item(item: ChangeBundleItem, mode: str) -> str:
     """Execute one item against the cluster. Returns kubectl output (or mock note)."""
+    invalid = _target_name_error(item, mode)
+    if invalid:
+        raise K8sCommandError(invalid)
     if not should_use_real_k8s(item.cluster_id):
         return f"[mock] {mode} {_resource_arg(item)} in {item.namespace}"
+
+    if mode == "helm":
+        # Through helm_service, so a queued Helm change gets exactly the checks
+        # of a direct one; approval_context tells its gate this is approved.
+        from .helm_service import run_approved_helm_change
+
+        item_input = {
+            **((item.new_payload_json or {}).get("input") or {}),
+            "clusterId": item.cluster_id,
+            "namespace": item.namespace,
+            "resourceName": item.resource_name,
+        }
+        output, _data = run_approved_helm_change(
+            item_input, item.action_type, approval_context=approval_context_for(item)
+        )
+        _record_helm_catalog(item)
+        return output
 
     if mode == "apply":
         path = _write_temp_yaml(sanitize_for_apply(item.yaml_preview or ""))
@@ -178,6 +234,23 @@ def _apply_item(item: ChangeBundleItem, mode: str) -> str:
         ).strip()
 
     raise K8sCommandError(f"Unknown execution mode: {mode}")
+
+
+def _record_helm_catalog(item: ChangeBundleItem) -> None:
+    """After a queued Helm install/upgrade ran, register it in the App Catalog
+    as the direct route would have (best-effort, as the requester)."""
+    if item.action_type not in ("helm_install", "helm_upgrade"):
+        return
+    try:
+        from .helm_service import record_helm_catalog_entry
+
+        body = dict(((item.new_payload_json or {}).get("input") or {}).get("helm") or {})
+        body.update(
+            {"clusterId": item.cluster_id, "namespace": item.namespace, "releaseName": item.resource_name}
+        )
+        record_helm_catalog_entry(item.bundle.requester if item.bundle else None, body)
+    except Exception:  # noqa: BLE001 — the release is installed; the catalog is secondary
+        logger.exception("Could not record the catalog entry for bundle item #%s", item.id)
 
 
 def execute_bundle(bundle: ChangeBundle) -> str:

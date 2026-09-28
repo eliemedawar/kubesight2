@@ -31,9 +31,9 @@ def resolve_test_database_uri() -> str:
 
 def refuse_production_tests() -> None:
     """Abort pytest if the environment looks like production."""
-    for env_key in ("FLASK_ENV", "APP_ENV"):
+    for env_key in ("KUBESIGHT_ENV", "FLASK_ENV", "APP_ENV"):
         value = os.getenv(env_key, "").strip().lower()
-        if value == "production":
+        if value in ("production", "prod"):
             print(
                 f"Refusing to run tests: {env_key}=production. "
                 "Unset it or use a non-production environment.",
@@ -68,6 +68,14 @@ def apply_test_environment() -> str:
     os.environ["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", DEFAULT_TEST_JWT_SECRET)
     # Never let production DATABASE_URL reach the app during tests.
     os.environ["DATABASE_URL"] = uri
+    # Tests register clusters; their kubeconfigs must never land in (or be
+    # "migrated" inside) the developer's real backend/data/kubeconfigs.
+    if not os.getenv("KUBESIGHT_KUBECONFIG_DIR", "").strip():
+        import tempfile
+
+        os.environ["KUBESIGHT_KUBECONFIG_DIR"] = tempfile.mkdtemp(
+            prefix="kubesight-test-kubeconfigs-"
+        )
     return uri
 
 
@@ -78,3 +86,7 @@ class TestingConfig:
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", DEFAULT_TEST_JWT_SECRET)
     # Documented for operators; k8s_provider reads K8S_REAL_MODE from os.environ.
     K8S_REAL_MODE = "false"
+    # Mock mode shows a demo App Services / Clients catalogue when the DB is
+    # empty. Tests assert on the database itself, so they opt out (see
+    # api/demo_fallback.py); a test that wants the demo turns it back on.
+    DEMO_DATA_FALLBACK = False

@@ -51,7 +51,22 @@ const EMPTY_RECEIVER = {
   headers: {},
   secret: "",
   enabled: true,
+  severityFilter: [],
+  namespaceFilter: "",
+  clusterFilter: "",
 };
+
+// Receiver filters narrow which alerts reach a receiver. Empty = every alert.
+const SEVERITY_OPTIONS = ["critical", "warning", "info"];
+
+function receiverFilterSummary(receiver) {
+  const parts = [];
+  const severities = receiver?.severityFilter || [];
+  if (severities.length) parts.push(`severity: ${severities.join(", ")}`);
+  if (receiver?.namespaceFilter) parts.push(`namespace: ${receiver.namespaceFilter}`);
+  if (receiver?.clusterFilter) parts.push(`cluster: ${receiver.clusterFilter}`);
+  return parts.length ? parts.join(" · ") : "All alerts";
+}
 
 const RECEIVER_TYPE_LABELS = {
   user: "User",
@@ -493,6 +508,52 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
             </>
           ) : null}
 
+          <fieldset className="full-width receiver-filters">
+            <legend>Only deliver alerts that match (leave empty for all)</legend>
+            <div className="receiver-filter-grid" role="group" aria-label="Severities">
+              {SEVERITY_OPTIONS.map((level) => {
+                const selected = (form.severityFilter || []).includes(level);
+                return (
+                  <label key={level} className="checkbox-label settings-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={(e) =>
+                        setForm((p) => {
+                          const current = new Set(p.severityFilter || []);
+                          if (e.target.checked) current.add(level);
+                          else current.delete(level);
+                          return { ...p, severityFilter: SEVERITY_OPTIONS.filter((s) => current.has(s)) };
+                        })
+                      }
+                    />
+                    {level.charAt(0).toUpperCase() + level.slice(1)}
+                  </label>
+                );
+              })}
+            </div>
+            <label>
+              Namespaces
+              <input
+                value={form.namespaceFilter || ""}
+                onChange={(e) => setForm((p) => ({ ...p, namespaceFilter: e.target.value }))}
+                placeholder="payments, prod-*"
+              />
+            </label>
+            <label>
+              Clusters
+              <input
+                value={form.clusterFilter || ""}
+                onChange={(e) => setForm((p) => ({ ...p, clusterFilter: e.target.value }))}
+                placeholder="prod-*"
+              />
+            </label>
+            <span className="muted" style={{ fontSize: "var(--font-size-sm)" }}>
+              Comma-separated; * and ? wildcards. With a namespace or cluster filter set, alerts that
+              have no namespace or cluster (e.g. node or service alerts) are not delivered here.
+            </span>
+          </fieldset>
+
           <label className="checkbox-label settings-checkbox full-width">
             <input
               type="checkbox"
@@ -556,6 +617,10 @@ function ReceiverDetailsModal({ open, receiver, onClose }) {
             <dd>
               <StatusBadge ok={receiver.enabled} label={receiver.enabled ? "Enabled" : "Disabled"} />
             </dd>
+          </div>
+          <div className="full-width">
+            <dt>Filters</dt>
+            <dd>{receiverFilterSummary(receiver)}</dd>
           </div>
           <div className="full-width">
             <dt>Receiver groups</dt>
@@ -730,6 +795,7 @@ export function ReceiversTab({
     name: receiver.name,
     typeDisplay: <ReceiverTypeBadge type={receiver.type} />,
     groups: formatGroups(receiver),
+    filtersDisplay: receiverFilterSummary(receiver),
     statusDisplay: (
       <StatusBadge ok={receiver.enabled} label={receiver.enabled ? "Enabled" : "Disabled"} />
     ),
@@ -763,6 +829,7 @@ export function ReceiversTab({
     { key: "name", label: "Name" },
     ...(typeFilter ? [] : [{ key: "typeDisplay", label: "Type" }]),
     { key: "groups", label: "Groups" },
+    { key: "filtersDisplay", label: "Filters" },
     { key: "statusDisplay", label: "Enabled" },
     { key: "lastTestDisplay", label: "Last test" },
     { key: "actionsDisplay", label: "" },

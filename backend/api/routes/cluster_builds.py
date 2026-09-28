@@ -23,6 +23,49 @@ def _actor_name():
     return getattr(user, "username", "") or ""
 
 
+def _day_two_approval_refusal(build_id: int, action: str, *, day_two_only: bool = False):
+    """The cluster's approval rule for a day-two change to a built cluster.
+
+    Once a build has registered its cluster, that cluster is an onboarded
+    cluster like any other and its per-cluster approval count applies to
+    add-ons, joining machines, bringing workloads and retrying one of those.
+    These are refused (not queued) without a live approved deployment request:
+    they are a run of the build's phase machine over SSH with the build's own
+    credentials and state, not a manifest the change-bundle executor can replay
+    later, and a bundle could not keep that state consistent with other
+    day-two work queued meanwhile. Returns an error response, or None.
+    """
+    try:
+        build = svc.get_build(build_id)
+    except LookupError:
+        return None  # the route reports the 404 itself
+    cluster_id = getattr(build, "result_cluster_id", None)
+    if not cluster_id:
+        return None  # nothing onboarded yet: still the initial build
+    if day_two_only and not getattr(build, "growth_started_at", None):
+        return None  # a retry of the initial build itself
+    from ..services.deployment_request_service import check_cluster_change_allowed
+
+    denied = check_cluster_change_allowed(
+        get_current_user(),
+        cluster_id,
+        action=f"cluster_build_{action}",
+        target_type="cluster_build",
+        target_id=str(build_id),
+    )
+    if not denied:
+        return None
+    message, status = denied
+    if status == 403:
+        message = (
+            f"{cluster_id} requires approval before it is changed, and Cluster Builder "
+            "day-two changes (add-ons, new machines, workloads) cannot be queued for "
+            "approval. Request a deployment approval for this cluster in Clusters, then "
+            "run this again while the approval window is open."
+        )
+    return error_response(message, status)
+
+
 @cluster_builds_bp.route("/options", methods=["GET"])
 @require_permission("cluster_builds:view")
 def wizard_options():
@@ -165,6 +208,9 @@ def start_build(build_id: int):
 @cluster_builds_bp.route("/<int:build_id>/retry", methods=["POST"])
 @require_permission("cluster_builds:execute")
 def retry_build(build_id: int):
+    refused = _day_two_approval_refusal(build_id, "retry", day_two_only=True)
+    if refused is not None:
+        return refused
     try:
         data = svc.retry_build(build_id, user=get_current_user())
     except LookupError:
@@ -268,6 +314,9 @@ def grow_preflight(build_id: int):
 @cluster_builds_bp.route("/<int:build_id>/grow", methods=["POST"])
 @require_permission("cluster_builds:execute")
 def grow_build(build_id: int):
+    refused = _day_two_approval_refusal(build_id, "grow")
+    if refused is not None:
+        return refused
     payload = request.get_json(silent=True) or {}
     try:
         data = svc.grow_build(
@@ -296,6 +345,9 @@ def grow_build(build_id: int):
 @cluster_builds_bp.route("/<int:build_id>/addons", methods=["POST"])
 @require_permission("cluster_builds:execute")
 def add_build_addons(build_id: int):
+    refused = _day_two_approval_refusal(build_id, "addons")
+    if refused is not None:
+        return refused
     payload = request.get_json(silent=True) or {}
     try:
         data = svc.add_addons(build_id, payload, actor=_actor_name())
@@ -451,6 +503,9 @@ def build_workload_plan(build_id: int):
 @cluster_builds_bp.route("/<int:build_id>/bring-workloads", methods=["POST"])
 @require_permission("cluster_builds:execute")
 def bring_workloads(build_id: int):
+    refused = _day_two_approval_refusal(build_id, "bring_workloads")
+    if refused is not None:
+        return refused
     payload = request.get_json(silent=True) or {}
     try:
         data = svc.bring_workloads(

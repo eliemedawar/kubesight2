@@ -26,13 +26,15 @@ from ...models_ci import (
     IMAGE_SCANNERS,
     PIPELINE_PURPOSES,
     RUNNER_TYPES,
+    RETIRED_STAGE_TYPES,
+    SAVEABLE_STAGE_TYPES,
     STAGE_TYPES,
     CiPipeline,
     CiPipelineStage,
     CiSecret,
     CiService,
 )
-from . import default_pipelines, jenkinsfile, templates
+from . import build_inputs, default_pipelines, jenkinsfile, templates
 from . import resources as ci_resources
 from .serializers import pipeline_to_dict
 
@@ -44,7 +46,16 @@ MAX_TIMEOUT_SECONDS = 24 * 3600
 
 
 class PipelineError(ValueError):
-    """A pipeline definition was rejected. Message is user-facing."""
+    """A pipeline definition was rejected. Message is user-facing.
+
+    ``code`` optionally names the rule, so the generated-pipeline validator can
+    report it (and Hermes' repair loop act on it) instead of a generic
+    ``invalid_stage``.
+    """
+
+    def __init__(self, message: str, *, code: Optional[str] = None):
+        super().__init__(message)
+        self.code = code
 
 
 def _clean(value: Any, limit: int) -> str:
@@ -461,6 +472,25 @@ def _check_image_tag_template(env: Dict[str, str], stage_name: str) -> None:
         )
 
 
+def _check_stage_build_inputs(
+    env: Dict[str, str], working_directory: Any, stage_name: str
+) -> None:
+    """The engine-read values a stage's own env sets, checked on save.
+
+    A literal IMAGE_TAG / IMAGE_NAME here is still tidied by the engine (it has
+    always been), so only the values that reach the build line verbatim —
+    the Dockerfile path and the working directory — are held to a grammar.
+    """
+    dockerfile = env.get("DOCKERFILE_PATH") or ""
+    if dockerfile:
+        problem = build_inputs.dockerfile_path_problem(dockerfile)
+        if problem:
+            raise PipelineError(f"Stage '{stage_name}': {problem}", code="path_escape")
+    problem = build_inputs.working_directory_problem(working_directory)
+    if problem:
+        raise PipelineError(f"Stage '{stage_name}': {problem}", code="path_escape")
+
+
 def _image_scan(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, Any]]:
     """Normalize a container_image stage's scan gate, or None.
 
@@ -544,10 +574,22 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         raise PipelineError(f"Stage {position + 1} needs a name.")
 
     stage_type = _clean(payload.get("stageType"), 32).lower() or "command"
+    if stage_type in RETIRED_STAGE_TYPES:
+        raise PipelineError(
+            f"Stage '{name}' is a '{stage_type}' stage, which KubeSight has no "
+            "executor for — a build would only ever skip it. "
+            + (
+                "Declare the files as artifacts on the stage that produces them "
+                "and remove this stage."
+                if stage_type == "publish_artifact"
+                else "Use the image scan gate on a container image stage, or run "
+                "the scanner in a command stage, and remove this stage."
+            )
+        )
     if stage_type not in STAGE_TYPES:
         raise PipelineError(
             f"Stage '{name}' has an unknown type '{stage_type}'. "
-            f"Supported: {', '.join(STAGE_TYPES)}."
+            f"Supported: {', '.join(SAVEABLE_STAGE_TYPES)}."
         )
 
     runner_type = _clean(payload.get("runnerType"), 24).lower() or None
@@ -573,6 +615,7 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
 
     env = _env_map(payload.get("env"))
     _check_image_tag_template(env, name)
+    _check_stage_build_inputs(env, payload.get("workingDirectory"), name)
 
     return {
         "position": position,
@@ -592,7 +635,10 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         "image_scan": _image_scan(payload.get("imageScan"), stage_type, name),
         "timeout_seconds": timeout,
         "continue_on_failure": bool(payload.get("continueOnFailure")),
-        "parallel_group": _clean(payload.get("parallelGroup"), 64) or None,
+        # Parallel groups were stored but never executed: stages always run in
+        # order. Accepting one would promise concurrency that does not happen,
+        # so a sent value is dropped (older clients still send the key).
+        "parallel_group": None,
         "enabled": payload.get("enabled") is not False,
     }
 
@@ -1076,8 +1122,29 @@ def validate_parameter_values(
 
     # Values a pipeline without parameters was given still travel through.
     if not definitions:
-        return {str(k): str(v)[:MAX_MULTILINE_CHARS] for k, v in submitted.items()}
+        accepted = {str(k): str(v)[:MAX_MULTILINE_CHARS] for k, v in submitted.items()}
+    _check_trigger_values(accepted, known)
     return accepted
+
+
+def _check_trigger_values(values: Dict[str, str], declared) -> None:
+    """Refuse trigger values that would reach generated shell or the loader.
+
+    The engine splices DOCKERFILE_PATH / IMAGE_TAG / IMAGE_NAME into the image
+    stage's buildctl line, next to the registry push credentials — whoever may
+    RUN a build must not thereby be able to rewrite that line. Checked on the
+    final values whether or not the pipeline declares the name, because a
+    declared parameter is a free-text field too. Undeclared names must also be
+    real variable names and not ones that redirect the shell (PATH, LD_*...).
+    """
+    for name, value in values.items():
+        if name not in declared and name not in RESERVED_VARIABLES:
+            problem = build_inputs.env_name_problem(name)
+            if problem:
+                raise PipelineError(problem)
+        problem = build_inputs.reserved_value_problem(name, value)
+        if problem:
+            raise PipelineError(problem)
 
 
 def resolve_for_build(

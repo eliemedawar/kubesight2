@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 
 from ..access_engine import can_access_namespace, can_access_resource, user_has_permission
 from ..audit import log_audit
@@ -13,6 +15,7 @@ from ..k8s_provider import (
     should_use_real_k8s,
 )
 from ..k8s_provider import _run_for_access
+from ..k8s_names import name_error
 from ..models import User
 from .deployment_service import _run_kubectl_for_cluster
 from .inventory_actions_service import _mock_rollout_history, parse_rollout_history
@@ -86,6 +89,19 @@ EXEC_PERMISSION = "apps:deploy"
 # Upper bound on a single exec command length (defensive — avoids unbounded argv).
 _MAX_EXEC_COMMAND_LENGTH = 4000
 
+# Reading a Secret's VALUES is its own permission. resources:view lets a user see
+# that a Secret exists, its type and its key names — enough to debug a missing
+# env var — but not the credentials in it. Without secrets:reveal, YAML comes
+# back with every data/stringData value replaced by this marker. `kubectl
+# describe secret` never prints values (only byte counts), so describe needs no
+# redaction.
+SECRET_REVEAL_PERMISSION = "secrets:reveal"
+REDACTED_SECRET_VALUE = "<hidden: secrets:reveal required>"
+_SECRET_VALUE_SECTIONS = ("data", "stringData")
+# kubectl copies the whole applied manifest — values included — into this
+# annotation, so it leaks exactly what the data section was redacted for.
+_LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
+
 
 def _normalize_kind(kind: str) -> Optional[str]:
     return KIND_ALIASES.get((kind or "").strip().lower())
@@ -102,6 +118,9 @@ def _check_resource_read_access(
     normalized = _normalize_kind(kind)
     if not normalized or not name.strip():
         return "Invalid resource kind or name", 400
+    invalid = name_error(namespace=namespace, names=((name, "resource name"),))
+    if invalid:
+        return invalid, 400
 
     permission = KIND_PERMISSION[normalized]
     if user and not user_has_permission(user, permission) and not user_has_permission(user, "resources:view"):
@@ -125,6 +144,54 @@ def _check_resource_read_access(
         return "Forbidden", 403
 
     return None
+
+
+def can_reveal_secret_values(user: Optional[User]) -> bool:
+    """Whether ``user`` may read Secret values. ``None`` is an internal caller."""
+    return user is None or user_has_permission(user, SECRET_REVEAL_PERMISSION)
+
+
+def _redact_secret_doc(doc: Dict[str, Any], hidden_keys: List[str]) -> None:
+    for section in _SECRET_VALUE_SECTIONS:
+        values = doc.get(section)
+        if isinstance(values, dict):
+            for key in values:
+                values[key] = REDACTED_SECRET_VALUE
+                hidden_keys.append(str(key))
+        elif values:
+            # Not a mapping (malformed): replace it whole rather than guess.
+            doc[section] = REDACTED_SECRET_VALUE
+    annotations = (doc.get("metadata") or {}).get("annotations")
+    if isinstance(annotations, dict) and _LAST_APPLIED_ANNOTATION in annotations:
+        annotations[_LAST_APPLIED_ANNOTATION] = REDACTED_SECRET_VALUE
+
+
+def redact_secret_yaml(yaml_content: str) -> Tuple[str, List[str]]:
+    """Replace every Secret value in ``yaml_content``; keep keys and metadata.
+
+    Handles single documents, multi-document streams and ``kind: List``. Returns
+    ``(redacted_yaml, hidden_key_names)``. Text that cannot be parsed is NOT
+    passed through — a parse failure must not become a leak.
+    """
+    try:
+        documents = [doc for doc in yaml.safe_load_all(yaml_content or "") if doc is not None]
+    except yaml.YAMLError:
+        return "# Secret values hidden (the YAML could not be parsed for redaction).\n", []
+
+    hidden: List[str] = []
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+        candidates = [doc]
+        if isinstance(doc.get("items"), list):
+            candidates.extend(item for item in doc["items"] if isinstance(item, dict))
+        for candidate in candidates:
+            if candidate.get("kind") == "Secret":
+                _redact_secret_doc(candidate, hidden)
+    dumped = "---\n".join(
+        yaml.safe_dump(doc, default_flow_style=False, sort_keys=False) for doc in documents
+    )
+    return dumped, hidden
 
 
 def _mock_describe(kind: str, namespace: str, name: str) -> str:
@@ -262,8 +329,23 @@ def get_resource_yaml(
     normalized = _normalize_kind(kind)
     assert normalized
 
+    is_secret = normalized == "secret"
+    reveal = is_secret and can_reveal_secret_values(user)
+
+    def _secret_fields(hidden_keys: List[str]) -> Dict[str, Any]:
+        if not is_secret:
+            return {}
+        return {
+            "valuesHidden": not reveal,
+            "hiddenKeys": sorted(set(hidden_keys)),
+            "revealPermission": SECRET_REVEAL_PERMISSION,
+        }
+
     if not should_use_real_k8s(cluster_id):
         yaml_content = _mock_yaml(normalized, namespace, name)
+        hidden: List[str] = []
+        if is_secret and not reveal:
+            yaml_content, hidden = redact_secret_yaml(yaml_content)
         return {
             "clusterId": cluster_id,
             "namespace": namespace,
@@ -271,25 +353,41 @@ def get_resource_yaml(
             "name": name,
             "yaml": yaml_content,
             "mode": "mock",
+            **_secret_fields(hidden),
         }, None, 200
 
     access = resolve_cluster_access(cluster_id)
     if not access:
         return None, "Cluster not found", 404
 
+    def _fetch() -> str:
+        return _run_for_access(access, ["get", normalized, name, "-n", namespace, "-o", "yaml"])
+
     try:
-        # Read-only kubectl call — cached (see get_resource_describe rationale).
-        yaml_content = cached_namespace_read(
-            access,
-            namespace,
-            f"yaml:{normalized}:{name}",
-            lambda: _run_for_access(access, ["get", normalized, name, "-n", namespace, "-o", "yaml"]),
-        )
+        hidden = []
+        if not is_secret:
+            # Read-only kubectl call — cached (see get_resource_describe rationale).
+            yaml_content = cached_namespace_read(access, namespace, f"yaml:{normalized}:{name}", _fetch)
+        elif reveal:
+            # Never cached: the plaintext is fetched for this request only and is
+            # not kept in a process-wide cache another request could be served from.
+            yaml_content = _fetch()
+        else:
+            # Only the REDACTED form is cached, under its own key, so the cache
+            # can never hand values to a user without secrets:reveal.
+            yaml_content = cached_namespace_read(
+                access,
+                namespace,
+                f"yaml:secret:{name}:redacted",
+                lambda: redact_secret_yaml(_fetch())[0],
+            )
+            hidden = redact_secret_yaml(yaml_content)[1]
         log_audit(
-            "resource_yaml_viewed",
+            "secret_values_revealed" if reveal else "resource_yaml_viewed",
             actor=user,
             target_type=normalized,
             target_id=f"{cluster_id}/{namespace}/{name}",
+            details={"valuesHidden": not reveal} if is_secret else None,
         )
         return {
             "clusterId": cluster_id,
@@ -297,6 +395,7 @@ def get_resource_yaml(
             "kind": normalized,
             "name": name,
             "yaml": yaml_content,
+            **_secret_fields(hidden),
         }, None, 200
     except K8sCommandError as exc:
         return None, str(exc), 503
@@ -395,6 +494,9 @@ def restart_resource(
         return None, "Invalid resource kind or name", 400
     if normalized not in RESTART_SUPPORTED_KINDS:
         return None, f"Restart is not supported for {normalized}", 400
+    invalid = name_error(namespace=namespace, names=((name, "resource name"),))
+    if invalid:
+        return None, invalid, 400
 
     denied = _check_resource_restart_access(user, cluster_id, namespace, normalized, name)
     if denied:
@@ -402,25 +504,25 @@ def restart_resource(
 
     # The cluster's approval rule: without a live approved request the restart is
     # sent for approval and carried out automatically once approved (202).
-    if user:
-        from .change_bundle_service import gate_or_queue
+    # A call without a user is held to the rule too (refused, not queued).
+    from .change_bundle_service import gate_or_queue
 
-        queued = gate_or_queue(
-            user,
-            cluster_id,
-            bundle_payload={
-                "actionType": "restart_workload",
-                "namespace": namespace,
-                "resourceKind": _KIND_LABELS.get(normalized, normalized),
-                "resourceName": name,
-            },
-            what=f"restart {normalized}/{name}",
-            action="restart",
-            target_type=normalized,
-            target_id=f"{cluster_id}/{namespace}/{name}",
-        )
-        if queued is not None:
-            return queued
+    queued = gate_or_queue(
+        user,
+        cluster_id,
+        bundle_payload={
+            "actionType": "restart_workload",
+            "namespace": namespace,
+            "resourceKind": _KIND_LABELS.get(normalized, normalized),
+            "resourceName": name,
+        },
+        what=f"restart {normalized}/{name}",
+        action="restart",
+        target_type=normalized,
+        target_id=f"{cluster_id}/{namespace}/{name}",
+    )
+    if queued is not None:
+        return queued
 
     if normalized == "pod":
         args = ["delete", "pod", name, "-n", namespace]
@@ -522,6 +624,13 @@ def exec_in_pod(
         return None, f"Command exceeds {_MAX_EXEC_COMMAND_LENGTH} characters", 400
 
     container = (container or "").strip() or None
+    invalid = name_error(
+        namespace=namespace,
+        names=((pod_name, "pod name"),),
+        containers=((container, "container name"),),
+    )
+    if invalid:
+        return None, invalid, 400
 
     # Reuse the restart access checks: exec is a write-level pod action.
     denied = _check_resource_restart_access(user, cluster_id, namespace, "pod", pod_name)

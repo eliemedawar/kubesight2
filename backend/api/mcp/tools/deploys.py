@@ -13,7 +13,9 @@ calls the service the UI calls, and the gates live inside those services:
   one a person types into the Helm dialog. It is generated from the release and
   namespace, so producing it means having named the right release in the right
   place — which is the point of the phrase. It, rollback and uninstall are also
-  under the same per-cluster approval rule as ``apply_yaml``.
+  under the same per-cluster approval rule as ``apply_yaml``: without a live
+  approved request the Helm change is queued as a change bundle with its full
+  parameters and run by KubeSight once approved.
 * Nobody is exempt from that rule — not admins, and not an agent holding an
   admin's token. A requester can never vote on their own request.
 * A change bundle is approved as a unit and executed by KubeSight afterwards.
@@ -208,12 +210,14 @@ def _deploy_diff(arguments: Dict[str, Any]) -> Dict[str, Any]:
 def _deploy_apply(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
     """Apply, through the same path the Deploy screen posts to.
 
-    The empty ``confirmation`` below is not a gate being skipped. ``apply_yaml``
-    takes the argument and never reads it — the deploy screen's confirmation is
-    a UI affordance, and the real gate is ``assert_deploy_allowed``, which runs
-    inside the service before anything reaches kubectl. Helm is the opposite
-    case: there the phrase *is* checked, which is why ``kubesight_helm_upgrade``
-    demands one.
+    The typed ``APPLY <namespace>`` phrase is checked on the server for the
+    Deploy screen's routes (``enforce_confirmation=True``), where it guards a
+    person against applying into the wrong namespace with one click. This tool
+    leaves it off on purpose: the tool call itself names the cluster and
+    namespace explicitly, the token is scoped, and the real gate —
+    the cluster's approval rule — runs inside ``apply_yaml`` either way. Helm
+    is different: its phrase is checked for every caller, which is why
+    ``kubesight_helm_upgrade`` demands one.
     """
     from ...services.deployment_service import apply_yaml
 
@@ -411,7 +415,7 @@ def _helm_releases(arguments: Dict[str, Any]) -> Dict[str, Any]:
     namespace = str(arguments.get("namespace") or "").strip()
     if namespace:
         namespace = require_namespace(user, cluster_id, namespace)
-    rows = list_releases(cluster_id, namespace or None) or []
+    rows = list_releases(cluster_id, namespace or None, user=user) or []
     total = len(rows)
     rows = [pick(row, _RELEASE_FIELDS) for row in take(rows, _limit(arguments, MAX_ROWS))]
     return {"clusterId": cluster_id, "totalMatching": total, "count": len(rows), "releases": rows}
@@ -443,7 +447,7 @@ def _helm_release_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
     release = str(arguments.get("release") or "").strip()
     if not release:
         raise ToolError("Name the release.")
-    detail = get_release_detail(cluster_id, namespace, release)
+    detail = get_release_detail(cluster_id, namespace, release, user=user)
     if not detail:
         raise ToolError(f"No release '{release}' in {cluster_id}/{namespace}, or Helm is unavailable.")
     return {"clusterId": cluster_id, "namespace": namespace, **detail}
@@ -460,9 +464,11 @@ def _helm_release_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "release and namespace you meant."
     ),
     approval=(
-        "Needs the exact confirmation phrase AND, on a cluster configured to "
-        "require approvals, a live approved deployment request for the token's "
-        "user — check kubesight_deploy_eligibility first."
+        "Needs the exact confirmation phrase. On a cluster configured to require "
+        "approvals, without a live approved deployment request this does NOT "
+        "install: the release (chart, version, values) is sent for approval as a "
+        "change bundle and KubeSight runs it automatically once approved. The "
+        "result says which happened — tell the person."
     ),
     write=True,
     schema={
@@ -500,7 +506,7 @@ def _helm_upgrade(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         install_or_upgrade_release(user, payload, str(arguments.get("confirmation") or "")),
         what="helm",
     ) or {}
-    return {"changed": f"released {payload['releaseName']} in {cluster_id}/{namespace}", **data}
+    return changed_or_queued(data, f"released {payload['releaseName']} in {cluster_id}/{namespace}")
 
 
 @tool(
@@ -512,9 +518,10 @@ def _helm_upgrade(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         "revision numbers are in its history."
     ),
     approval=(
-        "On a cluster configured to require approvals this fails unless the "
-        "token's user has a live approved deployment request — check "
-        "kubesight_deploy_eligibility first."
+        "On a cluster configured to require approvals, without a live approved "
+        "deployment request this does NOT run: it is sent for approval as a "
+        "change bundle and KubeSight carries it out once approved. The result "
+        "says which happened — tell the person."
     ),
     write=True,
     schema={
@@ -540,7 +547,7 @@ def _helm_rollback(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
     data = unwrap(
         rollback_release(user, cluster_id, namespace, release, revision), what=release
     ) or {}
-    return {"changed": f"rolled back {release} in {cluster_id}/{namespace}", **data}
+    return changed_or_queued(data, f"rolled back {release} in {cluster_id}/{namespace}")
 
 
 @tool(
@@ -553,9 +560,10 @@ def _helm_rollback(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         "before calling it."
     ),
     approval=(
-        "On a cluster configured to require approvals this fails unless the "
-        "token's user has a live approved deployment request — check "
-        "kubesight_deploy_eligibility first."
+        "On a cluster configured to require approvals, without a live approved "
+        "deployment request this does NOT run: it is sent for approval as a "
+        "change bundle and KubeSight carries it out once approved. The result "
+        "says which happened — tell the person."
     ),
     write=True,
     destructive=True,
@@ -578,4 +586,4 @@ def _helm_uninstall(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
     if not release:
         raise ToolError("Name the release.")
     data = unwrap(uninstall_release(user, cluster_id, namespace, release), what=release) or {}
-    return {"changed": f"uninstalled {release} from {cluster_id}/{namespace}", **data}
+    return changed_or_queued(data, f"uninstalled {release} from {cluster_id}/{namespace}")

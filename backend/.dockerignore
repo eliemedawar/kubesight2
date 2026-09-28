@@ -5,3 +5,6 @@ __pycache__
 .pytest_cache
 kubesight.db
 *.db
+*.log
+# Local runtime state (kubeconfigs, CI/mobile artifacts) must never ship in the image.
+/data

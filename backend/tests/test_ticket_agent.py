@@ -29,6 +29,18 @@ CLUSTER = "prod-us-east"
 NAMESPACE = "payments"
 DEPLOYMENT = "payments-api"
 
+# The inbound webhooks fail closed without a stored secret, so every test in
+# this module runs against an installation that has one configured.
+HOOK_SECRET = "hook-secret"
+HOOK = {"X-Ticketing-Secret": HOOK_SECRET}
+
+
+@pytest.fixture(autouse=True)
+def _inbound_secret(app):
+    from api.services import zoho_sync_service
+
+    zoho_sync_service.update_config({"inboundSecret": HOOK_SECRET})
+
 
 @pytest.fixture()
 def writes(monkeypatch):
@@ -137,7 +149,7 @@ def test_webhook_hands_every_ticket_to_hermes_which_executes(client, agent, writ
         "ticketId": "9001", "ticketNumber": "DR-9001", "subject": "deploy please",
         "description": "<p>Please deploy <b>v9.9.9</b></p>",
         "cf": {"cf_application": DEPLOYMENT, "cf_environment": NAMESPACE, "cf_tag": "v9.9.9"},
-    })
+    }, headers=HOOK)
     assert response.status_code == 200
     assert len(seen) == 1
 
@@ -158,7 +170,7 @@ def test_webhook_hands_every_ticket_to_hermes_which_executes(client, agent, writ
     assert started and started[0]["comment"] is None
 
     # A redelivered webhook for the same ticket does not wake Hermes again.
-    client.post("/api/ticketing/zoho/inbound", json={"ticketId": "9001", "ticketNumber": "DR-9001"})
+    client.post("/api/ticketing/zoho/inbound", json={"ticketId": "9001", "ticketNumber": "DR-9001"}, headers=HOOK)
     assert len(seen) == 1
 
 
@@ -166,7 +178,7 @@ def test_agent_off_keeps_the_dropdown_path(client, app, writes, monkeypatch):
     seen = _fake_hermes(monkeypatch, lambda m: None)
     agent_settings.update({"enabled": True})  # on, but no dedicated Hermes URL
     assert agent_settings.is_active() is False
-    client.post("/api/ticketing/zoho/inbound", json={"ticketId": "9100", "ticketNumber": "DR-9100"})
+    client.post("/api/ticketing/zoho/inbound", json={"ticketId": "9100", "ticketNumber": "DR-9100"}, headers=HOOK)
     assert seen == []
     assert TicketInterpretation.query.count() == 0
 
@@ -324,6 +336,32 @@ def test_telegram_button_press_approves(client, agent, writes, monkeypatch):
     db.session.refresh(task)
     assert task.status == "executed" and task.decided_by == "@devops_lead (Telegram)"
     assert agent_settings.get_or_create().telegram_update_offset == 11
+
+
+def test_telegram_chat_by_handle_without_approvers_refuses_presses(client, agent, writes, monkeypatch):
+    """An @channel cannot be matched to the press's numeric chat id; with no
+    approver list either, any subscriber could approve — so nobody can."""
+    monkeypatch.setattr("api.services.ticket_agent.telegram.send_message", lambda *a, **k: 77)
+    monkeypatch.setattr("api.services.ticket_agent.telegram.edit_message", lambda *a, **k: None)
+    answered = []
+    monkeypatch.setattr("api.services.ticket_agent.telegram.answer_callback",
+                        lambda token, cid, text="": answered.append(text))
+    agent_settings.update({"telegramEnabled": True, "telegramBotToken": "123:abc",
+                           "telegramChatId": "@devops_channel", "telegramApprovers": ""})
+    ticket = _ticket()
+    _request(ticket.id)
+    task = TicketInterpretation.query.filter_by(ticket_record_id=ticket.id).one()
+    monkeypatch.setattr(
+        "api.services.ticket_agent.telegram.get_updates",
+        lambda token, offset: [{"update_id": 20, "callback_query": {
+            "id": "cb2", "data": f"ka:{task.id}:a:{task.approval_nonce}",
+            "from": {"id": 9, "username": "random_subscriber"},
+            "message": {"chat": {"id": -100999}}}}],
+    )
+    assert engine.poll_telegram() == 0
+    db.session.refresh(task)
+    assert task.status == "awaiting_approval"
+    assert "approver list" in answered[-1]
 
 
 def test_rejection_wakes_hermes_to_write_the_impediment(client, agent, writes, monkeypatch):
@@ -509,6 +547,7 @@ def test_a_reply_on_a_parked_ticket_wakes_hermes_with_the_conversation(client, a
     response = client.post(
         "/api/zoho/inbound/comment",
         json={"ticketId": ticket.ticket_id, "comment": "<p>payments, tag v9.9.9 please</p>", "author": "Rami"},
+        headers={"X-Zoho-Secret": HOOK_SECRET},
     )
     assert response.status_code == 200
     result = response.get_json()["data"]["comments"][0]
@@ -568,7 +607,7 @@ def test_zoho_desk_webhook_shape_and_outgoing_threads(client, agent, writes, mon
                                                           "content": "It is payments.",
                                                           "commenter": {"name": "Rami"}}},
     ]
-    response = client.post("/api/ticketing/zoho/inbound/comment", json=body)
+    response = client.post("/api/ticketing/zoho/inbound/comment", json=body, headers=HOOK)
     assert response.status_code == 200
     comments = response.get_json()["data"]["comments"]
     assert len(comments) == 1 and comments[0]["handled"] is True
@@ -590,7 +629,7 @@ def test_a_ticket_put_on_hold_by_hand_resumes_from_its_zoho_status(client, agent
     seen = _fake_hermes(monkeypatch, lambda m: None)
     response = client.post("/api/zoho/inbound/comment", json={
         "ticketId": ticket.ticket_id, "comment": "deploy v9.9.9 to payments", "status": "On Hold",
-    })
+    }, headers={"X-Zoho-Secret": HOOK_SECRET})
     assert response.get_json()["data"]["comments"][0]["handled"] is True
     assert seen[0]["task"] == "continue_ticket"
 

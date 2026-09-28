@@ -14,12 +14,12 @@ from urllib.parse import urlparse
 
 import yaml
 
-from ..access_engine import can_access_namespace, is_admin, user_has_permission
+from ..access_engine import can_access_cluster, can_access_namespace, is_admin, user_has_permission
 from ..audit import log_audit
 from ..cluster_access import ClusterAccess
 from ..k8s_provider import resolve_cluster_access
 from ..models import User
-from .deployment_service import analyze_resources, sanitize_yaml_preview
+from .deployment_service import analyze_resources, check_registry_images, sanitize_yaml_preview
 
 RunHelmFn = Callable[[ClusterAccess, List[str], Optional[Dict[str, str]]], str]
 
@@ -138,10 +138,13 @@ def validate_chart_version(version: str) -> Tuple[bool, Optional[str]]:
     return True, None
 
 
-def _helm_env(access: ClusterAccess) -> Dict[str, str]:
+def _helm_env(access: ClusterAccess, kubeconfig_path: Optional[str] = None) -> Dict[str, str]:
+    """Subprocess env for helm. ``kubeconfig_path`` is the materialized
+    (decrypted) path; it defaults to the access path for pass-through configs."""
     env = os.environ.copy()
-    if access.kubeconfig_path:
-        env["KUBECONFIG"] = access.kubeconfig_path
+    path = kubeconfig_path if kubeconfig_path is not None else access.kubeconfig_path
+    if path:
+        env["KUBECONFIG"] = path
     return env
 
 
@@ -151,28 +154,40 @@ def run_helm(
     *,
     extra_env: Optional[Dict[str, str]] = None,
 ) -> str:
+    from ..kubeconfig_vault import KubeconfigDecryptError, materialized_kubeconfig
+
+    from ..k8s_names import unsafe_helm_arg
+
+    bad = unsafe_helm_arg(args)
+    if bad is not None:
+        # A flag-shaped release/namespace/chart value smuggled into the argv.
+        raise HelmCommandError(f"Refusing to run helm: argument {bad[:80]!r} is not allowed.")
     ensure_helm_installed()
-    command = [_helm_binary()]
-    if access.kubeconfig_path:
-        command += ["--kubeconfig", access.kubeconfig_path]
-    if access.context_name:
-        command += ["--kube-context", access.context_name]
-    command += args
+    try:
+        with materialized_kubeconfig(access.kubeconfig_path) as kubeconfig_path:
+            command = [_helm_binary()]
+            if kubeconfig_path:
+                command += ["--kubeconfig", kubeconfig_path]
+            if access.context_name:
+                command += ["--kube-context", access.context_name]
+            command += args
 
-    env = _helm_env(access)
-    if extra_env:
-        env.update(extra_env)
+            env = _helm_env(access, kubeconfig_path or "")
+            if extra_env:
+                env.update(extra_env)
 
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+    except KubeconfigDecryptError as exc:
+        raise HelmCommandError(str(exc)) from exc
     if completed.returncode != 0:
         stderr = (completed.stderr or completed.stdout or "").strip()
-        raise HelmCommandError(stderr or f"helm command failed: {' '.join(command)}")
+        raise HelmCommandError(stderr or f"helm command failed: helm {' '.join(args)}")
 
     # Helm installs/upgrades/rollbacks change workloads — drop cached namespace
     # resource reads for this cluster so the UI reflects the release right away.
@@ -513,13 +528,75 @@ def expected_confirmation(release_name: str, namespace: str, is_upgrade: bool) -
     return f"INSTALL {release_name} IN {namespace}"
 
 
+def _queue_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """What a queued Helm change keeps: the request as the caller sent it.
+
+    A chart template stays a template id + version (re-resolved when it runs)
+    rather than the resolved archive; an uploaded chart keeps its archive. The
+    typed confirmation is left out — the approval replaces it.
+    """
+    return {k: v for k, v in (payload or {}).items() if k != "confirmation"}
+
+
+def _render_for_checks(
+    runner: RunHelmFn,
+    access: ClusterAccess,
+    release_name: str,
+    chart_target: str,
+    namespace: str,
+    values_path: str,
+    version_args: List[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """``helm template`` the release so its images can be checked.
+
+    Returns ``(rendered, error)``. Best-effort: a chart that cannot be rendered
+    offline is not refused here (the install itself is the authority); the
+    caller reports that the image check could not run.
+    """
+    args = ["template", release_name, chart_target, "--namespace", namespace, "-f", values_path]
+    args.extend(version_args)
+    try:
+        return runner(access, args), None
+    except HelmNotInstalledError:
+        raise
+    except HelmCommandError as exc:
+        return None, str(exc)
+
+
+def _helm_preview(header: str, rendered: Optional[str], values_yaml: str) -> str:
+    """Bundle preview for a Helm change: the rendered manifest (secrets redacted)
+    or, when it could not be rendered, the values it will be installed with."""
+    lines = [f"# {header}"]
+    if rendered and rendered.strip():
+        try:
+            body = sanitize_yaml_preview(rendered)
+        except Exception:  # noqa: BLE001 — preview is informational
+            body = ""
+        if body.strip():
+            lines.append("# Rendered manifest (helm template; Secret values redacted):")
+            return "\n".join(lines) + "\n" + body
+    lines.append("# The chart could not be rendered for a preview. Values:")
+    return "\n".join(lines) + "\n" + (values_yaml or "# (chart defaults)\n")
+
+
 def install_or_upgrade_release(
     user: Optional[User],
     payload: Dict[str, Any],
     confirmation: str,
     *,
     run_helm_fn: Optional[RunHelmFn] = None,
+    approval_context: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Install or upgrade a release, under the cluster's approval rule.
+
+    On a cluster that needs approval (and no live approved request) the change
+    is not refused: it is queued as a single-item change bundle with its full
+    parameters and carried out by the bundle executor once approved (202,
+    ``pendingApproval``). The executor calls back in here with
+    ``approval_context`` so the same namespace, chart and image checks run
+    again at execution time; the typed confirmation is not asked again then.
+    """
+    original = _queue_payload(payload)
     try:
         payload = _prepare_chart_payload(payload)
     except HelmCommandError as exc:
@@ -538,13 +615,10 @@ def install_or_upgrade_release(
         _audit_unauthorized(user, payload, perm)
         return None, "Forbidden", 403
 
-    expected = expected_confirmation(release_name, namespace, is_upgrade)
-    if (confirmation or "").strip() != expected:
-        return None, f"Confirmation must be exactly: {expected}", 400
-
-    denied = _approval_gate(user, cluster_id, namespace, release_name, "upgrade" if is_upgrade else "install")
-    if denied:
-        return None, denied[0], denied[1]
+    if not approval_context:
+        expected = expected_confirmation(release_name, namespace, is_upgrade)
+        if (confirmation or "").strip() != expected:
+            return None, f"Confirmation must be exactly: {expected}", 400
 
     try:
         ensure_helm_installed()
@@ -552,10 +626,14 @@ def install_or_upgrade_release(
         return None, str(exc), 503
 
     values_yaml = payload.get("valuesYaml") or payload.get("values_yaml") or ""
-    release_name, namespace, cluster_id, access, chart_ref, local_path, _ = _base_helm_args(payload)
+    try:
+        release_name, namespace, cluster_id, access, chart_ref, local_path, _ = _base_helm_args(payload)
+    except HelmCommandError as exc:
+        return None, str(exc), 400
     values_path = _write_values_file(values_yaml)
     runner = run_helm_fn or run_helm
     action = "helm_upgrade_attempted" if is_upgrade else "helm_install_attempted"
+    verb = "upgrade" if is_upgrade else "install"
 
     try:
         if (payload.get("chartSource") or payload.get("chart_source") or "repository") == "repository":
@@ -573,6 +651,49 @@ def install_or_upgrade_release(
                 update_repositories(access)
 
         chart_target, version_args = _helm_chart_args(chart_ref, local_path)
+
+        # Registry image gate — the same rule as a YAML apply: render the
+        # release and refuse when an image is missing from a registry whose
+        # enforcement is "block" (warn/off registries never block).
+        rendered, render_err = _render_for_checks(
+            runner, access, release_name, chart_target, namespace, values_path, version_args
+        )
+        image_checks: List[Dict[str, Any]] = []
+        if rendered:
+            image_checks, image_blocking, image_err = check_registry_images(rendered)
+            if image_blocking:
+                log_audit(
+                    "helm_upgrade_failed" if is_upgrade else "helm_install_failed",
+                    actor=user,
+                    target_type="helm_release",
+                    target_id=f"{cluster_id}/{namespace}/{release_name}",
+                    details={"error": image_err, "reason": "image_not_in_registry"},
+                )
+                return None, image_err, 422
+
+        # The cluster's approval rule — checked after validation so only a
+        # change this user could make is ever queued.
+        chart_label = f"{payload.get('chartName') or chart_target} {payload.get('chartVersion') or ''}".strip()
+        queued = _approval_gate(
+            user,
+            cluster_id,
+            namespace,
+            release_name,
+            verb,
+            approval_context=approval_context,
+            bundle_payload={
+                "helm": {**original, "isUpgrade": is_upgrade},
+                "helmPreview": _helm_preview(
+                    f"helm {verb} {release_name} ({chart_label}) in namespace {namespace}",
+                    rendered,
+                    values_yaml,
+                ),
+            },
+            what=f"helm {verb} {release_name} in {namespace}",
+        )
+        if queued is not None:
+            return queued
+
         args = [
             "upgrade", "--install", release_name, chart_target,
             "--namespace", namespace,
@@ -595,6 +716,7 @@ def install_or_upgrade_release(
                 "chart": payload.get("chartName"),
                 "version": payload.get("chartVersion"),
                 "result": "success",
+                **({"approval": approval_context} if approval_context else {}),
             },
         )
         log_audit(
@@ -604,13 +726,20 @@ def install_or_upgrade_release(
             target_id=f"{cluster_id}/{namespace}/{release_name}",
             details={"output": output[:500] if output else ""},
         )
-        return {
+        result: Dict[str, Any] = {
             "installed": not is_upgrade,
             "upgraded": is_upgrade,
             "releaseName": release_name,
             "namespace": namespace,
             "output": output,
-        }, None, 200
+            "imageChecks": image_checks,
+        }
+        if render_err:
+            result["imageCheckWarning"] = (
+                "The chart could not be rendered to check its images against the "
+                f"linked registries: {render_err}"
+            )
+        return result, None, 200
     except HelmNotInstalledError as exc:
         return None, str(exc), 503
     except HelmCommandError as exc:
@@ -628,6 +757,19 @@ def install_or_upgrade_release(
         _cleanup_path(local_path)
 
 
+def _current_manifest_preview(cluster_id: str, namespace: str, release_name: str) -> str:
+    """Best-effort ``helm get manifest`` (secrets redacted) for a queued preview."""
+    from ..k8s_provider import should_use_real_k8s
+
+    try:
+        if not should_use_real_k8s(cluster_id) or not is_helm_installed():
+            return ""
+        manifest = run_helm(_resolve_access(cluster_id), ["get", "manifest", release_name, "-n", namespace])
+        return sanitize_yaml_preview(manifest) if manifest else ""
+    except Exception:  # noqa: BLE001 — preview is informational
+        return ""
+
+
 def rollback_release(
     user: Optional[User],
     cluster_id: str,
@@ -636,19 +778,43 @@ def rollback_release(
     revision: Optional[int] = None,
     *,
     run_helm_fn: Optional[RunHelmFn] = None,
+    approval_context: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     if user and not user_has_permission(user, "helm:rollback"):
         _audit_unauthorized(user, {"clusterId": cluster_id, "namespace": namespace, "releaseName": release_name}, "rollback")
         return None, "Forbidden", 403
     if user and not can_access_namespace(user, cluster_id, namespace):
         return None, "Forbidden", 403
-    denied = _approval_gate(user, cluster_id, namespace, release_name, "rollback")
-    if denied:
-        return None, denied[0], denied[1]
 
     ok, err = validate_release_name(release_name)
     if not ok:
         return None, err, 400
+    if revision not in (None, ""):
+        try:
+            revision = int(revision)
+        except (TypeError, ValueError):
+            return None, "revision must be a whole number.", 400
+        if revision < 1:
+            return None, "revision must be 1 or greater.", 400
+    else:
+        revision = None
+
+    target = f"revision {revision}" if revision else "the previous revision"
+    queued = _approval_gate(
+        user,
+        cluster_id,
+        namespace,
+        release_name,
+        "rollback",
+        approval_context=approval_context,
+        bundle_payload={
+            "revision": revision,
+            "helmPreview": f"# helm rollback {release_name} in namespace {namespace} to {target}\n",
+        },
+        what=f"helm rollback {release_name} to {target}",
+    )
+    if queued is not None:
+        return queued
 
     ensure_helm_installed()
     access = _resolve_access(cluster_id)
@@ -664,7 +830,11 @@ def rollback_release(
             actor=user,
             target_type="helm_release",
             target_id=f"{cluster_id}/{namespace}/{release_name}",
-            details={"revision": revision, "result": "success"},
+            details={
+                "revision": revision,
+                "result": "success",
+                **({"approval": approval_context} if approval_context else {}),
+            },
         )
         return {"rolledBack": True, "output": output}, None, 200
     except HelmNotInstalledError as exc:
@@ -687,19 +857,36 @@ def uninstall_release(
     release_name: str,
     *,
     run_helm_fn: Optional[RunHelmFn] = None,
+    approval_context: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     if user and not user_has_permission(user, "helm:uninstall"):
         _audit_unauthorized(user, {"clusterId": cluster_id, "namespace": namespace, "releaseName": release_name}, "uninstall")
         return None, "Forbidden", 403
     if user and not can_access_namespace(user, cluster_id, namespace):
         return None, "Forbidden", 403
-    denied = _approval_gate(user, cluster_id, namespace, release_name, "uninstall")
-    if denied:
-        return None, denied[0], denied[1]
 
     ok, err = validate_release_name(release_name)
     if not ok:
         return None, err, 400
+
+    queued = _approval_gate(
+        user,
+        cluster_id,
+        namespace,
+        release_name,
+        "uninstall",
+        approval_context=approval_context,
+        bundle_payload={
+            "helmPreview": (
+                f"# helm uninstall {release_name} in namespace {namespace}\n"
+                "# Every resource of the release (below, when readable) is deleted.\n"
+                + (_current_manifest_preview(cluster_id, namespace, release_name) if not approval_context else "")
+            ),
+        },
+        what=f"helm uninstall {release_name}",
+    )
+    if queued is not None:
+        return queued
 
     ensure_helm_installed()
     access = _resolve_access(cluster_id)
@@ -712,7 +899,10 @@ def uninstall_release(
             actor=user,
             target_type="helm_release",
             target_id=f"{cluster_id}/{namespace}/{release_name}",
-            details={"result": "success"},
+            details={
+                "result": "success",
+                **({"approval": approval_context} if approval_context else {}),
+            },
         )
         return {"uninstalled": True, "output": output}, None, 200
     except HelmNotInstalledError as exc:
@@ -728,12 +918,118 @@ def uninstall_release(
         return None, str(exc), 400
 
 
+# Change-bundle action types for Helm (see change_bundle_service.ACTION_TYPES).
+HELM_ACTION_TYPES = ("helm_install", "helm_upgrade", "helm_rollback", "helm_uninstall")
+
+
+def run_approved_helm_change(
+    item_input: Dict[str, Any], action_type: str, *, approval_context: str
+) -> Tuple[str, Dict[str, Any]]:
+    """Carry out a queued Helm change once its bundle is approved.
+
+    Called by the bundle executor. Runs through the same functions as a direct
+    call — with no user (the approval is the authorization; the requester's
+    Helm permission and namespace access were checked when it was queued) and
+    an explicit ``approval_context`` so the gate knows it is already approved.
+    Returns ``(output, data)``; raises HelmCommandError on failure.
+    """
+    item_input = item_input or {}
+    cluster_id = str(item_input.get("clusterId") or "")
+    namespace = str(item_input.get("namespace") or "")
+    release_name = str(item_input.get("resourceName") or "")
+    if action_type in ("helm_install", "helm_upgrade"):
+        helm_payload = dict(item_input.get("helm") or {})
+        helm_payload.setdefault("clusterId", cluster_id)
+        helm_payload.setdefault("namespace", namespace)
+        helm_payload.setdefault("releaseName", release_name)
+        data, err, status = install_or_upgrade_release(
+            None, helm_payload, "", approval_context=approval_context
+        )
+    elif action_type == "helm_rollback":
+        data, err, status = rollback_release(
+            None, cluster_id, namespace, release_name, item_input.get("revision"),
+            approval_context=approval_context,
+        )
+    elif action_type == "helm_uninstall":
+        data, err, status = uninstall_release(
+            None, cluster_id, namespace, release_name, approval_context=approval_context
+        )
+    else:
+        raise HelmCommandError(f"Unsupported Helm action: {action_type}")
+    if err or status >= 300:
+        raise HelmCommandError(err or f"{action_type} did not run (status {status})")
+    return str((data or {}).get("output") or "").strip(), data or {}
+
+
+def record_helm_catalog_entry(user: Optional[User], body: Dict[str, Any]) -> None:
+    """Register/refresh the App Catalog entry for an installed/upgraded release.
+
+    Shared by the direct install/upgrade routes and the bundle executor (for a
+    change that was queued for approval and has now run).
+    """
+    from .app_catalog_service import create_or_update_from_helm
+    from .helm_chart_template_service import get_chart_template
+
+    template_id = body.get("chartTemplateId") or body.get("chart_template_id")
+    template = get_chart_template(str(template_id)) if template_id else None
+    create_or_update_from_helm(
+        user,
+        cluster_id=body.get("clusterId") or body.get("cluster"),
+        namespace=body.get("namespace"),
+        release_name=body.get("releaseName") or body.get("release_name"),
+        chart_name=body.get("chartName") or body.get("chart_name") or (template or {}).get("name"),
+        chart_version=(
+            body.get("chartVersion") or body.get("chart_version") or (template or {}).get("version")
+        ),
+        owner_team=body.get("ownerTeam") or body.get("owner_team"),
+        environment=body.get("environment"),
+        criticality=body.get("criticality"),
+        description=body.get("description"),
+    )
+
+
+def filter_releases_for_user(
+    user: Optional[User], cluster_id: str, releases: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Keep only the releases in namespaces ``user`` may see on ``cluster_id``.
+
+    ``user=None`` is an internal caller and gets everything; admins see all; a
+    user without access to the cluster sees nothing.
+    """
+    if user is None or is_admin(user):
+        return releases
+    if not can_access_cluster(user, cluster_id):
+        return []
+    verdicts: Dict[str, bool] = {}
+    kept: List[Dict[str, Any]] = []
+    for release in releases:
+        namespace = str((release or {}).get("namespace") or "")
+        if namespace not in verdicts:
+            verdicts[namespace] = bool(namespace) and can_access_namespace(user, cluster_id, namespace)
+        if verdicts[namespace]:
+            kept.append(release)
+    return kept
+
+
 def list_releases(
     cluster_id: str,
     namespace: Optional[str] = None,
     *,
+    user: Optional[User] = None,
     run_helm_fn: Optional[RunHelmFn] = None,
 ) -> List[Dict[str, Any]]:
+    """Helm releases on a cluster, in one namespace or across all (``-A``).
+
+    With a ``user`` the result is scoped to what that user may see: a namespace
+    they cannot access yields nothing, and the all-namespaces listing is
+    filtered to their namespaces. ``user=None`` is for internal callers only
+    (e.g. inventory discovery, which filters its own rows per user).
+    """
+    if user is not None and not is_admin(user):
+        if not can_access_cluster(user, cluster_id):
+            return []
+        if namespace and not can_access_namespace(user, cluster_id, namespace):
+            return []
     if not is_helm_installed():
         return []
     access = _resolve_access(cluster_id)
@@ -745,9 +1041,12 @@ def list_releases(
         args.append("-A")
     try:
         output = runner(access, args)
-        return json.loads(output or "[]")
+        releases = json.loads(output or "[]")
     except (HelmCommandError, json.JSONDecodeError):
         return []
+    if not isinstance(releases, list):
+        return []
+    return filter_releases_for_user(user, cluster_id, releases)
 
 
 def _parse_chart_label(chart_label: str) -> Tuple[str, str]:
@@ -819,13 +1118,62 @@ def make_inventory_id(cluster_id: str, namespace: str, name: str) -> str:
     return quote(f"{cluster_id}|{namespace}|{name}", safe="")
 
 
+# Values keys that commonly hold credentials. Chart values are free-form, so
+# this is a name heuristic: it hides `postgresql.auth.password`, `apiKey`,
+# `tls.privateKey`, `smtp.secret` and the like from anyone without
+# secrets:reveal, the same bar the Secret YAML view applies.
+_SENSITIVE_VALUE_WORD = re.compile(
+    r"pass(word|wd|phrase)?|secret|token|api[-_]?key|access[-_]?key|private[-_]?key"
+    r"|credential|dsn|connection[-_]?string|^key$|[-_]key$",
+    re.IGNORECASE,
+)
+# camelCase `...Key` (apiKey, encryptionKey) without catching "monkey".
+_SENSITIVE_VALUE_CAMEL = re.compile(r"[a-z0-9]Key$")
+HIDDEN_HELM_VALUE = "<hidden: secrets:reveal required>"
+
+
+def _is_sensitive_value_key(key: str) -> bool:
+    return bool(_SENSITIVE_VALUE_WORD.search(key) or _SENSITIVE_VALUE_CAMEL.search(key))
+
+
+def _mask_sensitive_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        masked: Dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(item, (dict, list)):
+                masked[key] = _mask_sensitive_values(item)
+            elif item not in (None, "") and _is_sensitive_value_key(str(key)):
+                masked[key] = HIDDEN_HELM_VALUE
+            else:
+                masked[key] = item
+        return masked
+    if isinstance(value, list):
+        return [_mask_sensitive_values(item) for item in value]
+    return value
+
+
 def get_release_detail(
     cluster_id: str,
     namespace: str,
     release_name: str,
     *,
+    user: Optional[User] = None,
     run_helm_fn: Optional[RunHelmFn] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Release status, manifest and values, redacted to what ``user`` may see.
+
+    ``helm get manifest`` carries every Secret the chart renders and ``helm get
+    values`` the chart's credentials, so neither goes out raw by default:
+    without ``secrets:reveal`` Secret data is stripped from the manifest and
+    credential-looking values are masked; without ``helm:values:view`` the
+    values are not returned at all. ``user=None`` (internal callers) gets the
+    fully redacted form.
+    """
+    if user is not None and not is_admin(user):
+        if not can_access_cluster(user, cluster_id) or not can_access_namespace(user, cluster_id, namespace):
+            return None
+    reveal = bool(user) and user_has_permission(user, "secrets:reveal")
+    show_values = bool(user) and user_has_permission(user, "helm:values:view")
     if not is_helm_installed():
         return None
     access = _resolve_access(cluster_id)
@@ -857,6 +1205,11 @@ def get_release_detail(
         chart_name, chart_version = _parse_chart_label(str(chart_label))
 
     info = status_data.get("info") or {}
+    rendered = sanitize_yaml_preview(manifest) if manifest else ""
+    if not show_values:
+        values_summary = {}
+    elif not reveal:
+        values_summary = _mask_sensitive_values(values_summary)
     return {
         "releaseName": release_name,
         "namespace": namespace,
@@ -868,23 +1221,47 @@ def get_release_detail(
         "status": info.get("status") or status_data.get("status") or "unknown",
         "lastDeployed": info.get("last_deployed") or info.get("lastDeployed"),
         "valuesSummary": values_summary,
-        "renderedManifest": sanitize_yaml_preview(manifest) if manifest else "",
-        "manifest": manifest,
+        "valuesHidden": not show_values,
+        "secretValuesHidden": not reveal,
+        "renderedManifest": rendered,
+        "manifest": manifest if reveal else rendered,
     }
 
 
 def _approval_gate(
-    user: Optional[User], cluster_id: str, namespace: str, release_name: str, action: str
-) -> Optional[Tuple[str, int]]:
-    """The cluster's deployment-approval rule, same as a YAML apply."""
-    from .deployment_request_service import check_cluster_change_allowed
+    user: Optional[User],
+    cluster_id: str,
+    namespace: str,
+    release_name: str,
+    action: str,
+    *,
+    approval_context: Optional[str] = None,
+    bundle_payload: Optional[Dict[str, Any]] = None,
+    what: str = "",
+) -> Optional[Tuple[Optional[Dict[str, Any]], Optional[str], int]]:
+    """The cluster's deployment-approval rule, same as a YAML apply.
 
-    return check_cluster_change_allowed(
+    ``None`` → go ahead. Otherwise the ``(data, error, status)`` to return: 202
+    with a pending-approval payload when the change was queued as a change
+    bundle (applied by the executor once approved), or the refusal.
+    """
+    from .change_bundle_service import gate_or_queue
+
+    return gate_or_queue(
         user,
         cluster_id,
+        bundle_payload={
+            "actionType": f"helm_{action}",
+            "namespace": namespace,
+            "resourceKind": "HelmRelease",
+            "resourceName": release_name,
+            **(bundle_payload or {}),
+        },
+        what=what or f"helm {action} {release_name}",
         action=f"helm_{action}",
         target_type="helm_release",
         target_id=f"{cluster_id}/{namespace}/{release_name}",
+        approval_context=approval_context,
     )
 
 

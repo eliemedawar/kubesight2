@@ -139,6 +139,28 @@ export const deleteSshProfile = (id) =>
 export const testSshProfile = (id, host) =>
   request(`/api/ssh-connection-profiles/${id}/test`, { method: "POST", body: { host } });
 
+// --- SSH host keys (what makes strict / pinned usable) -----------------------
+
+export const listSshHostKeys = () => request("/api/ssh-host-keys");
+
+/** Fetch the fingerprint a host presents now. Trusts and records nothing. */
+export const scanSshHostKey = ({ host, port = 22, profileId } = {}) =>
+  request("/api/ssh-host-keys/scan", {
+    method: "POST",
+    body: { host, port, ...(profileId ? { profileId } : {}) },
+  });
+
+/** Pre-approve (pin) a fingerprint. `replace` must be true to overwrite a
+ *  DIFFERENT recorded fingerprint (the server answers 409 otherwise). */
+export const pinSshHostKey = ({ host, port = 22, keyType, fingerprint, replace = false }) =>
+  request("/api/ssh-host-keys", {
+    method: "POST",
+    body: { host, port, keyType, fingerprint, replace },
+  });
+
+export const deleteSshHostKey = (id) =>
+  request(`/api/ssh-host-keys/${id}`, { method: "DELETE" });
+
 // --- Build profiles (repository modes) --------------------------------------
 
 export const listBuildProfiles = () => request("/api/build-profiles");

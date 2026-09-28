@@ -21,6 +21,11 @@ These are not thin wrappers. Each write re-checks what Hermes asked for:
 
 Approving is deliberately not a tool: the agent that proposed an action must
 not be able to approve it.
+
+The writes answer under ``ticketing:agent`` rather than ``ticketing:manage``:
+the hermes-agent service account holds the former and not the latter, so a
+Hermes token can act on tickets without also being able to rewrite the
+integration's credentials or webhook secret. Admins hold both.
 """
 
 from __future__ import annotations
@@ -78,7 +83,7 @@ def _ticket_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 @tool(
     "kubesight_ticket_execute",
-    permission="ticketing:manage",
+    permission="ticketing:agent",
     description=(
         "Carry out what a ticket asks — deploy an image tag, set one environment variable, or "
         "restart — on one catalog target, and post your comment for the requester. The ticket "
@@ -107,7 +112,7 @@ def _ticket_execute(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
 
 @tool(
     "kubesight_ticket_request_approval",
-    permission="ticketing:manage",
+    permission="ticketing:agent",
     description=(
         "Ask a DevOps engineer to approve an action before it runs — for a ticket you understand "
         "but are not fully confident about. Posts `comment` on the ticket now and an "
@@ -137,7 +142,7 @@ def _ticket_request_approval(arguments: Dict[str, Any], *, user=None) -> Dict[st
 
 @tool(
     "kubesight_ticket_set_status",
-    permission="ticketing:manage",
+    permission="ticketing:agent",
     description=(
         "Move a ticket and post your comment with it. impediment = not understandable, not "
         "possible, or missing information (say what, and ask). on_hold = clear, but waiting on "
@@ -170,7 +175,7 @@ def _ticket_set_status(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any
 
 @tool(
     "kubesight_ticket_comment",
-    permission="ticketing:manage",
+    permission="ticketing:agent",
     description="Post a comment on a ticket without changing its status.",
     write=True,
     schema={

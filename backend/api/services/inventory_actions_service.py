@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..access_engine import can_access_namespace, can_access_resource, user_has_permission
 from ..audit import log_audit
+from ..k8s_names import name_error
 from ..k8s_provider import K8sCommandError, resolve_cluster_access, should_use_real_k8s
 from ..models import User
 from .deployment_service import _run_kubectl_for_cluster
@@ -59,6 +60,11 @@ def _check_deployment_action_access(
     workload_name: str,
     action: str,
 ) -> Optional[Tuple[str, int]]:
+    # Names reach a kubectl argv; a flag-shaped "name" must never get there.
+    invalid = name_error(namespace=namespace, names=((workload_name, "workload name"),))
+    if invalid:
+        return invalid, 400
+
     if user and not user_has_permission(user, "apps:deploy"):
         log_audit(
             "unauthorized_deployment_attempt",
@@ -113,8 +119,6 @@ def _approval_or_queue(
     ``None`` → go ahead. Otherwise the change was sent for approval as a change
     bundle (202, applied automatically once approved) or refused.
     """
-    if not user:
-        return None
     from .change_bundle_service import gate_or_queue
 
     action_type, verb = _QUEUE_AS[action]

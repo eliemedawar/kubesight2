@@ -127,6 +127,7 @@ const LAST_RESULT_LABELS = {
   not_met: "Not met",
   error: "Error",
   event_driven: "Event-driven",
+  no_data: "No data",
 };
 
 function PolicyLastResult({ policy }) {
@@ -135,7 +136,8 @@ function PolicyLastResult({ policy }) {
     return <span className="muted">—</span>;
   }
   const label = LAST_RESULT_LABELS[result] || result;
-  const title = result === "error" ? policy?.lastEvaluationError || undefined : undefined;
+  const title =
+    result === "error" || result === "no_data" ? policy?.lastEvaluationError || undefined : undefined;
   return (
     <span className={`policy-eval-result policy-eval-result-${result}`} title={title}>
       {label}
@@ -700,6 +702,29 @@ function PolicyFormModal({
                 </option>
               ))}
             </SearchableSelect>
+          </label>
+          <label>
+            Auto-resolve after quiet period (seconds)
+            <input
+              type="number"
+              min={60}
+              max={86400}
+              placeholder="Default: log window or evaluation interval, whichever is longer"
+              value={logConfig.resolveAfterSeconds ?? ""}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setForm((p) => ({
+                  ...p,
+                  logConfig: {
+                    ...(p.logConfig || logConfig),
+                    resolveAfterSeconds: raw === "" ? null : Number(raw),
+                  },
+                }));
+              }}
+            />
+            <span className="muted" style={{ fontSize: "var(--font-size-sm)" }}>
+              An active log alert resolves once its pod has logged no matching line for this long.
+            </span>
           </label>
 
           <h3 className="alert-policy-subheading">Context Lines</h3>

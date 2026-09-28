@@ -164,6 +164,9 @@ def rollout_health(cluster_id: str, namespace: str, name: str) -> Dict[str, Any]
     access = _resolve(cluster_id)
     if not access:
         raise K8sCommandError(f"Cluster '{cluster_id}' was not found.")
+    from ..k8s_provider import require_valid_k8s_names
+
+    require_valid_k8s_names(namespace=namespace, names=((name, "deployment name"),))
     raw = _run_for_access(access, ["get", "deployment", name, "-n", namespace, "-o", "json"])
     doc = json.loads(raw)
     status = doc.get("status") or {}
@@ -200,6 +203,18 @@ def _resource_key(doc: Dict[str, Any]) -> Tuple[str, str, str]:
     return kind, namespace, name
 
 
+def _contains_redacted_secret_value(doc: Dict[str, Any]) -> bool:
+    from .resource_actions_service import REDACTED_SECRET_VALUE
+
+    for section in SECRET_DATA_KEYS:
+        values = doc.get(section)
+        if values == REDACTED_SECRET_VALUE:
+            return True
+        if isinstance(values, dict) and REDACTED_SECRET_VALUE in values.values():
+            return True
+    return False
+
+
 def analyze_resources(
     documents: List[Dict[str, Any]],
     target_namespace: str,
@@ -230,6 +245,15 @@ def analyze_resources(
 
         if kind == "Secret":
             has_secrets = True
+            if _contains_redacted_secret_value(doc):
+                # Seeded from a YAML view that hid the values (no secrets:reveal).
+                # Applying it would overwrite the real values with the marker.
+                blocked.append(
+                    f"Secret/{name} still contains hidden placeholder values — "
+                    "applying it would overwrite the real ones. Replace every "
+                    "hidden value, or edit with the secrets:reveal permission."
+                )
+                continue
             if any(key in doc for key in SECRET_DATA_KEYS):
                 warnings.append(f"Secret/{name} contains secret values — only metadata will be shown in preview")
 
@@ -527,22 +551,34 @@ def _run_kubectl_diff(cluster_id: str, path: str, namespace: str) -> str:
     if not access:
         raise K8sCommandError(f"Cluster not found: {cluster_id}")
 
-    command = ["kubectl"]
-    if access.kubeconfig_path:
-        command += ["--kubeconfig", access.kubeconfig_path]
-    if access.context_name:
-        command += ["--context", access.context_name]
-    command += ["diff", "-f", path, "-n", namespace]
+    from ..kubeconfig_vault import KubeconfigDecryptError, materialized_kubeconfig
 
-    env = os.environ.copy()
-    if access.kubeconfig_path:
-        env["KUBECONFIG"] = access.kubeconfig_path
+    try:
+        with materialized_kubeconfig(access.kubeconfig_path) as kubeconfig_path:
+            command = ["kubectl"]
+            if kubeconfig_path:
+                command += ["--kubeconfig", kubeconfig_path]
+            if access.context_name:
+                command += ["--context", access.context_name]
+            diff_args = ["diff", "-f", path, "-n", namespace]
+            from ..k8s_provider import _refuse_unsafe_kubectl_args
 
-    diff_executable = resolve_kubectl_external_diff()
-    if diff_executable:
-        env["KUBECTL_EXTERNAL_DIFF"] = kubectl_external_diff_env_value(diff_executable)
+            _refuse_unsafe_kubectl_args(diff_args)
+            command += diff_args
 
-    completed = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+            env = os.environ.copy()
+            if kubeconfig_path:
+                env["KUBECONFIG"] = kubeconfig_path
+
+            diff_executable = resolve_kubectl_external_diff()
+            if diff_executable:
+                env["KUBECTL_EXTERNAL_DIFF"] = kubectl_external_diff_env_value(diff_executable)
+
+            completed = subprocess.run(
+                command, capture_output=True, text=True, check=False, env=env
+            )
+    except KubeconfigDecryptError as exc:
+        raise K8sCommandError(str(exc)) from exc
     if completed.returncode == 0:
         return completed.stdout or "No differences found."
     if completed.returncode == 1:
@@ -570,6 +606,14 @@ def _ensure_namespace(runner: RunKubectlFn, cluster_id: str, namespace: str) -> 
             raise
 
 
+def expected_apply_confirmation(namespace: str) -> str:
+    """The phrase a person types to confirm a YAML / image / wizard apply.
+
+    Must match what the UI shows ("Type APPLY <namespace>").
+    """
+    return f"APPLY {(namespace or '').strip()}"
+
+
 def apply_yaml(
     user: Optional[User],
     cluster_id: str,
@@ -577,7 +621,19 @@ def apply_yaml(
     yaml_content: str,
     confirmation: str,
     run_kubectl: Optional[RunKubectlFn] = None,
+    *,
+    enforce_confirmation: bool = False,
+    approval_context: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Validate and ``kubectl apply`` a manifest, honouring the approval gate.
+
+    ``enforce_confirmation`` is set by the user-facing routes: the typed phrase
+    (``APPLY <namespace>``) is then checked here on the server, not only in the
+    browser. Internal callers (bundle executor, automation, a version rollback
+    that checks its own phrase) and MCP tools leave it off. ``approval_context``
+    lets an internal caller that already holds an approval skip the gate
+    explicitly (see ``check_cluster_change_allowed``).
+    """
     if user and not user_has_permission(user, "apps:deploy"):
         log_audit(
             "unauthorized_deployment_attempt",
@@ -596,6 +652,11 @@ def apply_yaml(
             details={"action": "apply"},
         )
         return None, "Forbidden", 403
+
+    if enforce_confirmation:
+        expected = expected_apply_confirmation(namespace)
+        if (confirmation or "").strip() != expected:
+            return None, f'Confirmation must be exactly "{expected}"', 400
 
     validation, err, code = validate_yaml(yaml_content, namespace, user=user)
     if err:
@@ -616,20 +677,20 @@ def apply_yaml(
     # this user could apply is ever queued: without a live approved request, the
     # change is sent for approval as a change bundle and applied automatically
     # once approved (202, ``pendingApproval``). Local import avoids a cycle.
-    if user:
-        from .change_bundle_service import gate_or_queue
+    from .change_bundle_service import gate_or_queue
 
-        queued = gate_or_queue(
-            user,
-            cluster_id,
-            bundle_payload={"actionType": "apply_yaml", "namespace": namespace, "yaml": yaml_content},
-            what=f"apply YAML to {namespace}",
-            action="apply",
-            target_type="namespace",
-            target_id=f"{cluster_id}/{namespace}",
-        )
-        if queued is not None:
-            return queued
+    queued = gate_or_queue(
+        user,
+        cluster_id,
+        bundle_payload={"actionType": "apply_yaml", "namespace": namespace, "yaml": yaml_content},
+        what=f"apply YAML to {namespace}",
+        action="apply",
+        target_type="namespace",
+        target_id=f"{cluster_id}/{namespace}",
+        approval_context=approval_context,
+    )
+    if queued is not None:
+        return queued
 
     path = _write_temp_yaml(sanitize_for_apply(yaml_content))
     try:

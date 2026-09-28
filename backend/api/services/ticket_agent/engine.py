@@ -544,7 +544,14 @@ def _check(ticket: ZohoInboundTicket, req: Dict[str, Any]) -> validator.Plan:
     return plan
 
 
-def _start_run(ticket: ZohoInboundTicket, plan: validator.Plan, user, triggered_by: str):
+def _start_run(
+    ticket: ZohoInboundTicket,
+    plan: validator.Plan,
+    user,
+    triggered_by: str,
+    decision: Optional[Dict[str, Any]] = None,
+    approved: bool = False,
+):
     from ..deploy_automation_service import AutomationError, start_run
 
     override = {
@@ -555,7 +562,12 @@ def _start_run(ticket: ZohoInboundTicket, plan: validator.Plan, user, triggered_
         "value": plan.value,
     }
     try:
-        return start_run(ticket.id, user=user, auto=True, override=override, triggered_by=triggered_by)
+        # origin="agent": start_run re-runs the same validator over ``decision``
+        # itself, so no path into a run skips it.
+        return start_run(
+            ticket.id, user=user, auto=True, override=override, triggered_by=triggered_by,
+            origin="agent", decision=decision, approved=approved,
+        )
     except AutomationError as exc:
         raise AgentError(str(exc), exc.status)
 
@@ -577,7 +589,7 @@ def execute(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
             409,
         )
     task = _current_task(ticket, user)
-    run = _start_run(ticket, plan, user, TRIGGER)
+    run = _start_run(ticket, plan, user, TRIGGER, decision=req)
     _record(task, req, plan)
     task.route, task.status = "execute", "executed"
     task.run_id = run.get("id")
@@ -822,7 +834,7 @@ def approve(task_id: int, by: str, *, nonce: Optional[str] = None, user=None) ->
         req = dict(task.decision or {})
         on_approve = req.pop("commentOnApprove", None)
         plan = _check(ticket, req)  # targets may have changed while it waited
-        run = _start_run(ticket, plan, user, f"{TRIGGER} · approved by {by}"[:120])
+        run = _start_run(ticket, plan, user, f"{TRIGGER} · approved by {by}"[:120], decision=req, approved=True)
     except AgentError as exc:
         task.status, task.error, task.finished_at = "error", f"Approved, but could not start: {exc}", _now()
         db.session.commit()
@@ -937,6 +949,17 @@ def poll_telegram() -> int:
             _, task_id, verb, nonce = data.split(":", 3)
             if row.telegram_chat_id and not row.telegram_chat_id.startswith("@") and chat != row.telegram_chat_id:
                 raise AgentError("Wrong chat.", 403)
+            # An @handle cannot be matched against the numeric chat id Telegram
+            # reports, so the chat check above is skipped for it. With no
+            # approver list either, anyone who can see the button (a public
+            # channel's subscribers) could approve a deploy — fail closed.
+            if (row.telegram_chat_id or "").startswith("@") and not allow:
+                raise AgentError(
+                    "Approvals are refused: the chat is set by @name, so KubeSight cannot "
+                    "check where this press came from. Add an approver list, or use the "
+                    "numeric chat id.",
+                    403,
+                )
             if not _allowed(sender, allow):
                 raise AgentError("You are not on the approver list.", 403)
             who = f"@{sender['username']}" if sender.get("username") else (sender.get("first_name") or "Telegram user")

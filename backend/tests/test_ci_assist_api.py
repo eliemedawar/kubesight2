@@ -268,6 +268,131 @@ def test_saving_secret_values_needs_the_right_to_manage_secrets(
     assert "secret" in refused.get_json()["error"].lower()
 
 
+def _analyse(client, admin_token, service_id, monkeypatch):
+    FakeHermes(good_response()).install(monkeypatch)
+    fake_source.FAKE.load(fake_source.JAVA_GRADLE)
+    client.post(
+        f"/api/ci/services/{service_id}/analysis",
+        json={},
+        headers=auth_headers(admin_token),
+    )
+    return (
+        CiRepositoryAnalysis.query.filter_by(service_id=service_id)
+        .order_by(CiRepositoryAnalysis.id.desc())
+        .first()
+        .id
+    )
+
+
+def _saved_stage_names(service_id):
+    pipeline = db.session.get(CiService, service_id).default_pipeline()
+    return [stage.name for stage in pipeline.stages] if pipeline else []
+
+
+def test_a_generated_pipeline_waits_for_a_person_to_accept_it(
+    client, admin_token, service_id, monkeypatch
+):
+    """A proposal runs arbitrary commands with the service's secrets. It must
+    not become the service's pipeline because a model wrote it."""
+    analysis_id = _analyse(client, admin_token, service_id, monkeypatch)
+    latest = client.get(
+        f"/api/ci/analyses/{analysis_id}", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert latest["pipelineState"] == "valid"
+    assert latest["replacesCustomPipeline"] is False
+    assert _saved_stage_names(service_id) == []
+
+
+def test_rejecting_discards_the_proposal_and_changes_nothing(
+    client, admin_token, viewer_token, service_id, monkeypatch
+):
+    analysis_id = _analyse(client, admin_token, service_id, monkeypatch)
+
+    assert (
+        client.post(
+            f"/api/ci/analyses/{analysis_id}/reject", headers=auth_headers(viewer_token)
+        ).status_code
+        == 403
+    )
+    rejected = client.post(
+        f"/api/ci/analyses/{analysis_id}/reject",
+        json={"reason": "wrong JDK"},
+        headers=auth_headers(admin_token),
+    )
+    assert rejected.status_code == 200
+    assert rejected.get_json()["data"]["pipelineState"] == "rejected"
+    assert _saved_stage_names(service_id) == []
+
+    # A discarded proposal cannot be accepted afterwards by a stale screen.
+    late = client.post(
+        f"/api/ci/analyses/{analysis_id}/accept",
+        json={"inputs": {"NEXUS_PASSWORD": "hunter2"}},
+        headers=auth_headers(admin_token),
+    )
+    assert late.status_code == 400
+    assert "discarded" in late.get_json()["error"]
+
+
+def test_accepting_over_a_hand_edited_pipeline_asks_before_replacing_it(
+    client, admin_token, service_id, monkeypatch
+):
+    hand = client.post(
+        f"/api/ci/services/{service_id}/pipelines",
+        json={
+            "name": "default",
+            "isDefault": True,
+            "stages": [
+                {
+                    "name": "Make",
+                    "stageType": "command",
+                    "runnerLabels": ["linux"],
+                    "commands": ["make build"],
+                }
+            ],
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert hand.status_code == 201, hand.get_json()
+
+    analysis_id = _analyse(client, admin_token, service_id, monkeypatch)
+    latest = client.get(
+        f"/api/ci/analyses/{analysis_id}", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert latest["replacesCustomPipeline"] is True
+
+    asked = client.post(
+        f"/api/ci/analyses/{analysis_id}/accept",
+        json={"inputs": {"NEXUS_PASSWORD": "hunter2"}},
+        headers=auth_headers(admin_token),
+    )
+    assert asked.status_code == 409
+    assert asked.get_json()["data"] == {
+        "code": "pipeline_customized",
+        "requiresConfirmation": True,
+    }
+    assert _saved_stage_names(service_id) == ["Make"]
+
+    confirmed = client.post(
+        f"/api/ci/analyses/{analysis_id}/accept",
+        json={"inputs": {"NEXUS_PASSWORD": "hunter2"}, "replaceExisting": True},
+        headers=auth_headers(admin_token),
+    )
+    assert confirmed.status_code == 200, confirmed.get_json()
+    assert _saved_stage_names(service_id) == ["Checkout", "Build"]
+
+    # The next proposal replaces the previous ACCEPTED one without asking —
+    # nobody has edited it since — but asks again once somebody does.
+    second = _analyse(client, admin_token, service_id, monkeypatch)
+    assert (
+        client.post(
+            f"/api/ci/analyses/{second}/accept",
+            json={"inputs": {"NEXUS_PASSWORD": "hunter2"}},
+            headers=auth_headers(admin_token),
+        ).status_code
+        == 200
+    )
+
+
 def test_a_failed_analysis_reports_what_happened_and_leaves_the_service_usable(
     client, admin_token, service_id, monkeypatch
 ):

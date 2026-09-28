@@ -799,7 +799,9 @@ def start_automation_run(provider_key: str):
     if not ticket_record_id:
         return error_response("ticketRecordId is required.", 400)
     try:
-        data = automation_svc.start_run(int(ticket_record_id), user=get_current_user(), auto=False)
+        data = automation_svc.start_run(
+            int(ticket_record_id), user=get_current_user(), auto=False, origin="operator"
+        )
     except (TypeError, ValueError):
         return error_response("ticketRecordId must be a number.", 400)
     except AutomationError as exc:
@@ -830,18 +832,47 @@ _LEGACY_SECRET_HEADERS = {
 }
 
 
-@ticketing_bp.route("/<provider_key>/inbound", methods=["POST"])
-def inbound_webhook(provider_key: str):
-    """A ticketing system delivering a DevOps Request. Secret-verified."""
-    provider = _provider(provider_key)
+def inbound_secret_refusal(sync, provider_name: str, provided):
+    """The error response for a webhook delivery that must not be processed, or None.
+
+    Fails closed. With no secret stored the answer is 403 and says what to do
+    about it — an operator reading the sender's delivery log should not have to
+    guess why "401 invalid secret" keeps coming back when nothing was ever set.
+    A wrong or missing secret is 401.
+    """
+    if not sync.inbound_secret_configured():
+        return error_response(
+            f"No inbound webhook secret is configured for {provider_name}, so KubeSight "
+            "rejects every webhook delivery. Set one in Ticketing → "
+            f"{provider_name} → Settings → Inbound webhook, then send it in the "
+            "X-Ticketing-Secret header.",
+            403,
+        )
+    if not sync.verify_inbound_secret(provided):
+        return error_response("Invalid or missing webhook secret.", 401)
+    return None
+
+
+def _refuse_unverified_inbound(provider):
+    """Header first (the neutral one, then the provider's legacy name); the
+    ``?secret=`` query parameter stays as a fallback for senders that cannot set
+    headers, at the cost of the secret appearing in access logs."""
     legacy_header = _LEGACY_SECRET_HEADERS.get(provider.key)
     provided = (
         request.headers.get("X-Ticketing-Secret")
         or (request.headers.get(legacy_header) if legacy_header else None)
         or request.args.get("secret")
     )
-    if not provider.sync.verify_inbound_secret(provided):
-        return error_response("Invalid or missing webhook secret.", 401)
+    return inbound_secret_refusal(provider.sync, provider.name, provided)
+
+
+@ticketing_bp.route("/<provider_key>/inbound", methods=["POST"])
+def inbound_webhook(provider_key: str):
+    """A ticketing system delivering a DevOps Request. Secret-verified."""
+    provider = _provider(provider_key)
+    refused = _refuse_unverified_inbound(provider)
+    if refused is not None:
+        return refused
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         return error_response("Expected a JSON object body.", 400)
@@ -873,14 +904,9 @@ def inbound_comment_webhook(provider_key: str):
     on a ticket Hermes parked (impediment / on hold) wakes Hermes to continue.
     """
     provider = _provider(provider_key)
-    legacy_header = _LEGACY_SECRET_HEADERS.get(provider.key)
-    provided = (
-        request.headers.get("X-Ticketing-Secret")
-        or (request.headers.get(legacy_header) if legacy_header else None)
-        or request.args.get("secret")
-    )
-    if not provider.sync.verify_inbound_secret(provided):
-        return error_response("Invalid or missing webhook secret.", 401)
+    refused = _refuse_unverified_inbound(provider)
+    if refused is not None:
+        return refused
     payload = request.get_json(silent=True)
     if payload is None:
         return error_response("Expected a JSON body.", 400)

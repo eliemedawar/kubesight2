@@ -126,6 +126,8 @@ export default function AddAppModal({
   const [error, setError] = useState("");
   // Set when the change was sent for approval instead of applied.
   const [queuedMessage, setQueuedMessage] = useState("");
+  // Typed "APPLY <namespace>" — the server checks the same phrase.
+  const [confirmation, setConfirmation] = useState("");
 
   useEffect(() => {
     if (!open) {
@@ -138,6 +140,7 @@ export default function AddAppModal({
       setPreview(null);
       setDeployDiff(null);
       setError("");
+      setConfirmation("");
     }
   }, [open]);
 
@@ -188,7 +191,22 @@ export default function AddAppModal({
     setPreview(null);
     setDeployDiff(null);
     setError("");
+    setConfirmation("");
   };
+
+  const yamlPhrase = yamlForm.namespace ? `APPLY ${yamlForm.namespace}` : "";
+  const imagePhrase = imageForm.namespace ? `APPLY ${imageForm.namespace}` : "";
+  const renderConfirmation = (phrase) => (
+    <label className="deploy-confirmation">
+      Type <strong>{phrase}</strong> to confirm
+      <input
+        value={confirmation}
+        onChange={(e) => setConfirmation(e.target.value)}
+        placeholder={phrase}
+        autoComplete="off"
+      />
+    </label>
+  );
 
   const handleWorkloadSelect = (value) => {
     const [type, name] = value.split("|");
@@ -258,6 +276,7 @@ export default function AddAppModal({
         }
       }
       setPreview({ validation, dryRun });
+      setConfirmation("");
       setStep("yaml-confirm");
     } catch (err) {
       setError(err.message || "Validation failed");
@@ -276,6 +295,7 @@ export default function AddAppModal({
         yaml: yamlForm.yaml,
         deploymentName: yamlForm.deploymentName,
         description: yamlForm.description,
+        confirmation,
       });
       if (isPendingApproval(result)) {
         setQueuedMessage(pendingApprovalMessage(result));
@@ -303,6 +323,7 @@ export default function AddAppModal({
         environmentVariables: parseEnvVars(imageForm.envVars),
       });
       setPreview({ generated, dryRun, yaml: generated.yaml || dryRun.yaml });
+      setConfirmation("");
       setStep("image-confirm");
     } catch (err) {
       setError(err.message || "Preview failed");
@@ -319,6 +340,7 @@ export default function AddAppModal({
         ...imageForm,
         environmentVariables: parseEnvVars(imageForm.envVars),
         tags: [],
+        confirmation,
       });
       if (isPendingApproval(result)) {
         setQueuedMessage(pendingApprovalMessage(result));
@@ -689,12 +711,13 @@ export default function AddAppModal({
             {deployDiff?.hint ? (
               <p className="muted deploy-diff-hint">{deployDiff.hint}</p>
             ) : null}
+            {renderConfirmation(yamlPhrase)}
             <div className="modal-actions">
               <button type="button" className="btn-text" onClick={() => setStep("yaml-form")}>Back</button>
               <button
                 type="button"
                 className="btn-primary"
-                disabled={Boolean(queuedMessage) || busy}
+                disabled={Boolean(queuedMessage) || busy || confirmation !== yamlPhrase}
                 onClick={applyYaml}
               >
                 {busy ? "Applying..." : "Apply to Cluster"}
@@ -768,9 +791,15 @@ export default function AddAppModal({
                 <li key={`${res.kind}-${res.name}`}>{res.kind} {res.name}</li>
               ))}
             </ul>
+            {renderConfirmation(imagePhrase)}
             <div className="modal-actions">
               <button type="button" className="btn-text" onClick={() => setStep("image-form")}>Back</button>
-              <button type="button" className="btn-primary" disabled={busy || Boolean(queuedMessage)} onClick={applyImage}>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy || Boolean(queuedMessage) || confirmation !== imagePhrase}
+                onClick={applyImage}
+              >
                 {busy ? "Applying..." : "Apply to Cluster"}
               </button>
             </div>

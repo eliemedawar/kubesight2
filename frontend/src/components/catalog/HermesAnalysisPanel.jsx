@@ -3,6 +3,7 @@ import {
   acceptCiAnalysis,
   cancelCiAnalysis,
   getCiServiceAnalysis,
+  rejectCiAnalysis,
   startCiAnalysis,
   updateCiApplicationProfile,
 } from "../../api/ciAssistApi.js";
@@ -21,7 +22,8 @@ import RequiredConfigForm from "./RequiredConfigForm.jsx";
  * There are four outcomes and each has a different screen, because they need
  * different decisions:
  *
- *   analyzed  a profile and a valid pipeline — review, fill the gaps, create
+ *   analyzed  a profile and a valid pipeline — review, fill the gaps, then
+ *             accept or discard. Nothing is saved until somebody accepts.
  *   partial   a profile and a pipeline KubeSight refused — see why, or go manual
  *   failed    nothing — retry, or go manual
  *   (none)    never analyzed — offer to
@@ -128,14 +130,50 @@ export default function HermesAnalysisPanel({
     await begin({ applicationProfile: state?.applicationProfile || analysis?.applicationProfile });
   };
 
+  const REPLACE_QUESTION =
+    "This service's pipeline has been configured by hand. Accepting the " +
+    "proposal replaces those stages. Replace them?";
+
   const accept = async () => {
+    // Asked up front when the backend already said so; a 409 below covers the
+    // pipeline being edited in another tab after this screen loaded.
+    let replaceExisting = false;
+    if (analysis.replacesCustomPipeline) {
+      if (!window.confirm(REPLACE_QUESTION)) return;
+      replaceExisting = true;
+    }
     setBusy(true);
     setError("");
     try {
-      const result = await acceptCiAnalysis(analysis.id, { inputs });
+      let result;
+      try {
+        result = await acceptCiAnalysis(analysis.id, { inputs, replaceExisting });
+      } catch (err) {
+        if (err.status !== 409 || replaceExisting || !window.confirm(REPLACE_QUESTION)) {
+          throw err;
+        }
+        result = await acceptCiAnalysis(analysis.id, { inputs, replaceExisting: true });
+      }
       onAccepted?.(result);
+      await load();
     } catch (err) {
       setError(err.message || "The pipeline could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const discard = async () => {
+    if (!window.confirm("Discard this proposal? The service's pipeline is not changed.")) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await rejectCiAnalysis(analysis.id);
+      await load();
+    } catch (err) {
+      setError(err.message || "The proposal could not be discarded.");
     } finally {
       setBusy(false);
     }
@@ -289,8 +327,39 @@ export default function HermesAnalysisPanel({
             validation={analysis.validation}
           />
 
-          {analysis.state === "analyzed" && (
+          {analysis.state === "analyzed" && analysis.pipelineState === "accepted" && (
+            <p className="banner-message info">
+              Accepted — this proposal is the service&apos;s pipeline. Edit it on the
+              Pipeline tab, or regenerate to get a new proposal to review.
+            </p>
+          )}
+
+          {analysis.state === "analyzed" && analysis.pipelineState === "rejected" && (
+            <div className="sg-ci-assist-actions">
+              <p className="banner-message info">
+                Discarded. The service&apos;s pipeline was not changed.
+              </p>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy || !canEdit}
+                onClick={() => begin()}
+              >
+                Analyze again
+              </button>
+            </div>
+          )}
+
+          {analysis.state === "analyzed" &&
+            analysis.pipelineState !== "accepted" &&
+            analysis.pipelineState !== "rejected" && (
             <>
+              {analysis.replacesCustomPipeline && (
+                <p className="banner-message warning-banner">
+                  This service already has a pipeline configured by hand. Accepting
+                  replaces its stages — you will be asked to confirm.
+                </p>
+              )}
               <RequiredConfigForm
                 items={requiredInputs}
                 values={inputs}
@@ -309,7 +378,15 @@ export default function HermesAnalysisPanel({
                       : "Save this as the service's pipeline"
                   }
                 >
-                  {busy ? "Saving…" : "Save pipeline"}
+                  {busy ? "Saving…" : "Accept pipeline"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-outline"
+                  disabled={busy || !canEdit}
+                  onClick={discard}
+                >
+                  Discard proposal
                 </button>
                 {onConfigureManually && (
                   <button type="button" className="btn-outline" onClick={onConfigureManually}>
@@ -318,8 +395,8 @@ export default function HermesAnalysisPanel({
                 )}
               </div>
               <p className="field-hint">
-                This saves a normal KubeSight pipeline. Builds run on the existing
-                engine and never call Hermes again.
+                Nothing is saved until you accept. Accepting saves a normal KubeSight
+                pipeline; builds run on the existing engine and never call Hermes again.
               </p>
             </>
           )}

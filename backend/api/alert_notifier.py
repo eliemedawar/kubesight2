@@ -7,8 +7,8 @@ from .email_delivery import smtp_is_configured
 from .notification_routing import serialize_notifications
 from .models import AppSettings
 from .services.alert_routing_service import (
-    dispatch_firing_alerts,
     dispatch_policy_alert_notifications as route_policy_alert_notifications,
+    prune_delivery_markers,
     send_receiver_test,
     send_smtp_test,
 )
@@ -20,22 +20,61 @@ def _get_notification_settings() -> Dict[str, Any]:
     return serialize_notifications(raw)
 
 
-def dispatch_firing_alert_emails(alerts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Deliver notifications for firing policy alerts via assigned receivers."""
-    notifications = _get_notification_settings()
-    if not notifications.get("alerts"):
-        return {
-            "enabled": False,
-            "sent": 0,
-            "skipped": 0,
-            "failed": 0,
-            "errors": [],
-            "message": "Alert notifications are disabled in settings.",
-        }
+def alert_delivery_status() -> Dict[str, Any]:
+    """Read-only notification status for the alert list API.
 
-    summary = dispatch_firing_alerts(alerts)
-    summary["enabled"] = True
-    summary["smtpReady"] = smtp_is_configured()
+    Delivery itself runs on the background scheduler
+    (``dispatch_active_alert_notifications``); reading alerts never sends.
+    """
+    notifications = _get_notification_settings()
+    enabled = bool(notifications.get("alerts"))
+    return {
+        "enabled": enabled,
+        "smtpReady": smtp_is_configured(),
+        "deliveredBy": "scheduler",
+        "message": (
+            "Notifications are delivered by the background alert scheduler."
+            if enabled
+            else "Alert notifications are disabled in settings."
+        ),
+    }
+
+
+def dispatch_active_alert_notifications() -> Dict[str, Any]:
+    """Scheduler sweep: (re)deliver notifications for every active policy alert.
+
+    Covers every AlertHistory-backed alert type (metric, log, service,
+    automation). Delivery is gated per receiver by the policy's repeat interval
+    (see ``_due_for_repeat_delivery``), so running this every tick re-notifies
+    at most once per interval — the behaviour the alert list GET used to
+    provide as a side effect. Alerts on disabled or deleted policies are not
+    delivered. Delivery markers for alerts that are no longer active are pruned.
+    """
+    from .models import AlertHistory, AlertPolicy
+    from .services.alert_policy_evaluator import _history_to_alert_dict
+
+    summary: Dict[str, Any] = {"sent": 0, "skipped": 0, "errors": []}
+    rows = AlertHistory.query.filter(
+        AlertHistory.status == "active",
+        AlertHistory.policy_id.isnot(None),
+    ).all()
+    active_ids = [f"history-{row.id}" for row in rows]
+
+    notifications = _get_notification_settings()
+    if notifications.get("alerts"):
+        policies: Dict[int, Any] = {}
+        for row in rows:
+            if row.policy_id not in policies:
+                policies[row.policy_id] = AlertPolicy.query.get(row.policy_id)
+            policy = policies[row.policy_id]
+            if not policy or not policy.enabled:
+                continue
+            result = route_policy_alert_notifications(_history_to_alert_dict(row))
+            summary["sent"] += int(result.get("sent") or 0)
+            summary["skipped"] += int(result.get("skipped") or 0)
+            summary["errors"].extend(result.get("errors") or [])
+
+    prune_delivery_markers(active_ids)
     return summary
 
 

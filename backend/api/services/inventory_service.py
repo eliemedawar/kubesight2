@@ -1283,7 +1283,7 @@ def _find_inventory_row_for_detail(
     if should_use_real_k8s(cluster_id):
         from .helm_service import get_release_detail
 
-        helm_detail = get_release_detail(cluster_id, namespace, app_name)
+        helm_detail = get_release_detail(cluster_id, namespace, app_name, user=user)
         if helm_detail:
             now = datetime.now(timezone.utc).isoformat()
             return {
@@ -1525,7 +1525,7 @@ def get_inventory_detail(user: Optional[User], inventory_id: str) -> Tuple[Optio
         }
         if list_row.get("source") == "Helm" or list_row.get("helm"):
             from .helm_service import get_release_detail
-            helm_detail = get_release_detail(cluster_id, namespace, resolved_app_name)
+            helm_detail = get_release_detail(cluster_id, namespace, resolved_app_name, user=user)
             if helm_detail:
                 detail["helm"] = helm_detail
                 detail["summary"]["releaseName"] = helm_detail.get("releaseName")
@@ -1611,7 +1611,7 @@ def get_inventory_detail(user: Optional[User], inventory_id: str) -> Tuple[Optio
         helm_detail = HELM_RELEASE_DETAILS.get(helm_key)
         if not helm_detail and should_use_real_k8s(cluster_id):
             from .helm_service import get_release_detail
-            helm_detail = get_release_detail(cluster_id, namespace, app_name)
+            helm_detail = get_release_detail(cluster_id, namespace, app_name, user=user)
         if helm_detail:
             detail["helm"] = helm_detail
             detail["summary"]["releaseName"] = helm_detail.get("releaseName")

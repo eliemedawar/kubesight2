@@ -160,6 +160,13 @@ def support_objects(namespace="core"):
     ]
 
 
+
+@pytest.fixture(autouse=True)
+def _cluster_needs_no_approval(no_cluster_approvals):
+    """Day-two changes are held to the built cluster's approval rule (see
+    test_cluster_approval_gate); these tests are about the changes themselves."""
+    yield
+
 @pytest.fixture()
 def source_cluster(monkeypatch):
     """A stand-in for kubectl against the source cluster.

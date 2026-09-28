@@ -35,6 +35,7 @@ _BITBUCKET_STATES = {
     "running": bitbucket_status.STATE_INPROGRESS,
     "passed": bitbucket_status.STATE_SUCCESSFUL,
     "failed": bitbucket_status.STATE_FAILED,
+    "stopped": bitbucket_status.STATE_STOPPED,
 }
 
 

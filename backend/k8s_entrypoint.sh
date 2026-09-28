@@ -36,7 +36,21 @@ elif [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
   export K8S_KUBECONFIG="${CFG}"
 fi
 
-# Single worker keeps the in-process alert scheduler and caches singular;
-# threads provide concurrency for blocking kubectl/helm/log-stream calls.
-exec gunicorn -w 1 --threads 8 -b 0.0.0.0:5000 \
+# This entrypoint only ever serves the API in a cluster, so it defaults to
+# production. The backend keys its production checks off APP_ENV; set
+# APP_ENV=development explicitly to run this image any other way.
+export APP_ENV="${APP_ENV:-production}"
+export FLASK_DEBUG="${FLASK_DEBUG:-false}"
+
+# Background loops (scheduler tick, CI engine) elect a leader through a
+# Postgres advisory lock and boot-time migrations are serialised, so extra
+# workers or replicas no longer run each tick twice (see
+# api/services/leader_election.py), and upgrade jobs are persisted. The
+# default stays 1 because the TTL read caches are per process and only the
+# worker that made a change clears them: with more workers a list can lag a
+# write by up to its TTL (10-30s). Raise GUNICORN_WORKERS if that is acceptable.
+# Never add --preload: each worker must start its own loops after fork.
+# Threads provide concurrency for blocking kubectl/helm/log-stream calls.
+exec gunicorn -w "${GUNICORN_WORKERS:-1}" --threads "${GUNICORN_THREADS:-8}" \
+  -b 0.0.0.0:5000 \
   --timeout "${GUNICORN_TIMEOUT:-300}" "api:create_app()"

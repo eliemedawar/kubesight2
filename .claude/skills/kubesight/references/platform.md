@@ -38,9 +38,16 @@ response to each ticket and how far the run got, including the stage it stopped
 at and the error.
 
 ```
-kubesight_automation_run_start  {provider: "zoho", ticketRecordId: 88}
+kubesight_automation_run_start  {provider: "zoho", ticketRecordId: 88, confidence: "High", concerns: []}
 kubesight_automation_run_cancel {provider: "zoho", runId: 412}
 ```
+
+**A run you start is checked by the ticket validator first** — the same check
+the ticket agent's own plans go through (published targets, your confidence,
+the approval route). Say how sure you are with `confidence` (High / Medium /
+Low) and list anything doubtful in `concerns`. Without `confidence` it counts
+as Low, which routes to a human approval and is refused here: ask for that
+approval with `kubesight_ticket_request_approval` instead.
 
 **Starting a run is a deploy.** It deploys what the ticket asks for, into the
 cluster the ticket names, through the ordinary deploy path — so an

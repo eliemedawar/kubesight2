@@ -218,6 +218,52 @@ class ParamikoTransport:
             raise
         return client, bastion_client
 
+    # -- host-key scan -------------------------------------------------------
+
+    def scan_host_key(
+        self,
+        host: str,
+        port: int = 22,
+        *,
+        timeout_s: int = 10,
+        bastion: Optional[SshTarget] = None,
+    ) -> dict:
+        """Fetch the key a host presents WITHOUT trusting or recording it.
+
+        Only the SSH key exchange runs — no authentication is attempted and the
+        ``ssh_host_keys`` table is not touched, so an operator can compare the
+        fingerprint out-of-band before pinning it. Through a bastion the hop
+        itself is verified with its own policy (it is a real login).
+        """
+        paramiko = self._paramiko()
+        bastion_client = None
+        sock = None
+        transport = None
+        try:
+            if bastion is not None:
+                bastion_client = self._connect_one(paramiko, bastion)
+                sock = bastion_client.get_transport().open_channel(
+                    "direct-tcpip", (host, port), ("", 0), timeout=timeout_s
+                )
+            else:
+                sock = socket.create_connection((host, port), timeout=timeout_s)
+            transport = paramiko.Transport(sock)
+            transport.banner_timeout = timeout_s
+            transport.start_client(timeout=timeout_s)
+            key = transport.get_remote_server_key()
+            return {"keyType": key.get_name(), "keyBytes": key.asbytes()}
+        except SshConnectionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — normalize paramiko/socket errors
+            raise SshConnectionError(f"{host}:{port}: host-key scan failed — {exc}") from exc
+        finally:
+            for closable in (transport, sock, bastion_client):
+                try:
+                    if closable is not None:
+                        closable.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
     # -- execution ----------------------------------------------------------
 
     def run(

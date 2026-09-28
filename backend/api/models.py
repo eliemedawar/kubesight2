@@ -30,6 +30,26 @@ class Permission(db.Model):
     description = db.Column(db.String(255), nullable=False, default="")
 
 
+class RoleDefaultGrant(db.Model):
+    """Ledger of the built-in default permissions the seed has already granted a role.
+
+    Every boot tops the built-in roles up with the defaults ``rbac_data`` lists
+    for them, so a permission added in a new release reaches existing
+    installations. Without a memory of what was already handed out, that top-up
+    cannot tell "new default" from "default an admin deliberately removed" and
+    silently re-grants revoked permissions on every restart. A default is
+    granted once, recorded here, and never forced back after that.
+
+    Keyed by role *name* (the ``ROLE_DEFINITIONS`` key), not id, so it needs no
+    foreign key and survives a non-system role being deleted and re-seeded.
+    """
+
+    __tablename__ = "role_default_grants"
+
+    role_name = db.Column(db.String(64), primary_key=True)
+    permission_key = db.Column(db.String(120), primary_key=True)
+
+
 class User(db.Model):
     __tablename__ = "users"
 
@@ -67,8 +87,14 @@ class User(db.Model):
     # replaces it, so a temporary password can never authenticate twice.
     temporary_password_used = db.Column(db.Boolean, nullable=False, default=False)
     mfa_enabled = db.Column(db.Boolean, nullable=False, default=False)
-    totp_secret = db.Column(db.String(64), nullable=True)
+    # Fernet-encrypted (secret_encryption); a Fernet token of a 32-char base32
+    # seed is ~140 characters. Rows from before encryption held the plaintext
+    # seed and are encrypted in place by the migration.
+    totp_secret = db.Column(db.String(255), nullable=True)
     first_login_completed = db.Column(db.Boolean, nullable=False, default=True)
+    # Carried in every JWT as ``ver``; bumping it revokes every session the user
+    # has (see auth_utils.revoke_user_sessions). API tokens are not affected.
+    token_version = db.Column(db.Integer, nullable=False, default=0)
 
     # --- Failed-attempt / lockout tracking ------------------------------
     # Password and MFA failures are counted separately. Five consecutive
@@ -2895,3 +2921,6 @@ from .models_ticket_agent import (  # noqa: E402,F401
     TicketAgentSettings,
     TicketInterpretation,
 )
+
+# Upgrade Center jobs — persisted so a restart cannot lose an upgrade's record.
+from .models_upgrade import UpgradeJob  # noqa: E402,F401

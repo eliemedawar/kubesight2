@@ -210,6 +210,108 @@ def test_source_rejects_a_url_carrying_credentials(client, admin_token, credenti
     assert response.status_code == 400
 
 
+# ---------------------------------------------------------------------------
+# Source credentials
+# ---------------------------------------------------------------------------
+
+def _new_credential(client, token, **overrides):
+    return client.post(
+        "/api/ci/source/credentials",
+        json={
+            "name": "bitbucket-ci",
+            "credentialType": "repository_access_token",
+            "secret": "tok",
+            **overrides,
+        },
+        headers=auth_headers(token),
+    )
+
+
+def test_a_new_credential_is_read_only_unless_write_is_asked_for(client, admin_token):
+    read = _new_credential(client, admin_token)
+    assert read.status_code == 201
+    assert read.get_json()["data"]["readOnly"] is True
+
+    # Merge checks and build statuses write to Bitbucket; forcing every CI
+    # credential read-only made them impossible to set up from CI at all.
+    write = _new_credential(client, admin_token, name="bitbucket-ci-write", readOnly=False)
+    assert write.status_code == 201
+    assert write.get_json()["data"]["readOnly"] is False
+
+
+def test_a_credential_can_be_switched_between_read_and_write(client, admin_token):
+    created = _new_credential(client, admin_token).get_json()["data"]
+    url = f"/api/ci/source/credentials/{created['id']}"
+
+    writable = client.put(url, json={"readOnly": False}, headers=auth_headers(admin_token))
+    assert writable.status_code == 200
+    assert writable.get_json()["data"]["readOnly"] is False
+
+    back = client.put(url, json={"readOnly": True}, headers=auth_headers(admin_token))
+    assert back.get_json()["data"]["readOnly"] is True
+
+    # A rename onto another profile's name is refused, not a 500.
+    _new_credential(client, admin_token, name="other")
+    clash = client.put(url, json={"name": "other"}, headers=auth_headers(admin_token))
+    assert clash.status_code == 400
+
+
+def test_a_credential_an_analysed_application_uses_cannot_become_writable(
+    app, client, admin_token
+):
+    from api.models import User
+    from api.models_application_intelligence import IntelligenceApplication
+
+    created = _new_credential(client, admin_token).get_json()["data"]
+    with app.app_context():
+        admin = User.query.filter_by(username="admin").one()
+        db.session.add(
+            IntelligenceApplication(
+                name="Wallet",
+                slug="wallet",
+                repository_url="https://bitbucket.org/areeba/wallet",
+                repository_workspace="areeba",
+                repository_name="wallet",
+                credential_profile_id=created["id"],
+                created_by_user_id=admin.id,
+            )
+        )
+        db.session.commit()
+
+    refused = client.put(
+        f"/api/ci/source/credentials/{created['id']}",
+        json={"readOnly": False},
+        headers=auth_headers(admin_token),
+    )
+    assert refused.status_code == 409
+    assert "read-only" in refused.get_json()["error"]
+
+
+def test_a_credential_in_use_by_a_service_cannot_be_deleted(
+    client, admin_token, credential
+):
+    service_id = create_service(client, admin_token).get_json()["data"]["id"]
+    client.put(
+        f"/api/ci/services/{service_id}/source",
+        json={
+            "repositoryUrl": "https://bitbucket.org/areeba/payment-service",
+            "credentialProfileId": credential,
+        },
+        headers=auth_headers(admin_token),
+    )
+    refused = client.delete(
+        f"/api/ci/source/credentials/{credential}", headers=auth_headers(admin_token)
+    )
+    assert refused.status_code == 409
+    assert "1 CI service" in refused.get_json()["error"]
+
+    unused = _new_credential(client, admin_token, name="spare").get_json()["data"]
+    deleted = client.delete(
+        f"/api/ci/source/credentials/{unused['id']}", headers=auth_headers(admin_token)
+    )
+    assert deleted.status_code == 200
+
+
 def test_working_directory_cannot_escape_the_repository(client, admin_token, credential):
     service_id = create_service(client, admin_token).get_json()["data"]["id"]
     response = client.put(

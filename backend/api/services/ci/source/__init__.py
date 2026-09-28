@@ -135,9 +135,9 @@ class SourceProvider(Protocol):
         description: str,
         url: str,
     ) -> None:
-        """Report a merge check's verdict against a commit.
+        """Report a merge check's verdict, or a build's status, against a commit.
 
-        ``state`` is one of ``running``, ``passed``, ``failed`` — the port's
+        ``state`` is one of ``running``, ``passed``, ``failed``, ``stopped`` — the port's
         vocabulary, translated by the provider into whatever its host calls
         those. Raises :class:`SourceError`.
         """

@@ -24,4 +24,8 @@ RUN sed -i 's/\r$//' /app/k8s_entrypoint.sh && chmod +x /app/k8s_entrypoint.sh
 ENV PYTHONUNBUFFERED=1
 EXPOSE 5000
 
+# For plain Docker/compose runs; Kubernetes ignores this and uses its probes.
+# The start period covers boot-time migrations.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3   CMD curl -fsS http://127.0.0.1:5000/health > /dev/null || exit 1
+
 ENTRYPOINT ["sh", "/app/k8s_entrypoint.sh"]

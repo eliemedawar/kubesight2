@@ -74,6 +74,11 @@ def analysis_to_dict(row: Optional[CiRepositoryAnalysis]) -> Optional[Dict[str, 
         "derivedApplicationType": (profile or {}).get("derivedApplicationType"),
         "generatedPipeline": row.generated_pipeline,
         "requiredInputs": list(row.required_inputs or []),
+        # Whether Accept would replace hand-made stages — the review screen asks
+        # for confirmation up front instead of discovering it as a 409.
+        "replacesCustomPipeline": (
+            _replaces_custom_pipeline(row) if row.pipeline_state == "valid" else False
+        ),
         "validation": {
             "valid": bool(validation.get("valid")),
             "errors": list(validation.get("errors") or []),
@@ -98,6 +103,15 @@ def analysis_to_dict(row: Optional[CiRepositoryAnalysis]) -> Optional[Dict[str, 
         ),
         "executedByAccount": row.executed_by_account,
     }
+
+
+def _replaces_custom_pipeline(row: CiRepositoryAnalysis) -> bool:
+    from . import accept
+
+    try:
+        return accept.replaces_custom_pipeline(row.service)
+    except Exception:  # pragma: no cover - a hint must never break a read
+        return False
 
 
 def _reap_if_stale(row: Optional[CiRepositoryAnalysis]) -> Optional[CiRepositoryAnalysis]:

@@ -317,7 +317,7 @@ def test_a_compound_when_keeps_one_condition_and_says_what_it_dropped():
     assert any("cannot express" in message for message in _messages(draft))
 
 
-def test_parallel_branches_become_consecutive_stages_tagged_with_their_group():
+def test_parallel_branches_become_consecutive_stages_without_a_group_tag():
     draft = jenkinsfile.parse(
         """
         pipeline {
@@ -335,8 +335,9 @@ def test_parallel_branches_become_consecutive_stages_tagged_with_their_group():
     )
     names = [stage["name"] for stage in draft["stages"]]
     assert names == ["Checkout", "Backend", "Frontend"]
-    assert _stage(draft, "Backend")["parallelGroup"] == "Test"
-    assert _stage(draft, "Frontend")["parallelGroup"] == "Test"
+    # Stages always run in order, so no field may promise otherwise.
+    assert "parallelGroup" not in _stage(draft, "Backend")
+    assert "parallelGroup" not in _stage(draft, "Frontend")
     assert any("in parallel" in message for message in _messages(draft, jenkinsfile.INFO))
 
 

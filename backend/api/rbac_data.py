@@ -17,6 +17,7 @@ PERMISSIONS = [
     ("overview:view", "View cluster overview"),
     ("namespaces:view", "View namespaces"),
     ("resources:view", "View namespace resources"),
+    ("secrets:reveal", "Reveal Kubernetes Secret values (YAML shows them hidden otherwise)"),
     ("pods:view", "View pods"),
     ("deployments:view", "View deployments"),
     ("replicasets:view", "View ReplicaSets"),
@@ -78,6 +79,11 @@ PERMISSIONS = [
     ("registries:manage", "Add, edit, and remove linked image registries"),
     ("ticketing:view", "View the ticketing integrations (Jira, Zoho) and their status"),
     ("ticketing:manage", "Configure a ticketing integration and trigger a sync"),
+    (
+        "ticketing:agent",
+        "Act on DevOps tickets as the Hermes ticket agent: run a catalog action, ask for "
+        "approval, move a ticket's status and comment on it",
+    ),
     ("mobile_apps:view", "View mobile applications and download builds"),
     ("mobile_apps:manage", "Register mobile applications and configure store credentials"),
     ("cluster_builds:view", "View cluster builds"),
@@ -148,7 +154,7 @@ PERMISSION_GROUPS = [
         "id": "resources",
         "label": "Resources",
         "keys": [
-            "resources:view", "pods:view", "deployments:view", "replicasets:view",
+            "resources:view", "secrets:reveal", "pods:view", "deployments:view", "replicasets:view",
             "statefulsets:view", "daemonsets:view", "jobs:view", "cronjobs:view",
             "services:view", "services:ports:view",
         ],
@@ -236,7 +242,7 @@ PERMISSION_GROUPS = [
             "users:view", "users:manage", "users:create", "users:update", "users:disable", "users:delete",
             "roles:view", "roles:manage", "settings:view", "settings:manage",
             "audit:view", "api_tokens:manage", "registries:view", "registries:manage",
-            "ticketing:view", "ticketing:manage",
+            "ticketing:view", "ticketing:manage", "ticketing:agent",
         ],
     },
 ]
@@ -247,8 +253,12 @@ DANGEROUS_PERMISSION_KEYS = {
     "users:manage", "users:create", "users:update", "users:disable", "users:delete",
     "roles:manage", "clusters:add", "clusters:update", "clusters:remove",
     "settings:manage", "upgrades:start", "apps:deploy", "apps:delete", "inventory:remove",
+    # Starts deploy-automation runs (through the catalog guard rails).
+    "ticketing:agent",
     "helm:install", "helm:upgrade", "helm:rollback", "helm:uninstall", "helm:values:update",
     "app_services:delete", "clients:delete", "api_tokens:manage",
+    # Secret values are credentials: reading one is as good as holding it.
+    "secrets:reveal",
     "deployment_requests:manage", "change_bundles:manage",
     "service_blueprints:delete", "service_blueprints:deploy",
     "components:delete", "registries:manage", "mobile_apps:manage",
@@ -400,6 +410,10 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "apps:deploy",
     "apps:dryrun",
     "apps:diff",
+    # apps:deploy already lets this role overwrite any Secret and exec into the
+    # pods that mount them, so reading the values grants nothing new. Operators
+    # and viewers cannot write Secrets and do not get it.
+    "secrets:reveal",
     "helm:view",
     "helm:install",
     "helm:upgrade",
@@ -459,8 +473,31 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "ci_merge_checks:manage",
 ]
 
+# What the hermes-agent service account can actually do, and nothing more.
+#
+# Hermes never logs in. It reaches KubeSight in exactly one way: the MCP server
+# (/api/mcp) with a ksa_ API token an admin mints FOR this account (API Tokens →
+# create for user "hermes-agent"). Every MCP tool is filtered by the token
+# owner's permissions, so this list is the Hermes attack surface:
+#
+# * ``ticketing:view``  — kubesight_ticket_get / kubesight_tickets_list /
+#   kubesight_ticketing_providers: read the ticket it was handed and the catalog.
+# * ``ticketing:agent`` — kubesight_ticket_execute / _request_approval /
+#   _set_status / _comment. Deliberately NOT ``ticketing:manage``, which would
+#   also let a Hermes token rewrite integration credentials and webhook secrets
+#   and start/cancel arbitrary automation runs. Approving is not a tool at all.
+# * ``applications:execute`` — the identity Application Intelligence records as
+#   executor of a source analysis (audit actor). The analysis worker's callbacks
+#   authenticate with a per-analysis token, not with this account, so it grants
+#   no route access; it is kept so the executor is visibly a scoped role.
+#
+# No cluster grants: the seed strips access rules and cluster access from this
+# account, and the ticket tools deploy through deploy automation (whose own
+# cluster approval gates still apply), not through the account's cluster RBAC.
 HERMES_AGENT_PERMISSIONS = [
     "applications:execute",
+    "ticketing:view",
+    "ticketing:agent",
 ]
 
 ROLE_DEFINITIONS = {
@@ -485,7 +522,7 @@ ROLE_DEFINITIONS = {
         "permissions": VIEWER_PERMISSIONS,
     },
     "hermes-agent": {
-        "description": "Non-interactive, source-analysis-only Hermes service account",
+        "description": "Non-interactive Hermes service account: ticket agent + source-analysis executor",
         "is_system_role": True,
         "permissions": HERMES_AGENT_PERMISSIONS,
     },

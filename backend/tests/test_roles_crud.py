@@ -17,6 +17,38 @@ def test_seed_preserves_custom_role_permissions(app):
         viewer = Role.query.filter_by(name="viewer").first()
         assert all(perm.key != "logs:view" for perm in viewer.permissions)
 
+        # The migration-time top-up must respect the removal too.
+        from api.migrate_rbac import _sync_role_permissions
+
+        _sync_role_permissions()
+        viewer = Role.query.filter_by(name="viewer").first()
+        assert all(perm.key != "logs:view" for perm in viewer.permissions)
+
+
+def test_seed_still_grants_a_default_the_role_never_had(app, monkeypatch):
+    """A permission a new release adds to a built-in role reaches existing installs."""
+    from api import rbac_data
+    from api.db import db
+    from api.models import Permission
+    from api.seed import seed_defaults
+
+    with app.app_context():
+        viewer = Role.query.filter_by(name="viewer").first()
+        assert "users:manage" not in {perm.key for perm in viewer.permissions}
+        assert Permission.query.filter_by(key="users:manage").first() is not None
+
+        new_definitions = dict(rbac_data.ROLE_DEFINITIONS)
+        new_definitions["viewer"] = {
+            **new_definitions["viewer"],
+            "permissions": [*new_definitions["viewer"]["permissions"], "users:manage"],
+        }
+        monkeypatch.setattr("api.seed.ROLE_DEFINITIONS", new_definitions)
+        seed_defaults()
+        db.session.commit()
+
+        viewer = Role.query.filter_by(name="viewer").first()
+        assert "users:manage" in {perm.key for perm in viewer.permissions}
+
 
 def test_create_role_admin(client, admin_token):
     response = client.post(
@@ -114,7 +146,10 @@ def test_update_role(client, admin_token):
     assert audit is not None
 
 
-def test_delete_role_with_users_blocked(client, admin_token):
+def test_delete_role_with_users_unassigns_them(client, admin_token):
+    """Deleting an in-use custom role is allowed (the UI warns how many users
+    it affects); its users are left with no role — i.e. no permissions — and the
+    audit entry records how many were unassigned."""
     created = client.post(
         "/api/roles",
         headers=auth_headers(admin_token),
@@ -131,8 +166,13 @@ def test_delete_role_with_users_blocked(client, admin_token):
     db.session.commit()
 
     response = client.delete(f"/api/roles/{created['id']}", headers=auth_headers(admin_token))
-    assert response.status_code == 400
-    assert "assigned" in response.get_json()["error"].lower()
+    assert response.status_code == 200, response.get_json()
+    assert Role.query.get(created["id"]) is None
+    db.session.expire_all()
+    assert User.query.filter_by(username="viewer").first().role_id is None
+    audit = AuditLog.query.filter_by(action="role_deleted").order_by(AuditLog.id.desc()).first()
+    assert audit is not None
+    assert audit.details["users_unassigned"] == 1
 
 
 def test_delete_system_role_blocked(client, admin_token):

@@ -161,6 +161,12 @@ def accept_analysis(analysis_id: int):
 
     try:
         result = accept_service.accept(row, payload, actor=actor)
+    except accept_service.AcceptConflict as exc:
+        # Not a failure: a question. The client confirms and resends with
+        # replaceExisting: true.
+        return error_response(
+            str(exc), 409, data={"code": exc.code, "requiresConfirmation": True}
+        )
     except _USER_ERRORS as exc:
         return error_response(str(exc), 400)
     return success_response(
@@ -169,6 +175,20 @@ def accept_analysis(analysis_id: int):
             "service": catalog_service.service_detail(result["service"]),
         }
     )
+
+
+@ci_assist_bp.route("/analyses/<int:analysis_id>/reject", methods=["POST"])
+@require_permission("ci_pipelines:edit")
+def reject_analysis(analysis_id: int):
+    """Discard a proposal. The service and its pipeline are left untouched."""
+    row = analyses_service.get_analysis(analysis_id)
+    try:
+        accept_service.reject(
+            row, actor=_actor(), reason=str(_payload().get("reason") or "")
+        )
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    return success_response(analyses_service.analysis_to_dict(row))
 
 
 def _has_permission(user, key: str) -> bool:

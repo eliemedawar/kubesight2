@@ -9,6 +9,7 @@ from ..cluster_store import (
     ClusterValidationError,
     build_cluster_kubeconfig,
     cluster_to_management_dict,
+    delete_kubeconfig_file,
     list_active_custom_clusters,
     record_connection_test,
     test_cluster_connection,
@@ -74,6 +75,39 @@ from ..services.resource_actions_service import (
 from ..services.topology_service import build_cluster_topology, build_namespace_topology
 
 clusters_bp = Blueprint("clusters", __name__, url_prefix="/api/clusters")
+
+
+# Path segments that end up as kubectl arguments. kubectl parses flags even
+# after positionals, so a segment like ``--server=https://evil`` must be
+# refused before any handler (or its access checks) sees it.
+_K8S_LABEL_SEGMENTS = {"namespace": "namespace", "container_name": "container name"}
+_K8S_NAME_SEGMENTS = {
+    "pod_name": "pod name",
+    "resource_name": "resource name",
+    "deployment_name": "deployment name",
+}
+
+
+@clusters_bp.before_request
+def _reject_invalid_k8s_name_segments():
+    from ..k8s_names import name_error
+
+    view_args = request.view_args or {}
+    namespace = view_args.get("namespace")
+    message = name_error(
+        namespace=namespace,
+        names=tuple(
+            (view_args[key], what) for key, what in _K8S_NAME_SEGMENTS.items() if key in view_args
+        ),
+        containers=tuple(
+            (view_args[key], what)
+            for key, what in _K8S_LABEL_SEGMENTS.items()
+            if key in view_args and key != "namespace"
+        ),
+    )
+    if message:
+        return error_response(message, 400)
+    return None
 
 
 def _list_clusters_payload():
@@ -293,10 +327,30 @@ def delete_custom_cluster(cluster_ref: str):
     if err:
         return err
 
+    # The row stays (audit history, build results reference its public id),
+    # but nothing that grants access to the cluster may outlive the removal:
+    # the encrypted kubeconfig (and any legacy plaintext copy) is deleted and
+    # the row no longer points at it.
+    try:
+        delete_kubeconfig_file(cluster.id)
+    except (OSError, ClusterValidationError) as exc:
+        return error_response(f"Could not delete the stored kubeconfig: {exc}", 500)
+    cluster.kubeconfig_path = None
     cluster.is_active = False
+    cluster.last_connection_status = None
+    cluster.last_connection_error = None
     cluster.updated_at = datetime.now(timezone.utc)
     db.session.commit()
     invalidate_cluster_list_cache()
+    from ..audit import log_audit
+
+    log_audit(
+        "cluster_removed",
+        actor=get_current_user(),
+        target_type="cluster",
+        target_id=custom_cluster_public_id(cluster.id),
+        details={"name": cluster.name, "kubeconfigDeleted": True},
+    )
     return success_response(
         {
             "publicId": custom_cluster_public_id(cluster.id),

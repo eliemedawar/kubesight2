@@ -735,6 +735,11 @@ def export_selection(
     for item in picked:
         namespace, kind, name = item["namespace"], item["kind"], item["name"]
         resource = WORKLOAD_KINDS[kind]
+        from ...k8s_names import name_error
+
+        invalid = name_error(namespace=namespace, names=((name, "workload name"),))
+        if invalid:
+            raise WorkloadSourceError(invalid)
         try:
             doc = _kubectl_json(
                 source, ["get", resource, name, "-n", namespace, "-o", "json"]

@@ -322,7 +322,9 @@ def _set_step(run: DeployAutomationRun, key: str, status: str, detail: str = "")
     run.steps = steps
 
 
-def _fail(run: DeployAutomationRun, step_key: str, message: str) -> None:
+def _fail(run: DeployAutomationRun, step_key: str, message: str, notify: bool = True) -> None:
+    """Terminal failure of a run. ``notify=False`` when the caller sends its own
+    (more specific) outcome email — the rollout-failure path."""
     _set_step(run, step_key, "fail", message)
     run.status = "failed"
     run.error = message
@@ -341,6 +343,8 @@ def _fail(run: DeployAutomationRun, step_key: str, message: str) -> None:
         fire_run_failure_alerts(run)
     except Exception:  # alerting must never mask the failure itself
         logger.exception("Automation failure alerting failed: run_id=%s", run.id)
+    if notify:
+        _notify_run_outcome(run, "failed", message)
     _report_outcome(run, "failed")
 
 
@@ -398,14 +402,106 @@ def _open_target_run(cluster_id: str, namespace: str, name: str):
     )
 
 
+# Who asked for a run. Only the machine origins go through the ticket agent's
+# validator: an operator pressing Run in the Ticketing UI is looking at the
+# parsed ticket (that click IS the human check), and "auto" is the webhook
+# path, which only fires on clusters the operator switched to auto-start and
+# only from the ticket's own dropdown-resolved fields.
+RUN_ORIGINS = ("operator", "auto", "agent", "mcp")
+VALIDATED_ORIGINS = ("agent", "mcp")
+
+
+def _validate_machine_start(
+    ticket: ZohoInboundTicket,
+    snapshot: ZohoDeploymentSnapshot,
+    change_type: str,
+    tag: str,
+    variable: str,
+    value: str,
+    decision: Optional[Dict[str, Any]],
+    approved: bool,
+) -> None:
+    """Run the ticket agent's validator over a run an agent/MCP caller asked for.
+
+    Same inputs the engine uses (``validator.check(decision, catalog.targets
+    (provider), ticket, min_confidence)``). ``decision`` is Hermes' full action
+    request on the agent path; on the MCP path it only carries the caller's
+    claim (``confidence``, ``concerns``) and the rest is read off the run
+    itself — the ticket's own fields. A missing confidence counts as Low.
+
+    Refuses (AutomationError) when the validator finds errors, when it routes
+    the action to a human approval that has not happened (``approved``), or
+    when the checked plan is not the change this run would make.
+    """
+    from .ticket_agent import catalog, settings as agent_settings, validator
+    from .ticket_agent.schema import ACTION_CHANGE_TYPE, CONFIDENCES
+
+    claim = dict(decision or {})
+    if "action" not in claim:
+        action = next(a for a, ct in ACTION_CHANGE_TYPE.items() if ct == change_type)
+        confidence = claim.get("confidence")
+        if isinstance(confidence, str):
+            confidence = confidence.strip().capitalize()
+        claim = {
+            "decision": "execute",
+            "action": action,
+            "target": {"environment": snapshot.namespace, "application": snapshot.deployment_name},
+            "change": {"tag": tag or None, "variable": variable or None, "value": value or None},
+            "confidence": confidence if confidence in CONFIDENCES else "Low",
+            "understanding": claim.get("understanding") or "",
+            "concerns": [str(c) for c in (claim.get("concerns") or []) if str(c).strip()][:5],
+        }
+    bar = agent_settings.get_or_create().min_confidence or "High"
+    targets = catalog.targets(ticket.provider or "zoho")
+    plan = validator.check(claim, targets, ticket, bar)
+    if plan.errors:
+        raise AutomationError("Refused by the ticket validator: " + " ".join(plan.errors), 422)
+    if plan.route == "impediment":
+        raise AutomationError(
+            "Refused by the ticket validator: " + (" ".join(plan.reasons) or "the ticket needs clarification."),
+            422,
+        )
+    if plan.route == "approval" and not approved:
+        raise AutomationError(
+            "Refused by the ticket validator — this needs a human approval before it runs: "
+            + " ".join(plan.reasons)
+            + " Use kubesight_ticket_request_approval (or kubesight_ticket_execute once it clears the bar).",
+            409,
+        )
+    same = (
+        plan.snapshot is not None
+        and plan.snapshot.id == snapshot.id
+        and plan.change_type == change_type
+        and (plan.tag or "") == (tag or "")
+        and (plan.variable or "") == (variable or "")
+        and (plan.value or "") == (value or "")
+    )
+    if not same:
+        raise AutomationError(
+            "Refused by the ticket validator: the checked action is not the change this run would make.",
+            422,
+        )
+
+
 def start_run(
     ticket_record_id: int,
     user=None,
     auto: bool = False,
     override: Optional[Dict[str, Any]] = None,
     triggered_by: Optional[str] = None,
+    origin: str = "operator",
+    decision: Optional[Dict[str, Any]] = None,
+    approved: bool = False,
 ) -> Dict[str, Any]:
     """Create a run for one inbound ticket. Raises AutomationError on bad input.
+
+    ``origin`` ∈ :data:`RUN_ORIGINS` says who asked. ``agent`` (the Hermes
+    ticket engine) and ``mcp`` (the ``kubesight_automation_run_start`` tool)
+    must pass the ticket agent's validator — see
+    :func:`_validate_machine_start`; ``decision`` is what it checks and
+    ``approved`` is set once a human approved an approval-routed action.
+    ``operator`` (the Ticketing UI Run button) and ``auto`` (the webhook) are
+    not re-validated.
 
     A ticket carries exactly ONE change: an image tag (deploy flow) or a
     variable + value (env-var change flow) — the run's ``change_type`` follows.
@@ -421,6 +517,8 @@ def start_run(
     scheduler tick, because this one runs inside the ticketing system's HTTP
     request. A manual Run advances inline so the operator sees movement at once.
     """
+    if origin not in RUN_ORIGINS:
+        raise AutomationError(f"Unknown run origin '{origin}'.", 400)
     ticket = ZohoInboundTicket.query.get(int(ticket_record_id))
     if ticket is None:
         raise AutomationError("Inbound ticket not found.", 404)
@@ -458,11 +556,36 @@ def start_run(
         raise AutomationError("The ticket's deployment snapshot no longer exists.", 404)
     from .zoho_sync_service import CUSTOM_SOURCE_CLUSTER
 
+    if snapshot.cluster_id != CUSTOM_SOURCE_CLUSTER:
+        # Namespace, deployment and variable all land in a kubectl argv.
+        from ..k8s_names import name_error
+
+        invalid = name_error(
+            namespace=snapshot.namespace or "",
+            names=((snapshot.deployment_name or "", "deployment name"),),
+        )
+        if invalid:
+            raise AutomationError(invalid, 400)
+    if variable and (variable.startswith("-") or "=" in variable or any(c.isspace() for c in variable)):
+        raise AutomationError(f"Invalid variable name {variable[:80]!r}.", 400)
+
     if snapshot.cluster_id == CUSTOM_SOURCE_CLUSTER and (variable or restart):
         raise AutomationError(
             f"'{snapshot.namespace}' is a custom environment — variable changes and restarts need "
             "a live cluster deployment; only tag deploys route to Jenkins.",
             400,
+        )
+
+    if origin in VALIDATED_ORIGINS:
+        _validate_machine_start(
+            ticket,
+            snapshot,
+            "restart" if restart else ("env_var" if variable else "image"),
+            tag,
+            variable,
+            value,
+            decision,
+            approved,
         )
 
     conflict = _open_ticket_run(ticket.id)
@@ -529,6 +652,7 @@ def start_run(
             "variable": run.variable_name,
             "value": run.variable_value,
             "auto": bool(auto),
+            "origin": origin,
             "queuedBehind": ahead.id if ahead else None,
         },
     )
@@ -2090,6 +2214,7 @@ def _complete_deployed(run: DeployAutomationRun, pods_detail: str) -> None:
         resolve_run_success_alerts(run)
     except Exception:  # alert bookkeeping must never affect the run
         logger.exception("Automation alert resolution failed: run_id=%s", run.id)
+    _notify_run_outcome(run, "deployed", pods_detail)
     _report_outcome(run, "deployed")
 
 
@@ -2198,8 +2323,8 @@ def _handle_rollout_failure(
     else:
         rollback_note = "Auto-rollback is disabled — the deployment was left as-is."
 
-    _fail(run, "pods", f"{message} {rollback_note}")
-    _notify_admins_rollout_failure(run, message, rollback_note)
+    _fail(run, "pods", f"{message} {rollback_note}", notify=False)
+    _notify_run_outcome(run, "failed", message, extra=rollback_note, rollout=True)
 
 
 def _admin_emails() -> List[str]:
@@ -2217,9 +2342,52 @@ def _admin_emails() -> List[str]:
     return sorted(out)
 
 
-def _notify_admins_rollout_failure(run: DeployAutomationRun, message: str, rollback_note: str) -> None:
-    """Best-effort email to all admins — sent off-thread so the scheduler tick
-    (or webhook request) never waits on SMTP. Failures are swallowed."""
+def _outcome_recipients() -> List[str]:
+    """Who gets automation outcome emails.
+
+    There is no per-connection / automation recipient setting today (the
+    DeploymentRequestSetting recipients are the approver pool, a different
+    audience), so this is every active administrator — the audience the
+    rollout-failure email always had.
+    """
+    return _admin_emails()
+
+
+# Marker on the run's ``pods`` step: the outcomes already emailed for this run.
+_MAILED_KEY = "outcomeMailed"
+
+
+def _claim_outcome_mail(run: DeployAutomationRun, outcome: str) -> bool:
+    """Record that ``outcome`` is being emailed for this run; False if it already
+    was (a re-hit terminal path must not mail twice). Persisted with the run."""
+    steps = [dict(s) for s in (run.steps or _initial_steps())]
+    for step in steps:
+        if outcome in (step.get(_MAILED_KEY) or []):
+            return False
+    pods = next((s for s in steps if s.get("key") == "pods"), None)
+    if pods is None:
+        pods = {"key": "pods", "status": "wait", "detail": "", "at": None}
+        steps.append(pods)
+    pods[_MAILED_KEY] = list(pods.get(_MAILED_KEY) or []) + [outcome]
+    run.steps = steps
+    return True
+
+
+def _notify_run_outcome(
+    run: DeployAutomationRun,
+    outcome: str,
+    detail: str = "",
+    extra: str = "",
+    rollout: bool = False,
+) -> None:
+    """Best-effort outcome email for a finished automation run.
+
+    ``outcome`` is deployed | failed. Plain text, sent off-thread so the
+    scheduler tick (or webhook request) never waits on SMTP; no SMTP -> no-op;
+    every error is swallowed. At most one email per run and outcome.
+    ``rollout`` marks the rollout-health failure (its own subject line, plus
+    the rollback note in ``extra``).
+    """
     import threading
 
     from flask import current_app
@@ -2227,28 +2395,54 @@ def _notify_admins_rollout_failure(run: DeployAutomationRun, message: str, rollb
     from ..email_delivery import send_email, smtp_is_configured
 
     try:
+        if outcome not in ("deployed", "failed"):
+            return
         if not smtp_is_configured():
             return
-        recipients = _admin_emails()
+        recipients = _outcome_recipients()
         if not recipients:
             return
-        subject = f"KubeSight: rollout failed — {run.deployment_name} ({run.ticket_number or f'run #{run.id}'})"
-        body = "\n".join(
-            [
-                "A ticket-driven deployment failed its rollout health check.",
-                "",
-                f"Ticket:       {run.ticket_number or '-'}",
-                f"Deployment:   {run.deployment_name}",
-                f"Namespace:    {run.namespace}",
-                f"Cluster:      {run.cluster_id}",
-                f"Change:       {_change_summary(run)}",
-                "",
-                message,
-                rollback_note,
-                "",
-                "Details: KubeSight → Zoho Integration → Deploy automation.",
-            ]
+        if not _claim_outcome_mail(run, outcome):
+            return
+        ref = run.ticket_number or f"run #{run.id}"
+        if outcome == "deployed":
+            subject = f"KubeSight: automation succeeded — {run.deployment_name} ({ref})"
+            intro = "A ticket-driven automation run finished successfully."
+        elif rollout:
+            subject = f"KubeSight: rollout failed — {run.deployment_name} ({ref})"
+            intro = "A ticket-driven deployment failed its rollout health check."
+        else:
+            subject = f"KubeSight: automation failed — {run.deployment_name} ({ref})"
+            intro = "A ticket-driven automation run failed."
+        failed_step = next(
+            (s.get("key") for s in (run.steps or []) if s.get("status") == "fail"), None
         )
+        lines = [
+            intro,
+            "",
+            f"Ticket:       {run.ticket_number or '-'}",
+            f"Run:          #{run.id}",
+            f"Deployment:   {run.deployment_name}",
+            f"Namespace:    {run.namespace}",
+            f"Cluster:      {run.cluster_id}",
+            f"Change:       {_change_summary(run)}",
+            f"Started by:   {run.triggered_by or ('auto' if run.auto else '-')}",
+        ]
+        if outcome == "deployed":
+            mode = f"change bundle #{run.bundle_id}" if run.bundle_id else "direct apply"
+            lines.append(f"Mode:         {mode}")
+            if detail:
+                lines.append(f"Pods:         {detail}")
+        elif failed_step and not rollout:
+            lines.append(f"Failed step:  {failed_step}")
+        if run.jenkins_build_url:
+            lines.append(f"Build:        {run.jenkins_build_url}")
+        if outcome == "failed":
+            lines += ["", detail or run.error or "Unknown error."]
+            if extra:
+                lines.append(extra)
+        lines += ["", "Details: KubeSight → Ticketing → Deploy automation."]
+        body = "\n".join(lines)
         app = current_app._get_current_object()
 
         def _send_all() -> None:
@@ -2263,7 +2457,7 @@ def _notify_admins_rollout_failure(run: DeployAutomationRun, message: str, rollb
             return
         threading.Thread(
             target=lambda: _run_in_app_context(app, _send_all),
-            name="automation-failure-mail",
+            name="automation-outcome-mail",
             daemon=True,
         ).start()
     except Exception:
@@ -2352,7 +2546,7 @@ def maybe_auto_run(ticket_record_id: int) -> Optional[Dict[str, Any]]:
         # another. (An operator can still manually re-run via start_run.)
         if DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).first():
             return None
-        return start_run(ticket_record_id, user=None, auto=True)
+        return start_run(ticket_record_id, user=None, auto=True, origin="auto")
     except AutomationError:
         return None
     except Exception:

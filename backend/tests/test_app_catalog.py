@@ -155,7 +155,7 @@ def test_operator_can_dryrun_but_not_apply(client, operator_token):
     assert apply_resp.status_code == 403
 
 
-def test_yaml_apply_requires_confirmation(client, admin_token):
+def test_yaml_apply_requires_confirmation(client, admin_token, no_cluster_approvals):
     with patch("api.services.deployment_service._run_kubectl_for_cluster", return_value="applied"):
         response = client.post(
             "/api/inventory/deploy/yaml/apply",

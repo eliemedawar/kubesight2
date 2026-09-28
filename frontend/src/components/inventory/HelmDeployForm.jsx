@@ -7,6 +7,7 @@ import {
   renderHelmTemplate,
 } from "../../api/helmApi.js";
 import NamespaceSelect from "./NamespaceSelect.jsx";
+import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import { clusterOptionLabel, normalizeClusterOptions } from "../../utils/clusterOptions.js";
 
@@ -48,6 +49,8 @@ export default function HelmDeployForm({
   const [preview, setPreview] = useState(null);
   const [confirmation, setConfirmation] = useState("");
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
+  // Set when the release was sent for approval instead of installed.
+  const [queuedMessage, setQueuedMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -98,7 +101,12 @@ export default function HelmDeployForm({
     setError("");
     try {
       const payload = await buildPayload();
-      await installHelmRelease({ ...payload, confirmation });
+      const result = await installHelmRelease({ ...payload, confirmation });
+      if (isPendingApproval(result)) {
+        // Nothing is installed yet, so no success callback.
+        setQueuedMessage(pendingApprovalMessage(result));
+        return;
+      }
       onSuccess?.();
     } catch (err) {
       setError(err.message || "Helm install failed");
@@ -206,13 +214,14 @@ export default function HelmDeployForm({
           <li key={`${res.kind}-${res.name}`}>{res.kind} {res.name}</li>
         ))}
       </ul>
+      {queuedMessage ? <p className="banner-message" role="status">{queuedMessage}</p> : null}
       <label>
         Type <strong>{confirmationPhrase}</strong> to confirm
         <input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder={confirmationPhrase} />
       </label>
       <div className="modal-actions">
         <button type="button" className="btn-text" onClick={() => setStep("form")}>Back</button>
-        <button type="button" className="btn-primary" disabled={busy || confirmation !== confirmationPhrase} onClick={applyHelm}>
+        <button type="button" className="btn-primary" disabled={busy || confirmation !== confirmationPhrase || Boolean(queuedMessage)} onClick={applyHelm}>
           {busy ? "Installing..." : "Install / Upgrade Release"}
         </button>
       </div>

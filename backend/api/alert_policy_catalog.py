@@ -129,6 +129,8 @@ LOG_WINDOW_SECONDS_OPTIONS: List[Dict[str, Any]] = [
 ]
 ALLOWED_LOG_WINDOW_SECONDS = {item["seconds"] for item in LOG_WINDOW_SECONDS_OPTIONS}
 DEFAULT_LOG_WINDOW_SECONDS = 60
+MIN_LOG_RESOLVE_AFTER_SECONDS = 60
+MAX_LOG_RESOLVE_AFTER_SECONDS = 86400
 DEFAULT_CONTEXT_LINES_BEFORE = 5
 DEFAULT_CONTEXT_LINES_AFTER = 5
 DEFAULT_MAX_LOG_LINES = 20
@@ -251,6 +253,7 @@ def default_log_config() -> Dict[str, Any]:
         "contextLinesBefore": DEFAULT_CONTEXT_LINES_BEFORE,
         "contextLinesAfter": DEFAULT_CONTEXT_LINES_AFTER,
         "maxLines": DEFAULT_MAX_LOG_LINES,
+        "resolveAfterSeconds": None,
     }
 
 
@@ -284,6 +287,15 @@ def normalize_log_config(raw: Any) -> Dict[str, Any]:
         max_lines = int(raw.get("maxLines", defaults["maxLines"]))
     except (TypeError, ValueError):
         max_lines = defaults["maxLines"]
+    # Quiet period before an active log alert auto-resolves. None = default
+    # (see log_alert_evaluator.log_resolve_after_seconds).
+    resolve_after = raw.get("resolveAfterSeconds")
+    try:
+        resolve_after = int(resolve_after) if resolve_after not in (None, "") else None
+    except (TypeError, ValueError):
+        resolve_after = None
+    if resolve_after is not None:
+        resolve_after = max(MIN_LOG_RESOLVE_AFTER_SECONDS, min(resolve_after, MAX_LOG_RESOLVE_AFTER_SECONDS))
     return {
         "matchType": match_type,
         "pattern": str(raw.get("pattern") or "").strip(),
@@ -292,6 +304,7 @@ def normalize_log_config(raw: Any) -> Dict[str, Any]:
         "contextLinesBefore": max(0, min(context_before, 50)),
         "contextLinesAfter": max(0, min(context_after, 50)),
         "maxLines": max(1, min(max_lines, 200)),
+        "resolveAfterSeconds": resolve_after,
     }
 
 

@@ -984,10 +984,25 @@ class TestImageAndForwardProxy:
         assert "immutable" in response.get_json()["error"].lower()
 
     def test_registry_credentials_require_operator_secret(
-        self, client, admin_token, monkeypatch
+        self, client, monkeypatch
     ):
-        monkeypatch.delenv("ALERT_ROUTING_SECRET_KEY", raising=False)
-        monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
+        # No operator key at all: neither the dedicated encryption key (nor its
+        # legacy name) nor a real JWT key it could fall back to.
+        for name in (
+            "KUBESIGHT_SECRET_KEY",
+            "ALERT_ROUTING_SECRET_KEY",
+            "JWT_SECRET_KEY",
+            "FLASK_SECRET_KEY",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        # The JWT signing key is read per request, so a token minted before the
+        # keys were removed no longer verifies (401). Log in AFTER removing them:
+        # outside production that signs with the development default.
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin123"}
+        )
+        assert login.status_code == 200, login.get_json()
+        admin_token = login.get_json()["data"]["token"]
         response = client.post(
             "/api/build-profiles",
             json={

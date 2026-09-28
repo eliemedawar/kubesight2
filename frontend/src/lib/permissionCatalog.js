@@ -38,6 +38,7 @@ export const PERMISSION_GROUPS = [
     label: "Resources",
     keys: [
       "resources:view",
+      "secrets:reveal",
       "pods:view",
       "deployments:view",
       "replicasets:view",
@@ -190,6 +191,7 @@ export const PERMISSION_CATALOG = [
   { key: "overview:view", label: "View cluster overview", dangerous: false },
   { key: "namespaces:view", label: "View namespaces", dangerous: false },
   { key: "resources:view", label: "View resources", dangerous: false },
+  { key: "secrets:reveal", label: "Reveal Secret values", dangerous: true },
   { key: "pods:view", label: "View pods", dangerous: false },
   { key: "deployments:view", label: "View deployments", dangerous: false },
   { key: "replicasets:view", label: "View ReplicaSets", dangerous: false },

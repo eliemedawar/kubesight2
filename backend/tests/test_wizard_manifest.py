@@ -283,3 +283,107 @@ def test_generate_multi_port_nodeport_service():
     assert "name: metrics" in yaml_text
     # Both ports surface on the Service.
     assert "port: 8080" in yaml_text and "port: 9090" in yaml_text
+
+
+def _docs(yaml_text):
+    import yaml as _yaml
+    return [d for d in _yaml.safe_load_all(yaml_text) if d]
+
+
+def _statefulset_payload(**networking):
+    return {
+        "basics": {"appName": "db", "namespace": "data"},
+        "workloadType": "StatefulSet",
+        "containers": [{"name": "db", "image": "postgres", "tag": "16", "ports": [5432]}],
+        "networking": networking,
+        "scaling": {"replicas": 3},
+    }
+
+
+def test_statefulset_emits_headless_service_matching_selector():
+    yaml_text, summary, error = generate_wizard_manifests(
+        _statefulset_payload(service={"enabled": True, "type": "NodePort", "ports": [
+            {"name": "pg", "port": 5432, "targetPort": 5432, "nodePort": 30432},
+        ]})
+    )
+    assert error is None
+    docs = _docs(yaml_text)
+    sts = next(d for d in docs if d["kind"] == "StatefulSet")
+    headless = next(d for d in docs if d["kind"] == "Service" and d["metadata"]["name"] == sts["spec"]["serviceName"])
+    assert headless["metadata"]["name"] == "db-headless"
+    assert headless["metadata"]["namespace"] == "data"
+    assert headless["metadata"]["labels"] == sts["metadata"]["labels"]
+    assert headless["spec"]["clusterIP"] == "None"
+    assert headless["spec"]["selector"] == sts["spec"]["selector"]["matchLabels"]
+    assert headless["spec"]["ports"] == [{"name": "pg", "protocol": "TCP", "port": 5432, "targetPort": 5432}]
+    assert "type" not in headless["spec"]
+    assert {"kind": "Service", "name": "db-headless", "namespace": "data"} in summary["resources"]
+
+
+def test_statefulset_headless_service_uses_container_ports_without_service():
+    yaml_text, _summary, error = generate_wizard_manifests(_statefulset_payload())
+    assert error is None
+    headless = next(d for d in _docs(yaml_text) if d["kind"] == "Service")
+    assert headless["metadata"]["name"] == "db-headless"
+    assert headless["spec"]["ports"][0]["port"] == 5432
+
+
+def test_statefulset_without_ports_emits_portless_headless_service():
+    payload = _statefulset_payload()
+    payload["containers"][0]["ports"] = []
+    yaml_text, _summary, error = generate_wizard_manifests(payload)
+    assert error is None
+    headless = next(d for d in _docs(yaml_text) if d["kind"] == "Service")
+    assert headless["spec"]["clusterIP"] == "None"
+    assert "ports" not in headless["spec"]
+
+
+def test_deployment_emits_no_headless_service():
+    yaml_text, _summary, error = generate_wizard_manifests({
+        "basics": {"appName": "web"},
+        "workloadType": "Deployment",
+        "containers": [{"image": "nginx", "ports": [80]}],
+    })
+    assert error is None
+    assert "headless" not in yaml_text
+
+
+def _ingress_payload(**ingress):
+    return {
+        "basics": {"appName": "web", "namespace": "default"},
+        "workloadType": "Deployment",
+        "containers": [{"image": "nginx", "ports": [80]}],
+        "networking": {
+            "service": {"enabled": True, "port": 80},
+            "ingress": {"enabled": True, "host": "web.example.com", "path": "/", **ingress},
+        },
+    }
+
+
+def test_ingress_with_class_emits_ingress_class_name():
+    yaml_text, _summary, error = generate_wizard_manifests(_ingress_payload(ingressClassName="nginx"))
+    assert error is None
+    ing = next(d for d in _docs(yaml_text) if d["kind"] == "Ingress")
+    assert ing["spec"]["ingressClassName"] == "nginx"
+
+
+def test_ingress_accepts_class_name_alias():
+    yaml_text, _summary, error = generate_wizard_manifests(_ingress_payload(className="internal.nginx"))
+    assert error is None
+    ing = next(d for d in _docs(yaml_text) if d["kind"] == "Ingress")
+    assert ing["spec"]["ingressClassName"] == "internal.nginx"
+
+
+def test_ingress_without_class_omits_ingress_class_name():
+    for extra in ({}, {"ingressClassName": ""}, {"ingressClassName": "  "}):
+        yaml_text, _summary, error = generate_wizard_manifests(_ingress_payload(**extra))
+        assert error is None
+        ing = next(d for d in _docs(yaml_text) if d["kind"] == "Ingress")
+        assert "ingressClassName" not in ing["spec"]
+
+
+def test_ingress_invalid_class_errors():
+    for bad in ("Nginx", "nginx_ingress", "-nginx", "nginx.", "a b"):
+        yaml_text, summary, error = generate_wizard_manifests(_ingress_payload(ingressClassName=bad))
+        assert yaml_text == "" and summary == {}
+        assert error and "ingress class" in error.lower()

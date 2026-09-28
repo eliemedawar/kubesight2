@@ -81,7 +81,7 @@ Helm. Permission: `apps:deploy`.
 | `mobile_app_service.py` (1717 lines) | Fetches build artifacts from a Jenkins job | Phase 6 |
 | `resign_executor.py` + `k8s/jenkins/resign.Jenkinsfile` | Android/iOS re-signing runs as a Jenkins job | Phase 6 |
 | `JenkinsConnection` model + settings UI + `jenkins_client.py` (500 lines) | Config surface | Phase 7 (delete last) |
-| Root `Jenkinsfile` | Builds **KubeSight itself** — a build-time, not runtime, dependency | Optional dogfood, last |
+| Root `Jenkinsfile` | Removed 2026-09: its deploy stage applied manifests that no longer exist; `bitbucket-pipelines.yml` is KubeSight's own CI | Done |
 
 ---
 

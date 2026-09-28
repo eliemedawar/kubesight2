@@ -102,7 +102,7 @@ function BlueprintCard({ blueprint, active, onView, onDeploy, canDeploy }) {
   const showDeploy = canDeploy && blueprint.status !== "deprecated";
 
   const handleKeyDown = (e) => {
-    // Only act on the card itself — not on keys bubbling from the Deploy button.
+    // Only act on the card itself — not on keys bubbling from the Register button.
     if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
@@ -145,7 +145,7 @@ function BlueprintCard({ blueprint, active, onView, onDeploy, canDeploy }) {
           )}
           {blueprint.appServiceCount > 0 && (
             <span className="sg-bp-deploys">
-              {blueprint.appServiceCount} deploy{blueprint.appServiceCount !== 1 ? "s" : ""}
+              {blueprint.appServiceCount} instance{blueprint.appServiceCount !== 1 ? "s" : ""}
             </span>
           )}
         </div>
@@ -169,7 +169,7 @@ function BlueprintCard({ blueprint, active, onView, onDeploy, canDeploy }) {
             }}
           >
             <RocketIcon />
-            Deploy
+            Register instance
           </button>
         )}
       </footer>
@@ -192,7 +192,7 @@ function BlueprintDetail({ detail, onClose, onEdit, onDelete, onDeploy, canUpdat
         </div>
         <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           {canDeploy && detail.status !== "deprecated" && (
-            <button type="button" className="primary btn-compact" onClick={onDeploy}>Deploy</button>
+            <button type="button" className="primary btn-compact" onClick={onDeploy}>Register instance</button>
           )}
           {canUpdate && (
             <button type="button" className="btn-outline btn-compact" onClick={onEdit}>Edit</button>
@@ -382,8 +382,8 @@ export default function BlueprintsPage({ clusters = [] }) {
   });
 
   const subtitle = loading
-    ? "Reusable business service blueprints — deploy real app services from a logical design."
-    : `${blueprints.length} blueprint${blueprints.length === 1 ? "" : "s"} · deploy real app services from a logical design`;
+    ? "Reusable business service blueprints — register app service instances from a logical design."
+    : `${blueprints.length} blueprint${blueprints.length === 1 ? "" : "s"} · register app service instances from a logical design`;
 
   return (
     <div className="ops-page">
@@ -440,7 +440,7 @@ export default function BlueprintsPage({ clusters = [] }) {
               hint={
                 blueprints.length > 0
                   ? "Try adjusting the search or filter."
-                  : "Service blueprints define reusable service designs that can be deployed per client/environment."
+                  : "Service blueprints define reusable service designs that can be registered as instances per client/environment."
               }
             />
           ) : (

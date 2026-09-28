@@ -10,6 +10,7 @@ import {
 import { clusterOptionLabel, normalizeClusterOptions } from "../../utils/clusterOptions.js";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import NamespaceSelect from "./NamespaceSelect.jsx";
+import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 
 function initialFieldValue(variable) {
   const value = variable?.default;
@@ -120,6 +121,8 @@ export default function HelmChartDeployModal({
   const [preview, setPreview] = useState(null);
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  // Set when the release was sent for approval instead of installed.
+  const [queuedMessage, setQueuedMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -219,7 +222,12 @@ export default function HelmChartDeployModal({
     setBusy(true);
     setError("");
     try {
-      await installHelmRelease({ ...payload, confirmation });
+      const result = await installHelmRelease({ ...payload, confirmation });
+      if (isPendingApproval(result)) {
+        // Nothing is installed yet, so no success callback.
+        setQueuedMessage(pendingApprovalMessage(result));
+        return;
+      }
       onSuccess?.();
       onClose();
     } catch (err) {
@@ -252,6 +260,7 @@ export default function HelmChartDeployModal({
         </header>
 
         {error ? <p className="banner-message error">{error}</p> : null}
+        {queuedMessage ? <p className="banner-message" role="status">{queuedMessage}</p> : null}
 
         {step === "configure" ? (
           <form className="add-app-form" onSubmit={previewChart}>
@@ -437,7 +446,7 @@ export default function HelmChartDeployModal({
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy || confirmation !== confirmationPhrase}
+                disabled={busy || confirmation !== confirmationPhrase || Boolean(queuedMessage)}
                 onClick={install}
               >
                 {busy ? "Installing…" : "Install Release"}

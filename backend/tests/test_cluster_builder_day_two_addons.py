@@ -50,6 +50,13 @@ def _uploaded(script):
     return base64.b64decode(match.group(1)).decode("utf-8") if match else ""
 
 
+
+@pytest.fixture(autouse=True)
+def _cluster_needs_no_approval(no_cluster_approvals):
+    """Day-two changes are held to the built cluster's approval rule (see
+    test_cluster_approval_gate); these tests are about the changes themselves."""
+    yield
+
 @pytest.fixture()
 def built(client, admin_token, ssh_profile, app):
     """A completed single-CP build that went up with NGINX Ingress only."""
