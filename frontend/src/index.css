@@ -866,7 +866,12 @@ button svg {
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  overflow-x: hidden;
+  /* clip, not hidden. hidden makes overflow-y compute to auto, which turns
+     every page into a scroll container of its own: in a flex column it then
+     shrinks into a nested scroll box (under a workspace tab bar it did), and
+     position: sticky inside it pins to a box that never scrolls. clip stops
+     the sideways spill without either side effect. */
+  overflow-x: clip;
   padding: var(--ops-page-padding-y) var(--ops-page-padding-x);
 }
 

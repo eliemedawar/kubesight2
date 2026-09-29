@@ -84,7 +84,7 @@ only on pages listed in `CLUSTER_CONTEXT_PAGE_KEYS` / `NAMESPACE_CONTEXT_PAGE_KE
 | `logs` | `/logs` | `?cluster&ns&pod` | `App.jsx:160` `preferredLogPod` |
 | `alerts` | `/alerts/:tab` (`open`\|`history`\|`policies`) | `?cluster` | `AlertsPage.jsx:155` + tab hint |
 | `serviceCatalog` | `/service-catalog` | — | `ServiceCatalogPage.jsx:64` `opened` |
-| ↳ service detail | `/service-catalog/:serviceId/:tab` | `?build` | `ServiceDetailPage.jsx:60`, `:68` `openBuildId` |
+| ↳ service detail | `/service-catalog/:serviceId/:tab` | `?build` · pipeline tab: `?stage` (1-based) `?view=inputs` · merge checks tab: `?section=gate|connection|history` | `ServiceDetailPage.jsx:60`, `:68` `openBuildId`; `PipelineEditor.jsx` stage/view |
 |  | tabs: overview, source, application, pipeline, mergechecks, dockerfile, builds, artifacts, settings | | `routeTable.js` `TAB_VALUES.serviceDetail` — a tab absent from that list makes the whole route unparseable |
 | `blueprints` | `/blueprints` · `/blueprints/:blueprintId` | — | `BlueprintsPage.jsx:270` `detail` |
 | `applicationServices` | `/app-services` · `/app-services/:serviceId/:tab` | — | `ApplicationServicesPage.jsx:1542`, `:1440` |

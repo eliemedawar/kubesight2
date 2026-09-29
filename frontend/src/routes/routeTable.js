@@ -172,7 +172,10 @@ export const ROUTES = [
     pageKey: "serviceCatalog",
     params: { tab: { values: TAB_VALUES.serviceDetail } },
     defaults: { tab: "overview" },
-    query: ["build"],
+    // stage + view belong to the Pipeline tab: the selected stage (1-based) and
+    // whether the Build inputs view is open, so "look at stage 5" is a link.
+    // section is the Merge Checks tab's open view (gate/connection/history).
+    query: ["build", "stage", "view", "section"],
   },
   { key: "serviceCatalog", path: "/service-catalog" },
   { key: "blueprintDetail", path: "/blueprints/:blueprintId", pageKey: "blueprints" },

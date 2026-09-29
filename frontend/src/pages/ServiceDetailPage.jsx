@@ -72,7 +72,28 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
   // Whether the assisted path may be offered at all. Asked once, here, so the
   // Application tab can show a reason instead of a control that fails.
   const [assist, setAssist] = useState(null);
-  const [tab, setTab] = useRouteParam("tab", initialTab || "overview");
+  const [tab, changeTab] = useRouteParam("tab", initialTab || "overview");
+  // The Pipeline and Merge Checks tabs are drafts until saved. Leaving one —
+  // another tab, or back to the catalog — asks first, because the draft does
+  // not survive the trip.
+  const [pipelineDirty, setPipelineDirty] = useState(false);
+  const [mergeChecksDirty, setMergeChecksDirty] = useState(false);
+  const draftLabel =
+    tab === "pipeline" && pipelineDirty
+      ? "pipeline"
+      : tab === "mergeChecks" && mergeChecksDirty
+        ? "merge check"
+        : null;
+  const confirmLeaveDraft = () =>
+    !draftLabel ||
+    window.confirm(`Your ${draftLabel} changes are not saved. Leave and discard them?`);
+  const setTab = (next) => {
+    if (next === tab) return;
+    if (!confirmLeaveDraft()) return;
+    setPipelineDirty(false);
+    setMergeChecksDirty(false);
+    changeTab(next);
+  };
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [runOpen, setRunOpen] = useState(false);
@@ -166,7 +187,11 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
     <div className="ops-page">
       <div className="sg-ph">
         <div>
-          <button type="button" className="sg-ci-back" onClick={onBack}>
+          <button
+            type="button"
+            className="sg-ci-back"
+            onClick={() => confirmLeaveDraft() && onBack()}
+          >
             ← CI Services
           </button>
           <h2>
@@ -196,8 +221,14 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
               type="button"
               className="primary sg-cat-new"
               onClick={() => setRunOpen(true)}
-              disabled={Boolean(blockedReason)}
-              title={blockedReason || "Run a build — pick a branch or tag"}
+              // A build runs the SAVED pipeline; starting one mid-edit would run
+              // something other than what is on screen.
+              disabled={Boolean(blockedReason) || pipelineDirty}
+              title={
+                pipelineDirty
+                  ? "Save or discard your pipeline changes first — a build runs the saved pipeline"
+                  : blockedReason || "Run a build — pick a branch or tag"
+              }
             >
               <PlayIcon />
               Run build
@@ -280,6 +311,8 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             service={service}
             canEdit={can.editPipeline}
             onChanged={load}
+            onDirtyChange={setPipelineDirty}
+            onGoToTab={setTab}
           />
         )}
         {tab === "mergeChecks" && (
@@ -287,6 +320,9 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             service={service}
             canEdit={can.manageMergeChecks}
             canView={can.viewMergeChecks}
+            onDirtyChange={setMergeChecksDirty}
+            onGoToTab={setTab}
+            onOpenBuild={setOpenBuildId}
           />
         )}
         {tab === "dockerfile" && (

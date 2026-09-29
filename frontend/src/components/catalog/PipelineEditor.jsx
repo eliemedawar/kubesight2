@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import "../../styles/signal/pipelineWorkspace.css";
 import BuildParameters from "./BuildParameters.jsx";
 import JenkinsfileImportModal from "./JenkinsfileImportModal.jsx";
 import {
@@ -10,179 +11,67 @@ import {
   updateCiPipeline,
 } from "../../api/ciApi.js";
 import LoadingState from "../common/LoadingState.jsx";
+import { useRouter } from "../../routes/RouterContext.jsx";
+import { applicationTypeLabel, formatRelative } from "./ciShared.jsx";
+import { PlIcon } from "./pipeline/icons.jsx";
+import StageFlow from "./pipeline/StageFlow.jsx";
+import StagePicker from "./pipeline/StagePicker.jsx";
+import StageSheet from "./pipeline/StageSheet.jsx";
 import {
-  CheckIcon,
-  CONDITIONAL_STAGE_TYPES,
-  DEFAULT_IMAGE_SCAN,
-  DownIcon,
-  IMAGE_SCAN_ON_FAIL,
-  IMAGE_SCAN_THRESHOLDS,
-  PlusIcon,
-  RUNNER_TYPES,
-  RETIRED_STAGE_TYPES,
-  STAGE_TYPES,
-  stageTypeLabel,
-  TrashIcon,
-  UNIMPLEMENTED_STAGE_TYPES,
-  UpIcon,
-  applicationTypeLabel,
-} from "./ciShared.jsx";
+  blankStage,
+  changeKindPatch,
+  defaultStageName,
+  describeDiff,
+  fieldsLostOnKindChange,
+  forApi,
+  kindOf,
+  lintByStage,
+  MAX_STAGES,
+  moveItem,
+  parameterProblems,
+  pipelineDiff,
+  stageProblems,
+  stagesForLint,
+  uniqueStageName,
+  withKey,
+} from "./pipeline/stageModel.js";
 
-const blankStage = () => ({
-  name: "",
-  stageType: "command",
-  runnerType: "",
-  runnerLabels: [],
-  image: "",
-  workingDirectory: "",
-  commands: [],
-  env: {},
-  secretRefs: [],
-  artifacts: [],
-  hostAliases: [],
-  runCondition: null,
-  // Null, not a default object: a new stage is a command stage, and only an
-  // image stage has an image to gate.
-  imageScan: null,
-  timeoutSeconds: 1800,
-  continueOnFailure: false,
-  enabled: true,
-});
-
-const toLines = (values) => (values || []).join("\n");
-const fromLines = (text) =>
-  String(text || "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-// ip=host,host per line, mirroring how the backend accepts and validates them.
-const aliasesToText = (aliases) =>
-  (aliases || [])
-    .map((entry) => `${entry.ip}=${(entry.hostnames || []).join(",")}`)
-    .join("\n");
-
-// Parsed leniently here — the backend is the validator, so a half-typed line
-// does not throw while somebody is still typing it.
-const aliasesFromText = (text) =>
-  fromLines(text)
-    .map((line) => {
-      const index = line.indexOf("=");
-      if (index <= 0) return null;
-      const hostnames = line
-        .slice(index + 1)
-        .split(",")
-        .map((name) => name.trim())
-        .filter(Boolean);
-      return { ip: line.slice(0, index).trim(), hostnames };
-    })
-    .filter(Boolean);
-
-const envToText = (env) =>
-  Object.entries(env || {})
-    .map(([key, value]) => `${key}=${value}`)
-    .join("\n");
-
-const envFromText = (text) => {
-  const out = {};
-  fromLines(text).forEach((line) => {
-    const index = line.indexOf("=");
-    if (index > 0) out[line.slice(0, index).trim()] = line.slice(index + 1);
-  });
-  return out;
-};
-
-// A stage with no condition always runs; the summary says so rather than
-// leaving the row blank, because "no condition" and "condition not yet filled
-// in" look identical otherwise.
-const conditionSummary = (condition) => {
-  if (!condition?.variable) return "Always";
-  const verb = condition.operator === "not_equals" ? "is not" : "is";
-  return `${condition.variable} ${verb} "${condition.value ?? ""}"`;
-};
-
-/** Armed = a scan actually gates this stage's push. Absent and
- * `{enabled: false}` are both "not armed", but they are different answers to
- * "was this image scanned?" and the panel below shows them differently. */
-const scanArmed = (stage) =>
-  Boolean(stage.imageScan && stage.imageScan.enabled !== false);
-
-
-const stageSummary = (stage) => {
-  if (stage.stageType === "checkout") return "Repository source";
-  if (stage.stageType === "container_image") {
-    const where = stage.workingDirectory || "Dockerfile from service root";
-    return scanArmed(stage) ? `${where} · scanned before push` : where;
-  }
-  if (stage.stageType === "publish_artifact") {
-    const count = (stage.artifacts || []).length;
-    return count ? `${count} artifact ${count === 1 ? "pattern" : "patterns"}` : "Artifact handoff";
-  }
-  if (stage.stageType === "scan") return "Security policy scan";
-
-  const parts = [];
-  if (stage.image) parts.push(stage.image);
-  if ((stage.runnerLabels || []).length) parts.push(stage.runnerLabels.join(" + "));
-  if ((stage.commands || []).length) {
-    const count = stage.commands.filter(Boolean).length;
-    parts.push(`${count} ${count === 1 ? "command" : "commands"}`);
-  }
-  return parts.join(" · ") || "Not configured";
-};
+const clone = (value) => (value == null ? value : structuredClone(value));
 
 /**
- * A textarea whose stored form cannot represent everything a person types.
+ * Pipeline tab: the stages a build runs, and the inputs it asks for.
  *
- * Commands are stored as an array and env as an object, so re-serialising on
- * every keystroke deletes the blank line you just made with Enter — the value
- * snaps back and the key appears dead. Hold the raw text while the field has
- * focus, publish the parsed form as you type so nothing is lost on save, and
- * re-sync to the canonical text on blur.
+ * Left, the pipeline as a flow in run order; right, the one stage being
+ * looked at. Everything is a local draft until Save — the whole pipeline
+ * saves in one request, which is what makes reordering a local array move
+ * rather than a sequence of API calls that can half-apply. "Unsaved" is
+ * derived from the saved copy, so the save bar can say what changed and the
+ * flow can mark which stages.
  */
-function DraftTextarea({ value, onChangeText, ...props }) {
-  const [draft, setDraft] = useState(value);
-  const focused = useRef(false);
-
-  useEffect(() => {
-    if (!focused.current) setDraft(value);
-  }, [value]);
-
-  return (
-    <textarea
-      {...props}
-      value={draft}
-      onFocus={() => {
-        focused.current = true;
-      }}
-      onBlur={() => {
-        focused.current = false;
-        setDraft(value);
-      }}
-      onChange={(event) => {
-        setDraft(event.target.value);
-        onChangeText(event.target.value);
-      }}
-    />
-  );
-}
-
-/**
- * Pipeline tab: the ordered stage list plus one expanded stage editor.
- *
- * The whole pipeline saves in one request, which is what makes reordering a
- * local array move rather than a sequence of API calls that can half-apply.
- */
-export default function PipelineEditor({ service, onChanged, canEdit }) {
+export default function PipelineEditor({ service, onChanged, canEdit, onDirtyChange, onGoToTab }) {
+  const { route, getRoute, navigate } = useRouter();
   const [pipeline, setPipeline] = useState(null);
+  // The pipeline as last loaded or saved — the baseline every change is
+  // measured against, and what Discard restores.
+  const [saved, setSaved] = useState(null);
   const [stages, setStages] = useState([]);
   const [parameters, setParameters] = useState([]);
   const [secretKeys, setSecretKeys] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(null);
-  const [activePanel, setActivePanel] = useState("stage");
+  // "stage" shows the selected stage; "add" shows the kind picker for a stage
+  // about to be inserted at insertAt.
+  const [mode, setMode] = useState("stage");
+  const [insertAt, setInsertAt] = useState(0);
+  const [focusToken, setFocusToken] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  // A change that is real but not visible as a difference in the stages:
+  // taking ownership of the generated pipeline, or an imported draft.
+  const [forcedDirty, setForcedDirty] = useState(false);
+  const [removed, setRemoved] = useState(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   // What these stages assume about the runner they land on. Checked as they are
   // edited, because the failure it catches — an absolute /workspace path on an
   // agent — is only visible when a build has already burned.
@@ -192,32 +81,104 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
   // the list is the to-do for finishing the port, and it is only actionable
   // next to the stages it is about.
   const [importNotes, setImportNotes] = useState(null);
-  const generated = Boolean(pipeline?.isGeneratedDefault);
-  const editable = canEdit && !generated;
+  const menuRef = useRef(null);
+  const rootRef = useRef(null);
 
-  const load = async () => {
+  const view = route.query?.view === "inputs" ? "inputs" : "stages";
+  const setQuery = useCallback(
+    (patch) => {
+      const active = getRoute();
+      const query = { ...active.query };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null || value === undefined || value === "") delete query[key];
+        else query[key] = String(value);
+      }
+      navigate({ key: active.key, params: active.params, query }, { replace: true });
+    },
+    [getRoute, navigate]
+  );
+  const setView = (next) => setQuery({ view: next === "inputs" ? "inputs" : null });
+
+  const generated = Boolean(pipeline?.isGeneratedDefault);
+  const editable = canEdit && !generated && !saving;
+
+  const diff = useMemo(() => pipelineDiff(stages, parameters, saved), [stages, parameters, saved]);
+  const dirty = forcedDirty || diff.count > 0;
+
+  // Every problem a stage has, from three places, in the order they matter:
+  // what Save would refuse, what would fail on a runner, what the import left.
+  const lintMap = useMemo(() => lintByStage(lint), [lint]);
+  const problems = useMemo(
+    () =>
+      stages.map((stage, index) => [
+        ...stageProblems(stage, index, stages, parameters).map((item) => ({
+          ...item,
+          source: "save",
+          level: item.level || "error",
+        })),
+        ...(lintMap.get(index) || []).map((finding) => ({
+          source: "lint",
+          level: finding.level,
+          message: finding.message,
+          fix: finding.fix,
+          breaksOn: finding.breaksOn,
+        })),
+        ...(importNotes?.notes || [])
+          .filter((note) => note.stage && note.stage === stage.name && note.level !== "info")
+          .map((note) => ({ source: "import", level: "warning", message: note.message })),
+      ]),
+    [stages, parameters, lintMap, importNotes]
+  );
+  const blockingStages = problems
+    .map((list, index) => ({ index, count: list.filter((item) => item.source === "save" && item.level === "error").length }))
+    .filter((item) => item.count > 0);
+  const warningStages = problems
+    .map((list, index) => ({ index, count: list.filter((item) => item.level !== "error" || item.source === "lint").length }))
+    .filter((item) => item.count > 0 && !blockingStages.some((blocked) => blocked.index === item.index));
+  const inputProblems = parameters.filter((param, index) => parameterProblems(param, index, parameters).length).length;
+
+  // --- Loading ---------------------------------------------------------------
+
+  const adopt = useCallback((data, { keepSelection = false } = {}) => {
+    const nextStages = (data?.stages || []).map(withKey);
+    setPipeline(data);
+    setSaved(clone({ stages: nextStages, parameters: data?.parameters || [] }));
+    setStages(nextStages);
+    setParameters((data?.parameters || []).map((item) => ({ ...item })));
+    setForcedDirty(false);
+    setRemoved(null);
+    setSelectedIndex((current) => {
+      if (!nextStages.length) return null;
+      if (keepSelection && current !== null) return Math.min(current, nextStages.length - 1);
+      const fromUrl = Number(getRoute().query?.stage) - 1;
+      return Number.isInteger(fromUrl) && fromUrl >= 0 && fromUrl < nextStages.length ? fromUrl : 0;
+    });
+    setMode(nextStages.length ? "stage" : "add");
+    setInsertAt(0);
+  }, [getRoute]);
+
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const data = await listCiPipelines(service.id);
-      const first = data.items?.[0] || null;
-      const nextStages = first?.stages
-        ? first.stages.map((stage) => ({ ...stage }))
-        : [];
-      setPipeline(first);
-      setStages(nextStages);
-      setParameters(first?.parameters ? first.parameters.map((item) => ({ ...item })) : []);
-      setSelectedIndex(nextStages.length ? 0 : null);
-      setActivePanel(nextStages.length ? "stage" : "parameters");
-      setDirty(false);
+      const first =
+        data.items?.find((item) => item.isDefault) ||
+        data.items?.[0] || { name: "default", id: null, stages: [], parameters: [] };
+      adopt(first);
       setError("");
     } catch (err) {
       setError(err.message || "Could not load the pipeline.");
     } finally {
       setLoading(false);
     }
-  };
+  }, [service.id, adopt]);
 
   useEffect(() => {
+    // A different service is a different draft: nothing said about the last
+    // one carries over.
+    setNotice("");
+    setError("");
+    setImportNotes(null);
     load();
     listCiSecrets(service.id)
       // The list is this service's secrets plus every global one, so a service
@@ -233,49 +194,79 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
         setSecretKeys([...byKey].map(([key, scope]) => ({ key, scope })));
       })
       .catch(() => setSecretKeys([]));
-  }, [service.id]);
+  }, [service.id, load]);
 
-  const mutate = (index, patch) => {
-    setStages((prev) =>
-      prev.map((stage, position) =>
-        position === index ? { ...stage, ...patch } : stage
-      )
-    );
-    setDirty(true);
-  };
+  // --- Page-level wiring -----------------------------------------------------
 
-  const move = (index, delta) => {
-    const target = index + delta;
-    if (target < 0 || target >= stages.length) return;
-    setStages((prev) => {
-      const next = [...prev];
-      [next[index], next[target]] = [next[target], next[index]];
-      return next;
-    });
-    setSelectedIndex((current) =>
-      current === index ? target : current === target ? index : current
-    );
-    setActivePanel("stage");
-    setDirty(true);
-  };
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
-  const remove = (index) => {
-    setStages((prev) => prev.filter((_, position) => position !== index));
-    setSelectedIndex((current) => {
-      if (stages.length <= 1) return null;
-      if (current === index) return Math.min(index, stages.length - 2);
-      return current > index ? current - 1 : current;
-    });
-    if (stages.length <= 1) setActivePanel("parameters");
-    setDirty(true);
-  };
+  // The flow and the preview are sticky inside the page's scroll area, so
+  // their height has to come from that area, not the window: on a laptop the
+  // top bar and page padding eat a quarter of 100vh.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || typeof ResizeObserver === "undefined") return undefined;
+    // .page-content is the app's scroller.
+    const scroller = root.closest(".page-content");
+    if (!scroller) return undefined;
+    const apply = () => root.style.setProperty("--pl-view-h", `${scroller.clientHeight}px`);
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [loading]);
 
-  const add = () => {
-    setStages((prev) => [...prev, blankStage()]);
-    setSelectedIndex(stages.length);
-    setActivePanel("stage");
-    setDirty(true);
-  };
+  // Leaving the tab clears its own query keys, so ?stage=5 does not ride
+  // along to the Builds tab.
+  useEffect(
+    () => () => {
+      const active = getRoute();
+      if (active.key === "serviceDetail" && (active.query?.stage || active.query?.view)) {
+        const { stage: _stage, view: _view, ...rest } = active.query;
+        navigate({ key: active.key, params: active.params, query: rest }, { replace: true });
+      }
+    },
+    [getRoute, navigate]
+  );
+
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const warn = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  useEffect(() => {
+    if (!removed) return undefined;
+    const timer = window.setTimeout(() => setRemoved(null), 10000);
+    return () => window.clearTimeout(timer);
+  }, [removed]);
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = window.setTimeout(() => setNotice(""), 6000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const close = (event) => {
+      if (event.type === "keydown" && event.key !== "Escape") return;
+      if (event.type === "mousedown" && menuRef.current?.contains(event.target)) return;
+      setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [menuOpen]);
 
   // Debounced: this runs while somebody types a command, and the answer is
   // only interesting once they stop. A failed check is silent — a linter that
@@ -285,38 +276,182 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
       setLint(null);
       return undefined;
     }
+    let current = true;
     const timer = window.setTimeout(() => {
-      lintCiPipeline(stages)
-        .then(setLint)
-        .catch(() => setLint(null));
+      lintCiPipeline(stagesForLint(stages.map(forApi)))
+        .then((result) => current && setLint(result))
+        .catch(() => current && setLint(null));
     }, 600);
-    return () => window.clearTimeout(timer);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
   }, [stages]);
 
+  // --- Selection -------------------------------------------------------------
+
+  const select = (index) => {
+    setSelectedIndex(index);
+    setMode("stage");
+    if (view !== "stages" || String(index + 1) !== getRoute().query?.stage) {
+      setQuery({ stage: index + 1, view: null });
+    }
+  };
+
+  const openInserter = (at) => {
+    setInsertAt(at);
+    setMode("add");
+    if (view !== "stages") setView("stages");
+  };
+
+  // --- Edits -----------------------------------------------------------------
+
+  const mutate = (index, patch) =>
+    setStages((prev) => prev.map((stage, position) => (position === index ? { ...stage, ...patch } : stage)));
+
+  const changeKind = (index, stageType) => {
+    const stage = stages[index];
+    if (stage.stageType === stageType) return;
+    const lost = fieldsLostOnKindChange(stage, stageType);
+    if (
+      lost.length &&
+      !window.confirm(
+        `Making this a “${kindOf(stageType)?.label}” stage clears its ${lost.join(", ")} — ` +
+          "that kind has nowhere to use them. Continue?"
+      )
+    ) {
+      return;
+    }
+    const patch = changeKindPatch(stageType);
+    // A name that was only ever the default follows the kind.
+    if (!stage.name || stage.name === uniqueStageName(defaultStageName(stage.stageType), stages, index)) {
+      patch.name = uniqueStageName(defaultStageName(stageType), stages, index);
+    }
+    mutate(index, patch);
+  };
+
+  const insert = (stage, at) => {
+    if (stages.length >= MAX_STAGES) {
+      setError(`A pipeline can hold at most ${MAX_STAGES} stages.`);
+      return;
+    }
+    setStages((prev) => [...prev.slice(0, at), stage, ...prev.slice(at)]);
+    setSelectedIndex(at);
+    setMode("stage");
+    setQuery({ stage: at + 1, view: null });
+    setFocusToken((value) => value + 1);
+  };
+
+  const addKind = (stageType) =>
+    insert(
+      withKey({ ...blankStage(stageType), name: uniqueStageName(defaultStageName(stageType), stages) }),
+      insertAt
+    );
+
+  const copyOf = (index, at) => {
+    const copy = withKey(clone(stages[index]));
+    delete copy.id;
+    delete copy.position;
+    copy.name = uniqueStageName(`${stages[index].name || "Stage"} copy`, stages);
+    insert(copy, at);
+  };
+
+  const move = (from, to) => {
+    if (to < 0 || to >= stages.length || from === to) return;
+    const selectedStage = selectedIndex !== null ? stages[selectedIndex] : null;
+    const next = moveItem(stages, from, to);
+    setStages(next);
+    if (selectedStage) {
+      const position = next.indexOf(selectedStage);
+      setSelectedIndex(position);
+      setQuery({ stage: position + 1 });
+    }
+  };
+
+  const remove = (index) => {
+    const stage = stages[index];
+    setRemoved({ stage, index });
+    const next = stages.filter((_, position) => position !== index);
+    setStages(next);
+    if (!next.length) {
+      setSelectedIndex(null);
+      openInserter(0);
+      setQuery({ stage: null });
+    } else {
+      const position = Math.min(index, next.length - 1);
+      setSelectedIndex(position);
+      setQuery({ stage: position + 1 });
+    }
+  };
+
+  const undoRemove = () => {
+    if (!removed) return;
+    const at = Math.min(removed.index, stages.length);
+    setStages((prev) => [...prev.slice(0, at), removed.stage, ...prev.slice(at)]);
+    setSelectedIndex(at);
+    setMode("stage");
+    setQuery({ stage: at + 1 });
+    setRemoved(null);
+  };
+
+  /** A renamed input takes the run conditions that named it along. */
+  const changeParameters = (next) => {
+    const renames = new Map();
+    if (next.length === parameters.length) {
+      next.forEach((param, index) => {
+        const before = parameters[index]?.name;
+        if (before && param.name !== before && !next.some((other) => other.name === before)) {
+          renames.set(before, param.name);
+        }
+      });
+    }
+    setParameters(next);
+    if (renames.size) {
+      setStages((prev) =>
+        prev.map((stage) =>
+          stage.runCondition?.variable && renames.has(stage.runCondition.variable)
+            ? { ...stage, runCondition: { ...stage.runCondition, variable: renames.get(stage.runCondition.variable) } }
+            : stage
+        )
+      );
+    }
+  };
+
+  // --- Save / discard / template / import ------------------------------------
+
   const save = async () => {
-    if (!pipeline) return;
+    if (!pipeline || !dirty || saving || generated) return;
+    if (blockingStages.length) {
+      setView("stages");
+      select(blockingStages[0].index);
+      setError(
+        `${blockingStages.length === 1 ? "One stage needs" : `${blockingStages.length} stages need`} fixing before this can be saved — marked in the flow.`
+      );
+      return;
+    }
+    if (inputProblems) {
+      setView("inputs");
+      setError(`${inputProblems === 1 ? "One build input needs" : `${inputProblems} build inputs need`} fixing before this can be saved.`);
+      return;
+    }
     setSaving(true);
     setError("");
     try {
       const payload = {
-        name: pipeline.name,
+        name: pipeline.name || "default",
         isDefault: true,
         parameters,
         stages: stages.map((stage) => ({
-          ...stage,
+          ...forApi(stage),
           timeoutSeconds: Number(stage.timeoutSeconds) || 1800,
         })),
       };
-      const saved = pipeline.id
+      const result = pipeline.id
         ? await updateCiPipeline(pipeline.id, payload)
         : await createCiPipeline(service.id, payload);
-      setPipeline(saved);
-      setStages(saved.stages.map((stage) => ({ ...stage })));
-      setParameters((saved.parameters || []).map((item) => ({ ...item })));
-      setSelectedIndex((current) =>
-        saved.stages.length ? Math.min(current ?? 0, saved.stages.length - 1) : null
-      );
-      setDirty(false);
+      adopt({ ...result, isGeneratedDefault: false }, { keepSelection: true });
+      setImportNotes((current) => (current?.blocking?.length ? current : null));
+      setNotice(`Saved as version ${result.version}. The next build runs these stages.`);
       onChanged?.();
     } catch (err) {
       setError(err.message || "Could not save the pipeline.");
@@ -325,36 +460,66 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
     }
   };
 
-  const customizeDefault = () => {
-    setPipeline((current) => ({
-      ...current,
-      isGeneratedDefault: false,
-      version: current?.version || 1,
-    }));
-    setDirty(true);
-    if (!stages.length) {
-      setStages([blankStage()]);
-      setSelectedIndex(0);
-      setActivePanel("stage");
+  // Ctrl/Cmd+S saves from anywhere on the tab — the save bar can be scrolled
+  // out of mind while someone is deep in a command.
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => {
+    const onKey = (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        saveRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const discard = () => {
+    if (!saved) return;
+    if (diff.count > 2 && !window.confirm("Throw away every unsaved change to this pipeline?")) return;
+    if (forcedDirty) {
+      // Taking ownership of the starter pipeline, or an imported draft, is
+      // undone by reading the saved pipeline back rather than patching state.
+      setImportNotes(null);
+      setError("");
+      load().then(() => setNotice("Changes discarded — this is the saved pipeline again."));
+      return;
     }
+    const restored = clone(saved);
+    setStages(restored.stages.map((stage) => ({ ...stage })));
+    setParameters(restored.parameters.map((item) => ({ ...item })));
+    setRemoved(null);
+    setImportNotes(null);
+    setError("");
+    setSelectedIndex(restored.stages.length ? Math.min(selectedIndex ?? 0, restored.stages.length - 1) : null);
+    setMode(restored.stages.length ? "stage" : "add");
+    setNotice("Changes discarded — this is the saved pipeline again.");
+  };
+
+  const customizeDefault = () => {
+    setPipeline((current) => ({ ...current, isGeneratedDefault: false }));
+    setForcedDirty(true);
+    if (!stages.length) openInserter(0);
+    setNotice("The starter stages are now yours to edit. Save to make this the service's pipeline.");
   };
 
   const resetToTemplate = async () => {
+    setMenuOpen(false);
     if (
       !window.confirm(
-        "Replace every stage with the starter pipeline for this application type?"
+        `Replace every stage and build input with the ${applicationTypeLabel(service.applicationType)} starter pipeline? This saves immediately.`
       )
-    )
+    ) {
       return;
+    }
     setSaving(true);
     setError("");
     try {
-      const saved = await applyCiPipelineTemplate(service.id, service.applicationType);
-      setPipeline(saved);
-      setStages(saved.stages.map((stage) => ({ ...stage })));
-      setSelectedIndex(saved.stages.length ? 0 : null);
-      setActivePanel(saved.stages.length ? "stage" : "parameters");
-      setDirty(false);
+      const result = await applyCiPipelineTemplate(service.id, service.applicationType);
+      adopt({ ...result, isGeneratedDefault: false });
+      setImportNotes(null);
+      setNotice("Starter pipeline applied and saved.");
       onChanged?.();
     } catch (err) {
       setError(err.message || "Could not apply the template.");
@@ -375,21 +540,26 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
       ...(current || { name: "default", id: null }),
       isGeneratedDefault: false,
     }));
-    setStages(draft.stages.map((stage) => ({ ...stage })));
+    setStages(draft.stages.map(withKey));
     setParameters(draft.parameters.map((item) => ({ ...item })));
     setImportNotes(draft.notes?.length || draft.blocking?.length ? draft : null);
+    setForcedDirty(true);
     setSelectedIndex(draft.stages.length ? 0 : null);
-    setActivePanel(draft.stages.length ? "stage" : "parameters");
-    setDirty(true);
+    setMode(draft.stages.length ? "stage" : "add");
+    setQuery({ stage: draft.stages.length ? 1 : null, view: null });
     setImporting(false);
+    setNotice("Jenkinsfile imported as a draft. Review the stages, then save.");
   };
 
   if (loading) return <LoadingState label="Loading pipeline…" />;
 
-  return (
-    <div className="sg-ci-panel">
-      {error && <p className="banner-message error">{error}</p>}
+  const current = selectedIndex !== null ? stages[selectedIndex] : null;
+  const offCount = stages.filter((stage) => stage.enabled === false).length;
+  const conditionalCount = stages.filter((stage) => stage.runCondition?.variable).length;
+  const imageStages = stages.filter((stage) => stage.stageType === "container_image").length;
 
+  return (
+    <div className={`pl-root${dirty ? " is-dirty" : ""}`} ref={rootRef}>
       {importing && (
         <JenkinsfileImportModal
           service={service}
@@ -398,935 +568,364 @@ export default function PipelineEditor({ service, onChanged, canEdit }) {
         />
       )}
 
-      {generated && (
-        <section className="sg-ci-default-pipeline" aria-label="KubeSight default pipeline">
+      {/* ── Identity + what this pipeline does, in a sentence ─────────── */}
+      <header className="pl-top">
+        <div className="pl-top-id">
+          <span className="pl-top-glyph" aria-hidden="true">
+            <PlIcon name="stages" />
+          </span>
           <div>
-            <strong>Using KubeSight default pipeline</strong>
-            <span>
-              Application type: {pipeline.defaultMetadata?.applicationTypeLabel ||
-                applicationTypeLabel(service.applicationType)}
-            </span>
-            <span>
-              Detected command: <code>{pipeline.defaultMetadata?.detectedCommand}</code>
-            </span>
-            {pipeline.defaultMetadata?.detectedFiles?.length > 0 && (
-              <small>
-                Detected: {pipeline.defaultMetadata.detectedFiles.join(", ")}
-              </small>
-            )}
+            <h3>
+              Build pipeline
+              {generated && <span className="pl-tag is-accent">Starter · managed by KubeSight</span>}
+              {!generated && pipeline?.id == null && stages.length > 0 && <span className="pl-tag">Not saved yet</span>}
+              {!canEdit && (
+                <span className="pl-tag">
+                  <PlIcon name="lock" /> View only
+                </span>
+              )}
+            </h3>
+            <p className="pl-top-sentence">
+              {stages.length ? (
+                <>
+                  <b>{stages.length}</b> {stages.length === 1 ? "stage runs" : "stages run"} in order
+                  {offCount > 0 && <>, <b>{offCount}</b> turned off</>}
+                  {conditionalCount > 0 && <>, <b>{conditionalCount}</b> only for some builds</>}
+                  {imageStages > 0 && <> · pushes {imageStages === 1 ? "an image" : `${imageStages} images`}</>}
+                  {parameters.length > 0 && (
+                    <> · asks <b>{parameters.length}</b> {parameters.length === 1 ? "question" : "questions"} before it starts</>
+                  )}
+                </>
+              ) : (
+                "No stages yet — a build has nothing to run."
+              )}
+              {pipeline?.id && !generated && (
+                <span className="pl-top-meta">
+                  Version {pipeline.version}
+                  {pipeline.updatedAt && <> · saved {formatRelative(pipeline.updatedAt)}</>}
+                </span>
+              )}
+            </p>
+          </div>
+        </div>
+
+        <div className="pl-top-actions">
+          <div className="pl-viewswitch" role="tablist" aria-label="Pipeline sections">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "stages"}
+              className={`btn-ghost${view === "stages" ? " is-on" : ""}`}
+              onClick={() => setView("stages")}
+            >
+              <PlIcon name="stages" /> Stages <span className="pl-count">{stages.length}</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "inputs"}
+              className={`btn-ghost${view === "inputs" ? " is-on" : ""}`}
+              onClick={() => setView("inputs")}
+            >
+              <PlIcon name="inputs" /> Build inputs <span className="pl-count">{parameters.length}</span>
+              {inputProblems > 0 && <span className="pl-dot is-error" aria-label="needs fixing" />}
+            </button>
           </div>
           {canEdit && (
-            <button type="button" className="primary btn-compact" onClick={customizeDefault}>
-              Customize Pipeline
+            <div className="pl-menu" ref={menuRef}>
+              <button
+                type="button"
+                className="btn-ghost pl-menu-trigger"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                onClick={() => setMenuOpen((open) => !open)}
+                disabled={saving}
+              >
+                <PlIcon name="more" />
+                <span className="pl-sr">More pipeline actions</span>
+              </button>
+              {menuOpen && (
+                <div className="pl-menu-list" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="btn-ghost"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setImporting(true);
+                    }}
+                  >
+                    <PlIcon name="upload" />
+                    <span>
+                      <strong>Import a Jenkinsfile</strong>
+                      <small>Translate it into stages and inputs as a draft to review</small>
+                    </span>
+                  </button>
+                  <button type="button" role="menuitem" className="btn-ghost" onClick={resetToTemplate}>
+                    <PlIcon name="reset" />
+                    <span>
+                      <strong>Reset to the starter pipeline</strong>
+                      <small>{applicationTypeLabel(service.applicationType)} template · saves immediately</small>
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </header>
+
+      {error && (
+        <div className="pl-banner is-error" role="alert">
+          <PlIcon name="alert" />
+          <p>{error}</p>
+          <button type="button" className="btn-ghost pl-banner-close" aria-label="Dismiss" onClick={() => setError("")}>
+            <PlIcon name="x" />
+          </button>
+        </div>
+      )}
+
+      {/* ── The starter pipeline, said plainly ─────────────────────────── */}
+      {generated && (
+        <section className="pl-starter" aria-label="KubeSight starter pipeline">
+          <span className="pl-starter-glyph" aria-hidden="true">
+            <PlIcon name="sparkle" />
+          </span>
+          <div>
+            <strong>KubeSight builds this service with a starter pipeline</strong>
+            <p>
+              Picked for{" "}
+              {pipeline.defaultMetadata?.applicationTypeLabel || applicationTypeLabel(service.applicationType)}
+              {pipeline.defaultMetadata?.detectedCommand && (
+                <>
+                  {" "}— it runs <code>{pipeline.defaultMetadata.detectedCommand}</code>
+                </>
+              )}
+              {pipeline.defaultMetadata?.detectedFiles?.length > 0 && (
+                <> because the repository has {pipeline.defaultMetadata.detectedFiles.join(", ")}</>
+              )}
+              . It regenerates on every build, so it follows the repository. Customize it to take
+              control; the stages below become yours to edit.
+            </p>
+          </div>
+          {canEdit && (
+            <button type="button" className="primary" onClick={customizeDefault}>
+              Customize pipeline
             </button>
           )}
         </section>
       )}
 
-      {/* Survives the dialog: what a Jenkinsfile could not carry is work to do
-          in this editor, and it has to still be readable while it is done. */}
+      {/* ── What the Jenkinsfile left to do ────────────────────────────── */}
       {importNotes && (
-        <div className="sg-ci-import-carryover">
-          <div className="sg-ci-import-carryover-head">
-            <strong>Imported from a Jenkinsfile — {importNotes.summary}</strong>
+        <section className="pl-import" aria-label="Jenkinsfile import notes">
+          <header>
+            <PlIcon name="upload" />
+            <strong>Imported from a Jenkinsfile</strong>
+            <span>{importNotes.summary}</span>
             {/* "Dismiss", not a trash icon: the notes are a reminder, and an
                 icon that reads as delete makes people keep a list they have
                 already dealt with. */}
-            <button
-              type="button"
-              className="btn-outline btn-compact"
-              onClick={() => setImportNotes(null)}
-            >
+            <button type="button" className="btn-outline btn-compact" onClick={() => setImportNotes(null)}>
               Dismiss
             </button>
-          </div>
+          </header>
           {importNotes.blocking?.length > 0 && (
-            <ul className="sg-ci-import-blocking">
+            <ul className="pl-import-blocking">
               {importNotes.blocking.map((message, index) => (
-                <li key={index}>{message}</li>
+                <li key={index}>
+                  <PlIcon name="alert" /> {message}
+                </li>
               ))}
             </ul>
           )}
-          <ul className="sg-ci-import-notes">
-            {importNotes.notes.map((note, index) => (
-              <li key={index} className={`is-${note.level}`}>
-                {note.stage ? (
-                  <button
-                    type="button"
-                    className="sg-ci-lint-stage"
-                    onClick={() => {
-                      const position = stages.findIndex(
-                        (stage) => stage.name === note.stage
-                      );
-                      if (position >= 0) {
-                        setSelectedIndex(position);
-                        setActivePanel("stage");
-                      }
-                    }}
-                  >
-                    {note.stage}
-                  </button>
-                ) : (
-                  <span className="sg-ci-import-note-stage">Pipeline</span>
-                )}
-                <span>{note.message}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+          {importNotes.notes?.length > 0 && (
+            <ul className="pl-import-notes">
+              {importNotes.notes.map((note, index) => {
+                const position = note.stage ? stages.findIndex((stage) => stage.name === note.stage) : -1;
+                return (
+                  <li key={index} className={`is-${note.level}`}>
+                    {position >= 0 ? (
+                      <button type="button" className="btn-ghost pl-link" onClick={() => select(position)}>
+                        {note.stage}
+                      </button>
+                    ) : (
+                      <span className="pl-import-scope">{note.stage || "Pipeline"}</span>
+                    )}
+                    <span>{note.message}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
       )}
 
-      {lint && lint.counts.error + lint.counts.warning > 0 && (
-        <div
-          className={`sg-ci-lint${lint.counts.error ? " is-error" : ""}`}
-          aria-live="polite"
-        >
-          <p className="sg-ci-lint-summary">{lint.summary}</p>
-          <ul>
-            {lint.findings
-              .filter((finding) => finding.level !== "info")
-              .map((finding) => (
-                <li key={`${finding.stagePosition}-${finding.code}`}>
-                  <button
-                    type="button"
-                    className="sg-ci-lint-stage"
-                    onClick={() => {
-                      const index = stages.findIndex(
-                        (stage, position) =>
-                          (stage.position ?? position + 1) === finding.stagePosition
-                      );
-                      if (index >= 0) {
-                        setSelectedIndex(index);
-                        setActivePanel("stage");
-                      }
-                    }}
-                  >
-                    {finding.stageName}
-                  </button>
-                  <span className={`sg-ci-lint-level is-${finding.level}`}>
-                    {finding.level === "error" ? "fails" : "differs"}
-                    {finding.breaksOn === "agent"
-                      ? " on an agent"
-                      : finding.breaksOn === "kubernetes"
-                        ? " on Kubernetes"
-                        : ""}
-                  </span>
-                  <span>{finding.message}</span>
-                  {finding.fix && <em className="muted"> {finding.fix}</em>}
-                </li>
-              ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="sg-ci-pipeline-bar">
-        {pipeline && (
-          <div className="sg-ci-pipeline-identity">
-            <strong>{pipeline.name}</strong>
-            <span>{generated ? "Generated for each build" : `Revision ${pipeline.version}`}</span>
-          </div>
-        )}
-        <span className={`status-pill ${stages.length ? "ok" : "warn"} sg-ci-pipeline-ready`}>
-          {stages.length > 0 && <CheckIcon />}
-          {stages.length > 0
-            ? `${stages.length} ${stages.length === 1 ? "stage" : "stages"} configured`
-            : "No stages configured"}
-        </span>
-        <span className={`sg-ci-save-state${dirty ? " is-dirty" : ""}`} aria-live="polite">
-          {generated ? "Managed by KubeSight" : dirty ? "Unsaved changes" : "All changes saved"}
-        </span>
-        {canEdit && (
-          <div className="sg-ci-pipeline-actions">
-            <button
-              type="button"
-              className="btn-outline btn-compact"
-              onClick={() => setImporting(true)}
-              disabled={saving}
-              title="Read a Jenkinsfile into these stages and build inputs"
-            >
-              Import Jenkinsfile
-            </button>
-            {!generated && (
-              <button
-                type="button"
-                className="btn-outline btn-compact"
-                onClick={resetToTemplate}
-                disabled={saving}
-              >
-                Reset to template
-              </button>
+      {/* ── Health: what stands between this draft and a good build ───── */}
+      {view === "stages" && (blockingStages.length > 0 || warningStages.length > 0) && (
+        <div className={`pl-health${blockingStages.length ? " is-error" : ""}`} role="status">
+          <PlIcon name="alert" />
+          <p>
+            {blockingStages.length > 0 ? (
+              <>
+                <strong>
+                  {blockingStages.length} {blockingStages.length === 1 ? "stage needs" : "stages need"} fixing before saving
+                </strong>
+              </>
+            ) : (
+              <strong>
+                {warningStages.length} {warningStages.length === 1 ? "stage has" : "stages have"} something to check
+              </strong>
             )}
-            {/* Quiet when there is nothing to save — a disabled primary reads
-                as a broken button, not as a state. */}
-            <button
-              type="button"
-              className={dirty ? "primary btn-compact" : "btn-outline btn-compact"}
-              onClick={save}
-              disabled={saving || !dirty || generated}
-            >
-              {saving ? "Saving…" : dirty ? "Save pipeline" : "Saved ✓"}
-            </button>
+          </p>
+          <div className="pl-health-links">
+            {[...blockingStages, ...warningStages].slice(0, 6).map(({ index }) => (
+              <button key={index} type="button" className="btn-ghost pl-health-link" onClick={() => select(index)}>
+                <span>{index + 1}</span>
+                {stages[index]?.name || "Unnamed stage"}
+              </button>
+            ))}
+            {blockingStages.length + warningStages.length > 6 && (
+              <span className="muted">+{blockingStages.length + warningStages.length - 6} more</span>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      <div className="sg-ci-pipeline-workspace">
-        <aside className="sg-ci-pipeline-rail" aria-label="Pipeline structure">
-          <div className="sg-ci-pipeline-rail-head">
-            <div>
-              <strong>Pipeline stages</strong>
-              <span>{stages.length}</span>
-            </div>
-            <small>Select to edit</small>
-          </div>
+      {view === "inputs" ? (
+        <div className="pl-panel">
+          <BuildParameters
+            parameters={parameters}
+            stages={stages}
+            canEdit={editable}
+            onChange={changeParameters}
+            onOpenStage={(index) => {
+              setView("stages");
+              select(index);
+            }}
+          />
+        </div>
+      ) : (
+        <div className="pl-workspace">
+          <StageFlow
+            stages={stages}
+            selectedIndex={selectedIndex}
+            mode={mode}
+            insertAt={insertAt}
+            problems={problems}
+            changes={diff.perStage}
+            editable={editable}
+            branch={service.defaultBranch}
+            onSelect={select}
+            onMove={move}
+            onInsert={openInserter}
+          />
 
-          {stages.length > 0 ? (
-            <ol className="sg-ci-stage-rail-list">
-              {stages.map((stage, index) => (
-                <li key={index}>
-                  <button
-                    type="button"
-                    className={`sg-ci-stage-rail-item${
-                      activePanel === "stage" && selectedIndex === index ? " is-active" : ""
-                    }`}
-                    onClick={() => {
-                      setSelectedIndex(index);
-                      setActivePanel("stage");
-                    }}
-                    aria-current={
-                      activePanel === "stage" && selectedIndex === index ? "step" : undefined
-                    }
-                  >
-                    <span className="sg-ci-stage-index">{index + 1}</span>
-                    <span className="sg-ci-stage-rail-copy">
-                      <strong>{stage.name || <em>Unnamed stage</em>}</strong>
-                      <small>{stageSummary(stage)}</small>
-                    </span>
-                    <span className="sg-ci-stage-kind">{stageTypeLabel(stage.stageType)}</span>
-                  </button>
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <div className="sg-ci-stage-rail-empty">
-              <strong>No stages yet</strong>
-              <span>Add a stage or restore the starter template.</span>
-            </div>
-          )}
-
-          {editable && (
-            <button type="button" className="btn-outline btn-compact sg-ci-add-stage" onClick={add}>
-              <PlusIcon /> Add stage
-            </button>
-          )}
-
-          <button
-            type="button"
-            className={`sg-ci-pipeline-section-link${activePanel === "parameters" ? " is-active" : ""}`}
-            onClick={() => setActivePanel("parameters")}
-          >
-            <span>
-              <strong>Build inputs</strong>
-              <small>Shown before a manual run</small>
-            </span>
-            <span className="sg-ci-section-count">{parameters.length} configured</span>
-          </button>
-        </aside>
-
-        <section className="sg-ci-pipeline-inspector">
-          {activePanel === "parameters" ? (
-            <BuildParameters
-              parameters={parameters}
-              canEdit={editable}
-              onChange={(next) => {
-                setParameters(next);
-                setDirty(true);
-              }}
-            />
-          ) : selectedIndex !== null && stages[selectedIndex] ? (
-            <>
-              <header className="sg-ci-inspector-head">
-                <div>
-                  <span className="sg-ci-inspector-kicker">
-                    Stage {selectedIndex + 1} of {stages.length} ·{" "}
-                    {stageTypeLabel(stages[selectedIndex].stageType)}
-                  </span>
-                  <h3>{stages[selectedIndex].name || "Unnamed stage"}</h3>
-                  <p>{stageSummary(stages[selectedIndex])}</p>
-                </div>
-                {editable && (
-                  <div className="sg-ci-inspector-actions">
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label="Move stage up"
-                      title="Move stage up"
-                      disabled={selectedIndex === 0}
-                      onClick={() => move(selectedIndex, -1)}
-                    >
-                      <UpIcon />
+          <div className="pl-panel pl-stage-panel">
+            {mode === "add" && editable ? (
+              <>
+                <StagePicker
+                  stages={stages}
+                  insertAt={insertAt}
+                  onPick={addKind}
+                  onCopy={(index) => copyOf(index, insertAt)}
+                  onCancel={stages.length ? () => setMode("stage") : null}
+                />
+                {!stages.length && (
+                  <div className="pl-starter-options">
+                    <span>Or begin from something that already works</span>
+                    <button type="button" className="btn-outline btn-compact" onClick={resetToTemplate}>
+                      <PlIcon name="reset" /> {applicationTypeLabel(service.applicationType)} starter pipeline
                     </button>
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label="Move stage down"
-                      title="Move stage down"
-                      disabled={selectedIndex === stages.length - 1}
-                      onClick={() => move(selectedIndex, 1)}
-                    >
-                      <DownIcon />
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-button danger"
-                      aria-label="Remove stage"
-                      title="Remove stage"
-                      onClick={() => remove(selectedIndex)}
-                    >
-                      <TrashIcon />
+                    <button type="button" className="btn-outline btn-compact" onClick={() => setImporting(true)}>
+                      <PlIcon name="upload" /> Import a Jenkinsfile
                     </button>
                   </div>
                 )}
-              </header>
-              <StageFields
-                stage={stages[selectedIndex]}
-                secretKeys={secretKeys}
+              </>
+            ) : current ? (
+              <StageSheet
+                key={current._key ?? current.id ?? `new-${selectedIndex}`}
+                service={service}
+                stage={current}
+                index={selectedIndex}
+                total={stages.length}
+                stages={stages}
                 parameters={parameters}
-                canEdit={editable}
+                secretKeys={secretKeys}
+                problems={problems[selectedIndex] || []}
+                change={diff.perStage[selectedIndex]}
+                editable={editable}
+                focusName={focusToken}
                 onChange={(patch) => mutate(selectedIndex, patch)}
+                onChangeKind={(stageType) => changeKind(selectedIndex, stageType)}
+                onDuplicate={() => copyOf(selectedIndex, selectedIndex + 1)}
+                onMove={(delta) => move(selectedIndex, selectedIndex + delta)}
+                onRemove={() => remove(selectedIndex)}
+                onGoToTab={onGoToTab}
+                onOpenInputs={() => setView("inputs")}
               />
-            </>
-          ) : (
-            <div className="sg-ci-pipeline-empty">
-              <strong>This pipeline has no stages yet.</strong>
-              <p>
-                {editable
-                  ? "Add one, or reset to the starter template."
-                  : "There is nothing to configure."}
-              </p>
-            </div>
-          )}
-        </section>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Which fields a stage type actually consumes at run time. Offering the rest
- * is a lie the runner then ignores: a checkout runs a fixed script in the
- * worker image, so its `image` and `commands` go nowhere, and artifacts are
- * explicitly skipped for container_image stages (the image IS the artifact).
- * Keep this in step with runners/kubernetes.py.
- */
-const STAGE_FIELDS = {
-  // hostAliases is offered wherever a stage reaches the network — a checkout
-  // clones from a git host, so it needs name resolution too.
-  checkout: new Set(["runner", "hostAliases"]),
-  command: new Set([
-    "runner",
-    "image",
-    "workdir",
-    "hostAliases",
-    "commands",
-    "env",
-    "secrets",
-    "artifacts",
-  ]),
-  container_image: new Set(["runner", "workdir", "hostAliases", "env", "imageScan"]),
-  publish_artifact: new Set([]),
-  scan: new Set([]),
-};
-
-// Everything the new type will not use, cleared on the way — otherwise a value
-// typed under one type lingers invisibly in the saved pipeline.
-const CLEARED_BY_FIELD = {
-  hostAliases: { hostAliases: [] },
-  image: { image: "" },
-  workdir: { workingDirectory: "" },
-  commands: { commands: [] },
-  env: { env: {} },
-  secrets: { secretRefs: [] },
-  artifacts: { artifacts: [] },
-  // Cleared when the stage stops being an image stage: a gate left behind on a
-  // command stage would be rejected on save, and would read as protection that
-  // is not there until then.
-  imageScan: { imageScan: null },
-};
-
-function StageFields({ stage, secretKeys, parameters, canEdit, onChange }) {
-  const unimplemented = UNIMPLEMENTED_STAGE_TYPES.has(stage.stageType);
-  const fields = STAGE_FIELDS[stage.stageType] || STAGE_FIELDS.command;
-  const shows = (field) => fields.has(field);
-
-  const condition = stage.runCondition || { variable: "", operator: "equals", value: "" };
-  // A condition saved against a parameter that was later renamed still has to
-  // be selectable, or opening the editor would silently drop it on save.
-  const declared = (parameters || []).map((item) => item.name).filter(Boolean);
-  const conditionChoices = condition.variable && !declared.includes(condition.variable)
-    ? [...declared, condition.variable]
-    : declared;
-
-  const changeType = (stageType) => {
-    const next = STAGE_FIELDS[stageType] || STAGE_FIELDS.command;
-    const patch = { stageType };
-    for (const [field, cleared] of Object.entries(CLEARED_BY_FIELD)) {
-      if (!next.has(field)) Object.assign(patch, cleared);
-    }
-    onChange(patch);
-  };
-
-  return (
-    <div className="sg-ci-stage-card-body">
-      {unimplemented && (
-        <p className="banner-message info">{CONDITIONAL_STAGE_TYPES[stage.stageType]}</p>
-      )}
-
-      {stage.stageType === "checkout" && (
-        <p className="muted sg-ci-stage-note">
-          Clones the repository into <code>/workspace/source</code> using a fixed script.
-          The repository, branch and credentials come from the Source tab — there is
-          nothing to configure here.
-        </p>
-      )}
-
-      <div className="form-grid">
-        <label>
-          Stage name *
-          <input
-            value={stage.name}
-            maxLength={120}
-            disabled={!canEdit}
-            onChange={(event) => onChange({ name: event.target.value })}
-          />
-        </label>
-        <label>
-          Type
-          <select
-            value={stage.stageType}
-            disabled={!canEdit}
-            onChange={(event) => changeType(event.target.value)}
-          >
-            {STAGE_TYPES.map((type) => (
-              <option key={type.value} value={type.value}>
-                {type.label}
-              </option>
-            ))}
-            {/* A stored retired type must still show as selected, not as a
-                blank select that silently becomes something else. */}
-            {RETIRED_STAGE_TYPES.filter((type) => type.value === stage.stageType).map(
-              (type) => (
-                <option key={type.value} value={type.value} disabled>
-                  {type.label}
-                </option>
-              ),
-            )}
-          </select>
-        </label>
-
-        {shows("runner") && (
-          <>
-            <label>
-              Runner
-              <select
-                value={stage.runnerType || ""}
-                disabled={!canEdit}
-                onChange={(event) => onChange({ runnerType: event.target.value })}
-              >
-                {RUNNER_TYPES.map((type) => (
-                  <option key={type.value} value={type.value}>
-                    {type.label}
-                  </option>
-                ))}
-              </select>
-              <span className="field-hint">Leave as "any" and let labels decide.</span>
-            </label>
-            <label>
-              Required capabilities
-              <input
-                value={(stage.runnerLabels || []).join(", ")}
-                placeholder="linux, java21"
-                disabled={!canEdit}
-                onChange={(event) =>
-                  onChange({
-                    runnerLabels: event.target.value
-                      .split(",")
-                      .map((item) => item.trim().toLowerCase())
-                      .filter(Boolean),
-                  })
-                }
-              />
-              <span className="field-hint">
-                A runner must advertise all of these to be eligible.
-              </span>
-            </label>
-          </>
-        )}
-
-        {shows("image") && (
-          <label>
-            Container image
-            <input
-              value={stage.image || ""}
-              placeholder="maven:3.9-eclipse-temurin-21"
-              disabled={!canEdit}
-              onChange={(event) => onChange({ image: event.target.value })}
-            />
-          </label>
-        )}
-        {shows("workdir") && (
-          <label>
-            Working directory
-            <input
-              value={stage.workingDirectory || ""}
-              placeholder="(service default)"
-              disabled={!canEdit}
-              onChange={(event) => onChange({ workingDirectory: event.target.value })}
-            />
-            {stage.stageType === "container_image" && (
-              <span className="field-hint">
-                The build context — where the Dockerfile is looked for.
-              </span>
-            )}
-          </label>
-        )}
-
-        {shows("commands") && (
-          <label className="form-grid__full">
-            Commands
-            <DraftTextarea
-              rows={8}
-              style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
-              value={toLines(stage.commands)}
-              placeholder={"mvn -B clean package\nmvn -B test"}
-              disabled={!canEdit}
-              spellCheck={false}
-              // Lines are kept verbatim: these join back into one shell script,
-              // where a heredoc's blank lines and indentation are content.
-              onChangeText={(text) => onChange({ commands: text.split("\n") })}
-            />
-            <span className="field-hint">
-              One per line. Never put a secret here — reference it below instead.
-              Commands run in the checkout; use <code>$KUBESIGHT_WORKSPACE</code> and{" "}
-              <code>$KUBESIGHT_SOURCE</code> for absolute paths, since a literal{" "}
-              <code>/workspace</code> exists only on the Kubernetes runner.
-            </span>
-          </label>
-        )}
-
-        {shows("hostAliases") && (
-          <details className="sg-ci-stage-options form-grid__full">
-            <summary>
-              <span>
-                <strong>Runtime &amp; networking</strong>
-                <small>Host aliases used by the build container</small>
-              </span>
-              <span className="sg-ci-option-value">
-                {(stage.hostAliases || []).length
-                  ? `${stage.hostAliases.length} configured`
-                  : "Optional"}
-              </span>
-            </summary>
-            <div className="sg-ci-stage-options-body">
-              <label>
-                Host aliases
-                <DraftTextarea
-                  rows={3}
-                  style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
-                  value={aliasesToText(stage.hostAliases)}
-                  placeholder={"10.10.10.20=nexus.areeba.com,nexus\n10.10.10.30=db.internal"}
-                  disabled={!canEdit}
-                  spellCheck={false}
-                  onChangeText={(text) => onChange({ hostAliases: aliasesFromText(text) })}
-                />
-                <span className="field-hint">
-                  One per line as <code>ip=hostname</code>. Separate several hostnames for
-                  one address with commas.
-                  {stage.stageType === "container_image" && (
-                    <>
-                      {" "}These reach Dockerfile <code>RUN</code> steps, but not the base
-                      image pull or result push handled by BuildKit.
-                    </>
-                  )}
+            ) : (
+              <div className="pl-empty">
+                <span className="pl-empty-glyph" aria-hidden="true">
+                  <PlIcon name="stages" />
                 </span>
-              </label>
-            </div>
-          </details>
-        )}
-
-        {shows("imageScan") && (
-          <details className="sg-ci-stage-options form-grid__full" open={scanArmed(stage)}>
-            <summary>
-              <span>
-                <strong>Image scan</strong>
-                <small>Checked between building the image and pushing it</small>
-              </span>
-              <span className="sg-ci-option-value">
-                {scanArmed(stage)
-                  ? `Blocks at ${
-                      IMAGE_SCAN_THRESHOLDS.find(
-                        (item) => item.value === (stage.imageScan.threshold || "critical")
-                      )?.label || stage.imageScan.threshold
-                    }`
-                  : stage.imageScan
-                    ? "Turned off"
-                    : "Not configured"}
-              </span>
-            </summary>
-            <div className="sg-ci-stage-options-body">
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={scanArmed(stage)}
-                  disabled={!canEdit}
-                  onChange={(event) =>
-                    onChange({
-                      imageScan: event.target.checked
-                        ? { ...DEFAULT_IMAGE_SCAN, ...(stage.imageScan || {}), enabled: true }
-                        : { ...DEFAULT_IMAGE_SCAN, ...(stage.imageScan || {}), enabled: false },
-                    })
-                  }
-                />
-                <span>Scan this image before pushing it</span>
-              </label>
-              <span className="field-hint form-grid__full">
-                BuildKit stops short of the registry: the image it built is scanned
-                here, and pushed only if it passes. Nothing reaches the registry
-                first, so there is no vulnerable tag to clean up afterwards. Builds
-                already running keep the pipeline they started with — this applies
-                from the next build.
-              </span>
-
-              {scanArmed(stage) && (
-                <>
-                  <label>
-                    Block on
-                    <select
-                      value={stage.imageScan.threshold || "critical"}
-                      disabled={!canEdit}
-                      onChange={(event) =>
-                        onChange({
-                          imageScan: { ...stage.imageScan, threshold: event.target.value },
-                        })
-                      }
-                    >
-                      {IMAGE_SCAN_THRESHOLDS.map((item) => (
-                        <option key={item.value} value={item.value}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="field-hint">
-                      Every severity is recorded in the report either way. This only
-                      decides which ones stop the push. High is routinely non-empty
-                      on a stock base image.
-                    </span>
-                  </label>
-
-                  <label>
-                    When something is found
-                    <select
-                      value={stage.imageScan.onFail || "block"}
-                      disabled={!canEdit}
-                      onChange={(event) =>
-                        onChange({
-                          imageScan: { ...stage.imageScan, onFail: event.target.value },
-                        })
-                      }
-                    >
-                      {IMAGE_SCAN_ON_FAIL.map((item) => (
-                        <option key={item.value} value={item.value}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="field-hint">
-                      {(stage.imageScan.onFail || "block") === "block"
-                        ? "The stage fails and the image is not pushed."
-                        : "The report is attached and the image is pushed anyway — a gate that only reports."}
-                    </span>
-                  </label>
-
-                  <label className="checkbox-row form-grid__full">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(stage.imageScan.ignoreUnfixed)}
-                      disabled={!canEdit}
-                      onChange={(event) =>
-                        onChange({
-                          imageScan: {
-                            ...stage.imageScan,
-                            ignoreUnfixed: event.target.checked,
-                          },
-                        })
-                      }
-                    />
-                    <span>Ignore findings with no fix available</span>
-                  </label>
-                  <span className="field-hint form-grid__full">
-                    A CVE with no released fix cannot be cleared by rebuilding, so
-                    counting it blocks a build nobody can unblock. Off by default —
-                    ignoring them is a policy choice, not KubeSight's to make.
-                  </span>
-
-                  <p className="banner-message info form-grid__full">
-                    Needs the KubeSight CI image tools (buildctl + Trivy + crane) on
-                    the cluster: build <code>Dockerfile.ci-imagetools</code> and
-                    mirror it. Until it is there, a build of this stage fails to
-                    start and says so — it never falls back to pushing unscanned.
-                  </p>
-                </>
-              )}
-            </div>
-          </details>
-        )}
-
-        {shows("env") && (
-          <details className="sg-ci-stage-options form-grid__full">
-            <summary>
-              <span>
-                <strong>Environment</strong>
-                <small>Plain runtime values</small>
-              </span>
-              <span className="sg-ci-option-value">
-                {Object.keys(stage.env || {}).length
-                  ? `${Object.keys(stage.env).length} configured`
-                  : "Optional"}
-              </span>
-            </summary>
-            <div className="sg-ci-stage-options-body">
-              <label>
-                Environment variables
-                <DraftTextarea
-              rows={4}
-              style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
-              value={envToText(stage.env)}
-              placeholder={
-                stage.stageType === "container_image"
-                  ? "IMAGE_NAME=profile-ms\nIMAGE_TAG=V1.0.27\nDOCKERFILE_PATH=Dockerfile"
-                  : "MAVEN_OPTS=-Xmx2g"
-              }
-              disabled={!canEdit}
-              onChangeText={(text) => onChange({ env: envFromText(text) })}
-                />
-                <span className="field-hint">
-                  {stage.stageType === "container_image"
-                    ? "KEY=value, one per line. IMAGE_NAME, IMAGE_TAG and DOCKERFILE_PATH override the defaults (service slug, git ref, Dockerfile)."
-                    : "KEY=value, one per line. Not for secrets."}
-                </span>
-              </label>
-            </div>
-          </details>
-        )}
-
-        {shows("secrets") && (
-          <details className="sg-ci-stage-options form-grid__full">
-            <summary>
-              <span>
-                <strong>Secrets</strong>
-                <small>Protected values injected as environment variables</small>
-              </span>
-              <span className="sg-ci-option-value">
-                {(stage.secretRefs || []).length
-                  ? `${stage.secretRefs.length} selected`
-                  : "None selected"}
-              </span>
-            </summary>
-            <div className="sg-ci-stage-options-body">
-              {secretKeys.length === 0 ? (
-                <p className="muted">
-                  No secrets are available to this service yet. Add one — for this
-                  service or for every service — on the Settings tab.
+                <strong>No stages</strong>
+                <p>
+                  {generated
+                    ? "The starter pipeline could not be generated for this repository yet. Customize it to write the stages yourself."
+                    : "There is nothing to configure."}
                 </p>
-              ) : (
-                <div className="sg-ci-secret-refs">
-                  {secretKeys.map(({ key, scope }) => {
-                    const ref = (stage.secretRefs || []).find((item) => item.name === key);
-                    return (
-                      <label key={key} className="checkbox-row">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(ref)}
-                          disabled={!canEdit}
-                          onChange={(event) =>
-                            onChange({
-                              secretRefs: event.target.checked
-                                ? [...(stage.secretRefs || []), { name: key, envVar: key }]
-                                : (stage.secretRefs || []).filter((item) => item.name !== key),
-                            })
-                          }
-                        />
-                        <code>{key}</code>
-                        {scope === "global" && <span className="chip">global</span>}
-                        {ref && (
-                          <input
-                            className="sg-ci-envvar-input"
-                            value={ref.envVar}
-                            aria-label={`Environment variable for ${key}`}
-                            disabled={!canEdit}
-                            onChange={(event) =>
-                              onChange({
-                                secretRefs: (stage.secretRefs || []).map((item) =>
-                                  item.name === key
-                                    ? { ...item, envVar: event.target.value }
-                                    : item
-                                ),
-                              })
-                            }
-                          />
-                        )}
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </details>
-        )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
-        {shows("artifacts") && (
-          <details className="sg-ci-stage-options form-grid__full">
-            <summary>
+      {/* ── Save bar: only while there is something to save ────────────── */}
+      <div className="pl-dock">
+        {(removed || notice) && (
+          <div className="pl-toast" role="status">
+            <PlIcon name={removed ? "trash" : "check"} />
+            <span>{removed ? `Removed “${removed.stage.name || "Unnamed stage"}”` : notice}</span>
+            {removed && (
+              <button type="button" className="btn-ghost pl-toast-action" onClick={undoRemove}>
+                <PlIcon name="undo" /> Undo
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn-ghost"
+              aria-label="Dismiss"
+              onClick={() => (removed ? setRemoved(null) : setNotice(""))}
+            >
+              <PlIcon name="x" />
+            </button>
+          </div>
+        )}
+        {canEdit && dirty && (
+          <div className="pl-savebar" role="region" aria-label="Unsaved pipeline changes">
+            <span className={`pl-savebar-dot${blockingStages.length || inputProblems ? " is-error" : ""}`} aria-hidden="true" />
+            <div className="pl-savebar-text">
+              <strong>{saving ? "Saving…" : "Unsaved changes"}</strong>
               <span>
-                <strong>Artifacts</strong>
-                <small>Files collected after this stage finishes</small>
+                {blockingStages.length || inputProblems ? (
+                  `${blockingStages.length + inputProblems} to fix before saving`
+                ) : (
+                  describeDiff(diff) || (generated ? "" : "Ready to save")
+                )}
               </span>
-              <span className="sg-ci-option-value">
-                {(stage.artifacts || []).length
-                  ? `${stage.artifacts.length} patterns`
-                  : "None"}
-              </span>
-            </summary>
-            <div className="sg-ci-stage-options-body">
-              <label>
-                Artifacts to collect
-                <DraftTextarea
-                  rows={3}
-                  style={{ resize: "vertical", fontFamily: "var(--font-mono, monospace)" }}
-                  value={(stage.artifacts || [])
-                    .map((item) => `${item.path}:${item.type || "binary"}`)
-                    .join("\n")}
-                  placeholder={"target/*.jar:jar\ntarget/surefire-reports/*.xml:test-report"}
-                  disabled={!canEdit}
-                  spellCheck={false}
-                  onChangeText={(text) =>
-                    onChange({
-                      artifacts: fromLines(text).map((line) => {
-                        const index = line.lastIndexOf(":");
-                        return index > 0
-                          ? { path: line.slice(0, index), type: line.slice(index + 1) }
-                          : { path: line, type: "binary" };
-                      }),
-                    })
-                  }
-                />
-                <span className="field-hint">One per line, as path:type.</span>
-              </label>
             </div>
-          </details>
+            <button type="button" className="btn-outline btn-compact" onClick={discard} disabled={saving}>
+              Discard
+            </button>
+            <button type="button" className="primary btn-compact" onClick={save} disabled={saving || generated}>
+              <PlIcon name="check" />
+              {saving ? "Saving…" : "Save pipeline"}
+              <kbd>Ctrl S</kbd>
+            </button>
+          </div>
         )}
-
-        <details className="sg-ci-stage-options form-grid__full">
-          <summary>
-            <span>
-              <strong>Runs when</strong>
-              <small>Skip this stage unless a build input says otherwise</small>
-            </span>
-            <span className="sg-ci-option-value">{conditionSummary(stage.runCondition)}</span>
-          </summary>
-          <div className="sg-ci-stage-options-body form-grid">
-            <label>
-              Build input
-              <select
-                value={condition.variable}
-                disabled={!canEdit}
-                onChange={(event) =>
-                  onChange({
-                    runCondition: event.target.value
-                      ? { ...condition, variable: event.target.value }
-                      : null,
-                  })
-                }
-              >
-                <option value="">Always runs</option>
-                {conditionChoices.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-              <span className="field-hint">
-                {(parameters || []).length
-                  ? "One of this pipeline's build inputs."
-                  : "This pipeline has no build inputs yet — add one under Build inputs first."}
-              </span>
-            </label>
-            <label>
-              Comparison
-              <select
-                value={condition.operator}
-                disabled={!canEdit || !condition.variable}
-                onChange={(event) =>
-                  onChange({ runCondition: { ...condition, operator: event.target.value } })
-                }
-              >
-                <option value="equals">is</option>
-                <option value="not_equals">is not</option>
-              </select>
-            </label>
-            <label>
-              Value
-              <input
-                value={condition.value}
-                placeholder="true"
-                disabled={!canEdit || !condition.variable}
-                onChange={(event) =>
-                  onChange({ runCondition: { ...condition, value: event.target.value } })
-                }
-              />
-              <span className="field-hint">
-                Compared as text. A yes/no input holds <code>true</code> or <code>false</code>.
-              </span>
-            </label>
-          </div>
-        </details>
-
-        <details className="sg-ci-stage-options form-grid__full">
-          <summary>
-            <span>
-              <strong>Failure behavior</strong>
-              <small>Timeout and what happens after an error</small>
-            </span>
-            <span className="sg-ci-option-value">
-              {stage.continueOnFailure ? "Continue pipeline" : "Stop pipeline"}
-            </span>
-          </summary>
-          <div className="sg-ci-stage-options-body form-grid">
-            <label>
-              Timeout (seconds)
-              <input
-                type="number"
-                min={30}
-                max={86400}
-                value={stage.timeoutSeconds}
-                disabled={!canEdit}
-                onChange={(event) => onChange({ timeoutSeconds: event.target.value })}
-              />
-            </label>
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={Boolean(stage.continueOnFailure)}
-                disabled={!canEdit}
-                onChange={(event) => onChange({ continueOnFailure: event.target.checked })}
-              />
-              Continue if this stage fails
-              <span className="field-hint">
-                Later stages still run, but the build is still reported as failed.
-              </span>
-            </label>
-          </div>
-        </details>
       </div>
     </div>
   );
