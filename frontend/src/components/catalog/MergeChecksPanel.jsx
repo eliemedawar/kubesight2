@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   getMergeCheckEnforcement,
+  getMergeCheckWebhook,
   getServiceMergeChecks,
   listMergeChecks,
   redeliverMergeCheck,
   revealMergeCheckSecret,
   rotateMergeCheckSecret,
   saveServiceMergeChecks,
+  setupMergeChecksInSource,
 } from "../../api/mergeChecksApi.js";
 import LoadingState from "../common/LoadingState.jsx";
 import QualityGateFields, { TOOLS } from "./QualityGateFields.jsx";
@@ -64,10 +66,18 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
   // it is long enough that losing it to an unrelated save would sting.
   const [drafts, setDrafts] = useState({});
   const [enforcement, setEnforcement] = useState(null);
+  const [webhook, setWebhook] = useState(null);
+  const [settingUp, setSettingUp] = useState(false);
+  // What the setup button also does in Bitbucket. Protecting the branch is the
+  // point of the feature, so it is on; blocking direct pushes changes how a
+  // whole team works, so it is a deliberate tick.
+  const [protectBranches, setProtectBranches] = useState(true);
+  const [blockDirectPush, setBlockDirectPush] = useState(false);
 
   const toForm = (data) => ({
     enabled: Boolean(data.enabled),
     tools: [...(data.tools || [])],
+    toolsMode: data.toolsMode || "auto",
     events: [...(data.events || [])],
     targetBranches: (data.targetBranches || []).join("\n"),
     statusKey: data.statusKey || "KUBESIGHT-MERGE",
@@ -110,11 +120,20 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
     }
   }, [service.id]);
 
+  const loadWebhook = useCallback(async () => {
+    try {
+      setWebhook(await getMergeCheckWebhook(service.id));
+    } catch {
+      setWebhook({ known: false, exists: false, reason: "" });
+    }
+  }, [service.id]);
+
   useEffect(() => {
     load();
     loadRuns();
     loadEnforcement();
-  }, [load, loadRuns, loadEnforcement]);
+    loadWebhook();
+  }, [load, loadRuns, loadEnforcement, loadWebhook]);
 
   // A check that is still running settles within seconds of its build ending,
   // so the table refreshes itself while anything is in flight and stops as soon
@@ -153,10 +172,57 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
       setConfig(data);
       setForm(toForm(data));
       setNotice("Saved.");
+      // A changed event list shows up as "out of sync" beside the setup button.
+      loadWebhook();
     } catch (err) {
       setError(err.message || "Could not save the merge check configuration.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Webhook + secret + pipeline, done by KubeSight with the service's own
+  // credential. Idempotent, so it doubles as "push the current secret and
+  // events to Bitbucket" after a rotation or an events change.
+  const setupInSource = async ({ quiet = false } = {}) => {
+    setSettingUp(true);
+    setError("");
+    if (!quiet) setNotice("");
+    try {
+      const data = await setupMergeChecksInSource(service.id, {
+        protectBranches,
+        blockDirectPush,
+      });
+      setConfig(data.config);
+      setForm(toForm(data.config));
+      const parts = [
+        data.webhook.action === "created"
+          ? `Webhook created in ${data.webhook.repository}`
+          : `Webhook in ${data.webhook.repository} updated`,
+        "with the secret",
+      ];
+      if (data.pipeline.action === "created") parts.push("and the pipeline generated");
+      const protection = data.protection || {};
+      const protectedList = (protection.branches || []).map((row) => row.branch);
+      let message = `${parts.join(" ")}.`;
+      if (protection.ok) {
+        message += ` A pull request into ${protectedList.join(", ")} can no longer merge until KubeSight passes it`;
+        message += blockDirectPush ? ", and direct pushes are blocked." : ".";
+        if (!protection.hardBlock) {
+          message +=
+            " This Bitbucket plan would not enforce merge checks, so a blocked pull request shows as failing but can still be merged; hard blocking needs Bitbucket Premium.";
+        }
+      }
+      setNotice(`${message} Switch merge checks on when you are ready.`);
+      if (protection.ok === false) {
+        setError(`The webhook is set up, but the branch protection was not: ${protection.error}`);
+      }
+    } catch (err) {
+      setError(err.message || "KubeSight could not set this up in Bitbucket.");
+    } finally {
+      setSettingUp(false);
+      loadWebhook();
+      loadEnforcement();
     }
   };
 
@@ -183,6 +249,9 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
       setSecret(data.secret);
       setNotice(data.message);
       load();
+      // A webhook that already exists would start failing now; hand it the
+      // new secret straight away rather than leaving that to be remembered.
+      if (webhook?.exists) setupInSource({ quiet: true });
     } catch (err) {
       setError(err.message || "Could not rotate the webhook secret.");
     }
@@ -236,6 +305,8 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
     return <LoadingState label="Loading merge checks..." />;
   }
 
+  const automatic = form.toolsMode !== "custom";
+
   const blockers = [];
   if (!config.sourceReady) {
     blockers.push("Connect a repository and credential on the Source tab.");
@@ -276,6 +347,14 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
           </label>
         </header>
 
+        {enforcement?.enforced && !form.enabled && (
+          <p className="sg-mc-enforce sg-mc-enforce--warn">
+            <strong>Pull requests are stuck while this is off.</strong> Bitbucket requires
+            a passing build on {(enforcement.covered || []).join(", ")}, and KubeSight
+            reports nothing while merge checks are switched off.
+          </p>
+        )}
+
         {blockers.length > 0 && (
           <ul className="sg-mc-blockers">
             {blockers.map((line) => (
@@ -288,8 +367,25 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
       {/* ── The webhook ─────────────────────────────────────────────── */}
       <section className="form-section">
         <h4>Webhook</h4>
+        <WebhookSetup
+          webhook={webhook}
+          canEdit={canEdit}
+          busy={settingUp}
+          disabled={!config.sourceReady || !config.canReportVerdict?.ok}
+          credentialName={service.credentialProfileName}
+          protectBranches={protectBranches}
+          onProtectBranches={setProtectBranches}
+          blockDirectPush={blockDirectPush}
+          onBlockDirectPush={setBlockDirectPush}
+          branches={
+            config.targetBranches?.length
+              ? config.targetBranches
+              : [service.defaultBranch || "main"]
+          }
+          onSetup={() => setupInSource()}
+        />
         <p className="muted">
-          Add this in Bitbucket under <strong>Repository settings → Webhooks</strong>
+          Or add it by hand in Bitbucket under <strong>Repository settings → Webhooks</strong>
           and paste the secret into the webhook's <strong>Secret</strong> field —
           Bitbucket then signs every delivery (<code>X-Hub-Signature</code>) and the
           secret never travels. Senders that cannot sign can put the secret in an{" "}
@@ -421,9 +517,43 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
           edit must keep is the <code>##kubesight-metric</code> one: without it the
           gate reads the check as “not run”, not as “clean”.
         </p>
+        <div className="sg-mc-gatemode">
+          <label className="sg-mc-check">
+            <input
+              type="radio"
+              name="toolsMode"
+              checked={automatic}
+              disabled={!canEdit}
+              onChange={() => set("toolsMode", "auto")}
+            />
+            Automatic, by application type
+            <span className="sg-mc-tag">{config.applicationTypeLabel}</span>
+          </label>
+          <label className="sg-mc-check">
+            <input
+              type="radio"
+              name="toolsMode"
+              checked={!automatic}
+              disabled={!canEdit}
+              onChange={() => set("toolsMode", "custom")}
+            />
+            Choose the checks myself
+          </label>
+        </div>
+        {automatic && (
+          <p className="field-hint">
+            The checks follow the service's application type (set on the Overview
+            tab) and are re-chosen before every pull request, so changing the type or
+            adding SonarQube secrets takes effect without coming back here.
+          </p>
+        )}
         <div className="sg-mc-tools">
           {TOOLS.map(({ key, label, hint }) => {
             const script = scriptsByTool[key];
+            const selected = automatic
+              ? (config.recommendedTools || []).includes(key)
+              : form.tools.includes(key);
+            const reason = config.toolReasons?.[key];
             const open = showCommands === key;
             // The saved script, as one editable blob, unless there is an
             // unsaved draft for this tool.
@@ -432,14 +562,14 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
             const edited = Boolean(script) && draftValue !== savedText;
             return (
               <div
-                className={`sg-mc-tool${open ? " is-open" : ""}`}
+                className={`sg-mc-tool${open ? " is-open" : ""}${selected ? "" : " is-off"}`}
                 key={key}
               >
                 <label className="sg-mc-check">
                   <input
                     type="checkbox"
-                    checked={form.tools.includes(key)}
-                    disabled={!canEdit}
+                    checked={selected}
+                    disabled={!canEdit || automatic}
                     onChange={() => toggleIn("tools", key)}
                   />
                   <strong>{label}</strong>
@@ -450,6 +580,7 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
                   )}
                 </label>
                 <p className="muted">{hint}</p>
+                {automatic && reason && <p className="sg-mc-reason">{reason}</p>}
                 {script && (
                   <>
                     <button
@@ -565,14 +696,18 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
           branch requires the build to pass, a blocked pull request shows a red check
           and can still be merged.
         </p>
-        <EnforcementBanner enforcement={enforcement} statusKey={form.statusKey} />
+        <EnforcementBanner enforcement={enforcement} />
         <ol className="sg-mc-steps">
           <li>
-            <strong>Repository settings → Webhooks → Add webhook.</strong> Point it at
-            the URL above and tick the pull request events you chose.
+            <strong>Webhook.</strong>{" "}
+            {webhook?.exists
+              ? "Done — the repository has a webhook pointing here."
+              : "Use Set up in Bitbucket above, or add it by hand with the URL, the secret and the pull request events you chose."}
           </li>
           <li>
-            <strong>Repository settings → Branch restrictions.</strong> On{" "}
+            <strong>Branch restrictions</strong> are added by <em>Set up in Bitbucket</em>{" "}
+            when the block option is ticked. By hand: <strong>Repository settings →
+            Branch restrictions.</strong> On{" "}
             {config.targetBranches?.length
               ? config.targetBranches.join(", ")
               : "the branches you protect"}
@@ -687,7 +822,113 @@ export default function MergeChecksPanel({ service, canEdit, canView = true }) {
  * is decoration. So the page says which of the two it is, in Bitbucket's own
  * words, rather than leaving somebody to believe the steps below were enough.
  */
-function EnforcementBanner({ enforcement, statusKey }) {
+/**
+ * The one-click path: KubeSight creates the repository webhook with the secret
+ * (and the pipeline, if it is missing) using the service's own credential.
+ * The live state beside the button says whether it is already there, so the
+ * same button reads as "set up" the first time and "resync" afterwards.
+ */
+function WebhookSetup({
+  webhook,
+  canEdit,
+  busy,
+  disabled,
+  credentialName,
+  protectBranches,
+  onProtectBranches,
+  blockDirectPush,
+  onBlockDirectPush,
+  branches,
+  onSetup,
+}) {
+  let state;
+  if (!webhook) {
+    state = <span className="muted">Checking Bitbucket…</span>;
+  } else if (!webhook.known) {
+    state = (
+      <span className="muted">
+        Could not check Bitbucket{webhook.reason ? `: ${webhook.reason}` : "."}
+      </span>
+    );
+  } else if (!webhook.exists) {
+    state = <span>Not set up in {webhook.repository} yet.</span>;
+  } else if (webhook.inSync) {
+    state = (
+      <span className="sg-mc-webhook-ok">
+        <CheckIcon /> Set up in {webhook.repository}.
+      </span>
+    );
+  } else {
+    const problems = [];
+    if (!webhook.active) problems.push("it is disabled");
+    if (!webhook.secretSet) problems.push("it has no secret");
+    if (webhook.missingEvents?.length) {
+      problems.push(`it does not send ${webhook.missingEvents.join(", ")}`);
+    }
+    state = (
+      <span>
+        A webhook exists in {webhook.repository}, but {problems.join(" and ")}. Resync to
+        fix it.
+      </span>
+    );
+  }
+
+  const label = busy
+    ? "Setting up…"
+    : webhook?.exists
+      ? "Resync with Bitbucket"
+      : "Set up in Bitbucket";
+
+  return (
+    <div className="sg-mc-setup">
+      <div>
+        <p>
+          KubeSight can create the webhook, with its secret and the events below, and
+          generate the merge check pipeline — using the credential this service already
+          uses{credentialName ? ` (${credentialName})` : ""}. It needs the webhook scope,
+          and repository admin to protect branches. Nothing is switched on.
+        </p>
+        <p className="sg-mc-setup__state">{state}</p>
+        {canEdit && (
+          <div className="sg-mc-setup__options">
+            <label className="sg-mc-check">
+              <input
+                type="checkbox"
+                checked={protectBranches}
+                onChange={(event) => onProtectBranches(event.target.checked)}
+              />
+              <span>
+                Block merging a pull request into <strong>{branches.join(", ")}</strong>{" "}
+                until KubeSight passes it
+              </span>
+            </label>
+            <label className="sg-mc-check">
+              <input
+                type="checkbox"
+                checked={blockDirectPush}
+                disabled={!protectBranches}
+                onChange={(event) => onBlockDirectPush(event.target.checked)}
+              />
+              <span>Also block direct pushes, so a pull request is the only way in</span>
+            </label>
+          </div>
+        )}
+      </div>
+      {canEdit && (
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={busy || disabled}
+          onClick={onSetup}
+        >
+          {label}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function EnforcementBanner({ enforcement }) {
   if (!enforcement) {
     return <p className="muted sg-mc-enforce">Checking Bitbucket…</p>;
   }
@@ -697,6 +938,17 @@ function EnforcementBanner({ enforcement, statusKey }) {
         KubeSight could not read this repository's branch restrictions, so it cannot
         say whether a failed check would stop a merge.
         {enforcement.reason ? ` ${enforcement.reason}` : ""}
+      </p>
+    );
+  }
+  if (enforcement.enforced && !enforcement.hardBlock) {
+    const where = (enforcement.covered || []).join(", ");
+    return (
+      <p className="sg-mc-enforce sg-mc-enforce--warn">
+        <strong>Required, but only as a warning.</strong> Bitbucket requires a passing
+        build{where ? ` on ${where}` : ""}, but merge checks are not enforced there, so
+        a blocked pull request shows as failing and can still be merged. Turning on{" "}
+        <em>Prevent a merge with unresolved merge checks</em> needs Bitbucket Premium.
       </p>
     );
   }
@@ -716,7 +968,7 @@ function EnforcementBanner({ enforcement, statusKey }) {
       {(enforcement.restrictions || []).length === 0
         ? "This repository has no branch restriction requiring a passing build, so a blocked pull request can still be merged."
         : `Nothing requires a passing build on ${missing || "the branches this gate watches"}, so a blocked pull request into ${missing || "them"} can still be merged.`}{" "}
-      Add the restriction below and require the <code>{statusKey}</code> status.
+      Use <em>Set up in Bitbucket</em> above to add it, or add it by hand below.
     </p>
   );
 }

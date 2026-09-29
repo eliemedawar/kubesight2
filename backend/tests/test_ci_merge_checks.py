@@ -1029,3 +1029,393 @@ def test_semgrep_and_sonar_can_both_be_off_or_both_on(
         "Semgrep scan",
         "SonarQube scan",
     ]
+
+
+# ---------------------------------------------------------------------------
+# One-click setup: webhook + secret + pipeline with the service's credential
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def fake_hooks(monkeypatch):
+    """Bitbucket's webhook list, held in memory. Records every write."""
+    from api.services.ci.source import bitbucket_status
+
+    state = {"hooks": [], "writes": []}
+
+    def list_webhooks(**kwargs):
+        return [dict(hook) for hook in state["hooks"]]
+
+    def save_webhook(**kwargs):
+        state["writes"].append(kwargs)
+        if kwargs["uid"]:
+            for hook in state["hooks"]:
+                if hook["uuid"] == kwargs["uid"]:
+                    hook.update(
+                        url=kwargs["url"], events=list(kwargs["events"]),
+                        active=True, secretSet=True,
+                    )
+            return {"uuid": kwargs["uid"]}
+        hook = {
+            "uuid": f"{{hook-{len(state['hooks']) + 1}}}",
+            "url": kwargs["url"],
+            "description": kwargs["description"],
+            "events": list(kwargs["events"]),
+            "active": True,
+            "secretSet": True,
+        }
+        state["hooks"].append(hook)
+        return {"uuid": hook["uuid"]}
+
+    state["restrictions"] = []
+    state["restriction_writes"] = []
+    state["premium"] = True
+
+    def list_branch_restrictions(**kwargs):
+        return [
+            {"id": r["id"], "pattern": r["pattern"], "matchKind": "glob", "value": r.get("value")}
+            for r in state["restrictions"]
+            if r["kind"] == kwargs["kind"]
+        ]
+
+    def save_branch_restriction(**kwargs):
+        if kwargs["kind"] == bitbucket_status.ENFORCE_CHECKS_KIND and not state["premium"]:
+            raise bitbucket_status.StatusWriteError(
+                "Bitbucket rejected the request: premium only.", status=400, retryable=False
+            )
+        state["restriction_writes"].append(kwargs)
+        if kwargs.get("restriction_id"):
+            for r in state["restrictions"]:
+                if str(r["id"]) == kwargs["restriction_id"]:
+                    r["value"] = kwargs.get("value")
+            return {}
+        state["restrictions"].append({
+            "id": len(state["restrictions"]) + 100,
+            "kind": kwargs["kind"],
+            "pattern": kwargs["pattern"],
+            "value": kwargs.get("value"),
+        })
+        return {}
+
+    monkeypatch.setattr(bitbucket_status, "list_webhooks", list_webhooks)
+    monkeypatch.setattr(bitbucket_status, "save_webhook", save_webhook)
+    monkeypatch.setattr(bitbucket_status, "list_branch_restrictions", list_branch_restrictions)
+    monkeypatch.setattr(bitbucket_status, "save_branch_restriction", save_branch_restriction)
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://kubesight.example.com")
+    return state
+
+
+def _setup(client, token, service_id, **options):
+    return client.post(
+        f"/api/ci/services/{service_id}/merge-checks/setup",
+        json=options,
+        headers=auth_headers(token),
+    )
+
+
+def test_setup_creates_the_webhook_with_the_secret_and_the_pipeline(
+    app, client, admin_token, service_id, fake_hooks
+):
+    response = _setup(client, admin_token, service_id)
+    assert response.status_code == 200, response.get_json()
+    data = response.get_json()["data"]
+
+    assert data["webhook"]["action"] == "created"
+    assert data["webhook"]["repository"] == "areeba/checkout-web"
+    assert data["pipeline"]["action"] == "created"
+    assert data["config"]["pipelineId"]
+    # Plumbing only: the gate is still a separate decision.
+    assert data["config"]["enabled"] is False
+
+    write = fake_hooks["writes"][0]
+    slug = _slug(app, service_id)
+    assert write["url"] == f"https://kubesight.example.com/api/ci/merge-checks/inbound/{slug}"
+    assert write["repository_ref"] == "areeba/checkout-web"
+    assert write["token"] == "write-token"
+    assert write["secret"] == _secret(client, admin_token, service_id)
+    assert set(write["events"]) == {"pullrequest:created", "pullrequest:updated"}
+
+
+def test_setup_twice_updates_the_same_webhook_instead_of_adding_one(
+    client, admin_token, service_id, fake_hooks
+):
+    _setup(client, admin_token, service_id)
+    again = _setup(client, admin_token, service_id).get_json()["data"]
+
+    assert again["webhook"]["action"] == "updated"
+    assert again["pipeline"]["action"] == "unchanged"
+    assert len(fake_hooks["hooks"]) == 1
+    assert fake_hooks["writes"][1]["uid"] == "{hook-1}"
+
+
+def test_a_hand_made_webhook_with_the_query_secret_is_adopted(
+    app, client, admin_token, service_id, fake_hooks
+):
+    slug = _slug(app, service_id)
+    fake_hooks["hooks"].append({
+        "uuid": "{manual}",
+        "url": f"https://kubesight.example.com/api/ci/merge-checks/inbound/{slug}?secret=old",
+        "description": "by hand",
+        "events": ["pullrequest:created"],
+        "active": True,
+        "secretSet": False,
+    })
+    status = client.get(
+        f"/api/ci/services/{service_id}/merge-checks/webhook",
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]
+    assert status["exists"] is True and status["inSync"] is False
+    assert status["missingEvents"] == ["pullrequest:updated"]
+
+    data = _setup(client, admin_token, service_id).get_json()["data"]
+    assert data["webhook"]["action"] == "updated"
+    assert fake_hooks["writes"][0]["uid"] == "{manual}"
+    assert "?" not in fake_hooks["writes"][0]["url"]
+
+
+def test_setup_refuses_a_read_only_credential_before_calling_bitbucket(
+    app, client, admin_token, service_id, fake_hooks
+):
+    with app.app_context():
+        db.session.query(BitbucketCredentialProfile).update({"read_only": True})
+        db.session.commit()
+    response = _setup(client, admin_token, service_id)
+    assert response.status_code == 400
+    assert "read-only" in response.get_json()["error"]
+    assert fake_hooks["writes"] == []
+
+
+def test_setup_refuses_an_address_bitbucket_cannot_reach(
+    client, admin_token, service_id, fake_hooks, monkeypatch
+):
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:5055")
+    response = _setup(client, admin_token, service_id)
+    assert response.status_code == 400
+    assert "PUBLIC_BASE_URL" in response.get_json()["error"]
+    assert fake_hooks["writes"] == []
+
+
+def test_a_token_without_the_webhook_scope_is_explained(
+    client, admin_token, service_id, fake_hooks, monkeypatch
+):
+    from api.services.ci.source import bitbucket_status
+
+    def refuse(**kwargs):
+        raise bitbucket_status._webhook_error(
+            bitbucket_status.StatusWriteError("no", status=403, retryable=False)
+        )
+
+    monkeypatch.setattr(bitbucket_status, "list_webhooks", refuse)
+    response = _setup(client, admin_token, service_id)
+    assert response.status_code == 400
+    assert "webhook scope" in response.get_json()["error"]
+
+
+def test_only_managers_may_set_up_the_webhook(client, viewer_token, service_id, fake_hooks):
+    assert _setup(client, viewer_token, service_id).status_code == 403
+    assert fake_hooks["writes"] == []
+
+
+def _kinds(fake_hooks, pattern):
+    return sorted(r["kind"] for r in fake_hooks["restrictions"] if r["pattern"] == pattern)
+
+
+def test_setup_makes_the_default_branch_wait_for_a_passing_check(
+    client, admin_token, service_id, fake_hooks
+):
+    data = _setup(client, admin_token, service_id).get_json()["data"]
+
+    # No watched branches: the default branch is protected, never "*".
+    assert data["protection"]["ok"] is True
+    assert data["protection"]["hardBlock"] is True
+    assert [row["branch"] for row in data["protection"]["branches"]] == ["main"]
+    assert _kinds(fake_hooks, "main") == ["enforce_merge_checks", "require_passing_builds_to_merge"]
+    builds = [r for r in fake_hooks["restrictions"] if r["kind"] == "require_passing_builds_to_merge"]
+    assert builds[0]["value"] == 1
+
+
+def test_setup_protects_every_watched_branch_and_can_block_direct_pushes(
+    client, admin_token, service_id, fake_hooks
+):
+    _enable(client, admin_token, service_id, targetBranches=["master", "release/*"])
+    data = _setup(client, admin_token, service_id, blockDirectPush=True).get_json()["data"]
+
+    assert [row["branch"] for row in data["protection"]["branches"]] == ["master", "release/*"]
+    for pattern in ("master", "release/*"):
+        assert "push" in _kinds(fake_hooks, pattern)
+
+
+def test_setup_leaves_existing_restrictions_alone_and_raises_a_zero_minimum(
+    client, admin_token, service_id, fake_hooks
+):
+    fake_hooks["restrictions"] += [
+        {"id": 1, "kind": "require_passing_builds_to_merge", "pattern": "main", "value": 0},
+        {"id": 2, "kind": "enforce_merge_checks", "pattern": "main", "value": None},
+        {"id": 3, "kind": "push", "pattern": "main", "value": None},
+    ]
+    data = _setup(client, admin_token, service_id, blockDirectPush=True).get_json()["data"]
+
+    row = data["protection"]["branches"][0]
+    assert row == {
+        "branch": "main",
+        "passingBuilds": "updated",
+        "enforceChecks": "existing",
+        "directPush": "existing",
+    }
+    assert fake_hooks["restrictions"][0]["value"] == 1
+    assert len(fake_hooks["restrictions"]) == 3
+
+
+def test_without_premium_the_restriction_is_still_added_and_the_gap_reported(
+    client, admin_token, service_id, fake_hooks
+):
+    fake_hooks["premium"] = False
+    data = _setup(client, admin_token, service_id).get_json()["data"]
+
+    assert data["protection"]["ok"] is True
+    assert data["protection"]["hardBlock"] is False
+    assert "premium" in data["protection"]["hardBlockError"]
+    assert _kinds(fake_hooks, "main") == ["require_passing_builds_to_merge"]
+
+
+def test_branch_protection_can_be_left_out(client, admin_token, service_id, fake_hooks):
+    data = _setup(client, admin_token, service_id, protectBranches=False).get_json()["data"]
+    assert data["protection"] == {"requested": False}
+    assert fake_hooks["restrictions"] == []
+
+
+def test_a_token_that_cannot_protect_branches_keeps_the_webhook_and_says_why(
+    app, client, admin_token, service_id, fake_hooks, monkeypatch
+):
+    from api.services.ci.source import bitbucket_status
+
+    def refuse(**kwargs):
+        raise bitbucket_status._restriction_error(
+            bitbucket_status.StatusWriteError("no", status=403, retryable=False)
+        )
+
+    monkeypatch.setattr(bitbucket_status, "list_branch_restrictions", refuse)
+    response = _setup(client, admin_token, service_id)
+    assert response.status_code == 200
+    data = response.get_json()["data"]
+    assert data["webhook"]["action"] == "created"
+    assert data["protection"]["ok"] is False
+    assert "repository admin" in data["protection"]["error"]
+    assert "Branch protection failed" in data["config"]["lastError"]
+
+
+def test_enforcement_only_calls_it_a_hard_block_with_merge_checks_enforced(
+    client, admin_token, service_id, monkeypatch
+):
+    _enable(client, admin_token, service_id, targetBranches=["master"])
+    build = {"kind": "require_passing_builds_to_merge", "pattern": "master", "matchKind": "glob", "minimum": 1}
+    _fake_restrictions(monkeypatch, [build])
+    url = f"/api/ci/services/{service_id}/merge-checks/enforcement"
+    data = client.get(url, headers=auth_headers(admin_token)).get_json()["data"]
+    assert data["enforced"] is True and data["hardBlock"] is False
+
+    hard = {"kind": "enforce_merge_checks", "pattern": "master", "matchKind": "glob", "minimum": 0}
+    _fake_restrictions(monkeypatch, [build, hard])
+    data = client.get(url, headers=auth_headers(admin_token)).get_json()["data"]
+    assert data["enforced"] is True and data["hardBlock"] is True
+
+
+# ---------------------------------------------------------------------------
+# Automatic checks: the application type picks the tools
+# ---------------------------------------------------------------------------
+
+def _enable_auto(client, token, service_id, **overrides):
+    return client.put(
+        f"/api/ci/services/{service_id}/merge-checks",
+        json={
+            "enabled": True,
+            "toolsMode": "auto",
+            "events": ["pullrequest:created"],
+            **overrides,
+        },
+        headers=auth_headers(token),
+    )
+
+
+def _set_type(app, service_id, app_type):
+    with app.app_context():
+        service = db.session.get(CiService, service_id)
+        service.application_type = app_type
+        db.session.commit()
+
+
+def _stage_names(data):
+    return [stage["name"] for stage in data["pipelineStages"]]
+
+
+def test_a_new_configuration_follows_the_application_type(
+    app, client, admin_token, service_id
+):
+    _set_type(app, service_id, "java_gradle")
+    data = client.get(
+        f"/api/ci/services/{service_id}/merge-checks", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert data["toolsMode"] == "auto"
+    assert data["applicationTypeLabel"] == "Java (Gradle)"
+    assert data["tools"] == ["semgrep", "dependency_check"]
+    assert data["toolReasons"]["eslint"].startswith("Off:")
+
+
+def test_a_java_service_runs_no_eslint_and_scans_with_the_java_rules(
+    app, client, admin_token, service_id
+):
+    _set_type(app, service_id, "java_gradle")
+    response = _enable_auto(client, admin_token, service_id)
+    assert response.status_code == 200, response.get_json()
+    data = response.get_json()["data"]
+    assert _stage_names(data) == ["Checkout", "Semgrep scan", "Dependency-Check"]
+    semgrep = next(s for s in data["pipelineStages"] if s["tool"] == "semgrep")
+    assert any("p/default p/java" in line for line in semgrep["commands"])
+
+
+def test_a_node_service_gets_eslint(app, client, admin_token, service_id):
+    data = _enable_auto(client, admin_token, service_id).get_json()["data"]
+    assert _stage_names(data) == [
+        "Checkout", "ESLint", "Semgrep scan", "Dependency-Check",
+    ]
+
+
+def test_sonarqube_replaces_semgrep_once_its_secrets_exist(
+    app, client, admin_token, service_id
+):
+    from api.models_ci import CiSecret
+
+    with app.app_context():
+        for key in ("SONAR_HOST_URL", "SONAR_TOKEN"):
+            db.session.add(
+                CiSecret(scope="service", service_id=service_id, key=key, value_cipher="x")
+            )
+        db.session.commit()
+    data = _enable_auto(client, admin_token, service_id).get_json()["data"]
+    assert data["tools"] == ["eslint", "sonar", "dependency_check"]
+
+
+def test_custom_mode_keeps_what_was_ticked(app, client, admin_token, service_id):
+    _set_type(app, service_id, "java_gradle")
+    data = _enable_auto(
+        client, admin_token, service_id, toolsMode="custom", tools=["eslint"]
+    ).get_json()["data"]
+    assert data["toolsMode"] == "custom"
+    assert data["tools"] == ["eslint"]
+    assert _stage_names(data) == ["Checkout", "ESLint"]
+
+
+def test_a_pull_request_regenerates_the_checks_after_the_type_changes(
+    app, client, admin_token, service_id
+):
+    _enable_auto(client, admin_token, service_id)
+    _set_type(app, service_id, "java_maven")
+    slug = _slug(app, service_id)
+    secret = _secret(client, admin_token, service_id)
+    data = _post_hook(client, slug, secret, _pull_request_body()).get_json()["data"]
+    assert data["state"] == "running"
+    with app.app_context():
+        config = CiMergeCheckConfig.query.filter_by(service_id=service_id).one()
+        assert config.tools == ["semgrep", "dependency_check"]
+        build = db.session.get(CiBuild, db.session.get(CiMergeCheck, data["checkId"]).build_id)
+        names = [stage["name"] for stage in build.pipeline_snapshot["stages"]]
+        assert names == ["Checkout", "Semgrep scan", "Dependency-Check"]

@@ -828,6 +828,10 @@ def _migrate_merge_check_columns() -> None:
     # configurations already had.
     _add_column_if_missing("ci_merge_check_configs", "custom_commands", "JSON")
     _retype_json_column("ci_merge_check_configs", "custom_commands")
+    # Automatic tool selection by application type. NULL on every existing
+    # configuration reads as "auto": the tools follow the service's type from
+    # the next save or pull request on.
+    _add_column_if_missing("ci_merge_check_configs", "tools_mode", "VARCHAR(16)")
     # Semgrep's own cap and severity floor. The gate columns are declared on one
     # mixin and therefore exist on BOTH tables — adding them to only one is the
     # mistake this loop exists to prevent. NULL everywhere, which means

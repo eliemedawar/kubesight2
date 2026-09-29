@@ -3379,6 +3379,55 @@ button.sg-ci-workspace-entry:focus-visible {
   flex: none;
 }
 
+/* One-click setup: the explanation and live state on the left, the action on
+   the right, so the button reads as "do the paragraph beside me". */
+.sg-mc-setup {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: space-between;
+  margin: var(--space-3) 0 var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.sg-mc-setup p {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-subtle);
+}
+
+.sg-mc-setup .sg-mc-setup__state {
+  margin-top: var(--space-2);
+  color: var(--text);
+}
+
+.sg-mc-setup__options {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.sg-mc-setup button {
+  flex: none;
+}
+
+.sg-mc-webhook-ok {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--ok);
+}
+
+@media (max-width: 720px) {
+  .sg-mc-setup {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
 .sg-mc-choices {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -3443,6 +3492,19 @@ label.sg-mc-check {
 .sg-mc-tool p.muted {
   margin: var(--space-2) 0 var(--space-2);
   font-size: var(--font-size-xs);
+}
+
+/* Automatic mode: why this check is in or out for the service's type. */
+.sg-mc-tool p.sg-mc-reason {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* A check that will not run reads as such, but stays legible — its reason and
+   script are still worth reading. */
+.sg-mc-tool.is-off {
+  opacity: 0.72;
 }
 
 /* The generated shell, shown on request. Scrolls rather than wraps: a wrapped

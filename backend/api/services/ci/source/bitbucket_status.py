@@ -21,9 +21,13 @@ And it reads one thing: the repository's BRANCH RESTRICTIONS, to answer the only
 question that matters about this feature — "is the merge actually blocked?"
 KubeSight posting a red build status is necessary and not sufficient; until a
 branch restriction requires passing builds, that red status is decoration and
-anybody can still press Merge. Nothing in KubeSight can make that restriction
-exist, but it can look, and a gate that cannot say whether it is switched on is
-worse than no gate: it is a false sense of one.
+anybody can still press Merge. KubeSight can create that restriction (below),
+but it always looks rather than assumes, because a gate that cannot say whether
+it is switched on is worse than no gate: it is a false sense of one.
+
+Last, and only when somebody presses "Set up in Bitbucket": the repository's
+WEBHOOK, created or corrected so it points at this service with its secret, and
+the BRANCH RESTRICTIONS that make a merge wait for KubeSight's verdict.
 
 The same protections the read client enforces apply here — HTTPS only, the API
 origin pinned, no redirects followed, a response size cap — because a writer
@@ -310,6 +314,13 @@ def post_pull_request_comment(
 # restriction carries a `value` — the minimum number of SUCCESSFUL build
 # statuses the source commit must have — and a branch pattern it applies to.
 BUILD_RESTRICTION_KIND = "require_passing_builds_to_merge"
+# Premium only: turns every merge check on the branch — the passing-builds one
+# included — from a warning beside the Merge button into a refusal. Without it,
+# Bitbucket Cloud shows "0 of 1 builds passed" and still lets anybody merge.
+ENFORCE_CHECKS_KIND = "enforce_merge_checks"
+# Who may push straight to the branch. Empty users and groups = nobody, which
+# is what leaves "merge a pull request" as the only way in.
+PUSH_KIND = "push"
 
 
 def fetch_build_restrictions(
@@ -319,9 +330,10 @@ def fetch_build_restrictions(
     credential_type: str,
     principal: str = "",
 ) -> list:
-    """Every "require passing builds" restriction on this repository.
+    """Every "require passing builds" restriction on this repository — plus
+    any "enforce merge checks" ones, tagged by ``kind``.
 
-    Returns ``[{"pattern": "master", "matchKind": "glob", "minimum": 1}, ...]``,
+    Returns ``[{"kind": ..., "pattern": "master", "matchKind": "glob", "minimum": 1}, ...]``,
     empty when the repository has none — which is the answer that matters, and
     the one this whole read exists to distinguish from "we did not look".
 
@@ -331,7 +343,7 @@ def fetch_build_restrictions(
     """
     endpoint = (
         f"{API_ORIGIN}/2.0/repositories/{quote(repository_ref, safe='/')}"
-        f"/branch-restrictions?kind={BUILD_RESTRICTION_KIND}&pagelen=100"
+        f"/branch-restrictions?pagelen=100"
     )
     payload = _request(
         endpoint,
@@ -345,7 +357,8 @@ def fetch_build_restrictions(
     for item in payload.get("values") or []:
         if not isinstance(item, dict):
             continue
-        if item.get("kind") != BUILD_RESTRICTION_KIND:
+        kind = item.get("kind")
+        if kind not in (BUILD_RESTRICTION_KIND, ENFORCE_CHECKS_KIND):
             continue
         try:
             minimum = int(item.get("value") or 0)
@@ -353,6 +366,7 @@ def fetch_build_restrictions(
             minimum = 0
         found.append(
             {
+                "kind": kind,
                 "pattern": str(item.get("pattern") or ""),
                 "matchKind": str(item.get("branch_match_kind") or "glob"),
                 "branchType": str(item.get("branch_type") or ""),
@@ -360,3 +374,202 @@ def fetch_build_restrictions(
             }
         )
     return found
+
+
+# ---------------------------------------------------------------------------
+# The repository webhook: set up by KubeSight with the service's own credential
+# ---------------------------------------------------------------------------
+#
+# Creating the webhook here, rather than asking somebody to copy a URL and a
+# secret into Bitbucket's form, is what removes the half-configured state this
+# feature used to live in most often: a webhook with a stale secret, or with
+# `updated` unticked, silently runs nothing. It is still a write, so it needs
+# the same credential that reports verdicts — plus Bitbucket's webhook scope.
+
+def _hooks_endpoint(repository_ref: str, uid: str = "") -> str:
+    base = f"{API_ORIGIN}/2.0/repositories/{quote(repository_ref, safe='/')}/hooks"
+    return f"{base}/{quote(uid, safe='')}" if uid else base
+
+
+def _webhook_error(exc: StatusWriteError) -> StatusWriteError:
+    """The webhook calls fail for a different reason than a build status does."""
+    if exc.status in (401, 403):
+        return StatusWriteError(
+            "Bitbucket would not let this credential manage the repository's "
+            "webhooks. It needs the webhook scope (read and write), which is "
+            "repository admin on most token types.",
+            status=exc.status,
+            retryable=False,
+        )
+    return exc
+
+
+def list_webhooks(
+    *,
+    repository_ref: str,
+    token: str,
+    credential_type: str,
+    principal: str = "",
+) -> list:
+    """The repository's webhooks, reduced to what matching one needs.
+
+    One page: a repository with more webhooks than Bitbucket puts on a page is
+    not a case this setup step is going to reason about.
+    """
+    try:
+        payload = _request(
+            _hooks_endpoint(repository_ref),
+            repository_ref,
+            method="GET",
+            token=token,
+            credential_type=credential_type,
+            principal=principal,
+        )
+    except StatusWriteError as exc:
+        raise _webhook_error(exc) from exc
+    hooks = []
+    for item in payload.get("values") or []:
+        if not isinstance(item, dict):
+            continue
+        hooks.append(
+            {
+                "uuid": str(item.get("uuid") or ""),
+                "url": str(item.get("url") or ""),
+                "description": str(item.get("description") or ""),
+                "events": [str(e) for e in (item.get("events") or [])],
+                "active": bool(item.get("active")),
+                "secretSet": bool(item.get("secret_set")),
+            }
+        )
+    return hooks
+
+
+def save_webhook(
+    *,
+    repository_ref: str,
+    uid: str = "",
+    url: str,
+    secret: str,
+    events: list,
+    description: str,
+    token: str,
+    credential_type: str,
+    principal: str = "",
+) -> Dict[str, Any]:
+    """Create the webhook, or bring an existing one (``uid``) back in line.
+
+    The secret is always sent. Bitbucket never returns it, so there is no way to
+    tell a matching secret from a stale one except by setting it.
+    """
+    body = {
+        "description": description[:255],
+        "url": url,
+        "active": True,
+        "events": list(events),
+        "secret": secret,
+    }
+    try:
+        return _request(
+            _hooks_endpoint(repository_ref, uid),
+            repository_ref,
+            body,
+            method="PUT" if uid else "POST",
+            token=token,
+            credential_type=credential_type,
+            principal=principal,
+        )
+    except StatusWriteError as exc:
+        raise _webhook_error(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# Branch restrictions: set up by KubeSight so a merge waits for its verdict
+# ---------------------------------------------------------------------------
+
+def _restrictions_endpoint(repository_ref: str, restriction_id: str = "", kind: str = "") -> str:
+    base = f"{API_ORIGIN}/2.0/repositories/{quote(repository_ref, safe='/')}/branch-restrictions"
+    if restriction_id:
+        return f"{base}/{quote(str(restriction_id), safe='')}"
+    return f"{base}?kind={quote(kind, safe='')}&pagelen=100" if kind else base
+
+
+def _restriction_error(exc: StatusWriteError) -> StatusWriteError:
+    if exc.status in (401, 403):
+        return StatusWriteError(
+            "Bitbucket would not let this credential change the repository's "
+            "branch restrictions. That needs repository admin scope.",
+            status=exc.status,
+            retryable=False,
+        )
+    return exc
+
+
+def list_branch_restrictions(
+    *,
+    repository_ref: str,
+    kind: str,
+    token: str,
+    credential_type: str,
+    principal: str = "",
+) -> list:
+    """Glob restrictions of one kind, with the id needed to update one."""
+    try:
+        payload = _request(
+            _restrictions_endpoint(repository_ref, kind=kind),
+            repository_ref,
+            method="GET",
+            token=token,
+            credential_type=credential_type,
+            principal=principal,
+        )
+    except StatusWriteError as exc:
+        raise _restriction_error(exc) from exc
+    found = []
+    for item in payload.get("values") or []:
+        if not isinstance(item, dict) or item.get("kind") != kind:
+            continue
+        found.append(
+            {
+                "id": item.get("id"),
+                "pattern": str(item.get("pattern") or ""),
+                "matchKind": str(item.get("branch_match_kind") or "glob"),
+                "value": item.get("value"),
+            }
+        )
+    return found
+
+
+def save_branch_restriction(
+    *,
+    repository_ref: str,
+    restriction_id: str = "",
+    kind: str,
+    pattern: str,
+    value: Optional[int] = None,
+    token: str,
+    credential_type: str,
+    principal: str = "",
+) -> Dict[str, Any]:
+    """Create one glob restriction, or update an existing one by id."""
+    body: Dict[str, Any] = {
+        "kind": kind,
+        "branch_match_kind": "glob",
+        "pattern": pattern,
+    }
+    if value is not None:
+        body["value"] = int(value)
+    if kind == PUSH_KIND:
+        body["users"] = []
+        body["groups"] = []
+    try:
+        return _request(
+            _restrictions_endpoint(repository_ref, str(restriction_id or "")),
+            repository_ref,
+            body,
+            method="PUT" if restriction_id else "POST",
+            token=token,
+            credential_type=credential_type,
+            principal=principal,
+        )
+    except StatusWriteError as exc:
+        raise _restriction_error(exc) from exc

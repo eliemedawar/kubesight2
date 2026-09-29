@@ -205,6 +205,11 @@ class CiMergeCheckConfig(db.Model, _GateColumns):
     # and a stage that always reports zero is worse than no stage: it reads as
     # evidence.
     tools = db.Column(db.JSON, nullable=False, default=list)
+    # How ``tools`` is chosen. "auto" (NULL reads the same) derives it from the
+    # service's application type every time the pipeline is generated — ESLint
+    # only for Node, SonarQube or Semgrep, Dependency-Check where it can read the
+    # manifests; see ``merge_checks.profiles``. "custom" keeps what was ticked.
+    tools_mode = db.Column(db.String(16), nullable=True, default="auto")
 
     # Per-tool command overrides: {"eslint": ["line", "line", ...]}.
     #

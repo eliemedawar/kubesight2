@@ -41,6 +41,24 @@ export const saveServiceMergeChecks = (serviceId, payload) =>
 export const getMergeCheckEnforcement = (serviceId) =>
   request(`/api/ci/services/${encodeURIComponent(serviceId)}/merge-checks/enforcement`);
 
+/**
+ * Let KubeSight do the Bitbucket side: create (or correct) the repository
+ * webhook with the secret, generate the pipeline if it is missing, and (with
+ * `protectBranches`) add the branch restrictions that make a merge wait for a
+ * passing KubeSight check — all with the credential the service already uses.
+ * `blockDirectPush` also stops anybody pushing to those branches directly.
+ * Switches nothing on.
+ */
+export const setupMergeChecksInSource = (serviceId, options = {}) =>
+  request(`/api/ci/services/${encodeURIComponent(serviceId)}/merge-checks/setup`, {
+    method: "POST",
+    body: options,
+  });
+
+/** Whether Bitbucket already has a webhook pointing at this service. Live read. */
+export const getMergeCheckWebhook = (serviceId) =>
+  request(`/api/ci/services/${encodeURIComponent(serviceId)}/merge-checks/webhook`);
+
 /** The shared secret, in plaintext. Audited server-side on every reveal. */
 export const revealMergeCheckSecret = (serviceId) =>
   request(`/api/ci/services/${encodeURIComponent(serviceId)}/merge-checks/secret`);

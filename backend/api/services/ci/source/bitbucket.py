@@ -57,6 +57,10 @@ def _pattern_covers(restriction: Dict[str, Any], branch: str) -> bool:
     return fnmatch.fnmatch(branch, pattern)
 
 
+def _without_query(url: str) -> str:
+    return str(url or "").split("?", 1)[0].split("#", 1)[0].rstrip("/").lower()
+
+
 class BitbucketSourceProvider:
     provider = "bitbucket"
 
@@ -242,6 +246,72 @@ class BitbucketSourceProvider:
         except bitbucket_status.StatusWriteError as exc:
             raise SourceError(str(exc), retryable=exc.retryable) from exc
 
+    def find_webhook(
+        self, ref: RepositoryRef, credential, *, url: str
+    ) -> Optional[Dict[str, Any]]:
+        """The repository webhook that already points at ``url``, if any.
+
+        Matched on the URL without its query string, so a webhook set up by hand
+        with the ``?secret=`` fallback is recognised and corrected rather than
+        left beside a second one that fires the same checks twice.
+        """
+        token, credential_type, principal = self._credential_parts(credential)
+        try:
+            hooks = bitbucket_status.list_webhooks(
+                repository_ref=ref.full_name,
+                token=token,
+                credential_type=credential_type,
+                principal=principal,
+            )
+        except bitbucket_status.StatusWriteError as exc:
+            raise SourceError(str(exc), retryable=exc.retryable) from exc
+        wanted = _without_query(url)
+        for hook in hooks:
+            if _without_query(hook["url"]) == wanted:
+                return hook
+        return None
+
+    def ensure_webhook(
+        self,
+        ref: RepositoryRef,
+        credential,
+        *,
+        url: str,
+        secret: str,
+        events: List[str],
+        description: str,
+    ) -> Dict[str, Any]:
+        """Create the webhook, or update the one already pointing at ``url``."""
+        if credential is not None and credential.read_only:
+            raise SourceError(
+                f"Credential profile '{credential.name}' is marked read-only. "
+                "Creating a webhook is a write, so it needs a credential with "
+                "write access.",
+                retryable=False,
+            )
+        existing = self.find_webhook(ref, credential, url=url)
+        token, credential_type, principal = self._credential_parts(credential)
+        try:
+            saved = bitbucket_status.save_webhook(
+                repository_ref=ref.full_name,
+                uid=existing["uuid"] if existing else "",
+                url=url,
+                secret=secret,
+                events=events,
+                description=description,
+                token=token,
+                credential_type=credential_type,
+                principal=principal,
+            )
+        except bitbucket_status.StatusWriteError as exc:
+            raise SourceError(str(exc), retryable=exc.retryable) from exc
+        return {
+            "action": "updated" if existing else "created",
+            "uuid": str(saved.get("uuid") or (existing or {}).get("uuid") or ""),
+            "url": url,
+            "events": list(events),
+        }
+
     def check_merge_enforcement(
         self, ref: RepositoryRef, credential, *, branches: Optional[List[str]] = None
     ) -> Dict[str, Any]:
@@ -268,7 +338,16 @@ class BitbucketSourceProvider:
         except bitbucket_status.StatusWriteError as exc:
             raise SourceError(str(exc), retryable=exc.retryable) from exc
 
-        active = [item for item in restrictions if item["minimum"] > 0]
+        builds = [
+            item for item in restrictions
+            if item.get("kind", bitbucket_status.BUILD_RESTRICTION_KIND)
+            == bitbucket_status.BUILD_RESTRICTION_KIND
+        ]
+        hard = [
+            item for item in restrictions
+            if item.get("kind") == bitbucket_status.ENFORCE_CHECKS_KIND
+        ]
+        active = [item for item in builds if item["minimum"] > 0]
         watched = [branch for branch in (branches or []) if branch]
         covered, uncovered = [], []
         for branch in watched:
@@ -276,6 +355,11 @@ class BitbucketSourceProvider:
                 covered.append(branch)
             else:
                 uncovered.append(branch)
+        # Whether a failed check REFUSES the merge rather than warning beside it.
+        # Bitbucket Cloud only refuses with "enforce merge checks" (Premium).
+        hard_covered = bool(watched) and all(
+            any(_pattern_covers(item, branch) for item in hard) for branch in watched
+        )
 
         return {
             "restrictions": active,
@@ -285,5 +369,111 @@ class BitbucketSourceProvider:
             # realistic set of patterns covers "every branch" — so the honest
             # answer is "there is a restriction", not "you are covered".
             "enforced": bool(active) and not uncovered,
+            "hardBlock": bool(active) and not uncovered and hard_covered,
             "checkedBranches": watched,
+        }
+
+    def ensure_merge_protection(
+        self,
+        ref: RepositoryRef,
+        credential,
+        *,
+        branches: List[str],
+        block_direct_push: bool = False,
+    ) -> Dict[str, Any]:
+        """Make each branch wait for a passing build before it can be merged.
+
+        Per branch pattern, idempotently:
+
+        * ``require_passing_builds_to_merge`` with at least one — KubeSight
+          files INPROGRESS the moment a pull request arrives and FAILED when it
+          blocks, and Bitbucket counts "no failed and no in-progress builds", so
+          a pull request cannot merge before KubeSight has said yes;
+        * ``enforce_merge_checks`` — the Premium switch that makes that a
+          refusal instead of a warning. Refused on other plans, which is
+          reported, not raised: the first restriction is still worth having;
+        * optionally ``push`` with nobody allowed, so the branch cannot be
+          changed except by merging a pull request. An existing push
+          restriction is never touched — somebody chose who may push.
+        """
+        if credential is not None and credential.read_only:
+            raise SourceError(
+                f"Credential profile '{credential.name}' is marked read-only. "
+                "Changing branch restrictions is a write.",
+                retryable=False,
+            )
+        token, credential_type, principal = self._credential_parts(credential)
+        auth = {
+            "repository_ref": ref.full_name,
+            "token": token,
+            "credential_type": credential_type,
+            "principal": principal,
+        }
+
+        def existing(kind: str) -> Dict[str, Dict[str, Any]]:
+            items = bitbucket_status.list_branch_restrictions(kind=kind, **auth)
+            return {
+                item["pattern"]: item for item in items if item["matchKind"] == "glob"
+            }
+
+        try:
+            builds = existing(bitbucket_status.BUILD_RESTRICTION_KIND)
+            hard = existing(bitbucket_status.ENFORCE_CHECKS_KIND)
+            pushes = existing(bitbucket_status.PUSH_KIND) if block_direct_push else {}
+            results = []
+            hard_error = ""
+            for branch in branches:
+                row: Dict[str, Any] = {"branch": branch}
+
+                current = builds.get(branch)
+                if current is None:
+                    bitbucket_status.save_branch_restriction(
+                        kind=bitbucket_status.BUILD_RESTRICTION_KIND,
+                        pattern=branch, value=1, **auth,
+                    )
+                    row["passingBuilds"] = "created"
+                elif int(current.get("value") or 0) < 1:
+                    bitbucket_status.save_branch_restriction(
+                        restriction_id=str(current["id"]),
+                        kind=bitbucket_status.BUILD_RESTRICTION_KIND,
+                        pattern=branch, value=1, **auth,
+                    )
+                    row["passingBuilds"] = "updated"
+                else:
+                    row["passingBuilds"] = "existing"
+
+                if branch in hard:
+                    row["enforceChecks"] = "existing"
+                elif hard_error:
+                    row["enforceChecks"] = "unavailable"
+                else:
+                    try:
+                        bitbucket_status.save_branch_restriction(
+                            kind=bitbucket_status.ENFORCE_CHECKS_KIND,
+                            pattern=branch, **auth,
+                        )
+                        row["enforceChecks"] = "created"
+                    except bitbucket_status.StatusWriteError as exc:
+                        if exc.retryable or exc.status in (401, 403):
+                            raise
+                        hard_error = str(exc)
+                        row["enforceChecks"] = "unavailable"
+
+                if not block_direct_push:
+                    row["directPush"] = "skipped"
+                elif branch in pushes:
+                    row["directPush"] = "existing"
+                else:
+                    bitbucket_status.save_branch_restriction(
+                        kind=bitbucket_status.PUSH_KIND, pattern=branch, **auth,
+                    )
+                    row["directPush"] = "created"
+                results.append(row)
+        except bitbucket_status.StatusWriteError as exc:
+            raise SourceError(str(exc), retryable=exc.retryable) from exc
+
+        return {
+            "branches": results,
+            "hardBlock": not hard_error,
+            "hardBlockError": hard_error,
         }

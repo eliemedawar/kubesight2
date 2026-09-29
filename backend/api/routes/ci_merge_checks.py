@@ -176,6 +176,42 @@ def rotate_secret(service_id: int):
 
 
 @ci_merge_checks_bp.route(
+    "/services/<int:service_id>/merge-checks/setup", methods=["POST"]
+)
+@require_permission("ci_merge_checks:manage")
+def setup_in_source(service_id: int):
+    """Create the webhook, its secret, the pipeline and the branch restrictions
+    that make a merge wait for KubeSight — all with the service's credential."""
+    try:
+        service = _service(service_id)
+        payload = _payload()
+        data = merge_checks_service.configure_in_source(
+            service,
+            actor=get_current_user(),
+            protect_branches=payload.get("protectBranches", True) is not False,
+            block_direct_push=bool(payload.get("blockDirectPush")),
+        )
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
+
+
+@ci_merge_checks_bp.route(
+    "/services/<int:service_id>/merge-checks/webhook", methods=["GET"]
+)
+@require_permission("ci_merge_checks:view")
+def webhook_status(service_id: int):
+    """Whether Bitbucket already has a webhook for this service. A live read."""
+    try:
+        service = _service(service_id)
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    return success_response(merge_checks_service.webhook_status(service))
+
+
+@ci_merge_checks_bp.route(
     "/services/<int:service_id>/merge-checks/enforcement", methods=["GET"]
 )
 @require_permission("ci_merge_checks:view")

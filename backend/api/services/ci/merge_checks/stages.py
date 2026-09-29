@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 from .. import build_environments
 from ....models_merge_checks import MERGE_CHECK_TOOLS, TOOL_LABELS
 from .metrics import SENTINEL, STAGE_TOOL_ENV
+from .profiles import semgrep_rules
 
 # The checkout every check runs against. Named the same as everywhere else in
 # CI so the stage reads identically in the editor.
@@ -146,7 +147,7 @@ def _eslint_commands(count_warnings: bool) -> List[str]:
 # Semgrep — the same job as SonarQube, with nothing to operate
 # ---------------------------------------------------------------------------
 
-def _semgrep_commands(min_severity: str) -> List[str]:
+def _semgrep_commands(min_severity: str, app_type: str = "") -> List[str]:
     """Scan the checkout, count the findings, print the number.
 
     One step, unlike SonarQube: Semgrep reads the working tree and writes a
@@ -154,6 +155,10 @@ def _semgrep_commands(min_severity: str) -> List[str]:
     web API to ask afterwards. That is the entire difference between the two as
     far as this gate is concerned — and it is why a site with no SonarQube can
     pick this and get the same verdict.
+
+    The default rules follow the application type: ``p/default`` plus the
+    language's own pack (``p/java`` for a Gradle service, ``p/javascript`` and
+    ``p/typescript`` for Node). See ``profiles.semgrep_rules``.
 
     ``--metrics=off`` because a merge check must not phone home about somebody's
     private repository, and ``SEMGREP_RULES`` so an installation that wants no
@@ -163,15 +168,17 @@ def _semgrep_commands(min_severity: str) -> List[str]:
     counted = _SEMGREP_BY_FLOOR.get(min_severity, _SEMGREP_BY_FLOOR["medium"])
     counted_literal = ",".join(f"'{level}'" for level in counted)
     return [
-        '# Rules: a registry pack by default. Set SEMGREP_RULES to a path inside',
-        '# the repository (e.g. .semgrep/) to run with no network at all.',
-        'RULES="${SEMGREP_RULES:-p/default}"',
+        '# Rules: registry packs for this application type by default. Set',
+        '# SEMGREP_RULES to a path inside the repository (e.g. .semgrep/) to run',
+        '# with no network at all. Several rule sets are separated by spaces.',
+        f'RULES="${{SEMGREP_RULES:-{semgrep_rules(app_type)}}}"',
         'echo "Scanning with rules: $RULES"',
+        'CONFIG_ARGS=""',
+        'for R in $RULES; do CONFIG_ARGS="$CONFIG_ARGS --config $R"; done',
         "",
         "# Exits non-zero when it finds anything. Findings are the quality gate's",
         "# business, so the report is what decides whether this stage worked.",
-        "semgrep scan \\",
-        '  --config "$RULES" \\',
+        "semgrep scan $CONFIG_ARGS \\",
         "  --json \\",
         "  --output semgrep-report.json \\",
         "  --metrics=off \\",
@@ -401,12 +408,14 @@ _TOOL_TIMEOUTS = {
 }
 
 
-def generated_commands(tool: str, gate: Dict[str, Any], *, service_slug: str = "") -> List[str]:
+def generated_commands(
+    tool: str, gate: Dict[str, Any], *, service_slug: str = "", app_type: str = ""
+) -> List[str]:
     """The default script for one tool — what "Reset to the default" restores."""
     if tool == "eslint":
         return _eslint_commands(bool(gate.get("eslintCountWarnings")))
     if tool == "semgrep":
-        return _semgrep_commands(str(gate.get("semgrepMinSeverity") or "medium"))
+        return _semgrep_commands(str(gate.get("semgrepMinSeverity") or "medium"), app_type)
     if tool == "sonar":
         return _sonar_commands(
             str(gate.get("sonarMinSeverity") or "medium"), service_slug or "merge-check"
@@ -423,6 +432,7 @@ def check_stage(
     service_slug: str = "",
     known_secret_keys: Optional[set] = None,
     custom_commands: Optional[List[str]] = None,
+    app_type: str = "",
 ) -> Dict[str, Any]:
     """One tool's stage, wired to report against ``gate``.
 
@@ -441,7 +451,7 @@ def check_stage(
     elif tool == "eslint":
         commands = _eslint_commands(bool(gate.get("eslintCountWarnings")))
     elif tool in ("semgrep", "sonar", "dependency_check"):
-        commands = generated_commands(tool, gate, service_slug=service_slug)
+        commands = generated_commands(tool, gate, service_slug=service_slug, app_type=app_type)
     else:
         raise ValueError(f"Unknown merge check tool: {tool}")
 
@@ -485,6 +495,7 @@ def build_stages(
     service_slug: str = "",
     known_secret_keys: Optional[set] = None,
     custom_commands: Optional[Dict[str, List[str]]] = None,
+    app_type: str = "",
 ) -> List[Dict[str, Any]]:
     """Checkout plus one stage per selected tool, in canonical order."""
     ordered = [tool for tool in MERGE_CHECK_TOOLS if tool in set(tools or ())]
@@ -505,6 +516,7 @@ def build_stages(
             service_slug=service_slug,
             known_secret_keys=known_secret_keys,
             custom_commands=overrides.get(tool),
+            app_type=app_type,
         )
         for tool in ordered
     )
