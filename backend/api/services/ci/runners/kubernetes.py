@@ -217,7 +217,21 @@ else
     if git fetch --no-tags --depth 50 origin "$KUBESIGHT_REVISION" 2>/dev/null; then
       git checkout --quiet FETCH_HEAD
     else
-      git checkout --quiet "$KUBESIGHT_REVISION"
+      # A webhook may carry an abbreviated SHA, which cannot be fetched as a
+      # remote ref. The default-branch clone does not contain PR-only commits.
+      # Fetch the source branch to obtain its objects, then resolve the PINNED
+      # revision locally: the branch may have advanced since the webhook.
+      if ! git rev-parse --verify --end-of-options "${KUBESIGHT_REVISION}^{commit}" >/dev/null 2>&1 &&
+         [ -n "${KUBESIGHT_BRANCH:-}" ]; then
+        echo "Fetching source branch $KUBESIGHT_BRANCH to resolve $KUBESIGHT_REVISION"
+        git fetch --no-tags --depth 50 origin "refs/heads/$KUBESIGHT_BRANCH"
+      fi
+      if RESOLVED_COMMIT=$(git rev-parse --verify --end-of-options "${KUBESIGHT_REVISION}^{commit}" 2>/dev/null); then
+        git checkout --quiet --detach "$RESOLVED_COMMIT"
+      else
+        echo "Cannot resolve requested commit $KUBESIGHT_REVISION in the fetched repository. Check that the commit is available on the source branch, or use its full SHA." >&2
+        exit 1
+      fi
     fi
   fi
 fi
@@ -1335,6 +1349,7 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                     {
                         "KUBESIGHT_REPO_URL": execution.repository_url or "",
                         "KUBESIGHT_REVISION": execution.commit_sha or execution.branch or "",
+                        "KUBESIGHT_BRANCH": execution.branch or "",
                     },
                 )
                 + callback_env
