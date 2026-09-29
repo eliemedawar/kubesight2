@@ -29,6 +29,7 @@ from ...models_ci import (
     SERVICE_STATUSES,
     CiArtifact,
     CiBuild,
+    CiPipeline,
     CiSecret,
     CiService,
 )
@@ -309,13 +310,18 @@ def readiness(row: CiService) -> Dict[str, Any]:
     return {"ready": all(check["ok"] for check in checks), "checks": checks}
 
 
-def can_run_build(row: CiService) -> Optional[str]:
-    """None when a build may start, otherwise the reason it may not."""
+def can_run_build(row: CiService, *, pipeline_id: Optional[int] = None) -> Optional[str]:
+    """Readiness for the selected pipeline, or the normal build when omitted."""
     if row.status != "active":
         return f"This service is {row.status}. Set it to active before running builds."
     if not row.source_ready():
         return "Connect a repository and credential before running a build."
-    pipeline = row.default_pipeline()
+    if pipeline_id:
+        pipeline = db.session.get(CiPipeline, int(pipeline_id))
+        if pipeline is None or pipeline.service_id != row.id:
+            return "That pipeline does not belong to this service."
+    else:
+        pipeline = row.default_pipeline()
     stages = list(pipeline.stages) if pipeline else []
     if row.application_type == "generic" and not any(
         stage.enabled and stage.stage_type == "command" and list(stage.commands or [])

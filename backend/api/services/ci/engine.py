@@ -258,7 +258,7 @@ def trigger_build(
     """
     from .catalog import can_run_build
 
-    blocked = can_run_build(service)
+    blocked = can_run_build(service, pipeline_id=pipeline_id)
     if blocked:
         raise BuildError(blocked)
 
