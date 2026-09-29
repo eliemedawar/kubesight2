@@ -56,6 +56,7 @@ _SEMGREP_PACKS = {
     "node": ("p/default", "p/javascript", "p/typescript"),
     "python": ("p/default", "p/python"),
     "container": ("p/default", "p/dockerfile"),
+    "ios": ("p/default", "p/swift"),
 }
 
 _NO_DEPENDENCY_CHECK = {"ios", "flutter"}

@@ -1367,7 +1367,7 @@ def test_a_java_service_runs_no_eslint_and_scans_with_the_java_rules(
     response = _enable_auto(client, admin_token, service_id)
     assert response.status_code == 200, response.get_json()
     data = response.get_json()["data"]
-    assert _stage_names(data) == ["Checkout", "Semgrep scan", "Dependency-Check"]
+    assert _stage_names(data) == ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"]
     semgrep = next(s for s in data["pipelineStages"] if s["tool"] == "semgrep")
     assert any("p/default p/java" in line for line in semgrep["commands"])
 
@@ -1418,4 +1418,83 @@ def test_a_pull_request_regenerates_the_checks_after_the_type_changes(
         assert config.tools == ["semgrep", "dependency_check"]
         build = db.session.get(CiBuild, db.session.get(CiMergeCheck, data["checkId"]).build_id)
         names = [stage["name"] for stage in build.pipeline_snapshot["stages"]]
-        assert names == ["Checkout", "Semgrep scan", "Dependency-Check"]
+        assert names == ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"]
+
+
+def test_a_secret_added_after_enabling_reaches_the_stage_on_the_next_pull_request(
+    app, client, admin_token, service_id
+):
+    from api.models_ci import CiPipeline, CiSecret
+
+    _set_type(app, service_id, "java_gradle")
+    _enable_auto(client, admin_token, service_id)
+    with app.app_context():
+        db.session.add(CiSecret(scope="global", key="NVD_API_KEY", value_cipher="x"))
+        db.session.commit()
+    slug = _slug(app, service_id)
+    secret = _secret(client, admin_token, service_id)
+    _post_hook(client, slug, secret, _pull_request_body())
+    with app.app_context():
+        config = CiMergeCheckConfig.query.filter_by(service_id=service_id).one()
+        pipeline = db.session.get(CiPipeline, config.pipeline_id)
+        dc = next(s for s in pipeline.stages if s.name == "Dependency-Check")
+        assert [ref["name"] for ref in dc.secret_refs] == ["NVD_API_KEY"]
+
+
+# Every application type a service can declare, and the pipeline it must get.
+_EXPECTED_BY_TYPE = {
+    "container": ["Checkout", "Semgrep scan", "Dependency-Check"],
+    "java_maven": ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"],
+    "java_gradle": ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"],
+    "java": ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"],
+    "node": ["Checkout", "ESLint", "Semgrep scan", "Dependency-Check"],
+    "python": ["Checkout", "Semgrep scan", "Dependency-Check"],
+    "android": ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"],
+    "ios": ["Checkout", "Semgrep scan"],
+    "flutter": ["Checkout", "Semgrep scan"],
+    "generic": ["Checkout", "Semgrep scan", "Dependency-Check"],
+}
+
+
+def test_every_application_type_is_covered():
+    from api.models_ci import APPLICATION_TYPES
+
+    assert set(_EXPECTED_BY_TYPE) == set(APPLICATION_TYPES)
+
+
+@pytest.mark.parametrize("app_type", sorted(_EXPECTED_BY_TYPE))
+def test_each_application_type_gets_a_valid_pipeline_and_runs_to_a_verdict(
+    app, client, admin_token, service_id, captured_verdicts, app_type
+):
+    """Enable, receive a pull request, run the build, judge it: per type."""
+    from api.services.ci.merge_checks import profiles
+
+    _set_type(app, service_id, app_type)
+    response = _enable_auto(client, admin_token, service_id, maxTotalProblems=5)
+    assert response.status_code == 200, response.get_json()
+    data = response.get_json()["data"]
+    assert _stage_names(data) == _EXPECTED_BY_TYPE[app_type]
+
+    semgrep = next(s for s in data["pipelineStages"] if s["tool"] == "semgrep")
+    assert any(profiles.semgrep_rules(app_type) in line for line in semgrep["commands"])
+    dc = next((s for s in data["pipelineStages"] if s["tool"] == "dependency_check"), None)
+    if dc is not None:
+        experimental = any("--enableExperimental" in line for line in dc["commands"])
+        assert experimental == (app_type in ("python", "generic", "container"))
+
+    slug = _slug(app, service_id)
+    secret = _secret(client, admin_token, service_id)
+    started = _post_hook(client, slug, secret, _pull_request_body()).get_json()["data"]
+    assert started["state"] == "running"
+    _drain(app)
+    with app.app_context():
+        check = db.session.get(CiMergeCheck, started["checkId"])
+        build_id = check.build_id
+        tools = list(check.config.tools)
+    for tool in tools:
+        _report(app, build_id, tool, f"##kubesight-metric tool={tool} status=ok problems=1")
+    _drain(app, settle=True)
+    with app.app_context():
+        check = db.session.get(CiMergeCheck, started["checkId"])
+        assert check.state == "passed", check.reasons
+        assert check.total_problems == len(tools)

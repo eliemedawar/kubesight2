@@ -1421,6 +1421,7 @@ def test_an_agent_can_read_a_merge_gate_and_why_a_pull_request_was_blocked(
             service_id=service.id,
             enabled=True,
             tools=["eslint", "semgrep"],
+            tools_mode="custom",
             events=["pullrequest:created"],
             target_branches=["master"],
             gate_mode="override",

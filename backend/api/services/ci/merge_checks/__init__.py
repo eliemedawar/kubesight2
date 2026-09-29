@@ -317,6 +317,9 @@ def save_config(
         # match the configuration" condition.
         or dict(row.custom_commands or {}) != before_commands
         or row.pipeline_id is None
+        # A secret added since the last generation - "add NVD_API_KEY, then
+        # press Save" has to be enough.
+        or _secrets_drifted(service, row, _known_secret_keys(service))
     )
     if row.tools and (stages_stale or payload.get("regeneratePipeline")):
         _sync_pipeline(service, row, after_gate, actor=actor)
@@ -352,6 +355,26 @@ def _stage_relevant(gate: Dict[str, Any]) -> Tuple:
         gate.get("sonarMinSeverity"),
         gate.get("dependencyMinSeverity"),
     )
+
+
+def _build_tool_image(service: CiService) -> str:
+    """The image the service's own build runs Gradle/Maven in, if it has one.
+
+    The dependency stage resolves with the same JDK and build tool the project
+    is built with; a generic image is the fallback, not the first choice,
+    because "this project needs Java 17" is the usual way a generic one fails.
+    """
+    if profiles.application_type(service) not in stages.JAVA_TYPES:
+        return ""
+    markers = ("gradle", "mvn", "maven")
+    for pipeline in service.pipelines:
+        if (pipeline.purpose or "build") != "build" or not pipeline.enabled:
+            continue
+        for stage in sorted(pipeline.stages, key=lambda s: s.position):
+            text = " ".join(stage.commands or []).lower()
+            if stage.image and any(marker in text for marker in markers):
+                return stage.image
+    return ""
 
 
 def _sync_pipeline(
@@ -393,6 +416,7 @@ def _sync_pipeline(
             known_secret_keys=known_keys,
             custom_commands=dict(config.custom_commands or {}),
             app_type=profiles.application_type(service),
+            deps_image=_build_tool_image(service),
         ),
     }
 
@@ -1072,7 +1096,7 @@ def ingest(
             "message": "This commit has already been checked.",
         }
 
-    _refresh_automatic_tools(service, config)
+    _refresh_pipeline(service, config)
 
     check = CiMergeCheck(
         service_id=service.id,
@@ -1160,18 +1184,50 @@ def ingest(
     }
 
 
-def _refresh_automatic_tools(service: CiService, config: CiMergeCheckConfig) -> None:
-    """In automatic mode, catch the pipeline up with the service before a run.
+def _secrets_drifted(
+    service: CiService, config: CiMergeCheckConfig, known_keys: set
+) -> bool:
+    """Whether a secret a check can use was added or removed since generation.
 
-    The application type can change, and SonarQube secrets can be added, after
-    the pipeline was last generated. A pull request must be checked with the
-    tools the service would get TODAY, not the ones it had at the last save.
+    A stage only receives the secrets it references, and it can only reference
+    secrets that existed when the pipeline was generated. Without this, adding
+    NVD_API_KEY or the SonarQube pair after enabling merge checks would never
+    reach the stage.
+    """
+    pipeline = db.session.get(CiPipeline, config.pipeline_id) if config.pipeline_id else None
+    if pipeline is None:
+        return False
+    current = {
+        (stage.env or {}).get(metrics.STAGE_TOOL_ENV, ""): sorted(
+            ref.get("name", "") for ref in (stage.secret_refs or [])
+        )
+        for stage in pipeline.stages
+    }
+    for tool in config.tools or []:
+        wanted = sorted(
+            ref["name"] for ref in stages.tool_secret_refs(tool) if ref["name"] in known_keys
+        )
+        if current.get(tool, []) != wanted:
+            return True
+    return False
+
+
+def _refresh_pipeline(service: CiService, config: CiMergeCheckConfig) -> None:
+    """Catch the pipeline up with the service before a pull request runs.
+
+    In automatic mode the application type can change, and SonarQube secrets
+    can be added, after the pipeline was last generated; in either mode a
+    secret a check uses (NVD_API_KEY, SONAR_TOKEN) can be added. A pull request
+    must be checked with what the service has TODAY, not at the last save.
     Best effort: if regenerating fails, the existing pipeline still runs.
     """
-    if tools_mode(config) != "auto":
-        return
-    wanted = effective_tools(service, config)
-    if wanted == list(config.tools or []) and config.pipeline_id is not None:
+    known_keys = _known_secret_keys(service)
+    wanted = effective_tools(service, config, known_keys)
+    if (
+        wanted == list(config.tools or [])
+        and config.pipeline_id is not None
+        and not _secrets_drifted(service, config, known_keys)
+    ):
         return
     previous = list(config.tools or [])
     try:
@@ -1182,7 +1238,7 @@ def _refresh_automatic_tools(service: CiService, config: CiMergeCheckConfig) -> 
         # The old pipeline runs, so the gate must read the old tools' metrics.
         config.tools = previous
         logger.warning(
-            "Merge checks for %s could not follow the application type: %s",
+            "Merge checks for %s could not regenerate their pipeline: %s",
             service.slug,
             exc,
         )

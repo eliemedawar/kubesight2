@@ -40,6 +40,29 @@ from .profiles import semgrep_rules
 # CI so the stage reads identically in the editor.
 CHECKOUT_STAGE = "Checkout"
 
+# JVM application types, and the build tool that knows their dependencies.
+# Dependency-Check reads jars, not build.gradle or pom.xml, so for these the
+# pipeline first asks Gradle/Maven to put the resolved jars in DEPS_DIR —
+# without that step the scan reports zero and means nothing.
+JAVA_TYPES = ("java_gradle", "java_maven", "java", "android")
+_DEPS_TOOL = {
+    "java_gradle": "gradle",
+    "android": "gradle",
+    "java_maven": "maven",
+    "java": "maven",
+}
+_DEPS_ENV_KEY = {
+    "java_gradle": "gradle-8-jdk11",
+    "android": "android",
+    "java_maven": "maven-3.9-jdk21",
+    "java": "maven-3.9-jdk21",
+}
+DEPS_DIR = ".kubesight-deps"
+DEPS_STAGE = "Resolve dependencies"
+# Types whose dependency manifests Dependency-Check only reads with its
+# "experimental" analyzers on: pip requirements, Pipfile, Poetry.
+_DC_EXPERIMENTAL = ("python", "generic", "container")
+
 _STAGE_NAMES = {
     "eslint": "ESLint",
     "semgrep": "Semgrep scan",
@@ -107,6 +130,14 @@ def _eslint_commands(count_warnings: bool) -> List[str]:
     at the version and with the config the project pins. Fetching a floating
     ESLint from the network would lint the repository against rules its authors
     never agreed to, and would do it differently next week.
+
+    A project that has not set ESLint up (no dependency on it, no config) is
+    reported as `skipped` rather than failing: that is a fact about the
+    repository, not a tool that broke, and blocking every merge of a Node
+    service that never adopted ESLint would make the gate useless there.
+
+    Installed with the package manager the lockfile belongs to — ``npm ci``
+    against a yarn.lock ignores the lock and installs different versions.
     """
     counted = "e+w" if count_warnings else "e"
     return [
@@ -116,10 +147,32 @@ def _eslint_commands(count_warnings: bool) -> List[str]:
         "  exit 0",
         "fi",
         "",
-        "if [ -f package-lock.json ]; then",
-        "  npm ci --no-audit --no-fund",
+        "HAS_ESLINT=$(node -e \"const p=require('./package.json');"
+        "const d=Object.assign({},p.dependencies,p.devDependencies);"
+        "console.log(d.eslint||p.eslintConfig?'yes':'no')\")",
+        'if [ "$HAS_ESLINT" != yes ] && ! ls eslint.config.* .eslintrc* >/dev/null 2>&1; then',
+        '  echo "This project does not use ESLint (no dependency, no config) - skipped."',
+        '  echo "Add eslint to devDependencies with a config to have it checked."',
+        f"  {_metric('eslint', 'skipped', problems=0)}",
+        "  exit 0",
+        "fi",
+        "",
+        "INSTALL_EXIT=0",
+        "if [ -f pnpm-lock.yaml ]; then",
+        "  corepack enable >/dev/null 2>&1 || true",
+        "  pnpm install --frozen-lockfile || INSTALL_EXIT=$?",
+        "elif [ -f yarn.lock ]; then",
+        "  corepack enable >/dev/null 2>&1 || true",
+        "  yarn install --frozen-lockfile || yarn install --immutable || INSTALL_EXIT=$?",
+        "elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then",
+        "  npm ci --no-audit --no-fund || INSTALL_EXIT=$?",
         "else",
-        "  npm install --no-audit --no-fund",
+        "  npm install --no-audit --no-fund || INSTALL_EXIT=$?",
+        "fi",
+        'if [ "$INSTALL_EXIT" != 0 ]; then',
+        '  echo "Installing the dependencies failed (exit $INSTALL_EXIT), so ESLint cannot run."',
+        f"  {_metric('eslint', 'error', problems=0)}",
+        "  exit 1",
         "fi",
         "",
         "# ESLint exits non-zero when it finds anything. Findings are the quality",
@@ -171,24 +224,54 @@ def _semgrep_commands(min_severity: str, app_type: str = "") -> List[str]:
         '# Rules: registry packs for this application type by default. Set',
         '# SEMGREP_RULES to a path inside the repository (e.g. .semgrep/) to run',
         '# with no network at all. Several rule sets are separated by spaces.',
-        f'RULES="${{SEMGREP_RULES:-{semgrep_rules(app_type)}}}"',
+        f'DEFAULT_RULES="{semgrep_rules(app_type)}"',
+        "# Rules committed to the repository win over the registry: they work",
+        "# offline and are the ones the team actually agreed to.",
+        "if [ -f .semgrep.yml ]; then DEFAULT_RULES=.semgrep.yml;"
+        " elif [ -d .semgrep ]; then DEFAULT_RULES=.semgrep; fi",
+        'RULES="${SEMGREP_RULES:-$DEFAULT_RULES}"',
         'echo "Scanning with rules: $RULES"',
         'CONFIG_ARGS=""',
         'for R in $RULES; do CONFIG_ARGS="$CONFIG_ARGS --config $R"; done',
         "",
-        "# Exits non-zero when it finds anything. Findings are the quality gate's",
-        "# business, so the report is what decides whether this stage worked.",
+        "# Exit 1 means findings - the quality gate's business. 2 and above means",
+        "# Semgrep itself failed. Its own output is kept either way: a failure",
+        "# with no explanation is what this stage used to print.",
+        "SEMGREP_EXIT=0",
         "semgrep scan $CONFIG_ARGS \\",
         "  --json \\",
         "  --output semgrep-report.json \\",
         "  --metrics=off \\",
-        "  --quiet || true",
+        "  --disable-version-check \\",
+        "  2> semgrep-stderr.log || SEMGREP_EXIT=$?",
+        'echo "Semgrep exited with $SEMGREP_EXIT."',
         "",
         "if [ ! -s semgrep-report.json ]; then",
-        '  echo "Semgrep produced no report."',
+        '  echo "Semgrep produced no report. Its output:"',
+        '  echo "------------------------------------------------------------"',
+        "  tail -n 40 semgrep-stderr.log 2>/dev/null || true",
+        '  echo "------------------------------------------------------------"',
+        "  if [ \"$SEMGREP_EXIT\" = 127 ]; then",
+        '    echo "Hint: semgrep is not installed in this image - check the semgrep build environment."',
+        "  elif grep -qiE 'semgrep.dev|registry|HTTPS?Connection|resolve|timed out|SSL|certificate|proxy'"
+        " semgrep-stderr.log 2>/dev/null; then",
+        '    echo "Hint: the rules could not be downloaded from the Semgrep registry ($RULES)."',
+        '    echo "Allow the runner to reach https://semgrep.dev, or commit rules to the"',
+        '    echo "repository as .semgrep.yml or .semgrep/ - they are used automatically."',
+        "  elif grep -qi 'permission denied' semgrep-stderr.log 2>/dev/null; then",
+        '    echo "Hint: Semgrep could not write somewhere (HOME=$HOME, cache=${SEMGREP_CACHE_DIR:-unset})."',
+        "  fi",
         f"  {_metric('semgrep', 'error', problems=0)}",
         "  exit 1",
         "fi",
+        "",
+        "# A report can still carry errors (a rule that failed to parse, a file it",
+        "# could not read). Shown, not counted - they are not findings.",
+        'python3 -c "'
+        "import json;"
+        "e=json.load(open('semgrep-report.json')).get('errors') or [];"
+        "[print('Semgrep warning:', (x.get('message') or str(x))[:300]) for x in e[:10]]"
+        '" || true',
         "",
         # Counted in Python because the Semgrep image is a Python one — the
         # convention every script here follows: count in whatever the tool's own
@@ -210,7 +293,7 @@ def _semgrep_commands(min_severity: str, app_type: str = "") -> List[str]:
 # SonarQube
 # ---------------------------------------------------------------------------
 
-def _sonar_commands(min_severity: str, project_key: str) -> List[str]:
+def _sonar_commands(min_severity: str, project_key: str, app_type: str = "") -> List[str]:
     """Scan, then ask the server how many open issues that produced.
 
     Two steps because SonarQube is a server, not a linter: the scanner uploads
@@ -222,7 +305,18 @@ def _sonar_commands(min_severity: str, project_key: str) -> List[str]:
     scanner apply SONARQUBE's gate and fail the stage on it, which would put two
     gates in the path with different numbers and no way to tell which one
     stopped a merge. KubeSight's gate is the one this feature is about.
+
+    Java and Android sources are refused by the scanner unless it is told where
+    compiled classes are (``sonar.java.binaries``). A merge check does not
+    compile, so it points at any classes already present and otherwise at an
+    empty directory - the analysis then runs on source alone. Jars fetched by
+    the dependency stage are passed as libraries so types resolve.
+
+    If the scanner fails, or the server has not finished processing within the
+    wait, the stage reports an error rather than counting: the issue count on
+    the server would then belong to the PREVIOUS analysis.
     """
+    java = app_type in JAVA_TYPES
     severities = ",".join(_SONAR_BY_FLOOR.get(min_severity, _SONAR_BY_FLOOR["medium"]))
     return [
         'if [ -z "${SONAR_HOST_URL:-}" ] || [ -z "${SONAR_TOKEN:-}" ]; then',
@@ -233,32 +327,61 @@ def _sonar_commands(min_severity: str, project_key: str) -> List[str]:
         "fi",
         "",
         f'PROJECT_KEY="${{SONAR_PROJECT_KEY:-{project_key}}}"',
+        'JAVA_ARGS=""',
+        *(
+            [
+                "# Compiled classes if a previous step left any, else an empty dir.",
+                'BIN=$(find . -type d \\( -path "*/build/classes" -o -path "*/target/classes" \\)'
+                ' -not -path "./.git/*" 2>/dev/null | paste -sd, -)',
+                'if [ -z "$BIN" ]; then mkdir -p .kubesight-no-classes; BIN=.kubesight-no-classes; fi',
+                'JAVA_ARGS="-Dsonar.java.binaries=$BIN"',
+                f'if ls {DEPS_DIR}/*.jar >/dev/null 2>&1; then',
+                f'  JAVA_ARGS="$JAVA_ARGS -Dsonar.java.libraries={DEPS_DIR}/*.jar"',
+                "fi",
+            ]
+            if java
+            else []
+        ),
+        "rm -f .scannerwork/report-task.txt",
+        "SCANNER_EXIT=0",
         "sonar-scanner \\",
         '  -Dsonar.projectKey="$PROJECT_KEY" \\',
         '  -Dsonar.host.url="$SONAR_HOST_URL" \\',
         '  -Dsonar.token="$SONAR_TOKEN" \\',
         '  -Dsonar.sources=. \\',
         '  -Dsonar.scm.provider=git \\',
-        "  -Dsonar.qualitygate.wait=false || true",
+        f"  -Dsonar.exclusions={DEPS_DIR}/** \\",
+        "  $JAVA_ARGS \\",
+        "  -Dsonar.qualitygate.wait=false || SCANNER_EXIT=$?",
+        "",
+        "if [ ! -f .scannerwork/report-task.txt ]; then",
+        '  echo "The SonarQube scanner did not upload an analysis (exit $SCANNER_EXIT)."',
+        f"  {_metric('sonar', 'error', problems=0)}",
+        "  exit 1",
+        "fi",
         "",
         "# The analysis is queued, not applied, when the scanner exits. Wait for",
         "# the server to finish processing it before counting, or the count is of",
         "# the PREVIOUS analysis - which would pass a merge on yesterday's code.",
-        'if [ -f .scannerwork/report-task.txt ]; then',
-        '  CE_URL=$(sed -n "s/^ceTaskUrl=//p" .scannerwork/report-task.txt)',
-        "  ATTEMPT=0",
-        '  while [ -n "$CE_URL" ] && [ "$ATTEMPT" -lt 60 ]; do',
-        '    CE=$(curl -s -u "$SONAR_TOKEN:" "$CE_URL" || true)',
-        '    case "$CE" in',
-        '      *\\"status\\":\\"SUCCESS\\"*) break ;;',
-        '      *\\"status\\":\\"FAILED\\"*|*\\"status\\":\\"CANCELED\\"*)',
-        '        echo "SonarQube could not process the analysis."',
-        f"        {_metric('sonar', 'error', problems=0)}",
-        "        exit 1 ;;",
-        "    esac",
-        "    ATTEMPT=$((ATTEMPT + 1))",
-        "    sleep 5",
-        "  done",
+        'CE_URL=$(sed -n "s/^ceTaskUrl=//p" .scannerwork/report-task.txt)',
+        "ATTEMPT=0",
+        "PROCESSED=no",
+        'while [ -n "$CE_URL" ] && [ "$ATTEMPT" -lt 120 ]; do',
+        '  CE=$(curl -s -u "$SONAR_TOKEN:" "$CE_URL" || true)',
+        '  case "$CE" in',
+        '    *\\"status\\":\\"SUCCESS\\"*) PROCESSED=yes; break ;;',
+        '    *\\"status\\":\\"FAILED\\"*|*\\"status\\":\\"CANCELED\\"*)',
+        '      echo "SonarQube could not process the analysis."',
+        f"      {_metric('sonar', 'error', problems=0)}",
+        "      exit 1 ;;",
+        "  esac",
+        "  ATTEMPT=$((ATTEMPT + 1))",
+        "  sleep 5",
+        "done",
+        'if [ "$PROCESSED" != yes ]; then',
+        '  echo "SonarQube had not finished processing the analysis after 10 minutes."',
+        f"  {_metric('sonar', 'error', problems=0)}",
+        "  exit 1",
         "fi",
         "",
         'ISSUES=$(curl -s -u "$SONAR_TOKEN:" \\',
@@ -279,7 +402,7 @@ def _sonar_commands(min_severity: str, project_key: str) -> List[str]:
 # OWASP Dependency-Check
 # ---------------------------------------------------------------------------
 
-def _dependency_check_commands(min_severity: str) -> List[str]:
+def _dependency_check_commands(min_severity: str, app_type: str = "") -> List[str]:
     """Scan the dependency tree, count findings at or above the floor.
 
     Counted with grep rather than a JSON parser because the Dependency-Check
@@ -302,6 +425,23 @@ def _dependency_check_commands(min_severity: str) -> List[str]:
     """
     floors = _DC_BY_FLOOR.get(min_severity, _DC_BY_FLOOR["high"])
     pattern = "|".join(floors)
+    extra = [
+        '  --exclude "**/node_modules/**" \\',
+        '  --exclude "**/.git/**" \\',
+    ]
+    if app_type in _DC_EXPERIMENTAL:
+        extra.append("  --enableExperimental \\")
+    java_guard = (
+        [
+            f'if [ -z "$(find {DEPS_DIR} -type f \\( -name "*.jar" -o -name "*.aar" \\)'
+            ' 2>/dev/null | head -n 1)" ]; then',
+            f'  echo "Warning: no dependency jars in {DEPS_DIR} - the \'{DEPS_STAGE}\' stage'
+            ' found none, so only jars committed to the repository are scanned."',
+            "fi",
+        ]
+        if app_type in JAVA_TYPES
+        else []
+    )
     return [
         'DATA_DIR="${DC_DATA_DIR:-/tmp/dependency-check-data}"',
         'mkdir -p "$DATA_DIR" reports',
@@ -330,25 +470,55 @@ def _dependency_check_commands(min_severity: str) -> List[str]:
         'dc_unlock() { kill "$DC_HEARTBEAT" 2>/dev/null || true; rm -rf "$DC_LOCK"; }',
         "trap dc_unlock EXIT",
         "",
+        *java_guard,
         'NVD_ARGS=""',
-        'if [ -n "${NVD_API_KEY:-}" ]; then NVD_ARGS="--nvdApiKey $NVD_API_KEY"; fi',
+        'if [ -n "${NVD_API_KEY:-}" ]; then',
+        '  NVD_ARGS="--nvdApiKey $NVD_API_KEY"',
+        "else",
+        "  # Without a key NVD allows a handful of requests a minute; the first",
+        "  # full download needs thousands. Slow down rather than be refused.",
+        '  NVD_ARGS="--nvdApiDelay 8000"',
+        '  echo "No NVD_API_KEY - the NVD download will be slow and may be refused."',
+        "fi",
+        "# A mirror of the NVD feed (e.g. an internal vulnz/Nexus mirror) for a",
+        "# cluster that cannot reach services.nvd.nist.gov.",
+        'if [ -n "${NVD_DATAFEED_URL:-}" ]; then',
+        '  NVD_ARGS="--nvdDatafeed $NVD_DATAFEED_URL"',
+        '  echo "Using the NVD mirror at $NVD_DATAFEED_URL"',
+        "fi",
         "",
         "# Exits 1 when it finds anything at or above --failOnCVSS, which is not",
-        "# what should fail this stage. The report is what is read.",
-        "/usr/share/dependency-check/bin/dependency-check.sh \\",
+        "# what should fail this stage. The report is what is read; the output is",
+        "# kept so a failure can be explained below.",
+        "( /usr/share/dependency-check/bin/dependency-check.sh \\",
         '  --project "${KUBESIGHT_SERVICE_SLUG:-merge-check}" \\',
         "  --scan . \\",
         "  --format JSON \\",
         "  --out reports \\",
         '  --data "$DATA_DIR" \\',
         "  --failOnCVSS 11 \\",
-        "  $NVD_ARGS || true",
+        *extra,
+        "  $NVD_ARGS 2>&1 || true ) | tee dependency-check.log",
         "dc_unlock",
         "trap - EXIT",
         "",
         "REPORT=reports/dependency-check-report.json",
         'if [ ! -s "$REPORT" ]; then',
         '  echo "Dependency-Check produced no report."',
+        "  if grep -qE 'No documents exist|Error updating the NVD' dependency-check.log; then",
+        '    echo "Cause: the vulnerability database in $DATA_DIR is empty and could not be downloaded."',
+        '    if grep -qE "40[34]|429|rate limit" dependency-check.log; then',
+        '      echo "NVD refused the requests (403/429)."',
+        "    elif grep -qiE 'UnknownHost|Connect(ion)? (refused|timed out)|No route|SSL|PKIX' dependency-check.log; then",
+        '      echo "The runner cannot reach services.nvd.nist.gov (network, proxy or TLS)."',
+        "    fi",
+        '    if [ -z "${NVD_API_KEY:-}" ]; then',
+        '      echo "Fix: request a free key at https://nvd.nist.gov/developers/request-an-api-key"',
+        '      echo "and add it as a CI secret named NVD_API_KEY on the service Settings tab."',
+        "    fi",
+        '    echo "No internet from the runner? Set NVD_DATAFEED_URL to an internal NVD mirror."',
+        '    echo "The first successful run fills the shared cache; later scans take a minute or two."',
+        "  fi",
         f"  {_metric('dependency_check', 'error', problems=0)}",
         "  exit 1",
         "fi",
@@ -383,8 +553,16 @@ _TOOL_SECRETS = {
         {"name": "SONAR_HOST_URL", "envVar": "SONAR_HOST_URL"},
         {"name": "SONAR_TOKEN", "envVar": "SONAR_TOKEN"},
     ],
-    "dependency_check": [{"name": "NVD_API_KEY", "envVar": "NVD_API_KEY"}],
+    "dependency_check": [
+        {"name": "NVD_API_KEY", "envVar": "NVD_API_KEY"},
+        {"name": "NVD_DATAFEED_URL", "envVar": "NVD_DATAFEED_URL"},
+    ],
 }
+
+def tool_secret_refs(tool: str) -> List[Dict[str, str]]:
+    """Every secret this tool's stage can use, whether or not it exists yet."""
+    return [dict(ref) for ref in _TOOL_SECRETS.get(tool, [])]
+
 
 _TOOL_ARTIFACTS = {
     "eslint": [{"path": "eslint-report.json", "type": "test-report", "name": "eslint"}],
@@ -408,6 +586,105 @@ _TOOL_TIMEOUTS = {
 }
 
 
+def _gradle_deps_commands() -> List[str]:
+    """Copy every resolvable runtime classpath into DEPS_DIR, via an init script.
+
+    An init script rather than a task in the project: the repository is not
+    ours to edit, and an init script applies to every project of a multi-module
+    build. Android has no ``runtimeClasspath``; its variants do, hence the
+    release/debug names. A configuration that fails to resolve is reported and
+    skipped so one odd module does not empty the whole scan.
+    """
+    return [
+        "if [ -x ./gradlew ]; then GRADLE=./gradlew;",
+        "elif [ -f build.gradle ] || [ -f build.gradle.kts ] || [ -f settings.gradle ]"
+        " || [ -f settings.gradle.kts ]; then GRADLE=gradle;",
+        'else echo "No Gradle build here - nothing to resolve."; exit 0; fi',
+        f'mkdir -p "{DEPS_DIR}"',
+        "cat > /tmp/kubesight-deps.gradle <<'KUBESIGHT_EOF'",
+        "allprojects { p ->",
+        "  p.tasks.register('kubesightCopyDeps') { t ->",
+        "    t.doLast {",
+        "      ['runtimeClasspath', 'releaseRuntimeClasspath', 'debugRuntimeClasspath'].each { n ->",
+        "        def c = p.configurations.findByName(n)",
+        "        if (c != null && c.canBeResolved) {",
+        "          try {",
+        f"            p.copy {{ from c; into new File(p.rootDir, '{DEPS_DIR}') }}",
+        "          } catch (Exception e) {",
+        "            println \"kubesight: could not resolve ${p.path}:${n}: ${e.message}\"",
+        "          }",
+        "        }",
+        "      }",
+        "    }",
+        "  }",
+        "}",
+        "KUBESIGHT_EOF",
+        "$GRADLE -I /tmp/kubesight-deps.gradle kubesightCopyDeps \\",
+        "  --no-daemon --no-configuration-cache --continue -q \\",
+        '  || echo "Gradle could not resolve every dependency - scanning what it did."',
+    ]
+
+
+def _maven_deps_commands() -> List[str]:
+    """``dependency:copy-dependencies`` for the whole reactor into DEPS_DIR.
+
+    Tried without compiling first. A multi-module build whose modules depend on
+    each other cannot copy a sibling that was never packaged, so the second
+    attempt packages the reactor (tests skipped) — slower, only paid when
+    needed.
+    """
+    return [
+        "if [ -x ./mvnw ]; then MVN=./mvnw;",
+        "elif [ -f pom.xml ]; then MVN=mvn;",
+        'else echo "No Maven build here - nothing to resolve."; exit 0; fi',
+        f'OUT="$PWD/{DEPS_DIR}"',
+        'mkdir -p "$OUT"',
+        "copy_deps() {",
+        '  $MVN -B -q "$@" dependency:copy-dependencies \\',
+        '    "-DoutputDirectory=$OUT" -DincludeScope=runtime',
+        "}",
+        "copy_deps || {",
+        '  echo "Retrying after packaging the modules - a module depends on a sibling"',
+        '  echo "that has not been built yet (the errors above are expected then)."',
+        "  copy_deps -Dmaven.test.skip=true package",
+        '} || echo "Maven could not resolve every dependency - scanning what it did."',
+    ]
+
+
+def dependency_stage(app_type: str, image: str = "") -> Optional[Dict[str, Any]]:
+    """The stage that gives Dependency-Check (and SonarQube) jars to read.
+
+    Only for JVM types. Never fails the build: missing jars are reported by the
+    Dependency-Check stage in words, and a merge must not be blocked because a
+    helper step, rather than a check, had trouble.
+    """
+    tool = _DEPS_TOOL.get(app_type)
+    if tool is None:
+        return None
+    environment = build_environments.resolve(_DEPS_ENV_KEY[app_type]) or {}
+    body = _gradle_deps_commands() if tool == "gradle" else _maven_deps_commands()
+    return {
+        "name": DEPS_STAGE,
+        "stageType": "command",
+        "runnerType": environment.get("runnerType") or "",
+        "runnerLabels": list(environment.get("labels") or ["linux"]),
+        "image": image or environment.get("image") or "",
+        "commands": [
+            *body,
+            f'COUNT=$(find "{DEPS_DIR}" -type f \\( -name "*.jar" -o -name "*.aar" \\)'
+            ' 2>/dev/null | wc -l | tr -d " ")',
+            f'echo "$COUNT dependency files in {DEPS_DIR}."',
+            "exit 0",
+        ],
+        "env": {},
+        "secretRefs": [],
+        "artifacts": [],
+        "continueOnFailure": True,
+        "timeoutSeconds": 1800,
+        "enabled": True,
+    }
+
+
 def generated_commands(
     tool: str, gate: Dict[str, Any], *, service_slug: str = "", app_type: str = ""
 ) -> List[str]:
@@ -418,10 +695,14 @@ def generated_commands(
         return _semgrep_commands(str(gate.get("semgrepMinSeverity") or "medium"), app_type)
     if tool == "sonar":
         return _sonar_commands(
-            str(gate.get("sonarMinSeverity") or "medium"), service_slug or "merge-check"
+            str(gate.get("sonarMinSeverity") or "medium"),
+            service_slug or "merge-check",
+            app_type,
         )
     if tool == "dependency_check":
-        return _dependency_check_commands(str(gate.get("dependencyMinSeverity") or "high"))
+        return _dependency_check_commands(
+            str(gate.get("dependencyMinSeverity") or "high"), app_type
+        )
     raise ValueError(f"Unknown merge check tool: {tool}")
 
 
@@ -496,8 +777,15 @@ def build_stages(
     known_secret_keys: Optional[set] = None,
     custom_commands: Optional[Dict[str, List[str]]] = None,
     app_type: str = "",
+    deps_image: str = "",
 ) -> List[Dict[str, Any]]:
-    """Checkout plus one stage per selected tool, in canonical order."""
+    """Checkout, the JVM dependency step when a check needs jars, then one
+    stage per selected tool, in canonical order.
+
+    ``deps_image`` is the image the service's own build uses for Gradle/Maven,
+    when known: resolving with the JDK and build tool the project is built with
+    avoids "this project needs Java 17" failures from a generic image.
+    """
     ordered = [tool for tool in MERGE_CHECK_TOOLS if tool in set(tools or ())]
     stages: List[Dict[str, Any]] = [
         {
@@ -508,6 +796,10 @@ def build_stages(
             "timeoutSeconds": 600,
         }
     ]
+    if {"dependency_check", "sonar"} & set(ordered):
+        deps = dependency_stage(app_type, deps_image)
+        if deps is not None:
+            stages.append(deps)
     overrides = custom_commands or {}
     stages.extend(
         check_stage(
