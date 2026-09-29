@@ -73,17 +73,20 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
   // Application tab can show a reason instead of a control that fails.
   const [assist, setAssist] = useState(null);
   const [tab, changeTab] = useRouteParam("tab", initialTab || "overview");
-  // The Pipeline and Merge Checks tabs are drafts until saved. Leaving one —
+  // The Pipeline, Merge Checks and Settings tabs are drafts until saved. Leaving one —
   // another tab, or back to the catalog — asks first, because the draft does
   // not survive the trip.
   const [pipelineDirty, setPipelineDirty] = useState(false);
   const [mergeChecksDirty, setMergeChecksDirty] = useState(false);
+  const [settingsDirty, setSettingsDirty] = useState(false);
   const draftLabel =
     tab === "pipeline" && pipelineDirty
       ? "pipeline"
       : tab === "mergeChecks" && mergeChecksDirty
         ? "merge check"
-        : null;
+        : tab === "settings" && settingsDirty
+          ? "settings"
+          : null;
   const confirmLeaveDraft = () =>
     !draftLabel ||
     window.confirm(`Your ${draftLabel} changes are not saved. Leave and discard them?`);
@@ -92,6 +95,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
     if (!confirmLeaveDraft()) return;
     setPipelineDirty(false);
     setMergeChecksDirty(false);
+    setSettingsDirty(false);
     changeTab(next);
   };
   const [loading, setLoading] = useState(true);
@@ -355,6 +359,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             canManageSecrets={can.manageSecrets}
             onSaved={() => load()}
             onDeleted={onDeleted}
+            onDirtyChange={setSettingsDirty}
           />
         )}
       </div>

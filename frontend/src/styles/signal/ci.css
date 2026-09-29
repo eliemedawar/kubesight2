@@ -312,11 +312,6 @@
   margin-top: 0.4rem;
 }
 
-.sg-ci-panel-note {
-  margin-left: auto;
-  font-size: 0.78rem;
-}
-
 .sg-ci-inline-field {
   display: flex;
   gap: var(--space-2);
@@ -330,10 +325,6 @@
 
 /* Mode select plus its value box. The box is narrow on purpose: what goes in it
    is "8Gi", and a full-width field invites a sentence. */
-.sg-ci-resource-row input {
-  flex: 0 0 6.5rem;
-  min-width: 0;
-}
 
 .sg-ci-dl {
   display: grid;
@@ -554,52 +545,8 @@ button.sg-ci-strip-node:hover {
   height: 0.8rem;
 }
 
-.sg-ci-secret-form {
-  display: flex;
-  gap: var(--space-2);
-  align-items: center;
-  flex-wrap: wrap;
-  margin-top: var(--space-3);
-}
-
-.sg-ci-secret-form input {
-  flex: 1;
-  min-width: 9rem;
-}
-
-/* Scope change and delete belong on one line: the cell is sized to its content,
-   so without this they stack and the row grows to two lines. */
-.sg-ci-secret-row-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  white-space: nowrap;
-}
-
-/* Scope sits with the fields, not the Add button: it is part of what is being
-   created, and it must not stretch like the text inputs beside it. */
-.sg-ci-secret-scope {
-  flex: none;
-  min-width: 11rem;
-}
-
-/* A global secret is the exception in a service's list — mark it so a row that
-   cannot be edited here is recognisable before its buttons are read. */
-.sg-ci-scope-chip.is-global {
-  border-color: var(--info-border, var(--border));
-  background: var(--info-soft, transparent);
-  color: var(--info, var(--text-main));
-}
-
 /* Secret values are often whole files — give the field room and a code face,
    and let it grow without pushing the Add button off the row. */
-.sg-ci-secret-value {
-  flex: 2;
-  min-width: 14rem;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 0.78rem;
-  resize: vertical;
-}
 
 .sg-ci-danger {
   border: 1px solid var(--danger-border, var(--danger));
@@ -2128,84 +2075,6 @@ button.sg-ci-workspace-entry:focus-visible {
   gap: 0.35rem;
   font-size: 0.85rem;
   white-space: nowrap;
-}
-
-/* ---------------------------------------------------------------------------
-   Expected secrets — the keys an application type usually needs, listed above
-   the ones that exist. Deliberately quieter than the table below it: these are
-   suggestions, and a missing one never blocks a build, so nothing here uses
-   the error tone.
-   --------------------------------------------------------------------------- */
-
-.sg-ci-expected {
-  /* Ruled off from the section blurb above it: without this the two paragraphs
-     read as one run of prose and the list looks like part of the explanation. */
-  margin: var(--space-3) 0 var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-}
-
-.sg-ci-expected-list {
-  list-style: none;
-  margin: var(--space-2) 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.sg-ci-expected-list li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 0.8rem;
-}
-
-/* Fixed key and chip columns. Without them each row's description starts at a
-   different x, and the "Fill in" links end up on a ragged edge that reads as
-   sloppy rather than as a column. Both collapse to content when the row has to
-   wrap on a narrow screen. */
-.sg-ci-expected-list li > code {
-  flex: 0 0 15rem;
-}
-
-.sg-ci-expected-list li > .chip {
-  flex: 0 0 auto;
-  min-width: 4.75rem;
-  text-align: center;
-}
-
-/* The description may shrink but never grows: letting it stretch pushed "Fill
-   in" to the far edge of a wide screen, where it no longer reads as belonging
-   to the row it acts on. */
-.sg-ci-expected-list li > .muted {
-  flex: 0 1 34rem;
-}
-
-@media (max-width: 900px) {
-  .sg-ci-expected-list li > code {
-    flex: 0 1 auto;
-  }
-}
-
-/* A secret that is already set has nothing left to do, so it recedes rather
-   than competing with the ones that still need attention. */
-.sg-ci-expected-list li.is-set code,
-.sg-ci-expected-list li.is-set > .muted {
-  opacity: 0.65;
-}
-
-.sg-ci-expected .chip.is-ok {
-  border-color: var(--ok-border, var(--border));
-  background: var(--ok-soft, transparent);
-  color: var(--ok, var(--text-main));
-}
-
-.sg-ci-expected .chip.is-warn {
-  border-color: var(--warn-border, var(--border));
-  background: var(--warn-soft, transparent);
-  color: var(--warn, var(--text-main));
 }
 
 /* ---------------------------------------------------------------------------

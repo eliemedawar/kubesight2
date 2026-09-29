@@ -1,0 +1,616 @@
+/* ══ Service Settings tab ═════════════════════════════════════════════════
+   A rail of sections (each saying its current state) beside one card per
+   section. The root also carries .pl-root, so the pipeline editor's controls,
+   save bar and banners (pipelineWorkspace.css) are the same here; custom-drawn
+   buttons carry .btn-ghost to escape ui-polish.css's (0,8,1) button rule.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.st-root .st-layout {
+  display: grid;
+  grid-template-columns: minmax(12rem, 15rem) minmax(0, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+/* ── Rail ────────────────────────────────────────────────────────────── */
+
+.st-root .st-rail {
+  position: sticky;
+  top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+}
+
+.st-root .st-rail-link {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  color: var(--text-subtle);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.st-root .st-rail-link:hover {
+  color: var(--text-strong);
+  background: var(--bg-interactive);
+}
+
+.st-root .st-rail-link svg {
+  width: 1rem;
+  height: 1rem;
+  color: var(--text-muted);
+}
+
+.st-root .st-rail-link small {
+  max-width: 7rem;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-root .st-rail-link small.is-warn {
+  color: var(--warn);
+}
+
+.st-root .st-rail-link.is-danger,
+.st-root .st-rail-link.is-danger svg {
+  color: var(--danger);
+}
+
+.st-root .st-rail-note {
+  display: flex;
+  gap: 0.45rem;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3) 0.65rem 0.25rem;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-soft);
+  font-size: 0.6875rem;
+  line-height: 1.5;
+}
+
+.st-root .st-rail-note svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-top: 0.1rem;
+}
+
+/* ── Cards ───────────────────────────────────────────────────────────── */
+
+.st-root .st-sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.st-root .st-card {
+  scroll-margin-top: var(--space-4);
+}
+
+.st-root .st-card-head {
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.st-root .st-card-head h4 {
+  margin: 0;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: var(--font-size-md);
+  font-weight: 700;
+}
+
+.st-root .st-card-head p {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.st-root .st-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+}
+
+/* ── Builds ──────────────────────────────────────────────────────────── */
+
+.st-root .st-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  align-self: flex-start;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+}
+
+.st-root .st-stepper button {
+  width: 2.4rem;
+  min-height: 2.35rem;
+  padding: 0;
+  color: var(--text-subtle);
+  border-radius: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.st-root .st-stepper button:hover:not(:disabled) {
+  background: var(--bg-interactive);
+}
+
+.st-root .st-stepper button:disabled {
+  opacity: 0.35;
+}
+
+.st-root .pl-field .st-stepper input {
+  width: 4rem;
+  min-height: 2.35rem;
+  border-width: 0 1px;
+  border-radius: 0;
+  font-weight: 700;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+
+.st-root .st-stepper input::-webkit-outer-spin-button,
+.st-root .st-stepper input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.st-root .st-resources {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.st-root .st-resource {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(0, 1.4fr);
+  align-items: start;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+}
+
+.st-root .st-resource + .st-resource {
+  border-top: 1px solid var(--border-soft);
+}
+
+.st-root .st-resource-label strong,
+.st-root .st-resource-label small {
+  display: block;
+}
+
+.st-root .st-resource-label strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.st-root .st-resource-label small {
+  margin-top: 0.15rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+.st-root .st-resource-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.st-root .st-resource-custom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.st-root .st-resource-custom input {
+  width: 7rem;
+  min-height: 2.1rem;
+}
+
+/* ── Registry ────────────────────────────────────────────────────────── */
+
+.st-root .st-registries {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: var(--space-2);
+}
+
+.st-root .st-registry {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.st-root .st-registry:hover {
+  border-color: var(--border-strong);
+}
+
+.st-root .st-registry.is-on {
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-panel));
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.st-root .st-registry input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.st-root .st-registry:focus-within {
+  box-shadow: var(--ring);
+}
+
+.st-root .st-registry-icon {
+  display: grid;
+  place-items: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  flex: none;
+  color: var(--chart-5);
+  background: color-mix(in srgb, var(--chart-5) 12%, var(--bg-panel));
+  border-radius: var(--radius-md);
+}
+
+.st-root .st-registry.is-none .st-registry-icon {
+  color: var(--text-muted);
+  background: var(--bg-inset);
+}
+
+.st-root .st-registry-icon svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.st-root .st-registry-copy {
+  min-width: 0;
+}
+
+.st-root .st-registry-copy strong,
+.st-root .st-registry-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-root .st-registry-copy strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.st-root .st-registry-copy small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .st-imageref {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.st-root .st-imageref code {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+/* ── Secrets ─────────────────────────────────────────────────────────── */
+
+.st-root .st-secrets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.st-root .st-suggested {
+  display: flex;
+  gap: 0.75rem;
+  padding: var(--space-3) var(--space-4);
+  background: var(--info-soft);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius-lg);
+}
+
+.st-root .st-suggested.is-done {
+  background: var(--ok-soft);
+  border-color: var(--ok-border);
+}
+
+.st-root .st-suggested > svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin-top: 0.15rem;
+  color: var(--info);
+}
+
+.st-root .st-suggested.is-done > svg {
+  color: var(--ok);
+}
+
+.st-root .st-suggested > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.st-root .st-suggested strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+}
+
+.st-root .st-suggested > div > p {
+  margin: 0.1rem 0 0.5rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .st-suggested ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.st-root .st-suggested li {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0.4rem 0.55rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-xs);
+  color: var(--text-subtle);
+}
+
+.st-root .st-suggested li code {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.st-root .st-set {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--ok);
+  font-weight: 700;
+}
+
+.st-root .st-set svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.st-root .st-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  animation: pl-reveal var(--dur) var(--ease);
+}
+
+.st-root .st-add-actions,
+.st-root .st-replace-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.st-root .st-secret-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.st-root .st-secret-group .pl-block-title {
+  margin: 0;
+}
+
+.st-root .st-secret-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.st-root .st-secret {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.75rem;
+  padding: 0.65rem 0.8rem;
+}
+
+.st-root .st-secret + .st-secret {
+  border-top: 1px solid var(--border-soft);
+}
+
+.st-root .st-secret.is-shadowed {
+  opacity: 0.6;
+}
+
+.st-root .st-secret-icon {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-radius: var(--radius-md);
+}
+
+.st-root .st-secret-icon svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.st-root .st-secret-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  padding-top: 0.1rem;
+}
+
+.st-root .st-secret-copy strong {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.st-root .st-secret-copy strong code {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.st-root .st-secret-copy small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .st-secret-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.st-root .st-action {
+  gap: 0.3rem;
+  min-height: 2rem;
+  padding: 0.2rem 0.55rem;
+  color: var(--text-subtle);
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.st-root .st-action:hover {
+  color: var(--text-strong);
+  background: var(--bg-interactive);
+}
+
+.st-root .st-action svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.st-root .st-replace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.st-root .st-replace textarea {
+  width: 100%;
+}
+
+/* ── Danger ──────────────────────────────────────────────────────────── */
+
+.st-root .st-danger {
+  border-color: var(--danger-border);
+}
+
+.st-root .st-danger .st-card-head h4 {
+  color: var(--danger);
+}
+
+.st-root .st-delete-row input {
+  max-width: 24rem;
+}
+
+.st-root .st-delete-row .danger {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+.st-root .st-delete-row .danger:hover:not(:disabled) {
+  color: #fff;
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────── */
+
+@media (max-width: 1040px) {
+  .st-root .st-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .st-root .st-rail {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .st-root .st-rail-note {
+    display: none;
+  }
+
+  .st-root .st-resource {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .st-root .st-suggested li,
+  .st-root .st-secret {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .st-root .st-secret-icon {
+    display: none;
+  }
+
+  .st-root .st-card-head,
+  .st-root .st-card-body {
+    padding-right: var(--space-4);
+    padding-left: var(--space-4);
+  }
+}
