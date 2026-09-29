@@ -42,10 +42,31 @@ def _now():
 # The checks a merge gate can run, in the order they belong in a pipeline:
 # cheapest and most local first, so a build that is going to fail on a lint
 # error does not first spend four minutes downloading an NVD database.
-MERGE_CHECK_TOOLS = ("eslint", "semgrep", "sonar", "dependency_check")
+MERGE_CHECK_TOOLS = (
+    # Linters first: seconds each, and a PR that fails lint should say so
+    # before a scanner spends minutes on it.
+    "eslint",
+    "ruff",
+    "pmd",
+    "detekt",
+    "swiftlint",
+    "dart_analyze",
+    "hadolint",
+    "shellcheck",
+    "semgrep",
+    "sonar",
+    "dependency_check",
+)
 
 TOOL_LABELS = {
     "eslint": "ESLint",
+    "ruff": "Ruff",
+    "pmd": "PMD",
+    "detekt": "detekt",
+    "swiftlint": "SwiftLint",
+    "dart_analyze": "Dart analyze",
+    "hadolint": "Hadolint",
+    "shellcheck": "ShellCheck",
     "semgrep": "Semgrep",
     "sonar": "SonarQube",
     "dependency_check": "Dependency-Check",
@@ -127,6 +148,14 @@ class _GateColumns:
     max_semgrep_problems = db.Column(db.Integer, nullable=True)
     max_sonar_problems = db.Column(db.Integer, nullable=True)
     max_dependency_problems = db.Column(db.Integer, nullable=True)
+    # The per-language linters (see merge_checks/linters.py).
+    max_ruff_problems = db.Column(db.Integer, nullable=True)
+    max_pmd_problems = db.Column(db.Integer, nullable=True)
+    max_detekt_problems = db.Column(db.Integer, nullable=True)
+    max_swiftlint_problems = db.Column(db.Integer, nullable=True)
+    max_dart_problems = db.Column(db.Integer, nullable=True)
+    max_hadolint_problems = db.Column(db.Integer, nullable=True)
+    max_shellcheck_problems = db.Column(db.Integer, nullable=True)
 
     # Whether an ESLint warning counts as a problem. Off by default: a warning
     # is advice, and a gate that blocks a merge on advice is a gate people

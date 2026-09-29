@@ -842,6 +842,17 @@ def _migrate_merge_check_columns() -> None:
             continue
         _add_column_if_missing(table, "max_semgrep_problems", "INTEGER")
         _add_column_if_missing(table, "semgrep_min_severity", "VARCHAR(16)")
+        # The per-language linters' caps. NULL: only bound by the total.
+        for column in (
+            "max_ruff_problems",
+            "max_pmd_problems",
+            "max_detekt_problems",
+            "max_swiftlint_problems",
+            "max_dart_problems",
+            "max_hadolint_problems",
+            "max_shellcheck_problems",
+        ):
+            _add_column_if_missing(table, column, "INTEGER")
 
 
 def _migrate_registry_connection_columns() -> None:

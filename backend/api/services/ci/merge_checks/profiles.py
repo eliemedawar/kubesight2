@@ -9,7 +9,12 @@ service getting all four.
 
 The rules, deliberately few:
 
-* **ESLint** only where there is JavaScript to lint: Node services.
+* **A linter for the language**, ESLint's counterpart: ESLint for Node, Ruff
+  for Python, PMD for Java (plus detekt for Kotlin on Gradle and Android),
+  SwiftLint for iOS, ``dart analyze`` for Flutter.
+* **Hadolint and ShellCheck** on every server-side type, since those ship
+  Dockerfiles and scripts. Each reports `skipped` when the repository has none,
+  so carrying them costs a line in the log, not a false result.
 * **One code analyser, never two.** SonarQube when this service can reach one
   (both ``SONAR_HOST_URL`` and ``SONAR_TOKEN`` are available to it), Semgrep
   otherwise. They answer the same question; running both doubles the time and
@@ -61,6 +66,32 @@ _SEMGREP_PACKS = {
 
 _NO_DEPENDENCY_CHECK = {"ios", "flutter"}
 
+# The language linter(s) per type. Order does not matter; MERGE_CHECK_TOOLS
+# decides the stage order.
+_LANGUAGE_LINTERS = {
+    "node": ("eslint",),
+    "python": ("ruff",),
+    "java_maven": ("pmd",),
+    "java": ("pmd",),
+    "java_gradle": ("pmd", "detekt"),
+    "android": ("pmd", "detekt"),
+    "ios": ("swiftlint",),
+    "flutter": ("dart_analyze",),
+}
+# Types that ship server-side: they carry Dockerfiles and shell scripts.
+_SERVER_TYPES = {"node", "python", "java_maven", "java", "java_gradle", "container", "generic"}
+
+_LINTER_REASON = {
+    "eslint": "lints the JavaScript/TypeScript with the project's own ESLint and config",
+    "ruff": "lints the Python (the project's Ruff config, else Ruff's bug-only defaults)",
+    "pmd": "lints the Java (the project's ruleset, else PMD quickstart)",
+    "detekt": "lints any Kotlin; skipped when there is none",
+    "swiftlint": "lints the Swift",
+    "dart_analyze": "runs dart analyze with the project's analysis_options.yaml",
+    "hadolint": "lints the Dockerfiles; skipped when there are none",
+    "shellcheck": "lints the shell scripts; skipped when there are none",
+}
+
 
 def application_type(service) -> str:
     value = str(getattr(service, "application_type", "") or "generic").strip().lower()
@@ -92,11 +123,18 @@ def recommended_tools(
     chosen: List[str] = []
     label = type_label(app_type)
 
-    if app_type == "node":
-        chosen.append("eslint")
-        reasons["eslint"] = f"{label} — lints the JavaScript/TypeScript."
-    else:
-        reasons["eslint"] = f"Off: {label} has no JavaScript to lint."
+    linters = set(_LANGUAGE_LINTERS.get(app_type, ()))
+    if app_type in _SERVER_TYPES:
+        linters |= {"hadolint", "shellcheck"}
+    for tool, why in _LINTER_REASON.items():
+        if tool in linters:
+            chosen.append(tool)
+            reasons[tool] = f"{label}: {why}."
+        else:
+            reasons[tool] = f"Off: not a {label} language."
+    if "hadolint" not in linters:
+        reasons["hadolint"] = f"Off: {label} apps do not ship a Dockerfile."
+        reasons["shellcheck"] = f"Off: {label} apps do not ship shell scripts."
 
     if use_sonar:
         chosen.append("sonar")

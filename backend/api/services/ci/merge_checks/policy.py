@@ -38,13 +38,32 @@ TOOL_CAP_FIELD = {
     "semgrep": "maxSemgrepProblems",
     "sonar": "maxSonarProblems",
     "dependency_check": "maxDependencyProblems",
+    "ruff": "maxRuffProblems",
+    "pmd": "maxPmdProblems",
+    "detekt": "maxDetektProblems",
+    "swiftlint": "maxSwiftlintProblems",
+    "dart_analyze": "maxDartProblems",
+    "hadolint": "maxHadolintProblems",
+    "shellcheck": "maxShellcheckProblems",
 }
 TOOL_CAP_COLUMN = {
     "eslint": "max_eslint_problems",
     "semgrep": "max_semgrep_problems",
     "sonar": "max_sonar_problems",
     "dependency_check": "max_dependency_problems",
+    "ruff": "max_ruff_problems",
+    "pmd": "max_pmd_problems",
+    "detekt": "max_detekt_problems",
+    "swiftlint": "max_swiftlint_problems",
+    "dart_analyze": "max_dart_problems",
+    "hadolint": "max_hadolint_problems",
+    "shellcheck": "max_shellcheck_problems",
 }
+# The linters' caps, in the same (column, key, kind) shape as GATE_FIELDS.
+_LINTER_CAPS = tuple(
+    (TOOL_CAP_COLUMN[tool], TOOL_CAP_FIELD[tool], "int")
+    for tool in ("ruff", "pmd", "detekt", "swiftlint", "dart_analyze", "hadolint", "shellcheck")
+)
 
 # Every field the two tables share, as (column, payload key). One list, so a
 # new gate knob is added in one place and both the policy and the override
@@ -60,7 +79,7 @@ GATE_FIELDS = (
     ("sonar_min_severity", "sonarMinSeverity", "severity"),
     ("dependency_min_severity", "dependencyMinSeverity", "severity"),
     ("block_on_tool_error", "blockOnToolError", "bool"),
-)
+) + _LINTER_CAPS
 
 # What the gate falls back to when NEITHER the service nor the policy has an
 # opinion. Note that every cap is None here: an installation that has not set a
@@ -72,6 +91,7 @@ GATE_DEFAULTS: Dict[str, Any] = {
     "maxSemgrepProblems": None,
     "maxSonarProblems": None,
     "maxDependencyProblems": None,
+    **{key: None for _column, key, _kind in _LINTER_CAPS},
     "eslintCountWarnings": False,
     "semgrepMinSeverity": "medium",
     "sonarMinSeverity": "medium",
@@ -149,6 +169,10 @@ _LABELS = {
     "max_dependency_problems": "The Dependency-Check limit",
     "sonar_min_severity": "The SonarQube severity floor",
     "dependency_min_severity": "The Dependency-Check severity floor",
+    **{
+        TOOL_CAP_COLUMN[tool]: f"The {TOOL_LABELS[tool]} limit"
+        for tool in ("ruff", "pmd", "detekt", "swiftlint", "dart_analyze", "hadolint", "shellcheck")
+    },
 }
 
 

@@ -34,6 +34,58 @@ export const TOOLS = [
     // toggle where the others get a floor.
     counts: { type: "toggle", key: "eslintCountWarnings", label: "Count warnings too" },
   },
+  // ESLint's counterparts for the other languages. What each counts is fixed
+  // by the tool's own severity model, so the third column states it in words
+  // rather than offering a control.
+  {
+    key: "ruff",
+    capKey: "maxRuffProblems",
+    label: "Ruff",
+    hint: "Python lint — the project's Ruff config, else bug-only rules.",
+    counts: { type: "text", text: "Every finding" },
+  },
+  {
+    key: "pmd",
+    capKey: "maxPmdProblems",
+    label: "PMD",
+    hint: "Java lint — the project's ruleset, else PMD quickstart.",
+    counts: { type: "text", text: "Every violation" },
+  },
+  {
+    key: "detekt",
+    capKey: "maxDetektProblems",
+    label: "detekt",
+    hint: "Kotlin lint — the project's detekt.yml on top of the defaults.",
+    counts: { type: "text", text: "Every issue" },
+  },
+  {
+    key: "swiftlint",
+    capKey: "maxSwiftlintProblems",
+    label: "SwiftLint",
+    hint: "Swift lint with the project's .swiftlint.yml.",
+    counts: { type: "text", text: "Errors (warnings reported)" },
+  },
+  {
+    key: "dart_analyze",
+    capKey: "maxDartProblems",
+    label: "Dart analyze",
+    hint: "Dart/Flutter analysis with analysis_options.yaml.",
+    counts: { type: "text", text: "Errors and warnings" },
+  },
+  {
+    key: "hadolint",
+    capKey: "maxHadolintProblems",
+    label: "Hadolint",
+    hint: "Dockerfile lint. Skipped when there are no Dockerfiles.",
+    counts: { type: "text", text: "Errors and warnings" },
+  },
+  {
+    key: "shellcheck",
+    capKey: "maxShellcheckProblems",
+    label: "ShellCheck",
+    hint: "Shell script lint. Skipped when there are no scripts.",
+    counts: { type: "text", text: "Errors and warnings" },
+  },
   {
     key: "semgrep",
     capKey: "maxSemgrepProblems",
@@ -169,7 +221,9 @@ export default function QualityGateFields({
             </div>
 
             <div role="cell">
-              {counts.type === "toggle" ? (
+              {counts.type === "text" ? (
+                <span className="sg-qg-hint">{counts.text}</span>
+              ) : counts.type === "toggle" ? (
                 <label className="sg-qg-toggle">
                   <input
                     type="checkbox"

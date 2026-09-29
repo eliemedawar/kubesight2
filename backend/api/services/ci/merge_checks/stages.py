@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 from .. import build_environments
 from ....models_merge_checks import MERGE_CHECK_TOOLS, TOOL_LABELS
 from .metrics import SENTINEL, STAGE_TOOL_ENV
+from .linters import LINTERS, commands_for as linter_commands
 from .profiles import semgrep_rules
 
 # The checkout every check runs against. Named the same as everywhere else in
@@ -68,6 +69,7 @@ _STAGE_NAMES = {
     "semgrep": "Semgrep scan",
     "sonar": "SonarQube scan",
     "dependency_check": "Dependency-Check",
+    **{tool: str(spec["stage"]) for tool, spec in LINTERS.items()},
 }
 
 # Severity floors, worst first, as each tool spells them.
@@ -596,6 +598,14 @@ _TOOL_TIMEOUTS = {
     "dependency_check": 3600,
 }
 
+# The linters bring their own image, report and timeout from linters.LINTERS.
+for _tool, _spec in LINTERS.items():
+    _TOOL_ENV_KEY[_tool] = str(_spec["env"])
+    _TOOL_ARTIFACTS[_tool] = [
+        {"path": str(_spec["artifact"]), "type": "test-report", "name": _tool}
+    ]
+    _TOOL_TIMEOUTS[_tool] = int(_spec["timeout"])  # type: ignore[arg-type]
+
 
 def _gradle_deps_commands() -> List[str]:
     """Copy every resolvable runtime classpath into DEPS_DIR, via an init script.
@@ -700,6 +710,8 @@ def generated_commands(
     tool: str, gate: Dict[str, Any], *, service_slug: str = "", app_type: str = ""
 ) -> List[str]:
     """The default script for one tool — what "Reset to the default" restores."""
+    if tool in LINTERS:
+        return linter_commands(tool)
     if tool == "eslint":
         return _eslint_commands(bool(gate.get("eslintCountWarnings")))
     if tool == "semgrep":
@@ -742,7 +754,7 @@ def check_stage(
         commands = list(custom_commands)
     elif tool == "eslint":
         commands = _eslint_commands(bool(gate.get("eslintCountWarnings")))
-    elif tool in ("semgrep", "sonar", "dependency_check"):
+    elif tool in ("semgrep", "sonar", "dependency_check") or tool in LINTERS:
         commands = generated_commands(tool, gate, service_slug=service_slug, app_type=app_type)
     else:
         raise ValueError(f"Unknown merge check tool: {tool}")

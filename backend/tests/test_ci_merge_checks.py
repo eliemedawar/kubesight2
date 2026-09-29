@@ -1356,7 +1356,9 @@ def test_a_new_configuration_follows_the_application_type(
     ).get_json()["data"]
     assert data["toolsMode"] == "auto"
     assert data["applicationTypeLabel"] == "Java (Gradle)"
-    assert data["tools"] == ["semgrep", "dependency_check"]
+    assert data["tools"] == [
+        "pmd", "detekt", "hadolint", "shellcheck", "semgrep", "dependency_check",
+    ]
     assert data["toolReasons"]["eslint"].startswith("Off:")
 
 
@@ -1367,7 +1369,10 @@ def test_a_java_service_runs_no_eslint_and_scans_with_the_java_rules(
     response = _enable_auto(client, admin_token, service_id)
     assert response.status_code == 200, response.get_json()
     data = response.get_json()["data"]
-    assert _stage_names(data) == ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"]
+    assert _stage_names(data) == [
+        "Checkout", "Resolve dependencies", "PMD (Java lint)", "detekt (Kotlin lint)",
+        "Hadolint (Dockerfile lint)", "ShellCheck (shell lint)", "Semgrep scan", "Dependency-Check",
+    ]
     semgrep = next(s for s in data["pipelineStages"] if s["tool"] == "semgrep")
     assert any("p/default p/java" in line for line in semgrep["commands"])
 
@@ -1375,7 +1380,7 @@ def test_a_java_service_runs_no_eslint_and_scans_with_the_java_rules(
 def test_a_node_service_gets_eslint(app, client, admin_token, service_id):
     data = _enable_auto(client, admin_token, service_id).get_json()["data"]
     assert _stage_names(data) == [
-        "Checkout", "ESLint", "Semgrep scan", "Dependency-Check",
+        "Checkout", "ESLint", "Hadolint (Dockerfile lint)", "ShellCheck (shell lint)", "Semgrep scan", "Dependency-Check",
     ]
 
 
@@ -1391,7 +1396,7 @@ def test_sonarqube_replaces_semgrep_once_its_secrets_exist(
             )
         db.session.commit()
     data = _enable_auto(client, admin_token, service_id).get_json()["data"]
-    assert data["tools"] == ["eslint", "sonar", "dependency_check"]
+    assert data["tools"] == ["eslint", "hadolint", "shellcheck", "sonar", "dependency_check"]
 
 
 def test_custom_mode_keeps_what_was_ticked(app, client, admin_token, service_id):
@@ -1415,10 +1420,13 @@ def test_a_pull_request_regenerates_the_checks_after_the_type_changes(
     assert data["state"] == "running"
     with app.app_context():
         config = CiMergeCheckConfig.query.filter_by(service_id=service_id).one()
-        assert config.tools == ["semgrep", "dependency_check"]
+        assert config.tools == ["pmd", "hadolint", "shellcheck", "semgrep", "dependency_check"]
         build = db.session.get(CiBuild, db.session.get(CiMergeCheck, data["checkId"]).build_id)
         names = [stage["name"] for stage in build.pipeline_snapshot["stages"]]
-        assert names == ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"]
+        assert names == [
+            "Checkout", "Resolve dependencies", "PMD (Java lint)", "Hadolint (Dockerfile lint)", "ShellCheck (shell lint)",
+            "Semgrep scan", "Dependency-Check",
+        ]
 
 
 def test_a_secret_added_after_enabling_reaches_the_stage_on_the_next_pull_request(
@@ -1442,17 +1450,20 @@ def test_a_secret_added_after_enabling_reaches_the_stage_on_the_next_pull_reques
 
 
 # Every application type a service can declare, and the pipeline it must get.
+_JVM = ["Checkout", "Resolve dependencies", "PMD (Java lint)"]
+_LINT_OPS = ["Hadolint (Dockerfile lint)", "ShellCheck (shell lint)"]
+_SCAN = ["Semgrep scan", "Dependency-Check"]
 _EXPECTED_BY_TYPE = {
-    "container": ["Checkout", "Semgrep scan", "Dependency-Check"],
-    "java_maven": ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"],
-    "java_gradle": ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"],
-    "java": ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"],
-    "node": ["Checkout", "ESLint", "Semgrep scan", "Dependency-Check"],
-    "python": ["Checkout", "Semgrep scan", "Dependency-Check"],
-    "android": ["Checkout", "Resolve dependencies", "Semgrep scan", "Dependency-Check"],
-    "ios": ["Checkout", "Semgrep scan"],
-    "flutter": ["Checkout", "Semgrep scan"],
-    "generic": ["Checkout", "Semgrep scan", "Dependency-Check"],
+    "container": ["Checkout", *_LINT_OPS, *_SCAN],
+    "java_maven": [*_JVM, *_LINT_OPS, *_SCAN],
+    "java_gradle": [*_JVM, "detekt (Kotlin lint)", *_LINT_OPS, *_SCAN],
+    "java": [*_JVM, *_LINT_OPS, *_SCAN],
+    "node": ["Checkout", "ESLint", *_LINT_OPS, *_SCAN],
+    "python": ["Checkout", "Ruff (Python lint)", *_LINT_OPS, *_SCAN],
+    "android": [*_JVM, "detekt (Kotlin lint)", *_SCAN],
+    "ios": ["Checkout", "SwiftLint", "Semgrep scan"],
+    "flutter": ["Checkout", "Dart analyze", "Semgrep scan"],
+    "generic": ["Checkout", *_LINT_OPS, *_SCAN],
 }
 
 
@@ -1564,3 +1575,55 @@ def test_an_edited_script_is_not_treated_as_out_of_date(
         config = CiMergeCheckConfig.query.filter_by(service_id=service_id).one()
         pipeline_id = config.pipeline_id
     assert _semgrep_commands(app, pipeline_id) == edited
+
+
+# ---------------------------------------------------------------------------
+# The per-language linters
+# ---------------------------------------------------------------------------
+
+def test_a_linter_cap_blocks_on_top_of_the_total():
+    from api.services.ci.merge_checks.policy import GATE_DEFAULTS, evaluate
+
+    gate = {**GATE_DEFAULTS, "maxRuffProblems": 2, "maxTotalProblems": 100}
+    outcome = evaluate(
+        gate,
+        {
+            "ruff": {"status": "ok", "problems": 3},
+            "hadolint": {"status": "skipped", "problems": 0},
+        },
+    )
+    assert outcome["verdict"] == "blocked"
+    assert outcome["totalProblems"] == 3
+    assert any("Ruff reported 3" in reason for reason in outcome["reasons"])
+
+
+def test_linter_limits_can_be_set_on_a_service(app, client, admin_token, service_id):
+    _set_type(app, service_id, "python")
+    data = _enable_auto(
+        client,
+        admin_token,
+        service_id,
+        gateMode="override",
+        maxRuffProblems=0,
+        maxHadolintProblems=5,
+    ).get_json()["data"]
+    assert data["effectiveGate"]["maxRuffProblems"] == 0
+    assert data["effectiveGate"]["maxHadolintProblems"] == 5
+    assert data["override"]["maxShellcheckProblems"] is None
+
+
+@pytest.mark.parametrize(
+    "tool", ["ruff", "pmd", "detekt", "swiftlint", "dart_analyze", "hadolint", "shellcheck"]
+)
+def test_every_linter_reports_skipped_and_ok_and_runs_in_a_known_image(tool):
+    from api.services.ci import build_environments
+    from api.services.ci.merge_checks import stages as stage_defs
+
+    script = "\n".join(stage_defs.generated_commands(tool, {}))
+    assert f"tool={tool} status=skipped" in script
+    assert f"tool={tool} status=ok" in script
+    assert f"tool={tool} status=error" in script
+    stage = stage_defs.check_stage(tool, {})
+    assert stage["image"], f"{tool} has no image"
+    assert stage["env"]["KUBESIGHT_CHECK_TOOL"] == tool
+    assert build_environments.resolve(stage_defs._TOOL_ENV_KEY[tool])["configured"]

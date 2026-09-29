@@ -148,6 +148,43 @@ ENVIRONMENTS: Dict[str, Dict[str, Any]] = {
             "Set NVD_API_KEY as a CI secret to avoid NVD rate limiting."
         ),
     },
+    # Merge-check linters that ship as images. Ruff runs in the Python image
+    # and PMD/detekt in the JDK one, so they need no entry of their own.
+    "hadolint": {
+        "label": "Hadolint (Dockerfile lint)",
+        "env": "CI_TEMPLATE_HADOLINT_IMAGE",
+        # The -debian variant, not the default scratch image: the stage is a
+        # shell script and scratch has no shell.
+        "default": "{registry}/hadolint/hadolint:latest-debian",
+        "provides": {"hadolint": "true"},
+        "labels": ["linux"],
+    },
+    "shellcheck": {
+        "label": "ShellCheck",
+        "env": "CI_TEMPLATE_SHELLCHECK_IMAGE",
+        # -alpine for the same reason: the plain image has no shell.
+        "default": "{registry}/koalaman/shellcheck-alpine:stable",
+        "provides": {"shellcheck": "true"},
+        "labels": ["linux"],
+    },
+    "swiftlint": {
+        "label": "SwiftLint",
+        "env": "CI_TEMPLATE_SWIFTLINT_IMAGE",
+        # Published on GitHub's registry only. Repoint the variable at a
+        # mirror if the cluster cannot pull from ghcr.io.
+        "default": "ghcr.io/realm/swiftlint:latest",
+        "provides": {"swiftlint": "true"},
+        "labels": ["linux"],
+    },
+    "flutter-analyze": {
+        "label": "Flutter SDK (analysis)",
+        "env": "CI_TEMPLATE_FLUTTER_ANALYZE_IMAGE",
+        # Separate from "flutter" (the build image, unset by default) so the
+        # merge check works before a Flutter build environment is set up.
+        "default": "ghcr.io/cirruslabs/flutter:stable",
+        "provides": {"flutter": "true", "dart": "true"},
+        "labels": ["linux"],
+    },
     "android": {
         "label": "Android SDK",
         "env": "CI_TEMPLATE_ANDROID_IMAGE",
