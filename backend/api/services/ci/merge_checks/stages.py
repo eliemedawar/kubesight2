@@ -243,6 +243,11 @@ def _semgrep_commands(min_severity: str, app_type: str = "") -> List[str]:
         "  --output semgrep-report.json \\",
         "  --metrics=off \\",
         "  --disable-version-check \\",
+        # The target is named on purpose. The official image sets
+        # SEMGREP_IN_DOCKER, and with no target Semgrep then insists the code
+        # is mounted at /src — empty in a build pod — and dies with
+        # "Detected Docker environment without a code volume".
+        "  . \\",
         "  2> semgrep-stderr.log || SEMGREP_EXIT=$?",
         'echo "Semgrep exited with $SEMGREP_EXIT."',
         "",
