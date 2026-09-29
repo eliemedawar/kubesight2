@@ -320,6 +320,9 @@ def save_config(
         # A secret added since the last generation - "add NVD_API_KEY, then
         # press Save" has to be enough.
         or _secrets_drifted(service, row, _known_secret_keys(service))
+        # A KubeSight upgrade that changed a generated script: pressing Save
+        # must be enough to pick it up.
+        or _stages_drifted(service, row, _known_secret_keys(service))
     )
     if row.tools and (stages_stale or payload.get("regeneratePipeline")):
         _sync_pipeline(service, row, after_gate, actor=actor)
@@ -1184,6 +1187,51 @@ def ingest(
     }
 
 
+def _clean_lines(lines: Any) -> List[str]:
+    """Commands as the pipeline validator stores them: trailing whitespace and
+    leading/trailing blank lines dropped."""
+    cleaned = [str(line).rstrip() for line in (lines or [])]
+    while cleaned and not cleaned[0].strip():
+        cleaned.pop(0)
+    while cleaned and not cleaned[-1].strip():
+        cleaned.pop()
+    return cleaned
+
+
+def _stages_drifted(
+    service: CiService, config: CiMergeCheckConfig, known_keys: set
+) -> bool:
+    """Whether the stored pipeline differs from what would be generated now.
+
+    Catches a KubeSight upgrade that changed a generated script (a fix to the
+    Semgrep command, say): without this, every existing service would keep
+    running the old script until somebody changed an unrelated setting.
+    Customized scripts are part of the generation, so an edit is never undone
+    by this — it only compares against what the configuration asks for.
+    """
+    pipeline = db.session.get(CiPipeline, config.pipeline_id) if config.pipeline_id else None
+    if pipeline is None:
+        return False
+    wanted = stages.build_stages(
+        list(config.tools or []),
+        resolve_gate(config),
+        service_slug=service.slug,
+        known_secret_keys=known_keys,
+        custom_commands=dict(config.custom_commands or {}),
+        app_type=profiles.application_type(service),
+        deps_image=_build_tool_image(service),
+    )
+    stored = sorted(pipeline.stages, key=lambda s: s.position)
+    if [s["name"] for s in wanted] != [s.name for s in stored]:
+        return True
+    for generated, current in zip(wanted, stored):
+        if _clean_lines(generated.get("commands")) != _clean_lines(current.commands):
+            return True
+        if (generated.get("image") or "") != (current.image or ""):
+            return True
+    return False
+
+
 def _secrets_drifted(
     service: CiService, config: CiMergeCheckConfig, known_keys: set
 ) -> bool:
@@ -1227,6 +1275,7 @@ def _refresh_pipeline(service: CiService, config: CiMergeCheckConfig) -> None:
         wanted == list(config.tools or [])
         and config.pipeline_id is not None
         and not _secrets_drifted(service, config, known_keys)
+        and not _stages_drifted(service, config, known_keys)
     ):
         return
     previous = list(config.tools or [])

@@ -258,7 +258,13 @@ def _semgrep_commands(min_severity: str, app_type: str = "") -> List[str]:
         '  echo "------------------------------------------------------------"',
         "  if [ \"$SEMGREP_EXIT\" = 127 ]; then",
         '    echo "Hint: semgrep is not installed in this image - check the semgrep build environment."',
-        "  elif grep -qiE 'semgrep.dev|registry|HTTPS?Connection|resolve|timed out|SSL|certificate|proxy'"
+        "  elif grep -q 'without a code volume' semgrep-stderr.log 2>/dev/null; then",
+        '    echo "Hint: this stage runs an old script that does not name the folder to scan."',
+        '    echo "Save the Merge Checks tab (or open a new pull request) to regenerate it."',
+        # Specific network failures only: a bare "registry" or "resolve" also
+        # matches Semgrep's own file names (config_resolver.py) in a traceback.
+        "  elif grep -qiE 'HTTPSConnectionPool|ProxyError|ConnectionError|Name or service not known"
+        "|Temporary failure in name resolution|timed out|CERTIFICATE_VERIFY_FAILED|SSLError'"
         " semgrep-stderr.log 2>/dev/null; then",
         '    echo "Hint: the rules could not be downloaded from the Semgrep registry ($RULES)."',
         '    echo "Allow the runner to reach https://semgrep.dev, or commit rules to the"',
