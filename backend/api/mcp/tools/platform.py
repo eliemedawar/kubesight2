@@ -73,7 +73,14 @@ def _registries_list(_arguments: Dict[str, Any]) -> Dict[str, Any]:
     schema={
         "type": "object",
         "properties": {
-            "image": {"type": "string", "description": "Full reference, e.g. registry.example.com/app:1.4.2."}
+            "image": {"type": "string", "description": "Full reference, e.g. registry.example.com/app:1.4.2."},
+            "cluster": {
+                "type": "string",
+                "description": (
+                    "Cluster id the image would be deployed to. When that cluster has "
+                    "linked registries the image is checked in those, exactly as the deploy gate does."
+                ),
+            },
         },
         "required": ["image"],
     },
@@ -84,7 +91,8 @@ def _image_check(arguments: Dict[str, Any]) -> Dict[str, Any]:
     image = str(arguments.get("image") or "").strip()
     if not image:
         raise ToolError("Name the image, tag included.")
-    return check_image(image)
+    cluster = str(arguments.get("cluster") or "").strip() or None
+    return check_image(image, cluster_id=cluster)
 
 
 # ---------------------------------------------------------------------------

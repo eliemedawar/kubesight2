@@ -14,5 +14,19 @@ export const deleteRegistry = (id) =>
 export const testRegistry = (id) =>
   request(`/api/registries/${id}/test`, { method: "POST" });
 
-export const checkImage = (image) =>
-  request("/api/registries/check-image", { method: "POST", body: { image } });
+// With a clusterId that has linked registries, the image is checked in THOSE
+// registries (found in any one → available), exactly like the deploy gate.
+export const checkImage = (image, clusterId) =>
+  request("/api/registries/check-image", {
+    method: "POST",
+    body: clusterId ? { image, clusterId } : { image },
+  });
+
+// { clusterId: [registry ids] } for every cluster linked to a registry.
+export const listClusterRegistryLinks = () => request("/api/registries/cluster-links");
+
+export const setClusterRegistries = (clusterId, registryIds) =>
+  request(`/api/registries/clusters/${encodeURIComponent(clusterId)}`, {
+    method: "PUT",
+    body: { registryIds },
+  });

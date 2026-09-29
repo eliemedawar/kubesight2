@@ -294,15 +294,20 @@ def validate_yaml(
 
 def check_registry_images(
     yaml_content: str,
+    cluster_id: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], bool, Optional[str]]:
     """Verify container images exist in their linked registry before deploying.
 
     Returns ``(checks, blocking, error_message)``. ``blocking`` is True (with a
     human-readable ``error_message``) only when an image is missing from a
-    registry whose enforcement is ``block``. Registries that are unreachable, or
-    images with no matching linked registry, never block — the deploy proceeds
-    and Kubernetes remains the final authority. Any unexpected error is swallowed
-    so the image gate can never take down an otherwise-valid deploy.
+    registry whose enforcement is ``block``.
+
+    When ``cluster_id`` has linked registries, each image must be confirmed by
+    one of THEM — missing everywhere or unconfirmable (registry unreachable)
+    blocks. Otherwise images are host-matched across all registries, where an
+    unreachable registry or an image with no matching registry never blocks and
+    Kubernetes remains the final authority. Any unexpected error is swallowed so
+    the image gate can never take down an otherwise-valid deploy.
     """
     try:
         from .registry_service import check_images, images_from_documents
@@ -313,18 +318,28 @@ def check_registry_images(
         images = images_from_documents(documents)
         if not images:
             return [], False, None
-        checks, blocking = check_images(images)
+        checks, blocking = check_images(images, cluster_id=cluster_id)
         if not blocking:
             return checks, False, None
-        missing = [
-            c["image"]
-            for c in checks
-            if c.get("status") == "not_found" and c.get("enforcement") == "block"
-        ]
+        blocked = [c for c in checks if c.get("blocking")]
+        missing = [c["image"] for c in blocked if c.get("status") == "not_found"]
+        unconfirmed = [c["image"] for c in blocked if c.get("status") != "not_found"]
+        where = (
+            "this cluster's registries"
+            if any(c.get("clusterScoped") for c in blocked)
+            else "the linked registry"
+        )
+        parts = []
+        if missing:
+            parts.append(f"not found in {where} — " + ", ".join(missing))
+        if unconfirmed:
+            parts.append(
+                f"could not be confirmed because {where} could not be reached — "
+                + ", ".join(unconfirmed)
+            )
         message = (
-            "Deployment blocked: the following image(s) were not found in the "
-            "linked registry — " + ", ".join(missing) + ". Push the image or "
-            "correct the tag, then try again."
+            "Deployment blocked: image(s) " + "; ".join(parts) + ". Push the image, "
+            "correct the tag or fix the registry connection, then try again."
         )
         return checks, True, message
     except Exception:  # noqa: BLE001 — the image gate must never break a deploy
@@ -376,7 +391,7 @@ def dry_run_yaml(
     if err:
         return None, err, code
 
-    image_checks, image_blocking, image_err = check_registry_images(yaml_content)
+    image_checks, image_blocking, image_err = check_registry_images(yaml_content, cluster_id)
     if image_blocking:
         log_audit(
             "deployment_failed",
@@ -662,7 +677,7 @@ def apply_yaml(
     if err:
         return None, err, code
 
-    image_checks, image_blocking, image_err = check_registry_images(yaml_content)
+    image_checks, image_blocking, image_err = check_registry_images(yaml_content, cluster_id)
     if image_blocking:
         log_audit(
             "deployment_failed",

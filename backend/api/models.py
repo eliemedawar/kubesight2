@@ -1915,6 +1915,31 @@ class RegistryConnection(db.Model):
     )
 
 
+class RegistryClusterLink(db.Model):
+    """Which registries a cluster pulls from.
+
+    A cluster with one or more links has its deploy-time images checked against
+    THOSE registries only (repository + tag, whatever host the image names): the
+    image must exist in at least one of them. A cluster with no links keeps the
+    host-matching check across every enabled registry.
+    """
+
+    __tablename__ = "registry_cluster_links"
+    __table_args__ = (
+        db.UniqueConstraint("registry_id", "cluster_id", name="uq_registry_cluster_link"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    registry_id = db.Column(
+        db.Integer,
+        db.ForeignKey("registry_connections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Public cluster id, as the deploy flow uses it (e.g. "custom-3").
+    cluster_id = db.Column(db.String(120), nullable=False, index=True)
+
+
 class ZohoIntegration(db.Model):
     """Configuration for the Zoho Desk "DevOps Request" field-sync integration.
 

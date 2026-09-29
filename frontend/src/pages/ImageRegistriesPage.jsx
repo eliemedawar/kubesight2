@@ -11,6 +11,7 @@ import {
   testRegistry,
   updateRegistry,
 } from "../api/registriesApi.js";
+import { listClusters } from "../api/clustersApi.js";
 
 const EMPTY_FORM = {
   name: "",
@@ -23,6 +24,7 @@ const EMPTY_FORM = {
   verifyTls: true,
   enforcement: "block",
   enabled: true,
+  clusterIds: [],
 };
 
 const ENFORCEMENT_LABELS = {
@@ -50,7 +52,13 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState(null);
 
+  // Clusters a registry can be linked to. Best-effort: without clusters:view
+  // the picker is simply empty and links show by id.
+  const [clusters, setClusters] = useState([]);
+  const [clustersLoading, setClustersLoading] = useState(true);
+
   const [probeImage, setProbeImage] = useState("");
+  const [probeCluster, setProbeCluster] = useState("");
   const [probeResult, setProbeResult] = useState(null);
   const [probing, setProbing] = useState(false);
 
@@ -70,6 +78,40 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listClusters()
+      .then((data) => {
+        if (!cancelled) setClusters(data.items || []);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setClustersLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const clusterName = (id) => clusters.find((c) => String(c.id) === String(id))?.name || id;
+
+  const toggleCluster = (id) =>
+    setForm((prev) => ({
+      ...prev,
+      clusterIds: prev.clusterIds.includes(id)
+        ? prev.clusterIds.filter((c) => c !== id)
+        : [...prev.clusterIds, id],
+    }));
+
+  // Linked ids whose cluster is no longer listed stay selectable so a save
+  // doesn't silently drop them.
+  const pickerClusters = [
+    ...clusters.map((c) => ({ id: String(c.id), name: c.name || String(c.id) })),
+    ...form.clusterIds
+      .filter((id) => !clusters.some((c) => String(c.id) === id))
+      .map((id) => ({ id, name: id })),
+  ];
 
   const setField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
@@ -100,6 +142,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
       verifyTls: row.verifyTls !== false,
       enforcement: row.enforcement || "block",
       enabled: row.enabled !== false,
+      clusterIds: (row.clusterIds || []).map(String),
     });
     setError("");
     setNotice("");
@@ -185,7 +228,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
     setProbing(true);
     setProbeResult(null);
     try {
-      setProbeResult(await checkImage(image));
+      setProbeResult(await checkImage(image, probeCluster || undefined));
     } catch (err) {
       setError(err.message || "Image check failed.");
     } finally {
@@ -236,6 +279,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
               <tr>
                 <th>Name</th>
                 <th>Registry host</th>
+                <th>Clusters</th>
                 <th>Auth</th>
                 <th>Enforcement</th>
                 <th>Enabled</th>
@@ -258,6 +302,17 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
                           matches: {aliasHosts.join(", ")}
                         </div>
                       ) : null}
+                    </td>
+                    <td>
+                      {(row.clusterIds || []).length ? (
+                        <div className="registry-clusters">
+                          {row.clusterIds.map((id) => (
+                            <span key={id} className="badge">{clusterName(id)}</span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="muted">None</span>
+                      )}
                     </td>
                     <td>{row.authMode === "basic" ? `Basic (${row.username})` : "Anonymous"}</td>
                     <td>{ENFORCEMENT_LABELS[row.enforcement] || row.enforcement}</td>
@@ -299,8 +354,17 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
         <h3>Check an image</h3>
         <p className="muted">
           Test whether a specific image reference is available in a linked registry — the same check runs automatically before every deploy.
+          Pick a cluster to check the way a deploy to that cluster would: in the registries linked to it.
         </p>
         <div className="inline-form">
+          <SearchableSelect value={probeCluster} onChange={(e) => setProbeCluster(e.target.value)} aria-label="Cluster">
+            <option value="">Any registry (match by image host)</option>
+            {clusters.map((c) => (
+              <option key={c.id} value={String(c.id)}>
+                {c.name || c.id}
+              </option>
+            ))}
+          </SearchableSelect>
           <input
             value={probeImage}
             onChange={(e) => setProbeImage(e.target.value)}
@@ -411,6 +475,30 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
                   <option value="off">Do not check</option>
                 </SearchableSelect>
               </label>
+              <fieldset className="registry-form__row-full registry-form__clusters">
+                <legend>Clusters that pull from this registry</legend>
+                {pickerClusters.length ? (
+                  <div className="registry-form__cluster-list">
+                    {pickerClusters.map((c) => (
+                      <label key={c.id} className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={form.clusterIds.includes(c.id)}
+                          onChange={() => toggleCluster(c.id)}
+                        />
+                        {c.name}
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">{clustersLoading ? "Loading clusters…" : "No clusters available."}</p>
+                )}
+                <span className="field-hint">
+                  A deploy to a linked cluster must find its image (path + tag) in at least one of
+                  that cluster&apos;s registries, or it is blocked. Clusters with no registry linked
+                  keep matching images by host across all registries.
+                </span>
+              </fieldset>
               <div className="registry-form__checks">
                 <label className="checkbox-label">
                   <input type="checkbox" checked={form.verifyTls} onChange={(e) => setField("verifyTls", e.target.checked)} />

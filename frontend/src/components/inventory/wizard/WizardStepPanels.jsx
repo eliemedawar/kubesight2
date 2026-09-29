@@ -458,7 +458,7 @@ export function StepContainers({ state, setState }) {
             </Field>
             <Field label="Image *">
               <input value={container.image} onChange={(e) => updateContainer(index, { image: e.target.value })} placeholder="nginx" />
-              <ImageAvailabilityHint image={container.image} tag={container.tag} />
+              <ImageAvailabilityHint image={container.image} tag={container.tag} clusterId={state.basics?.clusterId} />
             </Field>
             <Field label="Tag">
               <input value={container.tag} onChange={(e) => updateContainer(index, { tag: e.target.value })} placeholder="latest" />

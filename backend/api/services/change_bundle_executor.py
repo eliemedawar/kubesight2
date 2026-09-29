@@ -101,7 +101,7 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optio
         # was present when the bundle was staged may have been deleted before the
         # (possibly days-later) deploy window opened. Block enforcement stops the
         # apply so a now-missing image never reaches the cluster.
-        _checks, blocking, image_err = check_registry_images(item.yaml_preview or "")
+        _checks, blocking, image_err = check_registry_images(item.yaml_preview or "", item.cluster_id)
         if blocking:
             return image_err, "image"
 

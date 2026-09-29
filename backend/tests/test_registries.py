@@ -469,3 +469,177 @@ def test_check_image_route(client, admin_token, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.get_json()["data"]["status"] == "found"
+
+
+# ---------------------------------------------------------------------------
+# Cluster-linked registries — the image must exist in one of the cluster's
+# registries, whatever host the image reference names.
+# ---------------------------------------------------------------------------
+
+def _urlopen_by_host(outcomes):
+    """Fake urlopen answering per registry host: 200, 404 or 'down'."""
+
+    def fake(req, **kw):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        for host, outcome in outcomes.items():
+            if host in url:
+                if outcome == "down":
+                    raise urllib.error.URLError("connection refused")
+                if outcome == 200:
+                    return _FakeResp(200)
+                raise _http_error(outcome)
+        raise AssertionError(f"unexpected registry call: {url}")
+
+    return fake
+
+
+def _two_linked_registries(app, cluster="custom-7"):
+    a = _make_conn(app, name="Nexus A", baseUrl="nexus-a.example.com", clusterIds=[cluster])
+    b = _make_conn(app, name="Nexus B", baseUrl="nexus-b.example.com", clusterIds=[cluster])
+    return a, b
+
+
+def test_cluster_links_roundtrip(app):
+    a, b = _two_linked_registries(app)
+    assert a["clusterIds"] == ["custom-7"]
+    with app.app_context():
+        assert registry_service.cluster_registry_ids("custom-7") == [a["id"], b["id"]]
+        assert registry_service.set_cluster_registries("custom-7", [b["id"]]) == [b["id"]]
+        assert registry_service.serialize(registry_service.get_connection(a["id"]))["clusterIds"] == []
+        registry_service.delete_connection(b["id"])
+        assert registry_service.cluster_registry_ids("custom-7") == []
+
+
+def test_cluster_links_reject_unknown_registry(app):
+    with app.app_context():
+        with pytest.raises(LookupError):
+            registry_service.set_cluster_registries("custom-7", [999])
+
+
+def test_cluster_check_found_in_any_linked_registry(app, monkeypatch):
+    _two_linked_registries(app)
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        _urlopen_by_host({"nexus-a": 404, "nexus-b": 200}),
+    )
+    with app.app_context():
+        # The image names neither registry's host — it's looked up by path + tag.
+        result = registry_service.check_image("registry.areeba.com/team/api:1.0", cluster_id="custom-7")
+        assert result["status"] == "found"
+        assert result["blocking"] is False
+        assert result["registry"] == "nexus-b.example.com"
+
+
+def test_cluster_check_missing_everywhere_blocks(app, monkeypatch):
+    _two_linked_registries(app)
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        _urlopen_by_host({"nexus-a": 404, "nexus-b": 404}),
+    )
+    with app.app_context():
+        checks, blocking = registry_service.check_images(["team/api:1.0"], cluster_id="custom-7")
+        assert blocking is True
+        assert checks[0]["status"] == "not_found"
+        assert len(checks[0]["registries"]) == 2
+
+
+def test_cluster_check_unreachable_blocks(app, monkeypatch):
+    _two_linked_registries(app)
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        _urlopen_by_host({"nexus-a": 404, "nexus-b": "down"}),
+    )
+    with app.app_context():
+        result = registry_service.check_image("team/api:1.0", cluster_id="custom-7")
+        assert result["status"] == "unreachable"
+        assert result["blocking"] is True
+
+
+def test_cluster_check_ignores_unlinked_registries(app, monkeypatch):
+    _make_conn(app, name="Linked", baseUrl="nexus-a.example.com", clusterIds=["custom-7"])
+    # Unlinked registry owning the image host — must NOT be consulted.
+    _make_conn(app, name="Other", baseUrl="nexus-b.example.com")
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        _urlopen_by_host({"nexus-a": 404}),
+    )
+    with app.app_context():
+        result = registry_service.check_image("nexus-b.example.com/team/api:1.0", cluster_id="custom-7")
+        assert result["status"] == "not_found"
+        assert result["blocking"] is True
+
+
+def test_cluster_without_links_keeps_host_matching(app, monkeypatch):
+    _make_conn(app, name="A", baseUrl="nexus-a.example.com", clusterIds=["custom-7"])
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        _urlopen_by_host({"nexus-a": "down"}),
+    )
+    with app.app_context():
+        # custom-8 has no links: host-matched, and an unreachable registry never blocks.
+        result = registry_service.check_image("nexus-a.example.com/team/api:1.0", cluster_id="custom-8")
+        assert result["status"] == "unreachable"
+        assert result["blocking"] is False
+        # An image with no matching host is simply not checked.
+        assert registry_service.check_image("team/api:1.0", cluster_id="custom-8")["status"] == "no_connection"
+
+
+def test_cluster_check_warn_only_does_not_block(app, monkeypatch):
+    _make_conn(app, baseUrl="nexus-a.example.com", enforcement="warn", clusterIds=["custom-7"])
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        _urlopen_by_host({"nexus-a": 404}),
+    )
+    with app.app_context():
+        result = registry_service.check_image("team/api:1.0", cluster_id="custom-7")
+        assert result["status"] == "not_found"
+        assert result["blocking"] is False
+
+
+def test_deploy_gate_uses_cluster_registries(app, monkeypatch):
+    _two_linked_registries(app)
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        _urlopen_by_host({"nexus-a": 404, "nexus-b": "down"}),
+    )
+    with app.app_context():
+        _, blocking, message = check_registry_images(_DEPLOY_YAML, "custom-7")
+        assert blocking is True
+        assert "this cluster's registries" in message
+
+
+def test_cluster_registry_routes(client, admin_token, viewer_token, monkeypatch):
+    headers = auth_headers(admin_token)
+    created = client.post(
+        "/api/registries",
+        json={"name": "Nexus", "baseUrl": "nexus-a.example.com", "username": "svc", "password": "p"},
+        headers=headers,
+    ).get_json()["data"]
+
+    resp = client.put(
+        "/api/registries/clusters/custom-7", json={"registryIds": [created["id"]]}, headers=headers
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["data"]["registryIds"] == [created["id"]]
+
+    assert client.get("/api/registries/clusters/custom-7", headers=headers).get_json()["data"]["registryIds"] == [created["id"]]
+    assert client.get("/api/registries/cluster-links", headers=headers).get_json()["data"]["links"] == {"custom-7": [created["id"]]}
+
+    resp = client.put("/api/registries/clusters/custom-7", json={"registryIds": [999]}, headers=headers)
+    assert resp.status_code == 404
+    resp = client.put(
+        "/api/registries/clusters/custom-7", json={"registryIds": []}, headers=auth_headers(viewer_token)
+    )
+    assert resp.status_code == 403
+
+    monkeypatch.setattr(
+        registry_client.urllib.request, "urlopen",
+        _urlopen_by_host({"nexus-a": 404}),
+    )
+    resp = client.post(
+        "/api/registries/check-image",
+        json={"image": "team/api:v1", "clusterId": "custom-7"},
+        headers=headers,
+    )
+    data = resp.get_json()["data"]
+    assert data["status"] == "not_found" and data["blocking"] is True

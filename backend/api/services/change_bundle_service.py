@@ -621,7 +621,7 @@ def _validate_item_now(item: ChangeBundleItem) -> None:
         if not err:
             # Reject staging an image that's missing from its linked registry
             # (block enforcement) — early feedback; execution re-checks too.
-            _checks, blocking, image_err = check_registry_images(item.yaml_preview or "")
+            _checks, blocking, image_err = check_registry_images(item.yaml_preview or "", item.cluster_id)
             if blocking:
                 err = image_err
         if err:
@@ -633,7 +633,7 @@ def _validate_item_now(item: ChangeBundleItem) -> None:
     elif mode == "helm" and item.action_type in ("helm_install", "helm_upgrade"):
         # The rendered manifest (when helm could render it) is checked against
         # the linked registries like a YAML apply; execution re-checks too.
-        _checks, blocking, image_err = check_registry_images(item.yaml_preview or "")
+        _checks, blocking, image_err = check_registry_images(item.yaml_preview or "", item.cluster_id)
         item.validation_status = "invalid" if blocking else "valid"
         item.validation_message = image_err if blocking else None
     else:

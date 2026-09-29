@@ -702,7 +702,7 @@ export default function SchemaDeployWizard({
     try {
       const results = await Promise.all(
         images.map((image) =>
-          checkImage(image).catch(() => ({
+          checkImage(image, clusterId).catch(() => ({
             image,
             status: "unreachable",
             message: "Could not run the image check.",
@@ -777,9 +777,11 @@ export default function SchemaDeployWizard({
   // applied automatically once approved.
   const approvalMessage = approvalNotice(eligibility);
 
-  // Missing images in a block-enforced linked registry stop the deploy.
-  const missingImages = imageChecks.filter(
-    (c) => c.status === "not_found" && c.enforcement === "block",
+  // The backend decides what blocks (`blocking`): a missing image in a
+  // block-enforced registry, or — for a cluster with linked registries — an
+  // image none of them could confirm. Older responses fall back to the old rule.
+  const missingImages = imageChecks.filter((c) =>
+    c.blocking ?? (c.status === "not_found" && c.enforcement === "block"),
   );
   const imageBlocked = missingImages.length > 0;
 
@@ -1662,7 +1664,11 @@ export default function SchemaDeployWizard({
                 ) : imageChecks.length ? (
                   <ul className="wizard-image-check__list">
                     {imageChecks.map((c) => (
-                      <li key={c.image} className={IMAGE_STATUS[c.status]?.className || ""}>
+                      <li
+                        key={c.image}
+                        className={c.blocking ? "status-error" : IMAGE_STATUS[c.status]?.className || ""}
+                        title={c.message || ""}
+                      >
                         <span className="badge">{IMAGE_STATUS[c.status]?.label || c.status}</span>
                         <code className="mono">{c.image}</code>
                       </li>
@@ -1674,8 +1680,14 @@ export default function SchemaDeployWizard({
                 {imageBlocked ? (
                   <p className="error-banner" role="alert" style={{ marginTop: "var(--space-3)" }}>
                     Deployment blocked: {missingImages.map((c) => c.image).join(", ")}{" "}
-                    {missingImages.length === 1 ? "was" : "were"} not found in the linked registry.
-                    Push the image or fix the tag, then re-check.
+                    {missingImages.length === 1 ? "was" : "were"}{" "}
+                    {missingImages.some((c) => c.status !== "not_found")
+                      ? "not confirmed by"
+                      : "not found in"}{" "}
+                    {missingImages.some((c) => c.clusterScoped)
+                      ? "this cluster's registries"
+                      : "the linked registry"}
+                    . Push the image, fix the tag or check the registry connection, then re-check.
                   </p>
                 ) : null}
               </div>

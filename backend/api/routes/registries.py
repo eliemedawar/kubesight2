@@ -54,7 +54,11 @@ def update_registry(connection_id: int):
         actor=get_current_user(),
         target_type="registry_connection",
         target_id=str(connection_id),
-        details={"name": data.get("name"), "baseUrl": data.get("baseUrl")},
+        details={
+            "name": data.get("name"),
+            "baseUrl": data.get("baseUrl"),
+            "clusterIds": data.get("clusterIds"),
+        },
     )
     return success_response(data)
 
@@ -91,4 +95,40 @@ def check_image():
     image = str(payload.get("image") or "").strip()
     if not image:
         return error_response("An image reference is required.", 400)
-    return success_response(svc.check_image(image))
+    cluster_id = str(payload.get("clusterId") or "").strip() or None
+    return success_response(svc.check_image(image, cluster_id=cluster_id))
+
+
+@registries_bp.route("/cluster-links", methods=["GET"])
+@require_permission("registries:view")
+def list_cluster_links():
+    """``{clusterId: [registry ids]}`` for every cluster linked to a registry."""
+    return success_response({"links": svc.cluster_links_summary()})
+
+
+@registries_bp.route("/clusters/<cluster_id>", methods=["GET"])
+@require_permission("registries:view")
+def get_cluster_registries(cluster_id: str):
+    return success_response(
+        {"clusterId": cluster_id, "registryIds": svc.cluster_registry_ids(cluster_id)}
+    )
+
+
+@registries_bp.route("/clusters/<cluster_id>", methods=["PUT"])
+@require_permission("registries:manage")
+def set_cluster_registries(cluster_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        registry_ids = svc.set_cluster_registries(cluster_id, payload.get("registryIds"))
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "registry_cluster_links_updated",
+        actor=get_current_user(),
+        target_type="cluster",
+        target_id=cluster_id,
+        details={"registryIds": registry_ids},
+    )
+    return success_response({"clusterId": cluster_id, "registryIds": registry_ids})

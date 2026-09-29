@@ -660,7 +660,7 @@ def install_or_upgrade_release(
         )
         image_checks: List[Dict[str, Any]] = []
         if rendered:
-            image_checks, image_blocking, image_err = check_registry_images(rendered)
+            image_checks, image_blocking, image_err = check_registry_images(rendered, cluster_id)
             if image_blocking:
                 log_audit(
                     "helm_upgrade_failed" if is_upgrade else "helm_install_failed",

@@ -1749,6 +1749,41 @@ td.actions { display: flex; gap: 0.75rem; white-space: nowrap; }
 }
 .registry-alias { font-size: 0.72rem; margin-top: 0.15rem; }
 
+/* Cluster <-> registry links */
+.registry-clusters { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.registry-form__clusters {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.85rem 0.75rem;
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.registry-form__clusters legend {
+  padding: 0 0.3rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm, 0.875rem);
+}
+.registry-form__clusters .muted { margin: 0; }
+.registry-form__cluster-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.4rem 1rem;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.cluster-registry-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.75rem 0 1rem;
+}
+.cluster-registry-list .checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 /* Deploy wizard — Review step image-availability panel */
 .wizard-image-check {
   margin: var(--space-3, 0.75rem) 0;

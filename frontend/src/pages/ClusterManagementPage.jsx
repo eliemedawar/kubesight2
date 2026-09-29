@@ -6,8 +6,16 @@ import {
   testCustomCluster,
   updateCustomCluster,
 } from "../api";
+import {
+  listClusterRegistryLinks,
+  listRegistries,
+  setClusterRegistries,
+} from "../api/registriesApi.js";
 import { formatAccessError } from "../utils/authz.js";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
+
+// Stable empty selection so the registries modal's reset effect doesn't loop.
+const EMPTY_IDS = [];
 
 const emptyForm = () => ({
   connectionMethod: "kubeconfig",
@@ -487,10 +495,84 @@ function ClusterModal({ open, mode, initial, onClose, onSave, saving, error }) {
   );
 }
 
+// Pick the image registries a cluster pulls from. A deploy to the cluster must
+// then find each image in one of these registries, or it is blocked.
+function ClusterRegistriesModal({ cluster, registries, selected, onClose, onSave, saving, error }) {
+  const [picked, setPicked] = useState(selected);
+
+  useEffect(() => {
+    setPicked(selected);
+  }, [selected]);
+
+  if (!cluster) {
+    return null;
+  }
+
+  const toggle = (id) =>
+    setPicked((prev) => (prev.includes(id) ? prev.filter((r) => r !== id) : [...prev, id]));
+
+  return (
+    <div className="modal-overlay" role="presentation" onClick={onClose}>
+      <section
+        className="card modal-panel cluster-modal"
+        role="dialog"
+        aria-labelledby="cluster-registries-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="modal-header">
+          <div>
+            <h3 id="cluster-registries-title">Registries for {cluster.name}</h3>
+            <p className="muted">
+              Before every deploy to this cluster, each image must be found in at least one of these
+              registries — otherwise the deploy is blocked. With none selected, images are matched by
+              host across all registries.
+            </p>
+          </div>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+          </button>
+        </header>
+
+        {registries.length ? (
+          <div className="cluster-registry-list">
+            {registries.map((registry) => (
+              <label key={registry.id} className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={picked.includes(registry.id)}
+                  onChange={() => toggle(registry.id)}
+                />
+                <span>
+                  {registry.name}{" "}
+                  <span className="muted mono">{registry.host || registry.baseUrl}</span>
+                  {!registry.enabled ? <span className="muted"> · disabled</span> : null}
+                  {registry.enforcement === "off" ? <span className="muted"> · not checked</span> : null}
+                </span>
+              </label>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">No registries yet. Add one under Integrations → Container registries.</p>
+        )}
+
+        {error ? <p className="routing-error">{error}</p> : null}
+        <footer className="modal-actions">
+          <button type="button" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button type="button" className="primary" onClick={() => onSave(picked)} disabled={saving}>
+            {saving ? "Saving..." : "Save"}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function DataTable({ columns, rows }) {
   const renderCell = (colKey, value, row) => {
-    if (colKey === "actions") {
-      return row.actions;
+    if (colKey === "actions" || colKey === "registries") {
+      return row[colKey];
     }
     if (value == null) {
       return "-";
@@ -545,6 +627,8 @@ export default function ClusterManagementPage({
   canUpdate = true,
   canRemove = true,
   canTest = true,
+  canViewRegistries = false,
+  canManageRegistries = false,
 }) {
   const [clusters, setClusters] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -556,6 +640,46 @@ export default function ClusterManagementPage({
   const [saving, setSaving] = useState(false);
   const [modalError, setModalError] = useState("");
   const [testingId, setTestingId] = useState("");
+  const [registries, setRegistries] = useState([]);
+  const [registryLinks, setRegistryLinks] = useState({});
+  const [registryCluster, setRegistryCluster] = useState(null);
+  const [registrySaving, setRegistrySaving] = useState(false);
+  const [registryError, setRegistryError] = useState("");
+
+  const loadRegistryLinks = useCallback(async () => {
+    if (!canViewRegistries) {
+      return;
+    }
+    try {
+      const [list, links] = await Promise.all([listRegistries(), listClusterRegistryLinks()]);
+      setRegistries(list.items || []);
+      setRegistryLinks(links.links || {});
+    } catch {
+      // Registry links are an extra column — never fail the page over them.
+    }
+  }, [canViewRegistries]);
+
+  useEffect(() => {
+    loadRegistryLinks();
+  }, [loadRegistryLinks]);
+
+  const saveClusterRegistries = async (registryIds) => {
+    if (!registryCluster) {
+      return;
+    }
+    setRegistrySaving(true);
+    setRegistryError("");
+    try {
+      await setClusterRegistries(registryCluster.publicId, registryIds);
+      setMessage(`Registries updated for ${registryCluster.name}.`);
+      setRegistryCluster(null);
+      await loadRegistryLinks();
+    } catch (saveError) {
+      setRegistryError(saveError.message);
+    } finally {
+      setRegistrySaving(false);
+    }
+  };
 
   const loadClusters = useCallback(async () => {
     setLoading(true);
@@ -669,17 +793,41 @@ export default function ClusterManagementPage({
     { key: "port", label: "Port" },
     { key: "protocol", label: "Protocol" },
     { key: "status", label: "Status" },
+    ...(canViewRegistries ? [{ key: "registries", label: "Registries" }] : []),
     { key: "lastTestedAt", label: "Last Tested" },
     { key: "actions", label: "Actions" },
   ];
+
+  const registryName = (id) => registries.find((r) => r.id === id)?.name || `#${id}`;
 
   const rows = clusters.map((cluster) => ({
     ...cluster,
     connection: connectionMethodLabel(cluster.connectionMethod),
     status: statusLabel(cluster),
     lastTestedAt: formatDate(cluster.lastTestedAt),
+    registries: (registryLinks[cluster.publicId] || []).length ? (
+      <div className="registry-clusters">
+        {registryLinks[cluster.publicId].map((id) => (
+          <span key={id} className="badge">{registryName(id)}</span>
+        ))}
+      </div>
+    ) : (
+      <span className="muted">Any (by host)</span>
+    ),
     actions: (
       <div className="table-actions">
+        {canManageRegistries ? (
+          <button
+            type="button"
+            className="btn-outline"
+            onClick={() => {
+              setRegistryError("");
+              setRegistryCluster(cluster);
+            }}
+          >
+            Registries
+          </button>
+        ) : null}
         {canUpdate ? (
           <button type="button" className="btn-outline" onClick={() => openEdit(cluster)}>
             Edit
@@ -735,6 +883,16 @@ export default function ClusterManagementPage({
         onSave={handleSave}
         saving={saving}
         error={modalError}
+      />
+
+      <ClusterRegistriesModal
+        cluster={registryCluster}
+        registries={registries}
+        selected={registryCluster ? registryLinks[registryCluster.publicId] || EMPTY_IDS : EMPTY_IDS}
+        onClose={() => setRegistryCluster(null)}
+        onSave={saveClusterRegistries}
+        saving={registrySaving}
+        error={registryError}
       />
     </>
   );

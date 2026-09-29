@@ -1677,6 +1677,8 @@ export default function App() {
             canUpdate={hasPermission("clusters:update")}
             canRemove={hasPermission("clusters:remove")}
             canTest={hasPermission("clusters:test")}
+            canViewRegistries={hasPermission("registries:view")}
+            canManageRegistries={hasPermission("registries:manage")}
           />
         );
       case "clusterOverview":
