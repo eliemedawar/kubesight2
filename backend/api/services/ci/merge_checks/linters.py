@@ -105,11 +105,25 @@ def ruff_commands() -> List[str]:
     """
     return [
         *_skip_unless_files("ruff", "-name '*.py'", "Python files"),
-        f'pip install --quiet --disable-pip-version-check "ruff=={RUFF_VERSION}" || {{',
-        '  echo "Could not install Ruff from the package index."',
-        f"  {_metric('ruff', 'error', problems=0)}",
-        "  exit 1",
-        "}",
+        # Installed into a known directory and run by its path. Stages run as a
+        # non-root user, so a plain `pip install` falls back to ~/.local/bin,
+        # which is not on PATH ("ruff: not found"). The directory is in the
+        # shared cache, so the install happens once, not on every pull request.
+        *_FETCH,
+        f'RUFF_DIR="$TOOLS_DIR/ruff-{RUFF_VERSION}"',
+        'if [ ! -x "$RUFF_DIR/bin/ruff" ]; then',
+        '  STAGING="$TOOLS_DIR/.ruff-install.$$"',
+        f'  pip install --quiet --disable-pip-version-check --no-cache-dir'
+        f' --target "$STAGING" "ruff=={RUFF_VERSION}" || {{',
+        '    rm -rf "$STAGING"',
+        '    echo "Could not install Ruff from the package index."',
+        f"    {_metric('ruff', 'error', problems=0)}",
+        "    exit 1",
+        "  }",
+        '  mv "$STAGING" "$RUFF_DIR" 2>/dev/null || rm -rf "$STAGING"',
+        "fi",
+        'RUFF="$RUFF_DIR/bin/ruff"',
+        '"$RUFF" --version',
         'SELECT="--select E4,E7,E9,F"',
         "if [ -f ruff.toml ] || [ -f .ruff.toml ] || grep -qs '^\\[tool\\.ruff' pyproject.toml; then",
         '  SELECT=""',
@@ -117,7 +131,7 @@ def ruff_commands() -> List[str]:
         "else",
         '  echo "Rules: E4,E7,E9,F (no Ruff config in the repository - bugs only)"',
         "fi",
-        "ruff check . $SELECT --output-format json --output-file ruff-report.json --exit-zero",
+        "\"$RUFF\" check . $SELECT --output-format json --output-file ruff-report.json --exit-zero",
         "if [ ! -f ruff-report.json ]; then",
         '  echo "Ruff produced no report."',
         f"  {_metric('ruff', 'error', problems=0)}",
