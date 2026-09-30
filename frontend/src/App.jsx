@@ -1658,6 +1658,8 @@ export default function App() {
             onNavigateToInventory={() => handleNavigate("inventory")}
             canOpenUpgrade={isPageAllowed("upgrade")}
             canOpenInventory={isPageAllowed("inventory")}
+            onNavigate={handleNavigate}
+            canOpenPage={isPageAllowed}
           />
         );
       case "clusters":
@@ -1969,6 +1971,8 @@ export default function App() {
             onNavigateToInventory={() => handleNavigate("inventory")}
             canOpenUpgrade={isPageAllowed("upgrade")}
             canOpenInventory={isPageAllowed("inventory")}
+            onNavigate={handleNavigate}
+            canOpenPage={isPageAllowed}
           />
         );
     }

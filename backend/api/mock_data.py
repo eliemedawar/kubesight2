@@ -82,6 +82,35 @@ CLUSTER_NODES: Dict[str, List[Dict[str, str]]] = {
     ],
 }
 
+# Per-node usage for the dashboard node table in mock mode. Kept apart from
+# CLUSTER_NODES, which is also the /nodes API response.
+NODE_METRICS: Dict[str, Dict[str, Any]] = {
+    "ip-10-0-1-12.ec2.internal": {
+        "roles": ["control-plane"], "cpuCores": 8, "cpuUsedCores": 3.1,
+        "memoryMiB": 32768, "memoryUsedMiB": 17900, "diskGiB": 100, "diskUsedGiB": 48.2,
+        "pods": 42, "podsCapacity": 110,
+    },
+    "ip-10-0-1-15.ec2.internal": {
+        "roles": ["worker"], "cpuCores": 16, "cpuUsedCores": 11.4,
+        "memoryMiB": 65536, "memoryUsedMiB": 58900, "diskGiB": 200, "diskUsedGiB": 181.5,
+        "pressures": ["DiskPressure"], "pods": 97, "podsCapacity": 110,
+    },
+    "ip-10-0-1-18.ec2.internal": {
+        "roles": ["worker"], "cpuCores": 16, "memoryMiB": 65536, "diskGiB": 200,
+        "cordoned": True, "pods": 0, "podsCapacity": 110,
+    },
+    "kind-worker": {
+        "roles": ["worker"], "cpuCores": 4, "cpuUsedCores": 1.2,
+        "memoryMiB": 8192, "memoryUsedMiB": 3900, "diskGiB": 60, "diskUsedGiB": 22.4,
+        "pods": 18, "podsCapacity": 110,
+    },
+    "kind-worker2": {
+        "roles": ["worker"], "cpuCores": 4, "cpuUsedCores": 0.8,
+        "memoryMiB": 8192, "memoryUsedMiB": 3100, "diskGiB": 60, "diskUsedGiB": 52.3,
+        "pods": 14, "podsCapacity": 110,
+    },
+}
+
 STORAGE_CLASSES: Dict[str, List[Dict[str, Any]]] = {
     "prod-us-east": [
         {"name": "gp3", "default": True, "provisioner": "kubernetes.io/aws-ebs"},

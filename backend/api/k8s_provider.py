@@ -1080,14 +1080,40 @@ def _node_roles(labels: Dict[str, Any]) -> List[str]:
     return roles or ["worker"]
 
 
+# Node conditions that mean the kubelet is evicting or refusing pods.
+_NODE_PRESSURE_CONDITIONS = ("DiskPressure", "MemoryPressure", "PIDPressure")
+
+NODE_CPU_WARN_PERCENT = 90
+NODE_MEMORY_WARN_PERCENT = 85
+# The kubelet's default hard eviction starts at nodefs.available < 10%, so 85%
+# used is the last comfortable point to act before pods start being evicted.
+NODE_DISK_WARN_PERCENT = 85
+
+
 def build_node_health(
     node_items: List[Dict[str, Any]],
     top_by_name: Optional[Dict[str, Dict[str, float]]] = None,
+    fs_by_name: Optional[Dict[str, Dict[str, Any]]] = None,
+    pod_items: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Per-node CPU/memory usage + readiness for the dashboard Node Health widget."""
+    """Per-node CPU/memory/disk usage + readiness for the dashboard node table.
+
+    ``fs_by_name`` is the kubelet Summary API ``node.fs`` reading per node (see
+    k8s_volume_stats). A node without one still reports its disk size from
+    ``ephemeral-storage`` capacity, with ``diskUsedBytes`` left None: unknown
+    usage is never shown as zero.
+    """
     from .k8s_metrics import _memory_to_mib
 
     top_by_name = top_by_name or {}
+    fs_by_name = fs_by_name or {}
+    pods_by_node: Dict[str, int] = {}
+    for pod in pod_items or []:
+        node_name = (pod.get("spec") or {}).get("nodeName")
+        phase = (pod.get("status") or {}).get("phase")
+        if node_name and phase not in ("Succeeded", "Failed"):
+            pods_by_node[node_name] = pods_by_node.get(node_name, 0) + 1
+
     rows: List[Dict[str, Any]] = []
     for node in node_items:
         meta = node.get("metadata", {}) or {}
@@ -1097,22 +1123,53 @@ def build_node_health(
         ready = any(
             c.get("type") == "Ready" and c.get("status") == "True" for c in conditions
         )
+        pressures = [
+            c.get("type")
+            for c in conditions
+            if c.get("type") in _NODE_PRESSURE_CONDITIONS and c.get("status") == "True"
+        ]
+        cordoned = bool((node.get("spec") or {}).get("unschedulable"))
         capacity = status.get("capacity", {}) or {}
         allocatable = status.get("allocatable", {}) or {}
 
         mem_total_mib = _memory_to_mib(str(allocatable.get("memory") or capacity.get("memory") or "0"))
         cpu_total = _cpu_to_cores(str(allocatable.get("cpu") or capacity.get("cpu") or "0"))
 
-        usage = top_by_name.get(name, {})
-        mem_used_mib = float(usage.get("mem_mib") or 0.0)
-        cpu_used = float(usage.get("cpu") or 0.0)
+        # No `kubectl top` row (NotReady node, no Metrics Server) means the
+        # usage is unknown, not zero.
+        usage = top_by_name.get(name)
+        measured = usage is not None
+        mem_used_mib = float((usage or {}).get("mem_mib") or 0.0)
+        cpu_used = float((usage or {}).get("cpu") or 0.0)
         mem_avail_mib = max(mem_total_mib - mem_used_mib, 0.0)
-        mem_pct = round(mem_used_mib / mem_total_mib * 100, 1) if mem_total_mib > 0 else None
-        cpu_pct = round(cpu_used / cpu_total * 100, 1) if cpu_total > 0 else None
+        mem_pct = round(mem_used_mib / mem_total_mib * 100, 1) if measured and mem_total_mib > 0 else None
+        cpu_pct = round(cpu_used / cpu_total * 100, 1) if measured and cpu_total > 0 else None
 
+        fs = fs_by_name.get(name) or {}
+        if fs.get("capacityBytes"):
+            disk_total = int(fs["capacityBytes"])
+            disk_used: Optional[int] = int(fs.get("usedBytes") or 0)
+            disk_pct: Optional[float] = round(disk_used / disk_total * 100, 1)
+        else:
+            capacity_mib = _memory_to_mib(str(capacity.get("ephemeral-storage") or "0"))
+            disk_total = int(capacity_mib * 1024 * 1024)
+            disk_used = None
+            disk_pct = None
+
+        issues: List[str] = []
         if not ready:
+            issues.append("Not ready")
+        issues.extend(pressures)
+        if disk_pct is not None and disk_pct >= NODE_DISK_WARN_PERCENT:
+            issues.append(f"Disk {round(disk_pct)}%")
+        if mem_pct is not None and mem_pct >= NODE_MEMORY_WARN_PERCENT:
+            issues.append(f"Memory {round(mem_pct)}%")
+        if cpu_pct is not None and cpu_pct >= NODE_CPU_WARN_PERCENT:
+            issues.append(f"CPU {round(cpu_pct)}%")
+
+        if not ready or pressures:
             node_status = "critical"
-        elif (mem_pct is not None and mem_pct >= 85) or (cpu_pct is not None and cpu_pct >= 90):
+        elif issues:
             node_status = "warning"
         else:
             node_status = "healthy"
@@ -1125,13 +1182,20 @@ def build_node_health(
                 "roles": _node_roles(meta.get("labels", {}) or {}),
                 "kubeletVersion": (status.get("nodeInfo", {}) or {}).get("kubeletVersion") or "",
                 "podsCapacity": int(capacity.get("pods") or 0),
-                "cpuUsedCores": round(cpu_used, 2),
+                "cpuUsedCores": round(cpu_used, 2) if measured else None,
                 "cpuTotalCores": round(cpu_total, 2),
                 "cpuPercent": cpu_pct,
-                "memoryUsedMiB": round(mem_used_mib),
+                "memoryUsedMiB": round(mem_used_mib) if measured else None,
                 "memoryTotalMiB": round(mem_total_mib),
-                "memoryAvailableMiB": round(mem_avail_mib),
+                "memoryAvailableMiB": round(mem_avail_mib) if measured else None,
                 "memoryPercent": mem_pct,
+                "diskUsedBytes": disk_used,
+                "diskTotalBytes": disk_total or None,
+                "diskPercent": disk_pct,
+                "pressures": pressures,
+                "cordoned": cordoned,
+                "podsRunning": pods_by_node.get(name, 0) if pod_items is not None else None,
+                "issues": issues,
             }
         )
 

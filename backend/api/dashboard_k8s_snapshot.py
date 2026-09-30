@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ from .k8s_provider import (
     is_failed_pod_status,
     list_cpu_alerts_from_pod_data,
 )
+from .k8s_volume_stats import fetch_cluster_volume_stats, ready_node_names
 from .ttl_cache import TTLCache
 from .upgrade_provider import build_cluster_info
 
@@ -35,6 +36,13 @@ _DASHBOARD_KUBECTL_TIMEOUT = int(os.getenv("DASHBOARD_KUBECTL_TIMEOUT_SECONDS", 
 _SNAPSHOT_TTL_SECONDS = int(os.getenv("DASHBOARD_SNAPSHOT_TTL_SECONDS", "15"))
 _snapshot_cache = TTLCache("dashboard-snapshot")
 
+# Node disk comes from each kubelet's Summary API (one proxied call per Ready
+# node), which is heavier than the rest of the snapshot and changes slowly, so
+# it keeps its own longer cache and is served stale while it refreshes.
+_NODE_FS_TTL_SECONDS = int(os.getenv("DASHBOARD_NODE_DISK_TTL_SECONDS", "60"))
+_NODE_FS_STALE_SECONDS = int(os.getenv("DASHBOARD_NODE_DISK_STALE_SECONDS", "300"))
+_node_fs_cache = TTLCache("dashboard-node-disk")
+
 
 @dataclass(frozen=True)
 class DashboardK8sSnapshot:
@@ -46,6 +54,10 @@ class DashboardK8sSnapshot:
     node_top_mib: float
     pod_top: PodTopMetrics
     node_top_by_name: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # node.fs usage per node that answered the kubelet Summary API.
+    node_fs_by_name: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Why no node disk usage could be read (e.g. missing nodes/proxy), else None.
+    node_fs_reason: Optional[str] = None
     reachable: bool = True
 
 
@@ -87,6 +99,21 @@ def fetch_dashboard_k8s_snapshot(access: ClusterAccess) -> DashboardK8sSnapshot:
     )
 
 
+def _fetch_node_fs(access: ClusterAccess, node_names: List[str]) -> Dict[str, Any]:
+    """Node disk usage via k8s_volume_stats, cached per cluster.
+
+    Only Ready nodes are probed: a NotReady kubelet cannot answer, and the
+    network timeout would trip the shared kubectl circuit breaker."""
+    if not node_names:
+        return {"available": False, "reason": "No Ready nodes to read disk usage from.", "nodes": {}}
+    return _node_fs_cache.get_or_compute(
+        f"node-fs:{access.cluster_id}",
+        _NODE_FS_TTL_SECONDS,
+        lambda: fetch_cluster_volume_stats(access, node_names),
+        stale_ttl=_NODE_FS_STALE_SECONDS,
+    )
+
+
 def _fetch_dashboard_k8s_snapshot_uncached(access: ClusterAccess) -> DashboardK8sSnapshot:
     """Fetch all cluster data in one parallel batch with no redundant kubectl calls.
 
@@ -113,6 +140,9 @@ def _fetch_dashboard_k8s_snapshot_uncached(access: ClusterAccess) -> DashboardK8
         pod_top_future = pool.submit(fetch_pod_top_metrics, access, False, _TOP_TIMEOUT)
 
         node_items, nodes_ok = _safe_json_items(nodes_future, "nodes")
+        # Disk needs the node list; it starts as soon as that lands and runs
+        # alongside the pod/top reads still in flight.
+        node_fs_future = pool.submit(_fetch_node_fs, access, ready_node_names(node_items))
         pod_items_raw, pods_ok = _safe_json_items(pods_future, "pods")
         pod_items = [_strip_pod(p) for p in pod_items_raw]
         version_data, version_ok = _safe_json_object(version_future)
@@ -130,6 +160,11 @@ def _fetch_dashboard_k8s_snapshot_uncached(access: ClusterAccess) -> DashboardK8
             pod_top = pod_top_future.result()
         except Exception:
             pod_top = {}
+        try:
+            node_fs = node_fs_future.result() or {}
+        except Exception as exc:
+            logger.warning("dashboard snapshot: node disk stats failed", exc_info=True)
+            node_fs = {"available": False, "reason": str(exc), "nodes": {}}
 
     reachable = nodes_ok or pods_ok or version_ok
 
@@ -147,13 +182,20 @@ def _fetch_dashboard_k8s_snapshot_uncached(access: ClusterAccess) -> DashboardK8
         node_top_mib=node_top_mib,
         pod_top=pod_top,
         node_top_by_name=node_top_by_name,
+        node_fs_by_name=dict(node_fs.get("nodes") or {}),
+        node_fs_reason=None if node_fs.get("available") else node_fs.get("reason"),
         reachable=reachable,
     )
 
 
 def node_health_from_snapshot(snapshot: DashboardK8sSnapshot) -> List[Dict[str, Any]]:
     """Per-node health from the already-fetched snapshot — no extra kubectl calls."""
-    return build_node_health(snapshot.node_items, snapshot.node_top_by_name)
+    return build_node_health(
+        snapshot.node_items,
+        snapshot.node_top_by_name,
+        fs_by_name=snapshot.node_fs_by_name,
+        pod_items=snapshot.pod_items,
+    )
 
 
 def _resolve_usage_totals(snapshot: DashboardK8sSnapshot) -> Tuple[float, float, float, float]:

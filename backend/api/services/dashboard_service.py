@@ -287,6 +287,11 @@ def _load_recent_audit_entries(limit: int = 200) -> List[AuditLog]:
     return AuditLog.query.order_by(AuditLog.created_at.desc()).limit(limit).all()
 
 
+# Routine sign-ins drown out the changes an operator cares about on the
+# dashboard; they stay in the Audit Logs page. Failed logins are kept.
+_ROUTINE_ACTIVITY_ACTIONS = {"login_success", "logout", "login_email_sent", "mfa_challenge"}
+
+
 def _recent_activity(
     user: Optional[User],
     cluster_id: str,
@@ -306,6 +311,8 @@ def _recent_activity(
         target_type = serialized.get("targetType")
         target_id = serialized.get("targetId")
         action = serialized.get("action") or ""
+        if action in _ROUTINE_ACTIVITY_ACTIONS:
+            continue
 
         if allowed_clusters is not None:
             if target_type == "cluster" and target_id not in allowed_clusters:
@@ -533,28 +540,102 @@ def _mock_namespaces(cluster_id: str) -> List[Dict[str, Any]]:
 
 
 def _mock_node_health(cluster_id: str) -> List[Dict[str, Any]]:
-    """Best-effort node health for mock clusters (no live metrics available)."""
-    rows: List[Dict[str, Any]] = []
+    """Node rows for mock clusters, built by the same code as a live cluster.
+
+    Each canned node is turned into the kubectl node object shape so readiness,
+    pressure, disk and thresholds are decided in one place (build_node_health)."""
+    from ..k8s_provider import build_node_health
+    from ..mock_data import NODE_METRICS
+
+    gib = 1024 ** 3
+    node_items: List[Dict[str, Any]] = []
+    top_by_name: Dict[str, Dict[str, float]] = {}
+    fs_by_name: Dict[str, Dict[str, Any]] = {}
+    pod_items: List[Dict[str, Any]] = []
     for node in CLUSTER_NODES.get(cluster_id, []):
+        name = node.get("name", "unknown")
+        metrics = NODE_METRICS.get(name, {})
         ready = str(node.get("status") or "").lower() == "ready"
-        rows.append(
+        conditions = [{"type": "Ready", "status": "True" if ready else "False"}]
+        conditions += [{"type": p, "status": "True"} for p in metrics.get("pressures", [])]
+        node_items.append(
             {
-                "name": node.get("name", "unknown"),
-                "status": "healthy" if ready else "critical",
-                "ready": ready,
-                "roles": node.get("roles") or ["worker"],
-                "kubeletVersion": node.get("kubeletVersion") or "",
-                "podsCapacity": int(node.get("podsCapacity") or 0),
-                "cpuUsedCores": node.get("cpuUsedCores"),
-                "cpuTotalCores": node.get("cpuTotalCores"),
-                "cpuPercent": node.get("cpuPercent"),
-                "memoryUsedMiB": node.get("memoryUsedMiB"),
-                "memoryTotalMiB": node.get("memoryTotalMiB"),
-                "memoryAvailableMiB": node.get("memoryAvailableMiB"),
-                "memoryPercent": node.get("memoryPercent"),
+                "metadata": {
+                    "name": name,
+                    "labels": {f"node-role.kubernetes.io/{r}": "" for r in metrics.get("roles", [])},
+                },
+                "spec": {"unschedulable": bool(metrics.get("cordoned"))},
+                "status": {
+                    "conditions": conditions,
+                    "capacity": {
+                        "cpu": str(metrics.get("cpuCores", 0)),
+                        "memory": f"{metrics.get('memoryMiB', 0)}Mi",
+                        "ephemeral-storage": f"{metrics.get('diskGiB', 0)}Gi",
+                        "pods": str(metrics.get("podsCapacity", 0)),
+                    },
+                    "nodeInfo": {"kubeletVersion": node.get("kubeletVersion") or ""},
+                },
             }
         )
-    return rows
+        if ready and "cpuUsedCores" in metrics:
+            top_by_name[name] = {"cpu": metrics["cpuUsedCores"], "mem_mib": metrics.get("memoryUsedMiB", 0)}
+        if ready and "diskUsedGiB" in metrics:
+            fs_by_name[name] = {
+                "usedBytes": int(metrics["diskUsedGiB"] * gib),
+                "capacityBytes": int(metrics.get("diskGiB", 0) * gib),
+            }
+        pod_items += [
+            {"spec": {"nodeName": name}, "status": {"phase": "Running"}}
+        ] * int(metrics.get("pods", 0))
+    return build_node_health(node_items, top_by_name, fs_by_name=fs_by_name, pod_items=pod_items)
+
+
+def _disk_usage(node_health: List[Dict[str, Any]], reason: Optional[str]) -> Dict[str, Any]:
+    """Cluster disk total summed over the nodes whose usage was measured.
+
+    ``available`` is False when no node reported usage; ``measuredNodes`` <
+    ``totalNodes`` means the total covers only part of the cluster."""
+    measured = [row for row in node_health if row.get("diskUsedBytes") is not None and row.get("diskTotalBytes")]
+    used = sum(int(row["diskUsedBytes"]) for row in measured)
+    total = sum(int(row["diskTotalBytes"]) for row in measured)
+    if not measured or total <= 0:
+        return {
+            "available": False,
+            "measuredNodes": 0,
+            "totalNodes": len(node_health),
+            "reason": reason or "Node disk usage is not available for this cluster.",
+        }
+    return {
+        "available": True,
+        "usedBytes": used,
+        "totalBytes": total,
+        "percent": round(used / total * 100, 1),
+        "measuredNodes": len(measured),
+        "totalNodes": len(node_health),
+        "reason": None,
+    }
+
+
+_TOP_ALERT_LIMIT = 5
+_PROBLEM_POD_LIMIT = 8
+
+
+def _top_alerts(alerts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The few alerts worth reading on the dashboard: critical first, newest first."""
+    ranked = [a for a in alerts if _severity_bucket(a.get("severity")) in ("critical", "warning")]
+    # Two stable passes: newest first, then critical ahead of warning.
+    ranked.sort(key=lambda a: a.get("firedAt") or a.get("createdAt") or "", reverse=True)
+    ranked.sort(key=lambda a: 0 if _severity_bucket(a.get("severity")) == "critical" else 1)
+    return [
+        {
+            "id": a.get("id"),
+            "severity": _severity_bucket(a.get("severity")),
+            "title": a.get("title") or a.get("message") or a.get("description") or "Alert",
+            "namespace": a.get("namespace"),
+            "firedAt": a.get("firedAt") or a.get("createdAt"),
+        }
+        for a in ranked[:_TOP_ALERT_LIMIT]
+    ]
 
 
 def _run_with_app_context(app, fn, *args, **kwargs):
@@ -678,6 +759,8 @@ def _load_real_k8s_dashboard_data(
     cpu_usage, memory_usage = utilization_from_snapshot(snapshot)
     # Derived from the snapshot's node data — no extra kubectl round-trip.
     node_health = node_health_from_snapshot(snapshot) if snapshot.reachable else []
+    # Carried on the overview so the loader's return shape stays unchanged.
+    overview["nodeDiskReason"] = snapshot.node_fs_reason
 
     upgrade_result = None
     if user and user_has_permission(user, "upgrades:precheck") and cluster_info:
@@ -825,7 +908,11 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         accessible_ns = {ns.get("name") for ns in namespaces}
         problem_pods = [pod for pod in problem_pods if pod.get("namespace") in accessible_ns]
     alert_counts = _count_alerts(alerts)
-    if ready_nodes is None or total_nodes is None:
+    if node_health:
+        # The rows the node table shows are the source of truth for the tile.
+        ready_nodes = sum(1 for row in node_health if row.get("ready"))
+        total_nodes = len(node_health)
+    elif ready_nodes is None or total_nodes is None:
         ready_nodes, total_nodes = _node_readiness(cluster or {})
     health = _compute_health(
         alert_counts=alert_counts,
@@ -969,6 +1056,10 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         },
         "namespaces": _namespace_health(namespaces, alerts),
         "nodeHealth": node_health,
+        "diskUsage": _disk_usage(node_health, (overview or {}).get("nodeDiskReason")),
+        "problemPods": list(problem_pods or [])[:_PROBLEM_POD_LIMIT],
+        "problemPodsTotal": len(problem_pods or []),
+        "topAlerts": _top_alerts(alerts),
         "recentActivity": _recent_activity(user, cluster_id, entries=audit_entries),
         "operationalEvents": _operational_events(user, cluster_id, entries=audit_entries),
         "userActivity": _user_activity(user, entries=audit_entries),

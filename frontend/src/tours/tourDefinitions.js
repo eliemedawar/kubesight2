@@ -61,28 +61,22 @@ const PAGE_TOURS = {
     {
       target: ".sg-ph",
       title: (ctx) => (ctx.isAdmin ? "Operations Dashboard" : "Your dashboard"),
-      body: "A live health summary of the active cluster. The status pill next to the title reflects overall cluster health right now.",
+      body: "A live health summary of the active cluster. The pill next to the title is overall health right now; it refreshes on its own every 30–60 seconds.",
     },
     {
-      target: ".ov-range",
-      title: "Time range",
-      body: "Choose how far back the CPU, memory, and network charts look.",
+      target: '[aria-label="Needs attention"]',
+      title: "Needs attention",
+      body: "Everything broken on this cluster, worst first: nodes down or under pressure, failing pods, critical alerts, an outdated Kubernetes version. Each row links to the page where you fix it.",
     },
     {
-      target: ".sg-ph-actions .primary",
-      title: "Upgrade Safe Mode",
-      body: "Jump to the Upgrade Center to precheck and plan a Kubernetes version upgrade.",
-      when: (ctx) => ctx.pageAllowed("upgrade"),
-    },
-    {
-      target: ".sg-kpi-grid",
+      target: ".db-vitals",
       title: "Cluster vitals",
-      body: "Health, CPU, memory, nodes, running pods, and active alerts at a glance — each tile trends over the selected range.",
+      body: "Nodes, pods and alerts at a glance, plus how much CPU, memory and disk the cluster has left. Bars turn amber at 85% and red at 90%.",
     },
     {
-      target: ".sg-feed",
-      title: "Recent events",
-      body: "The latest cluster events. Use “View all” to investigate anything suspicious.",
+      target: ".db-nodes",
+      title: "Nodes",
+      body: "Every node with its CPU, memory and disk usage, worst first. Disk is read from each node's kubelet; a dash means it could not be measured, never zero.",
     },
     {
       target: ".dashboard-my-access-first",

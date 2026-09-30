@@ -1,661 +1,464 @@
 import { useMemo } from "react";
-import ChartCanvas from "./charts/ChartCanvas.jsx";
-import Sparkline from "./charts/Sparkline.jsx";
-import { cssVar, drawArea, drawStacked } from "./charts/chartDraw.js";
-import { TIME_RANGES } from "./useDashboardSeries.js";
-import { formatDashboardTime, formatLatestVersion } from "../utils/dashboardStatus.js";
+import { formatDashboardTime } from "../utils/dashboardStatus.js";
+import { buildAttentionItems, formatBytes, usageTone } from "./attention.js";
 
-// ── status helpers ─────────────────────────────────────────────────
-// Tone name for pills / dots / bars, derived from the status word so all
-// colors stay token-driven (status-pill + ov-dot/sg-bar-fill modifiers).
-function pillTone(status) {
+// KubeSight Operations Dashboard — triage first. Top to bottom it answers:
+// is anything broken (Needs attention), how much room is left (vitals), which
+// node is the problem (node table with CPU/memory/disk), and what changed
+// lately. Everything shown is a real reading from the summary; a value that
+// could not be measured renders as "—" with the reason, never as zero.
+
+function toneOf(status) {
   const s = String(status || "").toLowerCase();
-  if (s === "critical" || s === "failed" || s === "fail") return "danger";
-  if (s === "warning" || s === "warn") return "warn";
-  if (s === "healthy" || s === "passed" || s === "pass" || s === "ready") return "ok";
-  return "unknown";
-}
-
-// Dot/bar tone: same mapping but "muted" for unknown (dots need a color).
-function dotTone(status) {
-  const tone = pillTone(status);
-  return tone === "unknown" ? "muted" : tone;
-}
-
-function statusLabel(status) {
-  const s = String(status || "unknown").toLowerCase();
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-// Format a memory figure given in MiB as GiB (e.g. 31744 -> "31.0 GiB").
-function formatGiB(mib) {
-  if (mib == null || Number.isNaN(Number(mib))) return "—";
-  return `${(Number(mib) / 1024).toFixed(1)} GiB`;
-}
-
-// Simple trend marker from the rolling series (recent vs. a few samples back).
-function trend(arr) {
-  if (!arr || arr.length < 6) return null;
-  const last = arr[arr.length - 1];
-  const prev = arr[arr.length - 6];
-  const delta = Math.round(Math.abs(last - prev));
-  if (!delta) return null;
-  return { dir: last >= prev ? "up" : "down", delta };
-}
-
-// Presentation tone for a feed entry, matched on its message/action text.
-function eventTone(event) {
-  const text = `${event.action || ""} ${event.message || ""}`;
-  if (/fail|error|critical/i.test(text)) return "danger";
-  if (/warn/i.test(text)) return "warn";
-  if (/success|passed|completed|resolved|healthy/i.test(text)) return "ok";
+  if (s === "critical" || s === "unreachable" || s === "failed") return "danger";
+  if (s === "warning") return "warn";
+  if (s === "healthy") return "ok";
   return "muted";
 }
 
-// ── inline icons (stroke-based, Signal style) ──────────────────────
-function Ic({ children, size = 14, strokeWidth = 1.8 }) {
+function label(status) {
+  const s = String(status || "unknown");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// "191" → "191 cores"; displays that already carry a unit pass through.
+function withUnit(display, unit) {
+  if (display == null || display === "") return display;
+  return /^[\d.,]+$/.test(String(display)) ? `${display} ${unit}` : display;
+}
+
+// Audit timestamps span days, so a bare clock time misleads; say how long ago.
+function ago(iso, fallback) {
+  const t = iso ? new Date(iso).getTime() : NaN;
+  if (!Number.isFinite(t)) return fallback || "";
+  const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? "yesterday" : `${days}d ago`;
+}
+
+function pct(value) {
+  return value == null || !Number.isFinite(Number(value)) ? null : Math.round(Number(value));
+}
+
+// ── icons (stroke, currentColor) ───────────────────────────────────
+function Ic({ children, size = 14 }) {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      width={size}
-      height={size}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={strokeWidth}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
+      strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       {children}
     </svg>
   );
 }
-
-const IcServer = () => (
-  <Ic>
-    <rect x="3" y="4" width="18" height="7" rx="2.5" />
-    <rect x="3" y="13" width="18" height="7" rx="2.5" />
-    <path d="M7 7.5h.01M7 16.5h.01" />
-  </Ic>
-);
-
-const IcCpu = () => (
-  <Ic>
-    <rect x="4" y="4" width="16" height="16" rx="2" />
-    <rect x="9" y="9" width="6" height="6" />
-    <path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2" />
-  </Ic>
-);
-
-const IcMemory = () => (
-  <Ic>
-    <rect x="3" y="5" width="18" height="11" rx="2" />
-    <path d="M7 19v-3M12 19v-3M17 19v-3" />
-  </Ic>
-);
-
-const IcNodes = () => (
-  <Ic>
-    <circle cx="6" cy="12" r="2.6" />
-    <circle cx="18" cy="5" r="2.6" />
-    <circle cx="18" cy="19" r="2.6" />
-    <path d="m8.4 10.7 7.2-4.5M8.4 13.3l7.2 4.5" />
-  </Ic>
-);
-
-const IcBox = () => (
-  <Ic>
-    <path d="M21 8v8a2 2 0 0 1-1 1.73l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.73l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8Z" />
-    <path d="M3.3 7 12 12l8.7-5M12 12v10" />
-  </Ic>
-);
-
 const IcAlert = () => (
-  <Ic>
-    <path d="m21.7 18-8-14a2 2 0 0 0-3.5 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z" />
-    <path d="M12 9v4M12 17h.01" />
-  </Ic>
+  <Ic><path d="m21.7 18-8-14a2 2 0 0 0-3.5 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z" /><path d="M12 9v4M12 17h.01" /></Ic>
 );
-
+const IcInfo = () => <Ic><circle cx="12" cy="12" r="9" /><path d="M12 8h.01M12 12v5" /></Ic>;
+const IcCheck = () => <Ic><path d="M20 6 9 17l-5-5" /></Ic>;
+const IcArrow = () => <Ic size={13}><path d="M5 12h14M13 6l6 6-6 6" /></Ic>;
 const IcRefresh = () => (
-  <Ic>
-    <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8" />
-    <path d="M21 3v5h-5" />
-  </Ic>
+  <Ic><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8" /><path d="M21 3v5h-5" /></Ic>
 );
 
-const IcRocket = () => (
-  <Ic>
-    <path d="M4.5 16.5c-1.5 1.3-2 5-2 5s3.7-.5 5-2c.7-.8.7-2.1-.1-2.9a2.18 2.18 0 0 0-2.9-.1Z" />
-    <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2Z" />
-    <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
-  </Ic>
-);
+const PAGE_LABEL = {
+  clusters: "Clusters",
+  resources: "Resources",
+  alerts: "Alerts",
+  upgrade: "Upgrade",
+  namespaces: "Namespaces",
+  auditLogs: "Audit log",
+};
 
-const IcArrow = () => (
-  <Ic strokeWidth={2}>
-    <path d="M7 17 17 7M8 7h9v9" />
-  </Ic>
-);
-
-const IcCheck = () => (
-  <Ic strokeWidth={2.2}>
-    <path d="M20 6 9 17l-5-5" />
-  </Ic>
-);
-
-const IcInfo = () => (
-  <Ic>
-    <circle cx="12" cy="12" r="9" />
-    <path d="M12 8h.01M12 12v5" />
-  </Ic>
-);
-
-// ── small building blocks ──────────────────────────────────────────
-function KvRow({ label, value, mono, tone }) {
-  const valClass = [
-    "ov-kv-val",
-    mono ? "ov-kv-val--mono" : "",
-    tone ? `ov-kv-val--${tone}` : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+function GoButton({ target, canOpen, onNavigate, children }) {
+  if (!target || !canOpen?.(target.page)) return null;
   return (
-    <div className="ov-kv-row">
-      <span className="ov-kv-key">{label}</span>
-      <span className={valClass}>{value}</span>
+    <button type="button" className="btn-ghost db-go" onClick={() => onNavigate?.(target.page, target.options)}>
+      {children || PAGE_LABEL[target.page] || "Open"}
+      <IcArrow />
+    </button>
+  );
+}
+
+// ── Needs attention ────────────────────────────────────────────────
+function Attention({ items, summary, canOpen, onNavigate }) {
+  if (!items.length) {
+    const nodes = summary?.nodes || {};
+    const running = summary?.pods?.running ?? 0;
+    return (
+      <section className="db-card db-clear" aria-label="Needs attention">
+        <span className="db-clear-ic"><IcCheck /></span>
+        <div>
+          <h2>Nothing needs attention</h2>
+          <p>
+            {nodes.ready}/{nodes.total} nodes ready · {running.toLocaleString()} pods running · no critical alerts
+          </p>
+        </div>
+      </section>
+    );
+  }
+  const worst = items[0].tone;
+  return (
+    <section className={`db-card db-attn db-attn--${worst}`} aria-label="Needs attention">
+      <div className="db-card-h">
+        <h2>Needs attention</h2>
+        <span className={`db-count db-count--${worst}`}>{items.length}</span>
+      </div>
+      <ul className="db-attn-list">
+        {items.map((item) => (
+          <li key={item.id} className={`db-attn-row db-attn-row--${item.tone}`}>
+            <span className="db-attn-ic">{item.tone === "info" ? <IcInfo /> : <IcAlert />}</span>
+            <span className="db-attn-kind">{item.kind}</span>
+            <div className="db-attn-body">
+              <p className="db-attn-title" title={item.title}>{item.title}</p>
+              {item.detail ? <p className="db-attn-detail">{item.detail}</p> : null}
+            </div>
+            <GoButton target={item.target} canOpen={canOpen} onNavigate={onNavigate} />
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// ── vitals ─────────────────────────────────────────────────────────
+function Meter({ name, percent, used, total, note }) {
+  const value = pct(percent);
+  const tone = usageTone(value);
+  return (
+    <div className="db-meter" title={note || undefined}>
+      <span className="db-meter-name">{name}</span>
+      <span className="db-bar" aria-hidden="true">
+        {value != null ? <span className={`db-bar-fill db-bar-fill--${tone}`} style={{ width: `${Math.min(value, 100)}%` }} /> : null}
+      </span>
+      <span className={`db-meter-val${value != null ? ` db-meter-val--${tone}` : ""}`}>
+        {value != null ? `${value}%` : "—"}
+      </span>
+      <span className="db-meter-sub">{value != null && used && total ? `${used} / ${total}` : note ? "not measured" : ""}</span>
     </div>
   );
 }
 
-function DeltaChip({ tone = "flat", children }) {
-  return <span className={`sg-delta sg-delta--${tone}`}>{children}</span>;
-}
-
-// KubeSight Operations Dashboard, restructured to the Signal concept's
-// Overview screen: sg-ph page header, sg-kpi tiles with sparklines, Signal
-// card headers on the chart panels, an sg-flist namespace card and an
-// sg-feed events card. Fed by the real dashboard summary + the rolling
-// series hook; the app's AppShell provides the surrounding chrome.
-export default function OpsDashboard({
-  summary,
-  series,
-  timeRange,
-  onTimeRangeChange,
-  lastRefreshedAt,
-  onRefresh,
-  canOpenUpgrade,
-  onNavigateToUpgrade,
-  onViewAllEvents,
-}) {
-  const health = summary?.health?.status || summary?.clusterHealth?.status || "healthy";
-  const healthReasons = summary?.health?.reasons || summary?.clusterHealth?.reasons || [];
+function Vitals({ summary }) {
+  const nodes = summary?.nodes || { ready: 0, total: 0 };
+  const pods = summary?.pods || {};
+  const alerts = summary?.alerts || {};
   const cpu = summary?.cpuUsage || {};
   const mem = summary?.memoryUsage || {};
-  const nodes = summary?.nodes || { ready: 0, total: 0, status: "unknown" };
-  const pods = summary?.pods || { running: 0, pending: 0, failed: 0 };
-  const alerts = summary?.alerts || { critical: 0, warning: 0, info: 0, total: 0 };
-  const version = summary?.version || {};
+  const disk = summary?.diskUsage || {};
+  const cordoned = (summary?.nodeHealth || []).filter((n) => n.cordoned).length;
+  const notReady = Math.max((nodes.total || 0) - (nodes.ready || 0), 0);
+  const diskNote = !disk.available
+    ? disk.reason
+    : disk.measuredNodes < disk.totalNodes
+      ? `Measured on ${disk.measuredNodes} of ${disk.totalNodes} nodes`
+      : "";
+
+  return (
+    <div className="db-vitals">
+      <div className="db-tile">
+        <p className="db-tile-label">Nodes ready</p>
+        <p className="db-tile-value">
+          <b className={notReady ? "db-t--danger" : undefined}>{nodes.ready}</b>
+          <span>/ {nodes.total}</span>
+        </p>
+        <p className="db-tile-sub">
+          {notReady ? <span className="db-t--danger">{notReady} not ready</span> : "All ready"}
+          {cordoned ? ` · ${cordoned} cordoned` : ""}
+        </p>
+      </div>
+      <div className="db-tile">
+        <p className="db-tile-label">Pods running</p>
+        <p className="db-tile-value"><b>{(pods.running ?? 0).toLocaleString()}</b></p>
+        <p className="db-tile-sub">
+          <span className={pods.failed ? "db-t--danger" : undefined}>{pods.failed || 0} failing</span>
+          {" · "}
+          <span className={pods.pending ? "db-t--warn" : undefined}>{pods.pending || 0} pending</span>
+        </p>
+      </div>
+      <div className="db-tile">
+        <p className="db-tile-label">Active alerts</p>
+        <p className="db-tile-value">
+          <b className={alerts.critical ? "db-t--danger" : undefined}>{alerts.total ?? 0}</b>
+        </p>
+        <p className="db-tile-sub">
+          {alerts.total ? (
+            <>
+              <span className={alerts.critical ? "db-t--danger" : undefined}>{alerts.critical || 0} critical</span>
+              {" · "}
+              <span className={alerts.warning ? "db-t--warn" : undefined}>{alerts.warning || 0} warning</span>
+            </>
+          ) : (
+            "None active"
+          )}
+        </p>
+      </div>
+      <div className="db-tile db-tile--capacity">
+        <p className="db-tile-label">Cluster capacity used</p>
+        <Meter
+          name="CPU"
+          percent={cpu.available ? cpu.percent : null}
+          used={cpu.usedDisplay}
+          total={withUnit(cpu.allocatableDisplay, "cores")}
+          note={cpu.available ? "" : cpu.reason}
+        />
+        <Meter
+          name="Memory"
+          percent={mem.available ? mem.percent : null}
+          used={mem.usedDisplay}
+          total={mem.allocatableDisplay}
+          note={mem.available ? "" : mem.reason}
+        />
+        <Meter
+          name="Disk"
+          percent={disk.available ? disk.percent : null}
+          used={disk.available ? formatBytes(disk.usedBytes) : ""}
+          total={disk.available ? formatBytes(disk.totalBytes) : ""}
+          note={diskNote}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── node table ─────────────────────────────────────────────────────
+function UsageCell({ name, percent, detail, missing }) {
+  const value = pct(percent);
+  const tone = usageTone(value);
+  return (
+    <td className="db-use" data-label={name}>
+      <div className="db-use-top">
+        <span className="db-bar" aria-hidden="true">
+          {value != null ? <span className={`db-bar-fill db-bar-fill--${tone}`} style={{ width: `${Math.min(value, 100)}%` }} /> : null}
+        </span>
+        <b className={value != null ? `db-use-pct db-use-pct--${tone}` : "db-use-pct"}>{value != null ? `${value}%` : "—"}</b>
+      </div>
+      <span className="db-use-sub">{value != null ? detail : missing}</span>
+    </td>
+  );
+}
+
+function NodeTable({ nodes, disk, canOpen, onNavigate }) {
+  const diskNote = !disk?.available && disk?.reason ? disk.reason : "";
+  return (
+    <section className="db-card db-nodes" aria-label="Nodes">
+      <div className="db-card-h">
+        <h2>Nodes</h2>
+        <span className="db-card-sub">{nodes.length} · worst first</span>
+        <div className="db-card-r">
+          {diskNote ? (
+            <span className="db-note" title={diskNote}>
+              <IcInfo />
+              Disk usage not readable
+              {/nodes\/proxy|forbidden/i.test(diskNote) ? <> · needs <code>nodes/proxy</code></> : null}
+            </span>
+          ) : null}
+          <GoButton target={{ page: "clusters" }} canOpen={canOpen} onNavigate={onNavigate} />
+        </div>
+      </div>
+      {nodes.length ? (
+        <div className="db-table-wrap">
+          <table className="db-table">
+            <thead>
+              <tr>
+                <th scope="col">Node</th>
+                <th scope="col">Status</th>
+                <th scope="col">CPU</th>
+                <th scope="col">Memory</th>
+                <th scope="col">Disk</th>
+                <th scope="col" className="db-num">Pods</th>
+              </tr>
+            </thead>
+            <tbody>
+              {nodes.map((node) => {
+                const tone = toneOf(node.status);
+                const flags = [...(node.pressures || [])];
+                if (!node.ready) flags.unshift("NotReady");
+                return (
+                  <tr key={node.name} className={`db-row db-row--${tone}`}>
+                    <th scope="row" className="db-node">
+                      <span className="db-node-name" title={node.name}>{node.name}</span>
+                      <span className="db-node-meta">
+                        {(node.roles || []).join(", ")}
+                        {node.kubeletVersion ? ` · ${node.kubeletVersion}` : ""}
+                        {node.cordoned ? <span className="db-tag">cordoned</span> : null}
+                      </span>
+                    </th>
+                    <td className="db-node-status">
+                      <span className={`db-status db-status--${tone}`}>
+                        <span className="db-dot" />
+                        {label(node.status)}
+                      </span>
+                      {flags.length ? (
+                        <span className="db-flags">
+                          {flags.map((flag) => (
+                            <span key={flag} className="db-flag">{flag}</span>
+                          ))}
+                        </span>
+                      ) : null}
+                    </td>
+                    <UsageCell
+                      name="CPU"
+                      percent={node.cpuPercent}
+                      detail={`${node.cpuUsedCores ?? "—"} / ${node.cpuTotalCores ?? "—"} cores`}
+                      missing={node.cpuTotalCores ? `of ${node.cpuTotalCores} cores` : ""}
+                    />
+                    <UsageCell
+                      name="Memory"
+                      percent={node.memoryPercent}
+                      detail={`${formatBytes((node.memoryUsedMiB || 0) * 1024 * 1024)} / ${formatBytes((node.memoryTotalMiB || 0) * 1024 * 1024)}`}
+                      missing={node.memoryTotalMiB ? `of ${formatBytes(node.memoryTotalMiB * 1024 * 1024)}` : ""}
+                    />
+                    <UsageCell
+                      name="Disk"
+                      percent={node.diskPercent}
+                      detail={`${formatBytes(node.diskUsedBytes)} / ${formatBytes(node.diskTotalBytes)}`}
+                      missing={node.diskTotalBytes ? `of ${formatBytes(node.diskTotalBytes)}` : "no data"}
+                    />
+                    <td className="db-num db-pods" data-label="Pods">
+                      {node.podsRunning ?? "—"}
+                      {node.podsCapacity ? <span> / {node.podsCapacity}</span> : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="db-empty">No node data for this cluster.</p>
+      )}
+    </section>
+  );
+}
+
+// ── namespaces + activity ──────────────────────────────────────────
+function Namespaces({ namespaces, canOpen, onNavigate }) {
+  const flagged = namespaces.filter((ns) => ns.status !== "healthy");
+  const rows = flagged.length ? flagged : namespaces.slice(0, 5);
+  return (
+    <section className="db-card" aria-label="Namespaces">
+      <div className="db-card-h">
+        <h2>{flagged.length ? "Namespaces with alerts" : "Busiest namespaces"}</h2>
+        <div className="db-card-r">
+          <GoButton target={{ page: "namespaces" }} canOpen={canOpen} onNavigate={onNavigate}>View all</GoButton>
+        </div>
+      </div>
+      {rows.length ? (
+        <ul className="db-list">
+          {rows.map((ns) => {
+            const tone = toneOf(ns.status);
+            return (
+              <li key={ns.name} className="db-list-row">
+                <span className={`db-dot db-dot--${tone}`} />
+                <span className="db-list-name" title={ns.name}>{ns.name}</span>
+                <span className="db-list-meta">{ns.pods} pods</span>
+                {ns.alertCount ? (
+                  <span className={`db-pill db-pill--${tone}`}>{ns.alertCount} alert{ns.alertCount === 1 ? "" : "s"}</span>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="db-empty">No namespaces you can see on this cluster.</p>
+      )}
+    </section>
+  );
+}
+
+function eventTone(event) {
+  const text = `${event.action || ""} ${event.message || ""}`;
+  if (/fail|error|critical|denied/i.test(text)) return "danger";
+  if (/warn|rollback/i.test(text)) return "warn";
+  return "muted";
+}
+
+function Activity({ events, canOpen, onNavigate }) {
+  return (
+    <section className="db-card" aria-label="Recent activity">
+      <div className="db-card-h">
+        <h2>Recent activity</h2>
+        <div className="db-card-r">
+          <GoButton target={{ page: "auditLogs" }} canOpen={canOpen} onNavigate={onNavigate}>View all</GoButton>
+        </div>
+      </div>
+      {events.length ? (
+        <ul className="db-list">
+          {events.map((event, i) => (
+            <li key={`${event.createdAt || event.time}-${i}`} className="db-list-row db-event">
+              <span className={`db-dot db-dot--${eventTone(event)}`} />
+              <span className="db-event-msg">{event.message}</span>
+              <span className="db-list-meta" title={event.createdAt || undefined}>{ago(event.createdAt, event.time)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="db-empty">No recent activity recorded.</p>
+      )}
+    </section>
+  );
+}
+
+export default function OpsDashboard({
+  summary,
+  isAdmin = true,
+  lastRefreshedAt,
+  refreshing = false,
+  onRefresh,
+  onNavigate,
+  canOpen,
+}) {
+  const health = summary?.health?.status || summary?.clusterHealth?.status || "unknown";
   const clusterInfo = summary?.clusterInfo || {};
-  const namespaces = summary?.namespaces || [];
-  const nodeHealth = summary?.nodeHealth || [];
+  const version = summary?.version || {};
+  const nodes = summary?.nodeHealth || [];
+  const items = useMemo(() => buildAttentionItems(summary), [summary]);
   const events = useMemo(
-    () => [...(summary?.operationalEvents || []), ...(summary?.recentActivity || [])].slice(0, 10),
+    () => [...(summary?.operationalEvents || []), ...(summary?.recentActivity || [])].slice(0, 6),
     [summary?.operationalEvents, summary?.recentActivity]
   );
 
-  // Canvas charts need resolved colors; these are read from design tokens at
-  // render time (theme-aware) — never hardcoded.
-  const accent = cssVar("--accent", "#3b82f6");
-  const TEAL = cssVar("--chart-8", "#2dd4bf");
-  const PURPLE = cssVar("--chart-3", "#8b5cf6");
-  const bands = series?.cpuBands || [];
-  const bandColors = bands.map((_, i) => (i === 0 ? accent : i === 1 ? TEAL : PURPLE));
-  // Same palette as var() names for DOM legend dots (no resolved hex in JSX).
-  const bandTokens = ["--accent", "--chart-8", "--chart-3"];
-  const cpuPeak = series?.cpu?.length ? Math.round(Math.max(...series.cpu)) : null;
-  // Charts need two real samples to draw a line; until then they say so rather
-  // than showing anything made up.
-  const cpuSamples = series?.cpu?.length || 0;
-  const memSamples = series?.mem?.length || 0;
-
-  const cpuTrend = trend(series?.cpu);
-  const memTrend = trend(series?.mem);
-  const healthTone = pillTone(health);
-  const notReady = Math.max((nodes.total ?? 0) - (nodes.ready ?? 0), 0);
-
-  const versionUpToDate = version.status === "up_to_date";
-
-  const dateLine = new Date().toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  });
-
   return (
-    <div className="ov-dash">
-      {/* ── Page header ───────────────────────────────────────── */}
-      <header className="sg-ph">
+    <div className="db-root">
+      <header className="sg-ph db-head">
         <div>
-          <div className="ov-title-line">
-            <h1>Operations Dashboard</h1>
-            <span className={`status-pill ${healthTone}`}>{statusLabel(health)}</span>
+          <div className="db-title">
+            <h1>{isAdmin ? "Operations Dashboard" : "Dashboard"}</h1>
+            <span className={`db-health db-health--${toneOf(health)}`}>
+              <span className="db-dot" />
+              {label(health)}
+            </span>
           </div>
           <p className="sg-ph-sub">
-            {dateLine} · {clusterInfo.name || summary?.clusterId || "cluster"} ·{" "}
-            <span className="ov-mono">{version.current || clusterInfo.version || "—"}</span> · updated{" "}
-            <span className="ov-mono">{formatDashboardTime(lastRefreshedAt || summary?.lastUpdated)}</span>
+            {clusterInfo.name || summary?.clusterId}
+            {version.current ? <> · <span className="db-mono">{version.current}</span></> : null}
+            {clusterInfo.provider && clusterInfo.provider !== "Unknown" ? ` · ${clusterInfo.provider}` : ""}
+            {" · updated "}
+            <span className="db-mono">{formatDashboardTime(lastRefreshedAt || summary?.lastUpdated)}</span>
           </p>
         </div>
         <div className="sg-ph-actions">
-          <div className="ov-range" role="group" aria-label="Chart time range">
-            {TIME_RANGES.map((range) => (
-              <button
-                key={range}
-                type="button"
-                className={`ov-range-pill${timeRange === range ? " is-active" : ""}`}
-                aria-pressed={timeRange === range}
-                onClick={() => onTimeRangeChange?.(range)}
-              >
-                {range}
-              </button>
-            ))}
-          </div>
-          <button type="button" className="btn-ghost ov-ghost" onClick={onRefresh}>
+          <button
+            type="button"
+            className={`btn-ghost db-refresh${refreshing ? " is-busy" : ""}`}
+            onClick={onRefresh}
+            disabled={refreshing}
+          >
             <IcRefresh />
-            Refresh
+            {refreshing ? "Refreshing" : "Refresh"}
           </button>
-          {canOpenUpgrade ? (
-            <button type="button" className="primary" onClick={onNavigateToUpgrade}>
-              <IcRocket />
-              Upgrade Safe Mode
-            </button>
-          ) : null}
         </div>
       </header>
 
-      {/* ── KPI tiles ─────────────────────────────────────────── */}
-      <div className="sg-kpi-grid">
-        <div className="sg-kpi">
-          <p className="sg-kpi-label">
-            <IcServer />
-            Cluster health
-          </p>
-          <div className="sg-kpi-value">
-            <b className={`ov-kpi-word ov-kpi-word--${dotTone(health)}`}>{statusLabel(health)}</b>
-          </div>
-          <div className="ov-kpi-sub">
-            {nodes.ready}/{nodes.total} nodes · {clusterInfo.podCount ?? pods.running} pods
-          </div>
-          {health !== "healthy" && healthReasons.length ? (
-            <ul className={`ov-kpi-reasons ov-kpi-reasons--${dotTone(health)}`}>
-              {healthReasons.map((reason) => (
-                <li key={reason}>{reason}</li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-
-        <div className="sg-kpi">
-          <p className="sg-kpi-label">
-            <IcCpu />
-            CPU usage
-          </p>
-          <div className="sg-kpi-value">
-            <b>{cpu.available ? `${cpu.percent}%` : "—"}</b>
-            {cpuTrend ? (
-              <DeltaChip tone="flat">
-                {cpuTrend.dir === "up" ? "▲" : "▼"} {cpuTrend.delta}%
-              </DeltaChip>
-            ) : null}
-          </div>
-          <div className="sg-spark">
-            <Sparkline data={series?.cpu} color="--chart-2" height={34} />
-          </div>
-          <div className="ov-kpi-sub">of {cpu.allocatableDisplay || "cluster vCPU"}</div>
-        </div>
-
-        <div className="sg-kpi">
-          <p className="sg-kpi-label">
-            <IcMemory />
-            Memory usage
-          </p>
-          <div className="sg-kpi-value">
-            <b>{mem.available ? `${mem.percent}%` : "—"}</b>
-            {memTrend ? (
-              <DeltaChip tone="flat">
-                {memTrend.dir === "up" ? "▲" : "▼"} {memTrend.delta}%
-              </DeltaChip>
-            ) : null}
-          </div>
-          <div className="sg-spark">
-            <Sparkline data={series?.mem} color="--chart-4" height={34} />
-          </div>
-          <div className="ov-kpi-sub">of {mem.allocatableDisplay || "allocatable"}</div>
-        </div>
-
-        <div className="sg-kpi">
-          <p className="sg-kpi-label">
-            <IcNodes />
-            Nodes
-          </p>
-          <div className="sg-kpi-value">
-            <b>
-              {nodes.ready} / {nodes.total}
-            </b>
-            {notReady > 0 ? <DeltaChip tone="down">{notReady} not ready</DeltaChip> : null}
-          </div>
-          <div className="ov-kpi-sub">
-            {nodes.ready === nodes.total && nodes.total > 0 ? "All ready" : statusLabel(nodes.status)}
-          </div>
-        </div>
-
-        <div className="sg-kpi">
-          <p className="sg-kpi-label">
-            <IcBox />
-            Running pods
-          </p>
-          <div className="sg-kpi-value">
-            <b>{pods.running}</b>
-            {pods.failed > 0 ? (
-              <DeltaChip tone="down">{pods.failed} failed</DeltaChip>
-            ) : pods.pending > 0 ? (
-              <DeltaChip tone="flat">{pods.pending} pending</DeltaChip>
-            ) : null}
-          </div>
-          <div className="ov-kpi-sub">
-            Pending {pods.pending} · Failed {pods.failed}
-          </div>
-        </div>
-
-        <div className="sg-kpi">
-          <p className="sg-kpi-label">
-            <IcAlert />
-            Active alerts
-          </p>
-          <div className="sg-kpi-value">
-            <b>{alerts.total}</b>
-            {alerts.critical > 0 ? (
-              <DeltaChip tone="down">{alerts.critical} critical</DeltaChip>
-            ) : alerts.warning > 0 ? (
-              <span className="sg-delta ov-delta--warn">{alerts.warning} warning</span>
-            ) : null}
-          </div>
-          <div className="ov-kpi-sub">
-            Critical {alerts.critical} · Warning {alerts.warning}
-          </div>
-        </div>
-      </div>
-
-      {/* ── CPU chart + namespace fleet list ──────────────────── */}
-      <div className="sg-row-2">
-        <section className="ov-card">
-          <div className="ov-card-h">
-            <h3>CPU Utilization</h3>
-            <span className="ov-card-sub">
-              By namespace · % of cluster
-              {cpuPeak != null ? ` · peak ${cpuPeak}%` : ""}
-            </span>
-            <div className="ov-card-r">
-              <div className="ov-legend">
-                {bands.map((band, i) => (
-                  <i key={band.label}>
-                    <span
-                      className="ov-sq"
-                      style={{ background: `var(${bandTokens[i] || "--chart-5"})` }}
-                    />
-                    {band.label}
-                  </i>
-                ))}
-              </div>
-              {bands.length > 1 ? (
-                <span className="ov-sample" title="The cluster total is measured; the per-namespace split is estimated from each namespace's pod count.">
-                  split est. by pods
-                </span>
-              ) : null}
-            </div>
-          </div>
-          <div className="ov-chart-wrap">
-            {cpuSamples >= 2 ? (
-              <ChartCanvas
-                className="ov-chart ov-chart--tall"
-                draw={(ctx, { width, height }) => {
-                  if (!bands.length || (bands[0]?.data?.length || 0) < 2) return;
-                  drawStacked(ctx, width, height, bands.map((b) => b.data), bandColors, 100, "%");
-                }}
-                deps={[bands, accent]}
-              />
-            ) : (
-              <div className="ov-empty">
-                {series?.cpuReal
-                  ? "Collecting CPU samples — the chart fills in as the dashboard refreshes."
-                  : "No CPU metrics source (Metrics Server not available)."}
-              </div>
-            )}
-          </div>
-        </section>
-
-        <section className="ov-card">
-          <div className="ov-card-h">
-            <h3>Namespaces</h3>
-            <span className="ov-card-sub">{namespaces.length} total</span>
-          </div>
-          {namespaces.length ? (
-            <div className="sg-flist ov-scroll">
-              {namespaces.map((ns) => (
-                <div className="sg-fl" key={ns.name}>
-                  <span className={`sg-fl-dot ov-dot--${dotTone(ns.status)}`} />
-                  <span className="sg-fl-name ov-mono" title={ns.name}>
-                    {ns.name}
-                  </span>
-                  <span className="sg-fl-meta">{ns.pods} pods</span>
-                  <span className={`status-pill status-pill--compact ${pillTone(ns.status)}`}>
-                    {statusLabel(ns.status)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="ov-empty">No namespaces available for this cluster.</div>
-          )}
-        </section>
-      </div>
-
-      {/* ── Memory + network charts ───────────────────────────── */}
-      <div className="sg-row-11">
-        <section className="ov-card">
-          <div className="ov-card-h">
-            <h3>Memory Utilization</h3>
-            <span className="ov-card-sub">
-              Working set · % of allocatable
-              {mem.usedDisplay && mem.allocatableDisplay
-                ? ` · ${mem.usedDisplay} / ${mem.allocatableDisplay}`
-                : ""}
-            </span>
-            <div className="ov-card-r">
-              <div className="ov-legend">
-                <i>
-                  <span className="ov-sq" style={{ background: "var(--chart-3)" }} />
-                  used
-                </i>
-                <i>
-                  <span className="ov-dashline" />
-                  limit {series?.memLimit || 85}%
-                </i>
-              </div>
-            </div>
-          </div>
-          <div className="ov-chart-wrap">
-            {memSamples >= 2 ? (
-              <ChartCanvas
-                className="ov-chart"
-                draw={(ctx, { width, height }) => {
-                  if ((series?.mem?.length || 0) < 2) return;
-                  drawArea(ctx, width, height, series.mem, PURPLE, 100, series.memLimit || 85, "%");
-                }}
-                deps={[series?.mem, series?.memLimit]}
-              />
-            ) : (
-              <div className="ov-empty">
-                {series?.memReal
-                  ? "Collecting memory samples — the chart fills in as the dashboard refreshes."
-                  : "No memory metrics source (Metrics Server not available)."}
-              </div>
-            )}
-          </div>
-        </section>
-
-        <section className="ov-card">
-          <div className="ov-card-h">
-            <h3>Network I/O</h3>
-            <span className="ov-card-sub">Cluster-wide throughput</span>
-          </div>
-          <div className="ov-chart-wrap">
-            {/* KubeSight has no network metrics source yet (no CNI / Prometheus
-                integration). Show that plainly — never sample numbers. */}
-            <div className="ov-empty">No network metrics source.</div>
-          </div>
-        </section>
-      </div>
-
-      {/* ── Node health + events feed ─────────────────────────── */}
-      <div className="sg-row-2">
-        <section className="ov-card">
-          <div className="ov-card-h">
-            <h3>Node Health</h3>
-            <span className="ov-card-sub">{nodeHealth.length} nodes</span>
-          </div>
-          {nodeHealth.length ? (
-            <>
-              <div className="ov-nt-head">
-                <span>Node</span>
-                <span>Status</span>
-                <span>Memory (used / total)</span>
-                <span className="ov-nt-sm">Free</span>
-                <span className="ov-nt-sm">Usage</span>
-              </div>
-              {nodeHealth.map((node) => {
-                const tone = dotTone(node.status);
-                return (
-                  <div className="ov-nt-row" key={node.name}>
-                    <span className="ov-nt-name" title={node.name}>
-                      {node.name}
-                    </span>
-                    <span className={`ov-status ov-status--${tone}`}>
-                      <span className={`sg-fl-dot ov-dot--${tone}`} />
-                      {statusLabel(node.status)}
-                    </span>
-                    <span className="ov-nt-mono">
-                      {formatGiB(node.memoryUsedMiB)} / {formatGiB(node.memoryTotalMiB)}
-                      {node.memoryPercent != null ? ` · ${node.memoryPercent}%` : ""}
-                    </span>
-                    <span className="ov-nt-mono ov-nt-sm">{formatGiB(node.memoryAvailableMiB)}</span>
-                    <span className="sg-bar-track ov-nt-sm">
-                      <span
-                        className={`sg-bar-fill${tone !== "muted" ? ` sg-bar-fill--${tone}` : ""}`}
-                        style={{ width: `${Math.min(node.memoryPercent ?? 0, 100)}%` }}
-                      />
-                    </span>
-                  </div>
-                );
-              })}
-            </>
-          ) : (
-            <div className="ov-empty">No node metrics available for this cluster.</div>
-          )}
-        </section>
-
-        <section className="ov-card">
-          <div className="ov-card-h">
-            <h3>Events &amp; Alerts</h3>
-            <div className="ov-card-r">
-              <button type="button" className="ov-lnk" onClick={onViewAllEvents}>
-                View all
-                <IcArrow />
-              </button>
-            </div>
-          </div>
-          {events.length ? (
-            <div className="sg-feed ov-scroll">
-              {events.map((event, i) => {
-                const tone = eventTone(event);
-                return (
-                  <div className="sg-fe" key={`${event.createdAt || event.time}-${i}`}>
-                    <span className={`sg-fic sg-fic--${tone}`}>
-                      {tone === "danger" || tone === "warn" ? (
-                        <IcAlert />
-                      ) : tone === "ok" ? (
-                        <IcCheck />
-                      ) : (
-                        <IcInfo />
-                      )}
-                    </span>
-                    <div>
-                      <p>{event.message}</p>
-                      <span className="ov-mono">
-                        {event.time}
-                        {event.action ? ` · ${event.action}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="ov-empty">No operational events recorded.</div>
-          )}
-        </section>
-      </div>
-
-      {/* ── Version + cluster info ────────────────────────────── */}
-      <div className="sg-row-11">
-        <section className="ov-card">
-          <div className="ov-card-h">
-            <h3>Version Status</h3>
-            <div className="ov-card-r">
-              <span className={`status-pill ${versionUpToDate ? "ok" : "warn"}`}>
-                {version.statusMessage || version.statusLabel || "Unknown"}
-              </span>
-            </div>
-          </div>
-          <div className="ov-kv">
-            <KvRow label="Provider" value={version.provider || clusterInfo.provider || "—"} />
-            <KvRow label="Current" value={version.current || "—"} mono />
-            <KvRow
-              label="Latest stable"
-              value={formatLatestVersion(version.latest || version.latestAvailable)}
-              mono
-            />
-            <KvRow
-              label="Upgrade support"
-              value={version.upgradeSupported ? "Supported" : "Not supported"}
-              tone={version.upgradeSupported ? "ok" : "warn"}
-            />
-          </div>
-          {canOpenUpgrade ? (
-            <div className="ov-card-foot">
-              <button type="button" className="ov-lnk" onClick={onNavigateToUpgrade}>
-                Open Upgrade Safe Mode
-                <IcArrow />
-              </button>
-            </div>
-          ) : null}
-        </section>
-
-        <section className="ov-card">
-          <div className="ov-card-h">
-            <h3>Cluster Information</h3>
-          </div>
-          <div className="ov-kv">
-            <KvRow label="Provider" value={clusterInfo.provider || "—"} />
-            <KvRow label="Cluster name" value={clusterInfo.name || "—"} mono />
-            <KvRow label="Context" value={clusterInfo.contextName || "—"} mono />
-            <KvRow label="Nodes" value={clusterInfo.nodeCount ?? nodes.total} />
-            <KvRow label="Namespaces" value={clusterInfo.namespaceCount ?? namespaces.length} />
-            <KvRow label="Pods" value={clusterInfo.podCount ?? pods.running} />
-          </div>
-        </section>
+      <Attention items={items} summary={summary} canOpen={canOpen} onNavigate={onNavigate} />
+      <Vitals summary={summary} />
+      <NodeTable nodes={nodes} disk={summary?.diskUsage} canOpen={canOpen} onNavigate={onNavigate} />
+      <div className="db-row-2">
+        <Namespaces namespaces={summary?.namespaces || []} canOpen={canOpen} onNavigate={onNavigate} />
+        <Activity events={events} canOpen={canOpen} onNavigate={onNavigate} />
       </div>
     </div>
   );

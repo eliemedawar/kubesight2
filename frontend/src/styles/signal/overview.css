@@ -1,440 +1,573 @@
-/* Signal page-specific styles — overview (owned by its page rework; shared vocabulary lives in screens.css) */
+/* Operations Dashboard (triage-first redesign). Cardinal tokens only.
+   Custom-drawn buttons carry .btn-ghost to escape ui-polish.css's (0,8,1)
+   button rule and are restyled here at (0,3,0), above .btn-ghost's (0,1,0). */
 
-/* ── page scaffold ──────────────────────────────────────────────── */
-.ov-dash {
+.db-root {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-4, 1rem);
+  min-width: 0;
 }
 
-.ov-mono {
-  font-family: var(--font-mono);
-}
+.db-root svg { flex-shrink: 0; }
+.db-mono { font-family: var(--font-mono); }
 
-.sg-ph-sub .ov-mono {
-  color: var(--text-subtle);
-}
-
-/* Title keeps the page's h1 semantics; style it like the Signal sg-ph h2. */
-.ov-title-line {
+/* ── header ─────────────────────────────────────────────────────── */
+.db-title {
   display: flex;
   align-items: center;
   gap: 0.7rem;
   flex-wrap: wrap;
 }
 
-.ov-dash .sg-ph h1 {
+.db-root .db-head h1 {
+  margin: 0;
   font-family: var(--font-display);
   font-size: 1.35rem;
   font-weight: 750;
   letter-spacing: -0.025em;
   line-height: 1.2;
   color: var(--text-strong);
-  margin: 0;
 }
 
-/* ── time-range segmented pill ──────────────────────────────────── */
-.ov-range {
+.db-head .sg-ph-sub .db-mono { color: var(--text-subtle); }
+
+.db-health {
   display: inline-flex;
-  gap: 2px;
-  padding: 3px;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  font-weight: 650;
+  color: var(--text-subtle);
   background: var(--bg-interactive);
+}
+.db-health--ok { color: var(--ok); background: var(--ok-soft); border-color: var(--ok-border); }
+.db-health--warn { color: var(--warn); background: var(--warn-soft); border-color: var(--warn-border); }
+.db-health--danger { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-border); }
+
+.db-root .btn-ghost.db-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.85rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
-}
-
-.ov-range-pill {
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
+  color: var(--text-subtle);
+  font-size: 0.8125rem;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 0.28rem 0.7rem;
-  border-radius: var(--radius-control);
-  cursor: pointer;
-  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
+.db-root .btn-ghost.db-refresh:hover:not(:disabled) { color: var(--text-strong); border-color: var(--border-strong); }
+.db-root .btn-ghost.db-refresh:disabled { opacity: 0.75; cursor: progress; }
+.db-refresh.is-busy svg { animation: db-spin 0.9s linear infinite; }
+@keyframes db-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .db-refresh.is-busy svg { animation: none; } }
 
-.ov-range-pill:hover {
-  background: transparent;
-  border-color: transparent;
-  color: var(--text-subtle);
-}
-
-.ov-range-pill.is-active,
-.ov-range-pill.is-active:hover {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-}
-
-/* ghost refresh button needs room for its label */
-.btn-ghost.ov-ghost {
-  padding: 0.4rem 0.85rem;
-}
-
-/* ── KPI tile extras (on top of sg-kpi) ─────────────────────────── */
-.ov-kpi-sub {
-  margin-top: 0.55rem;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-/* status word value — slightly smaller than numeric KPIs, tone-colored */
-.sg-kpi-value b.ov-kpi-word {
-  font-size: 1.4rem;
-}
-
-.sg-kpi-value b.ov-kpi-word--ok { color: var(--ok); }
-.sg-kpi-value b.ov-kpi-word--warn { color: var(--warn); }
-.sg-kpi-value b.ov-kpi-word--danger { color: var(--danger); }
-.sg-kpi-value b.ov-kpi-word--muted { color: var(--text-subtle); }
-
-.ov-kpi-reasons {
-  list-style: none;
-  margin: 0.5rem 0 0;
-  padding: 0;
-  display: grid;
-  gap: 0.2rem;
-}
-
-.ov-kpi-reasons li {
-  position: relative;
-  padding-left: 0.8rem;
-  font-size: 0.7rem;
-  line-height: 1.4;
-  color: var(--text-subtle);
-}
-
-.ov-kpi-reasons li::before {
-  content: "•";
-  position: absolute;
-  left: 0.1rem;
-  top: 0;
-}
-
-.ov-kpi-reasons--warn li::before { color: var(--warn); }
-.ov-kpi-reasons--danger li::before { color: var(--danger); }
-.ov-kpi-reasons--muted li::before { color: var(--text-muted); }
-
-/* warn-tone delta chip (screens.css only ships up/down/flat) */
-.ov-delta--warn {
-  background: var(--warn-soft);
-  color: var(--warn);
-}
-
-/* sparklines fill the tile */
-.sg-spark .sparkline-canvas {
-  display: block;
-  width: 100%;
-}
-
-/* ── Signal cards (flush shell + card header) ───────────────────── */
-.ov-card {
+/* ── cards ──────────────────────────────────────────────────────── */
+.db-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm), var(--highlight);
+  box-shadow: var(--shadow-sm);
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
 }
 
-.ov-card-h {
+.db-card-h {
   display: flex;
   align-items: center;
-  gap: 0.7rem;
-  padding: 0.95rem 1.25rem;
+  gap: 0.6rem;
+  padding: 0.85rem 1.1rem;
   border-bottom: 1px solid var(--border-soft);
   flex-wrap: wrap;
 }
 
-.ov-card-h h3 {
+.db-root .db-card-h h2 {
   margin: 0;
+  font-family: var(--font-sans);
   font-size: 0.875rem;
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--text-strong);
 }
 
-.ov-card-sub {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
+.db-card-sub { font-size: 0.75rem; color: var(--text-muted); }
 
-.ov-card-r {
+.db-card-r {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 0.9rem;
+  gap: 0.75rem;
   flex-wrap: wrap;
   min-width: 0;
 }
 
-.ov-card-foot {
-  margin-top: auto;
-  padding: 0.35rem 1.25rem 1rem;
-}
-
-/* chart legends in card headers */
-.ov-legend {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  font-size: 0.75rem;
-  color: var(--text-subtle);
-  flex-wrap: wrap;
-}
-
-.ov-legend i {
+.db-root .btn-ghost.db-go {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  font-style: normal;
+  gap: 0.3rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: var(--radius-control);
+  color: var(--accent-strong);
+  font-size: 0.75rem;
+  font-weight: 650;
   white-space: nowrap;
 }
+.db-root .btn-ghost.db-go:hover { background: var(--accent-soft); color: var(--accent-strong); }
+.db-root .btn-ghost.db-go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.ov-legend b {
-  font-weight: 650;
-  color: var(--text-main);
+.db-empty {
+  margin: 0;
+  padding: 1.1rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.db-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.db-note code { font-family: var(--font-mono); font-size: 0.68rem; }
+
+/* ── needs attention ────────────────────────────────────────────── */
+.db-count {
+  min-width: 1.4rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: var(--radius-full);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
+.db-count--danger { background: var(--danger); color: #fff; }
+.db-count--warn { background: var(--warn-soft); color: var(--warn); }
+.db-count--info { background: var(--info-soft); color: var(--info); }
 
-.ov-sq {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: 3px;
-  flex: none;
+.db-attn--danger { border-color: var(--danger-border); }
+
+.db-attn-list { list-style: none; margin: 0; padding: 0.3rem 0; }
+
+.db-attn-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 4.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 1.1rem 0.55rem 1.25rem;
 }
-
-.ov-dashline {
-  width: 0.9rem;
-  border-top: 2px dashed var(--warn);
-  flex: none;
+.db-attn-row + .db-attn-row { border-top: 1px solid var(--border-soft); }
+.db-attn-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.45rem;
+  bottom: 0.45rem;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--text-muted);
 }
+.db-attn-row--danger::before { background: var(--danger); }
+.db-attn-row--warn::before { background: var(--warn); }
+.db-attn-row--info::before { background: var(--info); }
 
-.ov-sample {
+.db-attn-ic {
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: var(--radius-full);
+}
+.db-attn-row--danger .db-attn-ic { background: var(--danger-soft); color: var(--danger); }
+.db-attn-row--warn .db-attn-ic { background: var(--warn-soft); color: var(--warn); }
+.db-attn-row--info .db-attn-ic { background: var(--info-soft); color: var(--info); }
+
+.db-attn-kind {
   font-family: var(--font-mono);
-  font-size: 0.625rem;
+  font-size: 0.66rem;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--warn);
-  background: var(--warn-soft);
-  border: 1px solid var(--warn-border);
-  border-radius: var(--radius-sm);
-  padding: 0.1rem 0.45rem;
-  white-space: nowrap;
+  color: var(--text-muted);
 }
 
-/* chart canvases */
-.ov-chart-wrap {
-  padding: 0.9rem 1.25rem 1.1rem;
-}
-
-.ov-chart {
-  display: block;
-  width: 100%;
-  height: 150px;
-}
-
-.ov-chart--tall {
-  height: 210px;
-}
-
-/* skeleton placeholder mirroring the canvas region */
-.ov-chart-skeleton {
-  width: 100%;
-  height: 150px;
-  border-radius: var(--radius-md);
-}
-
-.ov-chart-skeleton--tall {
-  height: 210px;
-}
-
-/* scrollable list/feed bodies (fleet list, events) */
-.ov-scroll {
-  max-height: 21rem;
-  overflow-y: auto;
-}
-
-/* ── status dots (tone-driven, token colors) ────────────────────── */
-.ov-dot--ok { background: var(--ok); }
-.ov-dot--warn { background: var(--warn); }
-.ov-dot--danger { background: var(--danger); }
-.ov-dot--muted { background: var(--text-muted); }
-
-/* dot + word status cell */
-.ov-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.72rem;
+.db-attn-body { min-width: 0; }
+.db-attn-title {
+  margin: 0;
+  font-size: 0.8125rem;
   font-weight: 650;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
+.db-attn-detail {
+  margin: 0.1rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-subtle);
+}
 
-.ov-status--ok { color: var(--ok); }
-.ov-status--warn { color: var(--warn); }
-.ov-status--danger { color: var(--danger); }
-.ov-status--muted { color: var(--text-subtle); }
-
-/* ── node health table ──────────────────────────────────────────── */
-.ov-nt-head,
-.ov-nt-row {
-  display: grid;
-  grid-template-columns: 1.5fr 0.9fr 1.5fr 0.8fr 1.2fr;
-  gap: 0.7rem;
+.db-clear {
+  flex-direction: row;
   align-items: center;
-  padding: 0.65rem 1.25rem;
+  gap: 0.85rem;
+  padding: 0.9rem 1.1rem;
+  border-color: var(--ok-border);
+}
+.db-clear-ic {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-full);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.db-root .db-clear h2 { margin: 0; font-size: 0.9rem; font-weight: 700; color: var(--text-strong); }
+.db-clear p { margin: 0.15rem 0 0; font-size: 0.78rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* ── vitals ─────────────────────────────────────────────────────── */
+.db-vitals {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 1.9fr);
+  gap: var(--space-4, 1rem);
+}
+
+.db-tile {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 0.95rem 1.1rem;
   min-width: 0;
 }
 
-.ov-nt-head {
-  font-size: 0.625rem;
+.db-tile-label {
+  margin: 0 0 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.db-tile-value {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-variant-numeric: tabular-nums;
+}
+.db-tile-value b {
+  font-family: var(--font-display);
+  font-size: 1.85rem;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--text-strong);
+}
+.db-tile-value span { font-size: 0.95rem; color: var(--text-muted); font-weight: 600; }
+
+.db-tile-sub {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.db-root .db-t--danger { color: var(--danger); }
+.db-root .db-t--warn { color: var(--warn); }
+
+.db-tile--capacity { display: flex; flex-direction: column; gap: 0.45rem; }
+.db-tile--capacity .db-tile-label { margin-bottom: 0.1rem; }
+
+.db-meter {
+  display: grid;
+  grid-template-columns: 3.6rem minmax(3rem, 1fr) 2.6rem minmax(0, 8.5rem);
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.75rem;
+}
+.db-meter-name { color: var(--text-subtle); font-weight: 600; }
+.db-meter-val {
+  text-align: right;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.db-meter-val--ok { color: var(--text-strong); }
+.db-meter-val--warn { color: var(--warn); }
+.db-meter-val--danger { color: var(--danger); }
+.db-meter-sub {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* shared usage bar */
+.db-bar {
+  display: block;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--bg-interactive);
+  overflow: hidden;
+  min-width: 2.5rem;
+}
+.db-bar-fill { display: block; height: 100%; border-radius: inherit; background: var(--text-muted); }
+.db-bar-fill--ok { background: var(--chart-2); }
+.db-bar-fill--warn { background: var(--warn); }
+.db-bar-fill--danger { background: var(--danger); }
+
+/* ── node table ─────────────────────────────────────────────────── */
+.db-table-wrap { overflow-x: auto; }
+
+.db-table {
+  width: 100%;
+  min-width: 820px;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.db-root .db-table thead th {
+  padding: 0.55rem 0.9rem;
+  text-align: left;
+  font-family: var(--font-sans);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-muted);
-  border-bottom: 1px solid var(--border);
-}
-
-.ov-nt-row {
+  background: var(--bg-panel-strong);
   border-bottom: 1px solid var(--border-soft);
+  white-space: nowrap;
 }
+.db-root .db-table thead th:first-child { padding-left: 1.1rem; }
 
-.ov-nt-row:last-child {
-  border-bottom: 0;
+.db-root .db-table tbody th,
+.db-root .db-table tbody td {
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+  text-align: left;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  background: transparent;
 }
+.db-root .db-table tbody tr:last-child th,
+.db-root .db-table tbody tr:last-child td { border-bottom: 0; }
+.db-root .db-table tbody th { padding-left: 1.1rem; }
+.db-row--danger { background: color-mix(in srgb, var(--danger) 4%, transparent); }
 
-.ov-nt-name {
+.db-root .db-table .db-num { text-align: right; }
+
+.db-node { max-width: 18rem; }
+.db-node-name {
+  display: block;
   font-family: var(--font-mono);
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   font-weight: 600;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.db-node-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.15rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.db-tag {
+  padding: 0 0.35rem;
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--info-border);
+  background: var(--info-soft);
+  color: var(--info);
+  font-size: 0.65rem;
+  font-weight: 650;
+}
+
+.db-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  flex-shrink: 0;
+}
+.db-dot--ok { color: var(--ok); }
+.db-dot--warn { color: var(--warn); }
+.db-dot--danger { color: var(--danger); }
+.db-dot--muted { color: var(--text-muted); }
+
+.db-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 650;
+  color: var(--text-subtle);
+}
+.db-status--ok { color: var(--ok); }
+.db-status--warn { color: var(--warn); }
+.db-status--danger { color: var(--danger); }
+
+.db-flags { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.25rem; }
+.db-flag {
+  padding: 0 0.35rem;
+  border-radius: var(--radius-chip);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+}
+
+.db-use { min-width: 9.5rem; }
+.db-use-top { display: flex; align-items: center; gap: 0.55rem; }
+.db-use-top .db-bar { flex: 1; }
+.db-use-pct {
+  min-width: 2.4rem;
+  text-align: right;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.db-use-pct--ok { color: var(--text-strong); }
+.db-use-pct--warn { color: var(--warn); }
+.db-use-pct--danger { color: var(--danger); }
+.db-use-sub {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.db-pods { font-variant-numeric: tabular-nums; font-weight: 650; color: var(--text-strong); white-space: nowrap; }
+.db-pods span { color: var(--text-muted); font-weight: 400; }
+
+/* ── namespaces + activity ──────────────────────────────────────── */
+.db-row-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4, 1rem);
+}
+
+.db-list { list-style: none; margin: 0; padding: 0.25rem 0; }
+.db-list-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1.1rem;
+  font-size: 0.8rem;
+  min-width: 0;
+}
+.db-list-row + .db-list-row { border-top: 1px solid var(--border-soft); }
+.db-list-name {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.db-list-meta {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.db-event-msg {
+  min-width: 0;
   color: var(--text-main);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ov-nt-mono {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  color: var(--text-subtle);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-@media (max-width: 720px) {
-  .ov-nt-head,
-  .ov-nt-row {
-    grid-template-columns: 1.4fr 1fr 1.4fr;
-  }
-
-  .ov-nt-sm {
-    display: none;
-  }
-}
-
-/* usage bar renders as a span inside the grid row — needs block display */
-.ov-nt-row .sg-bar-fill {
-  display: block;
-}
-
-/* feed meta timestamps in mono keep their muted size from sg-fe */
-.sg-fe .ov-mono {
-  font-size: 0.6875rem;
-}
-
-/* long unbroken event messages must wrap instead of overflowing the card */
-.ov-dash .sg-fe > div {
-  min-width: 0;
-}
-
-.ov-dash .sg-fe p {
-  overflow-wrap: anywhere;
-}
-
-/* ── key/value rows (version + cluster info) ────────────────────── */
-.ov-kv {
-  padding: 0.35rem 1.25rem 0.6rem;
-}
-
-.ov-kv-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.55rem 0;
-  border-bottom: 1px solid var(--border-soft);
-  font-size: 0.78rem;
-}
-
-.ov-kv-row:last-child {
-  border-bottom: 0;
-}
-
-.ov-kv-key {
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.ov-kv-val {
-  font-weight: 600;
-  color: var(--text-main);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-  min-width: 0;
-}
-
-.ov-kv-val--mono {
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  font-weight: 500;
-}
-
-.ov-kv-val--ok { color: var(--ok); }
-.ov-kv-val--warn { color: var(--warn); }
-
-/* ── red text links (concept .lnk) ──────────────────────────────── */
-.ov-lnk {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  border: 0;
-  background: none;
-  padding: 0;
-  font-size: 0.78rem;
+.db-pill {
+  padding: 0.05rem 0.45rem;
+  border-radius: var(--radius-chip);
+  font-size: 0.68rem;
   font-weight: 650;
-  color: var(--accent-strong);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+.db-pill--danger { background: var(--danger-soft); color: var(--danger); }
+.db-pill--warn { background: var(--warn-soft); color: var(--warn); }
+.db-pill--ok,
+.db-pill--muted { background: var(--bg-interactive); color: var(--text-subtle); }
+
+/* ── skeleton ───────────────────────────────────────────────────── */
+.db-skel-block { display: block; border-radius: var(--radius-lg); }
+.db-skel-attn { height: 4.25rem; }
+.db-skel-tile { height: 6.75rem; }
+.db-skel-table { height: 15rem; }
+.db-skel-list { height: 12rem; }
+
+/* ── responsive ─────────────────────────────────────────────────── */
+@media (max-width: 1180px) {
+  .db-vitals { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .db-tile--capacity { grid-column: 1 / -1; }
 }
 
-.ov-lnk:hover {
-  background: none;
-  border-color: transparent;
-  text-decoration: underline;
+@media (max-width: 960px) {
+  .db-row-2 { grid-template-columns: minmax(0, 1fr); }
 }
 
-.ov-lnk svg {
-  width: 0.8rem;
-  height: 0.8rem;
-  flex: none;
-}
+@media (max-width: 640px) {
+  .db-vitals { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.6rem; }
+  .db-tile { padding: 0.75rem 0.8rem; }
+  .db-tile-value b { font-size: 1.4rem; }
+  .db-tile-sub { font-size: 0.68rem; }
 
-/* ── empty states inside cards ──────────────────────────────────── */
-.ov-empty {
-  padding: 1.1rem 1.25rem;
-  font-size: 0.78rem;
-  color: var(--text-muted);
+  /* Node table becomes one card per node: name + status, then the three
+     usage bars side by side, labelled from data-label. */
+  .db-table-wrap { overflow: visible; }
+  .db-table, .db-table tbody { display: block; min-width: 0; }
+  .db-table thead { display: none; }
+  .db-root .db-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.35rem 0.75rem;
+    padding: 0.7rem 0.9rem;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .db-root .db-table tbody tr:last-child { border-bottom: 0; }
+  .db-root .db-table tbody th,
+  .db-root .db-table tbody td { padding: 0; border: 0; }
+  .db-root .db-table tbody th.db-node { grid-column: 1 / 3; padding: 0; max-width: none; min-width: 0; }
+  .db-root .db-table td.db-node-status { grid-column: 3; text-align: right; }
+  .db-node-status .db-flags { justify-content: flex-end; }
+  .db-use { min-width: 0; }
+  .db-use::before,
+  .db-root .db-table td.db-pods::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 0.2rem;
+    font-size: 0.64rem;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .db-use-sub { white-space: normal; }
+  .db-root .db-table td.db-pods { display: none; }
+
+  .db-attn-row { grid-template-columns: auto minmax(0, 1fr) auto; padding-right: 0.6rem; }
+  .db-attn-kind { display: none; }
+  .db-meter { grid-template-columns: 3.4rem minmax(3rem, 1fr) 2.6rem; }
+  .db-meter-sub { display: none; }
 }

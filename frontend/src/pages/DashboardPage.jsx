@@ -1,4 +1,3 @@
-import { useState } from "react";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
@@ -7,7 +6,6 @@ import { EMPTY_MESSAGES, isAccessDeniedError } from "../utils/authz.js";
 import { useAuth } from "../context/AuthContext.jsx";
 import { getDashboardWidgetRegistry, sortWidgetsForUser } from "../dashboard/widgetRegistry.js";
 import { getVisibleWidgets, groupWidgetsBySection } from "../dashboard/widgetVisibility.js";
-import { useDashboardSeries } from "../dashboard/useDashboardSeries.js";
 import OpsDashboard from "../dashboard/OpsDashboard.jsx";
 import DashboardSkeleton from "../dashboard/DashboardSkeleton.jsx";
 
@@ -25,13 +23,13 @@ export default function DashboardPage({
   onNavigateToInventory,
   canOpenUpgrade,
   canOpenInventory,
+  onNavigate,
+  canOpenPage,
 }) {
   const auth = useAuth();
-  const [timeRange, setTimeRange] = useState("6h");
   const clusterId = selectedCluster?.id;
   const summaryReady = Boolean(summary && clusterId && summary.clusterId === clusterId);
   const isAdmin = auth.isAdmin;
-  const series = useDashboardSeries(summaryReady ? summary : null, timeRange);
 
   const widgetRegistry = getDashboardWidgetRegistry(isAdmin);
   const visibleWidgets = sortWidgetsForUser(
@@ -51,7 +49,6 @@ export default function DashboardPage({
 
   const widgetProps = {
     summary,
-    series,
     selectedCluster,
     canOpenUpgrade,
     onNavigateToUpgrade,
@@ -161,13 +158,12 @@ export default function DashboardPage({
 
       <OpsDashboard
         summary={summary}
-        series={series}
-        timeRange={timeRange}
-        onTimeRangeChange={setTimeRange}
+        isAdmin={isAdmin}
         lastRefreshedAt={lastRefreshedAt}
+        refreshing={refreshing}
         onRefresh={onRefresh}
-        canOpenUpgrade={canOpenUpgrade}
-        onNavigateToUpgrade={onNavigateToUpgrade}
+        onNavigate={onNavigate}
+        canOpen={canOpenPage}
       />
     </>
   );
