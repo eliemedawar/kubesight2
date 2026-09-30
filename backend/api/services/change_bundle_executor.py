@@ -436,15 +436,22 @@ def _mark_expired(bundle: ChangeBundle) -> str:
 def _start_rollout_watches(bundle: ChangeBundle) -> None:
     """Queue a pod-health watch for every Deployment this bundle applied.
 
-    Deploy-automation bundles are skipped — their run already watches the same
-    deployment (with its own rollback + notification path), and two watchers
-    would race to `rollout undo` twice. Best-effort: a watch problem must never
-    disturb the just-finished execution.
+    Deploy-automation bundles and bundles a CI Deploy stage is waiting on are
+    skipped — their run (or stage) already watches the same deployment, with its
+    own rollback + notification path, and two watchers would race to roll back
+    twice. Best-effort: a watch problem must never disturb the just-finished
+    execution.
     """
     try:
         from ..models import BundleRolloutWatch, DeployAutomationRun
 
         if DeployAutomationRun.query.filter_by(bundle_id=bundle.id).first():
+            return
+        # Same for a bundle a CI Deploy stage queued: the stage watches the
+        # rollout and rolls back itself.
+        from .ci.deploy_stage import owns_bundle
+
+        if owns_bundle(bundle.id):
             return
         created = 0
         for item in bundle.items:

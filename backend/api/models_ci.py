@@ -47,14 +47,22 @@ SERVICE_STATUSES = ("active", "paused", "archived")
 CRITICALITIES = ("low", "medium", "high", "critical")
 
 # Stage kinds a stored pipeline may carry. ``checkout`` and ``command`` run on
-# every runner; ``container_image`` on the Kubernetes runner with BuildKit.
+# every runner; ``container_image`` on the Kubernetes runner with BuildKit;
+# ``deploy`` on no runner at all — KubeSight itself rolls the image out, through
+# the same approval gate and registry check as any other deploy (see
+# services/ci/deploy_stage.py).
 STAGE_TYPES = (
     "checkout",
     "command",
     "container_image",
+    "deploy",
     "publish_artifact",
     "scan",
 )
+# Stages the KubeSight server executes itself instead of handing to a runner.
+# They come after every runner stage (enforced on save), so a whole-build runner
+# has finished — and uploaded the image it pushed — before one starts.
+SERVER_STAGE_TYPES = ("deploy",)
 # Recognised so pipelines stored before they were retired still load (and are
 # still skipped, with a reason, by the engine), but refused on every NEW save:
 # no runner ever executed them, so offering them promised work that never ran.
@@ -413,6 +421,14 @@ class CiPipelineStage(db.Model):
     #    "onFail": "block", "ignoreUnfixed": false}``
     image_scan = db.Column(db.JSON, nullable=True)
 
+    # WHERE IT DEPLOYS. deploy stages only; NULL on every other stage.
+    # ``{"clusterId", "namespace", "deploymentName", "containerName", "image",
+    #    "createIfMissing", "create": {...form...}, "manifest": "<yaml>",
+    #    "authorizedBy": {"userId", "username", "at"}}`` — see
+    # pipelines._deploy_config. ``authorizedBy`` is written by the server only:
+    # it is whoever last saved this target, and builds deploy with their rights.
+    deploy = db.Column(db.JSON, nullable=True)
+
     # HOW it behaves.
     timeout_seconds = db.Column(db.Integer, nullable=False, default=1800)
     continue_on_failure = db.Column(db.Boolean, nullable=False, default=False)
@@ -555,6 +571,10 @@ class CiBuildStage(db.Model):
     log_line_count = db.Column(db.Integer, nullable=False, default=0)
     log_truncated = db.Column(db.Boolean, nullable=False, default=False)
     error = db.Column(db.Text, nullable=True)
+    # A deploy stage's progress and outcome: phase, target, the image rolled
+    # out and the one it replaced, the change bundle it waits on. Persisted so a
+    # backend restart resumes a rollout watch instead of forgetting it.
+    deploy_state = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
 
     build = db.relationship("CiBuild", back_populates="stages")

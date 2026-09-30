@@ -7,6 +7,8 @@
  * only say out loud, before Save, what it would say after.
  */
 
+import { blankDeploy, deployProblems, deploySummary, orderProblem } from "./deployModel.js";
+
 export const MIN_TIMEOUT_SECONDS = 30;
 export const MAX_TIMEOUT_SECONDS = 24 * 3600;
 export const DEFAULT_TIMEOUT_SECONDS = 1800;
@@ -16,7 +18,7 @@ export const MAX_PARAMETERS = 25;
 /** Environment-variable shaped: what a parameter or condition name must be. */
 export const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** The three kinds a stage can be given, in the order a pipeline uses them. */
+/** The kinds a stage can be given, in the order a pipeline uses them. */
 export const STAGE_KINDS = [
   {
     value: "checkout",
@@ -38,6 +40,14 @@ export const STAGE_KINDS = [
     verb: "Build an image",
     description: "Build the Dockerfile with BuildKit, optionally scan it, and push it to the registry.",
     icon: "image",
+  },
+  {
+    value: "deploy",
+    label: "Deploy",
+    verb: "Deploy to a cluster",
+    description:
+      "Roll the image out to a deployment in one of your clusters — created from a manifest if it is missing.",
+    icon: "rocket",
   },
 ];
 
@@ -66,6 +76,8 @@ export const STAGE_FIELDS = {
     "artifacts",
   ]),
   container_image: new Set(["runner", "workdir", "hostAliases", "env", "imageScan"]),
+  // Runs on the KubeSight server, not a runner: no image, no shell, no env.
+  deploy: new Set(["deploy"]),
   publish_artifact: new Set([]),
   scan: new Set([]),
 };
@@ -86,6 +98,7 @@ const CLEARED_BY_FIELD = {
   // command stage would be rejected on save, and would read as protection that
   // is not there until then.
   imageScan: { imageScan: null },
+  deploy: { deploy: null },
 };
 
 const FIELD_NAMES = {
@@ -97,6 +110,7 @@ const FIELD_NAMES = {
   secrets: "secrets",
   artifacts: "files to keep",
   imageScan: "image scan",
+  deploy: "deployment target",
 };
 
 const hasValue = (stage, field) => {
@@ -117,6 +131,8 @@ const hasValue = (stage, field) => {
       return (stage.artifacts || []).length > 0;
     case "imageScan":
       return Boolean(stage.imageScan);
+    case "deploy":
+      return Boolean(stage.deploy?.clusterId || stage.deploy?.deploymentName);
     default:
       return false;
   }
@@ -129,6 +145,8 @@ export function changeKindPatch(stageType) {
   for (const [field, cleared] of Object.entries(CLEARED_BY_FIELD)) {
     if (!next.has(field)) Object.assign(patch, cleared);
   }
+  // A Deploy stage is nothing without a target, so it arrives with a blank one.
+  if (stageType === "deploy") patch.deploy = blankDeploy();
   return patch;
 }
 
@@ -155,6 +173,7 @@ export const blankStage = (stageType = "command") => ({
   runCondition: null,
   // Null, not a default object: only an image stage has an image to gate.
   imageScan: null,
+  deploy: stageType === "deploy" ? blankDeploy() : null,
   timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
   continueOnFailure: false,
   enabled: true,
@@ -177,7 +196,7 @@ export function uniqueStageName(base, stages, ignoreIndex = -1) {
 
 /** Default names for a new stage of each kind. */
 export const defaultStageName = (stageType) =>
-  ({ checkout: "Checkout", command: "Run commands", container_image: "Build image" })[
+  ({ checkout: "Checkout", command: "Run commands", container_image: "Build image", deploy: "Deploy" })[
     stageType
   ] || "Stage";
 
@@ -254,6 +273,7 @@ export function stageSummary(stage) {
     const where = stage.workingDirectory ? ` in ${stage.workingDirectory}` : "";
     return `Builds ${dockerfile}${where}`;
   }
+  if (stage.stageType === "deploy") return deploySummary(stage);
   if (stage.stageType === "publish_artifact") return "Unsupported — publish artifact";
   if (stage.stageType === "scan") return "Unsupported — security scan";
   return firstCommand(stage) || "No commands yet";
@@ -295,6 +315,9 @@ export function stageFlags(stage) {
   if (stage.stageType === "container_image" && scanArmed(stage)) {
     flags.push({ key: "scan", icon: "shield", label: "Image is scanned before it is pushed" });
   }
+  if (stage.stageType === "deploy" && stage.deploy?.createIfMissing) {
+    flags.push({ key: "create", icon: "plus", label: "Creates the deployment if it is missing" });
+  }
   if ((stage.secretRefs || []).length) {
     const count = stage.secretRefs.length;
     flags.push({ key: "secrets", icon: "key", label: `${count} secret${count === 1 ? "" : "s"}` });
@@ -326,6 +349,11 @@ export function stageProblems(stage, index, stages, parameters) {
   if (stage.stageType === "command" && !commandCount(stage)) {
     problems.push({ field: "commands", message: "Add at least one command to run." });
   }
+  if (stage.stageType === "deploy") {
+    problems.push(...deployProblems(stage.deploy));
+  }
+  const misplaced = orderProblem(stage, index, stages);
+  if (misplaced) problems.push(misplaced);
   if (stage.stageType === "publish_artifact" || stage.stageType === "scan") {
     problems.push({
       field: "kind",

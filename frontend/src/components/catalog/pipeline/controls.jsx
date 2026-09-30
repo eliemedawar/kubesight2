@@ -162,7 +162,7 @@ function useDraft(value) {
 }
 
 /** Shell commands with a line gutter — a script, so it reads like one. */
-export function CommandEditor({ lines, onChange, disabled, placeholder, invalid, id }) {
+export function CommandEditor({ lines, onChange, disabled, placeholder, invalid, id, caption }) {
   const value = (lines || []).join("\n");
   const { draft, setDraft, bind } = useDraft(value);
   const gutter = useRef(null);
@@ -175,7 +175,7 @@ export function CommandEditor({ lines, onChange, disabled, placeholder, invalid,
           <i />
           <i />
         </span>
-        <span>sh · runs top to bottom, stops at the first failing line</span>
+        <span>{caption || "sh · runs top to bottom, stops at the first failing line"}</span>
       </div>
       <div className="pl-code-body">
         <pre className="pl-code-gutter" ref={gutter} aria-hidden="true">

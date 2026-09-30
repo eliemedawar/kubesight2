@@ -163,7 +163,9 @@ def capabilities_payload() -> Dict[str, Any]:
             "test-report", "coverage-report", "sbom",
         ],
         "stageTypesNotExecutable": [
-            item for item in STAGE_TYPES if item not in ("checkout", "command", "container_image")
+            item
+            for item in STAGE_TYPES
+            if item not in ("checkout", "command", "container_image", "deploy")
         ],
         "workspaceVariables": {
             "$KUBESIGHT_WORKSPACE": "The build workspace, shared by every stage.",
@@ -185,6 +187,8 @@ def capabilities_payload() -> Dict[str, Any]:
             "A stage's environment does NOT carry into the next stage; append to $KUBESIGHT_ENV for that.",
             "A checkout stage runs no commands — KubeSight performs the checkout itself.",
             "A container_image stage runs no commands — BuildKit builds the Dockerfile.",
+            "Never generate a deploy stage: its target is authorized by the person who "
+            "saves it, so a person adds it in the editor.",
         ],
     }
 

@@ -516,6 +516,25 @@ def update_pipeline(pipeline_id: int):
     return success_response(data)
 
 
+@ci_bp.route("/deploy-targets", methods=["GET"])
+@require_permission("ci_pipelines:view")
+def describe_deploy_target():
+    """What a Deploy stage can point at: a namespace's deployments and their
+    containers, the cluster's approval rule, and whether the caller could
+    authorize the target (saving it requires that)."""
+    from ..services.ci import deploy_stage
+
+    try:
+        data = deploy_stage.describe_target(
+            get_current_user(),
+            request.args.get("clusterId") or "",
+            request.args.get("namespace") or "",
+        )
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
+
+
 @ci_bp.route("/pipelines/<int:pipeline_id>", methods=["DELETE"])
 @require_permission("ci_pipelines:edit")
 def delete_pipeline(pipeline_id: int):

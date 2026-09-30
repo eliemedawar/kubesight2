@@ -310,7 +310,7 @@ def _pipeline_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
 STAGE_FIELDS = {
     "name", "stageType", "runnerType", "runnerLabels", "image", "workingDirectory",
     "commands", "env", "secretRefs", "artifacts", "resources", "hostAliases",
-    "runCondition", "imageScan", "timeoutSeconds", "continueOnFailure",
+    "runCondition", "imageScan", "deploy", "timeoutSeconds", "continueOnFailure",
     "enabled",
 }
 
@@ -506,8 +506,8 @@ def _checked_fields(payload: Any, *, what: str) -> Dict[str, Any]:
 _STAGE_SCHEMA = {
     "type": "object",
     "description": (
-        "A stage. name is required; stageType is checkout, command or "
-        "container_image (default command); a command stage needs commands. "
+        "A stage. name is required; stageType is checkout, command, "
+        "container_image or deploy (default command); a command stage needs commands. "
         "Other fields: image, runnerType, runnerLabels, workingDirectory, env, "
         "secretRefs [{name, envVar}], artifacts [{path, type, name}], "
         "hostAliases, runCondition, resources, timeoutSeconds, "
@@ -516,11 +516,21 @@ _STAGE_SCHEMA = {
         "imageScan {enabled, scanner: trivy, threshold: critical|high|medium|low, "
         "onFail: block|warn, ignoreUnfixed} gates the push on a vulnerability "
         "scan of the image the stage just built — enabled=true means a "
-        "finding at or above threshold stops the image reaching the registry."
+        "finding at or above threshold stops the image reaching the registry. "
+        "A deploy stage runs on the KubeSight server after every other stage "
+        "(deploy stages must be last) and needs deploy {clusterId, namespace, "
+        "deploymentName, containerName?, image? (empty = the image this build "
+        "pushed), createIfMissing, manifest (Deployment + optional Service YAML, "
+        "used only when the deployment does not exist)}. Saving a deploy target "
+        "requires apps:deploy on that namespace: builds then deploy with the "
+        "rights of whoever saved it, through the cluster's approval rule."
     ),
     "properties": {
         "name": {"type": "string"},
-        "stageType": {"type": "string", "enum": ["checkout", "command", "container_image"]},
+        "stageType": {
+            "type": "string",
+            "enum": ["checkout", "command", "container_image", "deploy"],
+        },
         "image": {"type": "string"},
         "commands": {"type": "array", "items": {"type": "string"}},
         "runnerLabels": {"type": "array", "items": {"type": "string"}},
@@ -540,6 +550,24 @@ _STAGE_SCHEMA = {
                 },
                 "onFail": {"type": "string", "enum": ["block", "warn"]},
                 "ignoreUnfixed": {"type": "boolean"},
+            },
+        },
+        "deploy": {
+            "type": "object",
+            "description": (
+                "deploy stages only. Where the build's image is rolled out: an "
+                "existing deployment gets only its container image changed; a "
+                "missing one is created from manifest when createIfMissing is true. "
+                "The namespace must already exist."
+            ),
+            "properties": {
+                "clusterId": {"type": "string"},
+                "namespace": {"type": "string"},
+                "deploymentName": {"type": "string"},
+                "containerName": {"type": "string"},
+                "image": {"type": "string"},
+                "createIfMissing": {"type": "boolean"},
+                "manifest": {"type": "string"},
             },
         },
         "enabled": {"type": "boolean"},

@@ -1051,6 +1051,9 @@ def _report_outcome(run: DeployAutomationRun, outcome: str) -> None:
         )
     elif outcome == "deployed":
         mode = "change bundle" if run.bundle_id else "direct apply"
+        stage = _ci_deploy_stage(run)
+        if stage is not None:
+            mode = _ci_deploy_mode(run, stage)
         if _is_custom_run(run):
             shown_tag = run.ticket_tag or run.image_tag
             engine_name = "KubeSight CI build" if run.ci_build_id else "Jenkins job"
@@ -1653,6 +1656,75 @@ def _trigger_native_build(run: DeployAutomationRun, service) -> bool:
     return True
 
 
+def _ci_deploy_stage(run: DeployAutomationRun, build=None):
+    """The CI build's Deploy stage for THIS run's target, if it has one that ran.
+
+    When the pipeline deploys the ticket's own deployment, the automation must
+    not deploy it a second time: that stage already checked the registry, went
+    through the cluster's approval, watched the rollout and rolled back on
+    failure. Its result is the run's result. A Deploy stage aimed somewhere else
+    (another environment) does not count — the ticket's target still needs its
+    deploy, and the automation does it as before.
+    """
+    if not run.ci_build_id:
+        return None
+    if build is None:
+        from ..models_ci import CiBuild
+
+        build = db.session.get(CiBuild, run.ci_build_id)
+    if build is None:
+        return None
+    for stage in sorted(build.stages, key=lambda s: s.position):
+        if stage.stage_type != "deploy" or not isinstance(stage.deploy_state, dict):
+            continue
+        target = stage.deploy_state.get("target") or {}
+        if (
+            str(target.get("clusterId") or "") == str(run.cluster_id or "")
+            and target.get("namespace") == run.namespace
+            and target.get("deploymentName") == run.deployment_name
+        ):
+            return stage
+    return None
+
+
+def _ci_deploy_mode(run: DeployAutomationRun, stage) -> str:
+    state = stage.deploy_state or {}
+    from ..models_ci import CiBuild
+
+    build = db.session.get(CiBuild, run.ci_build_id) if run.ci_build_id else None
+    mode = f"the Deploy stage of CI build #{build.number if build else '?'}"
+    if state.get("bundleId"):
+        mode += f", approved as change bundle #{state['bundleId']}"
+    return mode
+
+
+def _deploy_stage_progress(stage) -> str:
+    state = stage.deploy_state or {}
+    phase = state.get("phase")
+    if phase == "waiting_approval":
+        return f"Deploy stage '{stage.name}' waiting for approval of change bundle #{state.get('bundleId')}"
+    if phase == "rolling_out":
+        detail = state.get("lastDetail") or "waiting for the new pods"
+        return f"Deploy stage '{stage.name}' rolling out — {detail}"
+    return f"stage '{stage.name}'"
+
+
+def _complete_from_deploy_stage(run: DeployAutomationRun, build, stage) -> None:
+    """The CI build deployed the ticket's target itself — report that."""
+    state = stage.deploy_state or {}
+    _set_step(run, "build", "done", f"CI build #{build.number} succeeded")
+    _set_step(run, "verify", "done", f"the Deploy stage confirmed {state.get('image') or 'the image'} in the registry")
+    if state.get("bundleId"):
+        _set_step(run, "approval", "done", f"change bundle #{state['bundleId']} approved (queued by the Deploy stage)")
+    else:
+        _set_step(run, "approval", "skip", "the cluster needed no approval for the Deploy stage")
+    _set_step(run, "deploy", "done", f"performed by the CI build's Deploy stage '{stage.name}'")
+    detail = state.get("message") or "rolled out"
+    if state.get("outcome") == "unchanged":
+        detail = f"already running {state.get('image')} — nothing to change"
+    _complete_deployed(run, detail)
+
+
 def _do_poll_native_build(run: DeployAutomationRun) -> None:
     """building → verifying_image | failed, reading the native CI build."""
     from ..db import db as _db
@@ -1674,11 +1746,18 @@ def _do_poll_native_build(run: DeployAutomationRun) -> None:
         stage = next((s for s in build.stages if s.status == "running"), None)
         detail = f"CI build #{build.number} running"
         if stage is not None:
-            detail += f" — stage '{stage.name}'"
+            detail += " — " + (
+                _deploy_stage_progress(stage) if stage.stage_type == "deploy" else f"stage '{stage.name}'"
+            )
         _set_step(run, "build", "run", detail)
         return
 
+    deploy_stage = None if _is_custom_run(run) else _ci_deploy_stage(run, build)
+
     if build.status == "success":
+        if deploy_stage is not None and deploy_stage.status == "success":
+            _complete_from_deploy_stage(run, build, deploy_stage)
+            return
         if _is_custom_run(run):
             # A custom environment's build IS the outcome. Mobile binaries come
             # straight out of the CI artifact store — no Jenkins download.
@@ -1694,6 +1773,22 @@ def _do_poll_native_build(run: DeployAutomationRun) -> None:
         _set_step(run, "build", "done", f"CI build #{build.number} succeeded")
         run.status = "verifying_image"
         _set_step(run, "verify", "run", "re-checking the registry for the built tag")
+        return
+
+    if deploy_stage is not None and deploy_stage.status in ("failed", "timeout"):
+        # The build got as far as deploying the ticket's target and that is
+        # what failed — say what the stage said, on the step it failed at.
+        from .ci.deploy_stage import summarize
+
+        state = deploy_stage.deploy_state or {}
+        _set_step(run, "build", "done", f"CI build #{build.number} built the image")
+        if state.get("outcome") in ("rolled_back", "rollback_failed"):
+            step = "pods"  # Applied, but the pods never came up.
+        elif state.get("bundleId") and not state.get("rolloutStartedAt"):
+            step = "approval"  # Queued, and never approved/applied.
+        else:
+            step = "deploy"
+        _fail(run, step, summarize(deploy_stage))
         return
 
     failed_stage = next(

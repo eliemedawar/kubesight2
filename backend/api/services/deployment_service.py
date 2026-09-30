@@ -639,6 +639,7 @@ def apply_yaml(
     *,
     enforce_confirmation: bool = False,
     approval_context: Optional[str] = None,
+    change_note: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     """Validate and ``kubectl apply`` a manifest, honouring the approval gate.
 
@@ -647,7 +648,9 @@ def apply_yaml(
     browser. Internal callers (bundle executor, automation, a version rollback
     that checks its own phrase) and MCP tools leave it off. ``approval_context``
     lets an internal caller that already holds an approval skip the gate
-    explicitly (see ``check_cluster_change_allowed``).
+    explicitly (see ``check_cluster_change_allowed``). ``change_note`` is what
+    approvers read when the change is queued — a CI Deploy stage names the build
+    and the image instead of "apply YAML to <namespace>".
     """
     if user and not user_has_permission(user, "apps:deploy"):
         log_audit(
@@ -698,7 +701,7 @@ def apply_yaml(
         user,
         cluster_id,
         bundle_payload={"actionType": "apply_yaml", "namespace": namespace, "yaml": yaml_content},
-        what=f"apply YAML to {namespace}",
+        what=change_note or f"apply YAML to {namespace}",
         action="apply",
         target_type="namespace",
         target_id=f"{cluster_id}/{namespace}",

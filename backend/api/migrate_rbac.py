@@ -812,6 +812,13 @@ def _migrate_ci_columns() -> None:
         # for. Turning it on is an explicit edit.
         _add_column_if_missing("ci_pipeline_stages", "image_scan", "JSON")
         _retype_json_column("ci_pipeline_stages", "image_scan")
+        # Deploy stages. NULL on every stage that is not one.
+        _add_column_if_missing("ci_pipeline_stages", "deploy", "JSON")
+        _retype_json_column("ci_pipeline_stages", "deploy")
+    if "ci_build_stages" in existing:
+        # A deploy stage's persisted progress. NULL on every other stage row.
+        _add_column_if_missing("ci_build_stages", "deploy_state", "JSON")
+        _retype_json_column("ci_build_stages", "deploy_state")
 
 
 def _migrate_merge_check_columns() -> None:

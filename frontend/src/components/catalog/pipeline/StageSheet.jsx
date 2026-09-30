@@ -18,6 +18,7 @@ import {
   SettingRow,
   Switch,
 } from "./controls.jsx";
+import DeployStageFields from "./DeployStageFields.jsx";
 import { PlIcon } from "./icons.jsx";
 import {
   conditionSummary,
@@ -368,6 +369,17 @@ export default function StageSheet({
             editable={editable}
             onChange={onChange}
             onGoToTab={onGoToTab}
+          />
+        )}
+
+        {stage.stageType === "deploy" && (
+          <DeployStageFields
+            ids={ids}
+            stage={stage}
+            stages={stages}
+            index={index}
+            editable={editable}
+            onChange={onChange}
           />
         )}
       </section>

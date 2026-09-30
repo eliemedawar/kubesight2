@@ -19,7 +19,10 @@ calls the port. It contains no ``kubectl``, no HTTP, and no branch on runner
 type. Adding the Kubernetes Job runner or an external agent changes nothing
 here.
 
-The Flask process orchestrates; it never executes a build command itself.
+The Flask process orchestrates; it never executes a build command itself. The
+one kind of stage it carries out is a Deploy stage — not a build command but a
+KubeSight deploy, through the same approval gate and registry check as any other
+(see ``deploy_stage.py``). Those come last, after the runner is done.
 """
 
 from __future__ import annotations
@@ -36,10 +39,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ...audit import log_audit
 from ...db import db
-from ...models_ci import CiBuild, CiBuildStage, CiService
+from ...models_ci import SERVER_STAGE_TYPES, CiBuild, CiBuildStage, CiService
 from . import agents as agents_service
 from . import artifacts as artifacts_service
 from . import build_status as build_status_service
+from . import deploy_stage
 from . import logs as logs_service
 from . import pipelines as pipelines_service
 from . import queue as queue_service
@@ -624,7 +628,13 @@ def _process_cancellations() -> None:
     ).all()
     for build in builds:
         stage = _current_stage(build)
-        if stage is not None and stage.status == "running":
+        if stage is not None and stage.status == "running" and _is_server_stage(build, stage):
+            try:
+                deploy_stage.cancel(build, stage)
+            except Exception:
+                logger.exception("Cancelling deploy stage %s failed", stage.id)
+                _close_stage(stage, "cancelled", "Cancelled by request.")
+        elif stage is not None and stage.status == "running":
             adapter = _adapter_for(build)
             handle = _handle_for(build, stage)
             if adapter and handle:
@@ -686,6 +696,10 @@ def _advance_one(build: CiBuild) -> None:
             db.session.commit()
         return
     if stage.status != "running":
+        return
+
+    if _is_server_stage(build, stage):
+        _advance_server_stage(build, stage)
         return
 
     adapter = _adapter_for(build)
@@ -771,6 +785,43 @@ def _advance_one(build: CiBuild) -> None:
         _advance_one(build)
 
 
+def _is_server_stage(build: CiBuild, stage: CiBuildStage) -> bool:
+    stage_type = _definition_for(build, stage).get("stageType") or stage.stage_type
+    return stage_type in SERVER_STAGE_TYPES
+
+
+def _advance_server_stage(build: CiBuild, stage: CiBuildStage) -> None:
+    """One step of a stage KubeSight executes itself (a Deploy stage).
+
+    Same shape as the runner path below: advance, and once the stage is over,
+    start whatever follows in this pass. Nothing follows a Deploy stage but
+    other Deploy stages — each decides for itself whether an earlier failure
+    means it must not deploy.
+    """
+    definition = _definition_for(build, stage)
+    try:
+        deploy_stage.advance(build, stage, definition)
+    except Exception:
+        logger.exception("Advancing deploy stage %s failed", stage.id)
+        db.session.rollback()
+        _close_stage(
+            stage,
+            "failed",
+            "The Deploy stage failed unexpectedly while it was running; see the server log. "
+            "Check the deployment on the cluster before retrying.",
+        )
+    db.session.commit()
+    if stage.status in ("pending", "running"):
+        return
+    following = _current_stage(build)
+    if following is None:
+        _finalize(build)
+        db.session.commit()
+        return
+    if following.status == "pending" and build.status == "running":
+        _advance_one(build)
+
+
 def _dispatch_queued() -> None:
     claimed = queue_service.claim_next(_DISPATCH_PER_TICK)
     if not claimed:
@@ -843,7 +894,9 @@ def _build_requirements(build: CiBuild):
 
     def will_not_run(definition: Dict[str, Any]) -> bool:
         stage_type = definition.get("stageType") or "command"
-        if stage_type in _NEVER_EXECUTED_STAGE_TYPES:
+        # A Deploy stage runs on the KubeSight server, so it asks nothing of the
+        # runner the build is assigned to.
+        if stage_type in _NEVER_EXECUTED_STAGE_TYPES or stage_type in SERVER_STAGE_TYPES:
             return True
         return _condition_reason(build, definition) is not None
 
@@ -921,6 +974,10 @@ def _start_stage(build: CiBuild, stage: CiBuildStage) -> None:
     definition = _definition_for(build, stage)
     stage_type = definition.get("stageType") or stage.stage_type
 
+    if stage_type in SERVER_STAGE_TYPES:
+        _start_server_stage(build, stage, definition)
+        return
+
     adapter = _adapter_for(build)
     if adapter is None:
         _close_stage(stage, "failed", "No adapter is registered for the assigned runner.")
@@ -987,6 +1044,27 @@ def _start_stage(build: CiBuild, stage: CiBuildStage) -> None:
 
     if execution.secrets:
         secrets_service.mark_used(build.service_id, list(execution.secrets))
+
+
+def _start_server_stage(build: CiBuild, stage: CiBuildStage, definition: Dict[str, Any]) -> None:
+    """Start a stage no runner executes. Its own ``when`` clause still applies."""
+    condition = _condition_reason(build, definition)
+    if condition:
+        stage.started_at = _now()
+        _close_stage(stage, "skipped", None)
+        logs_service.append_system(stage, f"[kubesight] Skipped: {condition}")
+        return
+    try:
+        deploy_stage.start(build, stage, definition)
+    except Exception:
+        logger.exception("Starting deploy stage %s failed", stage.id)
+        db.session.rollback()
+        stage.started_at = stage.started_at or _now()
+        _close_stage(
+            stage,
+            "failed",
+            "The Deploy stage could not start; see the server log. Nothing was deployed.",
+        )
 
 
 def _close_stage(stage: CiBuildStage, status: str, error: Optional[str]) -> None:
@@ -1279,6 +1357,8 @@ def _build_plan(build: CiBuild, adapter, callback_token: str) -> List[StageExecu
     plan: List[StageExecution] = []
     for stage_row in sorted(build.stages, key=lambda s: s.position):
         definition = _definition_for(build, stage_row)
+        if (definition.get("stageType") or stage_row.stage_type) in SERVER_STAGE_TYPES:
+            continue  # KubeSight runs it after the runner is done.
         if _skip_reason(build, adapter, definition):
             continue
         plan.append(

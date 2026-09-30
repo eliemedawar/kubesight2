@@ -157,6 +157,13 @@ def pipeline_stage_to_dict(row: CiPipelineStage) -> Dict[str, Any]:
         # editor shows as "not configured" rather than as "off" — they are
         # different answers to "was this image scanned?".
         "imageScan": row.image_scan if isinstance(row.image_scan, dict) else None,
+        # Deploy stages only. Generated pipelines are SimpleNamespace stand-ins
+        # without the attribute, so it is read defensively.
+        "deploy": (
+            getattr(row, "deploy", None)
+            if isinstance(getattr(row, "deploy", None), dict)
+            else None
+        ),
         "timeoutSeconds": row.timeout_seconds,
         "continueOnFailure": bool(row.continue_on_failure),
         "enabled": bool(row.enabled),
@@ -216,6 +223,9 @@ def build_stage_to_dict(row: CiBuildStage) -> Dict[str, Any]:
         "logLineCount": row.log_line_count,
         "logTruncated": bool(row.log_truncated),
         "error": row.error,
+        # What a deploy stage did: target, image, the image it replaced, the
+        # change bundle it waited on, and how it ended. None on other stages.
+        "deploy": row.deploy_state if isinstance(row.deploy_state, dict) else None,
     }
 
 

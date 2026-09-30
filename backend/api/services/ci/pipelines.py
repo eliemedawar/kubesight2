@@ -28,13 +28,14 @@ from ...models_ci import (
     RUNNER_TYPES,
     RETIRED_STAGE_TYPES,
     SAVEABLE_STAGE_TYPES,
+    SERVER_STAGE_TYPES,
     STAGE_TYPES,
     CiPipeline,
     CiPipelineStage,
     CiSecret,
     CiService,
 )
-from . import build_inputs, default_pipelines, jenkinsfile, templates
+from . import build_inputs, default_pipelines, deploy_config, jenkinsfile, templates
 from . import resources as ci_resources
 from .serializers import pipeline_to_dict
 
@@ -547,6 +548,14 @@ def _image_scan(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[s
     }
 
 
+def _deploy(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, Any]]:
+    """A Deploy stage's target, or None. See ``deploy_config.normalize``."""
+    try:
+        return deploy_config.normalize(value, stage_type, stage_name)
+    except deploy_config.DeployConfigError as exc:
+        raise PipelineError(str(exc), code="invalid_deploy")
+
+
 def _resources(value: Any, stage_name: str) -> Optional[Dict[str, str]]:
     """This stage's override of the service's Build resources.
 
@@ -633,6 +642,7 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         "host_aliases": _host_aliases(payload.get("hostAliases"), name),
         "run_condition": _run_condition(payload.get("runCondition"), name),
         "image_scan": _image_scan(payload.get("imageScan"), stage_type, name),
+        "deploy": _deploy(payload.get("deploy"), stage_type, name),
         "timeout_seconds": timeout,
         "continue_on_failure": bool(payload.get("continueOnFailure")),
         # Parallel groups were stored but never executed: stages always run in
@@ -643,7 +653,104 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
     }
 
 
-def _apply_stages(pipeline: CiPipeline, stage_payloads: List[Dict[str, Any]]) -> None:
+def check_deploy_stages_last(normalized: List[Dict[str, Any]]) -> None:
+    """Deploy stages come after every stage a runner executes.
+
+    They run on the KubeSight server once the runner is done. A whole-build
+    runner (one Kubernetes Job per build) has no way to pause its pod for a
+    server-side step, so a stage placed after a deploy would run before it — a
+    smoke test passing against the version that was about to be replaced.
+    """
+    first_deploy = next(
+        (s for s in normalized if s["stage_type"] in SERVER_STAGE_TYPES), None
+    )
+    if first_deploy is None:
+        return
+    after = [
+        s for s in normalized
+        if s["position"] > first_deploy["position"] and s["stage_type"] not in SERVER_STAGE_TYPES
+    ]
+    if after:
+        raise PipelineError(
+            f"Stage '{after[0]['name']}' comes after the Deploy stage '{first_deploy['name']}'. "
+            "Deploy stages run on the KubeSight server once the build itself has finished, so "
+            "they must be the last stages. Move it above the Deploy stage.",
+            code="deploy_not_last",
+        )
+
+
+def _stamp_deploy_authority(
+    pipeline: CiPipeline, normalized: List[Dict[str, Any]], actor
+) -> None:
+    """Record who a Deploy stage deploys as — whoever last saved its target.
+
+    A build is often started by a webhook or a ticket, with no person behind it,
+    so the stage cannot borrow the permissions of whoever started it. Instead,
+    pointing a stage at a namespace requires being able to deploy there, and
+    that person's name is stamped on the target. Saving the pipeline for any
+    other reason keeps the stamp; changing anything the stamp covers (see
+    ``deploy_config.signature``) needs someone who could deploy it themselves.
+
+    The stamp is never read from the request — only carried over from the
+    stored stage with the same signature, or written here.
+    """
+    from ...access_engine import can_access_namespace, user_has_permission
+
+    stored: Dict[str, Dict[str, Any]] = {}
+    for row in pipeline.stages:
+        config = row.deploy if isinstance(row.deploy, dict) else None
+        if row.stage_type == "deploy" and config and isinstance(config.get("authorizedBy"), dict):
+            stored.setdefault(deploy_config.signature(config), config["authorizedBy"])
+
+    for stage in normalized:
+        config = stage.get("deploy")
+        if stage["stage_type"] != "deploy" or not config:
+            continue
+        kept = stored.get(deploy_config.signature(config))
+        if kept:
+            config["authorizedBy"] = dict(kept)
+            continue
+        where = f"{config['clusterId']}/{config['namespace']}"
+        if actor is None:
+            raise PipelineError(
+                f"Stage '{stage['name']}' deploys to {where}, and only a person who can deploy "
+                "there can set that target.",
+                code="deploy_not_authorized",
+            )
+        if not (
+            user_has_permission(actor, "apps:deploy")
+            and can_access_namespace(actor, config["clusterId"], config["namespace"])
+        ):
+            raise PipelineError(
+                f"You cannot deploy to {where}, so you cannot point the stage "
+                f"'{stage['name']}' there. Builds deploy with the rights of whoever saved the "
+                "target — ask someone who can deploy to that namespace to set it.",
+                code="deploy_not_authorized",
+            )
+        config["authorizedBy"] = {
+            "userId": actor.id,
+            "username": actor.username,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        log_audit(
+            "ci_deploy_target_authorized",
+            actor=actor,
+            target_type="ci_pipeline",
+            target_id=str(pipeline.id),
+            details={
+                "stage": stage["name"],
+                "cluster": config["clusterId"],
+                "namespace": config["namespace"],
+                "deployment": config["deploymentName"],
+                "createIfMissing": config["createIfMissing"],
+            },
+            commit=False,
+        )
+
+
+def _apply_stages(
+    pipeline: CiPipeline, stage_payloads: List[Dict[str, Any]], *, actor=None
+) -> None:
     if len(stage_payloads) > MAX_STAGES:
         raise PipelineError(f"A pipeline may not exceed {MAX_STAGES} stages.")
     known_keys = _known_secret_keys(pipeline.service_id)
@@ -657,6 +764,10 @@ def _apply_stages(pipeline: CiPipeline, stage_payloads: List[Dict[str, Any]]) ->
         raise PipelineError(
             f"Stage names must be unique: {', '.join(sorted(duplicates))} is repeated."
         )
+    check_deploy_stages_last(normalized)
+    # Before the clear below: the stamps being carried over live on the rows
+    # that are about to be replaced.
+    _stamp_deploy_authority(pipeline, normalized, actor)
 
     # Full replace. Stage ids are not stable across a save, which is why builds
     # snapshot their pipeline rather than pointing at live stage rows.
@@ -803,7 +914,7 @@ def create_pipeline(
     )
     db.session.add(pipeline)
     db.session.flush()
-    _apply_stages(pipeline, payload.get("stages") or [])
+    _apply_stages(pipeline, payload.get("stages") or [], actor=actor)
     if pipeline.is_default:
         _demote_other_defaults(service.id, pipeline.id)
     db.session.commit()
@@ -847,7 +958,7 @@ def update_pipeline(
         pipeline.parameters = _parameters(payload.get("parameters"))
 
     if "stages" in payload:
-        _apply_stages(pipeline, payload.get("stages") or [])
+        _apply_stages(pipeline, payload.get("stages") or [], actor=actor)
     # Bumped on every save so a build's snapshot records which revision ran.
     pipeline.version = int(pipeline.version or 1) + 1
     pipeline.updated_at = datetime.now(timezone.utc)

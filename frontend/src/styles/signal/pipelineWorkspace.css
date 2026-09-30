@@ -10,6 +10,8 @@
    Stage kinds have a colour each, taken from the validated chart palette so
    they stay distinguishable in both themes — identity, never status:
      checkout → chart-2 (blue) · commands → chart-3 (teal) · image → chart-5 (violet)
+     · deploy → chart-7 (orchid) — not chart-6/chart-4, which are the info and
+     warn tones and would make every Deploy stage read as a notice
    ═════════════════════════════════════════════════════════════════════════ */
 
 .pl-root {
@@ -31,12 +33,16 @@
 .pl-root .kind-container_image {
   --pl-kind: var(--chart-5);
 }
+.pl-root .kind-deploy {
+  --pl-kind: var(--chart-7);
+}
 .pl-root .kind-retired {
   --pl-kind: var(--warn);
 }
 .pl-root .kind-checkout,
 .pl-root .kind-command,
 .pl-root .kind-container_image,
+.pl-root .kind-deploy,
 .pl-root .kind-retired {
   --pl-kind-soft: color-mix(in srgb, var(--pl-kind) 12%, transparent);
   --pl-kind-line: color-mix(in srgb, var(--pl-kind) 38%, transparent);
@@ -1678,6 +1684,9 @@
 .pl-root .pl-sheet.kind-container_image .pl-seg--lg .pl-seg-option.is-on {
   --pl-kind: var(--chart-5);
 }
+.pl-root .pl-sheet.kind-deploy .pl-seg--lg .pl-seg-option.is-on {
+  --pl-kind: var(--chart-7);
+}
 
 .pl-root .pl-seg--lg .pl-seg-option.is-on > svg {
   color: var(--pl-kind);
@@ -1878,7 +1887,8 @@
 
 .pl-root .pl-sheet.kind-checkout .pl-setting.is-set .pl-setting-icon,
 .pl-root .pl-sheet.kind-command .pl-setting.is-set .pl-setting-icon,
-.pl-root .pl-sheet.kind-container_image .pl-setting.is-set .pl-setting-icon {
+.pl-root .pl-sheet.kind-container_image .pl-setting.is-set .pl-setting-icon,
+.pl-root .pl-sheet.kind-deploy .pl-setting.is-set .pl-setting-icon {
   color: var(--pl-kind);
 }
 
@@ -3090,5 +3100,211 @@
   .pl-root *::after {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+
+/* ══ Deploy stage ═════════════════════════════════════════════════════════
+   Where it deploys, what exists there, which image, the three guards, and
+   whose rights it uses — then the create-if-missing form. The guards are
+   always on the page: the safety rules are part of reading the stage, not
+   something found out from a failed build. */
+
+.pl-root .pl-deploy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.pl-root .pl-deploy-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.65rem 0.8rem;
+  color: var(--text-subtle);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.pl-root .pl-deploy-status > svg {
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.12rem;
+}
+
+.pl-root .pl-deploy-status p {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pl-root .pl-deploy-status small {
+  display: block;
+  color: var(--text-muted);
+}
+
+.pl-root .pl-deploy-status strong {
+  color: var(--text-strong);
+}
+
+.pl-root .pl-deploy-status.is-exists {
+  border-color: var(--ok-border);
+}
+
+.pl-root .pl-deploy-status.is-exists > svg {
+  color: var(--ok);
+}
+
+.pl-root .pl-deploy-status.is-new > svg {
+  color: var(--pl-kind);
+}
+
+.pl-root .pl-deploy-status.is-loading {
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.pl-root .pl-deploy-image {
+  width: 100%;
+  margin-top: calc(var(--space-2) * -1);
+}
+
+.pl-root .pl-deploy-guards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pl-root .pl-deploy-guard {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.75rem 0.85rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  min-width: 0;
+}
+
+.pl-root .pl-deploy-guard-icon {
+  display: grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex: none;
+  color: var(--pl-kind);
+  background: var(--pl-kind-soft);
+  border-radius: var(--radius-md);
+}
+
+.pl-root .pl-deploy-guard-icon svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.pl-root .pl-deploy-guard strong,
+.pl-root .pl-deploy-guard small {
+  display: block;
+}
+
+.pl-root .pl-deploy-guard strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.pl-root .pl-deploy-guard small {
+  margin-top: 0.15rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+.pl-root .pl-deploy-guard.is-warn {
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+}
+
+.pl-root .pl-deploy-guard.is-warn .pl-deploy-guard-icon {
+  color: var(--warn);
+  background: transparent;
+}
+
+.pl-root .pl-deploy-guard.is-info {
+  border-color: var(--info-border);
+}
+
+.pl-root .pl-deploy-authority {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.pl-root .pl-deploy-authority > svg {
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.15rem;
+  color: var(--pl-kind);
+}
+
+.pl-root .pl-deploy-authority p {
+  margin: 0;
+}
+
+.pl-root .pl-deploy-authority strong {
+  color: var(--text-strong);
+}
+
+.pl-root .pl-deploy-authority small {
+  display: block;
+  color: var(--text-muted);
+}
+
+.pl-root .pl-deploy-authority small.is-warn {
+  margin-top: 0.25rem;
+  color: var(--warn);
+}
+
+.pl-root .pl-deploy-authority.is-warn {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+}
+
+.pl-root .pl-deploy-create.is-on {
+  border-color: var(--pl-kind-line);
+  box-shadow: inset 3px 0 0 var(--pl-kind);
+}
+
+.pl-root .pl-deploy-create.is-on .pl-scan-icon {
+  color: var(--pl-kind);
+  background: var(--pl-kind-soft);
+}
+
+.pl-root .pl-deploy-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1100px) {
+  .pl-root .pl-deploy-guards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .pl-root .pl-deploy-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

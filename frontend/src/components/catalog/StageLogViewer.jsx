@@ -3,6 +3,7 @@ import { getCiStageLogs } from "../../api/ciApi.js";
 import { formatDuration } from "./ciShared.jsx";
 import { downloadCiStageLog } from "../../api/ciApi.js";
 import { parseApiTime } from "../../lib/apiTime.js";
+import DeployStageSummary from "./DeployStageSummary.jsx";
 
 // Log output is the one thing that must feel live; the loop ends when the
 // stage does. The backend drains the runner on demand for exactly this reason.
@@ -173,6 +174,7 @@ export default function StageLogViewer({ buildId, stage }) {
         )}
       </div>
 
+      <DeployStageSummary stage={stage} />
       {stage.error && <p className="banner-message error">{stage.error}</p>}
       {error && <p className="banner-message error">{error}</p>}
 

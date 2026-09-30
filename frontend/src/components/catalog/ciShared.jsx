@@ -30,6 +30,7 @@ export const STAGE_TYPES = [
   { value: "checkout", label: "Checkout" },
   { value: "command", label: "Command" },
   { value: "container_image", label: "Build container image" },
+  { value: "deploy", label: "Deploy to a cluster" },
 ];
 
 /** Stage kinds that never had an executor. No longer offered and refused on
