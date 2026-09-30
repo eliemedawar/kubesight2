@@ -106,7 +106,14 @@ metadata:
   labels:
     app: buildkitd
 spec:
-  replicas: 1
+  # Two builders on two different nodes, so a node whose pod network breaks
+  # (firewalld back after a reboot, a sick calico-node) takes out one builder,
+  # not image builds. Build pods reach each one directly through the headless
+  # `buildkitd-pods` Service below and use the first that answers — see
+  # CI_BUILDKIT_POOL in ci-backend-config.yaml. Each has its own emptyDir layer
+  # cache; KubeSight keeps each service on the same builder while it is healthy
+  # so that cache stays warm.
+  replicas: 2
   selector:
     matchLabels:
       app: buildkitd
@@ -136,6 +143,17 @@ spec:
       # Note this applies to EVERY image build, including base-image pulls, so
       # the address must serve both. Addressing the registry by IP in its
       # KubeSight connection avoids the question entirely.
+      affinity:
+        podAntiAffinity:
+          # Preferred, not required: on a cluster with one schedulable node the
+          # second builder still starts instead of sitting Pending forever.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: buildkitd
       serviceAccountName: buildkitd
       automountServiceAccountToken: false
       enableServiceLinks: false
@@ -211,6 +229,23 @@ metadata:
   name: buildkitd
   namespace: kubesight-buildkit
 spec:
+  selector:
+    app: buildkitd
+  ports:
+    - port: 1234
+      targetPort: 1234
+      protocol: TCP
+---
+# One DNS record per Ready buildkitd pod (clusterIP: None), so KubeSight can hand
+# each image stage every builder's own address instead of the one ClusterIP
+# above. A pod that is not Ready drops out of the answer on its own.
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd-pods
+  namespace: kubesight-buildkit
+spec:
+  clusterIP: None
   selector:
     app: buildkitd
   ports:

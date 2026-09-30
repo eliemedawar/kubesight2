@@ -49,6 +49,11 @@ data:
   # Empty/unset = container_image stages skip with an explanation. Set once
   # k8s/ci-buildkitd.yaml is applied and the buildkitd pod is 1/1 Ready.
   CI_BUILDKIT_ADDR: tcp://buildkitd.kubesight-buildkit.svc.cluster.local:1234
+  # Failover across builders. The headless Service over every buildkitd pod:
+  # each image stage tries each Ready builder directly, then CI_BUILDKIT_ADDR,
+  # and builds on the first that answers from its own node. Unset = the one
+  # address above only, and a builder the build pod cannot reach fails the stage.
+  CI_BUILDKIT_POOL: buildkitd-pods.kubesight-buildkit.svc.cluster.local
 
   # --- Image scanning (the gate between build and push) ---------------------
   # A container_image stage with scanning ARMED does not let buildkitd push at

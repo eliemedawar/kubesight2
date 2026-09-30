@@ -421,6 +421,98 @@ def test_supported_stage_types_follow_buildkit_configuration(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# BuildKit failover — a builder the build pod cannot reach must not fail it
+# ---------------------------------------------------------------------------
+
+_POOL = "buildkitd-pods.kubesight-buildkit.svc.cluster.local"
+_PRIMARY = "tcp://buildkitd.kubesight-buildkit.svc.cluster.local:1234"
+
+
+def _pool(monkeypatch, ips):
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", _PRIMARY)
+    monkeypatch.setenv("CI_BUILDKIT_POOL", _POOL)
+    seen = []
+
+    def resolve(host):
+        seen.append(host)
+        if isinstance(ips, Exception):
+            raise ips
+        return ips
+
+    monkeypatch.setattr(k8s, "_buildkit_resolver", resolve)
+    return seen
+
+
+def _image_script(**kw):
+    execution = _execution(1, "container_image", registry=_SCAN_REGISTRY, **kw)
+    return k8s.image_stage_script(execution, "/workspace/.kubesight/image-meta-1.json")
+
+
+def test_without_a_pool_the_stage_dials_the_one_address_as_before(monkeypatch):
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", _PRIMARY)
+    monkeypatch.delenv("CI_BUILDKIT_POOL", raising=False)
+    script = _image_script()
+
+    assert f"buildctl --addr {_PRIMARY} build" in script
+    assert "KS_BUILDKIT_ADDR" not in script
+
+
+def test_pool_gives_every_builder_then_the_service_address(monkeypatch):
+    seen = _pool(monkeypatch, ["192.168.173.175", "192.168.9.20", "192.168.9.20"])
+    candidates = k8s.buildkit_candidates("payment-service")
+
+    assert seen == [_POOL]
+    # Each Ready pod once, then the ClusterIP as the last resort.
+    assert sorted(candidates[:2]) == ["tcp://192.168.173.175:1234", "tcp://192.168.9.20:1234"]
+    assert candidates[2:] == [_PRIMARY]
+
+
+def test_a_service_keeps_its_builder_so_its_layer_cache_stays_warm(monkeypatch):
+    _pool(monkeypatch, ["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+    first = k8s.buildkit_candidates("payment-service")
+
+    # Resolution order is DNS's business, not the service's: same answer
+    # shuffled must still put the same builder first.
+    _pool(monkeypatch, ["10.0.0.3", "10.0.0.1", "10.0.0.2"])
+    assert k8s.buildkit_candidates("payment-service") == first
+
+    # And services spread over the builders rather than all piling on one.
+    firsts = {k8s.buildkit_candidates(f"svc-{n}")[0] for n in range(20)}
+    assert len(firsts) > 1
+
+
+def test_stage_builds_on_the_first_builder_that_answers(monkeypatch):
+    _pool(monkeypatch, ["192.168.173.175", "192.168.9.20"])
+    script = _image_script()
+
+    select = script.index("for KS_BK_TRY in")
+    build = script.index('buildctl --addr "$KS_BUILDKIT_ADDR" build')
+    assert select < build
+    assert "debug workers" in script[select:build]
+    assert _PRIMARY in script[select:build]
+    # Nobody answering is a clear failure, not a build against an empty address.
+    assert 'if [ -z "$KS_BUILDKIT_ADDR" ]' in script[select:build]
+    assert "exit 1" in script[select:build]
+
+
+def test_scanned_stage_picks_a_builder_after_its_tool_guard(monkeypatch):
+    _pool(monkeypatch, ["192.168.173.175", "192.168.9.20"])
+    script = _image_script(image_scan={"enabled": True, "threshold": "critical", "onFail": "block"})
+
+    assert script.index("command -v \"$KS_TOOL\"") < script.index("for KS_BK_TRY in")
+    assert script.index("for KS_BK_TRY in") < script.index('buildctl --addr "$KS_BUILDKIT_ADDR" build')
+    assert script.index('buildctl --addr "$KS_BUILDKIT_ADDR" build') < script.index("crane push")
+
+
+def test_unresolvable_pool_falls_back_to_the_service_address(monkeypatch):
+    _pool(monkeypatch, OSError("Name or service not known"))
+    assert k8s.buildkit_candidates("payment-service") == [_PRIMARY]
+    _pool(monkeypatch, [])
+    assert k8s.buildkit_candidates("payment-service") == [_PRIMARY]
+    assert f"buildctl --addr {_PRIMARY} build" in _image_script()
+
+
+# ---------------------------------------------------------------------------
 # Status parsing (fake kubectl)
 # ---------------------------------------------------------------------------
 

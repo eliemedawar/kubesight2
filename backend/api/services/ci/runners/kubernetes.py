@@ -45,7 +45,9 @@ import logging
 import os
 import re
 import shlex
+import socket
 import subprocess
+import zlib
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .. import build_environments, build_inputs, cache_layout
@@ -104,6 +106,101 @@ def worker_image() -> str:
 def buildkit_addr() -> str:
     """Where the shared rootless buildkitd listens. Empty = image builds off."""
     return os.getenv("CI_BUILDKIT_ADDR", "").strip()
+
+
+# ---------------------------------------------------------------------------
+# BuildKit failover
+#
+# One Service address is one point of failure that no readiness probe can see:
+# buildkitd's probe dials 127.0.0.1, so a pod on a node whose pod network is
+# broken (firewalld back after a reboot, a sick calico-node) stays Ready while
+# every build pod on every OTHER node times out dialling it.
+#
+# So when CI_BUILDKIT_POOL names a headless Service over the buildkitd pods,
+# each image stage gets every Ready builder's own address and uses the first
+# one that answers FROM THAT BUILD POD. The list is resolved here, when the Job
+# is created: the backend runs in-cluster, so a plain DNS lookup of a headless
+# Service returns one address per Ready pod, with no RBAC and no parsing of
+# nslookup output in a shell. CI_BUILDKIT_ADDR stays on the end of the list, so
+# a builder that moved between Job creation and the stage is still reachable.
+#
+# The order is rotated by service, not shuffled: each service keeps landing on
+# the same builder while it is healthy, and that builder's layer cache stays
+# warm for it.
+# ---------------------------------------------------------------------------
+
+_buildkit_resolver = None
+
+
+def set_buildkit_resolver(fn) -> None:
+    """Test hook: ``fn(host: str) -> list[str]`` of IP addresses."""
+    global _buildkit_resolver
+    _buildkit_resolver = fn
+
+
+def _resolve_host(host: str) -> List[str]:
+    if _buildkit_resolver is not None:
+        return list(_buildkit_resolver(host))
+    infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    return [info[4][0] for info in infos]
+
+
+def buildkit_pool_host() -> str:
+    """Headless Service host over every buildkitd pod. Empty = no failover."""
+    return os.getenv("CI_BUILDKIT_POOL", "").strip()
+
+
+def buildkit_candidates(service_slug: str) -> List[str]:
+    """Builder addresses an image stage tries, in order.
+
+    Just ``[CI_BUILDKIT_ADDR]`` when no pool is configured or it resolves to
+    nothing, which keeps the stage script exactly what it was before failover.
+    """
+    primary = buildkit_addr()
+    host = buildkit_pool_host()
+    if not primary or not host:
+        return [primary] if primary else []
+    port_match = re.search(r":(\d+)$", primary)
+    port = port_match.group(1) if port_match else "1234"
+    try:
+        ips = sorted(set(_resolve_host(host)))
+    except (OSError, UnicodeError) as exc:
+        logger.warning("Could not resolve BuildKit pool %s (%s); using %s only", host, exc, primary)
+        return [primary]
+    if not ips:
+        return [primary]
+    start = zlib.crc32(str(service_slug or "").encode("utf-8")) % len(ips)
+    ordered = ips[start:] + ips[:start]
+    addrs = [f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}" for ip in ordered]
+    return addrs + [primary]
+
+
+def _buildkit_select_script(candidates: List[str]) -> str:
+    """Shell that sets $KS_BUILDKIT_ADDR to the first builder that answers.
+
+    ``debug workers`` is the cheapest call that proves the whole path: TCP
+    through every NetworkPolicy, the gRPC handshake, and a daemon with a worker.
+    ``timeout`` bounds it when present, because a dial into a black-holed node
+    otherwise waits for as long as the kernel keeps retrying the SYN.
+    """
+    words = " ".join(_q(addr) for addr in candidates)
+    return (
+        'KS_BUILDKIT_ADDR=""\n'
+        'KS_BK_LIMIT=""\n'
+        "if command -v timeout >/dev/null 2>&1; then KS_BK_LIMIT=\"timeout 20\"; fi\n"
+        f"for KS_BK_TRY in {words}; do\n"
+        '  if $KS_BK_LIMIT buildctl --addr "$KS_BK_TRY" --timeout 10 debug workers >/dev/null 2>&1; then\n'
+        '    KS_BUILDKIT_ADDR="$KS_BK_TRY"\n'
+        "    break\n"
+        "  fi\n"
+        '  echo "[kubesight] BuildKit at $KS_BK_TRY did not answer from this node; trying the next builder" >&2\n'
+        "done\n"
+        'if [ -z "$KS_BUILDKIT_ADDR" ]; then\n'
+        f'  echo "[kubesight] No BuildKit builder answered ({len(candidates)} tried). Check that the buildkitd pods are Ready and that this node can reach pods on theirs." >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'echo "[kubesight] BuildKit: $KS_BUILDKIT_ADDR"\n'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +795,14 @@ def _buildctl_args(
     # The cache prelude runs BEFORE the tag prelude only because neither reads
     # the other; keeping the order fixed keeps the generated script diffable.
     prelude = (cache_prelude + _image_ref_prelude(registry)) if with_prelude else ""
+    # Several builders: pick one that answers from THIS pod, right before the
+    # build, after the tag and cache preludes (neither talks to buildkitd).
+    candidates = buildkit_candidates(execution.service_slug)
+    if len(candidates) > 1:
+        prelude += _buildkit_select_script(candidates)
+        addr_word = '"$KS_BUILDKIT_ADDR"'
+    else:
+        addr_word = _q(buildkit_addr())
     output_word = output or _buildctl_output(registry)
     context = "/workspace/source"
     if execution.working_directory:
@@ -709,7 +814,7 @@ def _buildctl_args(
         # an inline Dockerfile needs no copy into the context: point the
         # dockerfile local at the mounted file and leave the context alone.
         return prelude + (
-            f"buildctl --addr {_q(buildkit_addr())} build "
+            f"buildctl --addr {addr_word} build "
             f"--frontend dockerfile.v0 "
             f"--local {_q(f'context={context}')} "
             f"--local dockerfile={INLINE_DOCKERFILE_DIR} "
@@ -720,7 +825,7 @@ def _buildctl_args(
             f"--metadata-file {_q(meta_file)}"
         )
     return prelude + (
-        f"buildctl --addr {_q(buildkit_addr())} build "
+        f"buildctl --addr {addr_word} build "
         f"--frontend dockerfile.v0 "
         f"--local {_q(f'context={context}')} "
         f"--local {_q(f'dockerfile={context}/{dockerfile_dir}')} "
