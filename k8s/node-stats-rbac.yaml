@@ -1,0 +1,49 @@
+# Node disk usage — let KubeSight read each kubelet's Summary API.
+#
+# The Operations Dashboard's "Containerd disk" column, its cluster Disk meter
+# and the disk/PVC alert policies all come from
+#
+#     kubectl get --raw /api/v1/nodes/<node>/proxy/stats/summary
+#
+# which the API server only proxies for an identity with `get` on nodes/proxy.
+# Without it the dashboard says "Disk usage not readable · needs nodes/proxy"
+# and the disk alerts never fire.
+#
+# APPLY IT ON EVERY CLUSTER whose disk you want to see, and bind it to the
+# identity in the kubeconfig KubeSight uses for that cluster. If that is not
+# the kubesight-backend ServiceAccount below, find out who it is with
+#
+#     kubectl --kubeconfig <that kubeconfig> auth whoami
+#
+# and change the subject (kind: User for a certificate user). Check with
+#
+#     kubectl --kubeconfig <that kubeconfig> auth can-i get nodes/proxy
+#
+# WHAT IT GRANTS
+#   `get` on nodes/proxy is broader than the stats endpoint: it reaches every
+#   GET path on each node's kubelet (pod lists, logs, metrics). No create, so no
+#   exec or attach. Bind it to KubeSight's own identity only, never to a group.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesight-node-stats
+  labels:
+    app.kubernetes.io/name: kubesight
+    app.kubernetes.io/component: node-stats
+rules:
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubesight-node-stats
+subjects:
+  - kind: ServiceAccount
+    name: kubesight-backend
+    namespace: kubesight
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubesight-node-stats

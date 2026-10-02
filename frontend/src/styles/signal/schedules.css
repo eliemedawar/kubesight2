@@ -1,0 +1,532 @@
+/* ══ Service Settings → Schedules ═════════════════════════════════════════
+   Lives inside .pl-root.st-root, so the pipeline kit (Field, Switch,
+   Segmented, the st-add editor frame) is reused as-is; only the schedule row,
+   the cron preview and the scan recipe are drawn here. Every rule is scoped
+   under .st-root so nothing leaks onto other pages, and colours are tokens
+   only, so the light and dark themes both come for free. Buttons drawn here
+   carry .btn-ghost to stay clear of ui-polish.css's (0,8,1) button rule.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.st-root .sc-root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.st-root .sc-readonly {
+  margin: 0.25rem 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .sc-empty {
+  padding-top: var(--space-5);
+  padding-bottom: var(--space-5);
+}
+
+.st-root .sc-empty p {
+  max-width: 34rem;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+}
+
+/* ── The list ───────────────────────────────────────────────────────── */
+
+.st-root .sc-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.st-root .sc-item {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.75rem;
+  padding: 0.75rem 0.85rem;
+}
+
+.st-root .sc-item + .sc-item {
+  border-top: 1px solid var(--border-soft);
+}
+
+.st-root .sc-item.is-editing {
+  display: block;
+  padding: var(--space-3);
+}
+
+.st-root .sc-item.is-off .sc-icon,
+.st-root .sc-item.is-off .sc-when {
+  opacity: 0.55;
+}
+
+.st-root .sc-icon {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  color: var(--info);
+  background: var(--info-soft);
+  border-radius: var(--radius-md);
+}
+
+.st-root .sc-item.has-problem .sc-icon {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.st-root .sc-icon svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.st-root .sc-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.st-root .sc-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.st-root .sc-when,
+.st-root .sc-meta,
+.st-root .sc-vars {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.6rem;
+  margin: 0;
+  min-width: 0;
+}
+
+.st-root .sc-when {
+  color: var(--text-main);
+  font-size: var(--font-size-sm);
+}
+
+.st-root .sc-zone {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.st-root .sc-cron {
+  padding: 0.05rem 0.35rem;
+  color: var(--text-subtle);
+  background: var(--bg-inset);
+  border-radius: var(--radius-sm, 4px);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .sc-meta {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .sc-meta > span + span::before {
+  margin-right: 0.6rem;
+  color: var(--border-strong);
+  content: "·";
+}
+
+.st-root .sc-meta b {
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.st-root .sc-meta code,
+.st-root .sc-vars code {
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.st-root .sc-vars code {
+  padding: 0.05rem 0.35rem;
+  color: var(--text-subtle);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm, 4px);
+}
+
+/* Last run: a dot in the outcome's tone, then what happened. */
+.st-root .sc-last {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  color: var(--text-subtle);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .sc-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: none;
+  background: var(--text-muted);
+  border-radius: 50%;
+}
+
+.st-root .sc-last.is-ok .sc-dot { background: var(--ok); }
+.st-root .sc-last.is-info .sc-dot { background: var(--info); }
+.st-root .sc-last.is-warn .sc-dot { background: var(--warn); }
+.st-root .sc-last.is-danger .sc-dot { background: var(--danger); }
+
+.st-root .sc-last-label {
+  font-weight: 650;
+}
+
+.st-root .sc-last.is-danger .sc-last-label { color: var(--danger); }
+.st-root .sc-last.is-warn .sc-last-label { color: var(--warn); }
+
+.st-root .sc-buildlink {
+  min-height: 0;
+  padding: 0;
+  color: var(--accent-strong);
+  background: none;
+  font-size: var(--font-size-xs);
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.st-root .sc-buildlink:hover {
+  color: var(--text-strong);
+}
+
+.st-root .sc-last-when {
+  color: var(--text-muted);
+}
+
+.st-root .sc-last-detail {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.st-root .sc-problem {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0.15rem 0 0;
+  padding: 0.45rem 0.6rem;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.st-root .sc-problem svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex: none;
+  margin-top: 0.1rem;
+}
+
+.st-root .sc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+}
+
+.st-root .sc-actions .pl-switch {
+  margin-right: 0.35rem;
+}
+
+/* ── The editor ─────────────────────────────────────────────────────── */
+
+.st-root .sc-editor .pl-seg {
+  margin-bottom: 0.15rem;
+}
+
+.st-root .sc-tz,
+.st-root .sc-ref {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.st-root .pl-field .sc-tz input,
+.st-root .pl-field .sc-ref input {
+  flex: 1 1 12rem;
+  width: auto;
+  min-width: 0;
+}
+
+.st-root .sc-ref .pl-seg {
+  margin: 0;
+}
+
+.st-root .sc-cron-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem var(--space-3);
+}
+
+.st-root .pl-field .sc-cron-row input {
+  flex: 0 1 16rem;
+  width: auto;
+  min-width: 10rem;
+}
+
+.st-root .sc-cron-row small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .sc-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.15rem;
+  padding: 0.65rem 0.8rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.st-root .sc-preview.is-loading {
+  opacity: 0.7;
+}
+
+.st-root .sc-preview.is-error {
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+
+.st-root .sc-preview p {
+  margin: 0;
+}
+
+.st-root .sc-preview-words {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+}
+
+.st-root .sc-preview-words.is-muted {
+  color: var(--text-muted);
+}
+
+.st-root .sc-preview-words svg,
+.st-root .sc-preview-error svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: none;
+}
+
+.st-root .sc-preview-words svg {
+  color: var(--info);
+}
+
+.st-root .sc-preview-words span {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.st-root .sc-preview-error {
+  display: flex;
+  gap: 0.35rem;
+  color: var(--danger);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.st-root .sc-preview-runs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.st-root .sc-preview-runs li {
+  display: flex;
+  flex-direction: column;
+  padding: 0.3rem 0.55rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-strong);
+}
+
+.st-root .sc-preview-runs small {
+  color: var(--text-muted);
+  font-family: var(--font-body, inherit);
+  font-size: 0.6875rem;
+}
+
+.st-root .sc-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.st-root .sc-inputs .pl-block-title {
+  margin: 0;
+}
+
+.st-root .sc-inputs-note {
+  margin: -0.4rem 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .sc-input {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.st-root .sc-input > label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  color: var(--text-main);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.st-root .sc-input code {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+}
+
+.st-root .sc-required {
+  color: var(--warn);
+  font-size: 0.6875rem;
+  font-weight: 650;
+}
+
+.st-root .sc-input input,
+.st-root .sc-input select,
+.st-root .sc-input textarea {
+  width: 100%;
+  max-width: 32rem;
+  min-height: 2.25rem;
+}
+
+.st-root .sc-input small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+.st-root .sc-input.is-bool small {
+  padding-left: 2.85rem;
+}
+
+.st-root .sc-switches {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ── Nightly dependency scan recipe ─────────────────────────────────── */
+
+.st-root .sc-recipe {
+  display: flex;
+  gap: 0.75rem;
+  padding: var(--space-3) var(--space-4);
+  background: var(--info-soft);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius-lg);
+  color: var(--text-subtle);
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+}
+
+.st-root .sc-recipe > svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: none;
+  margin-top: 0.1rem;
+  color: var(--info);
+}
+
+.st-root .sc-recipe > div {
+  min-width: 0;
+}
+
+.st-root .sc-recipe strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+}
+
+.st-root .sc-recipe p,
+.st-root .sc-recipe ol {
+  margin: 0.25rem 0 0;
+}
+
+.st-root .sc-recipe ol {
+  padding-left: 1.1rem;
+}
+
+.st-root .sc-recipe code {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.st-root .sc-recipe-note {
+  color: var(--text-muted);
+}
+
+/* ── Narrow ─────────────────────────────────────────────────────────── */
+
+@media (max-width: 720px) {
+  .st-root .sc-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .st-root .sc-icon {
+    display: none;
+  }
+
+  .st-root .sc-actions {
+    justify-content: flex-start;
+  }
+
+  .st-root .pl-field .sc-cron-row input {
+    flex-basis: 100%;
+  }
+
+  .st-root .sc-input.is-bool small {
+    padding-left: 0;
+  }
+}

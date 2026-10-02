@@ -116,9 +116,17 @@ def cluster_items() -> List[Dict[str, Any]]:
     return items
 
 
-def visible_clusters(user: Any) -> List[Dict[str, Any]]:
+def _user_clusters(user: Any) -> List[Dict[str, Any]]:
     items = cluster_items()
     return filter_clusters_for_user(user, items) if user else items
+
+
+def visible_clusters(user: Any) -> List[Dict[str, Any]]:
+    """The clusters this token can see, minus any an administrator has closed to
+    the tool being called (Settings → MCP tools → Clusters)."""
+    from ..access import allows_cluster
+
+    return [item for item in _user_clusters(user) if allows_cluster(item.get("id"))]
 
 
 def resolve_cluster(user: Any, reference: Any) -> str:
@@ -131,7 +139,10 @@ def resolve_cluster(user: Any, reference: Any) -> str:
     raw = str(reference or "").strip()
     if not raw:
         raise ToolError("Name the cluster, by id or name.")
-    items = visible_clusters(user)
+    # Looked up among everything the token can see, not the MCP-filtered list,
+    # so a cluster closed to agents is refused by name below rather than
+    # reported as not existing.
+    items = _user_clusters(user)
     by_id = {str(item.get("id")): item for item in items}
     if raw in by_id:
         cluster_id = raw
@@ -140,12 +151,17 @@ def resolve_cluster(user: Any, reference: Any) -> str:
             (item for item in items if str(item.get("name", "")).lower() == raw.lower()), None
         )
         if match is None:
-            known = ", ".join(sorted(str(item.get("id")) for item in items)) or "none visible"
+            known = ", ".join(
+                sorted(str(item.get("id")) for item in visible_clusters(user))
+            ) or "none visible"
             raise ToolError(f"No cluster '{raw}'. Clusters you can see: {known}.")
         cluster_id = str(match.get("id"))
 
     if user is not None and not can_access_cluster(user, cluster_id):
         raise ToolError(f"This token has no access to cluster '{cluster_id}'.")
+    from ..access import check_cluster
+
+    check_cluster(cluster_id)
     return cluster_id
 
 

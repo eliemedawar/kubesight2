@@ -99,6 +99,23 @@ def _drop_obsolete_user_columns() -> None:
         _drop_column_if_exists("users", col)
 
 
+def _migrate_mcp_access_columns() -> None:
+    # Per-cluster MCP rules came a release after the table. NULL reads as "no
+    # cluster has a rule", which is what an existing installation had.
+    if "mcp_access_settings" in inspect(db.engine).get_table_names():
+        _add_column_if_missing("mcp_access_settings", "cluster_rules", "JSON")
+        _retype_json_column("mcp_access_settings", "cluster_rules")
+
+
+def _migrate_ticket_agent_columns() -> None:
+    # Troubleshooting tickets came after the settings table; on by default, as
+    # for a fresh install.
+    if "ticket_agent_settings" in inspect(db.engine).get_table_names():
+        _add_column_if_missing(
+            "ticket_agent_settings", "troubleshooting_enabled", "BOOLEAN DEFAULT true"
+        )
+
+
 def _migrate_cluster_build_columns() -> None:
     """Columns added after Cluster Builder's initial release.
 
@@ -418,6 +435,37 @@ def _grant_ticket_agent_to_ticket_managers() -> None:
     db.session.commit()
     if granted:
         logger.info("Granted ticketing:agent to %s role(s) holding ticketing:manage.", granted)
+
+
+def _grant_ci_approve_to_build_retriers() -> None:
+    """Introduce ``ci_builds:approve`` to every role that holds ``ci_builds:retry``.
+
+    Built-in roles get it from ROLE_DEFINITIONS; this covers custom roles, so
+    a team that runs builds can also answer the approval stages they hit —
+    and a custom role that held every permission keeps counting as an admin
+    (``is_admin`` is "holds all of them"). Same once-only shape as
+    ``_grant_ticket_agent_to_ticket_managers``: only while the permission row
+    does not exist yet, so removing it from a role later sticks.
+    """
+    from .models import Permission, Role
+    from .rbac_data import PERMISSIONS
+
+    if Permission.query.filter_by(key="ci_builds:approve").first() is not None:
+        return
+    approve = Permission(
+        key="ci_builds:approve", description=dict(PERMISSIONS).get("ci_builds:approve", "")
+    )
+    db.session.add(approve)
+    db.session.flush()
+    granted = 0
+    for role in Role.query.all():
+        held = {perm.key for perm in role.permissions}
+        if "ci_builds:retry" in held and "ci_builds:approve" not in held:
+            role.permissions.append(approve)
+            granted += 1
+    db.session.commit()
+    if granted:
+        logger.info("Granted ci_builds:approve to %s role(s) holding ci_builds:retry.", granted)
 
 
 def _sync_role_permissions() -> None:
@@ -790,6 +838,10 @@ def _migrate_ci_columns() -> None:
             conn.execute(
                 text("UPDATE ci_pipelines SET purpose = 'build' WHERE purpose IS NULL")
             )
+        # Post actions (notifications + cleanup when a build ends). NULL on
+        # every pipeline that predates them, which reads as "none".
+        _add_column_if_missing("ci_pipelines", "post_actions", "JSON")
+        _retype_json_column("ci_pipelines", "post_actions")
     if "ci_pipeline_stages" in existing:
         # Added after the table shipped: db.create_all() will not alter an
         # existing table, so a deployed database needs this backfilled. Existing
@@ -815,10 +867,34 @@ def _migrate_ci_columns() -> None:
         # Deploy stages. NULL on every stage that is not one.
         _add_column_if_missing("ci_pipeline_stages", "deploy", "JSON")
         _retype_json_column("ci_pipeline_stages", "deploy")
+        # The code scan quality gate. NULL is "no gate", like image_scan: no
+        # existing stage starts failing on findings until somebody arms it.
+        _add_column_if_missing("ci_pipeline_stages", "code_scan", "JSON")
+        _retype_json_column("ci_pipeline_stages", "code_scan")
+        # Scan stages' scanner. NULL on every other stage, and on a scan stage
+        # saved while the kind was retired - which the engine keeps skipping.
+        _add_column_if_missing("ci_pipeline_stages", "scan", "JSON")
+        _retype_json_column("ci_pipeline_stages", "scan")
+        # Approval and app store upload stages. NULL on every other stage.
+        _add_column_if_missing("ci_pipeline_stages", "approval", "JSON")
+        _retype_json_column("ci_pipeline_stages", "approval")
+        _add_column_if_missing("ci_pipeline_stages", "store_upload", "JSON")
+        _retype_json_column("ci_pipeline_stages", "store_upload")
+        # Parallel groups' fail-fast switch (parallel_group itself shipped with
+        # the table). NULL reads as "siblings run to completion", the default.
+        _add_column_if_missing("ci_pipeline_stages", "parallel_fail_fast", "BOOLEAN DEFAULT false")
     if "ci_build_stages" in existing:
         # A deploy stage's persisted progress. NULL on every other stage row.
         _add_column_if_missing("ci_build_stages", "deploy_state", "JSON")
         _retype_json_column("ci_build_stages", "deploy_state")
+        # Approval / store upload stages' persisted progress. NULL elsewhere.
+        _add_column_if_missing("ci_build_stages", "server_state", "JSON")
+        _retype_json_column("ci_build_stages", "server_state")
+    if "ci_builds" in existing:
+        # Test results and coverage per build. NULL on every build that ran
+        # before parsing existed, which reads as "no reports collected" — true.
+        _add_column_if_missing("ci_builds", "test_summary", "JSON")
+        _retype_json_column("ci_builds", "test_summary")
 
 
 def _migrate_merge_check_columns() -> None:
@@ -1232,6 +1308,8 @@ def _migrate_deploy_automation_columns() -> None:
         _add_column_if_missing("jenkins_connection", "rollback_on_failure", "BOOLEAN DEFAULT true")
         # Operator-pinned registry for the automation's image checks (2026-07-13).
         _add_column_if_missing("jenkins_connection", "registry_connection_id", "INTEGER")
+        # Which engine builds a missing image: auto | kubesight_ci | jenkins (2026-10-01).
+        _add_column_if_missing("jenkins_connection", "build_engine", "VARCHAR(16) DEFAULT 'auto'")
         # Per-parameter router contract toggles (2026-07-13).
         _add_column_if_missing("jenkins_connection", "send_param_app", "BOOLEAN DEFAULT true")
         _add_column_if_missing("jenkins_connection", "send_param_namespace", "BOOLEAN DEFAULT true")
@@ -1395,6 +1473,8 @@ def run_migrations() -> None:
     _migrate_client_service_egress_connections()
     _migrate_registry_connection_columns()
     _migrate_merge_check_columns()
+    _migrate_mcp_access_columns()
+    _migrate_ticket_agent_columns()
     _seed_builtin_ci_runners()
     from .access_rules import migrate_all_users_legacy_rules
     from .migrate_alert_routing import run_alert_routing_migrations
@@ -1405,6 +1485,7 @@ def run_migrations() -> None:
     # Must run BEFORE the prune: it reads the old rows the prune is about to drop.
     _migrate_renamed_permissions()
     _grant_ticket_agent_to_ticket_managers()
+    _grant_ci_approve_to_build_retriers()
     _prune_obsolete_permissions()
     # Cluster access (Area C): not schema, but one-time data fix-ups that must
     # run on every start.

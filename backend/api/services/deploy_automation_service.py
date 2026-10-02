@@ -145,6 +145,7 @@ def serialize_jenkins(row: JenkinsConnection) -> Dict[str, Any]:
         "rolloutTimeoutMinutes": int(row.rollout_timeout_minutes or 15),
         "rollbackOnFailure": bool(row.rollback_on_failure),
         "registryConnectionId": row.registry_connection_id,
+        "buildEngine": build_engine(row),
         "lastTestAt": _iso(row.last_test_at),
         "lastTestStatus": row.last_test_status,
         "lastTestMessage": row.last_test_message,
@@ -154,6 +155,28 @@ def serialize_jenkins(row: JenkinsConnection) -> Dict[str, Any]:
 
 def get_jenkins_dict() -> Dict[str, Any]:
     return serialize_jenkins(get_or_create_jenkins())
+
+
+# What builds an image a ticket asks for when the cluster's registries do not
+# have it yet. See JenkinsConnection.build_engine.
+BUILD_ENGINES = ("auto", "kubesight_ci", "jenkins")
+
+
+def build_engine(row: Optional[JenkinsConnection] = None) -> str:
+    row = row or get_or_create_jenkins()
+    value = (row.build_engine or "auto").strip().lower()
+    return value if value in BUILD_ENGINES else "auto"
+
+
+def set_build_engine(value: Any) -> str:
+    """Save the build engine choice. Raises AutomationError on an unknown one."""
+    choice = str(value or "").strip().lower()
+    if choice not in BUILD_ENGINES:
+        raise AutomationError(f"buildEngine must be one of {', '.join(BUILD_ENGINES)}.", 400)
+    row = get_or_create_jenkins()
+    row.build_engine = choice
+    db.session.commit()
+    return choice
 
 
 def update_jenkins(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -223,6 +246,12 @@ def update_jenkins(payload: Dict[str, Any]) -> Dict[str, Any]:
                 row.registry_connection_id = conn_id
             else:
                 errors.append("The selected image-check registry no longer exists.")
+    if "buildEngine" in payload:
+        choice = str(payload.get("buildEngine") or "").strip().lower()
+        if choice in BUILD_ENGINES:
+            row.build_engine = choice
+        else:
+            errors.append(f"buildEngine must be one of {', '.join(BUILD_ENGINES)}.")
 
     for key, attr, lo, hi in (
         ("buildTimeoutMinutes", "build_timeout_minutes", 1, 24 * 60),
@@ -420,8 +449,14 @@ def _validate_machine_start(
     value: str,
     decision: Optional[Dict[str, Any]],
     approved: bool,
+    sibling: bool = False,
 ) -> None:
     """Run the ticket agent's validator over a run an agent/MCP caller asked for.
+
+    ``sibling``: this run is one of several the same request starts (a ticket
+    for several applications). The request's dropdown comparison was made over
+    all of them by the agent, so it is not repeated per run — the ticket's
+    dropdowns can only ever name one of the applications.
 
     Same inputs the engine uses (``validator.check(decision, catalog.targets
     (provider), ticket, min_confidence)``). ``decision`` is Hermes' full action
@@ -453,7 +488,7 @@ def _validate_machine_start(
         }
     bar = agent_settings.get_or_create().min_confidence or "High"
     targets = catalog.targets(ticket.provider or "zoho")
-    plan = validator.check(claim, targets, ticket, bar)
+    plan = validator.check(claim, targets, ticket, bar, dropdowns=not sibling)
     if plan.errors:
         raise AutomationError("Refused by the ticket validator: " + " ".join(plan.errors), 422)
     if plan.route == "impediment":
@@ -492,8 +527,15 @@ def start_run(
     origin: str = "operator",
     decision: Optional[Dict[str, Any]] = None,
     approved: bool = False,
+    sibling: bool = False,
 ) -> Dict[str, Any]:
     """Create a run for one inbound ticket. Raises AutomationError on bad input.
+
+    ``sibling`` (agent origin only): the run is one of several the Hermes
+    ticket agent starts for one ticket that names several applications. The
+    one-open-run-per-ticket rule then gives way — the agent checked the ticket
+    had no open run before starting the first — and the runs proceed side by
+    side, each serialized only behind other runs on its own target.
 
     ``origin`` ∈ :data:`RUN_ORIGINS` says who asked. ``agent`` (the Hermes
     ticket engine) and ``mcp`` (the ``kubesight_automation_run_start`` tool)
@@ -519,6 +561,8 @@ def start_run(
     """
     if origin not in RUN_ORIGINS:
         raise AutomationError(f"Unknown run origin '{origin}'.", 400)
+    if sibling and origin != "agent":
+        raise AutomationError("Only the ticket agent starts several runs for one ticket.", 400)
     ticket = ZohoInboundTicket.query.get(int(ticket_record_id))
     if ticket is None:
         raise AutomationError("Inbound ticket not found.", 404)
@@ -557,6 +601,19 @@ def start_run(
     from .zoho_sync_service import CUSTOM_SOURCE_CLUSTER
 
     if snapshot.cluster_id != CUSTOM_SOURCE_CLUSTER:
+        # An agent's per-cluster rules (Settings → MCP tools → Clusters). A no-op
+        # unless this run is being started by an MCP tool call. Raised as an
+        # AutomationError so a multi-change ticket withdraws the runs it already
+        # queued rather than deploying half of what was asked.
+        from ..mcp.access import check_cluster
+        from ..mcp.protocol import ToolError
+
+        try:
+            check_cluster(snapshot.cluster_id)
+        except ToolError as exc:
+            raise AutomationError(str(exc), 403)
+
+    if snapshot.cluster_id != CUSTOM_SOURCE_CLUSTER:
         # Namespace, deployment and variable all land in a kubectl argv.
         from ..k8s_names import name_error
 
@@ -586,9 +643,10 @@ def start_run(
             value,
             decision,
             approved,
+            sibling=sibling,
         )
 
-    conflict = _open_ticket_run(ticket.id)
+    conflict = None if sibling else _open_ticket_run(ticket.id)
     if conflict:
         state = (
             "already queued"
@@ -1263,7 +1321,7 @@ def _do_resolve_variable(run: DeployAutomationRun, jrow: JenkinsConnection) -> N
     from .registry_service import check_image
 
     def check(image: str):
-        return check_image(image, preferred_connection_id=jrow.registry_connection_id)
+        return check_image(image, preferred_connection_id=jrow.registry_connection_id, cluster_id=run.cluster_id)
 
     var = run.variable_name or ""
     _set_step(run, "image_check", "run", "checking the running image is still in the registry")
@@ -1383,7 +1441,7 @@ def _do_resolve_restart(run: DeployAutomationRun, jrow: JenkinsConnection) -> No
     from .registry_service import check_image
 
     def check(image: str):
-        return check_image(image, preferred_connection_id=jrow.registry_connection_id)
+        return check_image(image, preferred_connection_id=jrow.registry_connection_id, cluster_id=run.cluster_id)
 
     _set_step(run, "image_check", "run", "checking the running image is still in the registry")
     if not should_use_real_k8s(run.cluster_id):
@@ -1524,9 +1582,20 @@ def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> Non
 
     # Native CI first: a CI service named after the environment (or the app)
     # builds the binaries in-house — the mobile APK/AAB/IPA flow without Jenkins.
-    ci_service = _native_ci_service(run)
+    engine = build_engine(jrow)
+    ci_service, ci_pipeline = _native_ci_match(run) if engine != "jenkins" else (None, None)
     if ci_service is not None:
-        _trigger_native_build(run, ci_service)
+        _trigger_native_build(run, ci_service, ci_pipeline)
+        return
+    if engine == "kubesight_ci":
+        _fail(
+            run,
+            "build",
+            f"'{run.namespace}' is a custom environment and builds are set to KubeSight CI, but no "
+            f"CI service builds it. Register a CI service with the slug '{run.namespace}' or "
+            f"'{run.deployment_name}' in the Service Catalog, or set the build engine to "
+            "Automatic or Jenkins.",
+        )
         return
 
     env_cfg = custom_environment_by_name(run.namespace, _run_provider(run)) or {}
@@ -1536,6 +1605,9 @@ def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> Non
         _fail(
             run,
             "build",
+            f"'{run.namespace}' is a custom environment and builds are set to Jenkins, but the "
+            "Jenkins connection is not set up (or has no job path for it)."
+            if engine == "jenkins" else
             f"'{run.namespace}' is a custom environment with no builder configured. "
             f"Register a CI service with the slug '{run.namespace}' or "
             f"'{run.deployment_name}' in the Service Catalog (preferred), or configure "
@@ -1584,10 +1656,29 @@ def _do_trigger_custom(run: DeployAutomationRun, jrow: JenkinsConnection) -> Non
 def _native_ci_service(run: DeployAutomationRun):
     """The CI service that builds this run's application, or None.
 
-    Mapping is by slug: a CI service whose slug matches the deployment name
-    (or, for custom environments, the environment name) is the builder. The
-    slug is stable, DNS-safe, and shown on every service card, so 'name your
-    CI service after the deployment' is the entire configuration story.
+    In order, the first that answers:
+
+    1. a service whose build pipeline has a Deploy stage aimed at exactly this
+       cluster / namespace / deployment — the pipeline says outright that it
+       ships this application;
+    2. a service whose slug is the deployment name;
+    3. a service whose slug is the image's name (the last part of the running
+       image's repository — ``issuing-ms`` for ``registry/areeba/issuing-ms``),
+       for deployments named differently from the image they run;
+    4. for custom environments, a service whose slug is the environment name.
+
+    The slug is stable, DNS-safe, and shown on every service card, so 'name
+    your CI service after the deployment' stays the whole story for most.
+    """
+    return _native_ci_match(run)[0]
+
+
+def _native_ci_match(run: DeployAutomationRun):
+    """``(service, pipeline)`` — the builder, and the pipeline to build with.
+
+    The pipeline is the one whose Deploy stage aims at the target when that is
+    how the service was found (it may not be the service's default), else
+    None: the service's default pipeline.
     """
     import re as _re
 
@@ -1596,17 +1687,55 @@ def _native_ci_service(run: DeployAutomationRun):
     def _slug(value: str) -> str:
         return _re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")[:180]
 
-    for candidate in (_slug(run.deployment_name), _slug(run.namespace)):
+    if not _is_custom_run(run):
+        service, pipeline = _ci_service_deploying(run)
+        if service is not None:
+            return service, pipeline
+    image_name = (run.image_repo or "").rstrip("/").rsplit("/", 1)[-1] if run.image_repo else ""
+    for candidate in (_slug(run.deployment_name), _slug(image_name), _slug(run.namespace)):
         if not candidate:
             continue
         row = CiService.query.filter_by(slug=candidate, status="active").first()
         if row is not None:
-            return row
-    return None
+            return row, None
+    return None, None
 
 
-def _trigger_native_build(run: DeployAutomationRun, service) -> bool:
-    """queued/checking → building on KubeSight's own CI. False = could not start."""
+def _ci_service_deploying(run: DeployAutomationRun):
+    """``(service, pipeline)`` of the active build pipeline that deploys this
+    run's target, or ``(None, None)``. A service's default pipeline wins over
+    another of its pipelines that deploys the target too."""
+    from ..models_ci import CiPipeline, CiPipelineStage, CiService
+
+    rows = (
+        db.session.query(CiPipelineStage, CiPipeline, CiService)
+        .join(CiPipeline, CiPipelineStage.pipeline_id == CiPipeline.id)
+        .join(CiService, CiPipeline.service_id == CiService.id)
+        .filter(CiPipelineStage.stage_type == "deploy", CiService.status == "active")
+        .order_by(CiService.id.asc(), CiPipeline.is_default.desc(), CiPipeline.id.asc())
+        .all()
+    )
+    for stage, pipeline, service in rows:
+        if (pipeline.purpose or "build") != "build" or pipeline.enabled is False:
+            continue
+        if stage.enabled is False:
+            continue
+        target = stage.deploy if isinstance(stage.deploy, dict) else {}
+        if (
+            str(target.get("clusterId") or "") == str(run.cluster_id or "")
+            and target.get("namespace") == run.namespace
+            and target.get("deploymentName") == run.deployment_name
+        ):
+            return service, pipeline
+    return None, None
+
+
+def _trigger_native_build(run: DeployAutomationRun, service, pipeline=None) -> bool:
+    """queued/checking → building on KubeSight's own CI. False = could not start.
+
+    ``pipeline`` is the one to build (the one whose Deploy stage matched);
+    None builds the service's default.
+    """
     from .ci import engine as ci_engine
 
     variables = {
@@ -1616,9 +1745,14 @@ def _trigger_native_build(run: DeployAutomationRun, service) -> bool:
         "TICKET_TAG": run.ticket_tag or run.image_tag or "",
         "KUBESIGHT_TICKET": run.ticket_number or "",
     }
+    image_name = _target_image_name(run, service, pipeline)
+    if image_name:
+        # ...under the repository the deployment pulls from.
+        variables["IMAGE_NAME"] = image_name
     try:
         build = ci_engine.trigger_build(
             service,
+            pipeline_id=pipeline.id if pipeline is not None else None,
             trigger_type="automation",
             variables={k: v for k, v in variables.items() if v},
         )
@@ -1633,9 +1767,11 @@ def _trigger_native_build(run: DeployAutomationRun, service) -> bool:
     run.build_triggered_at = datetime.now(timezone.utc)
     run.retry_count = 0
     run.status = "building"
+    where = f"service '{service.name}'" + (f", pipeline '{pipeline.name}'" if pipeline is not None else "")
     _set_step(
         run, "build", "run",
-        f"KubeSight CI build #{build['number']} queued on service '{service.name}'",
+        f"KubeSight CI build #{build['number']} queued on {where}"
+        + (f" — pushing {variables['IMAGE_NAME']}:{run.image_tag}" if variables.get("IMAGE_NAME") else ""),
     )
     log_audit(
         "automation_build_triggered",
@@ -1647,6 +1783,8 @@ def _trigger_native_build(run: DeployAutomationRun, service) -> bool:
             "deployment": run.deployment_name,
             "engine": "kubesight-ci",
             "ciService": service.slug,
+            "ciPipeline": pipeline.name if pipeline is not None else None,
+            "imageName": variables.get("IMAGE_NAME"),
             "ciBuildId": build["id"],
             "ciBuildNumber": build["number"],
             "tag": run.ticket_tag or run.image_tag,
@@ -1654,6 +1792,38 @@ def _trigger_native_build(run: DeployAutomationRun, service) -> bool:
         commit=False,
     )
     return True
+
+
+def _target_image_name(run: DeployAutomationRun, service, pipeline=None) -> str:
+    """The repository path the build should push to, or "" to leave it alone.
+
+    A ticket deploy verifies and rolls out ``<the deployment's repository>:<tag>``,
+    so the build has to push exactly that — e.g. ``areeba/issuing-ms``, which
+    the service slug alone would never produce. Passed only when it cannot
+    misfire: an image deploy (not a custom environment), a pipeline with ONE
+    enabled image-build stage (a pipeline building several images would push
+    them all under one name), and that stage not naming its image itself (the
+    pipeline author's choice wins).
+    """
+    if _is_custom_run(run) or not run.image_repo:
+        return ""
+    from .ci import build_inputs
+    from .registry_client import parse_image_reference
+
+    pipeline = pipeline if pipeline is not None else service.default_pipeline()
+    if pipeline is None:
+        return ""
+    image_stages = [
+        s for s in pipeline.stages
+        if s.stage_type == "container_image" and getattr(s, "enabled", True) is not False
+    ]
+    if len(image_stages) != 1 or (image_stages[0].env or {}).get("IMAGE_NAME"):
+        return ""
+    parsed = parse_image_reference(f"{run.image_repo}:{run.image_tag or 'latest'}")
+    repository = parsed.repository if parsed is not None else ""
+    if not repository or build_inputs.image_name_problem(repository):
+        return ""
+    return repository
 
 
 def _ci_deploy_stage(run: DeployAutomationRun, build=None):
@@ -1696,6 +1866,26 @@ def _ci_deploy_mode(run: DeployAutomationRun, stage) -> str:
     if state.get("bundleId"):
         mode += f", approved as change bundle #{state['bundleId']}"
     return mode
+
+
+def _ci_stage_progress(stage) -> str:
+    """What the running stage of a CI build is doing, for the run's build step.
+
+    A build held at an Approval stage is running, not stuck: the run keeps
+    waiting on it (native builds have no automation-side timeout; the stage's
+    own timeout ends the wait), and the step says who it is waiting for.
+    """
+    if stage.stage_type == "deploy":
+        return _deploy_stage_progress(stage)
+    if stage.stage_type == "approval":
+        from .ci.approval_stage import summarize as summarize_approval
+
+        return summarize_approval(stage)
+    if stage.stage_type == "store_upload":
+        from .ci.store_upload_stage import summarize as summarize_upload
+
+        return summarize_upload(stage)
+    return f"stage '{stage.name}'"
 
 
 def _deploy_stage_progress(stage) -> str:
@@ -1746,9 +1936,7 @@ def _do_poll_native_build(run: DeployAutomationRun) -> None:
         stage = next((s for s in build.stages if s.status == "running"), None)
         detail = f"CI build #{build.number} running"
         if stage is not None:
-            detail += " — " + (
-                _deploy_stage_progress(stage) if stage.stage_type == "deploy" else f"stage '{stage.name}'"
-            )
+            detail += " — " + _ci_stage_progress(stage)
         _set_step(run, "build", "run", detail)
         return
 
@@ -1794,6 +1982,14 @@ def _do_poll_native_build(run: DeployAutomationRun) -> None:
     failed_stage = next(
         (s for s in build.stages if s.status in ("failed", "timeout")), None
     )
+    if failed_stage is not None and failed_stage.stage_type == "approval":
+        # Nobody approved it (rejected, or out of time): that is the approval
+        # step failing, not the build.
+        from .ci.approval_stage import summarize as summarize_approval
+
+        _set_step(run, "build", "done", f"CI build #{build.number} built and tested")
+        _fail(run, "approval", summarize_approval(failed_stage))
+        return
     where = f" (stage '{failed_stage.name}')" if failed_stage is not None else ""
     _fail(
         run, "build",
@@ -1806,13 +2002,21 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     """checking_image → handoff (found) | building (missing) | failed."""
     from .registry_service import check_image
 
+    # The registries linked to the run's cluster decide (any one of them holding
+    # the tag is enough); a cluster with no linked registry falls back to the
+    # one registry that owns the image's host.
     target = _target_image(run)
-    result = check_image(target, preferred_connection_id=jrow.registry_connection_id)
+    result = check_image(target, preferred_connection_id=jrow.registry_connection_id, cluster_id=run.cluster_id)
     status = result.get("status")
+    scoped = bool(result.get("clusterScoped"))
 
     if status == "found":
-        _set_step(run, "image_check", "done", f"{target} already in the registry")
-        _set_step(run, "build", "skip", "image already present — no build needed")
+        # Already built: the deploy only swaps the tag on the live deployment.
+        _set_step(
+            run, "image_check", "done",
+            result.get("message") if scoped else f"{target} already in the registry",
+        )
+        _set_step(run, "build", "skip", "image already present — only the tag changes, no build needed")
         _set_step(run, "verify", "skip", "verified by the pre-check")
         _do_handoff(run)
         return
@@ -1832,18 +2036,34 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     if status == "no_connection":
         _set_step(
             run, "image_check", "done",
+            (result.get("message") or "no enabled registry is linked to this cluster")
+            + " — cannot verify; the build result will be trusted"
+            if scoped else
             "no linked registry owns this image host — cannot verify; the build result will be trusted",
         )
     else:
-        _set_step(run, "image_check", "done", f"{run.image_tag} not in the registry — build required")
+        _set_step(
+            run, "image_check", "done",
+            f"{result.get('message')} Build required." if scoped
+            else f"{run.image_tag} not in the registry — build required",
+        )
 
-    # KubeSight's own CI is the build engine of choice: a CI service whose slug
-    # matches the deployment name builds the image natively — no Jenkins in the
-    # path. The Jenkins router below remains only as the legacy fallback for
-    # applications not yet registered in the Service Catalog.
-    ci_service = _native_ci_service(run)
+    # Which engine builds it is the operator's choice (build_engine): KubeSight
+    # CI — the application's CI service — or Jenkins, or "auto": CI when the
+    # application has a CI service, the Jenkins router otherwise.
+    engine = build_engine(jrow)
+    ci_service, ci_pipeline = _native_ci_match(run) if engine != "jenkins" else (None, None)
     if ci_service is not None:
-        _trigger_native_build(run, ci_service)
+        _trigger_native_build(run, ci_service, ci_pipeline)
+        return
+    if engine == "kubesight_ci":
+        _fail(
+            run, "build",
+            f"{target} has to be built and builds are set to KubeSight CI, but no CI service "
+            f"builds '{run.deployment_name}'. In the Service Catalog, give it a CI service with "
+            f"the slug '{run.deployment_name}' or a Deploy stage aimed at {run.namespace}/"
+            f"{run.deployment_name} — or set the build engine to Automatic or Jenkins.",
+        )
         return
 
     # A job override from the source picker (a rule for this namespace, or for
@@ -1860,6 +2080,9 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     if not (jrow.enabled and jrow.base_url and path and jrow.api_token_encrypted):
         _fail(
             run, "build",
+            f"{target} has to be built and builds are set to Jenkins, but the Jenkins router "
+            "connection is not set up."
+            if engine == "jenkins" else
             "The image tag is not in the registry and no builder is configured for "
             f"'{run.deployment_name}'. Register a CI service with the slug "
             f"'{run.deployment_name}' in the Service Catalog (preferred), or configure "
@@ -1998,7 +2221,7 @@ def _do_verify(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     from .registry_service import check_image
 
     target = _target_image(run)
-    result = check_image(target, preferred_connection_id=jrow.registry_connection_id)
+    result = check_image(target, preferred_connection_id=jrow.registry_connection_id, cluster_id=run.cluster_id)
     status = result.get("status")
 
     if status == "found":
@@ -2019,10 +2242,14 @@ def _do_verify(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
                 f"registry unreachable — retrying ({run.retry_count}/{_MAX_TRANSIENT_RETRIES})",
             )
         return
+    where = "the cluster's registries" if result.get("clusterScoped") else "the registry"
+    pusher = (
+        "the CI service may push under another image name or to a registry not linked to this cluster"
+        if run.ci_build_id else "the routed job may not push this image"
+    )
     _fail(
         run, "verify",
-        f"The router build succeeded but {target} is still not in the registry — "
-        "the routed job may not push this image.",
+        f"The build succeeded but {target} is still not in {where} — {pusher}.",
     )
 
 

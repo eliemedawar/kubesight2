@@ -47,12 +47,83 @@ class Plan:
         self.problems.append(for_requester)
 
 
+@dataclass
+class Batch:
+    """A whole request — one Plan per application the ticket changes."""
+
+    route: str  # execute | approval | impediment
+    plans: List[Plan] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+    problems: List[str] = field(default_factory=list)
+    reasons: List[str] = field(default_factory=list)
+
+
+def check_request(
+    request: Dict[str, Any],
+    targets: List[ZohoDeploymentSnapshot],
+    ticket: ZohoInboundTicket,
+    min_confidence: str = "High",
+) -> Batch:
+    """Check every change of a request; the request routes as its worst change.
+
+    Each change is checked on its own for what makes it unrunnable. Whether a
+    human must look first is judged once for the whole request: Hermes'
+    confidence and concerns cover all of it, and the ticket's dropdowns are
+    compared with the set of targets rather than with each one — a ticket for
+    two applications has dropdowns naming at most one of them.
+    """
+    changes = schema.changes_of(request)
+    batch = Batch(route="execute")
+    seen = {}
+    for index, item in enumerate(changes):
+        plan = check(schema.single(request, item), targets, ticket, min_confidence, review=False)
+        label = _label(item)
+        prefix = f"changes[{index}] ({label}): " if len(changes) > 1 else ""
+        batch.errors.extend(prefix + e for e in plan.errors)
+        batch.problems.extend((f"{label}: " if len(changes) > 1 else "") + p for p in plan.problems)
+        if plan.snapshot is not None:
+            if plan.snapshot.id in seen:
+                batch.errors.append(
+                    f"changes[{index}] repeats changes[{seen[plan.snapshot.id]}] — the same application "
+                    "and environment. List each application once."
+                )
+                batch.problems.append(f"The ticket asks for {label} more than once; please list each application once.")
+            seen.setdefault(plan.snapshot.id, index)
+        batch.plans.append(plan)
+    if batch.errors:
+        batch.route = "impediment"
+        return batch
+
+    if _RANK.get(request["confidence"], 0) < _RANK.get(min_confidence, 3):
+        batch.reasons.append(f"Hermes' confidence is {request['confidence']} (the bar is {min_confidence}).")
+    for concern in request.get("concerns") or []:
+        batch.reasons.append(f"Hermes flagged: {concern}")
+    if len(batch.plans) == 1:
+        batch.reasons.extend(_disagreements(batch.plans[0], ticket))
+    else:
+        batch.reasons.extend(_batch_disagreements(batch.plans, ticket))
+    if batch.reasons:
+        batch.route = "approval"
+    return batch
+
+
+def _label(item: Dict[str, Any]) -> str:
+    target = item.get("target") or {}
+    return f"{target.get('application') or '?'} in {target.get('environment') or '?'}"
+
+
 def check(
     decision: Dict[str, Any],
     targets: List[ZohoDeploymentSnapshot],
     ticket: ZohoInboundTicket,
     min_confidence: str = "High",
+    review: bool = True,
+    dropdowns: bool = True,
 ) -> Plan:
+    """One change. ``review=False`` stops after the errors (the caller judges
+    confidence, concerns and dropdowns itself); ``dropdowns=False`` keeps the
+    confidence and concern checks but skips the dropdown comparison, for one
+    change of a request whose dropdowns were compared as a whole."""
     if decision["decision"] == "clarify":
         return Plan(route="impediment", reasons=["Hermes needs clarification from the requester."])
 
@@ -117,16 +188,38 @@ def check(
     if plan.errors:
         plan.route = "impediment"
         return plan
+    if not review:
+        return plan
 
     # --- Executable. Does a human need to look first? ---
     if _RANK.get(decision["confidence"], 0) < _RANK.get(min_confidence, 3):
         plan.reasons.append(f"Hermes' confidence is {decision['confidence']} (the bar is {min_confidence}).")
     for concern in decision.get("concerns") or []:
         plan.reasons.append(f"Hermes flagged: {concern}")
-    plan.reasons.extend(_disagreements(plan, ticket))
+    if dropdowns:
+        plan.reasons.extend(_disagreements(plan, ticket))
     if plan.reasons:
         plan.route = "approval"
     return plan
+
+
+def _batch_disagreements(plans: List[Plan], ticket: ZohoInboundTicket) -> List[str]:
+    """The dropdowns against a request for several applications.
+
+    The dropdowns can name one application and one tag, so they disagree only
+    when what they name is not part of the request at all.
+    """
+    out: List[str] = []
+    ids = {p.snapshot.id for p in plans if p.snapshot is not None}
+    if ticket.resolved and ticket.app_service_id and ticket.app_service_id not in ids:
+        out.append(
+            f"The ticket's dropdowns point at {ticket.app_service_name or 'another target'}, "
+            "which is not one of the applications Hermes chose."
+        )
+    ticket_tag = (ticket.tag or "").strip()
+    if ticket_tag and not any(p.change_type == "image" and p.tag == ticket_tag for p in plans):
+        out.append(f"The ticket's Tag field says {ticket_tag}, which none of Hermes' deploys use.")
+    return out
 
 
 def _disagreements(plan: Plan, ticket: ZohoInboundTicket) -> List[str]:

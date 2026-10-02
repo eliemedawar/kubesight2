@@ -21,9 +21,9 @@ from flask import Blueprint, Response, request
 
 from ..audit import log_audit
 from ..auth_utils import auth_required_enabled, get_current_user
-from ..decorators import require_auth
-from ..mcp import protocol, tools
-from ..response import error_response
+from ..decorators import require_auth, require_permission
+from ..mcp import access, protocol, tools
+from ..response import error_response, success_response
 
 mcp_bp = Blueprint("mcp", __name__, url_prefix="/api/mcp")
 
@@ -59,15 +59,25 @@ def mcp_endpoint():
     if auth_required_enabled() and user is None:
         return error_response("Unauthorized", 401)
 
+    # The administrator's switches (Settings → MCP tools), read once per
+    # request. They sit above the token's permissions: a tool switched off is
+    # refused whoever is asking, and one switched on still needs its permission.
+    policy = access.current()
+
     def call(name, arguments):
-        return tools.call(name, arguments, user=user)
+        if name in tools.known_names() and not policy.allows(name):
+            raise protocol.ToolError(policy.refusal(name))
+        # Lets the cluster checks deeper down (resolve_cluster, start_run) know
+        # which tool is asking, for the per-cluster rules.
+        with access.calling(policy, name):
+            return tools.call(name, arguments, user=user)
 
     # Advertise only what this token could actually call. ``tools.call``
     # re-checks every permission, so this is not the boundary — it is what keeps
     # a viewer's agent from planning around sixteen tools that will refuse it.
     body, has_body = protocol.batch(
         message,
-        tools=tools.definitions(user=user),
+        tools=access.filter_definitions(tools.definitions(user=user), policy),
         call=call,
         server_version=SERVER_VERSION,
     )
@@ -123,6 +133,35 @@ def _audit(message, user) -> None:
             "domains": domains,
         },
     )
+
+
+@mcp_bp.route("/access", methods=["GET"])
+@require_permission("settings:view")
+def get_access():
+    """Every tool, and whether an agent may call it. Settings → MCP tools."""
+    return success_response(access.payload())
+
+
+@mcp_bp.route("/access", methods=["PUT"])
+@require_permission("settings:manage")
+def update_access():
+    data = request.get_json(silent=True)
+    actor = get_current_user()
+    try:
+        changes = access.update(data if isinstance(data, dict) else {}, actor=actor)
+    except access.AccessError as exc:
+        return error_response(str(exc), 400)
+    if changes:
+        # Which tools moved, by name. "An agent lost kubesight_apply_yaml on
+        # Tuesday" is exactly the question somebody comes to the audit log with.
+        log_audit(
+            "mcp_access_changed",
+            actor=actor,
+            target_type="mcp",
+            target_id="kubesight",
+            details=changes,
+        )
+    return success_response(access.payload())
 
 
 @mcp_bp.route("", methods=["GET"])

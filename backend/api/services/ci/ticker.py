@@ -157,6 +157,29 @@ def guarded_advance_build_now(build_id: int) -> None:
     _guarded(current_app._get_current_object(), lambda: advance_build_now(build_id))
 
 
+def _idle_wait(app: Flask) -> float:
+    """The idle interval, cut short if a schedule comes due before it ends.
+
+    A schedule is the one kind of work nothing announces: no request wakes the
+    ticker at 02:00. So an idle loop sleeps until the sooner of its interval
+    and the next due schedule, and a nightly fires on its minute even on an
+    installation that raised CI_IDLE_TICK_SECONDS to minutes.
+    """
+    wait = idle_seconds()
+    try:
+        with app.app_context():
+            from .schedules import seconds_until_next_due
+
+            due_in = seconds_until_next_due()
+        if due_in is not None:
+            # A small floor so a schedule that is due but could not be claimed
+            # (another worker has it) does not spin this loop.
+            wait = min(wait, max(0.5, due_in + 0.05))
+    except Exception:
+        logger.debug("Could not read the next CI schedule", exc_info=True)
+    return wait
+
+
 def _loop(app: Flask) -> None:
     while True:
         busy = False
@@ -169,8 +192,8 @@ def _loop(app: Flask) -> None:
             logger.exception("CI engine tick failed")
         # A pass that found work almost certainly has more to do; one that found
         # none can afford to wait, because whatever creates the next build wakes
-        # us anyway.
-        _wake.wait(tick_seconds() if busy else idle_seconds())
+        # us anyway — except a schedule, which _idle_wait accounts for.
+        _wake.wait(tick_seconds() if busy else _idle_wait(app))
         _wake.clear()
 
 

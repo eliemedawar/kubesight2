@@ -249,6 +249,7 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         "kubesight_ticket_request_approval",
         "kubesight_ticket_set_status",
         "kubesight_ticket_comment",
+        "kubesight_ticket_answer",
     }
 
 
@@ -1588,3 +1589,225 @@ def test_automation_run_start_is_checked_by_the_ticket_validator(client, admin_t
     assert not result.get("isError"), result["content"][0]["text"]
     assert result["structuredContent"]["id"]
     assert DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Settings → MCP tools: the administrator's switches over the whole surface
+# ---------------------------------------------------------------------------
+
+def _tool_names(client, token):
+    return {
+        entry["name"]
+        for entry in rpc(client, token, "tools/list").get_json()["result"]["tools"]
+    }
+
+
+def test_the_switch_screen_lists_every_tool_on_by_default(client, admin_token):
+    """No row yet is how every existing installation starts — and it must
+    answer "everything on", or opening this screen would be what broke Hermes."""
+    data = client.get("/api/mcp/access", headers=auth_headers(admin_token)).get_json()["data"]
+    from api.mcp.tools import known_names
+
+    assert data["enabled"] is True
+    assert {entry["name"] for entry in data["tools"]} == set(known_names())
+    assert all(entry["enabled"] for entry in data["tools"])
+    flagged = {entry["name"] for entry in data["tools"] if entry["usedByTicketAgent"]}
+    assert "kubesight_ticket_execute" in flagged
+    assert "kubesight_services_list" not in flagged
+
+
+def test_a_switched_off_tool_disappears_and_is_refused(client, admin_token, service):
+    response = client.put(
+        "/api/mcp/access",
+        json={"disabledTools": ["kubesight_services_list"]},
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 200, response.get_data(as_text=True)
+
+    assert "kubesight_services_list" not in _tool_names(client, admin_token)
+    # Still refused for an agent holding a list from before the switch.
+    result = call_tool(client, admin_token, "kubesight_services_list")
+    assert result["isError"] is True
+    assert "switched off" in result["content"][0]["text"]
+    # Its neighbours are untouched.
+    assert not call_tool(client, admin_token, "kubesight_overview").get("isError")
+
+    from api.models import AuditLog
+
+    row = AuditLog.query.filter_by(action="mcp_access_changed").one()
+    assert row.details["turnedOff"] == ["kubesight_services_list"]
+
+    client.put("/api/mcp/access", json={"disabledTools": []}, headers=auth_headers(admin_token))
+    assert not call_tool(client, admin_token, "kubesight_services_list").get("isError")
+
+
+def test_the_master_switch_empties_the_list_and_refuses_everything(client, admin_token):
+    client.put("/api/mcp/access", json={"enabled": False}, headers=auth_headers(admin_token))
+    assert _tool_names(client, admin_token) == set()
+    result = call_tool(client, admin_token, "kubesight_overview")
+    assert result["isError"] is True
+    assert "MCP server is switched off" in result["content"][0]["text"]
+    # The protocol itself still answers, so a client gets a reason, not a hang.
+    assert rpc(client, admin_token, "ping").get_json()["result"] == {}
+
+
+def test_switching_on_is_a_ceiling_not_a_grant(client, admin_token, viewer_token):
+    """Everything on must never mean a viewer's token can write."""
+    client.put(
+        "/api/mcp/access",
+        json={"enabled": True, "disabledTools": []},
+        headers=auth_headers(admin_token),
+    )
+    assert "kubesight_pod_exec" not in _tool_names(client, viewer_token)
+
+
+def test_only_a_settings_manager_can_flip_a_switch(client, viewer_token, admin_token):
+    response = client.put(
+        "/api/mcp/access",
+        json={"enabled": False},
+        headers=auth_headers(viewer_token),
+    )
+    assert response.status_code == 403
+    bad = client.put(
+        "/api/mcp/access",
+        json={"disabledTools": ["kubesight_delete_everything"]},
+        headers=auth_headers(admin_token),
+    )
+    assert bad.status_code == 400
+    assert "kubesight_delete_everything" in bad.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
+# Settings → MCP tools → Clusters: the same ceiling, per cluster
+# ---------------------------------------------------------------------------
+
+def _rules(client, token, rules):
+    response = client.put(
+        "/api/mcp/access", json={"clusterRules": rules}, headers=auth_headers(token)
+    )
+    assert response.status_code == 200, response.get_data(as_text=True)
+    return response.get_json()["data"]
+
+
+def test_every_cluster_is_listed_and_starts_full(client, admin_token):
+    data = client.get("/api/mcp/access", headers=auth_headers(admin_token)).get_json()["data"]
+    by_id = {item["id"]: item for item in data["clusters"]}
+    assert {"prod-us-east", "staging-eu-west"} <= set(by_id)
+    assert all(item["mode"] == "full" for item in data["clusters"])
+    scoped = {entry["name"] for entry in data["tools"] if entry["clusterScoped"]}
+    assert {"kubesight_pod_logs", "kubesight_deploy_apply", "kubesight_ticket_execute"} <= scoped
+    assert "kubesight_services_list" not in scoped
+
+
+def test_a_read_only_cluster_refuses_writes_and_still_answers_reads(client, admin_token):
+    _rules(client, admin_token, {"prod-us-east": {"mode": "read"}})
+
+    refused = call_tool(
+        client, admin_token, "kubesight_workload_restart",
+        {"cluster": "prod-us-east", "namespace": "payments", "workload": "payments-api"},
+    )
+    assert refused["isError"] is True
+    assert "read only for agents" in refused["content"][0]["text"]
+
+    read = call_tool(client, admin_token, "kubesight_namespaces_list", {"cluster": "prod-us-east"})
+    assert not read.get("isError"), read["content"][0]["text"]
+
+    # The other cluster is untouched: the refusal is about prod, not the tool.
+    other = call_tool(
+        client, admin_token, "kubesight_workload_restart",
+        {"cluster": "staging-eu-west", "namespace": "payments", "workload": "payments-api"},
+    )
+    assert "read only for agents" not in other["content"][0]["text"]
+
+
+def test_a_closed_cluster_is_invisible_and_refused_by_name(client, admin_token):
+    _rules(client, admin_token, {"staging-eu-west": {"mode": "off"}})
+
+    listed = call_tool(client, admin_token, "kubesight_clusters_list")["structuredContent"]
+    ids = {str(item.get("id")) for item in listed["clusters"]}
+    assert "staging-eu-west" not in ids and "prod-us-east" in ids
+
+    refused = call_tool(client, admin_token, "kubesight_namespaces_list", {"cluster": "staging-eu-west"})
+    assert refused["isError"] is True
+    assert "closed to agents" in refused["content"][0]["text"]
+
+    # Not an agent: the UI's own route still sees every cluster.
+    ui = client.get("/api/clusters", headers=auth_headers(admin_token)).get_json()
+    ui_ids = {str(item.get("id")) for item in (ui.get("data") or {}).get("items", ui.get("data") or [])}
+    assert "staging-eu-west" in ui_ids
+
+
+def test_a_custom_cluster_switches_single_tools(client, admin_token):
+    _rules(
+        client, admin_token,
+        {"prod-us-east": {"mode": "custom", "disabledTools": ["kubesight_pod_logs"]}},
+    )
+    args = {"cluster": "prod-us-east", "namespace": "payments", "pod": "x"}
+    refused = call_tool(client, admin_token, "kubesight_pod_logs", args)
+    assert "switched off for cluster 'prod-us-east'" in refused["content"][0]["text"]
+    elsewhere = call_tool(client, admin_token, "kubesight_pod_logs", {**args, "cluster": "staging-eu-west"})
+    assert "switched off" not in elsewhere["content"][0]["text"]
+    assert not call_tool(
+        client, admin_token, "kubesight_namespaces_list", {"cluster": "prod-us-east"}
+    ).get("isError")
+
+
+def test_cluster_rules_are_validated(client, admin_token):
+    bad_mode = client.put(
+        "/api/mcp/access",
+        json={"clusterRules": {"prod-us-east": {"mode": "sometimes"}}},
+        headers=auth_headers(admin_token),
+    )
+    assert bad_mode.status_code == 400
+    # A tool with no cluster in it cannot be switched per cluster.
+    not_scoped = client.put(
+        "/api/mcp/access",
+        json={"clusterRules": {"prod-us-east": {"mode": "custom", "disabledTools": ["kubesight_services_list"]}}},
+        headers=auth_headers(admin_token),
+    )
+    assert not_scoped.status_code == 400
+    assert "kubesight_services_list" in not_scoped.get_json()["error"]
+
+    data = _rules(client, admin_token, {"prod-us-east": {"mode": "read"}})
+    from api.models import AuditLog
+
+    row = AuditLog.query.filter_by(action="mcp_access_changed").order_by(AuditLog.id.desc()).first()
+    assert row.details["clusters"]["prod-us-east"] == {"from": "full", "to": "read"}
+    assert {item["id"]: item["mode"] for item in data["clusters"]}["prod-us-east"] == "read"
+
+
+def test_a_ticket_deploy_into_a_read_only_cluster_never_starts(client, admin_token, app, monkeypatch):
+    """The deploy target picks the cluster, not an argument — so the check sits
+    in start_run, and the refusal leaves no run behind."""
+    from datetime import datetime, timezone
+
+    from api.models import DeployAutomationRun, ZohoDeploymentSnapshot, ZohoInboundTicket
+    from api.services.ticket_agent import catalog
+
+    monkeypatch.setattr(
+        "api.services.registry_service.check_image",
+        lambda image, **kw: {"status": "found", "image": image},
+    )
+    snapshot = ZohoDeploymentSnapshot(
+        cluster_id="prod-us-east", namespace="payments", deployment_name="payments-api"
+    )
+    db.session.add(snapshot)
+    db.session.flush()
+    ticket = ZohoInboundTicket(
+        ticket_id="zt-mcp-ro", ticket_number="DR-7101", resolved=True,
+        app_service_id=snapshot.id, tag="7.1.0", received_at=datetime.now(timezone.utc),
+    )
+    db.session.add(ticket)
+    db.session.commit()
+    monkeypatch.setattr(catalog, "targets", lambda provider: [snapshot])
+
+    _rules(client, admin_token, {"prod-us-east": {"mode": "read"}})
+    args = {"provider": "zoho", "ticketRecordId": ticket.id, "confidence": "High"}
+    result = call_tool(client, admin_token, "kubesight_automation_run_start", args)
+    assert result["isError"] is True
+    assert "read only for agents" in result["content"][0]["text"]
+    assert DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).count() == 0
+
+    _rules(client, admin_token, {})
+    result = call_tool(client, admin_token, "kubesight_automation_run_start", args)
+    assert not result.get("isError"), result["content"][0]["text"]

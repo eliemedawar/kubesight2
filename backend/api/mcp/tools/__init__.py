@@ -29,8 +29,10 @@ from __future__ import annotations
 from .registry import (  # noqa: F401  (the package's public surface)
     DOMAINS,
     call,
+    catalog,
     definitions,
     domain_of,
+    is_cluster_scoped,
     is_write,
     known_names,
     tool,
@@ -49,8 +51,10 @@ from . import tickets  # noqa: F401,E402  (platform domain: the Hermes ticket ag
 __all__ = [
     "DOMAINS",
     "call",
+    "catalog",
     "definitions",
     "domain_of",
+    "is_cluster_scoped",
     "is_write",
     "known_names",
     "tool",

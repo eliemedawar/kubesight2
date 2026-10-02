@@ -31,6 +31,7 @@ from ..services.ci import agents as agents_service
 from ..services.ci import artifacts as artifacts_service
 from ..services.ci import cache as cache_service
 from ..services.ci import catalog as catalog_service
+from ..services.ci import code_scan_report as code_scan_report_service
 from ..services.ci import engine as engine_service
 from ..services.ci import jenkinsfile as jenkinsfile_service
 from ..services.ci import logs as logs_service
@@ -41,6 +42,7 @@ from ..services.ci import scheduler as scheduler_service
 from ..services.ci import secrets as secrets_service
 from ..services.ci import stage_matrix as stage_matrix_service
 from ..services.ci import templates as templates_service
+from ..services.ci import test_summary as test_summary_service
 from ..services.ci import workspace as workspace_service
 from ..services.ci.serializers import (
     artifact_to_dict,
@@ -413,7 +415,18 @@ def list_pipeline_templates():
 def list_pipelines(service_id: int):
     service = catalog_service.get_service(service_id)
     items = pipelines_service.list_pipelines(service)
-    return success_response({"items": items, "count": len(items)})
+    # The Scan stage's tool cards: which image each scanner runs in, whether
+    # this installation has pointed it anywhere, and Semgrep's default rules
+    # for THIS service's application type - so the editor shows the real thing.
+    from ..services.ci import scan_stage
+
+    return success_response(
+        {
+            "items": items,
+            "count": len(items),
+            "scanTools": scan_stage.tool_catalog(service.application_type or ""),
+        }
+    )
 
 
 @ci_bp.route("/services/<int:service_id>/pipelines", methods=["POST"])
@@ -497,12 +510,23 @@ def get_pipeline_portability(pipeline_id: int):
 @require_permission("ci_pipelines:view")
 def lint_pipeline():
     """The same check against an unsaved edit, so the editor can warn before a
-    build burns. Pure text analysis — no database, no cluster."""
+    build burns. Text analysis, plus — only when the stages hold a parallel
+    group — how this installation would run it (the cluster version is read
+    from the runner's cache, not asked on every keystroke)."""
+    from ..services.ci import parallel_groups
+
     payload = _payload()
     stages = payload.get("stages")
     if not isinstance(stages, list):
         return error_response("Send stages: [...] to check.")
-    return success_response(portability_service.analyze(stages[:200]))
+    stages = [stage for stage in stages[:200] if isinstance(stage, dict)]
+    parallel = None
+    if parallel_groups.has_groups([stage for stage in stages if stage.get("enabled") is not False]):
+        try:
+            parallel = parallel_groups.installation_capability()
+        except Exception:  # A health check must never break the editor.
+            parallel = None
+    return success_response(portability_service.analyze(stages, parallel=parallel))
 
 
 @ci_bp.route("/pipelines/<int:pipeline_id>", methods=["PUT"])
@@ -533,6 +557,49 @@ def describe_deploy_target():
     except ValueError as exc:
         return error_response(str(exc), 400)
     return success_response(data)
+
+
+@ci_bp.route("/store-upload-targets", methods=["GET"])
+@require_permission("ci_pipelines:view")
+def describe_store_upload_targets():
+    """What an App store upload stage can point at: the registered mobile apps
+    (readiness, never credentials), which one belongs to the service, and
+    whether the caller could authorize a target — saving one requires admin,
+    like publishing from Mobile Apps does."""
+    from ..services.ci import store_upload_stage
+
+    service_id = request.args.get("serviceId")
+    return success_response(
+        store_upload_stage.describe_targets(
+            get_current_user(), int(service_id) if service_id and service_id.isdigit() else None
+        )
+    )
+
+
+@ci_bp.route("/approvers", methods=["GET"])
+@require_permission("ci_pipelines:edit")
+def list_approver_candidates():
+    """Active users an Approval stage can name — id, username and whether
+    they hold ci_builds:approve. No emails, roles or anything else. For the
+    people who edit pipelines: a saved stage already carries its approvers'
+    names, so reading one needs no user list."""
+    from ..access_engine import user_has_permission
+    from ..models import User
+
+    rows = User.query.filter(User.is_active.is_(True)).order_by(User.username.asc()).limit(500).all()
+    return success_response(
+        {
+            "items": [
+                {
+                    "id": user.id,
+                    "username": user.username,
+                    "fullName": getattr(user, "full_name", None) or "",
+                    "holdsApprove": user_has_permission(user, "ci_builds:approve"),
+                }
+                for user in rows
+            ]
+        }
+    )
 
 
 @ci_bp.route("/pipelines/<int:pipeline_id>", methods=["DELETE"])
@@ -660,7 +727,49 @@ def run_build(service_id: int):
 @require_permission("ci_builds:view")
 def get_build(build_id: int):
     row = engine_service.get_build(build_id)
-    return success_response(_merge_automation_info([build_to_dict(row)])[0])
+    data = _merge_automation_info([build_to_dict(row)])[0]
+    _attach_approval_viewer(row, data)
+    return success_response(data)
+
+
+def _attach_approval_viewer(row, data: dict) -> None:
+    """Say, on each waiting Approval stage, whether the caller may answer it
+    and why not — so the drawer can disable the buttons with the reason
+    instead of offering a click that will be refused."""
+    from ..services.ci import approval_stage
+
+    user = get_current_user()
+    by_id = {stage.id: stage for stage in row.stages}
+    for item in data.get("stages") or []:
+        if item.get("stageType") != "approval" or not item.get("approval"):
+            continue
+        stage = by_id.get(item["id"])
+        if stage is not None:
+            item["approval"] = {**item["approval"], "viewer": approval_stage.viewer(row, stage, user)}
+
+
+@ci_bp.route("/builds/<int:build_id>/tests", methods=["GET"])
+@require_permission("ci_builds:view")
+def get_build_tests(build_id: int):
+    """The build's test results and coverage: totals, failed cases, files.
+
+    Kept off the build payload itself, which every poll of the drawer fetches;
+    a hundred failed cases with their stack traces are read once, here.
+    """
+    row = engine_service.get_build(build_id)
+    return success_response(test_summary_service.build_detail(row))
+
+
+@ci_bp.route("/services/<int:service_id>/test-trend", methods=["GET"])
+@require_permission("ci_builds:view")
+def get_service_test_trend(service_id: int):
+    """Failed tests and coverage across the service's recent builds."""
+    catalog_service.get_service(service_id)
+    return success_response(
+        test_summary_service.service_trend(
+            service_id, limit=_int_arg("limit", test_summary_service.DEFAULT_TREND_BUILDS)
+        )
+    )
 
 
 @ci_bp.route("/builds/<int:build_id>/cancel", methods=["POST"])
@@ -683,6 +792,46 @@ def retry_build(build_id: int):
         )
     except _USER_ERRORS as exc:
         return error_response(str(exc), 409)
+
+
+# Gated on viewing the build, not on ci_builds:approve: an Approval stage
+# names its own approvers, who need not hold the permission. The stage
+# decides (approval_stage.eligibility) and every refusal is audited.
+@ci_bp.route("/builds/<int:build_id>/stages/<int:stage_id>/approve", methods=["POST"])
+@require_permission("ci_builds:view")
+def approve_build_stage(build_id: int, stage_id: int):
+    return _decide_build_stage(build_id, stage_id, "approve")
+
+
+@ci_bp.route("/builds/<int:build_id>/stages/<int:stage_id>/reject", methods=["POST"])
+@require_permission("ci_builds:view")
+def reject_build_stage(build_id: int, stage_id: int):
+    return _decide_build_stage(build_id, stage_id, "reject")
+
+
+def _decide_build_stage(build_id: int, stage_id: int, action: str):
+    from ..services.ci import approval_stage
+
+    row = engine_service.get_build(build_id)
+    stage = engine_service.get_build_stage(row, stage_id)
+    user = _actor()
+    comment = str(_payload().get("comment") or "")
+    try:
+        approval_stage.decide(row, stage, user, action, comment)
+    except approval_stage.ApprovalError as exc:
+        log_audit(
+            "ci_build_stage_decision_refused",
+            actor=user,
+            target_type="ci_build",
+            target_id=str(build_id),
+            details={"stage": stage.name, "decision": action, "reason": str(exc)},
+        )
+        return error_response(str(exc), exc.status)
+    db.session.expire_all()
+    row = engine_service.get_build(build_id)
+    data = _merge_automation_info([build_to_dict(row)])[0]
+    _attach_approval_viewer(row, data)
+    return success_response(data)
 
 
 @ci_bp.route("/services/<int:service_id>/parameters", methods=["GET"])
@@ -779,6 +928,111 @@ def download_stage_logs(build_id: int, stage_id: int):
         as_attachment=True,
         download_name=f"build-{build.number}-{stage.position + 1}-{stage.name}.log",
     )
+
+
+# ---------------------------------------------------------------------------
+# Code scan report — the PDF of a quality-gated stage's findings
+#
+# Built on request from the stage's scan-report artifact, never stored: the
+# JSON is the record, the PDF only a way of reading it. Sending is always a
+# person pressing Send with the recipients they chose; the stage's saved list
+# only pre-fills the dialog.
+# ---------------------------------------------------------------------------
+
+def _code_scan_error(exc: "code_scan_report_service.CodeScanReportError"):
+    return error_response(str(exc), exc.status)
+
+
+def _code_scan_report_resource(build_id: int, stage_id: int) -> str:
+    return f"ci-code-scan-report:{build_id}:{stage_id}"
+
+
+@ci_bp.route("/builds/<int:build_id>/stages/<int:stage_id>/code-scan", methods=["GET"])
+@require_permission("ci_artifacts:view")
+def get_code_scan_overview(build_id: int, stage_id: int):
+    build = engine_service.get_build(build_id)
+    stage = engine_service.get_build_stage(build, stage_id)
+    try:
+        payload = code_scan_report_service.overview(build, stage)
+    except code_scan_report_service.CodeScanReportError as exc:
+        return _code_scan_error(exc)
+    from ..email_delivery import smtp_is_configured
+
+    payload["emailConfigured"] = smtp_is_configured()
+    payload["suggestions"] = code_scan_report_service.recipient_suggestions()
+    return success_response(payload)
+
+
+@ci_bp.route(
+    "/builds/<int:build_id>/stages/<int:stage_id>/code-scan/report-ticket", methods=["POST"]
+)
+@require_permission("ci_artifacts:view")
+def create_code_scan_report_ticket(build_id: int, stage_id: int):
+    build = engine_service.get_build(build_id)
+    stage = engine_service.get_build_stage(build, stage_id)
+    if code_scan_report_service.report_artifact(build, stage) is None:
+        return error_response("This stage saved no scan results, so there is no report.", 404)
+    # Checked here, where the error reaches the page, rather than on the
+    # download - a browser navigation would show it as a raw JSON tab.
+    problem = code_scan_report_service.pdf_support_problem()
+    if problem:
+        return error_response(problem, 501)
+    return success_response(
+        {"ticket": create_download_ticket(_actor(), _code_scan_report_resource(build_id, stage.id))}
+    )
+
+
+@ci_bp.route("/builds/<int:build_id>/stages/<int:stage_id>/code-scan/report", methods=["GET"])
+@require_download_access("ci_artifacts:view", _code_scan_report_resource)
+def download_code_scan_report(build_id: int, stage_id: int):
+    build = engine_service.get_build(build_id)
+    stage = engine_service.get_build_stage(build, stage_id)
+    try:
+        pdf = code_scan_report_service.render_for_stage(build, stage)
+    except code_scan_report_service.CodeScanReportError as exc:
+        return _code_scan_error(exc)
+    log_audit(
+        "ci_code_scan_report_downloaded",
+        actor=_actor(),
+        target_type="ci_build",
+        target_id=str(build.id),
+        details={"serviceId": build.service_id, "buildNumber": build.number, "stage": stage.name},
+    )
+    return send_file(
+        io.BytesIO(pdf),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=code_scan_report_service.pdf_filename(build),
+    )
+
+
+@ci_bp.route("/builds/<int:build_id>/stages/<int:stage_id>/code-scan/send", methods=["POST"])
+@require_permission("ci_artifacts:view")
+def send_code_scan_report(build_id: int, stage_id: int):
+    build = engine_service.get_build(build_id)
+    stage = engine_service.get_build_stage(build, stage_id)
+    body = _payload()
+    actor = _actor()
+    try:
+        result = code_scan_report_service.send_report(
+            build, stage, body.get("recipients"), body.get("note"), actor
+        )
+    except code_scan_report_service.CodeScanReportError as exc:
+        return _code_scan_error(exc)
+    log_audit(
+        "ci_code_scan_report_sent",
+        actor=actor,
+        target_type="ci_build",
+        target_id=str(build.id),
+        details={
+            "serviceId": build.service_id,
+            "buildNumber": build.number,
+            "stage": stage.name,
+            "recipients": result["sentTo"],
+            "verdict": result["verdict"],
+        },
+    )
+    return success_response(result)
 
 
 # ---------------------------------------------------------------------------

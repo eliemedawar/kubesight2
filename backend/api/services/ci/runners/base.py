@@ -103,6 +103,16 @@ class StageExecution:
     # runner that cannot scan has to be able to see the gate in order to refuse
     # the stage rather than push past it.
     image_scan: Optional[Dict[str, Any]] = None
+    # The code scan quality gate a command stage runs under, or None. Already
+    # folded into ``commands`` by the engine (every runner gets the same
+    # script); carried as well so the Kubernetes collector knows to keep the
+    # report it writes. See services/ci/code_scan.py.
+    code_scan: Optional[Dict[str, Any]] = None
+    # A scan stage's scanner and options, or None. Like ``code_scan``, already
+    # turned into ``commands`` and ``image`` by the engine; carried so the
+    # Kubernetes collector knows which report (or SBOM) to keep. See
+    # services/ci/scan_stage.py.
+    scan: Optional[Dict[str, Any]] = None
     # Worker callback: where an in-cluster job reports artifacts and metadata,
     # and the fresh plaintext token authorizing it (its hash is on the build).
     callback_url: str = ""
@@ -110,10 +120,31 @@ class StageExecution:
     # Which runner the scheduler assigned. A pull runner needs it to record
     # whose queue the work belongs in; a push runner ignores it.
     runner_id: Optional[int] = None
+    # The parallel group this stage belongs to (services/ci/parallel_groups.py),
+    # or None. Per-stage runners need nothing from it — the engine starts every
+    # member itself. A whole-build runner reads it off the plan to lay the
+    # members out side by side.
+    parallel_group: Optional[str] = None
+    # The group stops its running members on the first failure.
+    parallel_fail_fast: bool = False
+    # "parallel" | "sequential" | "": how THIS build runs its groups, decided
+    # once by the engine (from the adapter's ``parallel_capability``) and the
+    # same for every stage, so the plan and the engine's scheduling agree.
+    parallel_mode: str = ""
+    # Why a group runs one stage at a time on this build, for the member logs.
+    parallel_reason: str = ""
     # Set on the FIRST stage only: the full resolved stage list for the build.
     # Whole-build runners (one Kubernetes Job per build) construct everything
     # from this; per-stage runners ignore it.
     plan: Optional[List["StageExecution"]] = None
+    # Set beside ``plan`` on the first stage: the build's cleanup commands
+    # (services/ci/post_actions.py), for a whole-build runner to run after
+    # every stage. Per-stage runners ignore it — the engine dispatches each
+    # cleanup to them itself, once the stages are over.
+    post_plan: Optional[List["StageExecution"]] = None
+    # On a cleanup's own execution (stage_type "post"): always | success |
+    # failure — which outcome of the stages it runs for.
+    post_when: Optional[str] = None
 
 
 @dataclass
@@ -167,6 +198,19 @@ class RunnerAdapter(Protocol):
     running build's workspace. It is optional: an adapter with no way to look
     inside a live workspace simply does not implement it, and the API says so
     rather than pretending the workspace is empty.
+
+    Three more optional methods concern parallel stage groups:
+
+    * ``parallel_capability() -> (bool, reason)`` — whether this runner can run
+      a group's members at the same time. Absent means yes: the engine starts
+      every member itself, so a per-stage runner is parallel by construction.
+      The Kubernetes runner says no on a cluster without native sidecars.
+    * ``running_since(handle) -> datetime | None`` — when the work actually
+      began, or None while it still waits for capacity. Group members are all
+      started at once, so a member queued behind its siblings on a one-slot
+      agent must not have its timeout clock running while it waits.
+    * ``poll_many(handles) -> {external_ref: status}`` — one observation for a
+      whole group, so a runner that reads one pod per build reads it once.
     """
 
     runner_type: str

@@ -4,6 +4,7 @@ import EmptyState from "../common/EmptyState.jsx";
 import LoadingState from "../common/LoadingState.jsx";
 import BuildDetailDrawer from "./BuildDetailDrawer.jsx";
 import StageMatrix from "./StageMatrix.jsx";
+import { TestBadge, TestTrend } from "./TestResultsPanel.jsx";
 import {
   StatusPill,
   TagIcon,
@@ -26,6 +27,9 @@ const REFRESH_MS = 1500;
 const STATUS_FILTERS = [
   ["all", "All"],
   ["running", "Running"],
+  // Not a build status: running builds held at an Approval stage — what an
+  // approver comes here to find.
+  ["awaiting_approval", "Awaiting approval"],
   ["queued", "Queued"],
   ["success", "Success"],
   ["failed", "Failed"],
@@ -183,6 +187,20 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
     </div>
   );
 
+  // The trend re-reads when a build finishes or its reports change, not on
+  // every poll of a running build.
+  const newestFinished = builds.find((build) => !isBuildActive(build.status));
+  const trendVersion = `${refreshToken ?? ""}:${newestFinished?.id ?? ""}:${JSON.stringify(
+    newestFinished?.testSummary ?? null
+  )}`;
+  const trend = (
+    <TestTrend
+      serviceId={service.id}
+      version={trendVersion}
+      onOpenBuild={(buildId) => setOpenBuild({ buildId, stageId: null })}
+    />
+  );
+
   const drawer = openBuild && (
     <BuildDetailDrawer
       buildId={openBuild.buildId}
@@ -198,6 +216,7 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
     return (
       <div className="sg-ci-panel">
         {toolbar}
+        {trend}
         <StageMatrix
           service={service}
           status={status}
@@ -217,6 +236,8 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
 
       {toolbar}
 
+      {builds.length > 0 && trend}
+
       {builds.length === 0 ? (
         <EmptyState
           message="No builds yet."
@@ -232,6 +253,7 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
                 <th>Commit</th>
                 <th>Status</th>
                 <th>Duration</th>
+                <th>Tests</th>
                 <th>When</th>
                 <th>Trigger</th>
                 <th>Deployed</th>
@@ -272,11 +294,26 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
                   </td>
                   <td>
                     <StatusPill status={build.status} />
+                    {build.awaitingApproval && (
+                      <span
+                        className="sg-ci-awaiting-chip"
+                        title={`Waiting at “${build.awaitingApproval.stageName}”`}
+                      >
+                        awaiting approval · {build.awaitingApproval.approvals}/{build.awaitingApproval.required}
+                      </span>
+                    )}
                     {build.status === "queued" && build.queueReason && (
                       <span className="field-hint">{build.queueReason}</span>
                     )}
                   </td>
                   <td>{formatDuration(build.durationSeconds)}</td>
+                  <td>
+                    {build.testSummary ? (
+                      <TestBadge summary={build.testSummary} />
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
                   <td>{formatRelative(build.finishedAt || build.startedAt || build.queuedAt)}</td>
                   <td>
                     {/* Provenance: WHO asked for this build. Ticket-driven
@@ -287,6 +324,17 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
                         title={`Deploy automation run #${build.automation.runId}`}
                       >
                         automation{build.automation.ticketNumber ? ` · ${build.automation.ticketNumber}` : ""}
+                      </span>
+                    ) : build.triggerType === "schedule" ? (
+                      <span
+                        className="sg-tag sg-ci-tag--auto"
+                        title={
+                          build.schedule?.manual
+                            ? `Schedule “${build.schedule?.name}”, started by hand${build.requestedBy ? ` by ${build.requestedBy}` : ""}`
+                            : `Started by the schedule “${build.schedule?.name || "?"}”${build.requestedBy ? `, as ${build.requestedBy}` : ""}`
+                        }
+                      >
+                        schedule{build.schedule?.name ? ` · ${build.schedule.name}` : ""}
                       </span>
                     ) : build.triggerType === "retry" ? (
                       <span className="chip">retry{build.requestedBy ? ` · ${build.requestedBy}` : ""}</span>
@@ -315,7 +363,7 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
           {builds.length === PAGE_SIZE && (
             <p className="muted sg-ci-build-note">
               Showing the {PAGE_SIZE} most recent builds
-              {status === "all" ? "" : ` with status “${status}”`}.
+              {status === "all" ? "" : ` with status “${(STATUS_FILTERS.find(([value]) => value === status) || [status, status])[1].toLowerCase()}”`}.
             </p>
           )}
         </div>

@@ -270,6 +270,9 @@ def _deployment_requests_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if arguments.get("cluster"):
         cluster_id = resolve_cluster(user, arguments.get("cluster"))
         rows = [row for row in rows if str(row.get("clusterId")) == cluster_id]
+    from ..access import keep_allowed
+
+    rows = keep_allowed(rows)
     total = len(rows)
     rows = [pick(row, _REQUEST_FIELDS) for row in take(rows, _limit(arguments, MAX_ROWS))]
     return {"totalMatching": total, "count": len(rows), "requests": rows}
@@ -329,6 +332,7 @@ _BUNDLE_FIELDS = (
 
 @tool(
     "kubesight_change_bundles_list",
+    cluster_scoped=True,
     permission="change_bundles:view",
     description=(
         "Change bundles — batches of changes submitted for approval as one unit "
@@ -347,7 +351,13 @@ def _change_bundles_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
     from ...services.change_bundle_service import list_bundles_for_approval
 
     status = str(arguments.get("status") or "").strip() or None
-    rows = list_bundles_for_approval(status=status)
+    from ..access import allows_cluster
+
+    # A bundle can span clusters; one closed to agents hides the whole bundle.
+    rows = [
+        row for row in list_bundles_for_approval(status=status)
+        if all(allows_cluster(cid) for cid in row.get("clusters") or [])
+    ]
     total = len(rows)
     rows = [pick(row, _BUNDLE_FIELDS) for row in take(rows, _limit(arguments, MAX_ROWS))]
     return {"totalMatching": total, "count": len(rows), "bundles": rows}
@@ -355,6 +365,7 @@ def _change_bundles_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 @tool(
     "kubesight_change_bundle_get",
+    cluster_scoped=True,
     permission="change_bundles:view",
     description=(
         "One change bundle with every item in it: what each one changes, and "
@@ -377,6 +388,10 @@ def _change_bundle_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
         row = get_bundle_or_error(int(arguments.get("bundleId") or 0))
     except (ChangeBundleError, TypeError, ValueError) as exc:
         raise ToolError(str(exc) or "Name the bundle by its id.")
+    from ..access import check_cluster
+
+    for item in row.items:
+        check_cluster(item.cluster_id)
     return serialize_bundle(row, include_items=True)
 
 

@@ -12,6 +12,7 @@ import {
 import ICONS from "./settings/settingsIcons.jsx";
 import PreferencesPanel from "./settings/PreferencesPanel.jsx";
 import MergeChecksPolicyPanel from "./settings/MergeChecksPolicyPanel.jsx";
+import McpToolsPanel from "./settings/McpToolsPanel.jsx";
 
 /**
  * Settings — the one place things get configured.
@@ -203,6 +204,8 @@ export default function SettingsPage({
             canManage={hasPermission("ci_merge_checks:manage") || isAdmin}
           />
         );
+      case "mcpTools":
+        return <McpToolsPanel canManage={hasPermission("settings:manage") || isAdmin} />;
       default:
         return null;
     }

@@ -120,6 +120,22 @@ def analyze_stage(stage: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
         )
 
+    if stage_type == "scan" and _targets_agent(stage):
+        # Same shape as the image stage: a fact about where it runs, said
+        # because the stage skips on an agent rather than failing there.
+        findings.append(
+            _finding(
+                stage,
+                level=INFO,
+                code="scan_needs_kubernetes",
+                breaks_on=AGENT,
+                message="Scan stages run on the Kubernetes runner, in the scanner's own image, "
+                "so this stage is skipped on an agent rather than run.",
+                fix="Route this pipeline to the Kubernetes runner, or accept that the scan "
+                "only happens there.",
+            )
+        )
+
     if _WORKSPACE_PATH.search(text) and _targets_agent(stage):
         findings.append(
             _finding(
@@ -211,12 +227,97 @@ def analyze_stage(stage: Dict[str, Any]) -> List[Dict[str, Any]]:
     return findings
 
 
-def analyze(stages: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    """Findings for a whole pipeline, plus a one-line verdict for the editor."""
+def _groups_could_land_on(members: List[Dict[str, Any]], kind: str) -> bool:
+    if kind == AGENT:
+        return any(_targets_agent(member) for member in members)
+    return any(
+        str(member.get("runnerType") or "").strip().lower() in ("", "any", "none", KUBERNETES)
+        for member in members
+    )
+
+
+def analyze_parallel_groups(
+    stages: List[Dict[str, Any]], capability: Optional[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Where a parallel group would NOT run side by side on this installation.
+
+    ``capability`` is what the API resolved (see routes/ci.lint_pipeline):
+    ``{"mode": auto|on|off, "kubernetes": {"supported", "reason"} | None}``.
+    Without it — a caller that only wants the text checks — nothing is said.
+    Disabled stages are left out, as a build leaves them out.
+    """
+    from . import parallel_groups
+
+    if not capability:
+        return []
+    enabled = [stage for stage in stages if isinstance(stage, dict) and stage.get("enabled") is not False]
     findings: List[Dict[str, Any]] = []
-    for stage in stages or []:
-        if isinstance(stage, dict):
-            findings.extend(analyze_stage(stage))
+    for run in parallel_groups.runs(enabled):
+        members = [enabled[index] for index in run]
+        first = members[0]
+        name = parallel_groups.normalize_name(first.get("parallelGroup")) or "group"
+        if capability.get("mode") == "off":
+            findings.append(
+                _finding(
+                    first,
+                    level=WARNING,
+                    code="parallel_switched_off",
+                    breaks_on=None,
+                    message=f"The parallel group '{name}' runs one stage at a time here: "
+                    + parallel_groups.OFF_REASON,
+                    fix="An administrator can remove CI_PARALLEL_STAGES=off from the backend "
+                    "configuration. The group still behaves like a group — siblings of a failed "
+                    "stage still run — it only takes longer.",
+                )
+            )
+            continue
+        kubernetes = capability.get("kubernetes")
+        if kubernetes and not kubernetes.get("supported") and _groups_could_land_on(members, KUBERNETES):
+            findings.append(
+                _finding(
+                    first,
+                    level=WARNING,
+                    code="parallel_runs_in_sequence",
+                    breaks_on=KUBERNETES,
+                    message=f"On the Kubernetes runner the parallel group '{name}' runs one stage at "
+                    f"a time: {kubernetes.get('reason') or 'native sidecar containers are not available.'}",
+                    fix="Stages run side by side on Kubernetes 1.29 or newer (native sidecar "
+                    "containers). If the cluster already has them, an administrator can set "
+                    "CI_PARALLEL_STAGES=on. Until then the group keeps its failure rules and "
+                    "only takes longer.",
+                )
+            )
+        if _groups_could_land_on(members, AGENT):
+            findings.append(
+                _finding(
+                    first,
+                    level=INFO,
+                    code="parallel_on_agent",
+                    breaks_on=AGENT,
+                    message=f"On an agent the stages of '{name}' are handed over together, and the "
+                    "agent runs as many at once as its concurrency allows — the shipped agent runs "
+                    "one at a time.",
+                    fix="Route the pipeline to the Kubernetes runner for stages that truly run side "
+                    "by side.",
+                )
+            )
+    return findings
+
+
+def analyze(
+    stages: Iterable[Dict[str, Any]], *, parallel: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Findings for a whole pipeline, plus a one-line verdict for the editor.
+
+    ``parallel`` is the installation's resolved parallel-stage capability (see
+    :func:`analyze_parallel_groups`); it is echoed back so the editor can say
+    how a group will run without asking twice.
+    """
+    stages = [stage for stage in (stages or []) if isinstance(stage, dict)]
+    findings: List[Dict[str, Any]] = []
+    for stage in stages:
+        findings.extend(analyze_stage(stage))
+    findings.extend(analyze_parallel_groups(stages, parallel))
 
     errors = [f for f in findings if f["level"] == ERROR]
     warnings = [f for f in findings if f["level"] == WARNING]
@@ -247,4 +348,7 @@ def analyze(stages: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
             "info": len([f for f in findings if f["level"] == INFO]),
         },
         "findings": findings,
+        # How parallel groups run on this installation, when the caller asked:
+        # {"mode", "kubernetes": {"supported", "reason"} | None}. None otherwise.
+        "parallel": parallel,
     }

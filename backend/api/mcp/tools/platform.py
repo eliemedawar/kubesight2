@@ -92,6 +92,10 @@ def _image_check(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if not image:
         raise ToolError("Name the image, tag included.")
     cluster = str(arguments.get("cluster") or "").strip() or None
+    if cluster:
+        from ..access import check_cluster
+
+        check_cluster(cluster)
     return check_image(image, cluster_id=cluster)
 
 
@@ -184,6 +188,7 @@ def _automation_runs_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 @tool(
     "kubesight_automation_run_start",
+    cluster_scoped=True,
     permission="ticketing:manage",
     description=(
         "Run the deploy automation for one inbound ticket. This deploys what the "

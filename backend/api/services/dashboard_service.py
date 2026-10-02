@@ -583,6 +583,7 @@ def _mock_node_health(cluster_id: str) -> List[Dict[str, Any]]:
             fs_by_name[name] = {
                 "usedBytes": int(metrics["diskUsedGiB"] * gib),
                 "capacityBytes": int(metrics.get("diskGiB", 0) * gib),
+                "source": "containerd",
             }
         pod_items += [
             {"spec": {"nodeName": name}, "status": {"phase": "Running"}}

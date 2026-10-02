@@ -189,15 +189,27 @@ export function deployProblems(deploy) {
   return problems;
 }
 
-/** Deploy stages run after the build, so nothing a runner executes may follow
- * one. The problem is put on the stage that is in the wrong place. */
+/** Kinds the KubeSight server runs itself, after the runner is done — the
+ * frontend copy of models_ci.SERVER_STAGE_TYPES. */
+export const SERVER_STAGE_KINDS = {
+  deploy: "Deploy",
+  approval: "Approval",
+  store_upload: "App store upload",
+};
+
+export const isServerStage = (stage) => Boolean(SERVER_STAGE_KINDS[stage?.stageType]);
+
+/** Server stages run after the build, so nothing a runner executes may follow
+ * one; they may follow each other in any order (an Approval before a Deploy is
+ * the point). The problem is put on the stage that is in the wrong place. */
 export function orderProblem(stage, index, stages) {
-  if (stage.stageType === "deploy") return null;
-  const deploy = stages.findIndex((other, position) => position < index && other.stageType === "deploy");
-  if (deploy < 0) return null;
+  if (isServerStage(stage)) return null;
+  const first = stages.findIndex((other, position) => position < index && isServerStage(other));
+  if (first < 0) return null;
+  const kind = SERVER_STAGE_KINDS[stages[first].stageType];
   return {
     field: "kind",
-    message: `Comes after the Deploy stage “${stages[deploy].name || `stage ${deploy + 1}`}”. Deploy stages run on the KubeSight server once the build has finished, so they must be last — move this stage above it.`,
+    message: `Comes after the ${kind} stage “${stages[first].name || `stage ${first + 1}`}”. ${kind} stages run on the KubeSight server once the build has finished, so they must be last — move this stage above it.`,
   };
 }
 

@@ -1098,8 +1098,9 @@ def build_node_health(
 ) -> List[Dict[str, Any]]:
     """Per-node CPU/memory/disk usage + readiness for the dashboard node table.
 
-    ``fs_by_name`` is the kubelet Summary API ``node.fs`` reading per node (see
-    k8s_volume_stats). A node without one still reports its disk size from
+    ``fs_by_name`` is the kubelet Summary API disk reading per node — containerd's
+    filesystem when the kubelet reports it, else ``node.fs``, named by its
+    ``source`` (see dashboard_k8s_snapshot.node_disk_by_name). A node without one still reports its disk size from
     ``ephemeral-storage`` capacity, with ``diskUsedBytes`` left None: unknown
     usage is never shown as zero.
     """
@@ -1150,11 +1151,13 @@ def build_node_health(
             disk_total = int(fs["capacityBytes"])
             disk_used: Optional[int] = int(fs.get("usedBytes") or 0)
             disk_pct: Optional[float] = round(disk_used / disk_total * 100, 1)
+            disk_source: Optional[str] = fs.get("source") or "node"
         else:
             capacity_mib = _memory_to_mib(str(capacity.get("ephemeral-storage") or "0"))
             disk_total = int(capacity_mib * 1024 * 1024)
             disk_used = None
             disk_pct = None
+            disk_source = None
 
         issues: List[str] = []
         if not ready:
@@ -1192,6 +1195,7 @@ def build_node_health(
                 "diskUsedBytes": disk_used,
                 "diskTotalBytes": disk_total or None,
                 "diskPercent": disk_pct,
+                "diskSource": disk_source,
                 "pressures": pressures,
                 "cordoned": cordoned,
                 "podsRunning": pods_by_node.get(name, 0) if pod_items is not None else None,

@@ -55,6 +55,16 @@ data:
   # address above only, and a builder the build pod cannot reach fails the stage.
   CI_BUILDKIT_POOL: buildkitd-pods.kubesight-buildkit.svc.cluster.local
 
+  # --- Parallel stage groups -------------------------------------------------
+  # Stages sharing a parallelGroup run side by side as native sidecar
+  # containers in the build pod, which needs Kubernetes 1.29+ (SidecarContainers,
+  # on by default from 1.29, GA in 1.33). auto = read the cluster version and
+  # run groups one stage at a time on an older cluster (every member's log says
+  # why); on = skip the check; off = every runner runs groups one at a time.
+  # A finished member parks in `sleep` (or `tail -f /dev/null`) until the pod
+  # ends, and keeps its resource REQUESTS for the whole build.
+  CI_PARALLEL_STAGES: auto
+
   # --- Image scanning (the gate between build and push) ---------------------
   # A container_image stage with scanning ARMED does not let buildkitd push at
   # all: the image comes back to the build pod as an archive, Trivy reads it,

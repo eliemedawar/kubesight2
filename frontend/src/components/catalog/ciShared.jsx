@@ -30,14 +30,16 @@ export const STAGE_TYPES = [
   { value: "checkout", label: "Checkout" },
   { value: "command", label: "Command" },
   { value: "container_image", label: "Build container image" },
+  { value: "scan", label: "Scan code & dependencies" },
   { value: "deploy", label: "Deploy to a cluster" },
+  { value: "approval", label: "Wait for approval" },
+  { value: "store_upload", label: "Publish to an app store" },
 ];
 
 /** Stage kinds that never had an executor. No longer offered and refused on
  * save; kept only so a pipeline stored with one still opens and names it. */
 export const RETIRED_STAGE_TYPES = [
   { value: "publish_artifact", label: "Publish artifact (unsupported)" },
-  { value: "scan", label: "Security scan (unsupported)" },
 ];
 
 export const stageTypeLabel = (stageType) =>
@@ -57,9 +59,9 @@ export const CONDITIONAL_STAGE_TYPES = {
     "records this one as skipped. Declare the files as artifacts on the stage " +
     "that produces them, then remove this stage.",
   scan:
-    "Scan stages have no executor and can no longer be saved. A build records " +
-    "this one as skipped. Use the image scan gate on a container image stage, or " +
-    "run the scanner in a command stage, then remove this stage.",
+    "Scan stages run on the Kubernetes runner, in the scanner's own image. On an " +
+    "agent a build records this one as skipped and says why — the report of a " +
+    "scan that failed would not survive there.",
 };
 
 export const UNIMPLEMENTED_STAGE_TYPES = new Set(Object.keys(CONDITIONAL_STAGE_TYPES));
@@ -90,6 +92,23 @@ export const DEFAULT_IMAGE_SCAN = {
   threshold: "critical",
   onFail: "block",
   ignoreUnfixed: false,
+};
+
+/** What counts toward a code scan quality gate. Semgrep's own severity words,
+ * because they are what the stage's log prints. */
+export const CODE_SCAN_COUNT_FROM = [
+  { value: "info", label: "Every finding" },
+  { value: "warning", label: "WARNING and ERROR" },
+  { value: "error", label: "ERROR only" },
+];
+
+/** A quality gate as it is first switched on. Mirrors code_scan.default_config(). */
+export const DEFAULT_CODE_SCAN = {
+  enabled: true,
+  tool: "semgrep",
+  maxBlocking: 0,
+  countFrom: "info",
+  recipients: [],
 };
 
 export const RUNNER_TYPES = [

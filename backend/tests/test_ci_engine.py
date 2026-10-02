@@ -38,6 +38,49 @@ def test_stage_image_reports_a_missing_run_build_variable():
         )
 
 
+def test_working_directory_takes_a_build_input():
+    from api.services.ci import engine
+
+    env = {"MODULE": "ds-amex"}
+    assert engine._resolve_working_directory("modules/${MODULE}", env, "Build Image") == "modules/ds-amex"
+    assert engine._resolve_working_directory("modules/$MODULE/", env, "Build Image") == "modules/ds-amex"
+    assert engine._resolve_working_directory("modules/${MODULE}", {"MODULE": "/ds-amex"}, "s") == "modules/ds-amex"
+    # Literal paths are untouched; empty stays empty.
+    assert engine._resolve_working_directory("modules/ds-amex", {}, "s") == "modules/ds-amex"
+    assert engine._resolve_working_directory("", env, "s") is None
+
+
+@pytest.mark.parametrize("module", ["../secrets", "a b", "x;rm -rf /", "$(id)"])
+def test_working_directory_input_cannot_escape_or_inject(module):
+    from api.services.ci import engine
+
+    with pytest.raises(engine.BuildError, match="working directory"):
+        engine._resolve_working_directory("modules/${MODULE}", {"MODULE": module}, "Build Image")
+
+
+def test_working_directory_with_an_empty_input_fails_instead_of_building_the_parent():
+    from api.services.ci import engine
+
+    with pytest.raises(engine.BuildError, match="MODULE.*empty or missing"):
+        engine._resolve_working_directory("modules/${MODULE}", {"MODULE": ""}, "Build Image")
+
+
+def test_image_name_takes_a_build_input():
+    from api.services.ci import engine
+
+    registry = {"repository": "build", "repositoryTemplate": "areeba/${MODULE}"}
+    engine._resolve_image_name(registry, {"MODULE": "DS-Amex"}, "Build Image")
+    assert registry["repository"] == "areeba/ds-amex"
+    assert "repositoryTemplate" not in registry
+
+    literal = {"repository": "jpts", "repositoryTemplate": ""}
+    engine._resolve_image_name(literal, {"MODULE": "ds-amex"}, "Build Image")
+    assert literal["repository"] == "jpts"
+
+    with pytest.raises(engine.BuildError, match="MODULE.*empty or missing"):
+        engine._resolve_image_name({"repositoryTemplate": "${MODULE}"}, {}, "Build Image")
+
+
 @pytest.fixture()
 def runnable_service(app, client, admin_token):
     """A service with source connected and a two-stage pipeline."""
@@ -1409,7 +1452,9 @@ def test_a_build_needing_a_label_no_runner_has_waits_with_the_reason(
 # Retired stage types and parallel groups are refused on save
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("stage_type", ["publish_artifact", "scan"])
+# `scan` is no longer here: it has an executor now, and a scan stage without a
+# scanner is refused with its own message (tests/test_ci_scan_stage.py).
+@pytest.mark.parametrize("stage_type", ["publish_artifact"])
 def test_a_stage_type_with_no_executor_cannot_be_saved(
     client, admin_token, runnable_service, stage_type
 ):
@@ -1425,12 +1470,14 @@ def test_a_stage_type_with_no_executor_cannot_be_saved(
     assert "no executor" in refused.get_json()["error"]
 
 
-def test_a_parallel_group_is_not_stored(client, admin_token, runnable_service):
-    """Stages always run in order; storing a group promised otherwise."""
+def test_a_parallel_group_of_one_is_refused(client, admin_token, runnable_service):
+    """A group of one stage is just a stage: saying it runs "in parallel"
+    with nothing would be a promise about nothing. (The full rules live in
+    test_ci_parallel_stages.py.)"""
     pipeline_id = client.get(
         f"/api/ci/services/{runnable_service}/pipelines", headers=auth_headers(admin_token)
     ).get_json()["data"]["items"][0]["id"]
-    saved = client.put(
+    refused = client.put(
         f"/api/ci/pipelines/{pipeline_id}",
         json={
             "stages": [
@@ -1444,9 +1491,8 @@ def test_a_parallel_group_is_not_stored(client, admin_token, runnable_service):
         },
         headers=auth_headers(admin_token),
     )
-    assert saved.status_code == 200
-    stage = saved.get_json()["data"]["stages"][0]
-    assert "parallelGroup" not in stage
+    assert refused.status_code == 400
+    assert "needs at least two stages" in refused.get_json()["error"]
 
     from api.models_ci import CiPipelineStage
 

@@ -4,10 +4,18 @@ import {
   cancelCiBuild,
   getCiBuild,
   listCiBuildArtifacts,
+  approveCiBuildStage,
+  rejectCiBuildStage,
   retryCiBuild,
 } from "../../api/ciApi.js";
+import ApprovalStagePanel from "./ApprovalStagePanel.jsx";
+import CodeScanReportPanel from "./CodeScanReportPanel.jsx";
+import StoreUploadStageSummary from "./StoreUploadStageSummary.jsx";
 import PipelineStrip from "./PipelineStrip.jsx";
+import { buildSteps } from "./pipeline/parallelModel.js";
+import PostActionRunPanel, { postRunState } from "./PostActionRunPanel.jsx";
 import StageLogViewer from "./StageLogViewer.jsx";
+import TestResultsPanel from "./TestResultsPanel.jsx";
 import WorkspaceBrowser from "./WorkspaceBrowser.jsx";
 import {
   StageStatusIcon,
@@ -22,6 +30,11 @@ import {
 // The drawer is open on one build the user is watching stage by stage, and it
 // stops polling as soon as that build finishes.
 const REFRESH_MS = 1200;
+// ...unless a post-action notification is still on its way (queued, sending,
+// waiting out a retry): those settle after the build, so keep looking, slowly.
+const SETTLE_MS = 4000;
+const settling = (build) =>
+  (build?.postActions || []).some((item) => item.status === "pending" || item.status === "running");
 
 /**
  * One build: header, stage list, and the selected stage's logs.
@@ -67,6 +80,7 @@ export default function BuildDetailDrawer({
 
   useEffect(() => {
     let cancelled = false;
+    let artifactsLoaded = false;
 
     const load = async () => {
       try {
@@ -86,12 +100,16 @@ export default function BuildDetailDrawer({
         }
 
         if (!isBuildActive(data.status)) {
-          const list = await listCiBuildArtifacts(buildId);
-          if (!cancelled) {
-            const items = list.items || [];
-            setArtifacts(items);
-            setArtifactTotal(list.total ?? items.length);
+          if (!artifactsLoaded) {
+            artifactsLoaded = true;
+            const list = await listCiBuildArtifacts(buildId);
+            if (!cancelled) {
+              const items = list.items || [];
+              setArtifacts(items);
+              setArtifactTotal(list.total ?? items.length);
+            }
           }
+          if (!cancelled && settling(data)) timerRef.current = window.setTimeout(load, SETTLE_MS);
           return;
         }
         timerRef.current = window.setTimeout(load, REFRESH_MS);
@@ -136,7 +154,9 @@ export default function BuildDetailDrawer({
     setShowWorkspace(false);
   };
 
-  const selectedStage = build?.stages?.find((stage) => stage.id === selectedStageId);
+  // A post-action row is selected like a stage: its log is a stage log.
+  const selectedPost = build?.postActions?.find((item) => item.id === selectedStageId);
+  const selectedStage = build?.stages?.find((stage) => stage.id === selectedStageId) || selectedPost;
   const active = build ? isBuildActive(build.status) : false;
 
   // Elapsed time for a stage the server has not timed yet.
@@ -175,11 +195,20 @@ export default function BuildDetailDrawer({
                 )}{" "}
                 ·{" "}
                 {build.commitSha ? <code>{shortSha(build.commitSha)}</code> : "no commit pinned"}
-                {/* Provenance: a ticket-driven build names its ticket here. */}
+                {/* Provenance: a ticket-driven build names its ticket here,
+                    a scheduled one its schedule (and whose rights it ran with). */}
                 {build.automation
                   ? ` · automation${
                       build.automation.ticketNumber
                         ? ` (ticket ${build.automation.ticketNumber})`
+                        : ""
+                    }`
+                  : build.triggerType === "schedule"
+                  ? ` · schedule “${build.schedule?.name || "?"}”${
+                      build.requestedBy
+                        ? build.schedule?.manual
+                          ? `, run now by ${build.requestedBy}`
+                          : ` as ${build.requestedBy}`
                         : ""
                     }`
                   : build.requestedBy
@@ -245,6 +274,28 @@ export default function BuildDetailDrawer({
         {build?.status === "queued" && build.queueReason && (
           <p className="banner-message info">{build.queueReason}</p>
         )}
+        {build?.awaitingApproval && selectedStageId !== build.awaitingApproval.stageId && (
+          <p className="banner-message info sg-ci-awaiting">
+            Waiting for approval at “{build.awaitingApproval.stageName}” —{" "}
+            {build.awaitingApproval.approvals} of {build.awaitingApproval.required}.{" "}
+            <button
+              type="button"
+              className="btn-outline btn-compact"
+              onClick={() => {
+                const stage = build.stages?.find((item) => item.id === build.awaitingApproval.stageId);
+                if (stage) selectStage(stage);
+              }}
+            >
+              Open it
+            </button>
+          </p>
+        )}
+
+        {build?.parallel?.mode === "sequential" && (
+          <p className="banner-message info">
+            This build ran its parallel groups one stage at a time: {build.parallel.reason}
+          </p>
+        )}
 
         {build && (
           <>
@@ -256,20 +307,67 @@ export default function BuildDetailDrawer({
 
             <div className="sg-ci-drawer-body">
               <ul className="sg-ci-stage-list">
-                {(build.stages || []).map((stage) => (
-                  <li key={stage.id}>
+                {buildSteps(build.stages || []).map((step) => {
+                  const row = (stage) => (
+                    <li key={stage.id}>
+                      <button
+                        type="button"
+                        className={`sg-ci-stage-row sg-ci-stage-row--${stage.status}${
+                          stage.id === selectedStageId ? " is-active" : ""
+                        }`}
+                        onClick={() => selectStage(stage)}
+                      >
+                        <span className={`sg-ci-stage-icon sg-ci-stage-icon--${stage.status}`}>
+                          <StageStatusIcon status={stage.status} />
+                        </span>
+                        <span className="sg-ci-stage-name">{stage.name}</span>
+                        <span className="sg-ci-stage-time">{stageDuration(stage)}</span>
+                      </button>
+                    </li>
+                  );
+                  if (!step.group) return row(step.items[0]);
+                  // A parallel group: its members ran at the same time, so
+                  // they hang off one bracket instead of reading as a sequence.
+                  const running = step.items.filter((stage) => stage.status === "running").length;
+                  return (
+                    <li key={`group-${step.items[0].id}`} className="sg-ci-stage-group">
+                      <div className="sg-ci-stage-group-head">
+                        <span className="sg-ci-stage-group-name">{step.group}</span>
+                        <span className="sg-ci-stage-group-meta">
+                          {build.parallel?.mode === "sequential"
+                            ? "one at a time"
+                            : running > 1
+                              ? `${running} running at once`
+                              : `${step.items.length} together`}
+                          {step.failFast ? " · fail fast" : ""}
+                        </span>
+                      </div>
+                      <ul className="sg-ci-stage-lanes">{step.items.map(row)}</ul>
+                    </li>
+                  );
+                })}
+                {/* Post actions: not stages — they never decide the build's
+                    result — so they sit under their own heading. */}
+                {(build.postActions || []).length > 0 && (
+                  <li className="sg-ci-post-heading" aria-hidden="true">
+                    When the build ended
+                  </li>
+                )}
+                {(build.postActions || []).map((item) => (
+                  <li key={`post-${item.id}`}>
                     <button
                       type="button"
-                      className={`sg-ci-stage-row sg-ci-stage-row--${stage.status}${
-                        stage.id === selectedStageId ? " is-active" : ""
+                      className={`sg-ci-stage-row sg-ci-stage-row--${item.status} sg-ci-post-row${
+                        item.id === selectedStageId ? " is-active" : ""
                       }`}
-                      onClick={() => selectStage(stage)}
+                      onClick={() => selectStage(item)}
+                      title={item.error || item.detail || item.name}
                     >
-                      <span className={`sg-ci-stage-icon sg-ci-stage-icon--${stage.status}`}>
-                        <StageStatusIcon status={stage.status} />
+                      <span className={`sg-ci-stage-icon sg-ci-stage-icon--${item.status}`}>
+                        <StageStatusIcon status={item.status} />
                       </span>
-                      <span className="sg-ci-stage-name">{stage.name}</span>
-                      <span className="sg-ci-stage-time">{stageDuration(stage)}</span>
+                      <span className="sg-ci-stage-name">{item.name}</span>
+                      <span className={`sg-ci-post-state is-${item.status}`}>{postRunState(item)}</span>
                     </button>
                   </li>
                 ))}
@@ -279,12 +377,38 @@ export default function BuildDetailDrawer({
                 {showWorkspace ? (
                   <WorkspaceBrowser buildId={build.id} active={active} />
                 ) : selectedStage ? (
-                  <StageLogViewer buildId={build.id} stage={selectedStage} />
+                  <>
+                    {selectedStage.codeScan && (
+                      <CodeScanReportPanel buildId={build.id} stage={selectedStage} />
+                    )}
+                    {selectedStage.stageType === "approval" && (
+                      <ApprovalStagePanel
+                        stage={selectedStage}
+                        busy={busy}
+                        onDecide={(action, comment) =>
+                          act(() =>
+                            (action === "approve" ? approveCiBuildStage : rejectCiBuildStage)(
+                              build.id,
+                              selectedStage.id,
+                              comment
+                            )
+                          )
+                        }
+                      />
+                    )}
+                    {selectedStage.stageType === "store_upload" && (
+                      <StoreUploadStageSummary stage={selectedStage} />
+                    )}
+                    {selectedPost && <PostActionRunPanel item={selectedPost} />}
+                    <StageLogViewer buildId={build.id} stage={selectedStage} />
+                  </>
                 ) : (
                   <p className="muted">Select a stage to see its output.</p>
                 )}
               </div>
             </div>
+
+            <TestResultsPanel build={build} />
 
             {artifacts.length > 0 && (
               <section className="sg-ci-drawer-artifacts">

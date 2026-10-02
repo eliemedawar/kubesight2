@@ -11,6 +11,7 @@ a history of builds that produced artifacts.
 | **Pipeline** | An ordered list of stages. **There is no dependency graph** — order is the only relationship. |
 | **Stage** | One step. `checkout` (KubeSight clones; runs no commands), `command` (a shell script), `container_image` (BuildKit builds the Dockerfile and pushes it; runs no commands). |
 | **Image scan** | A gate *inside* a `container_image` stage, not a stage of its own. Armed, BuildKit does not push at all: the image comes back as an archive, Trivy reads it, and only a pass reaches the push. |
+| **Server stage** | `deploy`, `approval`, `store_upload` — run by KubeSight itself after every runner stage (they must be last). An `approval` stage holds a build *running* until its named users / `ci_builds:approve` holders approve (never the person who started it, unless the stage allows it); a build waiting there shows `awaitingApproval` and is listed by `status=awaiting_approval`. You cannot approve for anyone — it is a person's click in the build drawer. A `store_upload` stage publishes the build's AAB/IPA through Mobile Apps (signature gate included); only an administrator can save its target. |
 | **Runner** | Where a stage executes. A stage runs on a runner whose capabilities are a **superset** of that stage's `runnerLabels`. |
 | **Build** | One execution. Renders from a *snapshot* of the pipeline, so editing a pipeline never rewrites history. |
 | **Secret** | Stored encrypted and write-only. A pipeline holds *references*; values are never readable, including by you. |

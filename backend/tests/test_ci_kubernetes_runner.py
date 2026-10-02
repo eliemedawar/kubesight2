@@ -413,7 +413,8 @@ def test_templated_tag_resolves_once_for_archive_scan_and_push(monkeypatch):
 def test_supported_stage_types_follow_buildkit_configuration(monkeypatch):
     adapter = k8s.KubernetesJobRunnerAdapter()
     monkeypatch.delenv("CI_BUILDKIT_ADDR", raising=False)
-    assert adapter.supported_stage_types() == {"checkout", "command"}
+    # Scan stages need nothing a command stage does not, BuildKit included.
+    assert adapter.supported_stage_types() == {"checkout", "command", "scan"}
     assert "BuildKit" in adapter.skip_reason("container_image")
     monkeypatch.setenv("CI_BUILDKIT_ADDR", "tcp://buildkitd:1234")
     assert "container_image" in adapter.supported_stage_types()

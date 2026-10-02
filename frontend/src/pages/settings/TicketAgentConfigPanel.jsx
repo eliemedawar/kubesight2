@@ -18,10 +18,33 @@ import {
  * here read-only.
  */
 
+// What builds a ticket's image when no registry linked to the cluster has the
+// tag yet. Stored with deploy automation, so every ticket run builds this way.
+const BUILD_ENGINES = [
+  {
+    value: "kubesight_ci",
+    label: "KubeSight CI",
+    hint:
+      "The application's CI service builds it. If the application has no CI service, the deploy fails and says so. Jenkins is never used.",
+  },
+  {
+    value: "jenkins",
+    label: "Jenkins",
+    hint: "The Jenkins router (or a job override) builds it. KubeSight CI is never used.",
+  },
+  {
+    value: "auto",
+    label: "Automatic",
+    hint: "KubeSight CI when the application has a CI service, Jenkins otherwise.",
+  },
+];
+
 const EMPTY = {
   enabled: false,
   minConfidence: "High",
+  buildEngine: "auto",
   publicComments: true,
+  troubleshootingEnabled: true,
   approvalTimeoutHours: 24,
   telegramEnabled: false,
   telegramBotToken: "",
@@ -33,7 +56,9 @@ function formFrom(settings) {
   return {
     enabled: Boolean(settings?.enabled),
     minConfidence: settings?.minConfidence || "High",
+    buildEngine: settings?.buildEngine || "auto",
     publicComments: settings?.publicComments !== false,
+    troubleshootingEnabled: settings?.troubleshootingEnabled !== false,
     approvalTimeoutHours: settings?.approvalTimeoutHours ?? 24,
     telegramEnabled: Boolean(settings?.telegramEnabled),
     telegramBotToken: "",
@@ -133,8 +158,9 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
           <p className="muted">
             When this is on, every ticket Zoho or Jira sends is handed to your Hermes (the one with
             the <span className="mono">kubesight</span> skill). Hermes reads it and acts through
-            KubeSight's MCP tools: it deploys, changes a variable or restarts, moves the ticket
-            (In Progress → Done, or Impediment) and writes every comment. The deploy itself goes
+            KubeSight's MCP tools: it deploys, changes a variable or restarts — or, when the
+            ticket reports a problem, investigates and answers why — moves the ticket (In Progress
+            → Done, or Impediment) and writes every comment. The deploy itself goes
             through the normal deploy automation, so cluster approvals, rollback and the pod-health
             check still apply.
           </p>
@@ -190,7 +216,61 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
               />
               Post Hermes' comments as public (the requester can see them)
             </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.troubleshootingEnabled}
+                onChange={(e) => set("troubleshootingEnabled", e.target.checked)}
+                disabled={ro}
+              />
+              Let Hermes troubleshoot problem tickets
+            </label>
+            <p className="field-hint">
+              For tickets that ask why something is broken rather than for a change. Hermes looks
+              at the application with read-only tools (pods, logs, events, alerts, recent
+              deploys) and answers with a diagnosis, the evidence and a recommendation. A fix it
+              suggests (restart, a variable, a tag) still waits for approval. Off: such tickets go
+              to Impediment for a person.
+            </p>
           </div>
+        </section>
+
+        <section className="card sg-zh-setsec">
+          <div className="card-header-row">
+            <h3>How deploys get their image</h3>
+          </div>
+          <p className="muted">
+            A ticket can name several applications, and Hermes deploys all of them together. For
+            each one, KubeSight first looks for the tag in the registries linked to the target
+            cluster. If one of them has it, only the tag on the deployment changes. If none has it,
+            the image is built first, checked in the registry again, then deployed.
+          </p>
+          <fieldset className="sg-zh-engines" disabled={ro}>
+            <legend>Build a missing image with</legend>
+            {BUILD_ENGINES.map((engine) => (
+              <label
+                key={engine.value}
+                className={`sg-zh-engine${form.buildEngine === engine.value ? " is-on" : ""}`}
+              >
+                <input
+                  type="radio"
+                  name="ticket-agent-build-engine"
+                  value={engine.value}
+                  checked={form.buildEngine === engine.value}
+                  onChange={() => set("buildEngine", engine.value)}
+                />
+                <span>
+                  <strong>{engine.label}</strong>
+                  <small>{engine.hint}</small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          <p className="field-hint">
+            KubeSight CI finds an application's CI service by a Deploy stage aimed at that
+            deployment, or by a slug matching the deployment or image name. This applies to every
+            ticket deploy, not just the ones Hermes starts.
+          </p>
         </section>
 
         <section className="card sg-zh-setsec">

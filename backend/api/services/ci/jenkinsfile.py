@@ -1600,6 +1600,71 @@ def _make_kubesight_portable(draft: _Draft, stage: Dict[str, Any]) -> None:
     stage["commands"] = commands
 
 
+def _tag_parallel_branches(
+    draft: _Draft,
+    members: List[Dict[str, Any]],
+    group: str,
+    *,
+    offset: int,
+    fail_fast: bool = False,
+) -> None:
+    """Make a ``parallel { }`` block's branches a KubeSight parallel group.
+
+    Only when they fit the group rules (services/ci/parallel_groups.py): two to
+    eight command stages, none of them already grouped by a nested block. The
+    name is made unique within the draft, because two separate groups may not
+    share one. Anything else stays consecutive stages, said in the note.
+    """
+    from . import parallel_groups
+
+    ungrouped = [member for member in members if not member.get("parallelGroup")]
+    fits = (
+        parallel_groups.MIN_GROUP_SIZE <= len(members) <= parallel_groups.MAX_GROUP_SIZE
+        and len(ungrouped) == len(members)
+        and all(member.get("stageType") in parallel_groups.PARALLEL_STAGE_TYPES for member in members)
+    )
+    if not fits:
+        reason = (
+            "a group needs at least two stages"
+            if len(members) < parallel_groups.MIN_GROUP_SIZE
+            else f"a group runs at most {parallel_groups.MAX_GROUP_SIZE} stages"
+            if len(members) > parallel_groups.MAX_GROUP_SIZE
+            else "only command stages can share a group here"
+        )
+        draft.note(
+            INFO,
+            f"'{group}' ran its branches in parallel. They were imported as consecutive "
+            f"stages in the order they appear, one after another — {reason}.",
+            stage=group,
+            offset=offset,
+        )
+        return
+    taken = {
+        (stage.get("parallelGroup") or "").lower()
+        for stage in draft.stages
+        if stage not in members and stage.get("parallelGroup")
+    }
+    name = (parallel_groups.normalize_name(group[: parallel_groups.MAX_NAME_CHARS]) or "parallel")
+    base, suffix = name[: parallel_groups.MAX_NAME_CHARS - 4], 2
+    while name.lower() in taken:
+        name = f"{base} {suffix}"
+        suffix += 1
+    for member in members:
+        member["parallelGroup"] = name
+        # Jenkins' `failFast true` on the parallel stage means the same thing.
+        member["parallelFailFast"] = bool(fail_fast)
+    draft.note(
+        INFO,
+        f"'{group}' ran its branches in parallel, and they still do: they were imported as "
+        f"the parallel group '{name}', which starts them together and continues once all "
+        "have finished"
+        + (", stopping the others at the first failure (failFast)" if fail_fast else "")
+        + ". They share one workspace, so check they do not write the same files.",
+        stage=group,
+        offset=offset,
+    )
+
+
 def _read_stages(
     draft: _Draft,
     start: int,
@@ -1621,23 +1686,15 @@ def _read_stages(
 
         if parallel is not None and parallel.has_body and steps is None:
             # The parent is a container, not a stage. Its branches become
-            # consecutive stages, because that is what the build engine does:
-            # it runs stages one after another. No group tag is emitted — a
-            # field that promised concurrency the engine never delivers would
-            # be the dishonest part of the import.
+            # consecutive stages sharing a parallel group — what KubeSight runs
+            # side by side — when they fit the group rules (2-8 command stages);
+            # otherwise plain consecutive stages, and the note says why.
             group = raw_name or "parallel"
-            draft.note(
-                INFO,
-                f"'{group}' ran its branches in parallel. They were imported as "
-                "consecutive stages in the order they appear — a build runs its "
-                "stages one after another.",
-                stage=group,
-                offset=stmt.span[0],
-            )
             agent_stmt = _named(inner, "agent")
             labels = inherited_labels
             if agent_stmt is not None:
                 labels = _read_agent(draft, agent_stmt, group).get("runnerLabels") or labels
+            before = len(draft.stages)
             _read_stages(
                 draft,
                 parallel.body[0],
@@ -1645,6 +1702,14 @@ def _read_stages(
                 taken=taken,
                 parallel_group=group,
                 inherited_labels=labels,
+            )
+            fail_fast_stmt = _named(inner, "failFast")
+            fail_fast = False
+            if fail_fast_stmt is not None:
+                positional, _ = _stmt_args(draft.text, draft.mask, fail_fast_stmt)
+                fail_fast = bool(positional) and _str(positional[0]) == "true"
+            _tag_parallel_branches(
+                draft, draft.stages[before:], group, offset=stmt.span[0], fail_fast=fail_fast
             )
             continue
 

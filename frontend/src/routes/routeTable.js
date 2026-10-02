@@ -97,6 +97,7 @@ export const TAB_VALUES = {
     "notifications",
     "security",
     "mergeChecks",
+    "mcpTools",
   ],
   // pages/ApplicationServicesPage.jsx:1440
   applicationServices: ["overview", "dr"],

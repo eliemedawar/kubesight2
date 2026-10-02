@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { PlIcon } from "./icons.jsx";
+import { REPORT_PRESETS, addPreset, findPreset } from "../testReportModel.js";
 
 /**
  * The pipeline editor's controls. Each one edits a value in the shape the API
@@ -430,7 +431,9 @@ export const ARTIFACT_TYPES = [
   "aab",
   "ipa",
   "test-report",
-  "coverage",
+  // "coverage" was offered here before the server had a name for it; it is
+  // still accepted and stored as coverage-report.
+  "coverage-report",
   "binary",
 ];
 
@@ -465,6 +468,33 @@ export function ArtifactRows({ value, onChange, disabled }) {
         addLabel="Add file"
         emptyText="Nothing is kept. Files left in the workspace are gone when the build ends."
       />
+      {!disabled && (
+        <label className="pl-rows-preset">
+          <span>
+            Keep test results or coverage — kept as <code>test-report</code> /{" "}
+            <code>coverage-report</code>, they become pass/fail counts and coverage on every build,
+            even when the tests fail.
+          </span>
+          <select
+            value=""
+            onChange={(event) => {
+              const preset = findPreset(event.target.value);
+              if (preset) update(addPreset(rows, preset), onChange);
+            }}
+          >
+            <option value="">Add a report location…</option>
+            {REPORT_PRESETS.map((group) => (
+              <optgroup key={group.group} label={group.group}>
+                {group.items.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label} — {item.path}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </label>
+      )}
     </>
   );
 }

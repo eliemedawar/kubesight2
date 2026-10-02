@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef } from "react";
 import {
+  CODE_SCAN_COUNT_FROM,
   CONDITIONAL_STAGE_TYPES,
+  DEFAULT_CODE_SCAN,
   DEFAULT_IMAGE_SCAN,
   IMAGE_SCAN_ON_FAIL,
   IMAGE_SCAN_THRESHOLDS,
@@ -18,9 +20,15 @@ import {
   SettingRow,
   Switch,
 } from "./controls.jsx";
+import ApprovalStageFields from "./ApprovalStageFields.jsx";
 import DeployStageFields from "./DeployStageFields.jsx";
+import StoreUploadFields from "./StoreUploadFields.jsx";
+import ScanStageFields from "./ScanStageFields.jsx";
+import ParallelGroupFields, { parallelSummary } from "./ParallelGroupFields.jsx";
+import { groupAt, PARALLEL_STAGE_TYPES } from "./parallelModel.js";
 import { PlIcon } from "./icons.jsx";
 import {
+  codeScanArmed,
   conditionSummary,
   DEFAULT_TIMEOUT_SECONDS,
   fieldsFor,
@@ -28,6 +36,7 @@ import {
   kindOf,
   mergePlainEnv,
   plainEnv,
+  runsSemgrep,
   scanArmed,
   STAGE_KINDS,
   stageSummary,
@@ -76,6 +85,7 @@ export default function StageSheet({
   stages,
   parameters,
   secretKeys,
+  scanTools,
   problems,
   change,
   editable,
@@ -86,6 +96,8 @@ export default function StageSheet({
   onRemove,
   onGoToTab,
   onOpenInputs,
+  onGroupChange,
+  parallelCapability,
   focusName,
 }) {
   const ids = useId();
@@ -323,7 +335,12 @@ export default function StageSheet({
                 label="Working directory"
                 htmlFor={`${ids}-workdir`}
                 optional
-                hint="Relative to the repository. Empty is the service's own directory."
+                hint={
+                  <>
+                    Relative to the repository. Empty is the service's own directory.{" "}
+                    <code>{"${VAR}"}</code> takes a build input, e.g. <code>{"modules/${MODULE}"}</code>.
+                  </>
+                }
               >
                 <input
                   id={`${ids}-workdir`}
@@ -358,6 +375,13 @@ export default function StageSheet({
                 onChange={(commands) => onChange({ commands })}
               />
             </Field>
+            <CodeScanGate
+              ids={ids}
+              stage={stage}
+              editable={editable}
+              onChange={onChange}
+              error={problemFor("codeScan")}
+            />
           </>
         )}
 
@@ -372,6 +396,29 @@ export default function StageSheet({
           />
         )}
 
+        {stage.stageType === "scan" && (
+          <ScanStageFields
+            ids={ids}
+            stage={stage}
+            index={index}
+            scanTools={scanTools}
+            secretKeys={secretKeys}
+            editable={editable}
+            onChange={onChange}
+            error={problemFor("scan")}
+            gate={
+              <CodeScanGate
+                ids={ids}
+                stage={stage}
+                editable={editable}
+                onChange={onChange}
+                error={problemFor("codeScan")}
+                locked
+              />
+            }
+          />
+        )}
+
         {stage.stageType === "deploy" && (
           <DeployStageFields
             ids={ids}
@@ -380,6 +427,31 @@ export default function StageSheet({
             index={index}
             editable={editable}
             onChange={onChange}
+          />
+        )}
+
+        {stage.stageType === "approval" && (
+          <ApprovalStageFields
+            ids={ids}
+            stage={stage}
+            stages={stages}
+            index={index}
+            editable={editable}
+            onChange={onChange}
+            error={problemFor("approval")}
+          />
+        )}
+
+        {stage.stageType === "store_upload" && (
+          <StoreUploadFields
+            ids={ids}
+            service={service}
+            stage={stage}
+            stages={stages}
+            index={index}
+            editable={editable}
+            onChange={onChange}
+            error={problemFor("storeUpload")}
           />
         )}
       </section>
@@ -423,6 +495,27 @@ export default function StageSheet({
           >
             <FailureSettings ids={ids} stage={stage} editable={editable} onChange={onChange} error={problemFor("timeout")} />
           </SettingRow>
+          {(PARALLEL_STAGE_TYPES.has(stage.stageType) || stage.parallelGroup) && onGroupChange && (
+            <SettingRow
+              icon="parallel"
+              title="Run in parallel"
+              hint="Start at the same time as the stage before it"
+              value={parallelSummary(stages, index)}
+              isSet={Boolean(groupAt(stages, index)?.indices.length > 1)}
+              tone={problemFor("parallel") ? "error" : undefined}
+              defaultOpen={Boolean(problemFor("parallel"))}
+            >
+              <ParallelGroupFields
+                ids={ids}
+                stages={stages}
+                index={index}
+                editable={editable}
+                capability={parallelCapability}
+                error={problemFor("parallel")}
+                onGroupChange={onGroupChange}
+              />
+            </SettingRow>
+          )}
         </div>
       </section>
 
@@ -628,7 +721,12 @@ function ImageStageFields({ ids, service, stage, editable, onChange, onGoToTab }
           label="Build context"
           htmlFor={`${ids}-context`}
           optional
-          hint="The directory sent to BuildKit. Empty is the service's own directory."
+          hint={
+            <>
+              The directory sent to BuildKit. Empty is the service's own directory.{" "}
+              <code>{"${VAR}"}</code> takes a build input, e.g. <code>{"modules/${MODULE}"}</code>.
+            </>
+          }
         >
           <input
             id={`${ids}-context`}
@@ -644,7 +742,12 @@ function ImageStageFields({ ids, service, stage, editable, onChange, onGoToTab }
           label="Image name"
           htmlFor={`${ids}-imagename`}
           optional
-          hint="The repository in the registry."
+          hint={
+            <>
+              The repository in the registry. <code>{"${VAR}"}</code> takes a build input, e.g.{" "}
+              <code>{"${MODULE}"}</code>.
+            </>
+          }
         >
           <input
             id={`${ids}-imagename`}
@@ -756,6 +859,125 @@ function ImageStageFields({ ids, service, stage, editable, onChange, onGoToTab }
 
       <p className="pl-field-hint">{CONDITIONAL_STAGE_TYPES.container_image}</p>
     </>
+  );
+}
+
+/**
+ * The quality gate on a stage that runs Semgrep: how many blocking findings
+ * the stage may have before it fails, and who the PDF report is offered to.
+ *
+ * Only offered in full once the stage runs semgrep — on any other command
+ * stage it would be a switch that fails every build. A gate already saved on
+ * such a stage is still shown, so it can be turned off.
+ */
+function CodeScanGate({ ids, stage, editable, onChange, error, locked }) {
+  // `locked` is a Semgrep scan stage: KubeSight writes the semgrep line and
+  // the gate is always on there (a scan stage that never gates is a log), so
+  // there is no switch and nothing to warn about the command.
+  const armed = locked || codeScanArmed(stage);
+  const scans = locked || runsSemgrep(stage);
+  if (!scans && !stage.codeScan) return null;
+  const gate = { ...DEFAULT_CODE_SCAN, ...(stage.codeScan || {}) };
+  const setGate = (patch) => onChange({ codeScan: { ...gate, ...patch } });
+  const allowed = gate.maxBlocking === "" ? "" : Number(gate.maxBlocking) || 0;
+  const countLabel = CODE_SCAN_COUNT_FROM.find((item) => item.value === gate.countFrom)?.label || "Every finding";
+
+  return (
+    <div className={`pl-scan pl-codescan${armed ? " is-on" : ""}`}>
+      <div className="pl-scan-head">
+        <span className="pl-scan-icon" aria-hidden="true">
+          <PlIcon name="shield" />
+        </span>
+        <div>
+          <strong>Quality gate on the scan&apos;s findings</strong>
+          <p>
+            Semgrep passes a finished scan however much it found. With the gate on, this stage fails
+            when Semgrep reports more blocking findings than you allow — and the build gets a PDF
+            report of every one, to download or send.
+          </p>
+        </div>
+        {locked ? (
+          <span className="pl-tag">Always on</span>
+        ) : (
+          <Switch
+            checked={armed}
+            disabled={!editable}
+            label={armed ? "On" : "Off"}
+            onChange={(next) => setGate({ enabled: next })}
+          />
+        )}
+      </div>
+      {armed && (
+        <div className="pl-scan-body">
+          <div className="pl-grid">
+            <Field
+              label="Blocking findings allowed"
+              htmlFor={`${ids}-maxblocking`}
+              error={error}
+              hint={
+                allowed === 0
+                  ? "0 — any blocking finding fails the stage."
+                  : `The stage fails at ${Number(allowed) + 1} or more.`
+              }
+            >
+              <input
+                id={`${ids}-maxblocking`}
+                type="number"
+                min={0}
+                max={100000}
+                step={1}
+                className="pl-codescan-count"
+                value={allowed}
+                disabled={!editable}
+                onChange={(event) =>
+                  setGate({
+                    maxBlocking: event.target.value === "" ? "" : Math.max(0, Math.floor(Number(event.target.value))),
+                  })
+                }
+              />
+            </Field>
+            <Field
+              label="Count"
+              hint={`${countLabel}. Findings below it are still in the report, just not counted.`}
+            >
+              <Segmented
+                label="Which findings count"
+                value={gate.countFrom || "info"}
+                options={CODE_SCAN_COUNT_FROM}
+                disabled={!editable}
+                onChange={(countFrom) => setGate({ countFrom })}
+              />
+            </Field>
+          </div>
+          <Field
+            label="Offer the report to"
+            optional
+            hint="Pre-fills the Send dialog on a build — you still choose who gets it, and nothing is sent on its own. Press Enter after each address."
+          >
+            <ChipsInput
+              label="Report recipients"
+              value={gate.recipients || []}
+              placeholder="lead@areeba.com, dev@areeba.com"
+              disabled={!editable}
+              onChange={(recipients) => setGate({ recipients })}
+            />
+          </Field>
+          {locked ? (
+            <p className="pl-field-hint">
+              To record findings without failing, raise the allowance. A <code>// nosemgrep</code>{" "}
+              comment on a line stops that finding counting. Applies from the next build.
+            </p>
+          ) : (
+          <p className="pl-field-hint">
+            Your <code>semgrep scan …</code> command stays as it is — KubeSight also saves its results
+            to a file for the gate. Drop <code>--error</code> if it is there: the gate decides now.
+            A <code>// nosemgrep</code> comment on a line stops that finding counting. Applies from the
+            next build.
+          </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -961,7 +1183,8 @@ function FailureSettings({ ids, stage, editable, onChange, error }) {
   );
 }
 
-function SecretPicker({ stage, secretKeys, editable, onChange, onGoToTab }) {
+// Exported for the post-action cleanup sheet, which attaches secrets the same way.
+export function SecretPicker({ stage, secretKeys, editable, onChange, onGoToTab }) {
   const refs = stage.secretRefs || [];
   // A reference to a secret that no longer exists is shown so it can be
   // removed — the backend refuses to save it, and hiding it would make that

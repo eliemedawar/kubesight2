@@ -4,7 +4,9 @@ The API server proxies each node's kubelet ``/stats/summary`` endpoint:
 
     kubectl get --raw /api/v1/nodes/<node>/proxy/stats/summary
 
-That payload carries ``node.fs`` (the node's root filesystem) and, per pod,
+That payload carries ``node.fs`` (the node's root filesystem),
+``node.runtime.imageFs`` (the container runtime's filesystem — where
+containerd keeps images and container layers, often its own disk) and, per pod,
 ``volume[]`` entries whose ``pvcRef`` names the claim they back. Both expose
 ``usedBytes`` / ``capacityBytes``, which is all the alert evaluator needs for
 ``disk_usage_percent`` and ``pvc_usage_percent``.
@@ -95,8 +97,14 @@ def _usage(entry: Any) -> Optional[Dict[str, Any]]:
 
 
 def parse_summary(node_name: str, summary: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract node fs usage and per-PVC usage from one kubelet summary."""
-    node_fs = _usage((summary.get("node") or {}).get("fs"))
+    """Extract node fs, container-runtime fs and per-PVC usage from one kubelet summary."""
+    node = summary.get("node") or {}
+    node_fs = _usage(node.get("fs"))
+    # containerd's own filesystem (/var/lib/containerd). With a split image
+    # filesystem (KubeletSeparateDiskGC) containerFs is where the writable
+    # layers live; otherwise imageFs covers both.
+    runtime = node.get("runtime") or {}
+    image_fs = _usage(runtime.get("imageFs")) or _usage(runtime.get("containerFs"))
     pvcs: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for pod in summary.get("pods") or []:
         pod_ref = pod.get("podRef") or {}
@@ -114,7 +122,7 @@ def parse_summary(node_name: str, summary: Dict[str, Any]) -> Dict[str, Any]:
             current = pvcs.get(key)
             if current is None or usage["percent"] > current["percent"]:
                 pvcs[key] = usage
-    return {"nodeFs": node_fs, "pvcs": pvcs}
+    return {"nodeFs": node_fs, "imageFs": image_fs, "pvcs": pvcs}
 
 
 def ready_node_names(node_items: List[Dict[str, Any]]) -> List[str]:
@@ -164,6 +172,7 @@ def fetch_cluster_volume_stats(
           "available": bool,            # at least one node's summary was read
           "reason": str | None,         # why nothing is available
           "nodes": {node: usage},       # node.fs usage per node that answered
+          "imageFs": {node: usage},     # container runtime (containerd) fs per node
           "pvcs": {(ns, name): usage},  # per claim, from pod volume stats
           "errors": {node: message},    # nodes whose summary could not be read
         }
@@ -176,7 +185,14 @@ def fetch_cluster_volume_stats(
         if entry and entry[0] > time.time():
             return entry[1]
 
-    result: Dict[str, Any] = {"available": False, "reason": None, "nodes": {}, "pvcs": {}, "errors": {}}
+    result: Dict[str, Any] = {
+        "available": False,
+        "reason": None,
+        "nodes": {},
+        "imageFs": {},
+        "pvcs": {},
+        "errors": {},
+    }
 
     if node_names is None:
         try:
@@ -208,6 +224,8 @@ def fetch_cluster_volume_stats(
         result["available"] = True
         if parsed["nodeFs"]:
             result["nodes"][name] = parsed["nodeFs"]
+        if parsed.get("imageFs"):
+            result["imageFs"][name] = parsed["imageFs"]
         for pvc_key, usage in parsed["pvcs"].items():
             current = result["pvcs"].get(pvc_key)
             if current is None or usage["percent"] > current["percent"]:

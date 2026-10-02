@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCiDeployTarget } from "../../../api/ciApi.js";
 import { listClusters, listNamespacesByCluster } from "../../../api/clustersApi.js";
+import SearchableSelect from "../../common/SearchableSelect.jsx";
 import { formatRelative } from "../ciShared.jsx";
 import { CommandEditor, EnvRows, Field, Segmented, Switch } from "./controls.jsx";
 import { blankDeploy, generateManifest, patchDeploy, SERVICE_TYPES } from "./deployModel.js";
@@ -84,85 +85,100 @@ export default function DeployStageFields({ ids, stage, stages, index, editable,
     <div className="pl-deploy">
       {/* ── Where ─────────────────────────────────────────────────────── */}
       <div className="pl-grid pl-deploy-target">
-        <Field label="Cluster" htmlFor={`${ids}-cluster`}>
-          <select
+        <Field label="Cluster">
+          <SearchableSelect
             id={`${ids}-cluster`}
+            aria-label="Cluster"
             value={deploy.clusterId}
             disabled={!editable}
+            placeholder="Pick a cluster…"
+            searchPlaceholder="Search clusters…"
+            options={[
+              ...(deploy.clusterId && !clusters.some((item) => item.id === deploy.clusterId)
+                ? [{ value: deploy.clusterId, label: deploy.clusterId }]
+                : []),
+              ...clusters.map((item) => ({ value: item.id, label: item.name || item.id })),
+            ]}
             onChange={(event) =>
+              event.target.value !== deploy.clusterId &&
               set({ clusterId: event.target.value, namespace: "", deploymentName: "", containerName: "" })
             }
-          >
-            <option value="">Pick a cluster…</option>
-            {!clusters.some((item) => item.id === deploy.clusterId) && deploy.clusterId && (
-              <option value={deploy.clusterId}>{deploy.clusterId}</option>
-            )}
-            {clusters.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name || item.id}
-              </option>
-            ))}
-          </select>
+          />
         </Field>
         <Field
           label="Namespace"
-          htmlFor={`${ids}-namespace`}
           error={namespaces.clusterId === deploy.clusterId ? namespaces.error : ""}
           hint={deploy.clusterId ? "Must already exist — a build never creates a namespace." : "Pick a cluster first."}
         >
-          <select
+          <SearchableSelect
             id={`${ids}-namespace`}
+            aria-label="Namespace"
             value={deploy.namespace}
             disabled={!editable || !deploy.clusterId}
-            onChange={(event) => set({ namespace: event.target.value, deploymentName: "", containerName: "" })}
-          >
-            <option value="">Pick a namespace…</option>
-            {deploy.namespace && !namespaceItems.includes(deploy.namespace) && (
-              <option value={deploy.namespace}>{deploy.namespace}</option>
-            )}
-            {namespaceItems.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
+            placeholder="Pick a namespace…"
+            searchPlaceholder="Search namespaces…"
+            options={[
+              ...(deploy.namespace && !namespaceItems.includes(deploy.namespace)
+                ? [{ value: deploy.namespace, label: deploy.namespace }]
+                : []),
+              ...namespaceItems.map((name) => ({ value: name, label: name })),
+            ]}
+            onChange={(event) =>
+              event.target.value !== deploy.namespace &&
+              set({ namespace: event.target.value, deploymentName: "", containerName: "" })
+            }
+          />
         </Field>
         <Field
           label="Deployment"
-          htmlFor={`${ids}-deployment`}
-          hint="Pick one that exists, or type the name of the one to create."
+          hint="Pick one that exists, or type a new name in the search to create it."
         >
-          <input
+          <SearchableSelect
             id={`${ids}-deployment`}
-            className="is-mono"
-            list={`${ids}-deployments`}
+            aria-label="Deployment"
             value={deploy.deploymentName}
-            placeholder={deploy.namespace ? "payments-api" : "Pick a namespace first"}
             disabled={!editable || !deploy.namespace}
-            spellCheck={false}
-            onChange={(event) => set({ deploymentName: event.target.value.trim().toLowerCase(), containerName: "" })}
+            placeholder={deploy.namespace ? "Pick or name a deployment…" : "Pick a namespace first"}
+            searchPlaceholder="Search, or type a new name…"
+            allowCustom
+            customOptionLabel={(name) => `Create “${name.toLowerCase()}”`}
+            options={(info?.deployments || []).map((item) => ({
+              value: item.name,
+              label: (
+                <span className="pl-deploy-option">
+                  <span>{item.name}</span>
+                  <small>
+                    {item.ready}/{item.desired} ready
+                  </small>
+                </span>
+              ),
+            }))}
+            onChange={(event) => {
+              const name = String(event.target.value || "").trim().toLowerCase();
+              if (name !== deploy.deploymentName) set({ deploymentName: name, containerName: "" });
+            }}
           />
-          <datalist id={`${ids}-deployments`}>
-            {(info?.deployments || []).map((item) => (
-              <option key={item.name} value={item.name} />
-            ))}
-          </datalist>
         </Field>
         {existing && containers.length > 1 ? (
-          <Field label="Container" htmlFor={`${ids}-container`} hint="The one whose image each build replaces.">
-            <select
+          <Field label="Container" hint="The one whose image each build replaces.">
+            <SearchableSelect
               id={`${ids}-container`}
+              aria-label="Container"
               value={deploy.containerName}
               disabled={!editable}
+              placeholder="Pick a container…"
+              searchPlaceholder="Search containers…"
+              options={containers.map((item) => ({
+                value: item.name,
+                label: (
+                  <span className="pl-deploy-option">
+                    <span>{item.name}</span>
+                    <small>{item.image}</small>
+                  </span>
+                ),
+              }))}
               onChange={(event) => set({ containerName: event.target.value })}
-            >
-              <option value="">Pick a container…</option>
-              {containers.map((item) => (
-                <option key={item.name} value={item.name}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
+            />
           </Field>
         ) : (
           !existing && (
@@ -326,19 +342,18 @@ export default function DeployStageFields({ ids, stage, stages, index, editable,
                 {service.enabled && form.port ? (
                   <div className="pl-grid pl-deploy-form">
                     <NumberField id={`${ids}-svc-port`} label="Service port" value={service.port} disabled={!editable} onChange={(port) => setCreate({ service: { ...service, port } })} placeholder="80" />
-                    <Field label="Reachable" htmlFor={`${ids}-svc-type`}>
-                      <select
+                    <Field label="Reachable">
+                      <SearchableSelect
                         id={`${ids}-svc-type`}
+                        aria-label="Reachable"
                         value={service.type || "ClusterIP"}
                         disabled={!editable}
+                        options={SERVICE_TYPES.map((item) => ({
+                          value: item.value,
+                          label: `${item.label} (${item.value})`,
+                        }))}
                         onChange={(event) => setCreate({ service: { ...service, type: event.target.value } })}
-                      >
-                        {SERVICE_TYPES.map((item) => (
-                          <option key={item.value} value={item.value}>
-                            {item.label} ({item.value})
-                          </option>
-                        ))}
-                      </select>
+                      />
                     </Field>
                   </div>
                 ) : null}

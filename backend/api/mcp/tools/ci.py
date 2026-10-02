@@ -230,9 +230,10 @@ def _service_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
     permission="ci_pipelines:view",
     description=(
         "The pipeline a service builds with: every stage in order, with the "
-        "commands it runs, the image, the runner it needs, its artifacts and the "
-        "secrets it references by name. Says whether the pipeline is saved or is "
-        "KubeSight's unsaved default."
+        "commands it runs, the image, the runner it needs, its artifacts, the "
+        "secrets it references by name and the parallelGroup it runs in (stages "
+        "sharing one run at the same time). Says whether the pipeline is saved or "
+        "is KubeSight's unsaved default."
     ),
     schema={
         "type": "object",
@@ -273,6 +274,8 @@ def _pipeline_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
                     for ref in stage.get("secretRefs") or []
                 ],
                 "hostAliases": stage.get("hostAliases"),
+                # A scan stage's commands are generated, so this is what it runs.
+                **({"scan": stage.get("scan")} if stage.get("stageType") == "scan" else {}),
                 "timeoutSeconds": stage.get("timeoutSeconds"),
                 "enabled": stage.get("enabled"),
             }
@@ -310,8 +313,9 @@ def _pipeline_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
 STAGE_FIELDS = {
     "name", "stageType", "runnerType", "runnerLabels", "image", "workingDirectory",
     "commands", "env", "secretRefs", "artifacts", "resources", "hostAliases",
-    "runCondition", "imageScan", "deploy", "timeoutSeconds", "continueOnFailure",
-    "enabled",
+    "runCondition", "imageScan", "codeScan", "deploy", "scan", "timeoutSeconds",
+    "continueOnFailure", "enabled", "approval", "storeUpload",
+    "parallelGroup", "parallelFailFast",
 }
 
 
@@ -416,6 +420,7 @@ def _save_stages(
     name: Optional[str] = None,
     description: Optional[str] = None,
     parameters: Any = None,
+    post_actions: Any = None,
 ) -> Dict[str, Any]:
     """Persist a stage list through the same path the editor screen posts to."""
     from ...services.ci import pipelines
@@ -432,6 +437,10 @@ def _save_stages(
     }
     if description is not None:
         payload["description"] = description
+    # Only when asked: absent keeps the saved post actions (notifications and
+    # cleanup when a build ends), as every stage edit should.
+    if post_actions is not None:
+        payload["postActions"] = post_actions
 
     try:
         if row is None:
@@ -507,33 +516,78 @@ _STAGE_SCHEMA = {
     "type": "object",
     "description": (
         "A stage. name is required; stageType is checkout, command, "
-        "container_image or deploy (default command); a command stage needs commands. "
+        "container_image, scan or deploy (default command); a command stage needs commands. "
         "Other fields: image, runnerType, runnerLabels, workingDirectory, env, "
         "secretRefs [{name, envVar}], artifacts [{path, type, name}], "
         "hostAliases, runCondition, resources, timeoutSeconds, "
-        "continueOnFailure, enabled. Stages always run one after another, in "
-        "order. On a container_image stage, "
+        "continueOnFailure, enabled. Stages run in order, except that consecutive "
+        "command, scan or container_image stages sharing a parallelGroup name (2-8 "
+        "of them, at least two enabled; never a checkout or a server stage) run at "
+        "the same time in one shared workspace, and the pipeline continues once all "
+        "of them are done. A failed member does not stop its siblings; the group "
+        "then fails (unless the member continues on failure) and later stages are "
+        "skipped. parallelFailFast=true on the group stops the running siblings at "
+        "the first failure instead. On a Kubernetes cluster older than 1.29 a group "
+        "runs one stage at a time with the same rules. On a container_image stage, "
         "imageScan {enabled, scanner: trivy, threshold: critical|high|medium|low, "
         "onFail: block|warn, ignoreUnfixed} gates the push on a vulnerability "
         "scan of the image the stage just built — enabled=true means a "
         "finding at or above threshold stops the image reaching the registry. "
+        "On a command stage that runs semgrep, codeScan {enabled, tool: semgrep, "
+        "maxBlocking, countFrom: info|warning|error, recipients} is a quality "
+        "gate: the stage fails when Semgrep reports more than maxBlocking "
+        "blocking findings, and a PDF report of them can be downloaded or "
+        "emailed from the build (recipients only pre-fill that dialog). "
+        "A scan stage runs one scanner with a script and image KubeSight generates "
+        "(no commands, image or artifacts on it; Kubernetes runner only) and needs "
+        "scan {tool: trivy_fs|semgrep|dependency_check|syft, ...}: trivy_fs takes "
+        "scanners [vuln, secret, misconfig], threshold, onFail: block|warn, "
+        "ignoreUnfixed, skipDirs; semgrep takes rules (empty = the packs for the "
+        "service's application type) and is gated by codeScan as above; "
+        "dependency_check takes failOnCvss (0-10), onFail, nvdApiKeySecret (a "
+        "secret name), nvdDatafeedUrl; syft takes format: cyclonedx-json|spdx-json "
+        "and describes the source tree. Its report (or SBOM) is kept on the build "
+        "as an artifact even when the scan fails it. "
         "A deploy stage runs on the KubeSight server after every other stage "
         "(deploy stages must be last) and needs deploy {clusterId, namespace, "
         "deploymentName, containerName?, image? (empty = the image this build "
         "pushed), createIfMissing, manifest (Deployment + optional Service YAML, "
         "used only when the deployment does not exist)}. Saving a deploy target "
         "requires apps:deploy on that namespace: builds then deploy with the "
-        "rights of whoever saved it, through the cluster's approval rule."
+        "rights of whoever saved it, through the cluster's approval rule. "
+        "An approval stage (also server-side and last, usually before a deploy) "
+        "holds the build until approval {users: [user ids], anyoneWithPermission "
+        "(holders of ci_builds:approve), minApprovals, allowSelfApproval, notify, "
+        "instructions} is met; its timeoutSeconds is how long it waits before "
+        "failing. A store_upload stage publishes one of the build's APK/AAB/IPA "
+        "artifacts through Mobile Apps: storeUpload {appId (default: the app "
+        "linked to the service), store: google_play|app_store, target (track, "
+        "default internal; or testflight), artifactType aab|apk|ipa, "
+        "artifactPattern?}. Saving a store target requires an administrator."
     ),
     "properties": {
         "name": {"type": "string"},
         "stageType": {
             "type": "string",
-            "enum": ["checkout", "command", "container_image", "deploy"],
+            "enum": [
+                "checkout", "command", "container_image", "scan", "deploy",
+                "approval", "store_upload",
+            ],
         },
         "image": {"type": "string"},
         "commands": {"type": "array", "items": {"type": "string"}},
         "runnerLabels": {"type": "array", "items": {"type": "string"}},
+        "parallelGroup": {
+            "type": "string",
+            "description": (
+                "Run this stage at the same time as the consecutive stages sharing "
+                "this name. Empty or absent: it runs on its own."
+            ),
+        },
+        "parallelFailFast": {
+            "type": "boolean",
+            "description": "On a parallel group: stop the other members when one fails.",
+        },
         "env": {"type": "object"},
         "imageScan": {
             "type": "object",
@@ -552,6 +606,47 @@ _STAGE_SCHEMA = {
                 "ignoreUnfixed": {"type": "boolean"},
             },
         },
+        "codeScan": {
+            "type": "object",
+            "description": (
+                "command stages, and Semgrep scan stages. Fails the stage when its semgrep scan "
+                "finds more than maxBlocking blocking findings (0 = any finding "
+                "fails). The stage's own semgrep command needs no change."
+            ),
+            "properties": {
+                "enabled": {"type": "boolean"},
+                "tool": {"type": "string", "enum": ["semgrep"]},
+                "maxBlocking": {"type": "integer", "minimum": 0},
+                "countFrom": {"type": "string", "enum": ["info", "warning", "error"]},
+                "recipients": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "scan": {
+            "type": "object",
+            "description": (
+                "scan stages only. The scanner KubeSight runs, and its gate. Saving a "
+                "scan stage without a tool is refused."
+            ),
+            "properties": {
+                "tool": {
+                    "type": "string",
+                    "enum": ["trivy_fs", "semgrep", "dependency_check", "syft"],
+                },
+                "scanners": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["vuln", "secret", "misconfig"]},
+                },
+                "threshold": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                "onFail": {"type": "string", "enum": ["block", "warn"]},
+                "ignoreUnfixed": {"type": "boolean"},
+                "skipDirs": {"type": "array", "items": {"type": "string"}},
+                "rules": {"type": "array", "items": {"type": "string"}},
+                "failOnCvss": {"type": "number", "minimum": 0, "maximum": 10},
+                "nvdApiKeySecret": {"type": "string"},
+                "nvdDatafeedUrl": {"type": "string"},
+                "format": {"type": "string", "enum": ["cyclonedx-json", "spdx-json"]},
+            },
+        },
         "deploy": {
             "type": "object",
             "description": (
@@ -568,6 +663,38 @@ _STAGE_SCHEMA = {
                 "image": {"type": "string"},
                 "createIfMissing": {"type": "boolean"},
                 "manifest": {"type": "string"},
+            },
+        },
+        "approval": {
+            "type": "object",
+            "description": (
+                "approval stages only. Who may approve and how many must. The person "
+                "who started the build cannot approve it unless allowSelfApproval."
+            ),
+            "properties": {
+                "instructions": {"type": "string"},
+                "users": {"type": "array", "items": {"type": "integer"}},
+                "anyoneWithPermission": {"type": "boolean"},
+                "minApprovals": {"type": "integer", "minimum": 1, "maximum": 10},
+                "allowSelfApproval": {"type": "boolean"},
+                "notify": {"type": "boolean"},
+            },
+        },
+        "storeUpload": {
+            "type": "object",
+            "description": (
+                "store_upload stages only. Which registered mobile app, store and "
+                "target the build's binary is published to."
+            ),
+            "properties": {
+                "appId": {"type": "integer"},
+                "store": {"type": "string", "enum": ["google_play", "app_store"]},
+                "target": {
+                    "type": "string",
+                    "enum": ["internal", "alpha", "beta", "production", "testflight", "review"],
+                },
+                "artifactType": {"type": "string", "enum": ["aab", "apk", "ipa"]},
+                "artifactPattern": {"type": "string"},
             },
         },
         "enabled": {"type": "boolean"},
@@ -739,6 +866,17 @@ def _pipeline_stage_remove(arguments: Dict[str, Any], *, user=None) -> Dict[str,
                 "type": "array",
                 "description": "Build inputs. Omit to keep the current ones.",
             },
+            "postActions": {
+                "type": "array",
+                "description": (
+                    "What happens when a build ends. Omit to keep the current ones. Each is "
+                    "{type: email|webhook|commands, when: always|success|failure|fixed} plus: "
+                    "email {recipients[], subject?, message?}; webhook {format: slack|teams|json, "
+                    "urlSecret: a CI secret NAME holding the URL}; commands {commands[], name?, "
+                    "image?, secretRefs?, timeoutSeconds?} (cleanup in the workspace after the "
+                    "runner stages; never 'fixed'; never changes the build's result)."
+                ),
+            },
         },
         "required": ["service", "stages"],
     },
@@ -760,6 +898,7 @@ def _pipeline_save(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         name=str(arguments.get("name") or "") or None,
         description=arguments.get("description"),
         parameters=arguments.get("parameters"),
+        post_actions=arguments.get("postActions"),
     )
     return _saved_summary(
         target, saved, f"replaced the pipeline with {len(checked)} stages"
@@ -1533,8 +1672,8 @@ def _build_logs(arguments: Dict[str, Any]) -> Dict[str, Any]:
     "kubesight_build_failure",
     permission="ci_builds:view",
     description=(
-        "Why a build failed, in one call: the stage that failed and the tail of "
-        "its log. Name a buildId, or name a service to get its most recent "
+        "Why a build failed, in one call: the stage that failed, the tail of "
+        "its log, and the tests that failed when the build kept test reports. Name a buildId, or name a service to get its most recent "
         "failed build. This is the tool for 'why did the build break' and 'why "
         "did my pull request get blocked' - kubesight_build_logs is for reading "
         "a specific stage you already have the id of."
@@ -1569,7 +1708,7 @@ def _build_failure(arguments: Dict[str, Any]) -> Dict[str, Any]:
     at the end; handing a model the whole thing buries the answer it came for.
     ``kubesight_build_logs`` is still there when the tail is not enough.
     """
-    from ...services.ci import logs
+    from ...services.ci import logs, test_summary
 
     build = None
     if arguments.get("buildId") is not None:
@@ -1652,6 +1791,10 @@ def _build_failure(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "skipped": [
             stage.name for stage in stages if stage.status == "skipped"
         ],
+        # The failing tests by name and assertion, when the build kept JUnit
+        # reports. A red test stage's log tail is usually the test runner's
+        # summary line; this is the part of it worth reading. None: no reports.
+        "tests": test_summary.failure_brief(build),
     }
 
 

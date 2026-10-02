@@ -17,13 +17,22 @@ const TASK_PILL = {
 
 const EVENT_LABEL = {
   run_finished: "Run finished",
+  runs_finished: "All runs finished",
   approval_rejected: "Approval rejected",
   approval_expired: "Approval expired",
 };
 
+// A troubleshooting answer reads as an answer, not as a change that was done.
+const ANSWERED_PILL = {
+  on_hold: ["info", "Answered · waiting on requester"],
+  done: ["ok", "Answered"],
+};
+
 export function AgentTaskPill({ task }) {
   if (!task) return <span className="muted">—</span>;
-  const [tone, label] = TASK_PILL[task.status] || ["muted", task.status];
+  const [tone, label] =
+    (task.route === "answered" && ANSWERED_PILL[task.status]) ||
+    TASK_PILL[task.status] || ["muted", task.status];
   return (
     <span className={`status-pill ${tone}`} title={task.understanding || task.error || ""}>
       {label}
@@ -31,23 +40,35 @@ export function AgentTaskPill({ task }) {
   );
 }
 
-function describe(task) {
-  const where = task.deploymentName ? `${task.deploymentName} in ${task.namespace}` : null;
+function describeOne(c) {
+  const where = c.deploymentName ? `${c.deploymentName} in ${c.namespace}` : null;
   if (!where) return null;
-  if (task.changeType === "env_var") return `set ${task.variableName}=${task.variableValue} on ${where}`;
-  if (task.changeType === "restart") return `restart ${where}`;
-  if (task.changeType === "image") return `deploy ${task.deploymentName} ${task.tag} to ${task.namespace}`;
+  if (c.changeType === "env_var") return `set ${c.variable}=${c.value} on ${where}`;
+  if (c.changeType === "restart") return `restart ${where}`;
+  if (c.changeType === "image") return `deploy ${c.deploymentName} ${c.tag} to ${c.namespace}`;
   return null;
 }
 
+// Tasks from before `changes` existed carry the one change in their columns.
+const changesOf = (task) =>
+  task.changes?.length
+    ? task.changes
+    : [{ ...task, variable: task.variableName, value: task.variableValue }];
+
 export default function AgentTaskCard({ task, canManage, deciding, onApprove, onReject }) {
-  const change = describe(task);
+  const changes = changesOf(task).filter((c) => describeOne(c));
+  const several = changes.length > 1;
+  const change = changes.length === 1 ? describeOne(changes[0]) : null;
+  const finishedRuns = task.event?.type === "runs_finished" ? task.event.runs || [] : [];
   const replied = task.event?.type === "requester_replied";
+  const trouble = task.troubleshooting || null;
   const title =
     task.kind === "followup"
       ? `Follow-up · ${EVENT_LABEL[task.event?.type] || "event"}`
       : replied
       ? "Requester replied — Hermes continued"
+      : trouble
+      ? "Hermes investigated the problem"
       : "Hermes read the ticket";
   return (
     <div className="sg-zh-run sg-zh-agent">
@@ -55,6 +76,7 @@ export default function AgentTaskCard({ task, canManage, deciding, onApprove, on
         <b>{title}</b>
         {task.confidence ? <span className="sg-tag">confidence {task.confidence}</span> : null}
         {change ? <span className="sg-tag mono">{change}</span> : null}
+        {several ? <span className="sg-tag">{changes.length} applications</span> : null}
         <span className="sg-zh-run-spacer" />
         <span className="sg-zh-htime">
           {task.createdAt ? new Date(task.createdAt).toLocaleString() : ""}
@@ -69,10 +91,62 @@ export default function AgentTaskCard({ task, canManage, deciding, onApprove, on
             </p>
           ))
         : null}
-      {task.understanding ? (
+      {trouble ? (
+        <div className="sg-zh-diag" aria-label="Hermes' diagnosis">
+          <p className="sg-zh-agent-line">
+            <span className="muted">Diagnosis:</span> {trouble.diagnosis}
+          </p>
+          {trouble.findings?.length ? (
+            <ul className="sg-zh-diag-findings" aria-label="Evidence">
+              {trouble.findings.map((f, index) => (
+                <li key={`${f.finding}-${index}`}>
+                  <span>{f.finding}</span>
+                  {f.evidence ? <span className="sg-zh-diag-evidence mono">{f.evidence}</span> : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {trouble.checked?.length ? (
+            <p className="sg-zh-fhint">
+              <span className="muted">Checked and healthy:</span> {trouble.checked.join(" · ")}
+            </p>
+          ) : null}
+          <p className="sg-zh-agent-line sg-zh-diag-rec">
+            <span className="muted">Recommendation:</span> {trouble.recommendation}
+          </p>
+          {task.status === "awaiting_approval" && change ? (
+            <p className="sg-zh-fhint">Hermes proposes this fix; it runs only if approved.</p>
+          ) : null}
+        </div>
+      ) : task.understanding ? (
         <p className="sg-zh-agent-line">
           <span className="muted">Understood:</span> {task.understanding}
         </p>
+      ) : null}
+      {several ? (
+        <ul className="sg-zh-agent-changes" aria-label="What Hermes is changing">
+          {changes.map((c, index) => (
+            <li key={`${c.namespace}/${c.deploymentName}/${index}`}>
+              <span className="sg-tag mono">{describeOne(c)}</span>
+              {c.runId ? <span className="sg-zh-run-ref">run #{c.runId}</span> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {finishedRuns.length ? (
+        <ul className="sg-zh-agent-changes" aria-label="How each run ended">
+          {finishedRuns.map((r) => (
+            <li key={r.runId}>
+              <span className={`status-pill ${r.result === "deployed" ? "ok" : r.result === "failed" ? "danger" : "muted"}`}>
+                {r.result}
+              </span>
+              <span className="mono">
+                {r.deployment} ({r.namespace})
+              </span>
+              <span className="sg-zh-run-ref">run #{r.runId}</span>
+            </li>
+          ))}
+        </ul>
       ) : null}
       {task.comment ? (
         <blockquote className="sg-zh-agent-quote" title="Hermes' comment on the ticket">

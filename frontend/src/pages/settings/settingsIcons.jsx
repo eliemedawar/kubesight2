@@ -88,6 +88,11 @@ export const ICONS = {
       <path d="M15 3a3 3 0 00-2.83 4h-.34A3.83 3.83 0 008 10.83V13h2v-2.17c0-1.01.82-1.83 1.83-1.83h.34A3 3 0 1015 3zm0 2a1 1 0 110 2 1 1 0 010-2z" />
     </svg>
   ),
+  mcp: (
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
+    </svg>
+  ),
   external: (
     <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z" />

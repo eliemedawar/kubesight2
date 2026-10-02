@@ -3,6 +3,7 @@ import { getCiStageMatrix } from "../../api/ciApi.js";
 import { parseApiTime } from "../../lib/apiTime.js";
 import EmptyState from "../common/EmptyState.jsx";
 import LoadingState from "../common/LoadingState.jsx";
+import { TestBadge } from "./TestResultsPanel.jsx";
 import {
   CheckIcon,
   ClockIcon,
@@ -205,6 +206,19 @@ export default function StageMatrix({
     [columns]
   );
 
+  // Consecutive columns of one parallel group share a band above the header.
+  const columnBands = useMemo(() => {
+    const bands = [];
+    columns.forEach((column, index) => {
+      const group = column.parallelGroup || null;
+      const last = bands[bands.length - 1];
+      if (last && last.group && group && last.group === group) last.span += 1;
+      else if (last && !last.group && !group) last.span += 1;
+      else bands.push({ group, span: 1, start: index });
+    });
+    return bands;
+  }, [columns]);
+
   const elapsed = (cell) => {
     if (cell.durationSeconds != null) return cell.durationSeconds;
     if (cell.status !== "running" || !cell.startedAt) return null;
@@ -311,6 +325,25 @@ export default function StageMatrix({
             duration. Use the arrow keys to move between cells.
           </caption>
           <thead>
+            {/* Parallel groups: one band over the columns of stages that ran
+                at the same time. Columns stay one per stage. */}
+            {columnBands.some((band) => band.group) && (
+              <tr className="sg-mx-bands">
+                <th className="sg-mx-gut" aria-hidden="true" />
+                {columnBands.map((band) =>
+                  band.group ? (
+                    <th key={`band-${band.start}`} colSpan={band.span} scope="colgroup" className="sg-mx-band">
+                      <span title={`${band.group}: these stages run at the same time`}>
+                        <span aria-hidden="true">∥ </span>
+                        {band.group}
+                      </span>
+                    </th>
+                  ) : (
+                    <th key={`band-${band.start}`} colSpan={band.span} aria-hidden="true" />
+                  )
+                )}
+              </tr>
+            )}
             <tr>
               <th className="sg-mx-gut" scope="col">
                 <span className="sg-mx-hdr-label">Build</span>
@@ -319,7 +352,7 @@ export default function StageMatrix({
                 <th
                   key={column.key}
                   scope="col"
-                  className="sg-mx-col"
+                  className={`sg-mx-col${column.parallelGroup ? " is-grouped" : ""}`}
                 >
                   <span className="sg-mx-col-name" title={`${column.name} · ${column.stageType}`}>
                     {column.name}
@@ -376,12 +409,15 @@ export default function StageMatrix({
                     )}
                     <code>{shortSha(row.commitSha)}</code>
                     <span>{formatRelative(row.finishedAt || row.startedAt || row.queuedAt)}</span>
+                    {row.testSummary && <TestBadge summary={row.testSummary} className="is-compact" />}
                     <span>
                       {row.automation
                         ? `automation${
                             row.automation.ticketNumber ? ` · ${row.automation.ticketNumber}` : ""
                           }`
-                        : row.requestedBy || "manual"}
+                        : row.triggerType === "schedule"
+                          ? `schedule · ${row.schedule?.name || "?"}`
+                          : row.requestedBy || "manual"}
                     </span>
                   </span>
                 </th>

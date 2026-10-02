@@ -48,9 +48,13 @@ CRITICALITIES = ("low", "medium", "high", "critical")
 
 # Stage kinds a stored pipeline may carry. ``checkout`` and ``command`` run on
 # every runner; ``container_image`` on the Kubernetes runner with BuildKit;
-# ``deploy`` on no runner at all — KubeSight itself rolls the image out, through
+# ``scan`` on the Kubernetes runner, with a script KubeSight generates around
+# one scanner (see services/ci/scan_stage.py); ``deploy`` on no runner at all — KubeSight itself rolls the image out, through
 # the same approval gate and registry check as any other deploy (see
-# services/ci/deploy_stage.py).
+# services/ci/deploy_stage.py). ``approval`` (a person must say yes — see
+# services/ci/approval_stage.py) and ``store_upload`` (an APK/AAB/IPA of the
+# build goes to Google Play or TestFlight — see services/ci/store_upload_stage.py)
+# also run on no runner.
 STAGE_TYPES = (
     "checkout",
     "command",
@@ -58,15 +62,20 @@ STAGE_TYPES = (
     "deploy",
     "publish_artifact",
     "scan",
+    "approval",
+    "store_upload",
 )
 # Stages the KubeSight server executes itself instead of handing to a runner.
 # They come after every runner stage (enforced on save), so a whole-build runner
-# has finished — and uploaded the image it pushed — before one starts.
-SERVER_STAGE_TYPES = ("deploy",)
+# has finished — and uploaded the image and files it produced — before one
+# starts. See services/ci/server_stages.py for which module runs each.
+SERVER_STAGE_TYPES = ("deploy", "approval", "store_upload")
 # Recognised so pipelines stored before they were retired still load (and are
 # still skipped, with a reason, by the engine), but refused on every NEW save:
 # no runner ever executed them, so offering them promised work that never ran.
-RETIRED_STAGE_TYPES = ("publish_artifact", "scan")
+# ``scan`` left this list when it gained an executor; a scan stage saved while
+# it was retired carries no scanner, and the engine still skips that one.
+RETIRED_STAGE_TYPES = ("publish_artifact",)
 # What a pipeline can be given today.
 SAVEABLE_STAGE_TYPES = tuple(t for t in STAGE_TYPES if t not in RETIRED_STAGE_TYPES)
 
@@ -112,7 +121,9 @@ STAGE_STATUSES = (
     "timeout",
 )
 
-TRIGGER_TYPES = ("manual", "retry", "api", "webhook", "automation")
+# ``schedule`` is a build a CiSchedule (models_ci_schedules) queued; the
+# snapshot's "schedule" entry names which one.
+TRIGGER_TYPES = ("manual", "retry", "api", "webhook", "automation", "schedule")
 
 ARTIFACT_TYPES = (
     "container-image",
@@ -347,6 +358,12 @@ class CiPipeline(db.Model):
     # see services/ci/pipelines._parameters. Accepted values travel as the
     # build's `variables`, which every stage already receives as environment.
     parameters = db.Column(db.JSON, nullable=False, default=list)
+    # What happens when a build of this pipeline ends — Jenkins' ``post {}``.
+    # A list of {type: email|webhook|commands, when: always|success|failure|
+    # fixed, ...that type's fields}; see services/ci/post_actions.py. NULL on
+    # every pipeline saved before post actions existed, which reads as none.
+    # Copied into each build's snapshot like the stages.
+    post_actions = db.Column(db.JSON, nullable=True)
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
     updated_at = db.Column(
@@ -429,14 +446,48 @@ class CiPipelineStage(db.Model):
     # it is whoever last saved this target, and builds deploy with their rights.
     deploy = db.Column(db.JSON, nullable=True)
 
+    # WHETHER ITS SCAN FINDINGS FAIL IT. command stages only; NULL everywhere
+    # else and on every stage saved before the gate existed, which means the
+    # stage passes or fails on its commands' exit code exactly as before.
+    # ``{"enabled": true, "tool": "semgrep", "maxBlocking": 5,
+    #    "countFrom": "info"|"warning"|"error", "recipients": ["a@b.com"]}``
+    # — see services/ci/code_scan.py. ``recipients`` only pre-fills the "Send
+    # report" dialog; nothing is emailed without somebody pressing Send.
+    code_scan = db.Column(db.JSON, nullable=True)
+
+    # WHICH SCANNER IT RUNS. scan stages only; NULL everywhere else, and on a
+    # scan stage saved before scan stages had an executor (which the engine
+    # skips, saying why). ``{"tool": "trivy_fs"|"semgrep"|"dependency_check"|
+    # "syft", ...that tool's options}`` — see services/ci/scan_stage.py. A
+    # Semgrep scan stage's gate is ``code_scan`` above, not a field here.
+    scan = db.Column(db.JSON, nullable=True)
+
+    # WHO MUST SAY YES. approval stages only; NULL everywhere else.
+    # ``{"instructions", "users": [{"id", "username"}], "anyoneWithPermission",
+    #    "minApprovals", "allowSelfApproval", "notify"}`` — see
+    # services/ci/approval_config.py.
+    approval = db.Column(db.JSON, nullable=True)
+
+    # WHERE THE APP GOES. store_upload stages only; NULL everywhere else.
+    # ``{"appId", "store", "target", "artifactType", "artifactPattern",
+    #    "authorizedBy": {"userId", "username", "at"}}`` — see
+    # services/ci/store_upload_config.py. ``authorizedBy`` is server-written,
+    # like a Deploy stage's: builds publish with that person's rights.
+    store_upload = db.Column(db.JSON, nullable=True)
+
     # HOW it behaves.
     timeout_seconds = db.Column(db.Integer, nullable=False, default=1800)
     continue_on_failure = db.Column(db.Boolean, nullable=False, default=False)
-    # Reserved for parallel execution. Written and serialized, never read by the
-    # sequential executor, so enabling parallelism later needs no migration.
-    # Never executed — stages always run in order. No longer written (every
-    # save stores None); the column stays so existing databases need no drop.
+    # WHAT IT RUNS ALONGSIDE. Consecutive stages sharing one non-empty name run
+    # at the same time, and the pipeline moves on once every one of them is
+    # done (see services/ci/parallel_groups.py for the rules and the engine for
+    # the failure semantics). NULL is an ordinary stage that runs on its own,
+    # which is every stage saved before groups ran.
     parallel_group = db.Column(db.String(64), nullable=True)
+    # The group stops its other members the moment one fails. Stored on every
+    # member (the save keeps them in agreement); NULL/False is the Jenkins
+    # ``parallel`` default — siblings run to completion.
+    parallel_fail_fast = db.Column(db.Boolean, nullable=True, default=False)
     enabled = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
 
@@ -505,6 +556,11 @@ class CiBuild(db.Model):
     error = db.Column(db.Text, nullable=True)
     # sha256 of the token an in-cluster job presents on its callbacks (Phase 3).
     worker_callback_token_hash = db.Column(db.String(64), nullable=True)
+    # Test results and coverage folded from the test-report / coverage-report
+    # artifacts this build kept — see services/ci/test_reports.py. On the build,
+    # not only on the artifacts, because artifacts expire after a day and the
+    # trend across builds must not expire with them. NULL: nothing collected.
+    test_summary = db.Column(db.JSON, nullable=True)
 
     queued_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
     started_at = db.Column(db.DateTime(timezone=True), nullable=True)
@@ -516,11 +572,25 @@ class CiBuild(db.Model):
     pipeline = db.relationship("CiPipeline", foreign_keys=[pipeline_id])
     requested_by = db.relationship("User", foreign_keys=[requested_by_user_id])
     runner = db.relationship("CiRunner", foreign_keys=[runner_id])
+    # The pipeline's stages. Post-action rows (stage_type "post", see
+    # services/ci/post_actions.py) live in the same table — so their logs,
+    # agent tasks and log viewer are a stage's — but are NOT stages of the
+    # build: they never decide its result, never count toward its progress and
+    # must not be seen by anything that walks the stage list. Hence the filter
+    # here, and their own collection below.
     stages = db.relationship(
         "CiBuildStage",
+        primaryjoin="and_(CiBuild.id == CiBuildStage.build_id, CiBuildStage.stage_type != 'post')",
         back_populates="build",
         cascade="all, delete-orphan",
         order_by="CiBuildStage.position",
+    )
+    post_stages = db.relationship(
+        "CiBuildStage",
+        primaryjoin="and_(CiBuild.id == CiBuildStage.build_id, CiBuildStage.stage_type == 'post')",
+        cascade="all, delete-orphan",
+        order_by="CiBuildStage.position",
+        overlaps="stages,build",
     )
     artifacts = db.relationship(
         "CiArtifact",
@@ -575,9 +645,17 @@ class CiBuildStage(db.Model):
     # out and the one it replaced, the change bundle it waits on. Persisted so a
     # backend restart resumes a rollout watch instead of forgetting it.
     deploy_state = db.Column(db.JSON, nullable=True)
+    # The progress of every OTHER server-side stage (approval, store_upload):
+    # who approved, the publish it is watching. A separate column rather than
+    # reusing deploy_state, because deploy automation and the bundle executor
+    # read deploy_state as "a Deploy stage's target" — a second meaning in the
+    # same column is how one of them would one day misread an approval.
+    # Post-action rows (stage_type "post") keep their kind, trigger and
+    # delivery attempts here too — see services/ci/post_actions.py.
+    server_state = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
 
-    build = db.relationship("CiBuild", back_populates="stages")
+    build = db.relationship("CiBuild", back_populates="stages", overlaps="post_stages")
     runner = db.relationship("CiRunner", foreign_keys=[runner_id])
 
 

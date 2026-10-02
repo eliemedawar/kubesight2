@@ -317,7 +317,7 @@ def test_a_compound_when_keeps_one_condition_and_says_what_it_dropped():
     assert any("cannot express" in message for message in _messages(draft))
 
 
-def test_parallel_branches_become_consecutive_stages_without_a_group_tag():
+def test_parallel_branches_become_a_parallel_group():
     draft = jenkinsfile.parse(
         """
         pipeline {
@@ -335,10 +335,49 @@ def test_parallel_branches_become_consecutive_stages_without_a_group_tag():
     )
     names = [stage["name"] for stage in draft["stages"]]
     assert names == ["Checkout", "Backend", "Frontend"]
-    # Stages always run in order, so no field may promise otherwise.
-    assert "parallelGroup" not in _stage(draft, "Backend")
-    assert "parallelGroup" not in _stage(draft, "Frontend")
-    assert any("in parallel" in message for message in _messages(draft, jenkinsfile.INFO))
+    # Consecutive stages sharing a group run side by side — what the
+    # Jenkinsfile asked for — and the checkout stays ahead of them.
+    assert _stage(draft, "Backend")["parallelGroup"] == "Test"
+    assert _stage(draft, "Frontend")["parallelGroup"] == "Test"
+    assert not _stage(draft, "Backend")["parallelFailFast"]
+    assert "parallelGroup" not in _stage(draft, "Checkout")
+    assert any("parallel group 'Test'" in message for message in _messages(draft, jenkinsfile.INFO))
+
+
+def test_fail_fast_parallel_branches_keep_fail_fast():
+    draft = jenkinsfile.parse(
+        """
+        pipeline {
+            agent any
+            stages {
+                stage('Checks') {
+                    failFast true
+                    parallel {
+                        stage('Lint') { steps { sh 'npm run lint' } }
+                        stage('Unit') { steps { sh 'npm test' } }
+                    }
+                }
+            }
+        }
+        """
+    )
+    assert _stage(draft, "Lint")["parallelFailFast"] is True
+    assert _stage(draft, "Unit")["parallelFailFast"] is True
+
+
+def test_a_single_parallel_branch_stays_an_ordinary_stage():
+    draft = jenkinsfile.parse(
+        """
+        pipeline {
+            agent any
+            stages {
+                stage('Test') { parallel { stage('Only') { steps { sh 'make test' } } } }
+            }
+        }
+        """
+    )
+    assert "parallelGroup" not in _stage(draft, "Only")
+    assert any("at least two stages" in message for message in _messages(draft, jenkinsfile.INFO))
 
 
 def test_duplicate_branch_names_are_made_unique_because_stage_names_must_be():

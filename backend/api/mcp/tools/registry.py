@@ -72,6 +72,7 @@ def tool(
     write: bool = False,
     destructive: bool = False,
     approval: str = "",
+    cluster_scoped: Optional[bool] = None,
 ) -> Callable:
     """Register one tool, the permission it answers under, and what it does.
 
@@ -80,12 +81,23 @@ def tool(
     documentation for the agent, not enforcement: enforcement lives in the
     service the tool calls, which is the same service the UI calls, so a gate
     cannot be sidestepped by coming in through here.
+
+    ``cluster_scoped`` says the tool reads or acts on a cluster, so the
+    per-cluster rules in Settings → MCP tools apply to it. Left unset it is
+    inferred from a ``cluster`` argument; a tool that reaches its cluster some
+    other way (an inventory id, a ticket's deploy target) declares it.
     """
 
     def decorate(func: Callable) -> Callable:
         if domain not in DOMAINS:
             raise ValueError(f"'{name}' declares unknown domain '{domain}'.")
+        scoped = (
+            cluster_scoped
+            if cluster_scoped is not None
+            else "cluster" in ((schema or {}).get("properties") or {})
+        )
         _REGISTRY[name] = {
+            "cluster_scoped": bool(scoped),
             "permission": permission,
             "description": description,
             "schema": schema or {"type": "object", "properties": {}},
@@ -141,6 +153,11 @@ def definitions(user: Any = None) -> List[Dict[str, Any]]:
     return out
 
 
+def is_cluster_scoped(name: str) -> bool:
+    entry = _REGISTRY.get(name)
+    return bool(entry and entry["cluster_scoped"])
+
+
 def domain_of(name: str) -> str:
     entry = _REGISTRY.get(name)
     return entry["domain"] if entry else ""
@@ -154,6 +171,27 @@ def is_write(name: str) -> bool:
 
 def known_names() -> List[str]:
     return sorted(_REGISTRY)
+
+
+def catalog() -> List[Dict[str, Any]]:
+    """Every registered tool and the facts about it, for the settings screen.
+
+    Unfiltered by user on purpose: an administrator switching tools on and off
+    is deciding for every token, so they need to see the whole surface.
+    """
+    return [
+        {
+            "name": name,
+            "domain": entry["domain"],
+            "permission": entry["permission"],
+            "description": entry["description"],
+            "write": entry["write"],
+            "destructive": entry["destructive"],
+            "approval": entry["approval"],
+            "clusterScoped": entry["cluster_scoped"],
+        }
+        for name, entry in sorted(_REGISTRY.items())
+    ]
 
 
 # Keys whose list length is worth saying out loud in the one-line summary. Order

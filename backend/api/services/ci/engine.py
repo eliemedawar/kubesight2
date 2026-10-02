@@ -23,6 +23,15 @@ The Flask process orchestrates; it never executes a build command itself. The
 one kind of stage it carries out is a Deploy stage — not a build command but a
 KubeSight deploy, through the same approval gate and registry check as any other
 (see ``deploy_stage.py``). Those come last, after the runner is done.
+
+Stages advance in STEPS. A step is one stage, or a parallel group: consecutive
+stages sharing a ``parallelGroup`` (see ``parallel_groups.py``). A group's
+members start together, are polled together, and the build moves on only once
+every one of them is terminal. Failure follows Jenkins' ``parallel``: siblings
+of a failed member run to completion and the group fails afterwards, unless the
+group is fail-fast, which stops them. Where the runner cannot run members side
+by side the group runs one member at a time with the same failure semantics, and
+the build records why (``pipeline_snapshot["parallel"]``).
 """
 
 from __future__ import annotations
@@ -39,16 +48,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ...audit import log_audit
 from ...db import db
-from ...models_ci import SERVER_STAGE_TYPES, CiBuild, CiBuildStage, CiService
+from ...models_ci import SERVER_STAGE_TYPES, TRIGGER_TYPES, CiBuild, CiBuildStage, CiService
 from . import agents as agents_service
 from . import artifacts as artifacts_service
+from . import build_inputs
 from . import build_status as build_status_service
+from . import code_scan
 from . import deploy_stage
 from . import logs as logs_service
+from . import parallel_groups
 from . import pipelines as pipelines_service
+from . import post_actions
 from . import queue as queue_service
 from . import resources as ci_resources
+from . import scan_stage
 from . import scheduler as scheduler_service
+from . import server_stages
 from . import secrets as secrets_service
 from . import source as source_port
 from .runners import (
@@ -107,7 +122,22 @@ _DEFAULT_SUPPORTED_STAGE_TYPES = frozenset({"checkout", "command"})
 # Stage types no runner executes. They are no longer accepted on save (see
 # pipelines.RETIRED_STAGE_TYPES), but snapshots and pipelines stored before that
 # still carry them, and they must keep loading — and keep being skipped.
-_NEVER_EXECUTED_STAGE_TYPES = frozenset({"publish_artifact", "scan"})
+_NEVER_EXECUTED_STAGE_TYPES = frozenset({"publish_artifact"})
+
+# A scan stage saved while the kind was retired names no scanner. It still
+# loads, and is skipped with this — never run with a guessed tool.
+_UNCONFIGURED_SCAN_REASON = (
+    "This scan stage was saved before scan stages could run, so it names no scanner. "
+    "Open it in the pipeline editor, choose Trivy, Semgrep, Dependency-Check or Syft, "
+    "and save — or remove it."
+)
+
+
+def _never_executed(definition: Dict[str, Any]) -> bool:
+    stage_type = definition.get("stageType") or "command"
+    if stage_type in _NEVER_EXECUTED_STAGE_TYPES:
+        return True
+    return stage_type == "scan" and not scan_stage.configured(definition.get("scan"))
 
 _STAGE_TYPE_PENDING_REASON = {
     "container_image": "Container image builds arrive with BuildKit.",
@@ -116,8 +146,8 @@ _STAGE_TYPE_PENDING_REASON = {
         "artifacts on the stage that produces them, and remove this stage."
     ),
     "scan": (
-        "Scan stages have no executor. Use the image scan gate on the container "
-        "image stage, or run the scanner in a command stage, and remove this stage."
+        "Scan stages run on the Kubernetes runner, and this build was given a runner "
+        "that does not run them. Pin the pipeline to the Kubernetes runner to scan."
     ),
 }
 
@@ -137,6 +167,23 @@ def _callback_url() -> str:
 def _sanitize_tag(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "")).strip("-.")
     return cleaned[:100] or "build"
+
+
+def _sanitize_repository(value: str) -> str:
+    """An image repository name: like a tag, but ``/`` separates its parts.
+
+    ``areeba/issuing-ms`` stays ``areeba/issuing-ms`` — tidying it as a tag made
+    it ``areeba-issuing-ms``, a repository no deployment pulls from. Each part is
+    tidied on its own (lowercase, no leading/trailing separator, no ``..``) and
+    empty parts are dropped, so ``//a//b/`` is ``a/b``.
+    """
+    parts = []
+    for part in str(value or "").lower().split("/"):
+        part = re.sub(r"[^a-z0-9._-]+", "-", part)
+        part = re.sub(r"\.{2,}", ".", part).strip("-._")
+        if part:
+            parts.append(part)
+    return "/".join(parts)[:255].strip("/") or "build"
 
 
 # A tag the build's own shell finishes, e.g. ``V${VERSION}-${KUBESIGHT_BUILD_NUMBER}``
@@ -173,6 +220,26 @@ def _resolve_stage_image(
     if not template:
         return None
 
+    resolved = _expand_build_variables(template, env, stage_name, "its container image")
+    # A remaining dollar sign means the template used unsupported syntax such
+    # as ${params.NAME}; pass a useful error instead of Kubernetes' opaque
+    # InvalidImageName event. Whitespace is likewise never valid in an image.
+    if "$" in resolved or any(char.isspace() for char in resolved):
+        raise BuildError(
+            f"Stage '{stage_name}' resolved to an invalid container image "
+            f"'{resolved}'. Use ${{VARIABLE}} or $VARIABLE with a build input."
+        )
+    return resolved
+
+
+def _expand_build_variables(
+    template: str, env: Dict[str, Any], stage_name: str, what: str
+) -> str:
+    """``${NAME}`` / ``$NAME`` replaced by build variables, server side.
+
+    Raises when a referenced variable is empty or missing: an empty module name
+    would build the repository root and push it under a name nobody asked for.
+    """
     missing: List[str] = []
 
     def replace(match: re.Match) -> str:
@@ -186,19 +253,56 @@ def _resolve_stage_image(
     if missing:
         names = ", ".join(sorted(set(missing)))
         raise BuildError(
-            f"Stage '{stage_name}' cannot resolve its container image because "
+            f"Stage '{stage_name}' cannot resolve {what} because "
             f"build input {names} is empty or missing. Set it in Run build or "
             "give the input a default value."
         )
-    # A remaining dollar sign means the template used unsupported syntax such
-    # as ${params.NAME}; pass a useful error instead of Kubernetes' opaque
-    # InvalidImageName event. Whitespace is likewise never valid in an image.
-    if "$" in resolved or any(char.isspace() for char in resolved):
-        raise BuildError(
-            f"Stage '{stage_name}' resolved to an invalid container image "
-            f"'{resolved}'. Use ${{VARIABLE}} or $VARIABLE with a build input."
-        )
     return resolved
+
+
+# A working directory filled from a build input reaches the runner's shell, and
+# the input is whatever the person running the build typed: held to a plain path
+# alphabet, not just "relative, no ..".
+_EXPANDED_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,512}$")
+
+
+def _resolve_working_directory(
+    value: Any, env: Dict[str, Any], stage_name: str
+) -> Optional[str]:
+    """A stage's working directory with build inputs expanded, e.g.
+    ``modules/${MODULE}`` -> ``modules/ds-amex``. Literal paths pass through."""
+    template = str(value or "").strip()
+    if not template or "$" not in template:
+        return template or None
+    resolved = _expand_build_variables(template, env, stage_name, "its working directory")
+    resolved = "/".join(part for part in resolved.strip().split("/") if part)
+    problem = build_inputs.working_directory_problem(resolved)
+    if not problem and (not resolved or not _EXPANDED_PATH_RE.match(resolved)):
+        problem = (
+            "A working directory filled from a build input may use letters, "
+            "digits, '.', '_', '-' and '/' only."
+        )
+    if problem:
+        raise BuildError(f"Stage '{stage_name}' resolved its working directory to '{resolved}': {problem}")
+    return resolved
+
+
+def _resolve_image_name(registry: Dict[str, Any], env: Dict[str, Any], stage_name: str) -> None:
+    """Finish a templated IMAGE_NAME (``${MODULE}``) in place, from build inputs.
+
+    Unlike a tag, every input exists before the stage starts, so the name is
+    final here — the log, the push, the build record and a Deploy stage all see
+    the same repository."""
+    template = registry.pop("repositoryTemplate", None)
+    if not template:
+        return
+    resolved = _sanitize_repository(
+        _expand_build_variables(template, env, stage_name, "its image name")
+    )
+    problem = build_inputs.image_name_problem(resolved)
+    if problem:
+        raise BuildError(f"Stage '{stage_name}' resolved its image name to '{resolved}': {problem}")
+    registry["repository"] = resolved
 
 
 def _now() -> datetime:
@@ -247,8 +351,13 @@ def trigger_build(
     retry_of: Optional[CiBuild] = None,
     variables: Optional[Dict[str, str]] = None,
     ref_type: Optional[str] = None,
+    schedule: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a queued build. Does not execute anything — the tick does that.
+
+    ``schedule`` is the provenance of a scheduled build (``{"id", "name"}``),
+    kept in the snapshot so the build still says which schedule queued it after
+    that schedule is renamed or deleted.
 
     ``variables`` are per-trigger environment overrides applied to every stage
     (and consulted for IMAGE_NAME/IMAGE_TAG on image stages) — how the deploy
@@ -296,6 +405,12 @@ def trigger_build(
         "refType": ref_type if ref_type in ("branch", "tag") else "branch",
         "stages": [stage_definition(stage) for stage in stages],
     }
+    if schedule:
+        snapshot["schedule"] = dict(schedule)
+    # What happens when the build ends (post_actions.py) — snapshotted with the
+    # stages for the same reason: editing the pipeline must not change what a
+    # build already running will send or clean up.
+    snapshot["postActions"] = post_actions.of_pipeline(pipeline)
 
     number = int(service.next_build_number or 1)
     service.next_build_number = number + 1
@@ -307,8 +422,7 @@ def trigger_build(
         pipeline_id=pipeline.id,
         number=number,
         status="queued",
-        trigger_type=trigger_type if trigger_type in
-        ("manual", "retry", "api", "webhook", "automation") else "manual",
+        trigger_type=trigger_type if trigger_type in TRIGGER_TYPES else "manual",
         branch=(branch or service.default_branch or "main")[:255],
         commit_sha=(commit_sha or None),
         requested_by_user_id=getattr(actor, "id", None),
@@ -333,6 +447,7 @@ def trigger_build(
                 status="pending",
             )
         )
+    post_actions.create_rows(build, snapshot["postActions"])
     db.session.commit()
 
     log_audit(
@@ -348,6 +463,7 @@ def trigger_build(
             "pipeline": pipeline.name,
             "trigger": build.trigger_type,
             "retryOf": retry_of.number if retry_of else None,
+            **({"schedule": schedule.get("name")} if schedule else {}),
         },
     )
     # Dispatch this build now instead of at the ticker's next interval: the
@@ -436,6 +552,10 @@ def advance_ci_builds() -> bool:
     Returns whether there was active work, which is how the ticker decides
     between its fast and idle intervals.
     """
+    # First, before the "anything to do?" count: a schedule coming due is how
+    # an idle installation gets work, and the build it queues should be
+    # dispatched by this same pass rather than the next one.
+    _fire_due_schedules()
     active = (
         CiBuild.query.filter(CiBuild.status.in_(("queued", "running"))).count()
     )
@@ -444,8 +564,9 @@ def advance_ci_builds() -> bool:
         # waiting to be handed to Bitbucket outlives the build that produced it
         # — a retry after a backoff is work with no running build behind it. So
         # the early return asks about that too, or a delivery that failed once
-        # would wait for whatever happens to build next.
-        return _settle_merge_checks() > 0
+        # would wait for whatever happens to build next. Post-action
+        # notifications are the same kind of work (post_actions.py).
+        return (_settle_merge_checks() + _deliver_post_actions()) > 0
 
     # A pass already in flight is doing exactly this work; a second one would
     # poll the same stage and race on the transition the first is committing.
@@ -483,6 +604,7 @@ def _run_pass() -> bool:
         _advance_running,
         _dispatch_queued,
         _settle_merge_checks,
+        _deliver_post_actions,
     ):
         try:
             step()
@@ -490,6 +612,24 @@ def _run_pass() -> bool:
             logger.exception("CI engine step %s failed", step.__name__)
             db.session.rollback()
     return True
+
+
+def _fire_due_schedules() -> int:
+    """Queue the builds of schedules that have come due.
+
+    Imported at the call site for the same reason as merge checks: schedules
+    trigger ordinary builds through this module. Never raises — a schedule
+    that cannot fire records why on its own row, and must not stop builds
+    that are already running from advancing.
+    """
+    try:
+        from .schedules import fire_due_schedules
+
+        return fire_due_schedules()
+    except Exception:
+        logger.exception("Firing due CI schedules failed")
+        db.session.rollback()
+        return 0
 
 
 def _settle_merge_checks() -> int:
@@ -510,6 +650,21 @@ def _settle_merge_checks() -> int:
         return settle()
     except Exception:
         logger.exception("Merge check settlement failed")
+        db.session.rollback()
+        return 0
+
+
+def _deliver_post_actions() -> int:
+    """Claim the post-action notifications that are due and hand them to the
+    senders (post_actions.py). Claiming is a quick conditional UPDATE; the
+    sending itself happens off this thread, so a slow SMTP relay or webhook
+    never holds up a pass. Never raises."""
+    try:
+        if not post_actions.pending_work():
+            return 0
+        return post_actions.deliver_due()
+    except Exception:
+        logger.exception("Post-action delivery failed")
         db.session.rollback()
         return 0
 
@@ -580,6 +735,8 @@ def _build_deadline_minutes(build: CiBuild) -> int:
             )
         except (TypeError, ValueError):
             total_seconds += _DEFAULT_STAGE_TIMEOUT_SECONDS
+    # Cleanup commands run inside the build too (post_actions.py).
+    total_seconds += post_actions.timeout_budget_seconds(build.pipeline_snapshot)
     budget = total_seconds // 60 + _BUILD_DEADLINE_GRACE_MINUTES
     return max(1, min(budget, _BUILD_HARD_CAP_MINUTES))
 
@@ -627,22 +784,29 @@ def _process_cancellations() -> None:
         CiBuild.status.in_(("queued", "running")),
     ).all()
     for build in builds:
-        stage = _current_stage(build)
-        if stage is not None and stage.status == "running" and _is_server_stage(build, stage):
-            try:
-                deploy_stage.cancel(build, stage)
-            except Exception:
-                logger.exception("Cancelling deploy stage %s failed", stage.id)
-                _close_stage(stage, "cancelled", "Cancelled by request.")
-        elif stage is not None and stage.status == "running":
+        # Every running stage, not only the current one: a parallel group has
+        # several. A whole-build runner is told once — cancelling its one Job
+        # stops every member — while a per-stage runner hears about each.
+        whole_build_cancelled = False
+        for stage in sorted(build.stages, key=lambda s: s.position):
+            if stage.status != "running":
+                continue
+            if _is_server_stage(build, stage):
+                try:
+                    server_stages.executor(_server_stage_type(build, stage)).cancel(build, stage)
+                except Exception:
+                    logger.exception("Cancelling server stage %s failed", stage.id)
+                    _close_stage(stage, "cancelled", "Cancelled by request.")
+                continue
             adapter = _adapter_for(build)
             handle = _handle_for(build, stage)
-            if adapter and handle:
+            if adapter and handle and not whole_build_cancelled:
                 try:
                     adapter.cancel(handle)
                     adapter.cleanup(handle)
                 except Exception:
                     logger.exception("Cancelling stage %s failed", stage.id)
+                whole_build_cancelled = _runs_whole_build(adapter)
             _close_stage(stage, "cancelled", "Cancelled by request.")
         for pending in build.stages:
             if pending.status == "pending":
@@ -678,17 +842,21 @@ def _advance_one(build: CiBuild) -> None:
     stage = _current_stage(build)
     if stage is None:
         # Every stage reached a terminal state; the build's outcome is whatever
-        # the stages said.
+        # the stages said. Committed here: with cleanup commands holding the
+        # decision (post_actions.hold_for_cleanup), this is the branch that
+        # finally decides the build, and a later step's rollback must not undo it.
         _finalize(build)
+        db.session.commit()
         return
     if stage.status == "pending":
         # Skipped stages resolve instantly, so walk past a run of them in this
-        # pass instead of burning one scheduler tick each.
+        # pass instead of burning one scheduler tick each. A step is one stage
+        # or a whole parallel group, whose members all start here together.
         while stage is not None and stage.status == "pending":
-            _start_stage(build, stage)
-            db.session.commit()
+            step = _step_rows(build, stage)
+            _start_step(build, step)
             next_stage = _current_stage(build)
-            if next_stage is stage or next_stage is None:
+            if next_stage is None or next_stage in step:
                 break
             stage = next_stage
         if _current_stage(build) is None:
@@ -700,6 +868,11 @@ def _advance_one(build: CiBuild) -> None:
 
     if _is_server_stage(build, stage):
         _advance_server_stage(build, stage)
+        return
+
+    step = _step_rows(build, stage)
+    if len(step) > 1:
+        _advance_group(build, step)
         return
 
     adapter = _adapter_for(build)
@@ -731,28 +904,17 @@ def _advance_one(build: CiBuild) -> None:
     if status not in TERMINAL_STATUSES:
         return
 
-    # One final drain: output flushed as the container exited would otherwise
-    # be lost, because the pump above ran before the terminal poll.
-    _pump_logs(build, stage, adapter, handle)
-
-    if status == SUCCEEDED:
-        _collect_artifacts(build, stage, adapter, handle, definition)
-        _close_stage(stage, "success", None)
-    elif status == SKIPPED:
-        # The runner reports a stage that declined to run because an earlier one
-        # failed. It is not a failure of this stage, and it has no artifacts.
-        _close_stage(stage, "skipped", "An earlier stage failed.")
-    elif status == TIMEOUT:
-        _close_stage(stage, "timeout", f"Stage exceeded its {timeout}s timeout.")
-    elif status == CANCELLED:
-        _close_stage(stage, "cancelled", "The runner cancelled this stage.")
-    else:
-        _close_stage(stage, "failed", "The stage reported failure.")
-
-    try:
-        adapter.cleanup(handle)
-    except Exception:
-        logger.exception("Runner cleanup failed for stage %s", stage.id)
+    _close_from_runner(build, stage, status, adapter, handle, definition, timeout)
+    if _parallel_mode(build)[0] == parallel_groups.SEQUENTIAL and not _runs_whole_build(adapter):
+        # A group member run on its own: say so in its log. Appended once the
+        # stage is over, never before — a per-stage runner numbers its own
+        # output from 1, and a line slipped in ahead would hide its first one.
+        # (The Kubernetes runner prints the same line from inside the pod.)
+        name = parallel_groups.group_name(_snapshot_stages(build), stage.position)
+        if name:
+            logs_service.append_system(
+                stage, parallel_groups.sequential_notice(name, _parallel_mode(build)[1]), commit=False
+            )
 
     # A whole-build runner keeps its pod walking after a failure so the collector
     # still uploads what earlier stages produced; its remaining stages report
@@ -764,8 +926,12 @@ def _advance_one(build: CiBuild) -> None:
         and not bool(definition.get("continueOnFailure"))
         and not _runs_whole_build(adapter)
     ):
+        # A member of a group run one stage at a time: its siblings still run
+        # (Jenkins parallel semantics hold whether or not the runner could run
+        # them side by side) unless the group is fail-fast.
+        spared = _siblings_still_to_run(build, stage)
         for pending in build.stages:
-            if pending.status == "pending":
+            if pending.status == "pending" and pending.position not in spared:
                 pending.status = "skipped"
                 db.session.add(pending)
     db.session.commit()
@@ -785,30 +951,362 @@ def _advance_one(build: CiBuild) -> None:
         _advance_one(build)
 
 
+def _close_from_runner(
+    build: CiBuild,
+    stage: CiBuildStage,
+    status: str,
+    adapter,
+    handle: RunnerHandle,
+    definition: Dict[str, Any],
+    timeout: int,
+    *,
+    cancelled_message: Optional[str] = None,
+) -> None:
+    """Close a stage the runner reported terminal, and release what it held."""
+    # One final drain: output flushed as the container exited would otherwise
+    # be lost, because the pump before the poll ran ahead of the terminal state.
+    _pump_logs(build, stage, adapter, handle)
+
+    if status == SUCCEEDED:
+        _collect_artifacts(build, stage, adapter, handle, definition)
+        _close_stage(stage, "success", None)
+    elif status == SKIPPED:
+        # The runner reports a stage that declined to run because an earlier one
+        # failed. It is not a failure of this stage, and it has no artifacts.
+        _close_stage(stage, "skipped", "An earlier stage failed.")
+    elif status == TIMEOUT:
+        _close_stage(stage, "timeout", f"Stage exceeded its {timeout}s timeout.")
+    elif status == CANCELLED:
+        _close_stage(stage, "cancelled", cancelled_message or "The runner cancelled this stage.")
+    else:
+        _close_stage(stage, "failed", "The stage reported failure.")
+
+    try:
+        adapter.cleanup(handle)
+    except Exception:
+        logger.exception("Runner cleanup failed for stage %s", stage.id)
+
+
+# ---------------------------------------------------------------------------
+# Parallel groups
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_stages(build: CiBuild) -> List[Dict[str, Any]]:
+    return (build.pipeline_snapshot or {}).get("stages") or []
+
+
+def _parallel_mode(build: CiBuild) -> Tuple[str, str]:
+    """``(mode, reason)``: how this build runs its parallel groups.
+
+    Decided ONCE, the first time a build with groups asks (its dispatch), from
+    the assigned runner's capability, and kept in the snapshot. A whole-build
+    runner lays its pod out from this answer, so it must never change under a
+    running build — not after a restart, not when the cluster is upgraded
+    halfway through. ``("", "")`` for a build with no groups, or one that has no
+    runner yet.
+    """
+    snapshot = build.pipeline_snapshot or {}
+    decided = snapshot.get("parallel")
+    if isinstance(decided, dict) and decided.get("mode") in (
+        parallel_groups.PARALLEL,
+        parallel_groups.SEQUENTIAL,
+    ):
+        return decided["mode"], str(decided.get("reason") or "")
+    if not parallel_groups.has_groups(snapshot.get("stages") or []):
+        return "", ""
+    adapter = _adapter_for(build)
+    if adapter is None:
+        return "", ""
+    mode, reason = parallel_groups.resolve(adapter)
+    from sqlalchemy.orm.attributes import flag_modified
+
+    updated = dict(snapshot)
+    updated["parallel"] = {"mode": mode, "reason": reason}
+    build.pipeline_snapshot = updated
+    flag_modified(build, "pipeline_snapshot")
+    db.session.add(build)
+    return mode, reason
+
+
+def _step_rows(build: CiBuild, stage: CiBuildStage) -> List[CiBuildStage]:
+    """The stages that advance together with ``stage``: its whole parallel
+    group when this build runs groups side by side, else just itself."""
+    if _parallel_mode(build)[0] != parallel_groups.PARALLEL:
+        return [stage]
+    positions = parallel_groups.group_positions(_snapshot_stages(build), stage.position)
+    if len(positions) < 2:
+        return [stage]
+    by_position = {row.position: row for row in build.stages}
+    rows = [by_position[position] for position in positions if position in by_position]
+    return rows if stage in rows else [stage]
+
+
+def _siblings_still_to_run(build: CiBuild, stage: CiBuildStage) -> set:
+    """Positions of the later members of ``stage``'s group that must still run
+    after it failed — every one of them, unless the group is fail-fast."""
+    definitions = _snapshot_stages(build)
+    positions = parallel_groups.group_positions(definitions, stage.position)
+    if len(positions) < 2 or parallel_groups.fail_fast(definitions, positions):
+        return set()
+    return {position for position in positions if position > stage.position}
+
+
+def _fail_fast_trigger(build: CiBuild, rows: List[CiBuildStage]) -> Optional[CiBuildStage]:
+    """The member whose failure stops a fail-fast group, or None."""
+    for row in rows:
+        if row.status != "cancelled" and parallel_groups.member_failed(
+            row.status, _definition_for(build, row)
+        ):
+            return row
+    return None
+
+
+def _start_step(build: CiBuild, rows: List[CiBuildStage]) -> None:
+    """Start every pending stage of a step, committing after each.
+
+    For a lone stage this is exactly the old start-and-commit. For a group it
+    starts the members back to back in one pass, so they run together; a
+    fail-fast group that already lost a member starts no more of them.
+    """
+    grouped = len(rows) > 1
+    fail_fast = grouped and parallel_groups.fail_fast(
+        _snapshot_stages(build), [row.position for row in rows]
+    )
+    for row in rows:
+        if row.status != "pending" or build.status != "running":
+            continue
+        trigger = _fail_fast_trigger(build, rows) if fail_fast else None
+        if trigger is not None:
+            _close_stage(
+                row,
+                "skipped",
+                f"Not started: '{trigger.name}' failed, and this group stops at its first failure.",
+            )
+        else:
+            _start_stage(build, row)
+        db.session.commit()
+
+
+def _advance_group(build: CiBuild, rows: List[CiBuildStage]) -> None:
+    """One step of a parallel group run side by side.
+
+    Start what has not started, poll every running member, close the ones
+    that ended, and move on only when every member is terminal. Failure is
+    Jenkins' ``parallel`` default: siblings of a failed member run on, and the
+    group fails once they are done. A fail-fast group stops the others instead.
+    """
+    if any(row.status == "pending" for row in rows):
+        # Members not started yet: the pass that started the group was cut
+        # short, or a restart followed it. Start them; they are polled next.
+        _start_step(build, rows)
+        if any(row.status == "running" for row in rows):
+            return
+
+    definitions = _snapshot_stages(build)
+    fail_fast = parallel_groups.fail_fast(definitions, [row.position for row in rows])
+    adapter = _adapter_for(build)
+    whole_build = _runs_whole_build(adapter)
+    running = [row for row in rows if row.status == "running"]
+
+    if running:
+        statuses: Dict[int, str] = {}
+        handles: Dict[int, RunnerHandle] = {}
+        for row in running:
+            handle = _handle_for(build, row)
+            if adapter is None or handle is None:
+                _close_stage(row, "failed", "The runner for this stage is no longer available.")
+                continue
+            handles[row.id] = handle
+            _pump_logs(build, row, adapter, handle)
+            timed_out = _member_timed_out(build, row, adapter, handle, whole_build)
+            if timed_out:
+                statuses[row.id] = TIMEOUT
+
+        to_poll = [row for row in running if row.id in handles and row.id not in statuses]
+        statuses.update(_poll_members(adapter, to_poll, handles))
+
+        # Cancelled members last, so a fail-fast stop can name the member
+        # whose failure caused it even when both were seen in this one poll.
+        ordered = sorted(
+            (row for row in running if statuses.get(row.id) in TERMINAL_STATUSES),
+            key=lambda row: (statuses[row.id] == CANCELLED, row.position),
+        )
+        for row in ordered:
+            definition = _definition_for(build, row)
+            message = None
+            if statuses[row.id] == CANCELLED and fail_fast:
+                trigger = _fail_fast_trigger(build, rows)
+                if trigger is not None:
+                    message = f"Stopped: '{trigger.name}' failed, and this group stops at its first failure."
+            _close_from_runner(
+                build,
+                row,
+                statuses[row.id],
+                adapter,
+                handles[row.id],
+                definition,
+                int(definition.get("timeoutSeconds") or _DEFAULT_STAGE_TIMEOUT_SECONDS),
+                cancelled_message=message,
+            )
+        db.session.commit()
+
+    if fail_fast:
+        _stop_group_after_failure(build, rows, adapter, whole_build)
+
+    if any(row.status in ("pending", "running") for row in rows):
+        return
+
+    # The whole group is over. On a per-stage runner nothing after it may run
+    # once a member that does not continue on failure has failed; a
+    # whole-build runner's pod skips them itself (the group's barrier writes
+    # the same fail flag a failed stage does), so its stages report skipped.
+    if not whole_build and any(
+        parallel_groups.member_failed(row.status, _definition_for(build, row)) for row in rows
+    ):
+        for pending in build.stages:
+            if pending.status == "pending":
+                pending.status = "skipped"
+                db.session.add(pending)
+    db.session.commit()
+
+    following = _current_stage(build)
+    if following is None:
+        _finalize(build)
+        db.session.commit()
+        return
+    if following.status == "pending" and build.status == "running":
+        # Start what follows the group in this pass, as after any stage.
+        _advance_one(build)
+
+
+def _member_timed_out(
+    build: CiBuild, row: CiBuildStage, adapter, handle: RunnerHandle, whole_build: bool
+) -> bool:
+    """Whether a running group member is past its own timeout.
+
+    The clock starts when the work actually began. Members are all handed to
+    the runner at once, and a one-slot agent runs them one after another, so a
+    member still waiting its turn is not counted — ``running_since`` says when
+    it really started, and the stage's start time moves there so its duration
+    is its own and not its wait.
+
+    On a whole-build runner the pod times members out itself (see
+    ``parallel_groups.POD_TIMEOUT_GRACE_SECONDS``): cancelling would delete the
+    one Job every sibling runs in. The engine only steps in, without
+    cancelling, if the pod has said nothing well past that point.
+    """
+    definition = _definition_for(build, row)
+    timeout = int(definition.get("timeoutSeconds") or _DEFAULT_STAGE_TIMEOUT_SECONDS)
+    clock = _aware(row.started_at)
+    asker = getattr(adapter, "running_since", None)
+    if callable(asker):
+        try:
+            since = _aware(asker(handle))
+        except Exception:
+            logger.exception("running_since failed for stage %s", row.id)
+            since = clock
+        if since is None:
+            return False  # Still waiting for capacity; the build deadline bounds it.
+        if clock is None or since > clock:
+            row.started_at = since
+            db.session.add(row)
+            clock = since
+    if clock is None:
+        return False
+    limit = timeout + (parallel_groups.ENGINE_TIMEOUT_GRACE_SECONDS if whole_build else 0)
+    if (_seconds_between(clock, _now()) or 0) <= limit:
+        return False
+    if not whole_build:
+        try:
+            adapter.cancel(handle)
+        except Exception:
+            logger.exception("Timeout cancel failed for stage %s", row.id)
+    return True
+
+
+def _poll_members(adapter, rows: List[CiBuildStage], handles: Dict[int, RunnerHandle]) -> Dict[int, str]:
+    """Every member's status, in one observation when the runner offers one."""
+    if not rows:
+        return {}
+    many = getattr(adapter, "poll_many", None)
+    if callable(many):
+        try:
+            by_ref = many([handles[row.id] for row in rows])
+            return {row.id: by_ref.get(handles[row.id].external_ref, RUNNING) for row in rows}
+        except RunnerError as exc:
+            logger.warning("Runner poll failed for a parallel group: %s", exc)
+            return {row.id: FAILED for row in rows}
+    statuses: Dict[int, str] = {}
+    for row in rows:
+        try:
+            statuses[row.id] = adapter.poll(handles[row.id])
+        except RunnerError as exc:
+            logger.warning("Runner poll failed for stage %s: %s", row.id, exc)
+            statuses[row.id] = FAILED
+    return statuses
+
+
+def _stop_group_after_failure(build: CiBuild, rows: List[CiBuildStage], adapter, whole_build: bool) -> None:
+    """Fail fast: once a member fails, stop the members still running.
+
+    A per-stage runner is told to cancel each one, and they close as
+    cancelled. A whole-build runner is not: cancelling means deleting the
+    build's one Job, and the pod already stops waiting by itself — its barrier
+    sees the failure and reports the others cancelled through the next poll.
+    """
+    trigger = _fail_fast_trigger(build, rows)
+    if trigger is None:
+        return
+    message = f"Stopped: '{trigger.name}' failed, and this group stops at its first failure."
+    changed = False
+    for row in rows:
+        if row.status == "pending":
+            _close_stage(row, "skipped", f"Not started: '{trigger.name}' failed, and this group stops at its first failure.")
+            changed = True
+        elif row.status == "running" and not whole_build:
+            handle = _handle_for(build, row)
+            if adapter is not None and handle is not None:
+                try:
+                    adapter.cancel(handle)
+                    adapter.cleanup(handle)
+                except Exception:
+                    logger.exception("Fail-fast cancel failed for stage %s", row.id)
+            _close_stage(row, "cancelled", message)
+            logs_service.append_system(row, f"[kubesight] {message}", commit=False)
+            changed = True
+    if changed:
+        db.session.commit()
+
+
 def _is_server_stage(build: CiBuild, stage: CiBuildStage) -> bool:
-    stage_type = _definition_for(build, stage).get("stageType") or stage.stage_type
-    return stage_type in SERVER_STAGE_TYPES
+    return _server_stage_type(build, stage) in SERVER_STAGE_TYPES
+
+
+def _server_stage_type(build: CiBuild, stage: CiBuildStage) -> str:
+    return _definition_for(build, stage).get("stageType") or stage.stage_type
 
 
 def _advance_server_stage(build: CiBuild, stage: CiBuildStage) -> None:
-    """One step of a stage KubeSight executes itself (a Deploy stage).
+    """One step of a stage KubeSight executes itself (Deploy, Approval, App
+    store upload — see server_stages.py for which module runs each).
 
     Same shape as the runner path below: advance, and once the stage is over,
-    start whatever follows in this pass. Nothing follows a Deploy stage but
-    other Deploy stages — each decides for itself whether an earlier failure
-    means it must not deploy.
+    start whatever follows in this pass. Nothing follows a server stage but
+    other server stages — each decides for itself whether an earlier failure
+    means it must not act.
     """
     definition = _definition_for(build, stage)
+    stage_type = _server_stage_type(build, stage)
     try:
-        deploy_stage.advance(build, stage, definition)
+        server_stages.executor(stage_type).advance(build, stage, definition)
     except Exception:
-        logger.exception("Advancing deploy stage %s failed", stage.id)
+        logger.exception("Advancing %s stage %s failed", stage_type, stage.id)
         db.session.rollback()
         _close_stage(
             stage,
             "failed",
-            "The Deploy stage failed unexpectedly while it was running; see the server log. "
-            "Check the deployment on the cluster before retrying.",
+            server_stages.ADVANCE_FAILED.get(stage_type, server_stages.ADVANCE_FAILED["deploy"]),
         )
     db.session.commit()
     if stage.status in ("pending", "running"):
@@ -873,7 +1371,9 @@ def _dispatch_queued() -> None:
         # checkout reports it (routes/ci_worker.report_meta).
         build_status_service.report(build)
 
-        _start_stage(build, stage)
+        # The first step: one stage, or every member of a leading parallel
+        # group (the build's parallel mode is decided here, on first ask).
+        _start_step(build, _step_rows(build, stage))
         db.session.commit()
 
         # A first stage that resolves instantly — skipped because this runner
@@ -896,7 +1396,7 @@ def _build_requirements(build: CiBuild):
         stage_type = definition.get("stageType") or "command"
         # A Deploy stage runs on the KubeSight server, so it asks nothing of the
         # runner the build is assigned to.
-        if stage_type in _NEVER_EXECUTED_STAGE_TYPES or stage_type in SERVER_STAGE_TYPES:
+        if _never_executed(definition) or stage_type in SERVER_STAGE_TYPES:
             return True
         return _condition_reason(build, definition) is not None
 
@@ -922,6 +1422,10 @@ def _skip_reason(build: CiBuild, adapter, definition: Dict[str, Any]) -> Optiona
     build) contains exactly the containers the engine will actually advance.
     """
     stage_type = definition.get("stageType") or "command"
+    if stage_type == "scan" and not scan_stage.configured(definition.get("scan")):
+        # Before the runner question: whichever runner this is, there is
+        # nothing to run, and the fix is in the editor, not the fleet.
+        return _UNCONFIGURED_SCAN_REASON
     if stage_type not in _supported_stage_types(adapter):
         reason = None
         asker = getattr(adapter, "skip_reason", None)
@@ -1015,6 +1519,9 @@ def _start_stage(build: CiBuild, stage: CiBuildStage) -> None:
         )
         if needs_plan:
             execution.plan = _build_plan(build, adapter, callback_token)
+            # Cleanup commands, for a whole-build runner to bake in after the
+            # stages (post_actions.py). Empty for per-stage runners.
+            execution.post_plan = post_actions.plan_for(build, adapter, callback_token)
     except Exception as exc:
         logger.exception("Preparing stage %s failed", stage.id)
         _close_stage(stage, "failed", _safe_message(exc))
@@ -1048,22 +1555,28 @@ def _start_stage(build: CiBuild, stage: CiBuildStage) -> None:
 
 def _start_server_stage(build: CiBuild, stage: CiBuildStage, definition: Dict[str, Any]) -> None:
     """Start a stage no runner executes. Its own ``when`` clause still applies."""
+    # Not before the cleanup commands are done: they run in the runner's
+    # workspace, which a server stage outlives (post_actions.py). The stage
+    # stays pending, and the next pass asks again.
+    if post_actions.hold_for_cleanup(build):
+        return
     condition = _condition_reason(build, definition)
     if condition:
         stage.started_at = _now()
         _close_stage(stage, "skipped", None)
         logs_service.append_system(stage, f"[kubesight] Skipped: {condition}")
         return
+    stage_type = definition.get("stageType") or stage.stage_type
     try:
-        deploy_stage.start(build, stage, definition)
+        server_stages.executor(stage_type).start(build, stage, definition)
     except Exception:
-        logger.exception("Starting deploy stage %s failed", stage.id)
+        logger.exception("Starting %s stage %s failed", stage_type, stage.id)
         db.session.rollback()
         stage.started_at = stage.started_at or _now()
         _close_stage(
             stage,
             "failed",
-            "The Deploy stage could not start; see the server log. Nothing was deployed.",
+            server_stages.START_FAILED.get(stage_type, server_stages.START_FAILED["deploy"]),
         )
 
 
@@ -1080,10 +1593,26 @@ def _fail_current_stage(build: CiBuild, message: str, status: str = "failed") ->
     stage = _current_stage(build)
     if stage is not None and stage.status in ("pending", "running"):
         _close_stage(stage, status, message)
+    # The other members of a parallel group are running too; a build that
+    # ends must not leave any stage behind it still saying "running".
+    for other in build.stages:
+        if other.status == "running":
+            _close_stage(other, status, message)
     for pending in build.stages:
         if pending.status == "pending":
             pending.status = "skipped"
             db.session.add(pending)
+
+
+def _stopped_by_fail_fast(build: CiBuild, stage: CiBuildStage) -> bool:
+    """Whether a cancelled stage was a fail-fast group stopping its members
+    because a sibling failed — the build failed then; nobody cancelled it."""
+    definitions = _snapshot_stages(build)
+    positions = parallel_groups.group_positions(definitions, stage.position)
+    if len(positions) < 2 or not parallel_groups.fail_fast(definitions, positions):
+        return False
+    rows = [row for row in build.stages if row.position in positions and row is not stage]
+    return _fail_fast_trigger(build, rows) is not None
 
 
 def _finalize(build: CiBuild) -> None:
@@ -1096,6 +1625,16 @@ def _finalize(build: CiBuild) -> None:
     statuses = [stage.status for stage in build.stages]
     if any(status in ("pending", "running") for status in statuses):
         return
+    # Cleanup commands run once the runner stages are over, and the build is
+    # decided after them — though never BY them: their rows are not stages
+    # (post_actions.py), so a failed cleanup cannot turn a green build red.
+    if post_actions.hold_for_cleanup(build):
+        return
+    cancelled = [stage for stage in build.stages if stage.status == "cancelled"]
+    if cancelled and all(_stopped_by_fail_fast(build, stage) for stage in cancelled):
+        # Members a fail-fast group stopped: the build FAILED (a sibling did),
+        # and calling it cancelled would blame a person who did nothing.
+        statuses = [status for status in statuses if status != "cancelled"]
     if "cancelled" in statuses:
         _finish_build(build, "cancelled", "A stage was cancelled.")
     elif "timeout" in statuses:
@@ -1122,6 +1661,10 @@ def _finish_build(build: CiBuild, status: str, error: Optional[str]) -> None:
     # never posted INPROGRESS, so a STOPPED would be the first thing said.
     if build.started_at is not None:
         build_status_service.report(build)
+    # Every terminal transition passes here, after server stages too, so this
+    # is where post-action notifications are decided (queued, never sent on
+    # this thread) and any cleanup that can no longer run is closed.
+    post_actions.on_build_finished(build)
 
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1686,10 @@ def _definition_for(build: CiBuild, stage: CiBuildStage) -> Dict[str, Any]:
     Position rather than id: the pipeline stage may have been deleted since,
     and the snapshot is the authority for what this build runs.
     """
+    if stage.stage_type == post_actions.POST_STAGE_TYPE:
+        # A post-action row: its definition is the snapshot's postActions
+        # entry, shaped like a command stage (what an agent claim runs).
+        return post_actions.definition_for(build, stage)
     stages = (build.pipeline_snapshot or {}).get("stages") or []
     if 0 <= stage.position < len(stages):
         return stages[stage.position] or {}
@@ -1215,11 +1762,18 @@ def _registry_for(
         else f"{_sanitize_tag(build.branch)}-{build.number}"
     )
     requested_tag = str(env.get("IMAGE_TAG") or "")
+    # ``${MODULE}`` is finished by _resolve_image_name once the stage's full
+    # environment is known; sanitizing it here would turn it into dashes.
+    requested_name = str(env.get("IMAGE_NAME") or "")
+    name_template = requested_name if "$" in requested_name else ""
     return (
         {
             "host": host,
             "port": urlsplit(row.base_url).port,
-            "repository": _sanitize_tag(env.get("IMAGE_NAME") or service.slug).lower(),
+            "repository": _sanitize_repository(
+                "" if name_template else (requested_name or service.slug)
+            ),
+            "repositoryTemplate": name_template,
             # A tag holding ${...} is passed through whole for the runner to
             # expand; sanitizing it here would turn the expansion into dashes.
             # The runner sanitizes the RESOLVED value, which is the string that
@@ -1295,11 +1849,14 @@ def _build_execution(
         # Clone credentials join the secret set so the masker covers them too.
         stage_secrets = {**stage_secrets, **spec.credential_env}
         working_directory = definition.get("workingDirectory") or spec.working_directory
+    working_directory = _resolve_working_directory(working_directory, env, stage.name)
 
     registry = None
     image_scan = None
     if stage_type == "container_image":
         registry, _ = _registry_for(build, definition)
+        if registry is not None:
+            _resolve_image_name(registry, env, stage.name)
         # Read off the SNAPSHOT like everything else here, so a build retried
         # from an old snapshot is gated exactly as it was when it first ran.
         # Absent on snapshots taken before scanning existed — those simply have
@@ -1308,6 +1865,42 @@ def _build_execution(
         if isinstance(candidate, dict) and candidate.get("enabled") is not False:
             image_scan = candidate
 
+    commands = list(definition.get("commands") or [])
+    code_scan_gate = None
+    if stage_type == "command":
+        # Off the snapshot too: a retried build is gated as it first was.
+        candidate = definition.get("codeScan")
+        if code_scan.armed(candidate):
+            code_scan_gate = candidate
+            # Folded into the commands HERE rather than in one runner, so the
+            # agent and the cluster run the same gate - one text, no runner on
+            # which the findings quietly stop counting.
+            commands = code_scan.wrap_commands(commands, candidate, stage.position)
+
+    image = _resolve_stage_image(definition.get("image"), env, stage.name)
+    scan_config = None
+    if stage_type == "scan" and scan_stage.configured(definition.get("scan")):
+        # Generated here, off the snapshot, for the same reasons as the code
+        # scan gate above: one script for every runner, and a retried build
+        # scans exactly as it first did. The image is the catalog's, never the
+        # stage's — see scan_stage.image_for.
+        scan_config = definition["scan"]
+        if scan_config.get("tool") == "semgrep":
+            code_scan_gate = scan_stage.gate_for(scan_config, definition.get("codeScan"), stage.name)
+        commands = scan_stage.commands(
+            scan_config,
+            position=stage.position,
+            application_type=service.application_type or "",
+            gate=code_scan_gate,
+        )
+        image = scan_stage.image_for(scan_config) or None
+        stage_secrets = {
+            **secrets_service.env_for_stage(
+                {"secretRefs": scan_stage.secret_refs(scan_config)}, resolved
+            ),
+            **stage_secrets,
+        }
+
     return StageExecution(
         build_id=build.id,
         build_number=build.number,
@@ -1315,9 +1908,9 @@ def _build_execution(
         service_slug=service.slug,
         stage_name=stage.name,
         stage_type=stage_type,
-        image=_resolve_stage_image(definition.get("image"), env, stage.name),
+        image=image,
         working_directory=working_directory,
-        commands=list(definition.get("commands") or []),
+        commands=commands,
         env=env,
         secrets=stage_secrets,
         # Stage over service, and whatever neither sets is left to the
@@ -1341,10 +1934,36 @@ def _build_execution(
         commit_sha=build.commit_sha,
         registry=registry,
         image_scan=image_scan,
+        code_scan=code_scan_gate,
+        scan=scan_config,
         callback_url=_callback_url(),
         callback_token=callback_token,
         runner_id=build.runner_id,
+        **_parallel_fields(build, stage),
     )
+
+
+def _parallel_fields(build: CiBuild, stage: CiBuildStage) -> Dict[str, Any]:
+    """The StageExecution fields that describe this stage's parallel group.
+
+    The mode and its reason go on EVERY stage of a build with groups, so a
+    whole-build runner reads the same answer off whichever stage carries the
+    plan; the group name only on members of a group of two or more.
+    """
+    mode, reason = _parallel_mode(build)
+    definitions = _snapshot_stages(build)
+    name = parallel_groups.group_name(definitions, stage.position)
+    return {
+        "parallel_group": name,
+        "parallel_fail_fast": bool(
+            name
+            and parallel_groups.fail_fast(
+                definitions, parallel_groups.group_positions(definitions, stage.position)
+            )
+        ),
+        "parallel_mode": mode,
+        "parallel_reason": reason,
+    }
 
 
 def _build_plan(build: CiBuild, adapter, callback_token: str) -> List[StageExecution]:
@@ -1516,7 +2135,16 @@ def list_builds(
     query = CiBuild.query
     if service_id is not None:
         query = query.filter(CiBuild.service_id == service_id)
-    if status and status != "all":
+    if status == "awaiting_approval":
+        # Not a build status: running builds held at an Approval stage — the
+        # list somebody who can approve wants to find.
+        query = query.filter(
+            CiBuild.status == "running",
+            CiBuild.stages.any(
+                db.and_(CiBuildStage.stage_type == "approval", CiBuildStage.status == "running")
+            ),
+        )
+    elif status and status != "all":
         query = query.filter(CiBuild.status == status)
     total = query.count()
     rows = (
@@ -1529,7 +2157,9 @@ def list_builds(
 
 
 def get_build_stage(build: CiBuild, stage_id: int) -> CiBuildStage:
-    for stage in build.stages:
+    # Post-action rows too: a cleanup's log, or a notification's attempts, is
+    # read through the same stage-log endpoints.
+    for stage in list(build.stages) + list(build.post_stages):
         if stage.id == int(stage_id):
             return stage
     raise LookupError("Build stage not found.")

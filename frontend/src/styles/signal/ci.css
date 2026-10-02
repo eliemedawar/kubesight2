@@ -594,6 +594,14 @@ button.sg-ci-strip-node:hover {
   box-shadow: var(--shadow-lg, var(--shadow-md));
 }
 
+/* The drawer scrolls; its sections must not shrink to fit it instead. A flex
+   column lets children shrink by default, and with parallel lanes, an approval
+   panel and test results a build is taller than the window — the strip then
+   clipped its lanes and the stage list slid under the Tests panel. */
+.sg-ci-drawer > * {
+  flex-shrink: 0;
+}
+
 .sg-ci-drawer-head {
   display: flex;
   align-items: flex-start;
@@ -908,10 +916,78 @@ button.sg-ci-strip-node:hover {
    --------------------------------------------------------------------------- */
 
 .sg-ci-runners {
-  max-width: 34rem;
+  width: min(44rem, 100%);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
+}
+
+/* The modal card scrolls as one. A flex child would otherwise shrink to fit
+   90vh — that is what crushed the runner list to a sliver. */
+.sg-ci-runners > * {
+  flex-shrink: 0;
+}
+
+/* Runners | Build cache. .btn-ghost keeps ui-polish's (0,8,1) button rule
+   off the tabs; restyled here. */
+.sg-ci-runners-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-ci-runners .sg-ci-runners-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: -1px;
+  padding: 0.5rem 0.85rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.sg-ci-runners .sg-ci-runners-tab:hover {
+  background: transparent;
+  color: var(--text-main);
+}
+
+.sg-ci-runners .sg-ci-runners-tab.is-on {
+  color: var(--text-strong);
+  border-bottom-color: var(--accent);
+}
+
+.sg-ci-runners-count {
+  min-width: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: var(--radius-full);
+  background: var(--bg-interactive);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.sg-ci-runners-tab.is-on .sg-ci-runners-count {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.sg-ci-runners-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* In its own tab the cache needs no divider from the list above it. */
+.sg-ci-runners-pane > .sg-ci-cache {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .sg-ci-runner-list {
@@ -920,18 +996,16 @@ button.sg-ci-strip-node:hover {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  max-height: 26rem;
-  overflow-y: auto;
+  gap: var(--space-3);
 }
 
 .sg-ci-runner {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: var(--space-2);
+  padding: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.45rem;
   background: var(--bg-panel);
 }
 
@@ -2738,4 +2812,1053 @@ label.sg-mc-check {
   height: 1px;
   overflow: hidden;
   clip: rect(0 0 0 0);
+}
+
+/* ── Code scan quality gate: verdict above a gated stage's log ───── */
+.sg-ci-gate {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: var(--space-2);
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border-strong);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm, 0.4rem);
+  background: var(--bg-panel);
+  font-size: 0.82rem;
+}
+
+.sg-ci-gate.is-failed {
+  border-color: var(--danger-border, var(--danger));
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.sg-ci-gate.is-passed {
+  border-color: var(--ok-border, var(--ok));
+  border-left-color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.sg-ci-gate.is-error { border-left-color: var(--warn); }
+.sg-ci-gate.is-muted,
+.sg-ci-gate.is-pending { border-left-color: var(--text-muted); }
+
+.sg-ci-gate-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 999px;
+  background: var(--bg-interactive);
+  color: var(--text-muted);
+}
+
+.sg-ci-gate.is-failed .sg-ci-gate-icon { color: var(--danger); background: var(--bg-panel); }
+.sg-ci-gate.is-passed .sg-ci-gate-icon { color: var(--ok); background: var(--bg-panel); }
+
+.sg-ci-gate-icon svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.sg-ci-gate-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.sg-ci-gate-text strong { font-size: 0.85rem; }
+.sg-ci-gate.is-failed .sg-ci-gate-text strong { color: var(--danger); }
+.sg-ci-gate.is-passed .sg-ci-gate-text strong { color: var(--ok); }
+
+.sg-ci-gate-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.sg-ci-gate-sev {
+  margin-left: 0.6rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sg-ci-gate-error { color: var(--danger); font-size: 0.75rem; }
+.sg-ci-gate-sent { color: var(--ok); font-size: 0.75rem; overflow-wrap: anywhere; }
+
+.sg-ci-gate-actions {
+  flex: none;
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@media (max-width: 640px) {
+  .sg-ci-gate { flex-wrap: wrap; }
+  .sg-ci-gate-actions { width: 100%; justify-content: flex-start; }
+  .sg-ci-gate-sev { display: block; margin-left: 0; }
+}
+
+/* ── Send the scan report ──────────────────────────────────────── */
+.sg-ci-send-backdrop { z-index: 1200; }
+
+.sg-ci-send {
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: var(--space-4);
+}
+
+.sg-ci-send .modal-card__header {
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.7rem;
+}
+
+.sg-ci-send .modal-card__header h3 { margin: 0 0 0.25rem; }
+.sg-ci-send .modal-card__header p { margin: 0; font-size: 0.82rem; }
+
+.sg-ci-send .form-label { margin-top: 0.4rem; }
+
+.sg-ci-send-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 2.4rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm, 0.4rem);
+  background: var(--bg-panel);
+  cursor: text;
+}
+
+.sg-ci-send-chips:focus-within {
+  border-color: var(--accent, var(--info));
+  box-shadow: 0 0 0 3px var(--info-soft);
+}
+
+.sg-ci-send-chips input {
+  flex: 1;
+  min-width: 10rem;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  padding: 0.25rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: inherit;
+  box-shadow: none;
+}
+
+.sg-ci-send-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+}
+
+.sg-ci-send-chip button {
+  padding: 0 0.2rem;
+  min-height: 0;
+  line-height: 1;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+}
+
+.sg-ci-send-suggest {
+  list-style: none;
+  margin: 0;
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 0.4rem);
+  background: var(--bg-panel);
+}
+
+.sg-ci-send-suggest button {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  font-size: 0.82rem;
+}
+
+.sg-ci-send-suggest code {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-send-note {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.sg-ci-send-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.sg-ci-send-spacer { flex: 1; }
+
+.sg-ci-linkbtn {
+  padding: 0;
+  min-height: 0;
+  text-decoration: underline;
+  font: inherit;
+}
+
+/* ── Test results & coverage ────────────────────────────────────────
+   The badge in build lists, the drawer's Tests section, and the trend strip
+   on the Builds tab. Status tokens only where they mean status (failed is
+   danger, an all-green run is ok); coverage is a magnitude and wears the
+   neutral info hue, never red or green. */
+.sg-ci-tbadge {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.sg-ci-tbadge-part {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+
+.sg-ci-tbadge-part i {
+  font-style: normal;
+  color: var(--text-subtle, var(--text-muted));
+}
+
+.sg-ci-tbadge-part.is-ok { color: var(--ok); font-weight: 600; }
+.sg-ci-tbadge-part.is-bad { color: var(--danger); font-weight: 650; }
+.sg-ci-tbadge-part.is-warn { color: var(--warn); }
+.sg-ci-tbadge.is-compact { font-size: 0.7rem; }
+
+.sg-ci-tests {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--bg-panel);
+  min-width: 0;
+}
+
+.sg-ci-tests.is-quiet {
+  border-style: dashed;
+  background: var(--bg-inset, var(--bg-panel));
+}
+
+.sg-ci-tests .form-label { margin: 0; }
+
+.sg-ci-tests-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+}
+
+.sg-ci-tests-empty {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.sg-ci-tests-empty code,
+.sg-ci-tests-errors code {
+  font-size: 0.74rem;
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-tests-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  gap: 0.4rem;
+}
+
+.sg-ci-tests-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 0.4rem);
+  background: var(--bg-inset, var(--bg-panel));
+  min-width: 0;
+}
+
+.sg-ci-tests-tile-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sg-ci-tests-tile-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong, var(--text-main));
+}
+
+.sg-ci-tests-tile-sub {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.sg-ci-tests-tile.is-bad {
+  border-color: var(--danger-border, var(--danger));
+  background: var(--danger-soft);
+}
+
+.sg-ci-tests-tile.is-bad .sg-ci-tests-tile-value { color: var(--danger); }
+
+.sg-ci-tests-tile.is-ok {
+  border-color: var(--ok-border, var(--ok));
+  background: var(--ok-soft);
+}
+
+.sg-ci-tests-tile.is-ok .sg-ci-tests-tile-value { color: var(--ok); }
+
+.sg-ci-cov {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.sg-ci-cov .field-hint { margin: 0; }
+
+.sg-ci-cov-row {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(4rem, 1fr) 3.4rem auto;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+}
+
+.sg-ci-cov-label { color: var(--text-muted); }
+
+.sg-ci-cov-bar {
+  position: relative;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--bg-interactive);
+  overflow: hidden;
+}
+
+.sg-ci-cov-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: var(--info);
+}
+
+.sg-ci-cov-pct {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.sg-ci-cov-counts {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 560px) {
+  .sg-ci-cov-row { grid-template-columns: 4rem minmax(3rem, 1fr) 3.2rem; }
+  .sg-ci-cov-counts { grid-column: 2 / -1; margin-top: -0.25rem; }
+}
+
+.sg-ci-tests-errors {
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--warn-border, var(--warn));
+  border-left-width: 3px;
+  border-radius: var(--radius-sm, 0.4rem);
+  background: var(--warn-soft);
+  font-size: 0.78rem;
+}
+
+.sg-ci-tests-errors ul {
+  margin: 0.3rem 0 0;
+  padding-left: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.sg-ci-tests-subhead {
+  margin: 0 0 0.3rem;
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.sg-ci-tests-fails {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  /* A hundred failures must not become the drawer. */
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
+.sg-ci-tcase details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 0.4rem);
+  background: var(--bg-panel);
+}
+
+.sg-ci-tcase details[open] { border-color: var(--border-strong); }
+
+.sg-ci-tcase summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.sg-ci-tcase summary::-webkit-details-marker { display: none; }
+
+.sg-ci-tcase summary:hover { background: var(--bg-interactive); }
+
+.sg-ci-tcase summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.sg-ci-tcase-mark {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-top: 0.35rem;
+  border-radius: 999px;
+  background: var(--danger);
+}
+
+.sg-ci-tcase.is-error .sg-ci-tcase-mark {
+  background: transparent;
+  border: 2px solid var(--danger);
+}
+
+.sg-ci-tcase-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.sg-ci-tcase-name {
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.78rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-tcase-kind {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--danger);
+}
+
+.sg-ci-tcase-where {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-tcase-msg {
+  flex-basis: 100%;
+  min-width: 0;
+  font-size: 0.76rem;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-tcase details[open] .sg-ci-tcase-msg { white-space: normal; overflow-wrap: anywhere; }
+
+.sg-ci-tcase-body {
+  padding: 0 0.6rem 0.55rem 1.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.sg-ci-tcase-body .field-hint { margin: 0; overflow-wrap: anywhere; }
+
+.sg-ci-tcase-body pre {
+  margin: 0;
+  max-height: 16rem;
+  overflow: auto;
+  padding: 0.5rem 0.6rem;
+  border-radius: var(--radius-sm, 0.4rem);
+  background: var(--bg-inset, var(--bg-interactive));
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-tests-files summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.sg-ci-tests-files ul {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-height: 12rem;
+  overflow-y: auto;
+  font-size: 0.76rem;
+}
+
+.sg-ci-tests-files li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.sg-ci-tests-files li code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+}
+
+.sg-ci-tests-file-count {
+  margin-left: auto;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Trend strip: two single-measure sparklines above the build history. */
+.sg-ci-trend {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--bg-panel);
+}
+
+.sg-ci-trend-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.sg-ci-trend-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.74rem;
+}
+
+.sg-ci-trend-title { color: var(--text-muted); }
+
+.sg-ci-trend-latest {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong, var(--text-main));
+}
+
+.sg-ci-trend-latest.is-bad { color: var(--danger); }
+.sg-ci-trend-latest.is-ok { color: var(--ok); }
+
+.sg-ci-spark {
+  display: block;
+  overflow: visible;
+}
+
+.sg-ci-spark-base { stroke: var(--border-strong); stroke-width: 1; }
+.sg-ci-spark rect.is-bad { fill: var(--danger); }
+.sg-ci-spark rect.is-zero { fill: var(--text-muted); opacity: 0.45; }
+
+.sg-ci-spark-line {
+  fill: none;
+  stroke: var(--info);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sg-ci-spark-dot {
+  fill: var(--info);
+  stroke: var(--bg-panel);
+  stroke-width: 2;
+}
+
+.sg-ci-spark-cross { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 2; }
+
+.sg-ci-spark-hit {
+  fill: transparent;
+  cursor: pointer;
+}
+
+.sg-ci-trend-hover {
+  min-height: 1em;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sg-ci-trend-note {
+  margin-left: auto;
+  align-self: center;
+  font-size: 0.7rem;
+}
+
+@media (max-width: 560px) {
+  .sg-ci-trend-note { margin-left: 0; flex-basis: 100%; }
+}
+
+
+/* ── Approval stage in a build: who, decisions, Approve / Reject ────────── */
+.sg-ci-approval-deadline {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.sg-ci-approval-message {
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  color: var(--text-strong);
+  background: var(--bg-panel);
+  border-left: 3px solid var(--warn-border);
+  border-radius: var(--radius-md);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-approval-decisions {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sg-ci-approval-decisions li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.sg-ci-approval-verdict {
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: var(--font-size-xs);
+  font-weight: 650;
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.sg-ci-approval-decisions li.is-reject .sg-ci-approval-verdict {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.sg-ci-approval-decisions q {
+  flex-basis: 100%;
+  color: var(--text-subtle);
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-approval-act {
+  display: grid;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.sg-ci-approval-comment {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.sg-ci-approval-comment textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  font-size: var(--font-size-sm);
+}
+
+.sg-ci-approval-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.sg-ci-approval-act .field-hint {
+  margin: 0;
+}
+
+/* ── Store upload in a build: the publish's steps ──────────────────────── */
+.sg-ci-store-steps {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sg-ci-store-steps li {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: 0.6rem;
+  align-items: baseline;
+  padding-left: 0.55rem;
+  border-left: 3px solid var(--border);
+}
+
+.sg-ci-store-steps li strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-xs);
+}
+
+.sg-ci-store-steps li span {
+  color: var(--text-subtle);
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-store-steps li.is-done {
+  border-left-color: var(--ok);
+}
+
+.sg-ci-store-steps li.is-run {
+  border-left-color: var(--info);
+}
+
+.sg-ci-store-steps li.is-fail {
+  border-left-color: var(--danger);
+}
+
+.sg-ci-store-steps li.is-skip,
+.sg-ci-store-steps li.is-wait {
+  opacity: 0.7;
+}
+
+/* ── "awaiting approval" in the builds list and the drawer ─────────────── */
+.sg-ci-awaiting-chip {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.5rem;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: 999px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.banner-message.sg-ci-awaiting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+@media (max-width: 560px) {
+  .sg-ci-store-steps li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.1rem;
+  }
+}
+
+/* ── Build drawer: post actions ──────────────────────────────────────
+   Rows under the stages, under their own heading: they happened when the
+   build ended and never decided its result. Same row as a stage (select it
+   to read its log), with a word for the outcome where a stage shows time. */
+.sg-ci-post-heading {
+  margin: 0.6rem 0 0.1rem;
+  padding: 0.4rem 0.6rem 0;
+  border-top: 1px dashed var(--border);
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sg-ci-post-state {
+  flex: none;
+  padding: 0 0.35rem;
+  border-radius: var(--radius-chip, 0.35rem);
+  color: var(--text-muted);
+  background: var(--bg-panel-strong, var(--bg-interactive));
+  font-size: 0.6875rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.sg-ci-post-state.is-success {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.sg-ci-post-state.is-failed,
+.sg-ci-post-state.is-timeout {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.sg-ci-post-state.is-running,
+.sg-ci-post-state.is-pending {
+  color: var(--info);
+  background: var(--info-soft);
+}
+
+.sg-ci-post-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-lg, 0.6rem);
+}
+
+.sg-ci-post-panel.is-success {
+  border-left-color: var(--ok);
+}
+
+.sg-ci-post-panel.is-failed,
+.sg-ci-post-panel.is-timeout {
+  border-left-color: var(--danger);
+}
+
+.sg-ci-post-panel.is-pending,
+.sg-ci-post-panel.is-running {
+  border-left-color: var(--info);
+}
+
+.sg-ci-post-panel header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.sg-ci-post-kind {
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+.sg-ci-post-when {
+  padding: 0 0.35rem;
+  color: var(--text-subtle);
+  background: var(--bg-panel-strong, var(--bg-interactive));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip, 0.35rem);
+  font-size: 0.6875rem;
+  font-weight: 650;
+}
+
+.sg-ci-post-verdict {
+  margin: 0;
+  color: var(--text-main);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-post-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.2rem 0.75rem;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.sg-ci-post-facts dt {
+  color: var(--text-muted);
+}
+
+.sg-ci-post-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 520px) {
+  .sg-ci-post-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sg-ci-post-facts dd {
+    margin-bottom: 0.25rem;
+  }
+}
+
+/* ── Parallel groups on builds ──────────────────────────────────────
+   Stages that ran at the same time: stacked under one bracket in the strip,
+   hung off one rule in the drawer's stage list, banded in the stage matrix. */
+
+.sg-ci-strip-item.is-group {
+  align-self: stretch;
+}
+
+.sg-ci-strip-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 0.3rem 0.4rem 0.4rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md, 0.6rem);
+}
+
+.sg-ci-strip-group--running { border-color: var(--info-border, var(--info)); }
+.sg-ci-strip-group--success { border-color: var(--ok-border, var(--ok)); }
+.sg-ci-strip-group--failed,
+.sg-ci-strip-group--timeout { border-color: var(--danger-border, var(--danger)); }
+
+.sg-ci-strip-group-label {
+  max-width: 12rem;
+  overflow: hidden;
+  padding: 0 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.sg-ci-strip-lanes {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+
+.sg-ci-stage-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0.15rem 0;
+  padding: 0.3rem 0 0.3rem 0.35rem;
+  border-left: 2px solid color-mix(in srgb, var(--info) 50%, var(--border));
+}
+
+.sg-ci-stage-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0 0.6rem 0 0.4rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.sg-ci-stage-group-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-subtle);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-ci-stage-group-meta {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.sg-ci-stage-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sg-mx-bands th {
+  padding: 0.4rem 0.6rem 0;
+  vertical-align: bottom;
+}
+
+.sg-mx-table thead .sg-mx-bands .sg-mx-gut {
+  border-bottom: 0;
+}
+
+/* .sg-mx-table prefix: the grid's own `th` reset is (0,1,1) and clears backgrounds. */
+.sg-mx-table .sg-mx-band {
+  text-align: left;
+  border-top: 2px solid color-mix(in srgb, var(--info) 55%, var(--border));
+  border-left: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--info) 5%, transparent);
+}
+
+.sg-mx-band > span {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  padding-bottom: 0.2rem;
+  color: var(--info);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-mx-col.is-grouped {
+  background: color-mix(in srgb, var(--info) 5%, transparent);
 }

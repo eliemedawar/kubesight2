@@ -27,6 +27,7 @@ import "./styles/signal/ticketing.css";
 import "./styles/signal/mobileApps.css";
 import "./styles/signal/clusterBuilder.css";
 import "./styles/signal/settings.css";
+import "./styles/signal/mcpTools.css";
 import "./styles/signal/login.css";
 import "./styles/signal/coachmarks.css";
 

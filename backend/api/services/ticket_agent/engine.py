@@ -330,11 +330,14 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
             **base,
             "task": "continue_ticket",
             "instruction": (
-                "You parked this ticket earlier and the requester has replied. Read the "
-                "conversation and the new comments, then handle it again with the "
-                "kubesight_ticket_* tools: execute it, request approval, or set it to "
-                "impediment / on_hold with a comment asking what is still missing."
+                "You parked or answered this ticket earlier and the requester has replied. Read "
+                "the conversation and the new comments, then handle it again with the "
+                "kubesight_ticket_* tools: execute it, request approval, answer it "
+                "(kubesight_ticket_answer, after investigating again if they say it is still "
+                "broken), or set it to impediment / on_hold with a comment asking what is "
+                "still missing."
             ),
+            "troubleshooting": agent_settings.troubleshooting_enabled(),
             "ticket": catalog.ticket_context(ticket),
             "conversation": _conversation(ticket, before=task.id),
             "newComments": event.get("comments") or [],
@@ -344,9 +347,13 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
         **base,
         "task": "handle_new_ticket",
         "instruction": (
-            "A new DevOps ticket arrived. Handle it with the kubesight_ticket_* tools: execute it, "
-            "request approval, or set it to impediment with a comment."
+            "A new DevOps ticket arrived. Handle it with the kubesight_ticket_* tools. A request "
+            "for a change: execute it, request approval, or set it to impediment with a comment. "
+            "A question or a problem report (something is wrong, failing, slow, not working): "
+            "investigate with your read-only KubeSight tools and answer it with "
+            "kubesight_ticket_answer — unless troubleshooting is false below."
         ),
+        "troubleshooting": agent_settings.troubleshooting_enabled(),
         "ticket": catalog.ticket_context(ticket),
         "catalog": catalog.catalog_entries(targets),
     }
@@ -516,60 +523,134 @@ def brief(record_id: Any) -> Dict[str, Any]:
     }
 
 
-def _record(task: TicketInterpretation, req: Dict[str, Any], plan: validator.Plan) -> None:
-    task.decision = req
+def _planned(batch: validator.Batch) -> List[Dict[str, Any]]:
+    """What each change resolved to — the record the UI and the follow-up read."""
+    out = []
+    for plan in batch.plans:
+        snap = plan.snapshot
+        out.append({
+            "snapshotId": snap.id if snap else None,
+            "clusterId": snap.cluster_id if snap else None,
+            "namespace": snap.namespace if snap else None,
+            "deploymentName": snap.deployment_name if snap else None,
+            "changeType": plan.change_type,
+            "tag": plan.tag,
+            "variable": plan.variable,
+            "value": plan.value,
+        })
+    return out
+
+
+def _record(task: TicketInterpretation, req: Dict[str, Any], batch: validator.Batch,
+            run_ids: Optional[List[int]] = None) -> None:
+    """Write the request onto the task.
+
+    The single-target columns hold the FIRST change, so a one-application
+    ticket reads exactly as before; every change (with its run once started)
+    is in ``decision["planned"]``.
+    """
+    planned = _planned(batch)
+    for item, run_id in zip(planned, run_ids or []):
+        item["runId"] = run_id
+    task.decision = {**req, "planned": planned, **({"runIds": list(run_ids)} if run_ids else {})}
     task.confidence = req.get("confidence")
     task.understanding = req.get("understanding")
-    task.change_type = plan.change_type
-    snap = plan.snapshot
+    first = batch.plans[0]
+    task.change_type = first.change_type
+    snap = first.snapshot
     task.snapshot_id = snap.id if snap else None
     task.cluster_id = snap.cluster_id if snap else None
     task.namespace = snap.namespace if snap else None
     task.deployment_name = snap.deployment_name if snap else None
-    task.tag = plan.tag
-    task.variable_name = plan.variable
-    task.variable_value = plan.value
+    task.tag = first.tag
+    task.variable_name = first.variable
+    task.variable_value = first.value
 
 
-def _check(ticket: ZohoInboundTicket, req: Dict[str, Any]) -> validator.Plan:
+def _check(ticket: ZohoInboundTicket, req: Dict[str, Any]) -> validator.Batch:
     row = agent_settings.get_or_create()
     targets = catalog.targets(ticket.provider or "zoho")
-    plan = validator.check(req, targets, ticket, row.min_confidence or "High")
-    if plan.errors:
+    batch = validator.check_request(req, targets, ticket, row.min_confidence or "High")
+    if batch.errors:
         raise AgentError(
-            "Refused: " + " ".join(plan.errors)
+            "Refused: " + " ".join(batch.errors)
             + " Fix the arguments, or set the ticket to impediment and ask the requester.",
             422,
         )
-    return plan
+    return batch
 
 
-def _start_run(
+def _start_runs(
     ticket: ZohoInboundTicket,
-    plan: validator.Plan,
+    req: Dict[str, Any],
+    batch: validator.Batch,
     user,
     triggered_by: str,
-    decision: Optional[Dict[str, Any]] = None,
     approved: bool = False,
-):
+) -> List[Dict[str, Any]]:
+    """One deploy-automation run per change, all or nothing.
+
+    Every change was checked before the first run is created, but a run can
+    still be refused on its own (its snapshot vanished, the cluster's names
+    changed). Then the runs already created are withdrawn — they are only
+    queued rows at that point, nothing has touched a registry, a builder or a
+    cluster — so a ticket is never left half deployed by a refusal.
+    """
     from ..deploy_automation_service import AutomationError, start_run
 
-    override = {
-        "snapshotId": plan.snapshot.id,
-        "changeType": plan.change_type,
-        "tag": plan.tag,
-        "variable": plan.variable,
-        "value": plan.value,
-    }
-    try:
-        # origin="agent": start_run re-runs the same validator over ``decision``
-        # itself, so no path into a run skips it.
-        return start_run(
-            ticket.id, user=user, auto=True, override=override, triggered_by=triggered_by,
-            origin="agent", decision=decision, approved=approved,
+    changes = schema.changes_of(req)
+    several = len(batch.plans) > 1
+    if several:
+        open_run = _open_run(ticket)
+        if open_run is not None:
+            raise AgentError(f"Run #{open_run.id} is already going for this ticket.", 409)
+    started: List[Dict[str, Any]] = []
+    for plan, item in zip(batch.plans, changes):
+        override = {
+            "snapshotId": plan.snapshot.id,
+            "changeType": plan.change_type,
+            "tag": plan.tag,
+            "variable": plan.variable,
+            "value": plan.value,
+        }
+        try:
+            # origin="agent": start_run re-runs the same validator over this
+            # change itself, so no path into a run skips it.
+            started.append(start_run(
+                ticket.id, user=user, auto=True, override=override, triggered_by=triggered_by,
+                origin="agent", decision=schema.single(req, item), approved=approved,
+                sibling=several,
+            ))
+        except AutomationError as exc:
+            _withdraw(started)
+            where = f"{plan.snapshot.deployment_name} in {plan.snapshot.namespace}: " if several else ""
+            note = " None of the ticket's changes were started." if started else ""
+            raise AgentError(f"{where}{exc}{note}", exc.status)
+    return started
+
+
+def _withdraw(runs: List[Dict[str, Any]]) -> None:
+    """Close runs created a moment ago, before anything picked them up.
+
+    Not :func:`cancel_run`: that reports the outcome to the ticket and wakes
+    Hermes, and these runs never happened as far as the requester is concerned.
+    """
+    for data in runs:
+        run = db.session.get(DeployAutomationRun, data.get("id"))
+        if run is None or run.status not in ("queued", "waiting"):
+            continue
+        run.status = "cancelled"
+        run.error = "Withdrawn — another change on the same ticket could not start."
+        run.finished_at = _now()
+        log_audit(
+            "automation_run_withdrawn",
+            actor=None,
+            target_type="deploy_automation_run",
+            target_id=str(run.id),
+            details={"ticket": run.ticket_number, "deployment": run.deployment_name},
+            commit=False,
         )
-    except AutomationError as exc:
-        raise AgentError(str(exc), exc.status)
+    db.session.commit()
 
 
 def execute(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, Any]:
@@ -580,19 +661,20 @@ def execute(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
         text = schema.comment(arguments.get("comment"))
     except schema.ContractError as exc:
         raise AgentError(str(exc), 400)
-    plan = _check(ticket, req)
-    if plan.route == "approval":
+    batch = _check(ticket, req)
+    if batch.route == "approval":
         raise AgentError(
-            "This needs approval before it runs: " + " ".join(plan.reasons)
+            "This needs approval before it runs: " + " ".join(batch.reasons)
             + " Call kubesight_ticket_request_approval with the same action, plus `comment` "
             "(posted now) and `commentOnApprove` (posted when it is approved).",
             409,
         )
     task = _current_task(ticket, user)
-    run = _start_run(ticket, plan, user, TRIGGER, decision=req)
-    _record(task, req, plan)
+    runs = _start_runs(ticket, req, batch, user, TRIGGER)
+    run_ids = [r.get("id") for r in runs]
+    _record(task, req, batch, run_ids)
     task.route, task.status = "execute", "executed"
-    task.run_id = run.get("id")
+    task.run_id = run_ids[0]
     task.comment = text
     task.finished_at = _now()
     task.error = None
@@ -603,16 +685,29 @@ def execute(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
         actor=user,
         target_type="ticket_interpretation",
         target_id=str(task.id),
-        details={"ticket": task.ticket_number, "runId": task.run_id, "action": req["action"],
-                 "target": f"{task.namespace}/{task.deployment_name}", "confidence": task.confidence},
+        details={"ticket": task.ticket_number, "runId": task.run_id, "runIds": run_ids,
+                 "action": req["action"],
+                 "targets": [f"{p['namespace']}/{p['deploymentName']}" for p in task.decision["planned"]],
+                 "confidence": task.confidence},
     )
+    several = len(runs) > 1
     return {
         "started": True,
         "runId": task.run_id,
-        "runStatus": run.get("status"),
+        "runStatus": runs[0].get("status"),
+        "runs": [
+            {"runId": r.get("id"), "application": r.get("deploymentName"), "environment": r.get("namespace"),
+             "status": r.get("status")}
+            for r in runs
+        ],
         "ticketStatus": "in_progress",
-        "note": "The ticket is In Progress and your comment is posted. KubeSight will send you a "
-                "follow-up task when the run finishes — do not set the ticket to done yourself now.",
+        "note": (
+            "The ticket is In Progress and your comment is posted. KubeSight will send you ONE "
+            "follow-up task when every run has finished"
+            if several else
+            "The ticket is In Progress and your comment is posted. KubeSight will send you a "
+            "follow-up task when the run finishes"
+        ) + " — do not set the ticket to done yourself now.",
     }
 
 
@@ -626,7 +721,7 @@ def request_approval(record_id: Any, arguments: Dict[str, Any], user=None) -> Di
         reasons = schema.str_list(arguments.get("reasons"), "reasons")
     except schema.ContractError as exc:
         raise AgentError(str(exc), 400)
-    plan = _check(ticket, req)
+    batch = _check(ticket, req)
     if _open_run(ticket):
         raise AgentError("A run is already going for this ticket.", 409)
     waiting = TicketInterpretation.query.filter_by(
@@ -637,9 +732,9 @@ def request_approval(record_id: Any, arguments: Dict[str, Any], user=None) -> Di
 
     row = agent_settings.get_or_create()
     task = _current_task(ticket, user)
-    _record(task, req, plan)
-    task.decision = {**req, "commentOnApprove": on_approve}
-    task.reasons = (reasons + [r for r in plan.reasons if r not in reasons])[:10] or [
+    _record(task, req, batch)
+    task.decision = {**task.decision, "commentOnApprove": on_approve}
+    task.reasons = (reasons + [r for r in batch.reasons if r not in reasons])[:10] or [
         "Hermes asked for a human to confirm."
     ]
     task.route, task.status = "approval", "awaiting_approval"
@@ -738,6 +833,109 @@ def set_status(record_id: Any, status: str, comment_text: Any, user=None) -> Dic
     return {"ticketStatus": status, "commentPosted": True}
 
 
+def answer(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, Any]:
+    """kubesight_ticket_answer: a troubleshooting ticket, investigated and answered.
+
+    The ticket asked WHY something is wrong rather than for a change. Hermes has
+    already looked (read-only tools); this records what it found — diagnosis,
+    evidence, recommendation — posts its comment, and moves the ticket.
+
+    A fix Hermes can name in KubeSight's own vocabulary (deploy a tag, set a
+    variable, restart) may come along as ``proposedFix``. It is never run from
+    here: it goes through :func:`request_approval`, exactly as a change ticket
+    Hermes is unsure about would, so a person approves it first. Diagnosing and
+    changing are two different confidences, and only one of them is Hermes'.
+    """
+    if not agent_settings.troubleshooting_enabled():
+        raise AgentError(
+            "Troubleshooting tickets are switched off for the ticket agent. Set the ticket to "
+            "impediment and say a DevOps engineer will look into it.",
+            409,
+        )
+    ticket = _ticket(record_id)
+    try:
+        found = schema.answer(arguments)
+        text = schema.comment(arguments.get("comment"))
+    except schema.ContractError as exc:
+        raise AgentError(str(exc), 400)
+    record = {"type": "troubleshooting", **found}
+
+    fix = arguments.get("proposedFix")
+    if fix not in (None, {}, ""):
+        if not isinstance(fix, dict):
+            raise AgentError(
+                "proposedFix must be an object: the same fields as kubesight_ticket_request_approval.",
+                400,
+            )
+        try:
+            extra_reasons = schema.str_list(fix.get("reasons"), "proposedFix.reasons")
+        except schema.ContractError as exc:
+            raise AgentError(str(exc), 400)
+        result = request_approval(
+            ticket.id,
+            {
+                **fix,
+                "ticketRecordId": ticket.id,
+                "comment": text,
+                "understanding": fix.get("understanding") or found["diagnosis"][: schema.MAX_UNDERSTANDING],
+                "confidence": fix.get("confidence") or found["confidence"],
+                "reasons": ["Proposed by Hermes as the fix for a troubleshooting ticket."] + extra_reasons,
+            },
+            user=user,
+        )
+        task = db.session.get(TicketInterpretation, result["taskId"])
+        task.decision = {**(task.decision or {}), "troubleshooting": record}
+        db.session.commit()
+        _audit_answer(task, found, user, fix=True)
+        return {"answered": True, "ticketStatus": "awaiting_approval", "fixProposed": True, **result}
+
+    task = _current_task(ticket, user)
+    for waiting in TicketInterpretation.query.filter(
+        TicketInterpretation.ticket_record_id == ticket.id,
+        TicketInterpretation.status == "awaiting_approval",
+        TicketInterpretation.id != task.id,
+    ).all():
+        _close_approval(waiting, "superseded", "Superseded — Hermes answered the ticket instead.")
+
+    from .. import ticketing
+
+    _remember(ticket, text)
+    db.session.commit()
+    ticketing.report_outcome(
+        ticket.provider or "zoho", ticket.ticket_id, schema.TICKET_STATUSES[found["status"]],
+        comment=text, public=agent_settings.comments_public(),
+    )
+    task.decision = {"troubleshooting": record}
+    task.confidence = found["confidence"]
+    task.understanding = found["diagnosis"][: schema.MAX_UNDERSTANDING]
+    task.comment = text
+    task.route = "answered"
+    # on_hold: the requester confirms or acts, and their reply comes back to
+    # Hermes (see _parked_task). done: answered, closed.
+    task.status = "on_hold" if found["status"] == "on_hold" else "done"
+    task.finished_at = _now()
+    task.error = None
+    db.session.commit()
+    _audit_answer(task, found, user, fix=False)
+    return {"answered": True, "ticketStatus": found["status"], "fixProposed": False, "commentPosted": True}
+
+
+def _audit_answer(task: TicketInterpretation, found: Dict[str, Any], user, *, fix: bool) -> None:
+    log_audit(
+        "ticket_agent_answered",
+        actor=user,
+        target_type="ticket_interpretation",
+        target_id=str(task.id),
+        details={
+            "ticket": task.ticket_number,
+            "confidence": found["confidence"],
+            "findings": len(found["findings"]),
+            "status": found["status"],
+            "fixProposed": fix,
+        },
+    )
+
+
 def add_comment(record_id: Any, comment_text: Any, user=None) -> Dict[str, Any]:
     """kubesight_ticket_comment: a comment with no status change."""
     ticket = _ticket(record_id)
@@ -760,22 +958,45 @@ def add_comment(record_id: Any, comment_text: Any, user=None) -> Dict[str, Any]:
 # Approvals — Telegram buttons, the UI, and expiry
 # ---------------------------------------------------------------------------
 
-def _describe_change(task: TicketInterpretation) -> str:
-    target = f"{task.deployment_name} in {task.namespace}"
-    if task.change_type == "env_var":
-        return f"set {task.variable_name}={task.variable_value} on {target}"
-    if task.change_type == "restart":
+def _describe_one(item: Dict[str, Any]) -> str:
+    target = f"{item.get('deploymentName')} in {item.get('namespace')}"
+    if item.get("changeType") == "env_var":
+        return f"set {item.get('variable')}={item.get('value')} on {target}"
+    if item.get("changeType") == "restart":
         return f"restart {target}"
-    return f"deploy {task.deployment_name} {task.tag} to {task.namespace}"
+    return f"deploy {item.get('deploymentName')} {item.get('tag')} to {item.get('namespace')}"
+
+
+def _planned_of(task: TicketInterpretation) -> List[Dict[str, Any]]:
+    """Every change of the task — rows from before ``planned`` read their columns."""
+    planned = (task.decision or {}).get("planned")
+    if isinstance(planned, list) and planned:
+        return planned
+    if not task.deployment_name:
+        return []
+    return [{
+        "snapshotId": task.snapshot_id, "clusterId": task.cluster_id, "namespace": task.namespace,
+        "deploymentName": task.deployment_name, "changeType": task.change_type, "tag": task.tag,
+        "variable": task.variable_name, "value": task.variable_value, "runId": task.run_id,
+    }]
+
+
+def _describe_change(task: TicketInterpretation) -> str:
+    return "; ".join(_describe_one(item) for item in _planned_of(task)) or "nothing"
 
 
 def _approval_text(task: TicketInterpretation, ticket: ZohoInboundTicket) -> str:
+    planned = _planned_of(task)
+    will = (
+        [f"Will: {_describe_one(planned[0])}"] if len(planned) == 1
+        else [f"Will ({len(planned)} applications):"] + [f"• {_describe_one(p)}" for p in planned]
+    )
     lines = [
         f"🎫 {task.ticket_number or 'Ticket'} — Hermes needs approval",
         (ticket.subject or "").strip(),
         "",
         f"Understood: {task.understanding or '-'}",
-        f"Will: {_describe_change(task)}",
+        *will,
         f"Confidence: {task.confidence or '-'}",
     ]
     if task.reasons:
@@ -831,16 +1052,19 @@ def approve(task_id: int, by: str, *, nonce: Optional[str] = None, user=None) ->
     try:
         if ticket is None:
             raise AgentError("The ticket is no longer in the inbound log.", 404)
-        req = dict(task.decision or {})
+        req = {k: v for k, v in (task.decision or {}).items() if k not in ("planned", "runIds")}
         on_approve = req.pop("commentOnApprove", None)
-        plan = _check(ticket, req)  # targets may have changed while it waited
-        run = _start_run(ticket, plan, user, f"{TRIGGER} · approved by {by}"[:120], decision=req, approved=True)
+        batch = _check(ticket, req)  # targets may have changed while it waited
+        runs = _start_runs(ticket, req, batch, user, f"{TRIGGER} · approved by {by}"[:120], approved=True)
     except AgentError as exc:
         task.status, task.error, task.finished_at = "error", f"Approved, but could not start: {exc}", _now()
         db.session.commit()
         _edit_telegram(task, f"⚠️ Approved by {by}, but it could not start: {exc}")
         raise
-    task.status, task.run_id, task.finished_at, task.error = "executed", run.get("id"), _now(), None
+    run_ids = [r.get("id") for r in runs]
+    _record(task, req, batch, run_ids)
+    task.decision = {**task.decision, "commentOnApprove": on_approve}
+    task.status, task.run_id, task.finished_at, task.error = "executed", run_ids[0], _now(), None
     db.session.commit()
     if on_approve:
         _post(ticket, on_approve)
@@ -849,9 +1073,10 @@ def approve(task_id: int, by: str, *, nonce: Optional[str] = None, user=None) ->
         actor=user,
         target_type="ticket_interpretation",
         target_id=str(task.id),
-        details={"ticket": task.ticket_number, "by": by, "runId": task.run_id},
+        details={"ticket": task.ticket_number, "by": by, "runId": task.run_id, "runIds": run_ids},
     )
-    _edit_telegram(task, f"✅ Approved by {by} — run #{task.run_id} started.")
+    shown = f"run #{run_ids[0]}" if len(run_ids) == 1 else "runs " + ", ".join(f"#{i}" for i in run_ids)
+    _edit_telegram(task, f"✅ Approved by {by} — {shown} started.")
     return serialize(task)
 
 
@@ -998,6 +1223,9 @@ def on_run_finished(run: DeployAutomationRun, outcome: str, comment: Optional[st
     """
     if not is_agent_run(run) or outcome not in ("deployed", "failed", "cancelled"):
         return False
+    task = _batch_task(run)
+    if task is not None:
+        return _on_batch_run_finished(task, run, outcome, comment, resolution)
     return queue_followup(run.ticket_record_id, {
         "type": "run_finished",
         "runId": run.id,
@@ -1013,6 +1241,85 @@ def on_run_finished(run: DeployAutomationRun, outcome: str, comment: Optional[st
             "outcome": "impediment" if outcome == "cancelled" else outcome,
             "comment": comment,
             "resolution": resolution,
+        },
+    })
+
+
+def _batch_task(run: DeployAutomationRun) -> Optional[TicketInterpretation]:
+    """The task that started this run together with others, if it did."""
+    if not run.ticket_record_id:
+        return None
+    for task in (
+        TicketInterpretation.query.filter_by(ticket_record_id=run.ticket_record_id, status="executed")
+        .order_by(TicketInterpretation.id.desc()).limit(20).all()
+    ):
+        ids = (task.decision or {}).get("runIds") or []
+        if run.id in ids:
+            return task if len(ids) > 1 else None
+    return None
+
+
+def _on_batch_run_finished(task: TicketInterpretation, run: DeployAutomationRun, outcome: str,
+                           comment: Optional[str], resolution: Optional[str]) -> bool:
+    """One run of a several-application ticket ended.
+
+    Nothing goes on the ticket until the LAST of them ends: the requester asked
+    for one thing, and gets one answer — every application's result in one
+    follow-up for Hermes to write up. Each run's own outcome is kept on the task
+    as it comes in, so the fallback can say what happened to every one.
+    """
+    from ..deploy_automation_service import OPEN_STATUSES as RUN_OPEN
+
+    decision = dict(task.decision or {})
+    outcomes = dict(decision.get("outcomes") or {})
+    outcomes[str(run.id)] = {"result": outcome, "comment": comment, "resolution": resolution}
+    decision["outcomes"] = outcomes
+    ids = [int(i) for i in decision.get("runIds") or []]
+    runs = {r.id: r for r in DeployAutomationRun.query.filter(DeployAutomationRun.id.in_(ids)).all()}
+    still_open = [r for r in runs.values() if r.status in RUN_OPEN]
+    if still_open or decision.get("followupQueued"):
+        task.decision = decision
+        db.session.commit()
+        return True
+    decision["followupQueued"] = True
+    task.decision = decision
+    db.session.commit()
+
+    results = []
+    for run_id in ids:
+        row = runs.get(run_id)
+        if row is None:
+            continue
+        seen = outcomes.get(str(run_id)) or {}
+        results.append({
+            "runId": row.id,
+            "result": seen.get("result") or row.status,
+            "deployment": row.deployment_name,
+            "namespace": row.namespace,
+            "changeType": row.change_type,
+            "tag": row.image_tag or None,
+            "variable": row.variable_name,
+            "error": row.error,
+        })
+    states = {r["result"] for r in results}
+    # One application failing fails the ticket: the requester asked for all of it.
+    overall = "failed" if "failed" in states else ("cancelled" if "cancelled" in states else "deployed")
+    lines = [
+        (outcomes.get(str(r["runId"])) or {}).get("comment")
+        or f"{r['deployment']} in {r['namespace']}: {r['result']}"
+        for r in results
+    ]
+    resolutions = [
+        (outcomes.get(str(r["runId"])) or {}).get("resolution") for r in results
+    ]
+    return queue_followup(run.ticket_record_id, {
+        "type": "runs_finished",
+        "result": overall,
+        "runs": results,
+        "fallback": {
+            "outcome": "impediment" if overall == "cancelled" else overall,
+            "comment": "\n".join(line for line in lines if line),
+            "resolution": " ".join(r for r in resolutions if r) or None,
         },
     })
 
@@ -1065,7 +1372,13 @@ def _parked_task(ticket: ZohoInboundTicket) -> Optional[TicketInterpretation]:
             continue
         if task.status in (PENDING, RUNNING, "awaiting_approval", "deciding"):
             return None
-        return task if task.route in schema.PARKED_STATUSES else None
+        if task.route in schema.PARKED_STATUSES:
+            return task
+        # A troubleshooting answer left on hold is waiting on the requester too:
+        # "still broken" or "that fixed it" comes back to Hermes.
+        if task.route == "answered" and task.status == "on_hold":
+            return task
+        return None
     return None
 
 
@@ -1137,7 +1450,9 @@ def on_ticket_comment(
         return {"handled": True, "reason": f"Added to task #{queued.id}, already queued."}
 
     parked = _parked_task(ticket)
-    parked_as = parked.route if parked else None
+    parked_as = (
+        ("on_hold" if parked.route == "answered" else parked.route) if parked else None
+    )
     status = (ticket_status or "").strip()
     if status:
         by_status = _status_parks(ticket.provider or "zoho", status)
@@ -1313,9 +1628,16 @@ def serialize(task: TicketInterpretation, brief: bool = False) -> Dict[str, Any]
         "variableValue": task.variable_value,
         "reasons": task.reasons or [],
         "concerns": decision.get("concerns") or [],
+        # Every application the task changes (one entry for most tickets).
+        "changes": [
+            {k: item.get(k) for k in ("namespace", "deploymentName", "changeType", "tag", "variable", "value", "runId")}
+            for item in _planned_of(task)
+        ],
         "runId": task.run_id,
         "error": task.error,
         "finalMessage": task.final_message,
+        # A troubleshooting ticket: diagnosis, evidence, recommendation.
+        "troubleshooting": decision.get("troubleshooting"),
         "createdAt": _iso(task.created_at),
         "finishedAt": _iso(task.finished_at),
     }

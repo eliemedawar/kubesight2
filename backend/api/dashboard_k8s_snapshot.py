@@ -54,7 +54,9 @@ class DashboardK8sSnapshot:
     node_top_mib: float
     pod_top: PodTopMetrics
     node_top_by_name: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    # node.fs usage per node that answered the kubelet Summary API.
+    # Disk usage per node that answered the kubelet Summary API: containerd's
+    # filesystem (runtime imageFs) when reported, else the root fs, each
+    # tagged with ``source``.
     node_fs_by_name: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Why no node disk usage could be read (e.g. missing nodes/proxy), else None.
     node_fs_reason: Optional[str] = None
@@ -182,10 +184,24 @@ def _fetch_dashboard_k8s_snapshot_uncached(access: ClusterAccess) -> DashboardK8
         node_top_mib=node_top_mib,
         pod_top=pod_top,
         node_top_by_name=node_top_by_name,
-        node_fs_by_name=dict(node_fs.get("nodes") or {}),
+        node_fs_by_name=node_disk_by_name(node_fs),
         node_fs_reason=None if node_fs.get("available") else node_fs.get("reason"),
         reachable=reachable,
     )
+
+
+def node_disk_by_name(stats: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """The disk the dashboard shows per node: containerd's, else the root fs.
+
+    Images and container layers are what fill a node, and containerd often
+    sits on its own (bigger) disk than the kubelet root — so its filesystem is
+    the one worth watching. ``source`` says which one a row is."""
+    disks: Dict[str, Dict[str, Any]] = {}
+    for name, usage in (stats.get("nodes") or {}).items():
+        disks[name] = {**usage, "source": "node"}
+    for name, usage in (stats.get("imageFs") or {}).items():
+        disks[name] = {**usage, "source": "containerd"}
+    return disks
 
 
 def node_health_from_snapshot(snapshot: DashboardK8sSnapshot) -> List[Dict[str, Any]]:

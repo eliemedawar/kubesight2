@@ -14,9 +14,13 @@ Shape (the approved Phase 1–3 workspace mode):
                               BuildKit image metadata back to KubeSight over the
                               per-build callback token)
 
-Kubernetes runs initContainers strictly in order and stops at the first failure,
-which is exactly sequential pipeline semantics. Per-stage status is read from
-``pod.status.initContainerStatuses``; per-stage logs from ``kubectl logs -c``.
+Kubernetes runs initContainers strictly in order, which is sequential pipeline
+semantics; every stage exits 0 and reports its real outcome as a log marker so
+the pod always reaches its collector (see ``_wrap_stage_script``). A parallel
+group is the exception: its members run side by side as native sidecars, with a
+barrier container after them (see "Parallel groups" below). Per-stage status is
+read from ``pod.status.initContainerStatuses`` and the markers; per-stage logs
+from ``kubectl logs -c``.
 
 Security is the ``application_analysis_jobs.py`` recipe, unchanged in intent:
 restricted securityContext (non-root 65532, no privilege escalation, read-only
@@ -50,9 +54,10 @@ import subprocess
 import zlib
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from .. import build_environments, build_inputs, cache_layout
+from .. import build_environments, build_inputs, cache_layout, code_scan, parallel_groups, scan_stage
 from .. import resources as ci_resources
 from .base import (
+    CANCELLED,
     FAILED,
     QUEUED,
     RUNNING,
@@ -448,6 +453,9 @@ print("[kubesight] artifact collection complete")
 
 
 _FAIL_FLAG = "/workspace/.kubesight/failed"
+# Written by a continue-on-failure stage that failed; read only by post-action
+# cleanup containers (see _post_action_containers).
+_SOFT_FAIL_FLAG = "/workspace/.kubesight/failed-continued"
 
 # Values one stage hands the next. A stage appends ``NAME=value`` lines to
 # $KUBESIGHT_ENV; every later stage sources the file before running, so a
@@ -490,7 +498,14 @@ def _wrap_stage_script(body: str, *, continue_on_failure: bool) -> str:
         "  exit 0\n"
         "fi\n"
     )
-    record = "" if continue_on_failure else 'if [ "$EC" -ne 0 ]; then : > "$KS_FLAG"; fi\n'
+    # A continue-on-failure stage still fails the BUILD, so it leaves a flag of
+    # its own — one no stage reads, only the post-action cleanup containers,
+    # which run "on failure" for it exactly as the engine would decide.
+    record = (
+        f'if [ "$EC" -ne 0 ]; then : > {_SOFT_FAIL_FLAG}; fi\n'
+        if continue_on_failure
+        else 'if [ "$EC" -ne 0 ]; then : > "$KS_FLAG"; fi\n'
+    )
     return (
         "set -u\nexport HOME=/tmp TMPDIR=/tmp\n"
         + guard
@@ -547,7 +562,8 @@ def _node_modules_keep() -> int:
         return cache_layout.NODE_MODULES_KEEP
 
 
-def _command_stage_script(execution: StageExecution) -> str:
+def _command_stage_body(execution: StageExecution) -> str:
+    """A command (or scan) stage's own shell, before any wrapper."""
     workdir = "/workspace/source"
     if execution.working_directory:
         workdir = f"/workspace/source/{execution.working_directory}"
@@ -559,10 +575,528 @@ def _command_stage_script(execution: StageExecution) -> str:
             workdir=execution.working_directory or "",
             keep=_node_modules_keep(),
         )
+    return f"cd {_q(workdir)}\n{commands}"
+
+
+def _command_stage_script(execution: StageExecution) -> str:
     return _wrap_stage_script(
-        f"cd {_q(workdir)}\n{commands}",
+        _command_stage_body(execution),
         continue_on_failure=bool(execution.continue_on_failure),
     )
+
+
+# ---------------------------------------------------------------------------
+# Parallel groups — members side by side in the build's one pod
+#
+# A pod runs its initContainers strictly one after another, which is what made
+# the pipeline sequential. A NATIVE SIDECAR — an initContainer with
+# ``restartPolicy: Always`` — is the exception: kubelet starts it in order, but
+# moves on to the next initContainer as soon as it is running instead of
+# waiting for it to exit. So a group's members are sidecars, started back to
+# back and running together, and a plain initContainer after them — the
+# BARRIER, in the worker image — is what waits:
+#
+#     stage-1 checkout            (initContainer)
+#     stage-2 lint     ┐
+#     stage-3 test     ├ sidecars: start together, run together
+#     stage-4 sonar    ┘
+#     barrier-2                   (initContainer: waits for 2, 3 and 4)
+#     stage-5 image               (initContainer: after the group)
+#     post-N …                    (post actions, owned by their own block)
+#     collector                   (main container)
+#
+# Every member writes its result to ``done-<position>`` on the shared
+# workspace. The barrier waits for all of them — each within its own timeout —
+# writes the fail flag when a member that does not continue on failure failed,
+# prints one verdict line per member, and exits; the stages after it then skip
+# or run exactly as they do after any other stage.
+#
+# A sidecar must NOT exit (kubelet restarts it), so a finished member parks in
+# ``sleep`` — or ``tail -f /dev/null`` in an image without it — until the pod
+# ends, when kubelet stops the sidecars after the collector. An image with
+# neither just exits: kubelet restarts it under its usual backoff, and the
+# restarted container sees its done file and only reprints the result. Noisy,
+# never wrong.
+#
+# Native sidecars need Kubernetes 1.29 or newer (the SidecarContainers feature,
+# on by default from 1.29 and GA in 1.33). ``parallel_capability`` checks the
+# cluster version — or ``CI_PARALLEL_STAGES`` overrides the check — and a
+# build on an older cluster lays its members out as ordinary initContainers,
+# one after another, with the same done files, barrier and failure semantics.
+#
+# Sidecars hold their resource REQUESTS for the pod's whole life, finished or
+# not: see ``resources.effective_pod_requests``, whose total the Job carries in
+# an annotation and the barrier prints.
+# ---------------------------------------------------------------------------
+
+_STATE_DIR = "/workspace/.kubesight"
+_GROUPS_ANNOTATION = "kubesight.io/parallel-groups"
+_REQUESTS_ANNOTATION = "kubesight.io/effective-requests"
+# The barrier's per-member verdict: "[kubesight-member] <position> <outcome>",
+# outcome one of ok | failed | skip | timeout | cancelled.
+_MEMBER_VERDICT = "[kubesight-member]"
+# A member that its own `timeout` wrapper stopped.
+_TIMEOUT_MARKER = "[kubesight-timeout]"
+_STAGE_SCRIPT_ENV = "KUBESIGHT_STAGE_SCRIPT"
+_BARRIER_PREFIX = "barrier-"
+_BARRIER_POLL_SECONDS = 2
+_STAGE_CONTAINER_RE = re.compile(r"^stage-(\d+)$")
+
+
+def barrier_container_name(first_position: int) -> str:
+    return f"{_BARRIER_PREFIX}{first_position}"
+
+
+def plan_groups(plan: List[StageExecution]) -> List[List[StageExecution]]:
+    """Runs of two or more consecutive plan entries sharing a parallel group.
+
+    Read off the PLAN, not the pipeline: the plan holds only the stages that
+    will run, so a member skipped by its run condition is simply not in it —
+    and a group left with one runnable member is no group, just a stage.
+    """
+    runs: List[List[StageExecution]] = []
+    current: List[StageExecution] = []
+    for execution in plan:
+        key = (execution.parallel_group or "").strip().lower()
+        if key and execution.stage_type != "checkout" and current and (
+            (current[-1].parallel_group or "").strip().lower() == key
+        ):
+            current.append(execution)
+            continue
+        if len(current) > 1:
+            runs.append(current)
+        current = [execution] if key and execution.stage_type != "checkout" else []
+    if len(current) > 1:
+        runs.append(current)
+    return runs
+
+
+def _plan_parallel_mode(plan: List[StageExecution]) -> str:
+    for execution in plan:
+        if execution.parallel_mode:
+            return execution.parallel_mode
+    return ""
+
+
+def _parallel_reason(plan: List[StageExecution]) -> str:
+    for execution in plan:
+        if execution.parallel_reason:
+            return execution.parallel_reason
+    return ""
+
+
+def _member_body(body: str) -> str:
+    """The member's own commands as one script for ``sh -c``: the same
+    ``set -eu`` and build-variable loading the sequential wrapper's subshell
+    gives a stage."""
+    return f"set -eu\n{_LOAD_BUILD_ENV}{body}\n"
+
+
+def member_stage_script(
+    execution: StageExecution,
+    *,
+    group: List[StageExecution],
+    parallel: bool,
+    reason: str = "",
+    state_dir: str = _STATE_DIR,
+    with_cache_prep: bool = True,
+) -> str:
+    """The wrapper every member of a group runs; its commands arrive in
+    ``$KUBESIGHT_STAGE_SCRIPT``.
+
+    The same contract as :func:`_wrap_stage_script` — exit markers, a skip when
+    an earlier stage failed — plus what running beside siblings needs: a done
+    file for the barrier, a failure recorded for the GROUP rather than written
+    straight to the fail flag (a sibling that has not started yet must not
+    read it as "an earlier stage failed"), and, as a sidecar, its own timeout
+    and staying alive once finished. ``state_dir`` exists so a test can run the
+    real script against a temporary directory.
+    """
+    position = execution.position
+    first = group[0].position
+    name = execution.parallel_group or "group"
+    siblings = [item.stage_name for item in group if item.position != position]
+    fail_fast = any(item.parallel_fail_fast for item in group)
+    timeout = max(1, int(execution.timeout_seconds or 1800))
+    cof = bool(execution.continue_on_failure)
+
+    if parallel:
+        rest = (
+            "ks_rest() {\n"
+            # A test hook, and an escape hatch for an image where a lingering
+            # sidecar is unwanted: exiting only costs a restart (see below).
+            '  if [ "${KUBESIGHT_KEEPALIVE:-1}" = "0" ]; then exit 0; fi\n'
+            "  trap 'exit 0' TERM INT HUP\n"
+            "  if command -v sleep >/dev/null 2>&1; then\n"
+            "    while :; do sleep 3600 & wait $!; done\n"
+            "  elif command -v tail >/dev/null 2>&1; then\n"
+            "    tail -f /dev/null & wait $!\n"
+            "  fi\n"
+            '  echo "[kubesight] This image has neither sleep nor tail, so the finished stage\'s '
+            'container exits and Kubernetes restarts it. The restart only reprints the result."\n'
+            "  exit 0\n"
+            "}\n"
+        )
+        intro = (
+            "echo "
+            + _q(f"[kubesight] Parallel group '{name}': runs at the same time as {', '.join(siblings)}.")
+            + "\n"
+        )
+        runner = (
+            'KS_TO=""\n'
+            # GNU and busybox ≥1.30 spell it this way; an older busybox does
+            # not, and then the barrier's deadline is the timeout.
+            "if timeout -s TERM 5 true >/dev/null 2>&1; then\n"
+            f'  KS_TO="timeout -s TERM {timeout}"\n'
+            "fi\n"
+            # A missing script is a failure, never an empty success.
+            f'$KS_TO sh -c "${{{_STAGE_SCRIPT_ENV}:-exit 97}}"\n'
+            "EC=$?\n"
+            'if [ -n "$KS_TO" ] && [ "$EC" -eq 124 ]; then\n'
+            f'  echo "[kubesight] Stopped: this stage exceeded its {timeout}s timeout." >&2\n'
+            "  KS_RESULT=timeout\n"
+            "else\n"
+            "  KS_RESULT=$EC\n"
+            "fi\n"
+        )
+    else:
+        rest = "ks_rest() { exit 0; }\n"
+        intro = f"echo {_q(parallel_groups.sequential_notice(name, reason or 'the runner cannot run them side by side.'))}\n"
+        runner = f'sh -c "${{{_STAGE_SCRIPT_ENV}:-exit 97}}"\nKS_RESULT=$?\n'
+
+    group_flag = f"$KS_STATE/group-{first}-failed"
+    record = (
+        'if [ "$KS_RESULT" != "0" ]; then\n'
+        + (
+            # Fails the BUILD all the same; post actions read this flag.
+            '  : > "$KS_STATE/failed-continued"\n'
+            if cof
+            else f'  : > "{group_flag}"\n'
+        )
+        + "fi\n"
+    )
+    fail_fast_guard = (
+        (
+            f'if [ -e "{group_flag}" ]; then\n'
+            '  echo "[kubesight] Skipped: another stage in this group failed, and the group stops at its first failure."\n'
+            "  ks_finish skip\n"
+            "fi\n"
+        )
+        if fail_fast
+        else ""
+    )
+    return (
+        "set -u\nexport HOME=/tmp TMPDIR=/tmp\n"
+        f"KS_STATE={_q(state_dir)}\n"
+        f"KS_POS={position}\n"
+        'mkdir -p "$KS_STATE" 2>/dev/null || true\n'
+        + rest
+        + "ks_report() {\n"
+        '  case "$1" in\n'
+        f'    skip) echo "{_SKIP_MARKER}" ;;\n'
+        f'    timeout) echo "{_TIMEOUT_MARKER}" ;;\n'
+        f'    *) echo "{_EXIT_MARKER} $1" ;;\n'
+        "  esac\n"
+        "}\n"
+        "ks_finish() {\n"
+        "  printf '%s\\n' \"$1\" > \"$KS_STATE/done-$KS_POS\"\n"
+        '  ks_report "$1"\n'
+        "  ks_rest\n"
+        "}\n"
+        # Restarted after finishing (a sidecar that could not stay alive):
+        # say the result again, never run the stage twice.
+        'if [ -s "$KS_STATE/done-$KS_POS" ]; then\n'
+        '  read -r KS_DONE < "$KS_STATE/done-$KS_POS" || KS_DONE=""\n'
+        '  echo "[kubesight] Kubernetes restarted this stage\'s container after it had finished; it is not run again."\n'
+        '  ks_report "${KS_DONE:-1}"\n'
+        "  ks_rest\n"
+        "fi\n"
+        # Restarted part-way through — killed for memory, say. Running it again
+        # would repeat side effects behind everybody's back; it failed.
+        'if [ -e "$KS_STATE/started-$KS_POS" ]; then\n'
+        '  echo "[kubesight] This stage\'s container stopped before the stage finished (out of memory, or killed) and Kubernetes restarted it. It is not run twice: the stage failed."\n'
+        + ('  : > "$KS_STATE/failed-continued"\n' if cof else f'  : > "{group_flag}"\n')
+        + "  ks_finish 137\n"
+        "fi\n"
+        ': > "$KS_STATE/started-$KS_POS"\n'
+        'if [ -e "$KS_STATE/failed" ]; then\n'
+        '  echo "[kubesight] Skipped: an earlier stage failed."\n'
+        "  ks_finish skip\n"
+        "fi\n"
+        + fail_fast_guard
+        + intro
+        + (_cache_prep() if with_cache_prep else "")
+        + runner
+        + record
+        + 'ks_finish "$KS_RESULT"\n'
+    )
+
+
+def barrier_script(
+    group: List[StageExecution],
+    *,
+    state_dir: str = _STATE_DIR,
+    poll_seconds: int = _BARRIER_POLL_SECONDS,
+    grace_seconds: int = parallel_groups.POD_TIMEOUT_GRACE_SECONDS,
+    reserved: str = "",
+) -> str:
+    """The plain initContainer that holds the pod until the whole group is done.
+
+    Waits for every member's done file, each within its own timeout (plus a
+    grace that lets the member's own ``timeout`` record the result first),
+    prints ``[kubesight-member] <position> <outcome>`` for each, and writes the
+    fail flag when a member that does not continue on failure failed — so the
+    stages after the group skip exactly as they do after any failed stage. A
+    fail-fast group stops waiting at the first such failure; the members still
+    running are stopped with the pod.
+    """
+    name = group[0].parallel_group or "group"
+    members = " ".join(
+        f"{item.position}:{max(1, int(item.timeout_seconds or 1800))}:{1 if item.continue_on_failure else 0}"
+        for item in group
+    )
+    fail_fast = 1 if any(item.parallel_fail_fast for item in group) else 0
+    names = ", ".join(item.stage_name for item in group)
+    lines = [
+        "set -u",
+        f"KS_STATE={_q(state_dir)}",
+        f"KS_POLL={int(poll_seconds)}",
+        f"KS_GRACE={int(grace_seconds)}",
+        f"KS_FAIL_FAST={fail_fast}",
+        f'KS_PENDING="{members}"',
+        'mkdir -p "$KS_STATE" 2>/dev/null || true',
+        "echo " + _q(f"[kubesight] Parallel group '{name}': waiting for {names}."),
+    ]
+    if reserved:
+        lines.append(
+            f"echo {_q('[kubesight] While it runs, this build pod requests ' + reserved + ': each stage of the group holds its requests until the build ends.')}"
+        )
+    lines += [
+        "KS_FAILED=0",
+        "KS_SOFT=0",
+        'ks_verdict() { echo "' + _MEMBER_VERDICT + ' $1 $2"; }',
+        'ks_bad() { if [ "$1" = "1" ]; then KS_SOFT=1; else KS_FAILED=1; fi; }',
+        "KS_START=$(date +%s)",
+        'while [ -n "$KS_PENDING" ]; do',
+        "  KS_ELAPSED=$(( $(date +%s) - KS_START ))",
+        '  KS_NEXT=""',
+        "  for KS_M in $KS_PENDING; do",
+        "    KS_POS=${KS_M%%:*}",
+        "    KS_REST=${KS_M#*:}",
+        "    KS_LIMIT=${KS_REST%%:*}",
+        "    KS_COF=${KS_REST#*:}",
+        '    if [ -s "$KS_STATE/done-$KS_POS" ]; then',
+        '      read -r KS_RES < "$KS_STATE/done-$KS_POS" || KS_RES=""',
+        '      case "$KS_RES" in',
+        '        0) ks_verdict "$KS_POS" ok ;;',
+        '        skip) ks_verdict "$KS_POS" skip ;;',
+        '        timeout) ks_verdict "$KS_POS" timeout; ks_bad "$KS_COF" ;;',
+        '        *) ks_verdict "$KS_POS" failed; ks_bad "$KS_COF" ;;',
+        "      esac",
+        '    elif [ "$KS_ELAPSED" -ge $(( KS_LIMIT + KS_GRACE )) ]; then',
+        '      : > "$KS_STATE/timeout-$KS_POS"',
+        '      echo "[kubesight] Stage $KS_POS ran past its ${KS_LIMIT}s timeout; the group stops waiting for it."',
+        '      ks_verdict "$KS_POS" timeout',
+        '      ks_bad "$KS_COF"',
+        "    else",
+        '      KS_NEXT="$KS_NEXT $KS_M"',
+        "    fi",
+        "  done",
+        "  KS_PENDING=${KS_NEXT# }",
+        '  if [ "$KS_FAIL_FAST" = "1" ] && [ "$KS_FAILED" = "1" ] && [ -n "$KS_PENDING" ]; then',
+        '    echo "[kubesight] A stage in this group failed, and the group stops at its first failure. The stages still running are stopped with the build pod."',
+        "    for KS_M in $KS_PENDING; do",
+        "      KS_POS=${KS_M%%:*}",
+        '      : > "$KS_STATE/cancelled-$KS_POS"',
+        '      ks_verdict "$KS_POS" cancelled',
+        "    done",
+        '    KS_PENDING=""',
+        "  fi",
+        '  if [ -n "$KS_PENDING" ]; then sleep "$KS_POLL"; fi',
+        "done",
+        'if [ "$KS_FAILED" = "1" ]; then',
+        '  : > "$KS_STATE/failed"',
+        '  echo "[kubesight] The group failed, so the stages after it are skipped."',
+        "fi",
+        'if [ "$KS_SOFT" = "1" ]; then : > "$KS_STATE/failed-continued"; fi',
+        "echo " + _q(f"[kubesight] Parallel group '{name}' finished."),
+        "exit 0",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _barrier_container(group: List[StageExecution], reserved: str) -> Dict[str, Any]:
+    return {
+        "name": barrier_container_name(group[0].position),
+        "image": _worker_image(),
+        "imagePullPolicy": _env("CI_IMAGE_PULL_POLICY", "IfNotPresent"),
+        "command": ["/bin/sh", "-c", barrier_script(group, reserved=reserved)],
+        "env": [{"name": "HOME", "value": "/tmp"}, {"name": "TMPDIR", "value": "/tmp"}],
+        "securityContext": dict(_SECURITY_CONTEXT),
+        # It only needs the workspace's state directory, but the mounts are
+        # every stage's so an operator inspecting the pod sees one shape.
+        "volumeMounts": _mounts(),
+        "resources": {
+            "requests": {"cpu": "10m", "memory": "16Mi"},
+            "limits": {"cpu": "100m", "memory": "64Mi"},
+        },
+    }
+
+
+def _lay_out_groups(
+    plan: List[StageExecution],
+    init_containers: List[Dict[str, Any]],
+    bodies: Dict[int, str],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """``(containers, annotations)`` with every group's members and barrier.
+
+    ``init_containers`` holds one container per plan entry, in plan order, as
+    the stage loop built them; members already carry the member wrapper and
+    ``bodies`` their commands. This adds the commands to each member's
+    environment, makes members sidecars when the build runs groups in
+    parallel, and puts the barrier after each group's last member.
+    """
+    groups = plan_groups(plan)
+    if not groups:
+        return init_containers, {}
+    parallel = _plan_parallel_mode(plan) == parallel_groups.PARALLEL
+    by_name = {container["name"]: container for container in init_containers}
+    reserved = ""
+    if parallel:
+        members = {_stage_container_name(member.position) for group in groups for member in group}
+        totals = ci_resources.effective_pod_requests(
+            [(container.get("resources") or {}, container["name"] in members) for container in init_containers],
+            # The collector, whose requests are fixed (see build_job_resources).
+            [{"requests": dict(_DEFAULT_REQUESTS)}],
+        )
+        reserved = ci_resources.describe_requests(totals)
+    barrier_after: Dict[str, Dict[str, Any]] = {}
+    for group in groups:
+        for member in group:
+            container = by_name[_stage_container_name(member.position)]
+            container["env"] = list(container.get("env") or []) + [
+                {"name": _STAGE_SCRIPT_ENV, "value": _member_body(bodies.get(member.position, "true"))}
+            ]
+            if parallel:
+                container["restartPolicy"] = "Always"
+        barrier_after[_stage_container_name(group[-1].position)] = _barrier_container(group, reserved)
+    laid_out: List[Dict[str, Any]] = []
+    for container in init_containers:
+        laid_out.append(container)
+        if container["name"] in barrier_after:
+            laid_out.append(barrier_after[container["name"]])
+    annotations = {
+        _GROUPS_ANNOTATION: json.dumps(
+            {
+                "mode": parallel_groups.PARALLEL if parallel else parallel_groups.SEQUENTIAL,
+                "groups": [[member.position for member in group] for group in groups],
+            },
+            separators=(",", ":"),
+        )
+    }
+    if reserved:
+        annotations[_REQUESTS_ANNOTATION] = reserved
+    return laid_out, annotations
+
+
+def _stage_command_script(
+    execution: StageExecution,
+    body: str,
+    plan: List[StageExecution],
+    bodies: Dict[int, str],
+) -> str:
+    """The script a stage container runs: the ordinary wrapper, or — for a
+    member of a group — the member wrapper, with ``body`` kept aside for its
+    environment (see :func:`_lay_out_groups`)."""
+    for group in plan_groups(plan):
+        if any(member is execution for member in group):
+            bodies[execution.position] = body
+            return member_stage_script(
+                execution,
+                group=group,
+                parallel=_plan_parallel_mode(plan) == parallel_groups.PARALLEL,
+                reason=_parallel_reason(plan),
+            )
+    return _wrap_stage_script(body, continue_on_failure=bool(execution.continue_on_failure))
+
+
+# ---------------------------------------------------------------------------
+# Cluster version — the gate for native sidecars
+# ---------------------------------------------------------------------------
+
+_SIDECAR_MIN_VERSION = (1, 29)
+_VERSION_TTL_SECONDS = float(os.getenv("CI_CLUSTER_VERSION_TTL_SECONDS", "600"))
+_VERSION_FAILURE_TTL_SECONDS = 60.0
+_version_cache: Dict[str, Any] = {"value": None, "error": "", "at": None}
+
+
+def reset_cluster_version_cache() -> None:
+    """Test hook, and what an operator's cluster upgrade waits out otherwise."""
+    _version_cache.update({"value": None, "error": "", "at": None})
+
+
+def cluster_version() -> Tuple[Optional[Tuple[int, int, str]], str]:
+    """``((major, minor, text), "")`` for the build cluster, or ``(None, why)``.
+
+    Read through the runner's own kubectl — the same transport and kubeconfig a
+    build uses — and cached, because it is asked on every build with a group
+    and on every pipeline edit that has one. A failed read is cached for a
+    minute only, so a cluster that was briefly unreachable is asked again soon.
+    """
+    import time as _time
+
+    now = _time.monotonic()
+    fetched = _version_cache.get("at")
+    if fetched is not None:
+        ttl = _VERSION_TTL_SECONDS if _version_cache.get("value") else _VERSION_FAILURE_TTL_SECONDS
+        if now - fetched < ttl:
+            return _version_cache.get("value"), _version_cache.get("error") or ""
+    value: Optional[Tuple[int, int, str]] = None
+    error = ""
+    try:
+        rc, out, err = _kubectl(["version", "-o", "json"], timeout=10)
+        data = json.loads(out) if out.strip() else {}
+        server = data.get("serverVersion") or {}
+        major = int(re.sub(r"\D", "", str(server.get("major") or "")) or 0)
+        minor = int(re.sub(r"\D", "", str(server.get("minor") or "")) or 0)
+        if major:
+            text = str(server.get("gitVersion") or f"v{major}.{minor}")
+            value = (major, minor, text)
+        else:
+            detail = (err or "").strip().splitlines()
+            error = detail[-1] if detail else "the cluster did not report a server version"
+            if rc == 0 and not detail:
+                error = "the cluster did not report a server version"
+    except (ValueError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        error = str(exc) or exc.__class__.__name__
+    _version_cache.update({"value": value, "error": error, "at": now})
+    return value, error
+
+
+def parallel_stage_capability() -> Tuple[bool, str]:
+    """Whether this installation's cluster can run group members side by side."""
+    mode = parallel_groups.env_mode()
+    if mode == "off":
+        return False, parallel_groups.OFF_REASON
+    if mode == "on":
+        return True, (
+            "Parallel stages are forced on (CI_PARALLEL_STAGES=on); the cluster version is "
+            "not checked, so it must support native sidecar containers."
+        )
+    version, error = cluster_version()
+    if version is None:
+        return False, (
+            f"KubeSight could not read the cluster's Kubernetes version ({error}), so it does "
+            "not assume native sidecar containers. Set CI_PARALLEL_STAGES=on if the cluster "
+            "is 1.29 or newer."
+        )
+    major, minor, text = version
+    if (major, minor) < _SIDECAR_MIN_VERSION:
+        return False, (
+            f"the build cluster runs Kubernetes {text}, and running stages side by side needs "
+            "native sidecar containers, which Kubernetes turns on by default from 1.29."
+        )
+    return True, f"Kubernetes {text} runs native sidecar containers."
 
 
 INLINE_DOCKERFILE_DIR = "/kubesight-dockerfile"
@@ -1418,10 +1952,21 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
     cof_positions: List[int] = []
     artifact_specs: List[Dict[str, Any]] = []
     image_specs: List[Dict[str, Any]] = []
+    # Parallel group members' own commands, by position: they travel in the
+    # member's environment rather than inline (see member_stage_script).
+    member_bodies: Dict[int, str] = {}
 
     for execution in plan:
         if execution.continue_on_failure:
             cof_positions.append(execution.position)
+        if execution.stage_type == "command" and code_scan.armed(execution.code_scan):
+            # Kept whether the gate passed or failed - the collector runs after
+            # a failed stage too, and a failed gate is when the report is read.
+            artifact_specs.append(code_scan.artifact_spec(execution.position))
+        if execution.stage_type == "scan":
+            # The same, for the report (or SBOM) a scan stage writes. A Semgrep
+            # scan stage's spec IS code_scan's, so the PDF finds it by name.
+            artifact_specs.extend(scan_stage.artifact_specs(execution.scan, execution.position))
         for spec in execution.artifacts or []:
             if isinstance(spec, dict) and spec.get("path") and execution.stage_type != "container_image":
                 artifact_specs.append(
@@ -1499,9 +2044,8 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                 "command": [
                     "/bin/sh",
                     "-c",
-                    _wrap_stage_script(
-                        image_stage_script(execution, meta_file),
-                        continue_on_failure=bool(execution.continue_on_failure),
+                    _stage_command_script(
+                        execution, image_stage_script(execution, meta_file), plan, member_bodies
                     ),
                 ],
                 "env": _plain_env(
@@ -1539,14 +2083,57 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                     else []
                 ),
             }
+        elif execution.stage_type == "scan":
+            # A command stage whose script and image KubeSight chose: the same
+            # container, cache mounts and secrets. Two differences. The shell
+            # is found on PATH rather than at /bin/sh, because the Syft image
+            # (anchore/syft:debug) carries busybox at /busybox and has no
+            # /bin/sh at all. And Trivy is pointed at the same database
+            # directory as the image scan gate, so it is downloaded once.
+            tool = (execution.scan or {}).get("tool")
+            container = {
+                **base,
+                "image": execution.image or _env("CI_DEFAULT_STAGE_IMAGE", "debian:bookworm-slim"),
+                "command": [
+                    "sh",
+                    "-c",
+                    _stage_command_script(execution, _command_stage_body(execution), plan, member_bodies),
+                ],
+                "env": _plain_env(
+                    execution,
+                    {"TRIVY_CACHE_DIR": trivy_cache_dir(execution), "TRIVY_TEMP_DIR": "/tmp"}
+                    if tool == "trivy_fs"
+                    else {},
+                )
+                + _secret_env(secret_name, execution),
+            }
         else:  # command
             container = {
                 **base,
                 "image": execution.image or _env("CI_DEFAULT_STAGE_IMAGE", "debian:bookworm-slim"),
-                "command": ["/bin/sh", "-c", _command_stage_script(execution)],
+                "command": [
+                    "/bin/sh",
+                    "-c",
+                    _stage_command_script(execution, _command_stage_body(execution), plan, member_bodies),
+                ],
                 "env": _plain_env(execution, {}) + _secret_env(secret_name, execution),
             }
         init_containers.append(container)
+
+    # -- parallel groups: members become sidecars (or stay in line on a cluster
+    # without them) and each group gets its barrier. Still among the STAGE
+    # containers, so everything below — post actions, collector — comes after
+    # every group has finished.
+    init_containers, group_annotations = _lay_out_groups(plan, init_containers, member_bodies)
+
+    # -- post actions: cleanup commands (services/ci/post_actions.py) --------
+    # AFTER every stage container (anything a stage needs in front of it
+    # belongs above this block) and BEFORE the collector. Each runs whatever
+    # the fail flag says, decides by it, and exits 0 so the collector still
+    # uploads. Kept to these lines on purpose: the stage containers above can
+    # change shape without touching them.
+    post_containers, post_timeout_seconds = _post_action_containers(first, secret_name, secret_data)
+    init_containers.extend(post_containers)
 
     # -- collector: the only main container; uploads artifacts, then the Job
     # completes. Its failure fails the Job — a build must not pass with its
@@ -1607,7 +2194,9 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
             }
         )
 
-    total_timeout = sum(int(execution.timeout_seconds or 1800) for execution in plan) + 900
+    total_timeout = (
+        sum(int(execution.timeout_seconds or 1800) for execution in plan) + 900 + post_timeout_seconds
+    )
     host_aliases = _merged_host_aliases(plan)
 
     job = {
@@ -1624,7 +2213,11 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                 "metadata": {
                     "labels": labels,
                     "annotations": {
-                        _COF_ANNOTATION: ",".join(str(p) for p in cof_positions)
+                        _COF_ANNOTATION: ",".join(str(p) for p in cof_positions),
+                        # Which stage containers are a parallel group, and
+                        # whether they run side by side — what `poll` reads
+                        # to know a member is not waited on like a stage.
+                        **group_annotations,
                     },
                 },
                 "spec": {
@@ -1799,6 +2392,149 @@ def _network_policy(
 
 
 # ---------------------------------------------------------------------------
+# Post actions — cleanup commands after the stages
+#
+# One ``post-N`` initContainer per cleanup (services/ci/post_actions.py), after
+# every stage and before the collector. Not stages: the engine never advances
+# them as such, and :meth:`KubernetesJobRunnerAdapter._is_last_stage` looks
+# past them, so the last STAGE still waits for the whole pod as before.
+#
+# Each container runs whatever the fail flag says — that is the point of a
+# cleanup — and decides by it: ``success`` runs when no stage failed,
+# ``failure`` when one did (a continue-on-failure stage's own flag counts, as
+# it fails the build), ``always`` either way. It is bounded by its own timeout
+# inside the pod, and always exits 0, so a failed cleanup never stops the
+# collector uploading what the stages produced.
+# ---------------------------------------------------------------------------
+
+POST_CONTAINER_PREFIX = "post-"
+
+
+def post_container_name(position: int) -> str:
+    from .. import post_actions
+
+    return f"{POST_CONTAINER_PREFIX}{max(0, int(position) - post_actions.POSITION_BASE)}"
+
+
+def _container_name_for(execution: StageExecution) -> str:
+    if execution.stage_type == "post":
+        return post_container_name(execution.position)
+    return _stage_container_name(execution.position)
+
+
+def post_container_script(
+    execution: StageExecution, *, root: str = "/workspace", tmp: str = "/tmp"
+) -> str:
+    """The whole shell of one cleanup container.
+
+    ``root``/``tmp`` exist so a test can run the real script against a
+    temporary directory; the manifest always uses the defaults.
+    """
+    from .. import post_actions
+
+    when = execution.post_when if execution.post_when in post_actions.CLEANUP_WHEN_VALUES else "always"
+    index = max(0, int(execution.position) - post_actions.POSITION_BASE)
+    state = f"{root}/.kubesight"
+    workdir = f"{root}/source" + (f"/{execution.working_directory}" if execution.working_directory else "")
+    try:
+        timeout = max(1, int(execution.timeout_seconds or post_actions.DEFAULT_CLEANUP_TIMEOUT))
+    except (TypeError, ValueError):
+        timeout = post_actions.DEFAULT_CLEANUP_TIMEOUT
+    commands = "\n".join(execution.commands or ["true"])
+    script_file = f"{tmp}/kubesight-post-{index}.sh"
+    # A quoted heredoc writes the commands verbatim; the delimiter only has to
+    # be a line the commands do not contain.
+    delimiter = f"KS_POST_{index}_EOF"
+    while delimiter in commands:
+        delimiter += "_"
+    gate = ""
+    if when == "success":
+        gate = (
+            'if [ "$KUBESIGHT_STAGES_RESULT" != "success" ]; then\n'
+            '  echo "[kubesight] Skipped: this cleanup runs when the stages succeed, and one of them failed."\n'
+            f'  echo "{_SKIP_MARKER}"\n'
+            "  exit 0\n"
+            "fi\n"
+        )
+    elif when == "failure":
+        gate = (
+            'if [ "$KUBESIGHT_STAGES_RESULT" != "failure" ]; then\n'
+            '  echo "[kubesight] Skipped: this cleanup runs when a stage fails, and every stage succeeded."\n'
+            f'  echo "{_SKIP_MARKER}"\n'
+            "  exit 0\n"
+            "fi\n"
+        )
+    return (
+        "set -u\n"
+        f"export HOME={_q(tmp)} TMPDIR={_q(tmp)}\n"
+        f"KS_STATE={_q(state)}\n"
+        'mkdir -p "$KS_STATE" 2>/dev/null || true\n'
+        'if [ -e "$KS_STATE/failed" ] || [ -e "$KS_STATE/failed-continued" ]; then\n'
+        "  KUBESIGHT_STAGES_RESULT=failure\n"
+        "else\n"
+        "  KUBESIGHT_STAGES_RESULT=success\n"
+        "fi\n"
+        "export KUBESIGHT_STAGES_RESULT\n"
+        f'echo "[kubesight] Post action ({when}): the stages ended in $KUBESIGHT_STAGES_RESULT."\n'
+        + gate
+        + f"if [ -d {_q(workdir)} ]; then\n"
+        f"  cd {_q(workdir)}\n"
+        "else\n"
+        '  echo "[kubesight] The source directory does not exist (did the checkout run?); '
+        'cleaning up from the workspace root."\n'
+        f"  cd {_q(root)} 2>/dev/null || cd /\n"
+        "fi\n"
+        f"cat > {_q(script_file)} <<'{delimiter}'\n"
+        f"export KUBESIGHT_ENV={_q(state + '/build.env')}\n"
+        'if [ -s "$KUBESIGHT_ENV" ]; then . "$KUBESIGHT_ENV"; fi\n'
+        f"{commands}\n"
+        f"{delimiter}\n"
+        "if command -v timeout >/dev/null 2>&1; then\n"
+        f"  timeout {timeout} sh -e {_q(script_file)}\n"
+        "else\n"
+        f"  sh -e {_q(script_file)}\n"
+        "fi\n"
+        "EC=$?\n"
+        'if [ "$EC" -eq 124 ]; then\n'
+        f'  echo "[kubesight] The cleanup exceeded its {timeout}s timeout and was stopped." >&2\n'
+        "fi\n"
+        f'echo "{_EXIT_MARKER} $EC"\n'
+        "exit 0\n"
+    )
+
+
+def _post_action_containers(
+    first: StageExecution, secret_name: str, secret_data: Dict[str, str]
+) -> Tuple[List[Dict[str, Any]], int]:
+    """``(containers, seconds)``: the cleanup initContainers for ``first.post_plan``
+    and what they add to the Job's deadline. Their secrets join the build's
+    Secret under their own keys (positions from 1000, never a stage's)."""
+    containers: List[Dict[str, Any]] = []
+    budget = 0
+    for execution in first.post_plan or []:
+        for env_name, value in (execution.secrets or {}).items():
+            secret_data[_secret_key(execution.position, env_name)] = _b64(value)
+        containers.append(
+            {
+                "name": post_container_name(execution.position),
+                "image": execution.image or _env("CI_DEFAULT_STAGE_IMAGE", "debian:bookworm-slim"),
+                "imagePullPolicy": _env("CI_IMAGE_PULL_POLICY", "IfNotPresent"),
+                "securityContext": dict(_SECURITY_CONTEXT),
+                "volumeMounts": _mounts(),
+                "resources": _stage_resources(execution),
+                "command": ["/bin/sh", "-c", post_container_script(execution)],
+                "env": _plain_env(execution, {"KUBESIGHT_POST_WHEN": execution.post_when or "always"})
+                + _secret_env(secret_name, execution),
+            }
+        )
+        try:
+            budget += int(execution.timeout_seconds or 600) + 60
+        except (TypeError, ValueError):
+            budget += 660
+    return containers, budget
+
+
+# ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
 
@@ -1813,7 +2549,9 @@ class KubernetesJobRunnerAdapter:
     # -- capabilities --------------------------------------------------------
 
     def supported_stage_types(self) -> set:
-        supported = {"checkout", "command"}
+        # A scan stage is a command stage with a generated script, so it needs
+        # nothing a command stage does not.
+        supported = {"checkout", "command", "scan"}
         if buildkit_addr():
             supported.add("container_image")
         return supported
@@ -1829,15 +2567,21 @@ class KubernetesJobRunnerAdapter:
     def can_run(self, requirements: StageRequirements) -> bool:
         return requirements.runner_type in (None, self.runner_type)
 
+    def parallel_capability(self) -> Tuple[bool, str]:
+        """Native sidecars or not: see the parallel groups notes above."""
+        return parallel_stage_capability()
+
     # -- lifecycle -----------------------------------------------------------
 
     def start(self, execution: StageExecution) -> RunnerHandle:
         job_name = job_name_for(execution)
-        ref = f"{job_name}#{_stage_container_name(execution.position)}"
+        # A cleanup (stage_type "post") attaches to its post-N container.
+        ref = f"{job_name}#{_container_name_for(execution)}"
         if execution.plan:
             self._create_job(execution)
-        # Later stages: the Job is already running their container in order —
-        # starting them is just attaching to the right container.
+        # Later stages: the Job is already running their container in order (or
+        # side by side, for a parallel group) — starting them is just attaching
+        # to the right container.
         return RunnerHandle(runner_id=0, external_ref=ref)
 
     def _create_job(self, execution: StageExecution) -> None:
@@ -2018,6 +2762,30 @@ class KubernetesJobRunnerAdapter:
     def poll(self, handle: RunnerHandle) -> str:
         job_name, container = _split_ref(handle.external_ref)
         job, pod = self._read_job_and_pod(job_name)
+        return self._status_of(job, pod, job_name, container, {})
+
+    def poll_many(self, handles: List[RunnerHandle]) -> Dict[str, str]:
+        """A parallel group's members in one observation: the Job and its pod
+        are read once per build, a barrier's verdicts once per group."""
+        statuses: Dict[str, str] = {}
+        reads: Dict[str, Tuple[Optional[dict], Optional[dict]]] = {}
+        verdicts: Dict[str, Dict[int, str]] = {}
+        for handle in handles:
+            job_name, container = _split_ref(handle.external_ref)
+            if job_name not in reads:
+                reads[job_name] = self._read_job_and_pod(job_name)
+            job, pod = reads[job_name]
+            statuses[handle.external_ref] = self._status_of(job, pod, job_name, container, verdicts)
+        return statuses
+
+    def _status_of(
+        self,
+        job: Optional[dict],
+        pod: Optional[dict],
+        job_name: str,
+        container: str,
+        verdicts: Dict[str, Dict[int, str]],
+    ) -> str:
         if job is None:
             return FAILED  # Deleted out from under us — the reaper's case.
 
@@ -2034,6 +2802,9 @@ class KubernetesJobRunnerAdapter:
                 return FAILED
             return QUEUED  # Pod not scheduled yet.
 
+        if self._runs_as_sidecar(pod, container):
+            return self._member_status(job_name, container, pod, job_status, deadline_exceeded, verdicts)
+
         status = self._container_status(pod, container)
         if status is None:
             return QUEUED
@@ -2047,6 +2818,8 @@ class KubernetesJobRunnerAdapter:
             marker = self._exit_marker(job_name, container)
             if marker == "skip":
                 return SKIPPED
+            if marker == "timeout":
+                return TIMEOUT
             if marker == "failed":
                 # The last stage still has to wait for the collector, otherwise
                 # a failed final stage would end the build before its artifacts
@@ -2079,16 +2852,156 @@ class KubernetesJobRunnerAdapter:
         return None
 
     def _is_last_stage(self, pod: dict, container: str) -> bool:
-        init = (pod.get("spec") or {}).get("initContainers") or []
-        return bool(init) and init[-1].get("name") == container
+        """Whether this stage is in the build's LAST step, and so must wait for
+        the whole pod (post actions + collector) before it may report success.
 
-    def _exit_marker(self, job_name: str, container: str) -> str:
+        The last step is the last stage container — or every member of a
+        parallel group that ends the pipeline, since any of them can finish
+        last. Post-action cleanup containers (post-N) and group barriers come
+        after the stages but are not stages, so only ``stage-N`` names count.
+        """
+        init = (pod.get("spec") or {}).get("initContainers") or []
+        stages = [
+            str(c.get("name") or "") for c in init if _STAGE_CONTAINER_RE.match(str(c.get("name") or ""))
+        ]
+        if not stages:
+            return False
+        if stages[-1] == container:
+            return True
+        group = self._group_of(pod, container)
+        return bool(group) and _stage_container_name(group[-1]) == stages[-1]
+
+    @staticmethod
+    def _stage_container_is_last(pod: dict, container: str) -> bool:
+        """The one container the collector's output is attached to: the last
+        ``stage-N``, even when the build ends with a group of several."""
+        init = (pod.get("spec") or {}).get("initContainers") or []
+        stages = [
+            str(c.get("name") or "") for c in init if _STAGE_CONTAINER_RE.match(str(c.get("name") or ""))
+        ]
+        return bool(stages) and stages[-1] == container
+
+    @staticmethod
+    def _collector_started(pod: dict) -> bool:
+        for status in (pod.get("status") or {}).get("containerStatuses") or []:
+            if status.get("name") == "collector":
+                state = status.get("state") or {}
+                return "running" in state or "terminated" in state
+        return False
+
+    @staticmethod
+    def _group_layout(pod: dict) -> Dict[str, Any]:
+        raw = ((pod.get("metadata") or {}).get("annotations") or {}).get(_GROUPS_ANNOTATION)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _group_of(self, pod: dict, container: str) -> Optional[List[int]]:
+        match = _STAGE_CONTAINER_RE.match(container or "")
+        if not match:
+            return None
+        position = int(match.group(1))
+        for group in self._group_layout(pod).get("groups") or []:
+            if isinstance(group, list) and position in group:
+                return [int(item) for item in group]
+        return None
+
+    def _runs_as_sidecar(self, pod: dict, container: str) -> bool:
+        """A member of a group laid out side by side. Such a container never
+        terminates while the build runs, so it is read off its done marker and
+        its barrier, never off its container state."""
+        return (
+            self._group_layout(pod).get("mode") == parallel_groups.PARALLEL
+            and self._group_of(pod, container) is not None
+        )
+
+    def _member_status(
+        self,
+        job_name: str,
+        container: str,
+        pod: dict,
+        job_status: dict,
+        deadline_exceeded: bool,
+        verdicts: Dict[str, Dict[int, str]],
+    ) -> str:
+        group = self._group_of(pod, container) or []
+        position = int(_STAGE_CONTAINER_RE.match(container).group(1))
+        status = self._container_status(pod, container)
+        state = (status or {}).get("state") or {}
+        started = bool(
+            "running" in state or "terminated" in state or int((status or {}).get("restartCount") or 0)
+        )
+
+        outcome: Optional[str] = None
+        # The barrier's word is final: it is what decided the fail flag, and
+        # it is the only one that knows about a member it stopped waiting for.
+        barrier = barrier_container_name(group[0]) if group else ""
+        barrier_state = (self._container_status(pod, barrier) or {}).get("state") or {}
+        if barrier and "terminated" in barrier_state:
+            if barrier not in verdicts:
+                verdicts[barrier] = self._barrier_verdicts(job_name, barrier)
+            outcome = verdicts[barrier].get(position)
+        if outcome is None and started:
+            outcome = self._exit_marker(job_name, container, default=None)
+
+        if outcome is None:
+            if deadline_exceeded:
+                return TIMEOUT
+            if int(job_status.get("failed") or 0) > 0:
+                return FAILED
+            return RUNNING if started else QUEUED
+        if outcome == "skip":
+            return SKIPPED
+        if outcome == "timeout":
+            return TIMEOUT
+        if outcome == "cancelled":
+            return CANCELLED
+        last = self._is_last_stage(pod, container)
+        if outcome == "failed":
+            # As for any stage: a failure in the build's last step still waits
+            # for the collector, or its artifacts would never be recorded.
+            if last and not self._job_finished(job_status):
+                return RUNNING
+            return FAILED
+        if last:
+            if int(job_status.get("succeeded") or 0) > 0:
+                return SUCCEEDED
+            if deadline_exceeded:
+                return TIMEOUT
+            if int(job_status.get("failed") or 0) > 0:
+                return FAILED
+            return RUNNING
+        return SUCCEEDED
+
+    def _barrier_verdicts(self, job_name: str, barrier: str) -> Dict[int, str]:
+        rc, out, _ = _kubectl(
+            ["logs", f"job/{job_name}", "-c", barrier, "-n", _namespace(), "--tail", "200"],
+            timeout=20,
+        )
+        found: Dict[int, str] = {}
+        if rc != 0:
+            return found
+        for line in out.splitlines():
+            if not line.startswith(_MEMBER_VERDICT):
+                continue
+            parts = line[len(_MEMBER_VERDICT):].split()
+            if len(parts) == 2 and parts[0].isdigit():
+                found[int(parts[0])] = parts[1]
+        return found
+
+    def _exit_marker(self, job_name: str, container: str, default: Any = "ok") -> Any:
         """What a stage's own log says about how it ended.
 
         Every stage exits 0 so the pod reaches the collector, so the container's
         exit code no longer carries the outcome — the marker does. Returns
-        "skip", "failed", or "ok" (also when no marker is found, which is the
-        pre-wrapper shape and means the exit code already told the truth).
+        "skip", "failed", "timeout" (a group member its own timeout stopped),
+        or "ok" — also when no marker is found, which is the pre-wrapper shape
+        and means the exit code already told the truth. A group member asks for
+        ``default=None`` instead: it is still running when it has no marker.
         """
         rc, out, _ = _kubectl(
             [
@@ -2098,14 +3011,16 @@ class KubernetesJobRunnerAdapter:
             timeout=20,
         )
         if rc != 0:
-            return "ok"
+            return default
         for line in out.splitlines():
             if line.startswith(_SKIP_MARKER):
                 return "skip"
+            if line.startswith(_TIMEOUT_MARKER):
+                return "timeout"
             if line.startswith(_EXIT_MARKER):
                 code = line.replace(_EXIT_MARKER, "").strip()
                 return "ok" if code in ("", "0") else "failed"
-        return "ok"
+        return default
 
     @staticmethod
     def _job_finished(job_status: dict) -> bool:
@@ -2118,9 +3033,14 @@ class KubernetesJobRunnerAdapter:
         # only window into artifact upload problems.
         if lines is not None:
             _, pod = self._read_job_and_pod(job_name)
-            if pod is not None and self._is_last_stage(pod, container):
+            if pod is not None and self._is_last_stage(pod, container) and self._stage_container_is_last(pod, container):
                 status = self._container_status(pod, container)
-                if status and (status.get("state") or {}).get("terminated"):
+                # A group member never terminates while the pod runs (it is a
+                # sidecar), so for one the collector having started is the
+                # sign the stage's own output is complete.
+                if status and (
+                    (status.get("state") or {}).get("terminated") or self._collector_started(pod)
+                ):
                     collector_lines = self._container_log_lines(job_name, "collector") or []
                     lines = lines + [f"[collector] {line}" for line in collector_lines]
         for index, content in enumerate(lines or [], start=1):

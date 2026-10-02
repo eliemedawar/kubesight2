@@ -267,7 +267,7 @@ function NodeTable({ nodes, disk, canOpen, onNavigate }) {
                 <th scope="col">Status</th>
                 <th scope="col">CPU</th>
                 <th scope="col">Memory</th>
-                <th scope="col">Disk</th>
+                <th scope="col" title="The filesystem containerd keeps images and container layers on (kubelet runtime imageFs); the root filesystem when the kubelet does not report one">Containerd disk</th>
                 <th scope="col" className="db-num">Pods</th>
               </tr>
             </thead>
@@ -314,8 +314,8 @@ function NodeTable({ nodes, disk, canOpen, onNavigate }) {
                     <UsageCell
                       name="Disk"
                       percent={node.diskPercent}
-                      detail={`${formatBytes(node.diskUsedBytes)} / ${formatBytes(node.diskTotalBytes)}`}
-                      missing={node.diskTotalBytes ? `of ${formatBytes(node.diskTotalBytes)}` : "no data"}
+                      detail={`${formatBytes(node.diskUsedBytes)} / ${formatBytes(node.diskTotalBytes)}${node.diskSource === "node" ? " · root fs" : ""}`}
+                      missing="not measured"
                     />
                     <td className="db-num db-pods" data-label="Pods">
                       {node.podsRunning ?? "—"}

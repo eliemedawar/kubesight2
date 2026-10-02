@@ -565,23 +565,27 @@ def ingest_ci_build(
     source: str = "manual",
     run=None,
     commit: bool = True,
+    artifact_ids: Optional[List[int]] = None,
 ) -> List[MobileAppBuild]:
-    """Create ``available`` build rows from a CI build's mobile artifacts."""
+    """Create ``available`` build rows from a CI build's mobile artifacts.
+
+    ``artifact_ids`` narrows the ingest to those artifacts — the App store
+    upload stage names the one file it publishes. None ingests them all.
+    """
     import shutil
 
     from ..models_ci import CiArtifact
     from .ci import artifacts as ci_artifacts_service
 
-    artifacts = (
-        CiArtifact.query.filter(
-            CiArtifact.build_id == ci_build.id,
-            CiArtifact.artifact_type.in_(tuple(_CI_MOBILE_TYPES)),
-            CiArtifact.storage_backend == "local",
-            CiArtifact.storage_ref.isnot(None),
-        )
-        .order_by(CiArtifact.id.asc())
-        .all()
+    query = CiArtifact.query.filter(
+        CiArtifact.build_id == ci_build.id,
+        CiArtifact.artifact_type.in_(tuple(_CI_MOBILE_TYPES)),
+        CiArtifact.storage_backend == "local",
+        CiArtifact.storage_ref.isnot(None),
     )
+    if artifact_ids is not None:
+        query = query.filter(CiArtifact.id.in_([int(i) for i in artifact_ids] or [0]))
+    artifacts = query.order_by(CiArtifact.id.asc()).all()
     created: List[MobileAppBuild] = []
     for artifact in artifacts:
         platform = _CI_MOBILE_TYPES[artifact.artifact_type]

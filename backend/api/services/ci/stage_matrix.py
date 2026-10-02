@@ -24,6 +24,7 @@ from sqlalchemy import and_, func, or_
 from ...db import db
 from ...models_ci import CiBuild, CiBuildStage, CiLogChunk
 from . import engine as engine_service
+from . import parallel_groups
 from .serializers import build_summary
 
 # How many builds the grid reads back. Twelve rows fit a screen; past thirty the
@@ -173,7 +174,17 @@ def _skip_kind(
     """
     if stage.status not in SKIP_STATUSES:
         return None
-    if any(position < stage.position for position in preempted_positions):
+    # A sibling in the same parallel group does not pre-empt a member: they
+    # run side by side, and a member skipped next to a failed sibling was
+    # skipped for its own reason. Unless the group is fail-fast — then the
+    # failure is exactly why the member never started.
+    definitions = (build.pipeline_snapshot or {}).get("stages") or []
+    siblings = parallel_groups.group_positions(definitions, stage.position)
+    if len(siblings) < 2 or parallel_groups.fail_fast(definitions, siblings):
+        siblings = []
+    if any(
+        position < stage.position and position not in siblings for position in preempted_positions
+    ):
         return SKIP_NOT_REACHED
     # Only a pre-removal snapshot has this; see SKIP_REUSED above.
     restore = (build.pipeline_snapshot or {}).get("restore") or {}
@@ -292,6 +303,15 @@ def stage_matrix(
                 "key": key,
                 "name": exemplar[key].name,
                 "stageType": exemplar[key].stage_type,
+                # The parallel group this stage ran in on the newest build that
+                # had it, or None. Columns stay one per stage; the grid marks
+                # the group across them.
+                "parallelGroup": parallel_groups.group_name(
+                    (exemplar[key].build.pipeline_snapshot or {}).get("stages") or [],
+                    exemplar[key].position,
+                )
+                if exemplar[key].build is not None
+                else None,
                 "avgSeconds": average if len(durations) >= MIN_SAMPLES_FOR_AVERAGE else None,
                 "sampleSize": len(durations),
                 # Counted separately: a failure is a broken build, a skip is a
@@ -307,7 +327,16 @@ def stage_matrix(
         )
 
     # Share of a typical build, over the columns that have an average to give.
-    total_average = sum(column["avgSeconds"] or 0 for column in columns)
+    # A parallel group costs the build its slowest member, not the sum of all
+    # of them, so consecutive columns of one group count once, as their max.
+    steps: List[List[Optional[int]]] = []
+    for index, column in enumerate(columns):
+        group = column.get("parallelGroup")
+        if group and index and columns[index - 1].get("parallelGroup") == group:
+            steps[-1].append(column["avgSeconds"])
+        else:
+            steps.append([column["avgSeconds"]])
+    total_average = parallel_groups.critical_path_seconds(steps)
     for column in columns:
         column["shareOfBuild"] = (
             round((column["avgSeconds"] or 0) / total_average, 4) if total_average else None

@@ -35,7 +35,8 @@ from ...models_ci import (
     CiSecret,
     CiService,
 )
-from . import build_inputs, default_pipelines, deploy_config, jenkinsfile, templates
+from . import build_inputs, code_scan, default_pipelines, deploy_config, jenkinsfile, scan_stage, templates
+from . import approval_config, parallel_groups, store_upload_config
 from . import resources as ci_resources
 from .serializers import pipeline_to_dict
 
@@ -556,6 +557,116 @@ def _deploy(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, 
         raise PipelineError(str(exc), code="invalid_deploy")
 
 
+def _approval(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, Any]]:
+    """An Approval stage's approvers and rules, or None. See ``approval_config``.
+
+    Named approvers are resolved here, against active users, so the stage
+    stores their names for the drawer and can never wait on an account that
+    could not log in to answer it.
+    """
+    known = None
+    if stage_type == "approval" and isinstance(value, dict) and value.get("users"):
+        from ...models import User
+
+        ids = []
+        for item in value.get("users") or []:
+            raw = item.get("id") if isinstance(item, dict) else item
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+        rows = User.query.filter(User.id.in_(ids or [0])).all() if ids else []
+        known = {row.id: row.username for row in rows if getattr(row, "is_active", True)}
+    try:
+        return approval_config.normalize(value, stage_type, stage_name, known_users=known)
+    except approval_config.ApprovalConfigError as exc:
+        raise PipelineError(str(exc), code="invalid_approval")
+
+
+def _store_upload(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, Any]]:
+    """An App store upload stage's target, or None. See ``store_upload_config``."""
+    try:
+        return store_upload_config.normalize(value, stage_type, stage_name)
+    except store_upload_config.StoreUploadConfigError as exc:
+        raise PipelineError(str(exc), code="invalid_store_upload")
+
+
+# Server stages other than Deploy run nothing in a container, so a command,
+# image or file pattern sent with one was written by somebody expecting it to
+# run. (Deploy predates this check and keeps accepting — and ignoring — them.)
+_SERVER_KIND_LABELS = {"deploy": "Deploy", "approval": "Approval", "store_upload": "App store upload"}
+
+
+def _server_stage_fields(payload: Dict[str, Any], stage_type: str, stage_name: str) -> None:
+    label = _SERVER_KIND_LABELS.get(stage_type, stage_type)
+    if _command_lines(payload.get("commands")) or _clean(payload.get("image"), 512):
+        raise PipelineError(
+            f"Stage '{stage_name}' is an {label} stage, which KubeSight runs itself — it has no "
+            "container, so no image or commands. Remove them, or use a command stage.",
+            code=f"invalid_{stage_type}",
+        )
+    if _artifact_specs(payload.get("artifacts")):
+        raise PipelineError(
+            f"Stage '{stage_name}' is an {label} stage and produces no files. Keep files on the "
+            "stage that builds them.",
+            code=f"invalid_{stage_type}",
+        )
+
+
+def _code_scan(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, Any]]:
+    """A command stage's code scan quality gate, or None. See ``code_scan.normalize``."""
+    try:
+        return code_scan.normalize(value, stage_type, stage_name)
+    except code_scan.CodeScanConfigError as exc:
+        raise PipelineError(str(exc), code="invalid_code_scan")
+
+
+def _scan(
+    payload: Dict[str, Any], stage_type: str, stage_name: str, known_keys: set
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """A scan stage's scanner, and the code scan gate that goes with it.
+
+    Returned together because they are decided together: a Semgrep scan stage
+    always carries the quality gate (defaulted when absent), and a scan stage
+    with any other tool may not carry it at all. See ``scan_stage``.
+    """
+    gate = _code_scan(payload.get("codeScan"), stage_type, stage_name)
+    try:
+        config = scan_stage.normalize(payload.get("scan"), stage_type, stage_name, known_keys)
+        if config is None:
+            return None, gate
+        return config, scan_stage.gate_for(config, gate, stage_name)
+    except scan_stage.ScanConfigError as exc:
+        raise PipelineError(str(exc), code="invalid_scan")
+
+
+def _scan_stage_fields(payload: Dict[str, Any], stage_name: str) -> None:
+    """Refuse what a scan stage would silently ignore.
+
+    Its image and script are generated from the scanner it names, and its
+    report is collected by name — so commands, an image or file patterns sent
+    with one were written by somebody who expects them to run.
+    """
+    if _command_lines(payload.get("commands")):
+        raise PipelineError(
+            f"Stage '{stage_name}' is a scan stage: KubeSight writes its script from the scanner "
+            "it names. Remove the commands, or make it a command stage to run your own.",
+            code="invalid_scan",
+        )
+    if _clean(payload.get("image"), 512):
+        raise PipelineError(
+            f"Stage '{stage_name}' is a scan stage, which runs in the scanner's approved image. "
+            "Remove the image; an administrator repoints the scanner image for the installation.",
+            code="invalid_scan",
+        )
+    if _artifact_specs(payload.get("artifacts")):
+        raise PipelineError(
+            f"Stage '{stage_name}' is a scan stage: its report is kept on the build "
+            "automatically. Remove the files to keep.",
+            code="invalid_scan",
+        )
+
+
 def _resources(value: Any, stage_name: str) -> Optional[Dict[str, str]]:
     """This stage's override of the service's Build resources.
 
@@ -576,6 +687,36 @@ def _known_secret_keys(service_id: int) -> set:
     return {row.key for row in rows}
 
 
+def _post_actions(value: Any, service_id: int) -> List[Dict[str, Any]]:
+    """A pipeline's post actions (notifications + cleanup when a build ends),
+    validated by services/ci/post_actions.py."""
+    from . import post_actions
+
+    try:
+        return post_actions.normalize(value, _known_secret_keys(service_id))
+    except post_actions.PostActionError as exc:
+        raise PipelineError(str(exc), code="invalid_post_action")
+
+
+def _parallel_group_name(value: Any, stage_name: str) -> Optional[str]:
+    try:
+        return parallel_groups.normalize_name(value)
+    except parallel_groups.GroupError as exc:
+        raise PipelineError(f"Stage '{stage_name}': {exc}", code=exc.code)
+
+
+def check_parallel_groups(normalized: List[Dict[str, Any]]) -> None:
+    """Every parallel group in the list follows the rules in parallel_groups.
+
+    Canonicalizes as it goes: every member ends up with the first member's
+    spelling of the name and one fail-fast switch for the group.
+    """
+    try:
+        parallel_groups.validate(normalized)
+    except parallel_groups.GroupError as exc:
+        raise PipelineError(str(exc), code=exc.code)
+
+
 def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> Dict[str, Any]:
     """Validate and normalize one stage payload into model kwargs."""
     name = _clean(payload.get("name"), 120)
@@ -587,13 +728,8 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         raise PipelineError(
             f"Stage '{name}' is a '{stage_type}' stage, which KubeSight has no "
             "executor for — a build would only ever skip it. "
-            + (
-                "Declare the files as artifacts on the stage that produces them "
-                "and remove this stage."
-                if stage_type == "publish_artifact"
-                else "Use the image scan gate on a container image stage, or run "
-                "the scanner in a command stage, and remove this stage."
-            )
+            "Declare the files as artifacts on the stage that produces them "
+            "and remove this stage."
         )
     if stage_type not in STAGE_TYPES:
         raise PipelineError(
@@ -610,6 +746,11 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
     commands = _command_lines(payload.get("commands"))
     if stage_type == "command" and not commands:
         raise PipelineError(f"Stage '{name}' is a command stage but has no commands.")
+    if stage_type == "scan":
+        _scan_stage_fields(payload, name)
+    if stage_type in ("approval", "store_upload"):
+        _server_stage_fields(payload, stage_type, name)
+    scan_config, gate = _scan(payload, stage_type, name, known_keys)
 
     timeout = payload.get("timeoutSeconds")
     try:
@@ -643,40 +784,54 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         "run_condition": _run_condition(payload.get("runCondition"), name),
         "image_scan": _image_scan(payload.get("imageScan"), stage_type, name),
         "deploy": _deploy(payload.get("deploy"), stage_type, name),
+        "approval": _approval(payload.get("approval"), stage_type, name),
+        "store_upload": _store_upload(payload.get("storeUpload"), stage_type, name),
+        "code_scan": gate,
+        "scan": scan_config,
         "timeout_seconds": timeout,
         "continue_on_failure": bool(payload.get("continueOnFailure")),
-        # Parallel groups were stored but never executed: stages always run in
-        # order. Accepting one would promise concurrency that does not happen,
-        # so a sent value is dropped (older clients still send the key).
-        "parallel_group": None,
+        # Consecutive stages sharing a name run at the same time. Only the
+        # name is cleaned here; whether the group is a valid one (consecutive,
+        # runner stages, 2-8 members) is a property of the whole list, checked
+        # by parallel_groups.validate in _apply_stages.
+        "parallel_group": _parallel_group_name(payload.get("parallelGroup"), name),
+        "parallel_fail_fast": bool(payload.get("parallelFailFast")),
         "enabled": payload.get("enabled") is not False,
     }
 
 
 def check_deploy_stages_last(normalized: List[Dict[str, Any]]) -> None:
-    """Deploy stages come after every stage a runner executes.
+    """Server stages (Deploy, Approval, App store upload) come after every stage
+    a runner executes.
 
     They run on the KubeSight server once the runner is done. A whole-build
     runner (one Kubernetes Job per build) has no way to pause its pod for a
-    server-side step, so a stage placed after a deploy would run before it — a
-    smoke test passing against the version that was about to be replaced.
+    server-side step, so a stage placed after one would run before it — a
+    smoke test passing against the version that was about to be replaced, or a
+    "post-approval" step that ran before anybody approved. Server stages may
+    follow each other in any order: an Approval before a Deploy is the point.
     """
-    first_deploy = next(
+    first_server = next(
         (s for s in normalized if s["stage_type"] in SERVER_STAGE_TYPES), None
     )
-    if first_deploy is None:
+    if first_server is None:
         return
     after = [
         s for s in normalized
-        if s["position"] > first_deploy["position"] and s["stage_type"] not in SERVER_STAGE_TYPES
+        if s["position"] > first_server["position"] and s["stage_type"] not in SERVER_STAGE_TYPES
     ]
     if after:
+        kind = _SERVER_KIND_LABELS.get(first_server["stage_type"], first_server["stage_type"])
         raise PipelineError(
-            f"Stage '{after[0]['name']}' comes after the Deploy stage '{first_deploy['name']}'. "
-            "Deploy stages run on the KubeSight server once the build itself has finished, so "
-            "they must be the last stages. Move it above the Deploy stage.",
-            code="deploy_not_last",
+            f"Stage '{after[0]['name']}' comes after the {kind} stage '{first_server['name']}'. "
+            f"{kind} stages run on the KubeSight server once the build itself has finished, so "
+            f"they must be the last stages. Move it above the {kind} stage.",
+            code="deploy_not_last" if first_server["stage_type"] == "deploy" else "server_stage_not_last",
         )
+
+
+# The name the ordering rule has now that it covers every server stage kind.
+check_server_stages_last = check_deploy_stages_last
 
 
 def _stamp_deploy_authority(
@@ -748,6 +903,102 @@ def _stamp_deploy_authority(
         )
 
 
+def _default_store_upload_apps(pipeline: CiPipeline, normalized: List[Dict[str, Any]]) -> None:
+    """Fill an App store upload stage's app with the one linked to this service.
+
+    The editor pre-selects it; this makes an API or MCP save that leaves it out
+    mean the same thing, and refuses one that names an app that is not there.
+    """
+    from ...models import MobileApplication
+
+    for stage in normalized:
+        config = stage.get("store_upload")
+        if stage["stage_type"] != "store_upload" or not config:
+            continue
+        if config.get("appId"):
+            if db.session.get(MobileApplication, int(config["appId"])) is None:
+                raise PipelineError(
+                    f"Stage '{stage['name']}' publishes mobile application #{config['appId']}, "
+                    "which does not exist. Pick a registered app.",
+                    code="invalid_store_upload",
+                )
+            continue
+        linked = MobileApplication.query.filter_by(ci_service_id=pipeline.service_id).all()
+        if len(linked) != 1:
+            raise PipelineError(
+                f"Stage '{stage['name']}' does not say which mobile application to publish"
+                + (
+                    f", and {len(linked)} are linked to this service. Pick one."
+                    if linked
+                    else ", and none is linked to this service. Register it under Mobile Apps "
+                    "(linked to this CI service), or pick one."
+                ),
+                code="invalid_store_upload",
+            )
+        config["appId"] = linked[0].id
+
+
+def _stamp_store_upload_authority(
+    pipeline: CiPipeline, normalized: List[Dict[str, Any]], actor
+) -> None:
+    """Record who an App store upload stage publishes as — the administrator
+    who last saved its target.
+
+    The same rule as ``_stamp_deploy_authority``, with the permission the
+    Mobile Apps publish route itself requires: publishing to a store is
+    admin-only (``routes/mobile_apps.publish_build`` is ``@require_admin``), so
+    pointing a stage at a store is too. Unrelated edits keep the stamp; a
+    change to anything ``store_upload_config.signature`` covers needs an
+    administrator. Never read from the request.
+    """
+    from ...access_engine import is_admin
+    from ...models import MobileApplication
+
+    stored: Dict[str, Dict[str, Any]] = {}
+    for row in pipeline.stages:
+        config = row.store_upload if isinstance(getattr(row, "store_upload", None), dict) else None
+        if row.stage_type == "store_upload" and config and isinstance(config.get("authorizedBy"), dict):
+            stored.setdefault(store_upload_config.signature(config), config["authorizedBy"])
+
+    for stage in normalized:
+        config = stage.get("store_upload")
+        if stage["stage_type"] != "store_upload" or not config:
+            continue
+        kept = stored.get(store_upload_config.signature(config))
+        if kept:
+            config["authorizedBy"] = dict(kept)
+            continue
+        where = store_upload_config.target_label(config)
+        if actor is None or not is_admin(actor):
+            raise PipelineError(
+                f"Only an administrator can point the stage '{stage['name']}' at {where}: "
+                "publishing to a store is admin-only, and builds publish with the rights of "
+                "whoever saved the target. Ask an administrator to set it.",
+                code="store_upload_not_authorized",
+            )
+        config["authorizedBy"] = {
+            "userId": actor.id,
+            "username": actor.username,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        app = db.session.get(MobileApplication, int(config["appId"]))
+        log_audit(
+            "ci_store_upload_target_authorized",
+            actor=actor,
+            target_type="ci_pipeline",
+            target_id=str(pipeline.id),
+            details={
+                "stage": stage["name"],
+                "app": app.name if app else config["appId"],
+                "store": config["store"],
+                "target": config["target"],
+                "artifactType": config["artifactType"],
+                "artifactPattern": config["artifactPattern"],
+            },
+            commit=False,
+        )
+
+
 def _apply_stages(
     pipeline: CiPipeline, stage_payloads: List[Dict[str, Any]], *, actor=None
 ) -> None:
@@ -764,10 +1015,13 @@ def _apply_stages(
         raise PipelineError(
             f"Stage names must be unique: {', '.join(sorted(duplicates))} is repeated."
         )
+    check_parallel_groups(normalized)
     check_deploy_stages_last(normalized)
+    _default_store_upload_apps(pipeline, normalized)
     # Before the clear below: the stamps being carried over live on the rows
     # that are about to be replaced.
     _stamp_deploy_authority(pipeline, normalized, actor)
+    _stamp_store_upload_authority(pipeline, normalized, actor)
 
     # Full replace. Stage ids are not stable across a save, which is why builds
     # snapshot their pipeline rather than pointing at live stage rows.
@@ -915,6 +1169,8 @@ def create_pipeline(
     db.session.add(pipeline)
     db.session.flush()
     _apply_stages(pipeline, payload.get("stages") or [], actor=actor)
+    if "postActions" in payload:
+        pipeline.post_actions = _post_actions(payload.get("postActions"), service.id)
     if pipeline.is_default:
         _demote_other_defaults(service.id, pipeline.id)
     db.session.commit()
@@ -959,6 +1215,10 @@ def update_pipeline(
 
     if "stages" in payload:
         _apply_stages(pipeline, payload.get("stages") or [], actor=actor)
+    # Absent from the payload = unchanged, like stages: a client that predates
+    # post actions (or an MCP stage edit) must not wipe them.
+    if "postActions" in payload:
+        pipeline.post_actions = _post_actions(payload.get("postActions"), pipeline.service_id)
     # Bumped on every save so a build's snapshot records which revision ran.
     pipeline.version = int(pipeline.version or 1) + 1
     pipeline.updated_at = datetime.now(timezone.utc)
@@ -1073,9 +1333,17 @@ def import_jenkinsfile(
     # never repaired: a stage silently rewritten to be saveable is a stage that
     # no longer matches the Jenkinsfile it came from.
     blocking: List[str] = []
+    normalized_draft: List[Dict[str, Any]] = []
     for index, stage in enumerate(draft["stages"]):
         try:
-            normalize_stage(stage, index, known)
+            normalized_draft.append(normalize_stage(stage, index, known))
+        except PipelineError as exc:
+            blocking.append(str(exc))
+    if len(normalized_draft) == len(draft["stages"]):
+        # Parallel groups are a rule about the whole list, so they can only be
+        # judged once every stage normalized.
+        try:
+            check_parallel_groups(normalized_draft)
         except PipelineError as exc:
             blocking.append(str(exc))
     try:

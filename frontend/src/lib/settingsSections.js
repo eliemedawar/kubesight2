@@ -100,6 +100,21 @@ export const SETTINGS_SECTIONS = [
     requires: { anyPermissions: ["ci_merge_checks:view", "ci_merge_checks:manage"] },
   },
   {
+    // A panel for the same reason: a list of switches, not a workspace. It is
+    // the ceiling over every agent token at once, so it is installation
+    // policy and sits with Settings rather than on the API tokens page.
+    id: "mcpTools",
+    group: "administration",
+    label: "MCP tools",
+    icon: "mcp",
+    panel: "mcpTools",
+    title: "MCP tools",
+    summary:
+      "Which of KubeSight's tools an agent such as Hermes may call. A tool that is on still needs the permission of the token calling it.",
+    wide: true,
+    requires: { anyPermissions: ["settings:view", "settings:manage"] },
+  },
+  {
     id: "userManagement",
     group: "administration",
     label: "User management",

@@ -252,3 +252,81 @@ def workspace_size_limit(chosen_limits: Iterable[Any], *, scanning: bool) -> str
         if is_set(limit):
             default = larger(default, limit)
     return default
+
+
+# ---------------------------------------------------------------------------
+# Parallel groups: what a pod with sidecars asks the scheduler for
+#
+# A parallel group's members run as NATIVE SIDECARS in the build pod
+# (runners/kubernetes.py), and a sidecar holds its resource REQUESTS for the
+# pod's whole life — a member that finished in the first minute of a two-hour
+# build still has its CPU and memory reserved on the node until the pod ends.
+# Kubernetes sizes such a pod as:
+#
+#   each initContainer:  its own request + every sidecar started before it
+#   the pod:             max(the largest of those,
+#                            every main container + every sidecar)
+#
+# So a group of N members adds N stage requests to everything that follows it.
+# Per-container requests stay what they were — a member is an ordinary stage
+# container — and the cap on a group (parallel_groups.MAX_GROUP_SIZE) is what
+# keeps the total schedulable. The runner records the total on the Job and the
+# group's barrier prints it, so a pod Pending on "Insufficient cpu" explains
+# itself.
+# ---------------------------------------------------------------------------
+
+_REQUEST_KEYS = ("cpu", "memory", "ephemeral-storage")
+
+
+def _quantity(value: Any, key: str) -> float:
+    """A request in base units: cores for cpu, bytes otherwise. 0 when unset."""
+    text = str(value or "").strip()
+    if not text or is_off(text):
+        return 0.0
+    if key == "cpu":
+        try:
+            return float(text[:-1]) / 1000 if text.endswith("m") else float(text)
+        except ValueError:
+            return 0.0
+    return float(quantity_bytes(text) or 0)
+
+
+def effective_pod_requests(
+    init_containers: Iterable[Any], main_containers: Iterable[Dict[str, Any]] = ()
+) -> Dict[str, float]:
+    """The scheduler's view of a pod's requests, sidecars included.
+
+    ``init_containers`` are ``(resources, is_sidecar)`` pairs in pod order;
+    ``main_containers`` are resources maps. Returns cores for ``cpu`` and bytes
+    for the rest — see the note above for the rule.
+    """
+    totals: Dict[str, float] = {}
+    for key in _REQUEST_KEYS:
+        sidecars = 0.0
+        peak = 0.0
+        for resources, is_sidecar in init_containers:
+            own = _quantity(((resources or {}).get("requests") or {}).get(key), key)
+            peak = max(peak, own + sidecars)
+            if is_sidecar:
+                sidecars += own
+        mains = sum(
+            _quantity(((resources or {}).get("requests") or {}).get(key), key)
+            for resources in main_containers
+        )
+        totals[key] = max(peak, mains + sidecars)
+    return totals
+
+
+def describe_requests(totals: Dict[str, float]) -> str:
+    """``"0.4 CPU, 1.0Gi memory"`` — for a build log, not for a manifest."""
+    parts = []
+    cpu = totals.get("cpu") or 0.0
+    if cpu:
+        parts.append(f"{round(cpu, 2):g} CPU")
+    memory = totals.get("memory") or 0.0
+    if memory:
+        parts.append(f"{memory / 1024 ** 3:.1f}Gi memory")
+    disk = totals.get("ephemeral-storage") or 0.0
+    if disk:
+        parts.append(f"{disk / 1024 ** 3:.1f}Gi ephemeral storage")
+    return ", ".join(parts)

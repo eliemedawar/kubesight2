@@ -26,6 +26,7 @@ from typing import IO, Any, Dict, List, Optional, Protocol, Tuple, runtime_check
 
 from ...db import db
 from ...models_ci import ARTIFACT_TYPES, CiArtifact
+from . import test_reports, test_summary
 from .runners.base import ArtifactRef
 
 logger = logging.getLogger(__name__)
@@ -193,7 +194,12 @@ def record_artifact(
     A ref carrying ``local_path`` is ingested into the local store first; a ref
     carrying ``uri`` is already published (a pushed image) and is recorded as-is.
     """
-    artifact_type = ref.artifact_type if ref.artifact_type in ARTIFACT_TYPES else "binary"
+    # "coverage", "junit" and friends are what people type in the Kind box (and
+    # what the stage editor once offered); they mean the two report types.
+    declared_type = test_reports.normalize_type(ref.artifact_type)
+    if declared_type not in test_reports.REPORT_TYPES:
+        declared_type = ref.artifact_type
+    artifact_type = declared_type if declared_type in ARTIFACT_TYPES else "binary"
     row = CiArtifact(
         service_id=service_id,
         build_id=build_id,
@@ -228,6 +234,11 @@ def record_artifact(
         row.storage_backend = "registry" if artifact_type == "container-image" else "local"
 
     db.session.add(row)
+    if ref.local_path:
+        # Test and coverage reports become numbers on the artifact and its
+        # build. Read from the upload's own file, which is still on disk here;
+        # never raises, so a broken report cannot fail the upload.
+        test_summary.ingest(row, ref.local_path)
     if commit:
         db.session.commit()
     return row

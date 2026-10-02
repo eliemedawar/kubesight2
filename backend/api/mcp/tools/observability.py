@@ -245,7 +245,9 @@ def _alerts_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
         else:
             items.extend(_filter_mock_alerts(cid))
 
-    items = _merge_policy_alerts(items, user, cluster_id)
+    from ..access import keep_allowed
+
+    items = keep_allowed(_merge_policy_alerts(items, user, cluster_id))
     if user:
         items = filter_alerts_for_user(user, items)
     severity = str(arguments.get("severity") or "").strip().lower()
@@ -290,7 +292,9 @@ def _alert_policies_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     user = _user()
     cluster_id = resolve_cluster(user, arguments.get("cluster")) if arguments.get("cluster") else None
-    rows = list_policies(user, cluster_id) or []
+    from ..access import keep_allowed
+
+    rows = keep_allowed(list_policies(user, cluster_id) or [])
     total = len(rows)
     rows = [pick(row, _POLICY_FIELDS) for row in take(rows, _limit(arguments, MAX_ROWS))]
     return {"totalMatching": total, "count": len(rows), "policies": rows}

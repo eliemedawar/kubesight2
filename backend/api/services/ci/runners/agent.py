@@ -99,6 +99,15 @@ class ExternalAgentRunnerAdapter:
                 "Container image builds run on the Kubernetes runner with BuildKit, "
                 "not on an agent."
             )
+        # Deliberately not supported, though it is "only" a script: an agent
+        # may run it without the scanner's image (and so without the scanner),
+        # and it uploads files only after a stage passes - a scan that failed
+        # its gate would lose the very report that says why.
+        if stage_type == "scan":
+            return (
+                "Scan stages run on the Kubernetes runner, in the scanner's own image, "
+                "where the report is kept even when the scan fails the build."
+            )
         return None
 
     def can_run(self, requirements: StageRequirements) -> bool:
@@ -150,6 +159,19 @@ class ExternalAgentRunnerAdapter:
         if task.exit_code is None and task.error is None:
             return SKIPPED
         return FAILED
+
+    def running_since(self, handle: RunnerHandle) -> Optional[datetime]:
+        """When an agent claimed the task — None while it still waits in the queue.
+
+        A parallel group hands every member to the agent at once, and an agent
+        claims only as many tasks as its ``max_concurrent`` allows (the shipped
+        agent runs one at a time). A member waiting its turn has not started, so
+        its timeout must not be counting down.
+        """
+        task = _task_for(handle)
+        if task is None or task.state == "queued":
+            return None
+        return _aware(task.claimed_at)
 
     def drain_logs(self, handle: RunnerHandle, after_seq: int) -> Iterator[LogChunk]:
         # The agent posts its output as it produces it, and that callback appends

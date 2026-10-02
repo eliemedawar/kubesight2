@@ -114,6 +114,10 @@ def catalog_entries(rows: List[ZohoDeploymentSnapshot]) -> List[Dict[str, Any]]:
                 # Custom environments are a Jenkins job, not a live Deployment:
                 # there is nothing to restart and no variable to set.
                 "allowedActions": ["deploy_image"] if is_custom else ["deploy_image", "set_env_var", "restart"],
+                # Where it runs, so a troubleshooting ticket can be investigated
+                # with the cluster tools (namespace = environment, deployment =
+                # application). None for a custom environment: nothing live.
+                "cluster": None if is_custom else row.cluster_id,
             }
         )
     return entries

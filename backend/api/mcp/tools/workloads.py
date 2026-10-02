@@ -87,8 +87,10 @@ def _inventory_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
         if value:
             filters[key] = value
 
+    from ..access import keep_allowed
+
     items = unwrap(list_inventory(user, filters), what="inventory")
-    items = items or []
+    items = keep_allowed(items or [])
     summary = summarize_inventory(items)
     trimmed = [pick(item, _INVENTORY_FIELDS) for item in take(items, _limit(arguments, MAX_ROWS))]
     return {"summary": summary, "totalMatching": len(items), "count": len(trimmed), "items": trimmed}
@@ -96,6 +98,7 @@ def _inventory_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 @tool(
     "kubesight_inventory_get",
+    cluster_scoped=True,
     permission="inventory:view",
     description=(
         "One application in full: every Kubernetes object behind it, its "
@@ -119,6 +122,12 @@ def _inventory_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
     inventory_id = str(arguments.get("inventoryId") or "").strip()
     if not inventory_id:
         raise ToolError("An inventoryId is required — take it from kubesight_inventory_list.")
+    from ...services.inventory_service import parse_inventory_id
+    from ..access import check_cluster
+
+    parsed = parse_inventory_id(inventory_id)
+    if parsed:
+        check_cluster(parsed[0])
     return unwrap(get_inventory_detail(_user(), inventory_id), what=inventory_id) or {}
 
 

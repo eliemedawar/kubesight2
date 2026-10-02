@@ -7,7 +7,9 @@ import { pageHref } from "../../routes/RouterContext.jsx";
 import { CRITICALITIES } from "./ciShared.jsx";
 import { Field, Segmented } from "./pipeline/controls.jsx";
 import { PlIcon } from "./pipeline/icons.jsx";
+import SchedulesSection from "./serviceSettings/SchedulesSection.jsx";
 import SecretsSection from "./serviceSettings/SecretsSection.jsx";
+import { railSummary } from "./serviceSettings/scheduleModel.js";
 
 // What a build stage of this service may use. Each row is three-way: inherit the
 // installation default, name a value, or take the limit off entirely. Ephemeral
@@ -77,6 +79,7 @@ const modesFor = (resources) =>
 const SECTIONS = [
   { id: "st-general", label: "General", icon: "sparkle" },
   { id: "st-builds", label: "Builds", icon: "server" },
+  { id: "st-schedules", label: "Schedules", icon: "clock" },
   { id: "st-registry", label: "Image registry", icon: "image" },
   { id: "st-secrets", label: "Secrets", icon: "key" },
   { id: "st-danger", label: "Danger zone", icon: "trash" },
@@ -104,6 +107,12 @@ export default function ServiceSettingsPanel({
   canDelete,
   canViewSecrets,
   canManageSecrets,
+  // Schedules: listed with ci_builds:view, changed with ci_pipelines:edit AND
+  // ci_builds:run (the API requires both), run now with ci_builds:run.
+  canViewSchedules = false,
+  canEditSchedules = false,
+  canRunSchedules = false,
+  onOpenBuild,
 }) {
   const [saved, setSaved] = useState(() => toForm(service));
   const [form, setForm] = useState(() => toForm(service));
@@ -114,6 +123,7 @@ export default function ServiceSettingsPanel({
   const [modes, setModes] = useState(() => modesFor(service.buildResources));
   const [registries, setRegistries] = useState(null);
   const [secretCount, setSecretCount] = useState(null);
+  const [schedules, setSchedules] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -270,12 +280,14 @@ export default function ServiceSettingsPanel({
     "st-general": STATUSES.find((item) => item.value === form.status)?.label,
     "st-builds": `${form.maxConcurrentBuilds} at a time`,
     "st-registry": form.registryConnectionId ? registry?.name || "Linked" : "None",
+    "st-schedules": railSummary(schedules).text,
     "st-secrets": secretCount === null ? "" : `${secretCount.length}`,
     "st-danger": "",
   };
   const railTone = {
     "st-general": form.status === "active" ? "" : "warn",
     "st-registry": form.registryConnectionId ? "" : "warn",
+    "st-schedules": railSummary(schedules).tone,
   };
   const sectionDirty = {
     "st-general": changed.some((key) => ["status", "criticality", "ownerTeam"].includes(key)),
@@ -283,7 +295,10 @@ export default function ServiceSettingsPanel({
     "st-registry": changed.includes("registryConnectionId"),
   };
   const sections = SECTIONS.filter(
-    (item) => (item.id !== "st-secrets" || canViewSecrets) && (item.id !== "st-danger" || canDelete)
+    (item) =>
+      (item.id !== "st-secrets" || canViewSecrets) &&
+      (item.id !== "st-schedules" || canViewSchedules) &&
+      (item.id !== "st-danger" || canDelete)
   );
 
   return (
@@ -352,7 +367,7 @@ export default function ServiceSettingsPanel({
           ))}
           <p className="st-rail-note">
             <PlIcon name="lock" />
-            Secrets save as soon as they are added or changed. Everything else waits for Save.
+            Secrets and schedules save on their own, as soon as they are added or changed. Everything else waits for Save.
           </p>
         </nav>
 
@@ -519,6 +534,31 @@ export default function ServiceSettingsPanel({
               )}
             </div>
           </section>
+
+          {/* ── Schedules ───────────────────────────────────────────── */}
+          {canViewSchedules && (
+            <section className="pl-panel st-card" id="st-schedules" aria-labelledby="st-schedules-title">
+              <header className="st-card-head">
+                <h4 id="st-schedules-title">Schedules</h4>
+                <p>
+                  Builds that start on their own — nightly, every weekday morning, once a week — at a cron time
+                  in the timezone you choose. Each one is an ordinary build, shown in Builds with its schedule's
+                  name.
+                </p>
+              </header>
+              <div className="st-card-body">
+                <SchedulesSection
+                  service={service}
+                  canEdit={canEditSchedules}
+                  canRun={canRunSchedules && service.status === "active"}
+                  onError={setError}
+                  onNotice={setNotice}
+                  onSummary={setSchedules}
+                  onOpenBuild={onOpenBuild}
+                />
+              </div>
+            </section>
+          )}
 
           {/* ── Image registry ──────────────────────────────────────── */}
           <section className="pl-panel st-card" id="st-registry" aria-labelledby="st-registry-title">

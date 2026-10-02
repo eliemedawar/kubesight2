@@ -231,6 +231,34 @@ class AppSettings(db.Model):
     )
 
 
+class McpAccessSettings(db.Model):
+    """Which MCP tools an agent may call at all. Single row (id=1).
+
+    A ceiling over every token, not a grant: a tool switched on here still needs
+    the permission its route needs. Tools are stored as the ones switched OFF,
+    so a missing row — or a tool added by a later release — means "on", which
+    is how the server behaved before this switch existed.
+    """
+
+    __tablename__ = "mcp_access_settings"
+
+    id = db.Column(db.Integer, primary_key=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    disabled_tools = db.Column(db.JSON, nullable=False, default=list)
+    # Per cluster, a further ceiling: {cluster_id: {"mode": "read"|"off"|"custom",
+    # "disabledTools": [...]}}. A cluster with no entry follows the switches above.
+    cluster_rules = db.Column(db.JSON, nullable=True, default=dict)
+    updated_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    updated_by = db.relationship("User", foreign_keys=[updated_by_user_id])
+
+
 class Cluster(db.Model):
     __tablename__ = "clusters"
 
@@ -2327,6 +2355,12 @@ class JenkinsConnection(db.Model):
     # Nexus instances); when set and that connection matches the image's host, it
     # wins over the default first-created-wins scan. Null = auto-match by host.
     registry_connection_id = db.Column(db.Integer, nullable=True)
+    # What builds a ticket's image when the cluster's registries don't have the
+    # tag yet: "kubesight_ci" (the application's CI service, never Jenkins),
+    # "jenkins" (the router / job overrides, never CI) or "auto" (CI when the
+    # application has a CI service, otherwise Jenkins — the behaviour from
+    # before this was a choice, and what NULL means).
+    build_engine = db.Column(db.String(16), nullable=True, default="auto")
 
     last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
     last_test_status = db.Column(db.String(16), nullable=True)
@@ -2941,6 +2975,11 @@ from .models_merge_checks import (  # noqa: E402,F401
     CiMergeCheckConfig,
     CiMergeCheckPolicy,
 )
+
+# Scheduled builds, bolted on the same way: a fired schedule is an ordinary
+# build with trigger_type 'schedule'. Imported here so create_all makes the
+# table on an existing database too.
+from .models_ci_schedules import CiSchedule  # noqa: E402,F401
 from .models_ticket_agent import (  # noqa: E402,F401
     TicketAgentPostedComment,
     TicketAgentSettings,

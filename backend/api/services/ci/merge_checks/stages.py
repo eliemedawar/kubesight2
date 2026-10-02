@@ -63,6 +63,9 @@ DEPS_STAGE = "Resolve dependencies"
 # Types whose dependency manifests Dependency-Check only reads with its
 # "experimental" analyzers on: pip requirements, Pipfile, Poetry.
 _DC_EXPERIMENTAL = ("python", "generic", "container")
+# The same list, for the pipeline's Scan stage — one answer to "which types
+# need the experimental analyzers", not two that drift.
+DC_EXPERIMENTAL_TYPES = _DC_EXPERIMENTAL
 
 _STAGE_NAMES = {
     "eslint": "ESLint",
@@ -202,6 +205,44 @@ def _eslint_commands(count_warnings: bool) -> List[str]:
 # Semgrep — the same job as SonarQube, with nothing to operate
 # ---------------------------------------------------------------------------
 
+def semgrep_rules_lines(default_rules: str, *, repository_rules_win: bool = True) -> List[str]:
+    """Shell that picks Semgrep's rules into ``$RULES`` and ``$CONFIG_ARGS``.
+
+    Shared with the pipeline's Scan stage (``services/ci/scan_stage.py``), so
+    "which rules did this scan use" has one answer in both places: the default
+    packs, rules committed to the repository when there are any, and
+    ``SEMGREP_RULES`` over both.
+
+    ``repository_rules_win=False`` is for rules somebody chose by name on a
+    stage. A ``.semgrep.yml`` quietly replacing an explicit choice would scan
+    with rules the person who picked them never saw.
+    """
+    lines = [
+        '# Rules: registry packs for this application type by default. Set',
+        '# SEMGREP_RULES to a path inside the repository (e.g. .semgrep/) to run',
+        '# with no network at all. Several rule sets are separated by spaces.',
+        f'DEFAULT_RULES="{default_rules}"',
+    ]
+    if repository_rules_win:
+        lines.extend(
+            [
+                "# Rules committed to the repository win over the registry: they work",
+                "# offline and are the ones the team actually agreed to.",
+                "if [ -f .semgrep.yml ]; then DEFAULT_RULES=.semgrep.yml;"
+                " elif [ -d .semgrep ]; then DEFAULT_RULES=.semgrep; fi",
+            ]
+        )
+    lines.extend(
+        [
+            'RULES="${SEMGREP_RULES:-$DEFAULT_RULES}"',
+            'echo "Scanning with rules: $RULES"',
+            'CONFIG_ARGS=""',
+            'for R in $RULES; do CONFIG_ARGS="$CONFIG_ARGS --config $R"; done',
+        ]
+    )
+    return lines
+
+
 def _semgrep_commands(min_severity: str, app_type: str = "") -> List[str]:
     """Scan the checkout, count the findings, print the number.
 
@@ -223,18 +264,7 @@ def _semgrep_commands(min_severity: str, app_type: str = "") -> List[str]:
     counted = _SEMGREP_BY_FLOOR.get(min_severity, _SEMGREP_BY_FLOOR["medium"])
     counted_literal = ",".join(f"'{level}'" for level in counted)
     return [
-        '# Rules: registry packs for this application type by default. Set',
-        '# SEMGREP_RULES to a path inside the repository (e.g. .semgrep/) to run',
-        '# with no network at all. Several rule sets are separated by spaces.',
-        f'DEFAULT_RULES="{semgrep_rules(app_type)}"',
-        "# Rules committed to the repository win over the registry: they work",
-        "# offline and are the ones the team actually agreed to.",
-        "if [ -f .semgrep.yml ]; then DEFAULT_RULES=.semgrep.yml;"
-        " elif [ -d .semgrep ]; then DEFAULT_RULES=.semgrep; fi",
-        'RULES="${SEMGREP_RULES:-$DEFAULT_RULES}"',
-        'echo "Scanning with rules: $RULES"',
-        'CONFIG_ARGS=""',
-        'for R in $RULES; do CONFIG_ARGS="$CONFIG_ARGS --config $R"; done',
+        *semgrep_rules_lines(semgrep_rules(app_type)),
         "",
         "# Exit 1 means findings - the quality gate's business. 2 and above means",
         "# Semgrep itself failed. Its own output is kept either way: a failure",
@@ -459,6 +489,59 @@ def _dependency_check_commands(min_severity: str, app_type: str = "") -> List[st
         'DATA_DIR="${DC_DATA_DIR:-/tmp/dependency-check-data}"',
         'mkdir -p "$DATA_DIR" reports',
         "",
+        *dependency_check_lock_lines(),
+        "",
+        *java_guard,
+        *dependency_check_nvd_lines(),
+        "",
+        "# Exits 1 when it finds anything at or above --failOnCVSS, which is not",
+        "# what should fail this stage. The report is what is read; the output is",
+        "# kept so a failure can be explained below.",
+        "( /usr/share/dependency-check/bin/dependency-check.sh \\",
+        '  --project "${KUBESIGHT_SERVICE_SLUG:-merge-check}" \\',
+        "  --scan . \\",
+        "  --format JSON \\",
+        "  --out reports \\",
+        '  --data "$DATA_DIR" \\',
+        "  --failOnCVSS 11 \\",
+        *extra,
+        "  $NVD_ARGS 2>&1 || true ) | tee dependency-check.log",
+        "dc_unlock",
+        "trap - EXIT",
+        "",
+        "REPORT=reports/dependency-check-report.json",
+        'if [ ! -s "$REPORT" ]; then',
+        '  echo "Dependency-Check produced no report."',
+        *dependency_check_failure_hints(),
+        f"  {_metric('dependency_check', 'error', problems=0)}",
+        "  exit 1",
+        "fi",
+        "",
+        "count() {",
+        '  grep -o "\\"severity\\"[^,]*\\"$1\\"" "$REPORT" 2>/dev/null | wc -l | tr -d " "',
+        "}",
+        "CRIT=$(count CRITICAL)",
+        "HIGH=$(count HIGH)",
+        "MED=$(count MEDIUM)",
+        "LOW=$(count LOW)",
+        f'COUNTED=$(grep -Eo "\\"severity\\"[^,]*\\"({pattern})\\"" "$REPORT" 2>/dev/null'
+        ' | wc -l | tr -d " ")',
+        f'echo "{SENTINEL} tool=dependency_check status=ok problems=$COUNTED'
+        ' critical=$CRIT high=$HIGH medium=$MED low=$LOW"',
+    ]
+
+
+def dependency_check_lock_lines() -> List[str]:
+    """Shell that takes the one-scan-per-NVD-database lock on ``$DATA_DIR``.
+
+    Shared with the pipeline's Scan stage, which uses the SAME database (the
+    ``_shared/`` cache) — two lock implementations would be two processes that
+    each believe they hold the H2 file. See ``_dependency_check_commands`` for
+    why it is a directory with a heartbeat. The caller releases it with
+    ``dc_unlock`` as soon as the scan is done, and the EXIT trap covers the
+    paths that never get there.
+    """
+    return [
         "# One scan at a time per NVD database - see the stage's docstring.",
         'DC_LOCK="$DATA_DIR/.kubesight-scan.lock"',
         "DC_WAITED=0",
@@ -482,8 +565,16 @@ def _dependency_check_commands(min_severity: str, app_type: str = "") -> List[st
         # exited must not fail the scan on its way out.
         'dc_unlock() { kill "$DC_HEARTBEAT" 2>/dev/null || true; rm -rf "$DC_LOCK"; }',
         "trap dc_unlock EXIT",
-        "",
-        *java_guard,
+    ]
+
+
+def dependency_check_nvd_lines() -> List[str]:
+    """Shell that builds ``$NVD_ARGS`` from ``NVD_API_KEY`` / ``NVD_DATAFEED_URL``.
+
+    Shared with the Scan stage so a key or mirror configured once works for
+    both, under the same variable names the merge check documents.
+    """
+    return [
         'NVD_ARGS=""',
         'if [ -n "${NVD_API_KEY:-}" ]; then',
         '  NVD_ARGS="--nvdApiKey $NVD_API_KEY"',
@@ -499,30 +590,22 @@ def _dependency_check_commands(min_severity: str, app_type: str = "") -> List[st
         '  NVD_ARGS="--nvdDatafeed $NVD_DATAFEED_URL"',
         '  echo "Using the NVD mirror at $NVD_DATAFEED_URL"',
         "fi",
-        "",
-        "# Exits 1 when it finds anything at or above --failOnCVSS, which is not",
-        "# what should fail this stage. The report is what is read; the output is",
-        "# kept so a failure can be explained below.",
-        "( /usr/share/dependency-check/bin/dependency-check.sh \\",
-        '  --project "${KUBESIGHT_SERVICE_SLUG:-merge-check}" \\',
-        "  --scan . \\",
-        "  --format JSON \\",
-        "  --out reports \\",
-        '  --data "$DATA_DIR" \\',
-        "  --failOnCVSS 11 \\",
-        *extra,
-        "  $NVD_ARGS 2>&1 || true ) | tee dependency-check.log",
-        "dc_unlock",
-        "trap - EXIT",
-        "",
-        "REPORT=reports/dependency-check-report.json",
-        'if [ ! -s "$REPORT" ]; then',
-        '  echo "Dependency-Check produced no report."',
-        "  if grep -qE 'No documents exist|Error updating the NVD' dependency-check.log; then",
+    ]
+
+
+def dependency_check_failure_hints(log: str = "dependency-check.log") -> List[str]:
+    """Shell that explains, from the scanner's ``log``, why there is no report.
+
+    Indented to sit inside the caller's ``if [ ! -s "$REPORT" ]`` block. The
+    causes are always the same three - an empty database, NVD refusing, no
+    route out - and each has a different fix, so the log names which one.
+    """
+    return [
+        f"  if grep -qE 'No documents exist|Error updating the NVD' {log}; then",
         '    echo "Cause: the vulnerability database in $DATA_DIR is empty and could not be downloaded."',
-        '    if grep -qE "40[34]|429|rate limit" dependency-check.log; then',
+        f'    if grep -qE "40[34]|429|rate limit" {log}; then',
         '      echo "NVD refused the requests (403/429)."',
-        "    elif grep -qiE 'UnknownHost|Connect(ion)? (refused|timed out)|No route|SSL|PKIX' dependency-check.log; then",
+        f"    elif grep -qiE 'UnknownHost|Connect(ion)? (refused|timed out)|No route|SSL|PKIX' {log}; then",
         '      echo "The runner cannot reach services.nvd.nist.gov (network, proxy or TLS)."',
         "    fi",
         '    if [ -z "${NVD_API_KEY:-}" ]; then',
@@ -532,21 +615,6 @@ def _dependency_check_commands(min_severity: str, app_type: str = "") -> List[st
         '    echo "No internet from the runner? Set NVD_DATAFEED_URL to an internal NVD mirror."',
         '    echo "The first successful run fills the shared cache; later scans take a minute or two."',
         "  fi",
-        f"  {_metric('dependency_check', 'error', problems=0)}",
-        "  exit 1",
-        "fi",
-        "",
-        "count() {",
-        '  grep -o "\\"severity\\"[^,]*\\"$1\\"" "$REPORT" 2>/dev/null | wc -l | tr -d " "',
-        "}",
-        "CRIT=$(count CRITICAL)",
-        "HIGH=$(count HIGH)",
-        "MED=$(count MEDIUM)",
-        "LOW=$(count LOW)",
-        f'COUNTED=$(grep -Eo "\\"severity\\"[^,]*\\"({pattern})\\"" "$REPORT" 2>/dev/null'
-        ' | wc -l | tr -d " ")',
-        f'echo "{SENTINEL} tool=dependency_check status=ok problems=$COUNTED'
-        ' critical=$CRIT high=$HIGH medium=$MED low=$LOW"',
     ]
 
 

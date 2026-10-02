@@ -61,7 +61,8 @@ describe("stage problems mirror what a save refuses", () => {
   });
 
   it("names retired kinds as unsaveable", () => {
-    const stage = { ...blankStage("scan"), name: "Scan" };
+    // `scan` left the retired list when it gained an executor (scanModel.test.js).
+    const stage = { ...blankStage("publish_artifact"), name: "Publish" };
     expect(stageProblems(stage, 0, [stage], [])[0].field).toBe("kind");
   });
 });

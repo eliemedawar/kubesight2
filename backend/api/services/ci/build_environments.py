@@ -148,6 +148,39 @@ ENVIRONMENTS: Dict[str, Dict[str, Any]] = {
             "Set NVD_API_KEY as a CI secret to avoid NVD rate limiting."
         ),
     },
+    "trivy": {
+        # The pipeline's Scan stage (Trivy filesystem). The plain Trivy image,
+        # not the CI image tools: a filesystem scan needs no buildctl or crane,
+        # and this one is published upstream, so it only has to be mirrored.
+        # Alpine-based, so the stage script has the /bin/sh it needs.
+        "label": "Trivy (vulnerability, secret and misconfiguration scanner)",
+        "env": "CI_TEMPLATE_TRIVY_IMAGE",
+        "default": "{registry}/aquasec/trivy:latest",
+        "provides": {"trivy": "true"},
+        "labels": ["linux"],
+        "notes": (
+            "Keeps its vulnerability database in the build cache "
+            "($KUBESIGHT_CACHE_DIR/trivy), shared with the image scan gate. "
+            "Set CI_TRIVY_DB_REPOSITORY to a mirror on a cluster with no route "
+            "to ghcr.io."
+        ),
+    },
+    "syft": {
+        # The pipeline's Scan stage (SBOM). The :debug variant on purpose: the
+        # default anchore/syft image is FROM scratch, with no shell at all, and
+        # every stage is a shell script. :debug adds busybox (on PATH, at
+        # /busybox) and keeps the binary at /syft, which the stage looks for
+        # when `syft` itself is not on PATH.
+        "label": "Syft (SBOM generator)",
+        "env": "CI_TEMPLATE_SYFT_IMAGE",
+        "default": "{registry}/anchore/syft:debug",
+        "provides": {"syft": "true"},
+        "labels": ["linux"],
+        "notes": (
+            "Use the :debug tag (or any image with a shell and syft): the "
+            "default tag has no shell and the stage cannot start in it."
+        ),
+    },
     # Merge-check linters that ship as images. Ruff runs in the Python image
     # and PMD/detekt in the JDK one, so they need no entry of their own.
     "hadolint": {

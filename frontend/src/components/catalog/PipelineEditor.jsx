@@ -17,6 +17,20 @@ import { PlIcon } from "./pipeline/icons.jsx";
 import StageFlow from "./pipeline/StageFlow.jsx";
 import StagePicker from "./pipeline/StagePicker.jsx";
 import StageSheet from "./pipeline/StageSheet.jsx";
+import PostActionsBlock from "./pipeline/PostActionsBlock.jsx";
+import PostActionSheet, { PostActionPicker } from "./pipeline/PostActionSheet.jsx";
+import {
+  blankPostAction,
+  changePostType,
+  MAX_POST_ACTIONS,
+  moveAction,
+  postActionChange,
+  postActionProblems,
+  postActionsChanged,
+  postActionsForApi,
+  postActionTitle,
+  withPostKey,
+} from "./pipeline/postActionModel.js";
 import {
   blankStage,
   changeKindPatch,
@@ -35,6 +49,15 @@ import {
   uniqueStageName,
   withKey,
 } from "./pipeline/stageModel.js";
+import {
+  joinPrevious,
+  leaveGroup,
+  normalizeGroups,
+  parallelGroups,
+  regroupAround,
+  renameGroup,
+  setGroupFailFast,
+} from "./pipeline/parallelModel.js";
 
 const clone = (value) => (value == null ? value : structuredClone(value));
 
@@ -56,7 +79,15 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
   const [saved, setSaved] = useState(null);
   const [stages, setStages] = useState([]);
   const [parameters, setParameters] = useState([]);
+  // What happens when a build ends (notifications + cleanup), saved with the
+  // pipeline in the same request. Selected in the flow's "When the build
+  // ends" block; mode "post" shows one, "post-add" the kind picker.
+  const [postActions, setPostActions] = useState([]);
+  const [selectedPost, setSelectedPost] = useState(null);
   const [secretKeys, setSecretKeys] = useState([]);
+  // The Scan stage's tool cards (image, configured, default rules) - sent with
+  // the pipeline listing so they describe THIS installation and service.
+  const [scanTools, setScanTools] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(null);
   // "stage" shows the selected stage; "add" shows the kind picker for a stage
   // about to be inserted at insertAt.
@@ -103,7 +134,20 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
   const editable = canEdit && !generated && !saving;
 
   const diff = useMemo(() => pipelineDiff(stages, parameters, saved), [stages, parameters, saved]);
-  const dirty = forcedDirty || diff.count > 0;
+  const postDirty = useMemo(
+    () => postActionsChanged(saved?.postActions || [], postActions),
+    [saved, postActions]
+  );
+  const dirty = forcedDirty || diff.count > 0 || postDirty;
+  const postProblems = useMemo(
+    () => postActions.map((action, index) => postActionProblems(action, index, postActions, secretKeys)),
+    [postActions, secretKeys]
+  );
+  const postChanges = useMemo(
+    () => postActions.map((action) => postActionChange(action, saved?.postActions || [])),
+    [postActions, saved]
+  );
+  const blockingPost = postProblems.findIndex((list) => list.length > 0);
 
   // Every problem a stage has, from three places, in the order they matter:
   // what Save would refuse, what would fail on a runner, what the import left.
@@ -141,10 +185,15 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
 
   const adopt = useCallback((data, { keepSelection = false } = {}) => {
     const nextStages = (data?.stages || []).map(withKey);
+    const nextPost = (data?.postActions || []).map(withPostKey);
     setPipeline(data);
-    setSaved(clone({ stages: nextStages, parameters: data?.parameters || [] }));
+    setSaved(clone({ stages: nextStages, parameters: data?.parameters || [], postActions: nextPost }));
     setStages(nextStages);
     setParameters((data?.parameters || []).map((item) => ({ ...item })));
+    setPostActions(nextPost.map((item) => ({ ...item })));
+    setSelectedPost((current) =>
+      keepSelection && current !== null && current < nextPost.length ? current : null
+    );
     setForcedDirty(false);
     setRemoved(null);
     setSelectedIndex((current) => {
@@ -153,7 +202,10 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
       const fromUrl = Number(getRoute().query?.stage) - 1;
       return Number.isInteger(fromUrl) && fromUrl >= 0 && fromUrl < nextStages.length ? fromUrl : 0;
     });
-    setMode(nextStages.length ? "stage" : "add");
+    // Saving while a post action is open keeps it open.
+    setMode((currentMode) =>
+      keepSelection && currentMode === "post" && nextPost.length ? "post" : nextStages.length ? "stage" : "add"
+    );
     setInsertAt(0);
   }, [getRoute]);
 
@@ -161,6 +213,7 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
     setLoading(true);
     try {
       const data = await listCiPipelines(service.id);
+      setScanTools(data.scanTools || []);
       const first =
         data.items?.find((item) => item.isDefault) ||
         data.items?.[0] || { name: "default", id: null, stages: [], parameters: [] };
@@ -335,7 +388,9 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
       setError(`A pipeline can hold at most ${MAX_STAGES} stages.`);
       return;
     }
-    setStages((prev) => [...prev.slice(0, at), stage, ...prev.slice(at)]);
+    // Landing between two members of a parallel group joins it (see
+    // parallelModel.regroupAround) — a stage dropped into a group runs with it.
+    setStages((prev) => regroupAround([...prev.slice(0, at), stage, ...prev.slice(at)], at));
     setSelectedIndex(at);
     setMode("stage");
     setQuery({ stage: at + 1, view: null });
@@ -359,19 +414,33 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
   const move = (from, to) => {
     if (to < 0 || to >= stages.length || from === to) return;
     const selectedStage = selectedIndex !== null ? stages[selectedIndex] : null;
-    const next = moveItem(stages, from, to);
+    const moved = moveItem(stages, from, to);
+    // Groups follow the move: carried out of its group a stage runs on its
+    // own, dropped into another it joins it. Positions do not change.
+    const next = regroupAround(moved, to);
     setStages(next);
     if (selectedStage) {
-      const position = next.indexOf(selectedStage);
+      const position = moved.indexOf(selectedStage);
       setSelectedIndex(position);
       setQuery({ stage: position + 1 });
     }
   };
 
+  // "Run in parallel with the stage before", the group's name, its fail-fast.
+  const changeGroup = (index, action, value) =>
+    setStages((prev) => {
+      if (action === "join") return joinPrevious(prev, index);
+      if (action === "leave") return leaveGroup(prev, index);
+      if (action === "rename") return renameGroup(prev, index, value);
+      if (action === "failFast") return setGroupFailFast(prev, index, value);
+      return prev;
+    });
+
   const remove = (index) => {
     const stage = stages[index];
     setRemoved({ stage, index });
-    const next = stages.filter((_, position) => position !== index);
+    // A group left with one stage is just that stage again.
+    const next = normalizeGroups(stages.filter((_, position) => position !== index));
     setStages(next);
     if (!next.length) {
       setSelectedIndex(null);
@@ -387,7 +456,7 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
   const undoRemove = () => {
     if (!removed) return;
     const at = Math.min(removed.index, stages.length);
-    setStages((prev) => [...prev.slice(0, at), removed.stage, ...prev.slice(at)]);
+    setStages((prev) => regroupAround([...prev.slice(0, at), removed.stage, ...prev.slice(at)], at));
     setSelectedIndex(at);
     setMode("stage");
     setQuery({ stage: at + 1 });
@@ -417,6 +486,66 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
     }
   };
 
+  // --- Post actions (when the build ends) -----------------------------------
+
+  const selectPost = (index) => {
+    setSelectedPost(index);
+    setMode("post");
+    if (view !== "stages") setView("stages");
+  };
+
+  const openPostPicker = () => {
+    if (postActions.length >= MAX_POST_ACTIONS) return;
+    setMode("post-add");
+    if (view !== "stages") setView("stages");
+  };
+
+  const addPost = (type) => {
+    if (postActions.length >= MAX_POST_ACTIONS) {
+      setError(`A pipeline can have at most ${MAX_POST_ACTIONS} post actions.`);
+      return;
+    }
+    const at = postActions.length;
+    setPostActions((prev) => [...prev, withPostKey(blankPostAction(type))]);
+    setSelectedPost(at);
+    setMode("post");
+  };
+
+  const mutatePost = (index, patch) =>
+    setPostActions((prev) => prev.map((action, position) => (position === index ? { ...action, ...patch } : action)));
+
+  const changePostKind = (index, type) => {
+    const action = postActions[index];
+    if (!action || action.type === type) return;
+    const hasContent =
+      (action.recipients || []).length ||
+      action.urlSecret ||
+      (action.commands || []).some((line) => String(line).trim()) ||
+      action.subject ||
+      action.message;
+    if (hasContent && !window.confirm("Changing what this post action does clears its settings. Continue?")) return;
+    setPostActions((prev) => prev.map((item, position) => (position === index ? changePostType(item, type) : item)));
+  };
+
+  const movePost = (from, to) => {
+    if (to < 0 || to >= postActions.length) return;
+    setPostActions((prev) => moveAction(prev, from, to));
+    setSelectedPost(to);
+  };
+
+  const removePost = (index) => {
+    const action = postActions[index];
+    const next = postActions.filter((_, position) => position !== index);
+    setPostActions(next);
+    if (next.length) {
+      setSelectedPost(Math.min(index, next.length - 1));
+    } else {
+      setSelectedPost(null);
+      setMode(stages.length ? "stage" : "add");
+    }
+    setNotice(`Removed “${postActionTitle(action)}” — Discard brings it back until you save.`);
+  };
+
   // --- Save / discard / template / import ------------------------------------
 
   const save = async () => {
@@ -434,6 +563,11 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
       setError(`${inputProblems === 1 ? "One build input needs" : `${inputProblems} build inputs need`} fixing before this can be saved.`);
       return;
     }
+    if (blockingPost >= 0) {
+      selectPost(blockingPost);
+      setError(`The post action “${postActionTitle(postActions[blockingPost])}” needs fixing before this can be saved.`);
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -445,6 +579,7 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
           ...forApi(stage),
           timeoutSeconds: Number(stage.timeoutSeconds) || 1800,
         })),
+        postActions: postActionsForApi(postActions),
       };
       const result = pipeline.id
         ? await updateCiPipeline(pipeline.id, payload)
@@ -489,6 +624,8 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
     const restored = clone(saved);
     setStages(restored.stages.map((stage) => ({ ...stage })));
     setParameters(restored.parameters.map((item) => ({ ...item })));
+    setPostActions((restored.postActions || []).map((item) => ({ ...item })));
+    setSelectedPost(null);
     setRemoved(null);
     setImportNotes(null);
     setError("");
@@ -555,6 +692,9 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
 
   const current = selectedIndex !== null ? stages[selectedIndex] : null;
   const offCount = stages.filter((stage) => stage.enabled === false).length;
+  const runsTogether = parallelGroups(stages);
+  const groupCount = runsTogether.length;
+  const groupedCount = runsTogether.reduce((sum, run) => sum + run.indices.length, 0);
   const conditionalCount = stages.filter((stage) => stage.runCondition?.variable).length;
   const imageStages = stages.filter((stage) => stage.stageType === "container_image").length;
 
@@ -589,11 +729,20 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
               {stages.length ? (
                 <>
                   <b>{stages.length}</b> {stages.length === 1 ? "stage runs" : "stages run"} in order
+                  {groupCount > 0 && (
+                    <>
+                      , <b>{groupedCount}</b> of them side by side in{" "}
+                      {groupCount === 1 ? "a parallel group" : <><b>{groupCount}</b> parallel groups</>}
+                    </>
+                  )}
                   {offCount > 0 && <>, <b>{offCount}</b> turned off</>}
                   {conditionalCount > 0 && <>, <b>{conditionalCount}</b> only for some builds</>}
                   {imageStages > 0 && <> · pushes {imageStages === 1 ? "an image" : `${imageStages} images`}</>}
                   {parameters.length > 0 && (
                     <> · asks <b>{parameters.length}</b> {parameters.length === 1 ? "question" : "questions"} before it starts</>
+                  )}
+                  {postActions.length > 0 && (
+                    <> · <b>{postActions.length}</b> {postActions.length === 1 ? "post action" : "post actions"} when it ends</>
                   )}
                 </>
               ) : (
@@ -819,10 +968,44 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
             onSelect={select}
             onMove={move}
             onInsert={openInserter}
+            endSlot={
+              <PostActionsBlock
+                actions={postActions}
+                selectedIndex={mode === "post" ? selectedPost : null}
+                adding={mode === "post-add"}
+                problems={postProblems}
+                changes={postChanges}
+                editable={editable}
+                onSelect={selectPost}
+                onAdd={openPostPicker}
+              />
+            }
           />
 
           <div className="pl-panel pl-stage-panel">
-            {mode === "add" && editable ? (
+            {mode === "post-add" && editable ? (
+              <PostActionPicker
+                onPick={addPost}
+                onCancel={() => setMode(postActions.length && selectedPost !== null ? "post" : stages.length ? "stage" : "add")}
+              />
+            ) : mode === "post" && selectedPost !== null && postActions[selectedPost] ? (
+              <PostActionSheet
+                key={postActions[selectedPost]._key ?? `post-${selectedPost}`}
+                action={postActions[selectedPost]}
+                index={selectedPost}
+                total={postActions.length}
+                actions={postActions}
+                secretKeys={secretKeys}
+                problems={postProblems[selectedPost] || []}
+                change={postChanges[selectedPost]}
+                editable={editable}
+                onChange={(patch) => mutatePost(selectedPost, patch)}
+                onChangeType={(type) => changePostKind(selectedPost, type)}
+                onMove={(delta) => movePost(selectedPost, selectedPost + delta)}
+                onRemove={() => removePost(selectedPost)}
+                onGoToTab={onGoToTab}
+              />
+            ) : mode === "add" && editable ? (
               <>
                 <StagePicker
                   stages={stages}
@@ -853,6 +1036,7 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
                 stages={stages}
                 parameters={parameters}
                 secretKeys={secretKeys}
+                scanTools={scanTools}
                 problems={problems[selectedIndex] || []}
                 change={diff.perStage[selectedIndex]}
                 editable={editable}
@@ -864,6 +1048,8 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
                 onRemove={() => remove(selectedIndex)}
                 onGoToTab={onGoToTab}
                 onOpenInputs={() => setView("inputs")}
+                onGroupChange={editable ? (action, value) => changeGroup(selectedIndex, action, value) : undefined}
+                parallelCapability={lint?.parallel || null}
               />
             ) : (
               <div className="pl-empty">
@@ -905,14 +1091,20 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
         )}
         {canEdit && dirty && (
           <div className="pl-savebar" role="region" aria-label="Unsaved pipeline changes">
-            <span className={`pl-savebar-dot${blockingStages.length || inputProblems ? " is-error" : ""}`} aria-hidden="true" />
+            <span
+              className={`pl-savebar-dot${blockingStages.length || inputProblems || blockingPost >= 0 ? " is-error" : ""}`}
+              aria-hidden="true"
+            />
             <div className="pl-savebar-text">
               <strong>{saving ? "Saving…" : "Unsaved changes"}</strong>
               <span>
-                {blockingStages.length || inputProblems ? (
-                  `${blockingStages.length + inputProblems} to fix before saving`
+                {blockingStages.length || inputProblems || blockingPost >= 0 ? (
+                  `${
+                    blockingStages.length + inputProblems + postProblems.filter((list) => list.length).length
+                  } to fix before saving`
                 ) : (
-                  describeDiff(diff) || (generated ? "" : "Ready to save")
+                  [describeDiff(diff), postDirty ? "post actions changed" : ""].filter(Boolean).join(", ") ||
+                  (generated ? "" : "Ready to save")
                 )}
               </span>
             </div>

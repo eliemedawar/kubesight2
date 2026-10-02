@@ -770,6 +770,11 @@ def run_task(client: Client, task: Dict[str, Any], root: str) -> int:
                 )
         if exit_code == 0:
             upload_artifacts(client, task, workspace, shipper)
+        else:
+            # Test and coverage reports are read most when the tests failed,
+            # so they are kept from a failed stage too. Everything else still
+            # waits for success: a half-built jar is not an output.
+            upload_artifacts(client, task, workspace, shipper, only_types=REPORT_TYPES)
     except subprocess.TimeoutExpired:
         exit_code, error = 124, "The stage exceeded its timeout."
         shipper.add(error, "stderr")
@@ -833,10 +838,17 @@ def _outcome(exit_code: int, error: Optional[str], seconds: float) -> str:
     return "FAILED after %s (exit %s)%s" % (took, exit_code, detail)
 
 
+# The artifact kinds kept from a FAILED stage. "coverage" and "junit" are the
+# words the server also accepts for them.
+REPORT_TYPES = ("test-report", "coverage-report", "coverage", "junit")
+
+
 def upload_artifacts(client: Client, task: Dict[str, Any], workspace: str,
-                     shipper: LogShipper) -> None:
+                     shipper: LogShipper, only_types: Optional[tuple] = None) -> None:
     source = os.path.join(workspace, "source")
     for spec in task.get("artifacts") or []:
+        if only_types is not None and str(spec.get("type") or "").strip().lower() not in only_types:
+            continue
         pattern = os.path.join(source, spec.get("workdir") or "", spec.get("path") or "")
         matches = [p for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)]
         if not matches:

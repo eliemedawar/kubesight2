@@ -285,13 +285,22 @@ def _build_alert_html(alert: Dict[str, Any]) -> str:
 """
 
 
-def send_email(to_address: str, subject: str, body: str, *, html_body: Optional[str] = None) -> None:
+def send_email(
+    to_address: str,
+    subject: str,
+    body: str,
+    *,
+    html_body: Optional[str] = None,
+    attachments: Optional[list] = None,
+) -> None:
     """Send an email using the configured SMTP settings.
 
     Shares the same DB/env SMTP configuration as alert routing so any feature
     can reuse the management mail relay without re-implementing transport. When
     ``html_body`` is supplied it is attached as an HTML alternative (the plain
-    ``body`` remains the fallback for text-only clients).
+    ``body`` remains the fallback for text-only clients). ``attachments`` is a
+    list of ``(filename, bytes, "type/subtype")``. ``to_address`` may name
+    several recipients, comma-separated — they all see each other.
     """
     if not to_address or "@" not in to_address:
         raise EmailDeliveryError("Recipient email address is not configured.")
@@ -309,6 +318,11 @@ def send_email(to_address: str, subject: str, body: str, *, html_body: Optional[
     message.set_content(body)
     if html_body:
         message.add_alternative(html_body, subtype="html")
+    for filename, content, mimetype in attachments or []:
+        maintype, _, subtype = str(mimetype or "application/octet-stream").partition("/")
+        message.add_attachment(
+            content, maintype=maintype, subtype=subtype or "octet-stream", filename=filename
+        )
 
     try:
         if settings["use_ssl"]:

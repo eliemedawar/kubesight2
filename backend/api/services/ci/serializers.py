@@ -22,6 +22,7 @@ from ...models_ci import (
     CiService,
 )
 from . import resources as ci_resources
+from . import test_reports
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
@@ -164,8 +165,40 @@ def pipeline_stage_to_dict(row: CiPipelineStage) -> Dict[str, Any]:
             if isinstance(getattr(row, "deploy", None), dict)
             else None
         ),
+        # Command stages only; NULL is "no quality gate". Read defensively for
+        # the same SimpleNamespace reason as `deploy`.
+        "codeScan": (
+            getattr(row, "code_scan", None)
+            if isinstance(getattr(row, "code_scan", None), dict)
+            else None
+        ),
+        # Scan stages only: the scanner and its options. NULL on a scan stage
+        # saved before the kind had an executor, which the engine skips.
+        "scan": (
+            getattr(row, "scan", None)
+            if isinstance(getattr(row, "scan", None), dict)
+            else None
+        ),
+        # Approval stages only: who may approve, how many, the message.
+        "approval": (
+            getattr(row, "approval", None)
+            if isinstance(getattr(row, "approval", None), dict)
+            else None
+        ),
+        # App store upload stages only: app, store, target, which file, and
+        # the administrator it publishes as.
+        "storeUpload": (
+            getattr(row, "store_upload", None)
+            if isinstance(getattr(row, "store_upload", None), dict)
+            else None
+        ),
         "timeoutSeconds": row.timeout_seconds,
         "continueOnFailure": bool(row.continue_on_failure),
+        # Consecutive stages sharing a name run at the same time — see
+        # services/ci/parallel_groups.py. None on a stage that runs on its own.
+        # Read defensively: generated pipelines are SimpleNamespace stand-ins.
+        "parallelGroup": getattr(row, "parallel_group", None) or None,
+        "parallelFailFast": bool(getattr(row, "parallel_fail_fast", False)),
         "enabled": bool(row.enabled),
     }
 
@@ -183,6 +216,9 @@ def pipeline_to_dict(row: CiPipeline, *, with_stages: bool = True) -> Dict[str, 
         "purpose": getattr(row, "purpose", None) or "build",
         "version": row.version,
         "parameters": _json_list(row.parameters),
+        # What happens when a build ends — see services/ci/post_actions.py.
+        # A generated default shows the ones saved on the row it stands in for.
+        "postActions": _post_actions_of(row),
         "stageCount": len(row.stages),
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
@@ -190,6 +226,12 @@ def pipeline_to_dict(row: CiPipeline, *, with_stages: bool = True) -> Dict[str, 
     if with_stages:
         data["stages"] = [pipeline_stage_to_dict(stage) for stage in row.stages]
     return data
+
+
+def _post_actions_of(row: Any) -> List[Dict[str, Any]]:
+    from . import post_actions
+
+    return post_actions.of_pipeline(row)
 
 
 def stage_definition(row: CiPipelineStage) -> Dict[str, Any]:
@@ -226,7 +268,41 @@ def build_stage_to_dict(row: CiBuildStage) -> Dict[str, Any]:
         # What a deploy stage did: target, image, the image it replaced, the
         # change bundle it waited on, and how it ended. None on other stages.
         "deploy": row.deploy_state if isinstance(row.deploy_state, dict) else None,
+        # An Approval stage's wait: who may approve, the decisions so far, how
+        # it ended. An App store upload stage's publish and its steps.
+        "approval": _server_state(row, "approval"),
+        "storeUpload": _server_state(row, "store_upload"),
     }
+
+
+def _server_state(row: CiBuildStage, stage_type: str) -> Optional[Dict[str, Any]]:
+    if row.stage_type != stage_type:
+        return None
+    value = getattr(row, "server_state", None)
+    return value if isinstance(value, dict) else None
+
+
+def _awaiting_approval(row: CiBuild) -> Optional[Dict[str, Any]]:
+    """The approval a running build is held at, so lists can say so."""
+    if row.status != "running":
+        return None
+    for stage in row.stages:
+        if stage.stage_type != "approval" or stage.status != "running":
+            continue
+        state = stage.server_state if isinstance(stage.server_state, dict) else {}
+        if state.get("phase") != "waiting_approval":
+            continue
+        approvals = len({
+            d.get("userId") for d in state.get("decisions") or [] if d.get("decision") == "approve"
+        })
+        return {
+            "stageId": stage.id,
+            "stageName": stage.name,
+            "approvals": approvals,
+            "required": int(state.get("required") or 1),
+            "deadlineAt": state.get("deadlineAt"),
+        }
+    return None
 
 
 def build_summary(row: CiBuild) -> Dict[str, Any]:
@@ -245,10 +321,16 @@ def build_summary(row: CiBuild) -> Dict[str, Any]:
         failed_stage = failed.name if failed else None
     elif row.status == "running":
         stages = sorted(row.stages, key=lambda s: s.position)
-        running = next((s for s in stages if s.status == "running"), None)
-        if running is not None:
-            current_stage = running.name
-            stage_progress = f"{running.position + 1}/{len(stages)}"
+        running = [s for s in stages if s.status == "running"]
+        if running:
+            # A parallel group runs several at once; the card names them all
+            # rather than picking one and implying the others are not running.
+            current_stage = (
+                running[0].name
+                if len(running) == 1
+                else f"{running[0].name} + {len(running) - 1} in parallel"
+            )
+            stage_progress = f"{running[0].position + 1}/{len(stages)}"
     return {
         "id": row.id,
         "serviceId": row.service_id,
@@ -257,6 +339,13 @@ def build_summary(row: CiBuild) -> Dict[str, Any]:
         "triggerType": row.trigger_type,
         "branch": row.branch,
         "refType": (row.pipeline_snapshot or {}).get("refType") or "branch",
+        # {"id", "name"} of the schedule that queued this build, from the
+        # snapshot so it survives the schedule being renamed or deleted.
+        "schedule": (
+            (row.pipeline_snapshot or {}).get("schedule")
+            if isinstance((row.pipeline_snapshot or {}).get("schedule"), dict)
+            else None
+        ),
         "commitSha": row.commit_sha,
         "durationSeconds": row.duration_seconds,
         "queuedAt": _iso(row.queued_at),
@@ -267,6 +356,12 @@ def build_summary(row: CiBuild) -> Dict[str, Any]:
         "failedStage": failed_stage,
         "currentStage": current_stage,
         "stageProgress": stage_progress,
+        # {stageId, stageName, approvals, required, deadlineAt} while the build
+        # waits at an Approval stage; None otherwise.
+        "awaitingApproval": _awaiting_approval(row),
+        # Test counts and coverage from the reports the build kept, or None.
+        # The compact form only; the failed cases are behind /builds/<id>/tests.
+        "testSummary": test_reports.compact(getattr(row, "test_summary", None)),
     }
 
 
@@ -288,8 +383,72 @@ def build_to_dict(row: CiBuild, *, with_stages: bool = True) -> Dict[str, Any]:
         }
     )
     if with_stages:
-        data["stages"] = [build_stage_to_dict(stage) for stage in row.stages]
+        from . import parallel_groups
+
+        snapshot = (row.pipeline_snapshot or {}).get("stages") or []
+        data["stages"] = []
+        for stage in row.stages:
+            item = build_stage_to_dict(stage)
+            item["codeScan"] = _stage_code_scan(snapshot, stage.position)
+            item["scan"] = _stage_scan(snapshot, stage.position)
+            # The group this stage ran in, as the BUILD saw it: a group of
+            # two or more consecutive members in the snapshot, else None.
+            item["parallelGroup"] = parallel_groups.group_name(snapshot, stage.position)
+            item["parallelFailFast"] = bool(
+                item["parallelGroup"]
+                and parallel_groups.fail_fast(
+                    snapshot, parallel_groups.group_positions(snapshot, stage.position)
+                )
+            )
+            data["stages"].append(item)
+        # {"mode": "parallel"|"sequential", "reason"} once a build with groups
+        # has started — "sequential" says the runner could not run them side by
+        # side, and why. None for a build with no groups.
+        decided = (row.pipeline_snapshot or {}).get("parallel")
+        data["parallel"] = dict(decided) if isinstance(decided, dict) else None
+        # What ran when the build ended: notifications (sent / not sent / why)
+        # and cleanup rows with their own logs. Not stages — see post_actions.py.
+        from . import post_actions
+
+        data["postActions"] = post_actions.serialize(row)
     return data
+
+
+def _stage_code_scan(snapshot: List[Any], position: int) -> Optional[Dict[str, Any]]:
+    """The quality gate this build's stage ran under, from the build's snapshot.
+
+    The threshold only: the build drawer uses it to offer the report, and the
+    saved recipients are read from the live pipeline when the dialog opens.
+    """
+    if not 0 <= position < len(snapshot):
+        return None
+    gate = (snapshot[position] or {}).get("codeScan")
+    if not isinstance(gate, dict) or gate.get("enabled") is False:
+        return None
+    return {
+        "tool": gate.get("tool") or "semgrep",
+        "maxBlocking": int(gate.get("maxBlocking") or 0),
+        "countFrom": gate.get("countFrom") or "info",
+    }
+
+
+def _stage_scan(snapshot: List[Any], position: int) -> Optional[Dict[str, Any]]:
+    """What a scan stage ran, from the build's snapshot: tool, one-line policy,
+    and the artifacts it leaves - so the drawer can point at the report."""
+    from . import scan_stage
+
+    if not 0 <= position < len(snapshot):
+        return None
+    definition = snapshot[position] or {}
+    config = definition.get("scan")
+    if definition.get("stageType") != "scan" or not scan_stage.configured(config):
+        return None
+    return {
+        "tool": config["tool"],
+        "label": scan_stage.TOOL_LABELS[config["tool"]],
+        "summary": scan_stage.summary(config),
+        "produces": scan_stage.produces(config, position),
+    }
 
 
 # ---------------------------------------------------------------------------

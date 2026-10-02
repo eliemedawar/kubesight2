@@ -83,6 +83,14 @@ const PATHS = {
       <path d="m8.8 12 2.2 2.2 4.3-4.4" />
     </>
   ),
+  // A magnifier over a tick: looks through the code, says whether it passed.
+  scan: (
+    <>
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="m15.4 15.4 5.1 5.1" />
+      <path d="m7.9 10.6 1.8 1.8 3.2-3.3" />
+    </>
+  ),
   key: (
     <>
       <circle cx="8" cy="15" r="4" />
@@ -221,6 +229,33 @@ const PATHS = {
       <path d="M3.5 12a8.5 8.5 0 1 0 2.5-6" />
       <path d="M3.5 4v4.5H8" />
       <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  // A person with a check mark: somebody signs this stage off.
+  approval: (
+    <>
+      <circle cx="9.5" cy="7.5" r="3.5" />
+      <path d="M3 20c.6-3.7 3.2-6 6.5-6 1.6 0 3 .5 4.1 1.4" />
+      <path d="m14.5 18 2.2 2.2L21 16" />
+    </>
+  ),
+  // A phone with an arrow going up out of it: the binary leaves for a store.
+  store: (
+    <>
+      <rect x="6" y="2.5" width="12" height="19" rx="2.5" />
+      <path d="M10.5 18.5h3" />
+      <path d="M12 14V7.5M9.25 10 12 7.25 14.75 10" />
+    </>
+  ),
+  thumbsDown: (
+    <path d="M10 15.5v3.8a2 2 0 0 0 3.6 1.2l4.4-6V4.5H8.6a2 2 0 0 0-2 1.6l-1.5 7.2a1.8 1.8 0 0 0 1.8 2.2zM18 4.5h2.5v10H18" />
+  ),
+  // One line forking into three lanes that join again: a parallel group.
+  parallel: (
+    <>
+      <path d="M12 2.5v3M12 18.5v3" />
+      <path d="M12 5.5c-5 0-6 2-6 4.5v4c0 2.5 1 4.5 6 4.5M12 5.5c5 0 6 2 6 4.5v4c0 2.5-1 4.5-6 4.5" />
+      <path d="M12 5.5v13" />
     </>
   ),
 };

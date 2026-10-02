@@ -92,6 +92,7 @@ export default function SearchableSelect({
   const [dropPos, setDropPos] = useState(null);
   const triggerRef = useRef(null);
   const dropRef = useRef(null);
+  const searchRef = useRef(null);
 
   const items = useMemo(() => buildOptions(options, children), [options, children]);
   const showSearch = allowCustom || items.length > searchThreshold;
@@ -141,6 +142,14 @@ export default function SearchableSelect({
       window.removeEventListener("scroll", reposition, true);
     };
   }, [open, search]);
+
+  // The panel renders hidden until it is positioned, and a hidden input cannot
+  // take focus — so focus the search once it is visible, letting typing start
+  // straight away without clicking into it.
+  const positioned = Boolean(dropPos);
+  useEffect(() => {
+    if (open && positioned) searchRef.current?.focus({ preventScroll: true });
+  }, [open, positioned]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -207,6 +216,14 @@ export default function SearchableSelect({
         type="button"
         className={`ss-trigger${open ? " ss-trigger--open" : ""}${disabled ? " ss-trigger--disabled" : ""}`}
         onClick={() => !disabled && setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          // Typing on the closed trigger opens it with that letter already searched.
+          if (disabled || open || !showSearch) return;
+          if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey || e.key === " ") return;
+          e.preventDefault();
+          setSearch(e.key);
+          setOpen(true);
+        }}
         disabled={disabled}
         aria-label={ariaLabel}
         aria-haspopup="listbox"
@@ -242,6 +259,7 @@ export default function SearchableSelect({
           {showSearch && (
             <div className="ss-search-wrap">
               <input
+                ref={searchRef}
                 className="ss-search"
                 autoFocus
                 placeholder={searchPlaceholder}

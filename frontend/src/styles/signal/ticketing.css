@@ -689,6 +689,8 @@
 }
 .sg-zh-webhook-closed svg {
   flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
   margin-top: 0.1rem;
 }
 
@@ -1665,11 +1667,104 @@
   color: var(--text-muted);
   line-height: 1.45;
 }
+/* A troubleshooting answer: diagnosis, then the evidence, then what to do. */
+.sg-zh-diag {
+  margin: 0 0 0.5rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius-sm);
+  background: var(--info-soft);
+}
+.sg-zh-diag .sg-zh-agent-line:last-child,
+.sg-zh-diag .sg-zh-fhint:last-child {
+  margin-bottom: 0;
+}
+.sg-zh-diag-findings {
+  margin: 0 0 0.45rem;
+  padding-left: 1.1rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+.sg-zh-diag-findings li {
+  margin-bottom: 0.2rem;
+  overflow-wrap: anywhere;
+}
+.sg-zh-diag-evidence {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.sg-zh-diag-rec {
+  font-weight: 500;
+}
 .sg-zh-agent-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.6rem;
+}
+/* Ticket agent settings: which engine builds a missing image. */
+.sg-zh-engines {
+  margin: 0.75rem 0 0.5rem;
+  padding: 0;
+  border: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.5rem;
+}
+.sg-zh-engines legend {
+  padding: 0;
+  margin-bottom: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.sg-zh-engine {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-panel);
+  cursor: pointer;
+}
+.sg-zh-engine.is-on {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+.sg-zh-engine input { margin-top: 0.2rem; flex: none; }
+.sg-zh-engine span { display: grid; gap: 0.2rem; }
+.sg-zh-engine strong { font-size: 0.85rem; }
+.sg-zh-engine small { font-size: 0.75rem; line-height: 1.4; color: var(--text-muted); }
+.sg-zh-engines:disabled .sg-zh-engine { cursor: default; opacity: 0.75; }
+
+/* A ticket for several applications: one line per application in a cell. */
+.sg-zh-agentcell {
+  display: grid;
+  gap: 0.2rem;
+  justify-items: start;
+}
+.sg-zh-agentcell .muted { font-size: 0.72rem; }
+/* …and in the task card, the list of what it changes. */
+.sg-zh-agent-changes {
+  margin: 0 0 0.5rem;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+}
+.sg-zh-agent-changes li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.sg-zh-agent-changes .sg-zh-run-ref {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 .sg-zh-tsubject {
   max-width: 22rem;

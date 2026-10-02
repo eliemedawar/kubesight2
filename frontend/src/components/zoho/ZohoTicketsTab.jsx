@@ -28,6 +28,23 @@ const agentChangeLabel = (task) => {
   if (task.changeType === "restart") return "restart";
   return task.tag || null;
 };
+// Every application the task changes — one for most tickets, several when the
+// ticket named several (each with its own run).
+const agentChanges = (task) => {
+  if (!task) return [];
+  if (task.changes?.length) return task.changes;
+  return [{ ...task, variable: task.variableName, value: task.variableValue }];
+};
+const changeLabel = (c) => {
+  if (c.changeType === "env_var") return `${c.variable}=${c.value}`;
+  if (c.changeType === "restart") return "restart";
+  return c.tag || null;
+};
+// A ticket for several applications has several runs going at once — the
+// newest one finishing first does not make the ticket idle.
+const anyRunActive = (ticketRuns) => (ticketRuns || []).some((r) => ACTIVE_RUN_STATUSES.has(r.status));
+// Shown in a table cell: the first few, then a count.
+const CELL_MAX = 3;
 
 // Hermes can be asked again once it has settled on something other than a run.
 const REHANDLE = new Set(["impediment", "on_hold", "error", "superseded", "done"]);
@@ -78,23 +95,29 @@ export default function ZohoTicketsTab({
   }, [runs, tickets]);
 
   const counts = useMemo(() => {
-    const latest = (t) => runsByTicket.get(t.id)?.[0];
+    const runsOf = (t) => runsByTicket.get(t.id) || [];
     return {
       all: tickets.length,
       unresolved: tickets.filter((t) => !t.resolved).length,
-      active: tickets.filter((t) => ACTIVE_RUN_STATUSES.has(latest(t)?.status)).length,
-      approval: tickets.filter((t) => latest(t)?.status === "awaiting_approval" || agentWaiting(t))
-        .length,
+      active: tickets.filter((t) => anyRunActive(runsOf(t))).length,
+      approval: tickets.filter(
+        (t) => runsOf(t).some((r) => r.status === "awaiting_approval") || agentWaiting(t)
+      ).length,
       impediment: tickets.filter((t) => handleTask(t)?.status === "impediment").length,
     };
   }, [tickets, runsByTicket]);
 
   const query = search.trim().toLowerCase();
   const visible = tickets.filter((t) => {
-    const latest = runsByTicket.get(t.id)?.[0];
+    const ticketRuns = runsByTicket.get(t.id) || [];
     if (filter === "unresolved" && t.resolved) return false;
-    if (filter === "active" && !ACTIVE_RUN_STATUSES.has(latest?.status)) return false;
-    if (filter === "approval" && latest?.status !== "awaiting_approval" && !agentWaiting(t)) return false;
+    if (filter === "active" && !anyRunActive(ticketRuns)) return false;
+    if (
+      filter === "approval" &&
+      !ticketRuns.some((r) => r.status === "awaiting_approval") &&
+      !agentWaiting(t)
+    )
+      return false;
     if (filter === "impediment" && handleTask(t)?.status !== "impediment") return false;
     if (!query) return true;
     return [
@@ -129,8 +152,8 @@ export default function ZohoTicketsTab({
     return null;
   };
 
-  const canRun = (ticket, latest) =>
-    canManage && ticket.resolved && ticketChange(ticket) && !ACTIVE_RUN_STATUSES.has(latest?.status);
+  const canRun = (ticket, ticketRuns) =>
+    canManage && ticket.resolved && ticketChange(ticket) && !anyRunActive(ticketRuns);
 
   return (
     <>
@@ -200,7 +223,10 @@ export default function ZohoTicketsTab({
               <tbody>
                 {visible.map((t) => {
                   const ticketRuns = runsByTicket.get(t.id) || [];
-                  const latest = ticketRuns[0];
+                  // The pill follows a run still going (several apps run side by
+                  // side) before the newest one.
+                  const latest =
+                    ticketRuns.find((r) => ACTIVE_RUN_STATUSES.has(r.status)) || ticketRuns[0];
                   const tasks = t.agentTasks || [];
                   const hasDetail = ticketRuns.length > 0 || tasks.length > 0;
                   const isOpen = expanded.has(t.id) && hasDetail;
@@ -243,9 +269,14 @@ export default function ZohoTicketsTab({
                       ) : null}
                       <td>
                         {agentActive && agentAction(t) ? (
-                          <span className="mono">
-                            {agentAction(t).deploymentName} ({agentAction(t).namespace})
-                          </span>
+                          <AgentCell
+                            items={agentChanges(agentAction(t))}
+                            render={(c) => (
+                              <span className="mono">
+                                {c.deploymentName} ({c.namespace})
+                              </span>
+                            )}
+                          />
                         ) : agentActive && !t.resolved ? (
                           <span className="muted">—</span>
                         ) : t.resolved ? (
@@ -260,13 +291,17 @@ export default function ZohoTicketsTab({
                       <td>
                         {(() => {
                           if (agentActive) {
-                            const label = agentChangeLabel(agentAction(t));
-                            return label ? (
-                              <span className="sg-tag mono" title="what Hermes understood">
-                                {label}
-                              </span>
-                            ) : (
-                              "—"
+                            const task = agentAction(t);
+                            if (!task || !agentChangeLabel(task)) return "—";
+                            return (
+                              <AgentCell
+                                items={agentChanges(task)}
+                                render={(c) => (
+                                  <span className="sg-tag mono" title="what Hermes understood">
+                                    {changeLabel(c) || "—"}
+                                  </span>
+                                )}
+                              />
                             );
                           }
                           const change = ticketChange(t);
@@ -326,7 +361,7 @@ export default function ZohoTicketsTab({
                         <td className="sg-zh-tactions" onClick={(e) => e.stopPropagation()}>
                           {agentActive &&
                           REHANDLE.has(firstReading?.status) &&
-                          !ACTIVE_RUN_STATUSES.has(latest?.status) ? (
+                          !anyRunActive(ticketRuns) ? (
                             <button
                               type="button"
                               className="btn-ghost sg-zh-trun"
@@ -340,7 +375,7 @@ export default function ZohoTicketsTab({
                               <IconRefresh />
                             </button>
                           ) : null}
-                          {canRun(t, latest) ? (
+                          {canRun(t, ticketRuns) ? (
                             <button
                               type="button"
                               className="btn-ghost sg-zh-trun"
@@ -426,5 +461,22 @@ export default function ZohoTicketsTab({
         </section>
       ) : null}
     </>
+  );
+}
+
+// A Deployment / Change cell: one line per application Hermes is changing,
+// the first few shown and the rest counted (all of them in the tooltip).
+function AgentCell({ items, render }) {
+  if (items.length <= 1) return items[0] ? render(items[0]) : "—";
+  const shown = items.slice(0, CELL_MAX);
+  const rest = items.length - shown.length;
+  const title = items.map((c) => `${c.deploymentName} (${c.namespace}) ${changeLabel(c) || ""}`).join("\n");
+  return (
+    <span className="sg-zh-agentcell" title={title}>
+      {shown.map((c, index) => (
+        <span key={`${c.namespace}/${c.deploymentName}/${index}`}>{render(c)}</span>
+      ))}
+      {rest > 0 ? <span className="muted">+{rest} more</span> : null}
+    </span>
   );
 }

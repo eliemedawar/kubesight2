@@ -1,0 +1,538 @@
+/* ══ Settings → MCP tools ═════════════════════════════════════════════════
+   A master switch, a toolbar (search · show · presets), then one card per
+   domain with a row per tool. Reuses .settings-switch from settings.css; the
+   filter buttons carry .btn-ghost to escape ui-polish.css's (0,8,1) button
+   selector.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.mcp-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-bottom: 4.5rem; /* room for the floating save bar */
+}
+
+/* ─── Master card ─── */
+.mcp-master-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+.mcp-master-text h3 {
+  margin: 0 0 0.25rem;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.mcp-master-text .settings-card-sub {
+  margin-bottom: 0;
+}
+.mcp-master-text strong {
+  color: var(--text-main);
+  font-weight: 600;
+}
+.mcp-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: var(--space-4) 0 0.5rem;
+  font-size: var(--font-size-sm);
+  min-width: 0;
+}
+.mcp-endpoint code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 0.35rem);
+  padding: 0.15rem 0.45rem;
+  overflow-wrap: anywhere;
+}
+
+.mcp-warn {
+  margin: 0;
+}
+
+/* ─── Toolbar ─── */
+.mcp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.mcp-search {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+.mcp-filter {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.mcp-filter .btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.7rem;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+.mcp-filter .btn-ghost:hover {
+  color: var(--text-main);
+}
+.mcp-filter .btn-ghost.is-active {
+  background: var(--bg-panel);
+  color: var(--text-strong);
+  box-shadow: var(--shadow-sm);
+}
+.mcp-count {
+  min-width: 1.15rem;
+  padding: 0 0.3rem;
+  border-radius: var(--radius-full);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-align: center;
+}
+.mcp-presets {
+  display: flex;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+/* With the server off nothing below applies — still editable, visibly moot. */
+.mcp-toolbar.is-dimmed,
+.mcp-groups.is-dimmed {
+  opacity: 0.55;
+}
+
+/* ─── Domain cards ─── */
+.mcp-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.mcp-group {
+  padding: 0;
+  overflow: hidden;
+}
+.mcp-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel-strong);
+}
+.mcp-group-head h3 {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.mcp-group-head .settings-card-sub {
+  margin: 0.1rem 0 0;
+}
+.mcp-group-count {
+  margin-left: auto;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mcp-group-head .settings-switch {
+  margin-left: 0;
+}
+
+/* The switch carries .btn-ghost so ui-polish's global button rule (min-height,
+   padding) skips it; these restate its own look above .btn-ghost's. */
+.mcp-panel .mcp-switch.btn-ghost {
+  width: 36px;
+  height: 21px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+}
+.mcp-panel .mcp-switch.btn-ghost[aria-checked="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.mcp-panel .mcp-switch.btn-ghost:hover:not(:disabled) {
+  border-color: var(--accent-border);
+}
+.mcp-panel .mcp-switch.btn-ghost[aria-checked="true"]:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+.mcp-panel .mcp-switch.btn-ghost:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Some on, some off: the thumb sits in the middle. */
+.mcp-panel .mcp-switch.btn-ghost.is-mixed {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+.mcp-panel .mcp-switch.is-mixed::after {
+  translate: 7.5px 0;
+}
+
+.mcp-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.mcp-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0.7rem var(--space-5);
+  border-top: 1px solid var(--border);
+}
+.mcp-row:first-child {
+  border-top: 0;
+}
+.mcp-row .settings-switch {
+  margin-left: 0;
+}
+.mcp-row.is-changed {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+.mcp-row.is-off .mcp-name,
+.mcp-row.is-off .mcp-desc,
+.mcp-row.is-off .mcp-perm {
+  opacity: 0.55;
+}
+.mcp-row.is-off .mcp-name {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-muted);
+}
+
+.mcp-row-main {
+  min-width: 0;
+}
+.mcp-row-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.mcp-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+.mcp-desc {
+  margin: 0.2rem 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.mcp-perm {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-subtle);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 0.1rem 0.5rem;
+  white-space: nowrap;
+}
+
+/* Tags: read is quiet, writes warn, destructive is the alert red. */
+.mcp-tag {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--bg-panel);
+}
+.mcp-tag.is-write {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+}
+.mcp-tag.is-danger {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+.mcp-tag.is-info {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: var(--info-border);
+}
+.mcp-tag.is-pending {
+  color: var(--text-subtle);
+  border-style: dashed;
+}
+
+/* ─── Tools / Clusters tabs ─── */
+.mcp-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.mcp-tabs .btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.85rem;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.mcp-tabs .btn-ghost:hover {
+  color: var(--text-main);
+  background: transparent;
+}
+.mcp-tabs .btn-ghost.is-active {
+  color: var(--text-strong);
+  border-bottom-color: var(--accent);
+}
+.mcp-tab-count {
+  font-weight: 500;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.mcp-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--warn);
+}
+.is-dimmed > .mcp-clusters {
+  opacity: 0.55;
+}
+
+/* ─── Clusters tab ─── */
+.mcp-clusters {
+  padding: 0;
+  overflow: hidden;
+}
+.mcp-clusters-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel-strong);
+}
+.mcp-clusters-head .settings-card-sub {
+  margin: 0;
+  max-width: 70ch;
+}
+.mcp-clusters-counts {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  justify-content: flex-end;
+}
+.mcp-tag.mode-tag-read {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: var(--info-border);
+}
+.mcp-tag.mode-tag-off {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+.mcp-tag.mode-tag-custom {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+}
+
+.mcp-cluster-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.mcp-cluster {
+  padding: 0.85rem var(--space-5);
+  border-top: 1px solid var(--border);
+}
+.mcp-cluster:first-child {
+  border-top: 0;
+}
+.mcp-cluster.is-changed {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+.mcp-cluster-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.mcp-cluster-id {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  min-width: 0;
+  margin-right: auto;
+}
+.mcp-cluster-name {
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.mcp-cluster-hint {
+  margin: 0.35rem 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+.mcp-cluster-hint strong {
+  color: var(--text-main);
+}
+.mcp-cluster-warn {
+  color: var(--warn);
+  font-weight: 500;
+}
+
+/* The mode control reuses the filter's segmented look; the chosen mode takes
+   its own colour so a page of clusters reads at a glance. */
+.mcp-seg .btn-ghost.is-active.mode-read {
+  color: var(--info);
+}
+.mcp-seg .btn-ghost.is-active.mode-off {
+  color: var(--danger);
+}
+.mcp-seg .btn-ghost.is-active.mode-custom {
+  color: var(--warn);
+}
+.mcp-seg .btn-ghost:disabled {
+  cursor: default;
+}
+
+.mcp-panel .btn-ghost.mcp-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.mcp-panel .btn-ghost.mcp-link:hover {
+  text-decoration: underline;
+  background: transparent;
+}
+
+.mcp-cluster-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: var(--space-4);
+  margin-top: 0.75rem;
+  padding: var(--space-4);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.mcp-cluster-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.35rem;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.mcp-cluster-group-head .mcp-link {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.mcp-cluster-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.mcp-cluster-group li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0;
+}
+.mcp-cluster-group li .settings-switch,
+.mcp-cluster-group li .mcp-cluster-everywhere {
+  margin-left: auto;
+}
+.mcp-cluster-group li .mcp-name {
+  font-size: var(--font-size-xs);
+}
+.mcp-cluster-group li.is-off .mcp-name {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+.mcp-empty {
+  padding: var(--space-5);
+  text-align: center;
+}
+.mcp-saved {
+  margin: 0;
+}
+
+@media (max-width: 700px) {
+  .mcp-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .mcp-perm {
+    grid-column: 1;
+    justify-self: start;
+  }
+  .mcp-row .settings-switch {
+    grid-row: 1;
+    grid-column: 2;
+  }
+  .mcp-presets {
+    margin-left: 0;
+  }
+  .mcp-clusters-head {
+    flex-direction: column;
+  }
+  .mcp-clusters-counts {
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+  .mcp-seg {
+    width: 100%;
+  }
+  .mcp-seg .btn-ghost {
+    flex: 1;
+    justify-content: center;
+    padding-inline: 0.3rem;
+  }
+}

@@ -12,6 +12,7 @@
      checkout → chart-2 (blue) · commands → chart-3 (teal) · image → chart-5 (violet)
      · deploy → chart-7 (orchid) — not chart-6/chart-4, which are the info and
      warn tones and would make every Deploy stage read as a notice
+     · scan → chart-8 (steel) — a check, not an alert, so not the ok/warn tones
    ═════════════════════════════════════════════════════════════════════════ */
 
 .pl-root {
@@ -36,6 +37,17 @@
 .pl-root .kind-deploy {
   --pl-kind: var(--chart-7);
 }
+.pl-root .kind-scan {
+  --pl-kind: var(--chart-8);
+}
+/* approval → chart-4 (amber): a gate somebody has to open, not a failure. */
+.pl-root .kind-approval {
+  --pl-kind: var(--chart-4);
+}
+/* store_upload → chart-6 (sea blue): the binary leaving for a store. */
+.pl-root .kind-store_upload {
+  --pl-kind: var(--chart-6);
+}
 .pl-root .kind-retired {
   --pl-kind: var(--warn);
 }
@@ -43,6 +55,9 @@
 .pl-root .kind-command,
 .pl-root .kind-container_image,
 .pl-root .kind-deploy,
+.pl-root .kind-scan,
+.pl-root .kind-approval,
+.pl-root .kind-store_upload,
 .pl-root .kind-retired {
   --pl-kind-soft: color-mix(in srgb, var(--pl-kind) 12%, transparent);
   --pl-kind-line: color-mix(in srgb, var(--pl-kind) 38%, transparent);
@@ -1687,6 +1702,15 @@
 .pl-root .pl-sheet.kind-deploy .pl-seg--lg .pl-seg-option.is-on {
   --pl-kind: var(--chart-7);
 }
+.pl-root .pl-sheet.kind-scan .pl-seg--lg .pl-seg-option.is-on {
+  --pl-kind: var(--chart-8);
+}
+.pl-root .pl-sheet.kind-approval .pl-seg--lg .pl-seg-option.is-on {
+  --pl-kind: var(--chart-4);
+}
+.pl-root .pl-sheet.kind-store_upload .pl-seg--lg .pl-seg-option.is-on {
+  --pl-kind: var(--chart-6);
+}
 
 .pl-root .pl-seg--lg .pl-seg-option.is-on > svg {
   color: var(--pl-kind);
@@ -1888,7 +1912,8 @@
 .pl-root .pl-sheet.kind-checkout .pl-setting.is-set .pl-setting-icon,
 .pl-root .pl-sheet.kind-command .pl-setting.is-set .pl-setting-icon,
 .pl-root .pl-sheet.kind-container_image .pl-setting.is-set .pl-setting-icon,
-.pl-root .pl-sheet.kind-deploy .pl-setting.is-set .pl-setting-icon {
+.pl-root .pl-sheet.kind-deploy .pl-setting.is-set .pl-setting-icon,
+.pl-root .pl-sheet.kind-scan .pl-setting.is-set .pl-setting-icon {
   color: var(--pl-kind);
 }
 
@@ -3306,5 +3331,909 @@
 @media (max-width: 720px) {
   .pl-root .pl-deploy-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Deploy stage pickers use the app's SearchableSelect; each option shows the
+   name, and the ready count or image beside it. */
+.pl-deploy-option {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.pl-deploy-option > span {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.pl-deploy-option > small {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Code scan quality gate on a command stage — shares the image scan's card. */
+.pl-root .pl-codescan {
+  margin-top: var(--space-3, 0.9rem);
+}
+
+.pl-root .pl-codescan .pl-codescan-count {
+  max-width: 9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* "Files to keep": the test/coverage report presets under the rows. */
+.pl-root .pl-rows-preset {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.pl-root .pl-rows-preset code {
+  font-size: 0.95em;
+}
+
+.pl-root .pl-rows-preset select {
+  max-width: 100%;
+  min-height: 2.1rem;
+  padding: 0.3rem 0.55rem;
+}
+
+/* ── Scan stage ─────────────────────────────────────────────────────────
+   Tool cards are buttons, so they carry .btn-ghost and are restyled here at
+   (0,2,0) — see the note at the top about ui-polish's (0,8,1) button rule. */
+.pl-root .pl-scan-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.pl-root .pl-scan-tool {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.7rem 0.85rem;
+  color: var(--text-main);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  font-weight: 400;
+  text-align: left;
+  white-space: normal;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.pl-root .pl-scan-tool:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--pl-kind) 4%, var(--bg-panel));
+  border-color: var(--border-strong);
+}
+
+.pl-root .pl-scan-tool.is-on {
+  background: color-mix(in srgb, var(--pl-kind) 7%, var(--bg-panel));
+  border-color: var(--pl-kind);
+  box-shadow: 0 0 0 1px var(--pl-kind);
+}
+
+.pl-root .pl-scan-tool:focus-visible {
+  outline: 2px solid var(--pl-kind);
+  outline-offset: 2px;
+}
+
+.pl-root .pl-scan-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.pl-root .pl-scan-tool-head > svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  color: var(--pl-kind);
+}
+
+.pl-root .pl-scan-tool-head strong {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.pl-root .pl-scan-tool-head .pl-scan-tool-check {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.pl-root .pl-scan-tool small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+.pl-root .pl-scan-gate {
+  margin-top: var(--space-3, 0.9rem);
+}
+
+.pl-root .pl-scan-gate.is-on {
+  border-color: var(--pl-kind-line);
+  box-shadow: inset 3px 0 0 var(--pl-kind);
+}
+
+.pl-root .pl-scan-body.is-flush {
+  padding-left: var(--space-4);
+  border-top: 0;
+}
+
+.pl-root .pl-scan-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.pl-root .pl-scan-score {
+  max-width: 8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.pl-root .pl-scan-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: var(--space-3, 0.9rem);
+  padding: 0.75rem 0.9rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+}
+
+.pl-root .pl-scan-facts p {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  margin: 0;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+}
+
+.pl-root .pl-scan-facts p > svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  margin-top: 0.15rem;
+  color: var(--pl-kind);
+}
+
+.pl-root .pl-scan-facts p > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pl-root .pl-scan-facts p.is-warn {
+  color: var(--warn);
+}
+
+.pl-root .pl-scan-facts p.is-warn > svg {
+  color: var(--warn);
+}
+
+.pl-root .pl-scan-facts code {
+  color: var(--text-main);
+}
+
+@media (max-width: 720px) {
+  .pl-root .pl-scan-tools {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Approval and App store upload stages
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.pl-root .pl-approval,
+.pl-root .pl-store {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.pl-root .pl-approval textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+}
+
+.pl-root .pl-approval-who {
+  display: grid;
+  gap: var(--space-3);
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: inset 3px 0 0 var(--pl-kind);
+}
+
+.pl-root .pl-approval-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.pl-root .pl-approval-row-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  color: var(--pl-kind);
+  background: var(--pl-kind-soft);
+  border-radius: var(--radius-md);
+}
+
+.pl-root .pl-approval-row-icon svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.pl-root .pl-approval-row strong {
+  display: block;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+}
+
+.pl-root .pl-approval-row small {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.pl-root .pl-approval-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  list-style: none;
+}
+
+.pl-root .pl-approval-chips li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  padding: 0.2rem 0.3rem 0.2rem 0.55rem;
+  color: var(--text-strong);
+  background: var(--pl-kind-soft);
+  border: 1px solid var(--pl-kind-line);
+  border-radius: 999px;
+  font-size: var(--font-size-xs);
+}
+
+.pl-root .pl-approval-chips li > svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--pl-kind);
+}
+
+.pl-root .pl-approval-chips li > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* btn-ghost keeps ui-polish's (0,8,1) button rule off it; restyled here. */
+.pl-root .pl-approval-chips .btn-ghost.pl-approval-remove {
+  display: inline-grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  min-height: 0;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pl-root .pl-approval-chips .btn-ghost.pl-approval-remove:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.pl-root .pl-approval-chips .btn-ghost.pl-approval-remove svg {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.pl-root .pl-approval-rules {
+  grid-template-columns: minmax(8rem, 12rem) minmax(0, 1fr);
+  align-items: start;
+}
+
+.pl-root .pl-approval-rules input[type="number"] {
+  max-width: 8rem;
+}
+
+.pl-root .pl-approval-checks {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* The search list is portalled outside .pl-root, like .pl-deploy-option. */
+.pl-approval-option {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.pl-approval-option > small {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .pl-root .pl-approval-rules {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pl-root .pl-approval-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .pl-root .pl-approval-row .pl-switch {
+    grid-column: 2;
+  }
+}
+
+/* ── Post actions: "When the build ends" ────────────────────────────────
+   Hung off the end of the flow, after "Build finishes", because that is
+   when they happen. Kind colours are identity, never status:
+     email → chart-6 (sea blue) · webhook → chart-5 (violet)
+     · cleanup → chart-3 (teal, the colour of command stages — it is one)
+   ───────────────────────────────────────────────────────────────────── */
+
+.pl-root .pl-post-item.is-email,
+.pl-root .pl-post-sheet.is-email,
+.pl-root .pl-post-pick.is-email {
+  --pl-kind: var(--chart-6);
+}
+.pl-root .pl-post-item.is-webhook,
+.pl-root .pl-post-sheet.is-webhook,
+.pl-root .pl-post-pick.is-webhook {
+  --pl-kind: var(--chart-5);
+}
+.pl-root .pl-post-item.is-commands,
+.pl-root .pl-post-sheet.is-commands,
+.pl-root .pl-post-pick.is-commands {
+  --pl-kind: var(--chart-3);
+}
+.pl-root .pl-post-item,
+.pl-root .pl-post-sheet,
+.pl-root .pl-post-pick {
+  --pl-kind-soft: color-mix(in srgb, var(--pl-kind) 12%, transparent);
+  --pl-kind-line: color-mix(in srgb, var(--pl-kind) 38%, transparent);
+}
+
+.pl-root .pl-post {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--border);
+}
+
+.pl-root .pl-post-head {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.35rem 0.55rem 0.35rem calc(var(--pl-spine) - 0.75rem);
+}
+
+.pl-root .pl-post-head-dot {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  color: var(--text-subtle);
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+}
+
+.pl-root .pl-post-head-dot svg {
+  width: 0.8rem;
+  height: 0.8rem;
+}
+
+.pl-root .pl-post-head strong,
+.pl-root .pl-post-head small {
+  display: block;
+}
+
+.pl-root .pl-post-head strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+}
+
+.pl-root .pl-post-head small {
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+}
+
+.pl-root .pl-post-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0.15rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pl-root .pl-post-card {
+  display: grid;
+  grid-template-columns: 1.9rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.55rem;
+  width: 100%;
+  min-height: 0;
+  padding: 0.45rem 0.55rem 0.45rem calc(var(--pl-spine) - 0.95rem);
+  color: var(--text-main);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pl-root .pl-post-card:hover {
+  background: var(--bg-interactive);
+  border-color: transparent;
+}
+
+.pl-root .pl-post-card.is-selected {
+  background: var(--bg-panel);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-md), inset 3px 0 0 var(--accent);
+}
+
+.pl-root .pl-post-card.has-errors:not(.is-selected) {
+  background: color-mix(in srgb, var(--danger) 5%, transparent);
+}
+
+.pl-root .pl-post-glyph {
+  display: grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  color: var(--pl-kind);
+  background: color-mix(in srgb, var(--pl-kind) 12%, var(--bg-panel));
+  border: 1px solid var(--pl-kind-line);
+  border-radius: var(--radius-lg);
+}
+
+.pl-root .pl-post-glyph svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.pl-root .pl-post-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.pl-root .pl-post-copy strong {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.pl-root .pl-post-copy small {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pl-root .pl-post-copy small.is-mono {
+  font-size: 0.6875rem;
+}
+
+.pl-root .pl-post-when {
+  display: inline-flex;
+  align-items: center;
+  height: 1.1rem;
+  padding: 0 0.35rem;
+  color: var(--text-subtle);
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  font-size: 0.625rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.pl-root .pl-post-when.is-success,
+.pl-root .pl-post-when.is-fixed {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: var(--ok-border);
+}
+
+.pl-root .pl-post-when.is-failure {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.pl-root .pl-post-add {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 0;
+  margin-top: 0.2rem;
+  padding: 0.45rem 0.55rem 0.45rem calc(var(--pl-spine) - 0.95rem);
+  color: var(--accent-strong);
+  background: transparent;
+  border: 1px dashed transparent;
+  border-radius: var(--radius-lg);
+  font-weight: 400;
+  text-align: left;
+}
+
+.pl-root .pl-post-add > svg {
+  box-sizing: content-box;
+  width: 0.95rem;
+  height: 0.95rem;
+  padding: 0.45rem;
+  background: var(--bg-panel);
+  border: 1px dashed var(--accent-border);
+  border-radius: var(--radius-lg);
+}
+
+.pl-root .pl-post-add:hover:not(:disabled),
+.pl-root .pl-post-add.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.pl-root .pl-post-add:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.pl-root .pl-post-add strong,
+.pl-root .pl-post-add small {
+  display: block;
+}
+
+.pl-root .pl-post-add strong {
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.pl-root .pl-post-add small {
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+}
+
+.pl-root .pl-post-empty {
+  margin: 0.25rem 0 0;
+  padding: 0 0.55rem 0 calc(var(--pl-spine) - 0.75rem);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.pl-root .pl-post-sheet.is-email .pl-seg--lg .pl-seg-option.is-on {
+  --pl-kind: var(--chart-6);
+}
+.pl-root .pl-post-sheet.is-webhook .pl-seg--lg .pl-seg-option.is-on {
+  --pl-kind: var(--chart-5);
+}
+.pl-root .pl-post-sheet.is-commands .pl-seg--lg .pl-seg-option.is-on {
+  --pl-kind: var(--chart-3);
+}
+
+.pl-root .pl-post-semantics {
+  margin-top: var(--space-3);
+}
+
+.pl-root .pl-post-secret {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pl-root .pl-post-secret select {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .pl-root .pl-post-card {
+    grid-template-columns: 1.9rem minmax(0, 1fr);
+  }
+
+  .pl-root .pl-post-card .pl-flow-problem {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+/* ── Parallel groups ─────────────────────────────────────────────────
+   In the flow a group is one tinted box on the spine: a fork glyph and its
+   name on top, then its stages as LANES — each node pushed right of the
+   spine and tied to it by a short stub, so the spine reads as the group's
+   bracket rather than as a sequence. Colours are theme tokens, so light and
+   dark follow on their own. */
+
+.pl-root {
+  --pl-group: var(--info);
+  --pl-group-line: color-mix(in srgb, var(--info) 55%, var(--border));
+  --pl-lane-indent: 1.9rem;
+}
+
+.pl-root .pl-flow-group {
+  position: relative;
+  margin: 0.2rem 0;
+  padding: 0.1rem 0 0.3rem;
+  background: color-mix(in srgb, var(--pl-group) 5%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--pl-group) 32%, transparent);
+  border-radius: var(--radius-lg);
+}
+
+.pl-root .pl-flow-group.has-selected {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--pl-group) 45%, transparent);
+}
+
+.pl-root .pl-flow-group::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--pl-spine) - 1px);
+  width: 2px;
+  background: var(--pl-group-line);
+  pointer-events: none;
+}
+
+.pl-root .pl-flow-group-head {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.35rem 0.55rem 0.15rem calc(var(--pl-spine) - 0.75rem);
+}
+
+.pl-root .pl-flow-group-glyph {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  color: var(--pl-group);
+  background: var(--bg-panel);
+  border: 1px solid var(--pl-group-line);
+  border-radius: var(--radius-full);
+}
+
+.pl-root .pl-flow-group-glyph svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.pl-root .pl-flow-group-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pl-root .pl-flow-group-title strong {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pl-root .pl-flow-group-title small {
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+}
+
+.pl-root .pl-flow-lanes {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pl-root .pl-flow-item.in-lane {
+  padding-left: var(--pl-lane-indent);
+}
+
+.pl-root .pl-flow-item.in-lane::before {
+  background: var(--pl-group-line);
+}
+
+/* The stub from the bracket to the lane's node: node centre sits 0.2rem item
+   padding + 0.5rem card padding + half a 2.25rem node below the item top. */
+.pl-root .pl-flow-item.in-lane::after {
+  content: "";
+  position: absolute;
+  top: calc(0.2rem + 0.5rem + 1.125rem - 1px);
+  left: var(--pl-spine);
+  width: calc(var(--pl-lane-indent) - 1.125rem);
+  height: 2px;
+  background: var(--pl-group-line);
+  pointer-events: none;
+}
+
+.pl-root .pl-flow-item.in-lane .pl-flow-node {
+  border-color: var(--pl-group-line);
+}
+
+/* The sheet's "Run in parallel" settings. */
+.pl-root .pl-parallel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.pl-root .pl-parallel-switch .pl-field-hint {
+  margin: 0.35rem 0 0;
+}
+
+.pl-root .pl-parallel-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--pl-group-line);
+  border-radius: var(--radius-lg);
+}
+
+.pl-root .pl-parallel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.pl-root .pl-parallel-head strong,
+.pl-root .pl-parallel-head small {
+  display: block;
+}
+
+.pl-root .pl-parallel-head strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+}
+
+.pl-root .pl-parallel-head small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.pl-root .pl-parallel-glyph {
+  display: grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex: none;
+  color: var(--pl-group);
+  background: var(--bg-panel);
+  border: 1px solid var(--pl-group-line);
+  border-radius: var(--radius-full);
+}
+
+.pl-root .pl-parallel-glyph svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.pl-root .pl-parallel-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pl-root .pl-parallel-members li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.2rem 0.55rem;
+  color: var(--text-subtle);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+}
+
+.pl-root .pl-parallel-members li.is-current {
+  color: var(--text-strong);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.pl-root .pl-parallel-members li.is-off {
+  border-style: dashed;
+  opacity: 0.7;
+}
+
+.pl-root .pl-parallel-number {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 700;
+}
+
+.pl-root .pl-parallel-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pl-root .pl-parallel-tag {
+  color: var(--text-muted);
+  font-size: 0.625rem;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .pl-root {
+    --pl-lane-indent: 1.5rem;
   }
 }

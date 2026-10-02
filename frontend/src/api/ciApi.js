@@ -179,11 +179,45 @@ export const runCiBuild = (serviceId, payload = {}) =>
 
 export const getCiBuild = (id) => request(`/api/ci/builds/${encodeURIComponent(id)}`);
 
+// Test results and coverage parsed from the build's test-report and
+// coverage-report artifacts: totals, failed cases, per-file entries.
+export const getCiBuildTests = (id) =>
+  request(`/api/ci/builds/${encodeURIComponent(id)}/tests`);
+
+// Failed tests and coverage over the service's last `limit` builds that kept reports.
+export const getCiServiceTestTrend = (serviceId, query = {}) =>
+  request(`/api/ci/services/${encodeURIComponent(serviceId)}/test-trend`, { query });
+
 export const cancelCiBuild = (id) =>
   request(`/api/ci/builds/${encodeURIComponent(id)}/cancel`, { method: "POST" });
 
 export const retryCiBuild = (id) =>
   request(`/api/ci/builds/${encodeURIComponent(id)}/retry`, { method: "POST" });
+
+// Answer an Approval stage. The stage decides who may (its named approvers
+// and/or ci_builds:approve holders, never the build's starter unless allowed);
+// a refusal arrives as a 403/409 with the reason. Returns the updated build.
+export const approveCiBuildStage = (buildId, stageId, comment = "") =>
+  request(
+    `/api/ci/builds/${encodeURIComponent(buildId)}/stages/${encodeURIComponent(stageId)}/approve`,
+    { method: "POST", body: { comment } }
+  );
+
+export const rejectCiBuildStage = (buildId, stageId, comment = "") =>
+  request(
+    `/api/ci/builds/${encodeURIComponent(buildId)}/stages/${encodeURIComponent(stageId)}/reject`,
+    { method: "POST", body: { comment } }
+  );
+
+// Who an Approval stage can name: active users, and whether each already holds
+// ci_builds:approve.
+export const listCiApproverCandidates = () => request("/api/ci/approvers");
+
+// What an App store upload stage can point at: registered mobile apps with
+// their store readiness (never credentials), and whether the caller may
+// authorize a target (admin-only, like publishing from Mobile Apps).
+export const getCiStoreUploadTargets = (serviceId) =>
+  request("/api/ci/store-upload-targets", { query: { serviceId: serviceId || undefined } });
 
 // Offset read: pass the previous response's nextSeq to fetch only new lines.
 export const getCiStageLogs = (buildId, stageId, after = 0, limit = 1000) =>
@@ -207,6 +241,26 @@ export const downloadCiStageLog = async (buildId, stageId) => {
   const { ticket } = await createCiStageLogDownloadTicket(buildId, stageId);
   startDownload(ciStageLogDownloadPath(buildId, stageId), ticket);
 };
+
+// ---------------------------------------------------------------------------
+// Code scan report — the PDF of a quality-gated stage's findings
+// ---------------------------------------------------------------------------
+
+const codeScanPath = (buildId, stageId) =>
+  `/api/ci/builds/${encodeURIComponent(buildId)}/stages/${encodeURIComponent(stageId)}/code-scan`;
+
+export const getCiCodeScan = (buildId, stageId) => request(codeScanPath(buildId, stageId));
+
+export const downloadCiCodeScanReport = async (buildId, stageId) => {
+  const { ticket } = await request(`${codeScanPath(buildId, stageId)}/report-ticket`, { method: "POST" });
+  startDownload(`${codeScanPath(buildId, stageId)}/report`, ticket);
+};
+
+export const sendCiCodeScanReport = (buildId, stageId, { recipients, note }) =>
+  request(`${codeScanPath(buildId, stageId)}/send`, {
+    method: "POST",
+    body: { recipients, note },
+  });
 
 // ---------------------------------------------------------------------------
 // Artifacts
@@ -330,3 +384,32 @@ export const lintCiPipeline = (stages) =>
 export const getCiPipelinePortability = (pipelineId) =>
   request(`/api/ci/pipelines/${encodeURIComponent(pipelineId)}/portability`);
 
+
+// ---------------------------------------------------------------------------
+// Schedules — cron-triggered builds. The server is the only cron evaluator:
+// the form asks previewCiSchedule for the words and the next runs rather than
+// computing them, so what it shows and what fires cannot disagree.
+// ---------------------------------------------------------------------------
+
+const schedulesPath = (serviceId) =>
+  `/api/ci/services/${encodeURIComponent(serviceId)}/schedules`;
+
+export const listCiSchedules = (serviceId) => request(schedulesPath(serviceId));
+
+export const createCiSchedule = (serviceId, payload) =>
+  request(schedulesPath(serviceId), { method: "POST", body: payload });
+
+export const updateCiSchedule = (serviceId, scheduleId, payload) =>
+  request(`${schedulesPath(serviceId)}/${encodeURIComponent(scheduleId)}`, {
+    method: "PUT",
+    body: payload,
+  });
+
+export const deleteCiSchedule = (serviceId, scheduleId) =>
+  request(`${schedulesPath(serviceId)}/${encodeURIComponent(scheduleId)}`, { method: "DELETE" });
+
+export const runCiScheduleNow = (serviceId, scheduleId) =>
+  request(`${schedulesPath(serviceId)}/${encodeURIComponent(scheduleId)}/run`, { method: "POST" });
+
+export const previewCiSchedule = ({ cron, timezone, count }) =>
+  request("/api/ci/schedules/preview", { method: "POST", body: { cron, timezone, count } });

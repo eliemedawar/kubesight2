@@ -137,7 +137,12 @@ def test_webhook_hands_every_ticket_to_hermes_which_executes(client, agent, writ
         assert {
             "environment": NAMESPACE, "application": DEPLOYMENT,
             "allowedActions": ["deploy_image", "set_env_var", "restart"],
-        } in message["catalog"]
+        } in [
+            {k: e[k] for k in ("environment", "application", "allowedActions")}
+            for e in message["catalog"]
+        ]
+        # Where each one runs, for troubleshooting tickets.
+        assert all(e["cluster"] for e in message["catalog"])
         assert {e["environment"] for e in message["catalog"]} == {NAMESPACE}
         # The Desk HTML description reaches Hermes as text.
         assert "Please deploy v9.9.9" in message["ticket"]["description"]

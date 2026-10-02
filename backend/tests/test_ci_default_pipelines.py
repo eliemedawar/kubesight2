@@ -137,12 +137,55 @@ def test_repository_inspection_uses_the_requested_ref_and_service_subdirectory(m
     result = default_pipelines.inspect_repository(service, "release/2.0")
 
     assert result["files"] == {"gradlew": "#!/bin/sh"}
-    assert calls[0] == (
+    # The probes run concurrently, so their order is not part of the contract.
+    assert (
         service.repository_url,
         "credential",
         "release/2.0",
         "backend/service-a/gradlew",
+    ) in calls
+    assert len(calls) == 4
+
+
+def test_repository_inspection_is_cached_per_service_and_ref(monkeypatch):
+    from api import ttl_cache
+
+    calls = []
+
+    class Provider:
+        @staticmethod
+        def parse_repository_url(url):
+            return url
+
+        @staticmethod
+        def read_file(ref, credential, revision, path):
+            calls.append((revision, path))
+            if path == "requirements.txt":
+                return "flask\n"
+            raise LookupError(path)
+
+    monkeypatch.setattr(ttl_cache, "caching_disabled", lambda: False)
+    monkeypatch.setattr(default_pipelines, "_INSPECTION_CACHE", ttl_cache.TTLCache("test"))
+    monkeypatch.setattr(default_pipelines.source_port, "get_provider", lambda name: Provider())
+    service = SimpleNamespace(
+        id=42,
+        application_type="python",
+        working_directory="",
+        repository_provider="bitbucket",
+        repository_url="https://bitbucket.org/team/devops-ai",
+        credential_profile=None,
+        default_branch="main",
+        source_ready=lambda: True,
     )
+
+    first = default_pipelines.inspect_repository(service)
+    second = default_pipelines.inspect_repository(service)
+    assert first["files"] == second["files"] == {"requirements.txt": "flask\n"}
+    assert len(calls) == 4
+
+    # Another ref is another answer.
+    default_pipelines.inspect_repository(service, "release/1.0")
+    assert len(calls) == 8
 
 
 @pytest.fixture()

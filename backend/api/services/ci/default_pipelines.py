@@ -16,12 +16,20 @@ from __future__ import annotations
 
 import json
 import posixpath
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
+from ...ttl_cache import TTLCache
 from . import build_environments
 from . import source as source_port
 from . import templates
+
+
+# Marker-file answers per service, repository, directory, ref and credential.
+_INSPECTION_CACHE = TTLCache("ci-default-pipeline-inspection")
+INSPECTION_TTL_SECONDS = 300
 
 
 # Resolved through the build environment catalog — same values, one owner. See
@@ -86,19 +94,69 @@ def inspect_repository(service, revision: str = "") -> Dict[str, Any]:
     except Exception:
         return result
 
-    for path in paths:
+    credential = _credential_snapshot(service.credential_profile)
+    repo_paths = {path: _repo_path(service, path) for path in paths}
+    revision_name = result["revision"]
+
+    def read_markers() -> Dict[str, str]:
+        return _read_markers(handler, ref, credential, revision_name, repo_paths)
+
+    service_id = getattr(service, "id", None)
+    if service_id is None:
+        result["files"] = read_markers()
+        return result
+    # Every Pipeline tab view of a service with no saved stages lands here, and
+    # each probe is a Bitbucket round trip. Cached briefly: a stale answer can
+    # only pick the fallback's wording, never the build's tool, because the
+    # generated commands repeat the same checks in the real checkout.
+    key = (
+        service_id,
+        app_type,
+        str(service.repository_url or ""),
+        str(getattr(service, "working_directory", "") or ""),
+        revision_name,
+        getattr(service.credential_profile, "id", None),
+        str(getattr(service.credential_profile, "updated_at", "") or ""),
+    )
+    result["files"] = dict(
+        _INSPECTION_CACHE.get_or_compute(key, INSPECTION_TTL_SECONDS, read_markers)
+    )
+    return result
+
+
+def _credential_snapshot(credential):
+    """The credential's plain fields, safe to hand to worker threads.
+
+    The ORM row belongs to the request's session; reading a lazy attribute of
+    it from another thread is not. Anything that is not a credential row (a
+    test double, None) is passed through unchanged.
+    """
+    if credential is None or not hasattr(credential, "secret_cipher"):
+        return credential
+    return SimpleNamespace(
+        id=getattr(credential, "id", None),
+        name=credential.name,
+        enabled=credential.enabled,
+        secret_cipher=credential.secret_cipher,
+        credential_type=credential.credential_type,
+        principal=credential.principal,
+    )
+
+
+def _read_markers(handler, ref, credential, revision: str, repo_paths: Dict[str, str]) -> Dict[str, str]:
+    """Read every marker file at once — the probes are independent round trips."""
+
+    def read(repo_path: str) -> Optional[str]:
         try:
-            result["files"][path] = handler.read_file(
-                ref,
-                service.credential_profile,
-                result["revision"],
-                _repo_path(service, path),
-            )
+            return handler.read_file(ref, credential, revision, repo_path)
         except Exception:
             # A 404 means only that this signal is absent; an outage is handled
             # by the checkout-time detection embedded in the generated stage.
-            continue
-    return result
+            return None
+
+    with ThreadPoolExecutor(max_workers=len(repo_paths)) as pool:
+        contents = dict(zip(repo_paths, pool.map(read, repo_paths.values())))
+    return {path: text for path, text in contents.items() if text is not None}
 
 
 def _stage(

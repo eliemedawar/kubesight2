@@ -8,6 +8,15 @@
  */
 
 import { blankDeploy, deployProblems, deploySummary, orderProblem } from "./deployModel.js";
+import { scanBlocks, scanProblems, scanSummary } from "./scanModel.js";
+import {
+  approvalProblems,
+  approvalSummary,
+  blankApproval,
+  DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+} from "./approvalModel.js";
+import { blankStoreUpload, storeUploadProblems, storeUploadSummary } from "./storeUploadModel.js";
+import { groupProblems } from "./parallelModel.js";
 
 export const MIN_TIMEOUT_SECONDS = 30;
 export const MAX_TIMEOUT_SECONDS = 24 * 3600;
@@ -42,12 +51,36 @@ export const STAGE_KINDS = [
     icon: "image",
   },
   {
+    value: "scan",
+    label: "Scan",
+    verb: "Scan code & dependencies",
+    description:
+      "Trivy, Semgrep, Dependency-Check or a Syft SBOM — KubeSight writes the script, keeps the report and applies the gate.",
+    icon: "scan",
+  },
+  {
     value: "deploy",
     label: "Deploy",
     verb: "Deploy to a cluster",
     description:
       "Roll the image out to a deployment in one of your clusters — created from a manifest if it is missing.",
     icon: "rocket",
+  },
+  {
+    value: "approval",
+    label: "Approval",
+    verb: "Wait for approval",
+    description:
+      "Hold the build until the right people approve it — usually just before a Deploy or a store upload.",
+    icon: "approval",
+  },
+  {
+    value: "store_upload",
+    label: "App store upload",
+    verb: "Publish to an app store",
+    description:
+      "Send the build's AAB or IPA to a Google Play track or TestFlight, through Mobile Apps.",
+    icon: "store",
   },
 ];
 
@@ -74,12 +107,18 @@ export const STAGE_FIELDS = {
     "env",
     "secrets",
     "artifacts",
+    "codeScan",
   ]),
   container_image: new Set(["runner", "workdir", "hostAliases", "env", "imageScan"]),
   // Runs on the KubeSight server, not a runner: no image, no shell, no env.
   deploy: new Set(["deploy"]),
+  approval: new Set(["approval"]),
+  store_upload: new Set(["storeUpload"]),
   publish_artifact: new Set([]),
-  scan: new Set([]),
+  // KubeSight writes the image and script and keeps the report itself, so no
+  // image, commands or files to keep. Variables and secrets still reach the
+  // scanner (SEMGREP_RULES, TRIVY_* settings); a Semgrep scan keeps codeScan.
+  scan: new Set(["runner", "workdir", "hostAliases", "env", "secrets", "codeScan", "scan"]),
 };
 
 export const fieldsFor = (stageType) => STAGE_FIELDS[stageType] || STAGE_FIELDS.command;
@@ -98,7 +137,14 @@ const CLEARED_BY_FIELD = {
   // command stage would be rejected on save, and would read as protection that
   // is not there until then.
   imageScan: { imageScan: null },
+  // Same reasoning, the other way round: only a command stage that runs
+  // semgrep, or a Semgrep scan stage, has findings to count.
+  codeScan: { codeScan: null },
   deploy: { deploy: null },
+  approval: { approval: null },
+  storeUpload: { storeUpload: null },
+  // Only a scan stage names a scanner; the backend refuses one anywhere else.
+  scan: { scan: null },
 };
 
 const FIELD_NAMES = {
@@ -110,7 +156,11 @@ const FIELD_NAMES = {
   secrets: "secrets",
   artifacts: "files to keep",
   imageScan: "image scan",
+  codeScan: "quality gate",
   deploy: "deployment target",
+  approval: "approvers",
+  storeUpload: "store target",
+  scan: "scanner settings",
 };
 
 const hasValue = (stage, field) => {
@@ -131,8 +181,16 @@ const hasValue = (stage, field) => {
       return (stage.artifacts || []).length > 0;
     case "imageScan":
       return Boolean(stage.imageScan);
+    case "codeScan":
+      return Boolean(stage.codeScan);
     case "deploy":
       return Boolean(stage.deploy?.clusterId || stage.deploy?.deploymentName);
+    case "scan":
+      return Boolean(stage.scan?.tool);
+    case "approval":
+      return Boolean(stage.approval && ((stage.approval.users || []).length || stage.approval.instructions));
+    case "storeUpload":
+      return Boolean(stage.storeUpload?.appId);
     default:
       return false;
   }
@@ -147,6 +205,11 @@ export function changeKindPatch(stageType) {
   }
   // A Deploy stage is nothing without a target, so it arrives with a blank one.
   if (stageType === "deploy") patch.deploy = blankDeploy();
+  if (stageType === "approval") {
+    patch.approval = blankApproval();
+    patch.timeoutSeconds = DEFAULT_APPROVAL_TIMEOUT_SECONDS;
+  }
+  if (stageType === "store_upload") patch.storeUpload = blankStoreUpload();
   return patch;
 }
 
@@ -173,9 +236,17 @@ export const blankStage = (stageType = "command") => ({
   runCondition: null,
   // Null, not a default object: only an image stage has an image to gate.
   imageScan: null,
+  codeScan: null,
   deploy: stageType === "deploy" ? blankDeploy() : null,
-  timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+  approval: stageType === "approval" ? blankApproval() : null,
+  storeUpload: stageType === "store_upload" ? blankStoreUpload() : null,
+  // Null until a tool is picked: the sheet asks first, and a save says so.
+  scan: null,
+  timeoutSeconds: stageType === "approval" ? DEFAULT_APPROVAL_TIMEOUT_SECONDS : DEFAULT_TIMEOUT_SECONDS,
   continueOnFailure: false,
+  // Consecutive stages sharing a name run at the same time (parallelModel.js).
+  parallelGroup: null,
+  parallelFailFast: false,
   enabled: true,
 });
 
@@ -196,9 +267,15 @@ export function uniqueStageName(base, stages, ignoreIndex = -1) {
 
 /** Default names for a new stage of each kind. */
 export const defaultStageName = (stageType) =>
-  ({ checkout: "Checkout", command: "Run commands", container_image: "Build image", deploy: "Deploy" })[
-    stageType
-  ] || "Stage";
+  ({
+    checkout: "Checkout",
+    command: "Run commands",
+    container_image: "Build image",
+    scan: "Security scan",
+    deploy: "Deploy",
+    approval: "Approval",
+    store_upload: "Publish to store",
+  })[stageType] || "Stage";
 
 /**
  * `registry.areeba.com/alpine/git:2.45` → `alpine/git:2.45`.
@@ -265,6 +342,15 @@ export const mergePlainEnv = (stage, nextPlain) => {
 export const scanArmed = (stage) =>
   Boolean(stage.imageScan && stage.imageScan.enabled !== false);
 
+/** Armed = the stage fails when its Semgrep scan finds too much. */
+export const codeScanArmed = (stage) =>
+  Boolean(stage.codeScan && stage.codeScan.enabled !== false);
+
+/** Whether a command line starts Semgrep — the gate only sees a `semgrep`
+ * run directly in the stage's commands (the shim is a shell function). */
+export const runsSemgrep = (stage) =>
+  (stage.commands || []).some((line) => /(^|[\s;&|(])semgrep(\s|$)/.test(String(line)));
+
 /** One line: what this stage does. Shown under its name in the flow. */
 export function stageSummary(stage) {
   if (stage.stageType === "checkout") return "Clones the repository";
@@ -274,8 +360,10 @@ export function stageSummary(stage) {
     return `Builds ${dockerfile}${where}`;
   }
   if (stage.stageType === "deploy") return deploySummary(stage);
+  if (stage.stageType === "approval") return approvalSummary(stage);
+  if (stage.stageType === "store_upload") return storeUploadSummary(stage);
   if (stage.stageType === "publish_artifact") return "Unsupported — publish artifact";
-  if (stage.stageType === "scan") return "Unsupported — security scan";
+  if (stage.stageType === "scan") return scanSummary(stage);
   return firstCommand(stage) || "No commands yet";
 }
 
@@ -315,6 +403,12 @@ export function stageFlags(stage) {
   if (stage.stageType === "container_image" && scanArmed(stage)) {
     flags.push({ key: "scan", icon: "shield", label: "Image is scanned before it is pushed" });
   }
+  if (stage.stageType === "scan" && scanBlocks(stage)) {
+    flags.push({ key: "gate", icon: "shield", label: "Findings over the gate fail the build" });
+  }
+  if (stage.stageType === "approval" && stage.approval?.notify) {
+    flags.push({ key: "notify", icon: "message", label: "Emails the approvers when a build is waiting" });
+  }
   if (stage.stageType === "deploy" && stage.deploy?.createIfMissing) {
     flags.push({ key: "create", icon: "plus", label: "Creates the deployment if it is missing" });
   }
@@ -352,9 +446,19 @@ export function stageProblems(stage, index, stages, parameters) {
   if (stage.stageType === "deploy") {
     problems.push(...deployProblems(stage.deploy));
   }
+  if (stage.stageType === "approval") {
+    problems.push(...approvalProblems(stage.approval));
+  }
+  if (stage.stageType === "store_upload") {
+    problems.push(...storeUploadProblems(stage.storeUpload));
+  }
+  problems.push(...groupProblems(stage, index, stages));
   const misplaced = orderProblem(stage, index, stages);
   if (misplaced) problems.push(misplaced);
-  if (stage.stageType === "publish_artifact" || stage.stageType === "scan") {
+  if (stage.stageType === "scan") {
+    problems.push(...scanProblems(stage));
+  }
+  if (stage.stageType === "publish_artifact") {
     problems.push({
       field: "kind",
       message: "This stage kind has no executor and can no longer be saved. Change its kind or remove it.",
@@ -367,6 +471,24 @@ export function stageProblems(stage, index, stages, parameters) {
     (!Number.isFinite(timeout) || timeout < MIN_TIMEOUT_SECONDS || timeout > MAX_TIMEOUT_SECONDS)
   ) {
     problems.push({ field: "timeout", message: "The timeout must be between 30 seconds and 24 hours." });
+  }
+  if (stage.stageType === "command" && codeScanArmed(stage) && commandCount(stage) && !runsSemgrep(stage)) {
+    problems.push({
+      field: "codeScan",
+      message:
+        "The quality gate is on, but no command here runs semgrep — every build would fail the gate with nothing to check.",
+      fix: "Run `semgrep scan …` directly in this stage's commands, or turn the gate off.",
+      level: "warning",
+    });
+  }
+  const maxBlocking = stage.codeScan?.maxBlocking;
+  if (
+    codeScanArmed(stage) &&
+    maxBlocking !== undefined &&
+    maxBlocking !== "" &&
+    !(Number.isInteger(Number(maxBlocking)) && Number(maxBlocking) >= 0 && Number(maxBlocking) <= 100000)
+  ) {
+    problems.push({ field: "codeScan", message: "Allowed blocking findings must be a whole number from 0 to 100000." });
   }
   const variable = stage.runCondition?.variable;
   if (variable) {
@@ -447,6 +569,10 @@ const comparable = (stage) => {
     workingDirectory: rest.workingDirectory || "",
     enabled: rest.enabled !== false,
     runCondition: rest.runCondition?.variable ? rest.runCondition : null,
+    // Saved stages carry null/false; a stage edited back to "no group" may
+    // carry "" — neither is a change.
+    parallelGroup: String(rest.parallelGroup || "").trim() || null,
+    parallelFailFast: Boolean(rest.parallelGroup && rest.parallelFailFast),
   });
 };
 

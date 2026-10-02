@@ -158,3 +158,48 @@ def test_summary_node_counts_match_the_node_rows(client, admin_token):
     assert data["nodes"]["total"] == len(rows)
     assert data["nodes"]["ready"] == sum(1 for r in rows if r["ready"])
     assert all(e["action"] not in ("login_success", "logout") for e in data["recentActivity"])
+
+
+def test_summary_reads_containerd_image_fs_alongside_root_fs():
+    from api.k8s_volume_stats import parse_summary
+
+    parsed = parse_summary("n1", {
+        "node": {
+            "fs": {"usedBytes": 4 * GIB, "capacityBytes": 5 * GIB},
+            "runtime": {"imageFs": {"usedBytes": 60 * GIB, "capacityBytes": 200 * GIB}},
+        },
+    })
+    assert parsed["nodeFs"]["capacityBytes"] == 5 * GIB
+    assert parsed["imageFs"]["usedBytes"] == 60 * GIB
+    assert parsed["imageFs"]["capacityBytes"] == 200 * GIB
+
+
+def test_summary_without_runtime_fs_has_no_image_fs():
+    from api.k8s_volume_stats import parse_summary
+
+    parsed = parse_summary("n1", {"node": {"fs": {"usedBytes": 1, "capacityBytes": 10}}})
+    assert parsed["imageFs"] is None
+
+
+def test_dashboard_disk_prefers_containerd_and_falls_back_to_root_fs():
+    stats = {
+        "nodes": {
+            "a": {"usedBytes": 4 * GIB, "capacityBytes": 5 * GIB},
+            "b": {"usedBytes": 2 * GIB, "capacityBytes": 50 * GIB},
+        },
+        "imageFs": {"a": {"usedBytes": 60 * GIB, "capacityBytes": 200 * GIB}},
+    }
+    disks = dashboard_k8s_snapshot.node_disk_by_name(stats)
+    assert disks["a"]["source"] == "containerd"
+    assert disks["a"]["capacityBytes"] == 200 * GIB
+    assert disks["b"]["source"] == "node"
+
+    rows = {r["name"]: r for r in build_node_health([_node("a"), _node("b")], {}, fs_by_name=disks)}
+    assert rows["a"]["diskPercent"] == 30.0
+    assert rows["a"]["diskSource"] == "containerd"
+    assert rows["b"]["diskSource"] == "node"
+
+
+def test_unmeasured_disk_has_no_source():
+    rows = build_node_health([_node("n1")], {})
+    assert rows[0]["diskSource"] is None

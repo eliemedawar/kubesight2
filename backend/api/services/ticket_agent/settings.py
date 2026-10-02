@@ -44,6 +44,11 @@ def is_active() -> bool:
     return bool(row and row.enabled and hermes.dedicated() and hermes.is_configured())
 
 
+def troubleshooting_enabled() -> bool:
+    row = db.session.get(TicketAgentSettings, 1)
+    return row is None or row.troubleshooting_enabled is not False
+
+
 def comments_public() -> bool:
     row = db.session.get(TicketAgentSettings, 1)
     return bool(row.public_comments) if row else True
@@ -59,6 +64,12 @@ def _iso(dt):
     return dt.isoformat() if dt else None
 
 
+def _build_engine() -> str:
+    from ..deploy_automation_service import build_engine
+
+    return build_engine()
+
+
 def serialize(row: Optional[TicketAgentSettings] = None) -> Dict[str, Any]:
     row = row or get_or_create()
     return {
@@ -66,6 +77,8 @@ def serialize(row: Optional[TicketAgentSettings] = None) -> Dict[str, Any]:
         "active": is_active(),
         "minConfidence": row.min_confidence or "High",
         "publicComments": bool(row.public_comments),
+        # NULL on a row migrated before the column existed reads as on.
+        "troubleshootingEnabled": row.troubleshooting_enabled is not False,
         "approvalTimeoutHours": int(row.approval_timeout_hours or 24),
         "telegramEnabled": bool(row.telegram_enabled),
         "telegramBotTokenConfigured": bool(row.telegram_bot_token_encrypted),
@@ -75,6 +88,10 @@ def serialize(row: Optional[TicketAgentSettings] = None) -> Dict[str, Any]:
         "hermesConfigured": hermes.is_configured(),
         "hermesHint": hermes.configuration_hint(),
         "hermesDedicated": hermes.dedicated(),
+        # Stored with the rest of deploy automation (every ticket run builds the
+        # same way, whoever started it); edited here because it is the choice of
+        # what Hermes' deploys build with.
+        "buildEngine": _build_engine(),
         "lastTestAt": _iso(row.last_test_at),
         "lastTestStatus": row.last_test_status,
         "lastTestMessage": row.last_test_message,
@@ -87,7 +104,8 @@ def update(payload: Dict[str, Any]) -> Dict[str, Any]:
     row = get_or_create()
     errors: List[str] = []
     for key, attr in (("enabled", "enabled"), ("publicComments", "public_comments"),
-                      ("telegramEnabled", "telegram_enabled")):
+                      ("telegramEnabled", "telegram_enabled"),
+                      ("troubleshootingEnabled", "troubleshooting_enabled")):
         if key in payload:
             setattr(row, attr, bool(payload.get(key)))
     if "minConfidence" in payload:
@@ -123,6 +141,14 @@ def update(payload: Dict[str, Any]) -> Dict[str, Any]:
     if payload.get("clearTelegramBotToken"):
         row.telegram_bot_token_encrypted = None
         row.telegram_update_offset = None
+    if "buildEngine" in payload:
+        from ..deploy_automation_service import BUILD_ENGINES, get_or_create_jenkins
+
+        choice = str(payload.get("buildEngine") or "").strip().lower()
+        if choice not in BUILD_ENGINES:
+            errors.append(f"buildEngine must be one of {', '.join(BUILD_ENGINES)}.")
+        else:
+            get_or_create_jenkins().build_engine = choice
     if errors:
         db.session.rollback()
         raise ValueError(" ".join(errors))

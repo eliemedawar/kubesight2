@@ -111,11 +111,14 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
   const [refreshToken, setRefreshToken] = useState(0);
 
   const load = useCallback(async () => {
+    // Both requests leave together; the page waits for the slower one, not the sum.
+    const pipelinesRequest = listCiPipelines(serviceId);
+    pipelinesRequest.catch(() => {}); // awaited below; only silences the early-rejection warning
     try {
       const data = await getCiServiceSummary(serviceId);
       setSummary(data);
       setError("");
-      const pipelines = await listCiPipelines(serviceId);
+      const pipelines = await pipelinesRequest;
       setStages(pipelines.items?.[0]?.stages || []);
     } catch (err) {
       setError(err.message || "Could not load the service.");
@@ -357,6 +360,10 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             canDelete={can.delete}
             canViewSecrets={can.viewSecrets}
             canManageSecrets={can.manageSecrets}
+            canViewSchedules={hasPermission("ci_builds:view")}
+            canEditSchedules={can.editPipeline && can.run}
+            canRunSchedules={can.run}
+            onOpenBuild={(id) => setOpenBuildId(String(id))}
             onSaved={() => load()}
             onDeleted={onDeleted}
             onDirtyChange={setSettingsDirty}

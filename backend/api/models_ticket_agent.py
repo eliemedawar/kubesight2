@@ -43,6 +43,11 @@ class TicketAgentSettings(db.Model):
     public_comments = db.Column(db.Boolean, nullable=False, default=True)
     # An approval nobody answers turns into an impediment after this long.
     approval_timeout_hours = db.Column(db.Integer, nullable=False, default=24)
+    # Tickets that ask WHY something is broken rather than for a change: Hermes
+    # investigates with read-only tools and answers with a diagnosis and a
+    # recommendation (kubesight_ticket_answer). A fix it proposes still goes
+    # through approval — troubleshooting never changes anything on its own.
+    troubleshooting_enabled = db.Column(db.Boolean, nullable=False, default=True)
 
     # --- Telegram approvals ---
     telegram_enabled = db.Column(db.Boolean, nullable=False, default=False)
