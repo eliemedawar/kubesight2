@@ -92,7 +92,9 @@ the rest.
 **You do not pick how an image gets built.** A `deploy_image` whose tag is
 already in one of the cluster's linked registries only swaps the tag on the
 deployment. A missing tag is built first — by KubeSight CI or Jenkins, whichever
-the DevOps team set — then verified in the registry and deployed.
+the DevOps team set — then verified in the registry and deployed. On a cluster
+that needs approval, all of the ticket's changes go to the approvers in ONE
+change bundle, once every one of them is ready.
 
 **A ticket that reports a problem is troubleshooting, not an impediment.**
 "payments-api returns 502", "why is issuing-ms restarting?" — find where it runs

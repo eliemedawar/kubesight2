@@ -243,7 +243,9 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
             A ticket can name several applications, and Hermes deploys all of them together. For
             each one, KubeSight first looks for the tag in the registries linked to the target
             cluster. If one of them has it, only the tag on the deployment changes. If none has it,
-            the image is built first, checked in the registry again, then deployed.
+            the image is built first, checked in the registry again, then deployed. On a cluster
+            that needs approval, all of a ticket's changes wait for each other and go to the
+            approvers together in one change bundle.
           </p>
           <fieldset className="sg-zh-engines" disabled={ro}>
             <legend>Build a missing image with</legend>

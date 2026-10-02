@@ -760,6 +760,15 @@ def _withdraw_bundle(run: DeployAutomationRun, user) -> str:
     if bundle is None:
         return ""
     reason = f"Automation run #{run.id} was cancelled."
+    shared = DeployAutomationRun.query.filter(
+        DeployAutomationRun.bundle_id == bundle.id, DeployAutomationRun.id != run.id
+    ).count()
+    if shared:
+        reason = (
+            f"Automation run #{run.id} ({run.deployment_name}) was cancelled. The bundle is approved "
+            f"as a whole, so its {shared} other change{'s' if shared != 1 else ''} "
+            f"{'are' if shared != 1 else 'is'} withdrawn with it."
+        )
     if bundle.status == "pending_approval":
         try:
             decide_bundle(bundle.id, "decline", actor=user, reason=reason)
@@ -2262,9 +2271,175 @@ def _do_handoff(run: DeployAutomationRun) -> None:
 
     required = cluster_required_approvals(run.cluster_id)
     if required > 0:
-        _handoff_bundle(run, required)
+        siblings = _bundle_siblings(run)
+        if siblings:
+            # One ticket, several changes: they go to approval together.
+            run.status = "awaiting_approval"
+            _set_step(run, "approval", "wait", "joining the ticket's other changes in one change bundle")
+            _try_group_bundle(run, siblings)
+        else:
+            _handoff_bundle(run, required)
     else:
         _handoff_direct(run)
+
+
+# ---------------------------------------------------------------------------
+# One change bundle per ticket — the changes of a several-application ticket
+# ---------------------------------------------------------------------------
+#
+# A ticket the agent split into several runs is still one request, so the
+# changes that need approval are approved together: each run that reaches its
+# handoff on an approval-gated cluster waits (awaiting_approval, no bundle yet)
+# until every sibling headed for approval has caught up — built, verified,
+# ready — and then ONE change bundle carries all of them. A sibling that fails
+# or is cancelled on the way stops being waited for; one on a cluster without
+# approvals deploys directly as before. Each run still watches its own item,
+# its own rollout and its own rollback.
+
+
+def _bundle_siblings(run: DeployAutomationRun) -> List[DeployAutomationRun]:
+    """The runs started with ``run`` by one several-application request, or []."""
+    if not run.ticket_record_id or _is_custom_run(run):
+        return []
+    try:
+        from .ticket_agent.engine import batch_run_ids
+
+        ids = batch_run_ids(run)
+    except Exception:  # noqa: BLE001 — grouping is a nicety; never break the run
+        logger.exception("Could not read the sibling runs of run %s", run.id)
+        return []
+    if len(ids) < 2:
+        return []
+    rows = {r.id: r for r in DeployAutomationRun.query.filter(DeployAutomationRun.id.in_(ids)).all()}
+    return [rows[i] for i in ids if i in rows]
+
+
+def _try_group_bundle(run: DeployAutomationRun, siblings: List[DeployAutomationRun]) -> None:
+    """Bundle the siblings waiting for approval — once none is still on its way."""
+    from .deployment_request_service import cluster_required_approvals
+
+    ready: List[DeployAutomationRun] = []
+    on_the_way: List[DeployAutomationRun] = []
+    for other in siblings:
+        if other.status in TERMINAL_STATUSES or other.status == "verifying_rollout":
+            continue
+        if other.status == "awaiting_approval":
+            if other.bundle_id is None:
+                ready.append(other)
+            continue  # already in a bundle
+        if _is_custom_run(other) or cluster_required_approvals(other.cluster_id) <= 0:
+            continue  # deploys without approval — nothing to wait for
+        on_the_way.append(other)
+    if on_the_way:
+        names = ", ".join(o.deployment_name for o in on_the_way)
+        for waiting in ready:
+            _set_step(
+                waiting, "approval", "wait",
+                f"waiting for {names} — the ticket's changes go to approval together in one change bundle",
+            )
+        return
+    if run in ready:
+        _handoff_group_bundle(ready)
+
+
+def _bundle_yaml(run: DeployAutomationRun) -> Optional[str]:
+    """The live manifest with this run's change made, or None (the run is failed)."""
+    from .resource_actions_service import get_resource_yaml
+
+    data, err, _code = get_resource_yaml(None, run.cluster_id, run.namespace, "deployment", run.deployment_name)
+    if err or not data or not data.get("yaml"):
+        _fail(run, "approval", f"Could not read the live deployment manifest: {err or 'empty YAML'}")
+        return None
+    try:
+        if _is_restart_run(run):
+            return _restart_in_yaml(data["yaml"], datetime.now(timezone.utc).isoformat())
+        if _is_env_run(run):
+            return _set_env_in_yaml(data["yaml"], run.variable_name or "", run.variable_value or "")
+        return _swap_image_in_yaml(data["yaml"], run.deployment_name, run.container_name or "", _target_image(run))
+    except (AutomationError, yaml.YAMLError) as exc:
+        kind = "restart" if _is_restart_run(run) else ("variable" if _is_env_run(run) else "image")
+        _fail(run, "approval", f"Could not prepare the {kind} change: {exc}")
+        return None
+
+
+def _bundle_change_note(run: DeployAutomationRun) -> str:
+    if _is_restart_run(run):
+        return f"{run.deployment_name} → restart"
+    if _is_env_run(run):
+        return f"{run.deployment_name} → {run.variable_name}={run.variable_value}"
+    return f"{run.deployment_name} → {run.image_tag}"
+
+
+def _handoff_group_bundle(runs: List[DeployAutomationRun]) -> None:
+    """Author + submit ONE change bundle carrying every run's change."""
+    from .change_bundle_service import ChangeBundleError, add_item, get_or_create_draft, submit_bundle
+
+    prepared = []
+    for member in runs:
+        _set_step(member, "approval", "run", "authoring the ticket's change bundle")
+        manifest = _bundle_yaml(member)
+        if manifest is not None:
+            prepared.append((member, manifest))
+    if not prepared:
+        return
+    first = prepared[0][0]
+    provider, _ticket_id = _ticket_ref(first)
+    label = "Jira" if provider == "jira" else "Zoho"
+    now = datetime.now(timezone.utc)
+    jrow = get_or_create_jenkins()
+    try:
+        bundle = get_or_create_draft(None)  # user=None → always a fresh draft
+        for member, manifest in prepared:
+            add_item(None, bundle.id, {
+                "actionType": "edit_deployment",
+                "clusterId": member.cluster_id,
+                "namespace": member.namespace,
+                "yaml": manifest,
+            })
+        changes = "; ".join(f"{_bundle_change_note(m)} in {m.namespace}" for m, _ in prepared)
+        submitted = submit_bundle(
+            None,
+            bundle.id,
+            note=(f"{label} {first.ticket_number or 'ticket'} — {len(prepared)} changes "
+                  f"(automated request): {changes}"),
+            window_start=(now + timedelta(minutes=2)).isoformat(),
+            window_end=(now + timedelta(hours=int(jrow.bundle_window_hours or 24))).isoformat(),
+            window_timezone="UTC",
+            # Separate applications: one failing to apply must not hold back the
+            # others. Each run still watches its own rollout and rolls back alone.
+            stop_on_failure=False,
+        )
+    except ChangeBundleError as exc:
+        for member, _manifest in prepared:
+            _fail(member, "approval", f"Could not create the ticket's change bundle: {exc}")
+        return
+
+    required = submitted.get("requiredApprovals")
+    for member, _manifest in prepared:
+        member.bundle_id = bundle.id
+        member.status = "awaiting_approval"
+        _set_step(
+            member, "approval", "run",
+            f"bundle #{bundle.id} awaiting approval — {len(prepared)} changes of "
+            f"{member.ticket_number or 'the ticket'} together"
+            + (f" ({required} required)" if required is not None else ""),
+        )
+        _set_step(member, "deploy", "wait", "deploys via the bundle executor once approved")
+        log_audit(
+            "automation_bundle_created",
+            actor=None,
+            target_type="deploy_automation_run",
+            target_id=str(member.id),
+            details={
+                "ticket": member.ticket_number,
+                "bundleId": bundle.id,
+                "deployment": member.deployment_name,
+                "changeType": member.change_type or "image",
+                "change": _change_summary(member),
+                "grouped": [m.id for m, _ in prepared],
+            },
+            commit=False,
+        )
 
 
 def _swap_image_in_yaml(yaml_text: str, deployment_name: str, container_name: str, new_image: str) -> str:
@@ -2340,27 +2515,11 @@ def _handoff_bundle(run: DeployAutomationRun, required: int) -> None:
         get_or_create_draft,
         submit_bundle,
     )
-    from .resource_actions_service import get_resource_yaml
 
     _set_step(run, "approval", "run", "authoring the change bundle")
 
-    data, err, _code = get_resource_yaml(None, run.cluster_id, run.namespace, "deployment", run.deployment_name)
-    if err or not data or not data.get("yaml"):
-        _fail(run, "approval", f"Could not read the live deployment manifest: {err or 'empty YAML'}")
-        return
-
-    try:
-        if _is_restart_run(run):
-            swapped = _restart_in_yaml(data["yaml"], datetime.now(timezone.utc).isoformat())
-        elif _is_env_run(run):
-            swapped = _set_env_in_yaml(data["yaml"], run.variable_name or "", run.variable_value or "")
-        else:
-            swapped = _swap_image_in_yaml(
-                data["yaml"], run.deployment_name, run.container_name or "", _target_image(run)
-            )
-    except (AutomationError, yaml.YAMLError) as exc:
-        kind = "restart" if _is_restart_run(run) else ("variable" if _is_env_run(run) else "image")
-        _fail(run, "approval", f"Could not prepare the {kind} change: {exc}")
+    swapped = _bundle_yaml(run)
+    if swapped is None:
         return
 
     now = datetime.now(timezone.utc)
@@ -2796,6 +2955,17 @@ def _run_in_app_context(app, task) -> None:
 
 def _do_watch_bundle(run: DeployAutomationRun) -> None:
     """awaiting_approval → deployed | failed, mirroring the bundle's lifecycle."""
+    if run.bundle_id is None:
+        # Waiting for the ticket's other changes to share one bundle.
+        siblings = _bundle_siblings(run)
+        if siblings:
+            _try_group_bundle(run, siblings)
+        else:
+            # The grouping is gone (the agent task was deleted): go alone.
+            from .deployment_request_service import cluster_required_approvals
+
+            _handoff_bundle(run, max(1, cluster_required_approvals(run.cluster_id)))
+        return
     bundle = ChangeBundle.query.get(run.bundle_id) if run.bundle_id else None
     if bundle is None:
         _fail(run, "approval", "The change bundle was deleted before it executed.")
@@ -2825,8 +2995,34 @@ def _do_watch_bundle(run: DeployAutomationRun) -> None:
         _fail(run, "approval", f"Change bundle #{bundle.id} expired before it was executed.")
         return
     if status in ("failed", "partially_failed"):
+        # A shared bundle: this run's change may have applied while another's did not.
+        item = _own_bundle_item(run, bundle)
+        if item is not None and item.status == "succeeded":
+            _set_step(run, "approval", "done", f"bundle #{bundle.id} approved")
+            _set_step(run, "deploy", "done", f"applied by bundle #{bundle.id} (another change in it failed)")
+            _begin_rollout_watch(run)
+            return
+        if item is not None and item.status == "skipped":
+            _fail(run, "deploy", f"Change bundle #{bundle.id} stopped before applying this change.")
+            return
         _fail(run, "deploy", f"Change bundle #{bundle.id} execution {status.replace('_', ' ')}.")
         return
+
+
+def _own_bundle_item(run: DeployAutomationRun, bundle: ChangeBundle):
+    """This run's item in a bundle it shares with its siblings (None if alone)."""
+    items = list(bundle.items)
+    if len(items) < 2:
+        return None
+    return next(
+        (
+            i for i in items
+            if str(i.cluster_id) == str(run.cluster_id)
+            and i.namespace == run.namespace
+            and i.resource_name == run.deployment_name
+        ),
+        None,
+    )
 
 
 # ---------------------------------------------------------------------------

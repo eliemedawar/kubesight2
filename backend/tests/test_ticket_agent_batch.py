@@ -391,3 +391,137 @@ def test_a_slug_match_builds_the_default_pipeline(app, monkeypatch, triggered):
     run = _checking_run()
     automation._do_check(run, automation.get_or_create_jenkins())
     assert triggered[0]["pipeline_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# One change bundle for the ticket's changes on approval-gated clusters
+# ---------------------------------------------------------------------------
+
+def _gated(monkeypatch, unreachable=()):
+    """Approval-gated cluster; live manifests per deployment; registry per tag."""
+    from api.models import DeploymentRequestSetting
+
+    approvals = DeploymentRequestSetting.query.first()
+    approvals.cluster_required_approvals = {CLUSTER: 1}
+    db.session.commit()
+
+    def live(user, cluster_id, namespace, kind, name):
+        return ({"yaml": (
+            "apiVersion: apps/v1\nkind: Deployment\n"
+            f"metadata:\n  name: {name}\n  namespace: {namespace}\n"
+            "spec:\n  replicas: 2\n  template:\n    spec:\n      containers:\n"
+            f"        - name: {name}\n          image: ghcr.io/mock/{name}:old\n"
+        )}, None, 200)
+
+    monkeypatch.setattr("api.services.resource_actions_service.get_resource_yaml", live)
+    state = {"unreachable": set(unreachable)}
+
+    def check(image, **kw):
+        if any(image.endswith(f":{tag}") for tag in state["unreachable"]):
+            return {"status": "unreachable", "image": image, "message": "registry timed out"}
+        return {"status": "found", "image": image, "message": f"{image} found"}
+
+    monkeypatch.setattr("api.services.registry_service.check_image", check)
+    return state
+
+
+def _runs(ticket):
+    return {r.deployment_name: r for r in DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id)}
+
+
+def test_the_tickets_changes_share_one_change_bundle(client, agent, writes, monkeypatch):
+    from api.models import ChangeBundle
+
+    _gated(monkeypatch)
+    _fake_hermes(monkeypatch, lambda m: None)
+    ticket = _ticket()
+    engine.execute(ticket.id, _both())
+    automation.advance_runs()
+
+    runs = _runs(ticket)
+    assert {r.status for r in runs.values()} == {"awaiting_approval"}
+    bundle_ids = {r.bundle_id for r in runs.values()}
+    assert len(bundle_ids) == 1 and None not in bundle_ids
+    bundle = db.session.get(ChangeBundle, bundle_ids.pop())
+    assert bundle.status == "pending_approval" and bundle.stop_on_failure is False
+    assert sorted(i.resource_name for i in bundle.items) == sorted([DEPLOYMENT, OTHER])
+    assert "2 changes" in bundle.note and "payments-api → v9.9.9" in bundle.note
+    assert ChangeBundle.query.filter(ChangeBundle.status != "draft").count() == 1
+
+    bundle.status = "completed"
+    db.session.commit()
+    automation.advance_runs()
+    assert {r.status for r in _runs(ticket).values()} == {"deployed"}
+
+
+def test_a_ready_change_waits_for_the_one_still_on_its_way(client, agent, writes, monkeypatch):
+    state = _gated(monkeypatch, unreachable=("v2.0.0",))
+    _fake_hermes(monkeypatch, lambda m: None)
+    ticket = _ticket()
+    engine.execute(ticket.id, _both())
+    automation.advance_runs()
+
+    runs = _runs(ticket)
+    first, other = runs[DEPLOYMENT], runs[OTHER]
+    assert first.status == "awaiting_approval" and first.bundle_id is None
+    assert other.status == "checking_image"
+    approval = next(s for s in first.steps if s["key"] == "approval")
+    assert approval["status"] == "wait" and OTHER in approval["detail"]
+
+    state["unreachable"].clear()
+    automation.advance_runs()
+    runs = _runs(ticket)
+    assert runs[DEPLOYMENT].bundle_id and runs[DEPLOYMENT].bundle_id == runs[OTHER].bundle_id
+
+
+def test_a_failed_sibling_is_not_waited_for(client, agent, writes, monkeypatch):
+    from api.models import ChangeBundle
+
+    _gated(monkeypatch, unreachable=("v2.0.0",))
+    _fake_hermes(monkeypatch, lambda m: None)
+    ticket = _ticket()
+    engine.execute(ticket.id, _both())
+    automation.advance_runs()
+    automation.cancel_run(_runs(ticket)[OTHER].id)
+    automation.advance_runs()
+
+    first = _runs(ticket)[DEPLOYMENT]
+    assert first.status == "awaiting_approval" and first.bundle_id
+    bundle = db.session.get(ChangeBundle, first.bundle_id)
+    assert [i.resource_name for i in bundle.items] == [DEPLOYMENT]
+
+
+def test_each_run_follows_its_own_item_in_a_partly_failed_bundle(client, agent, writes, monkeypatch):
+    from api.models import ChangeBundle
+
+    _gated(monkeypatch)
+    _fake_hermes(monkeypatch, lambda m: None)
+    ticket = _ticket()
+    engine.execute(ticket.id, _both())
+    automation.advance_runs()
+    bundle = db.session.get(ChangeBundle, _runs(ticket)[DEPLOYMENT].bundle_id)
+    for item in bundle.items:
+        item.status = "succeeded" if item.resource_name == DEPLOYMENT else "failed"
+    bundle.status = "partially_failed"
+    db.session.commit()
+    automation.advance_runs()
+
+    runs = _runs(ticket)
+    assert runs[DEPLOYMENT].status == "deployed"
+    assert runs[OTHER].status == "failed" and f"#{bundle.id}" in runs[OTHER].error
+
+
+def test_cancelling_one_change_says_the_shared_bundle_goes_with_it(client, agent, writes, monkeypatch):
+    from api.models import ChangeBundle
+
+    _gated(monkeypatch)
+    _fake_hermes(monkeypatch, lambda m: None)
+    ticket = _ticket()
+    engine.execute(ticket.id, _both())
+    automation.advance_runs()
+    runs = _runs(ticket)
+    automation.cancel_run(runs[DEPLOYMENT].id)
+    bundle = db.session.get(ChangeBundle, runs[OTHER].bundle_id)
+    assert bundle.status == "rejected" and "1 other change is withdrawn" in bundle.rejection_reason
+    automation.advance_runs()
+    assert _runs(ticket)[OTHER].status == "failed"

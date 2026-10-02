@@ -1259,6 +1259,13 @@ def _batch_task(run: DeployAutomationRun) -> Optional[TicketInterpretation]:
     return None
 
 
+def batch_run_ids(run: DeployAutomationRun) -> List[int]:
+    """Every run started by the same request as ``run`` (itself included), in
+    the order the ticket listed them — ``[]`` when it was started alone."""
+    task = _batch_task(run)
+    return [int(i) for i in (task.decision or {}).get("runIds") or []] if task is not None else []
+
+
 def _on_batch_run_finished(task: TicketInterpretation, run: DeployAutomationRun, outcome: str,
                            comment: Optional[str], resolution: Optional[str]) -> bool:
     """One run of a several-application ticket ended.

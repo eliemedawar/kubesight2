@@ -56,7 +56,9 @@ KubeSight can do three things to an application in an environment:
 One ticket may ask for this on SEVERAL applications ("deploy issuing-ms 1.4.2 and processing-ms
 2.0.1 to UAT"). Handle them all in ONE call: put one entry per application in `changes`, each with
 its own action, environment, application and tag (or variable + value). Never split one ticket
-into several execute calls, and never ask the requester to open separate tickets for it.
+into several execute calls, and never ask the requester to open separate tickets for it. Where a
+cluster needs approval, KubeSight puts all of the ticket's changes into ONE change bundle that the
+DevOps approvers approve together — you do not have to ask for that.
 
 Tickets are free text: a subject and a description written by a person. Work out the action(s),
 the application(s), the environment(s) and the tag/variable/value of each from what they wrote,
