@@ -347,6 +347,29 @@ def test_overview_says_whether_anything_can_build_at_all(client, admin_token, se
     assert "issuing" in payload["needsSetup"]
 
 
+def test_the_cache_status_answers_for_one_service(client, admin_token, service, monkeypatch):
+    """What an agent needs to explain a slow build or a corrupt-cache error:
+    where this service's tools cache, and whether its builds can ever land on a
+    second cache slot."""
+    monkeypatch.setenv("CI_CACHE_CLAIM_NAME", "ci-cache")
+    result = call_tool(client, admin_token, "kubesight_ci_cache_status", {"service": "issuing"})
+    assert not result.get("isError"), result
+    payload = result["structuredContent"]
+    assert payload["cache"]["enabled"] is True
+    assert "suggestions" not in payload["cache"]
+    own = payload["service"]
+    assert own["cacheDir"] == "/kubesight-cache/issuing"
+    assert own["toolPaths"]["GRADLE_USER_HOME"] == "/kubesight-cache/issuing/gradle"
+    assert own["usesSlots"] is False
+    assert "gradle" in payload["slots"]["tools"]
+
+
+def test_the_cache_status_is_read_only(client, admin_token):
+    from api.mcp.tools.registry import _REGISTRY
+
+    assert _REGISTRY["kubesight_ci_cache_status"]["write"] is False
+
+
 def test_a_service_can_be_found_by_slug_or_id(client, admin_token, service):
     """Agents have whichever is to hand."""
     by_slug = call_tool(client, admin_token, "kubesight_service_get", {"service": "issuing"})

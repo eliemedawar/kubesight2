@@ -45,6 +45,7 @@ and one that returned only JSON would make cheap orientation expensive.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Dict, List, NamedTuple, Optional
 
@@ -1961,6 +1962,87 @@ def _runners_list(_arguments: Dict[str, Any]) -> Dict[str, Any]:
             "superset of the stage's runnerLabels."
         ),
     }
+
+
+def _int_setting(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, "") or default))
+    except ValueError:
+        return default
+
+
+@tool(
+    "kubesight_ci_cache_status",
+    permission="ci_runners:view",
+    description=(
+        "The build cache: whether it is on, the volume behind it and whether it is "
+        "Bound, which tools share one copy across services, warnings, and the last "
+        "measure/clean job. With a service, also where each of that service's tools "
+        "caches and whether two of its builds can run at once (which puts the second "
+        "on its own cache slot). Read-only - emptying a cache is a person's action "
+        "on the Runners page."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {
+                "type": "string",
+                "description": "Optional. Service id, slug or name, for its own cache paths.",
+            },
+        },
+    },
+)
+def _ci_cache_status(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    from ...services.ci import cache as ci_cache
+    from ...services.ci import cache_layout
+
+    try:
+        state = ci_cache.status()
+    except Exception as exc:
+        raise ToolError(f"The cache state could not be read: {exc}")
+    state.pop("suggestions", None)
+    result: Dict[str, Any] = {
+        "cache": state,
+        "slots": {
+            "count": _int_setting("CI_CACHE_SLOTS", cache_layout.DEFAULT_SLOTS),
+            "tools": list(cache_layout.SLOT_SUBDIRS),
+            "leaseStaleSeconds": _int_setting(
+                "CI_CACHE_LEASE_STALE_SECONDS", cache_layout.DEFAULT_LEASE_STALE_SECONDS
+            ),
+        },
+    }
+    reference = str(arguments.get("service") or "").strip()
+    if reference:
+        row = _service_or_error(reference)
+        base = cache_layout.service_cache_dir(row.slug or "", cache_layout.CACHE_MOUNT_PATH)
+        shared = set(state.get("shared", {}).get("tools") or []) if state.get("mode") == "claim" else set()
+        env = cache_layout.tool_env(
+            base, cache_layout.shared_cache_dir(cache_layout.CACHE_MOUNT_PATH) if shared else "", tuple(shared)
+        )
+        running = [
+            f"#{build.number}"
+            for build in CiBuild.query.filter(
+                CiBuild.service_id == row.id, CiBuild.status.in_(("queued", "running"))
+            ).limit(10)
+        ]
+        usage = [
+            entry
+            for entry in (state.get("maintenance") or {}).get("usage") or []
+            if str(entry.get("service") or "") == cache_layout.slug_dir(row.slug or "")
+        ]
+        concurrent = max(1, int(row.max_concurrent_builds or 1))
+        result["service"] = {
+            "slug": row.slug,
+            "cacheDir": base if state.get("enabled") else "",
+            "toolPaths": env if state.get("enabled") else {},
+            "slotDirectory": f"{base}/{cache_layout.SLOTS_DIR_NAME}/<N>",
+            "maxConcurrentBuilds": concurrent,
+            # One build at a time is always slot 0: the paths above.
+            "usesSlots": concurrent > 1,
+            "activeBuilds": running,
+            "measured": usage,
+        }
+    return result
 
 
 @tool(

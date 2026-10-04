@@ -72,7 +72,6 @@ def test_shareable_tools_point_at_the_shared_subtree_by_default():
     assert env["SEMGREP_CACHE_DIR"] == f"{SHARED}/semgrep"
     assert env["SEMGREP_VERSION_CACHE_PATH"] == f"{SHARED}/semgrep/version"
     assert env["npm_config_cache"] == f"{SHARED}/npm"
-    assert env["YARN_CACHE_FOLDER"] == f"{SHARED}/yarn"
     assert env["npm_config_store_dir"] == f"{SHARED}/pnpm"
     assert env["PIP_CACHE_DIR"] == f"{SHARED}/pip"
     assert env["GOMODCACHE"] == f"{SHARED}/go/mod"
@@ -85,13 +84,15 @@ def test_tools_that_break_when_shared_stay_per_service():
     assert env["KUBESIGHT_CACHE_DIR"] == OWN
     assert env["GRADLE_USER_HOME"] == f"{OWN}/gradle"
     assert env["GRADLE_BUILD_CACHE_DIR"] == f"{OWN}/gradle-build-cache"
-    assert env["MAVEN_OPTS"] == f"-Dmaven.repo.local={OWN}/maven"
+    assert env["MAVEN_OPTS"] == f"-Dmaven.repo.local={OWN}/maven {cache_layout.MAVEN_LOCK_OPTS}"
     assert env["BUILDKIT_CACHE_DIR"] == f"{OWN}/buildkit"
     assert env["GOCACHE"] == f"{OWN}/go/build"
+    # yarn classic corrupts a cache two installs unpack into at once.
+    assert env["YARN_CACHE_FOLDER"] == f"{OWN}/yarn"
 
 
 def test_none_of_the_unsafe_tools_can_even_be_selected():
-    for key in ("gradle", "maven", "buildkit", "gradle-build-cache"):
+    for key in ("gradle", "maven", "buildkit", "gradle-build-cache", "yarn"):
         assert key not in cache_layout.SHAREABLE_KEYS
     assert cache_layout.parse_shared(["gradle", "npm"]) == ("npm",)
 
@@ -161,7 +162,9 @@ def test_prep_creates_shared_scanner_dirs_in_the_shared_subtree():
     _, script = _stage()
     assert '"$KUBESIGHT_SHARED_CACHE_DIR/dependency-check-data"' in script
     assert '"$KUBESIGHT_SHARED_CACHE_DIR/semgrep"' in script
-    assert '"$KUBESIGHT_CACHE_DIR/gradle/init.d"' in script
+    # Gradle lives in this build's cache slot - the service's own directory
+    # unless another build of the service holds it.
+    assert '"$KUBESIGHT_CACHE_SLOT_DIR/gradle/init.d"' in script
     assert '"$KUBESIGHT_CACHE_DIR/dependency-check-data"' not in script
 
 
@@ -176,7 +179,7 @@ def test_the_mismatch_check_expects_the_shared_path_for_shared_tools():
     _, script = _stage()
     assert ('if [ "${DC_DATA_DIR:-}" != "$KUBESIGHT_SHARED_CACHE_DIR/dependency-check-data" ]'
             in script)
-    assert 'if [ "${GRADLE_USER_HOME:-}" != "$KUBESIGHT_CACHE_DIR/gradle" ]' in script
+    assert 'if [ "${GRADLE_USER_HOME:-}" != "$KUBESIGHT_CACHE_SLOT_DIR/gradle" ]' in script
 
 
 def test_the_mismatch_check_matches_what_is_actually_injected():

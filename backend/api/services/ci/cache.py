@@ -150,7 +150,12 @@ def _runner_row() -> Optional[CiRunner]:
     # context at all — a missing database is "nothing saved", not an error.
     try:
         return CiRunner.query.filter(CiRunner.name == RUNNER_NAME).first()
+    except RuntimeError:  # outside an application context
+        return None
     except Exception:  # pragma: no cover - depends on app/db state
+        # Loud, because "nothing saved" means the CI_CACHE_* variables decide,
+        # and a cache switched on in the UI then quietly is not for this build.
+        logger.warning("CI cache settings could not be read; using CI_CACHE_* for now", exc_info=True)
         return None
 
 

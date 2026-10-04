@@ -312,7 +312,7 @@ def test_an_unwritable_cache_warns_and_lets_the_build_run():
     assert "is not writable" in script
     # The prep is outside the stage's own `set -e` subshell, so it cannot be
     # what fails the stage.
-    assert script.index("mkdir -p \"$KUBESIGHT_CACHE_DIR") < script.index("\nset -e\n")
+    assert script.index("mkdir -p \"$KUBESIGHT_CACHE_SLOT_DIR") < script.index("\nset -e\n")
 
 
 def test_gradles_build_cache_is_wired_up_by_an_init_script():
@@ -333,7 +333,7 @@ def test_the_gradle_init_script_can_be_switched_off(monkeypatch):
     monkeypatch.setenv("CI_CACHE_GRADLE_INIT", "off")
     script = _job(_execution())["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
     assert "kubesight-build-cache.gradle" not in script
-    assert '"$KUBESIGHT_CACHE_DIR/gradle"' in script
+    assert '"$KUBESIGHT_CACHE_SLOT_DIR/gradle"' in script
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +528,9 @@ def test_a_tool_pointed_away_from_the_cache_is_called_out_by_name():
     overridden."""
     script = _job(_execution())["spec"]["template"]["spec"]["initContainers"][0]["command"][2]
     for name, subdir in cache_layout.PATH_VARS:
-        assert f'if [ "${{{name}:-}}" != "$KUBESIGHT_CACHE_DIR/{subdir}" ]; then' in script
+        # Gradle's directories are compared with this build's cache slot.
+        parent = "$KUBESIGHT_CACHE_SLOT_DIR" if subdir.startswith("gradle") else "$KUBESIGHT_CACHE_DIR"
+        assert f'if [ "${{{name}:-}}" != "{parent}/{subdir}" ]; then' in script
     # It prints the offending VALUE, because the common cause is a literal
     # "$KUBESIGHT_CACHE_DIR/gradle" that Kubernetes never expanded — invisible
     # unless you can see the stray dollar sign.
@@ -547,3 +549,56 @@ def test_the_mismatch_check_matches_what_is_actually_injected():
     injected = cache_layout.tool_env("/kubesight-cache/test123")
     for name, subdir in cache_layout.PATH_VARS:
         assert injected[name] == f"/kubesight-cache/test123/{subdir}", name
+
+
+# ---------------------------------------------------------------------------
+# Stability: one answer per build, and nothing a concurrent stage can half-read
+# ---------------------------------------------------------------------------
+
+def test_one_manifest_reads_the_cache_settings_once_and_agrees_with_itself(monkeypatch):
+    """Every part of the Job asks whether the cache is on. When each question
+    was its own database read, one read failing half way through gave a pod
+    whose containers mount a "cache" volume it does not declare. Here the
+    setting flips after the first read: the whole manifest must keep the first
+    answer."""
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        claim = CLAIM if len(calls) == 1 else ""
+        return {"claimName": claim, "storageClass": ""}
+
+    monkeypatch.setattr(k8s, "_read_cache_runtime", flaky)
+    job = _job(_execution(0), _execution(1))
+    spec = job["spec"]["template"]["spec"]
+    assert len(calls) == 1
+    assert any(volume["name"] == "cache" for volume in spec["volumes"])
+    for container in spec["initContainers"] + spec["containers"]:
+        names = {mount["name"] for mount in container.get("volumeMounts", [])}
+        assert "cache" in names, container["name"]
+    assert spec["securityContext"]["fsGroup"] == cache_layout.CACHE_FS_GROUP
+
+
+def test_the_pin_ends_with_the_manifest(monkeypatch):
+    """Outside a manifest the setting is read fresh, so a switch in the UI
+    takes effect on the very next build."""
+    _job(_execution())
+    monkeypatch.setenv("CI_CACHE_CLAIM_NAME", "")
+    assert not k8s.cache_enabled()
+
+
+def test_the_gradle_init_script_works_on_gradle_9():
+    """removeUnusedEntriesAfterDays was removed in Gradle 9.0; setting it in
+    the init script failed every Gradle 9 build at settings time."""
+    assert "removeUnusedEntriesAfterDays" not in cache_layout.GRADLE_INIT_SCRIPT
+    assert "directory = new File(kubesightCacheDir)" in cache_layout.GRADLE_INIT_SCRIPT
+
+
+def test_the_gradle_init_script_is_replaced_never_truncated_in_place():
+    """Every stage rewrites this one file. A `cat >` straight onto it let a
+    Gradle starting in a parallel stage read half a script. It is written aside
+    under a name Gradle ignores (not *.gradle) and renamed in."""
+    script = cache_layout.prep_script()
+    assert 'cat > "$KUBESIGHT_CACHE_SLOT_DIR/gradle/init.d/' not in script
+    assert '.tmp")' in script and 'mv -f "$KS_GI_TMP" "$KS_GI"' in script
+    assert 'cmp -s "$KS_GI_TMP" "$KS_GI"' in script

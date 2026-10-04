@@ -280,3 +280,68 @@ away, which is the gate working. The findings are on the build as a
 what a service has produced; quote the severities from it rather than guessing
 which CVE was the blocker. Artifact *contents* are not readable here, only their
 names, types and sizes.
+
+## The build cache — why a build is slow, or fails on a corrupt cache
+
+Every stage gets a persistent per-service directory on one volume
+(`/kubesight-cache/<service-slug>`), and every build tool is already pointed
+into it: Gradle, Maven, npm, yarn, pnpm, pip, Go, Dependency-Check's NVD
+database, Semgrep, Trivy, BuildKit's layer export, and a saved `node_modules`
+per lockfile. Nothing has to be added to a pipeline for it to work.
+
+```
+kubesight_ci_cache_status {}                     → on? volume Bound? warnings? last measure
+kubesight_ci_cache_status {service: "payment"}   → + that service's paths, sizes, running builds
+```
+
+Read `cache.enabled`, `cache.claim.phase` and `cache.warnings` first — a warning
+there is already the answer, written for a person. `cache.source` says whether
+the UI switch or the `CI_CACHE_*` environment decides, so nobody hunts for the
+wrong toggle.
+
+**The stage log says what the cache did — quote it.** Every stage prints:
+
+| Line in the stage log | What it means |
+|---|---|
+| `Cache: off. Every build starts cold.` | Nobody turned it on (Runners → Build cache). Not a fault. |
+| `warm: gradle/caches maven …` / `cold: …` | Per tool. A tool in `cold:` on a service's second build is the one to look at. `(shared)` marks the copy every service shares. |
+| `GRADLE_USER_HOME=… ^ not …` | The stage's own Environment overrides the cache path, so that tool starts cold every build. A literal `$KUBESIGHT_CACHE_DIR/...` there means Kubernetes did not expand it — fix the stage env, or `export` it inside the commands. |
+| `Cache directory … is not writable; this build runs cold.` | Volume ownership. The fix is on the NFS server (`chown 65532:65532`), a person's job. |
+| `uses cache slot N` | Another build of the same service was running, so this one used its own copy for Gradle, Maven, yarn, BuildKit and Trivy — cold the first time, warm after. Expected, not an error. |
+| `All N cache slots … start cold` | More builds of one service at once than `CI_CACHE_SLOTS`. |
+| `node_modules cache: restored …` / `saved …` / `waiting for <stage>` | The install was skipped / stored / is queued behind a parallel stage installing in the same pod. Waiting is correct: two installs at once break `node_modules`. |
+| `Waiting for another Dependency-Check scan` | The shared NVD database takes one scan at a time. |
+
+**Errors that mean a corrupt cache, not bad code.** If a build fails with one of
+these and the code did not change, the cache is the suspect:
+
+| Error in the log | Tool |
+|---|---|
+| `Extracting tar content of undefined failed, the file appears to be corrupt` | yarn |
+| `invalid LOC header`, `zip END header not found`, `error in opening zip file` | Maven / Gradle (a truncated jar) |
+| `Timeout waiting to lock … It is currently in use by another Gradle instance` | Gradle |
+| `Could not compile initialization script … kubesight-build-cache.gradle` | Gradle init script read mid-write |
+| `Database may be already in use` (H2) | Dependency-Check |
+| `Could not set unknown property 'removeUnusedEntriesAfterDays'` | KubeSight older than its Gradle 9 fix — upgrade, not clean |
+
+The fix is to **empty that service's cache** and run the build again. That is a
+person's action — Runners → Build cache → Clean, or `k8s/ci-cache.sh clean
+<slug>` — and it is refused while a build of that service is running. There is
+no tool here that deletes a cache: say which service, quote the error, and
+recommend the clean. Emptying it costs one cold build, nothing else.
+
+What is already handled, so do not recommend it as a fix:
+
+- **Parallel stages** share the cache safely: Maven has file locks on, Node
+  installs take turns, Gradle and Trivy lock themselves.
+- **Two builds of one service** each get their own cache slot
+  (`service.usesSlots`; a service limited to one build at a time never does).
+- **Different services** never share Gradle, Maven, yarn or BuildKit — only the
+  content-addressed npm/pnpm/pip/Go stores, Semgrep and the NVD database, which
+  are safe to share.
+
+"The cache is on but the build is still slow" is usually one of: the build is
+the service's first (everything `cold:`), the stage overrides a cache variable
+(the `^ not` line), the Gradle command has no `--build-cache` (the Gradle build
+cache is configured but only used when asked for), or the pipeline runs
+`gradle clean`. Read the log before guessing.

@@ -540,7 +540,12 @@ def container_tool_env(cache: str) -> Dict[str, str]:
     build starts with an empty ~/.gradle inside a fresh container.
     """
     return {
-        "MAVEN_OPTS": "-Dmaven.repo.local=" + cache + "/maven",
+        # The file locks let two Mavens share the repository without
+        # corrupting it (Maven 3.9+; older versions ignore them). Mirrors
+        # cache_layout.MAVEN_LOCK_OPTS on the server.
+        "MAVEN_OPTS": "-Dmaven.repo.local=" + cache + "/maven"
+        " -Daether.syncContext.named.factory=file-lock"
+        " -Daether.syncContext.named.nameMapper=file-gav",
         "GRADLE_USER_HOME": cache + "/gradle",
         # Gradle has no environment variable for its build cache directory, so
         # on Kubernetes KubeSight writes an init script that reads this one. An

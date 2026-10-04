@@ -16,6 +16,7 @@ costs a page and loading all seven costs the answer.
 |---|---|
 | a build, a pipeline, a runner, a service's source | [references/ci.md](references/ci.md) |
 | a pull request that was blocked, the quality gate | [references/ci.md](references/ci.md) |
+| a slow build, the build cache, a corrupt cache error | [references/ci.md](references/ci.md) |
 | a cluster, a namespace, a pod's state, events, topology | [references/clusters.md](references/clusters.md) |
 | what is running and what version; restart, scale, roll back, exec | [references/workloads.md](references/workloads.md) |
 | deploying, Helm, approvals, change bundles | [references/deploys.md](references/deploys.md) |

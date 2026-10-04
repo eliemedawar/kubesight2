@@ -44,6 +44,7 @@ registry auth is a per-build docker config Secret mounted read-only.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -51,6 +52,7 @@ import re
 import shlex
 import socket
 import subprocess
+import threading
 import zlib
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -358,7 +360,7 @@ echo "Checkout complete."
 """
 
 _COLLECTOR_SCRIPT = r"""
-import glob, io, json, os, sys, urllib.request, uuid
+import glob, io, json, os, shutil, sys, urllib.request, uuid
 
 CALLBACK = os.environ["KUBESIGHT_CALLBACK_URL"].rstrip("/")
 TOKEN = os.environ["KUBESIGHT_CALLBACK_TOKEN"]
@@ -367,6 +369,33 @@ MAX_BYTES = int(os.environ.get("KUBESIGHT_MAX_ARTIFACT_BYTES", str(512 * 1024 * 
 specs = json.loads(os.environ.get("KUBESIGHT_ARTIFACTS", "[]"))
 images = json.loads(os.environ.get("KUBESIGHT_IMAGES", "[]"))
 failures = 0
+
+
+def release_cache_slot():
+    # Every stage of this build is done, so the cache slot it leased goes back
+    # now rather than when the lease goes stale - another build of this service
+    # may be waiting to land on slot 0. A failure here costs nothing but that.
+    cache_dir = os.environ.get("KUBESIGHT_CACHE_DIR", "")
+    if not cache_dir:
+        return
+    leases = os.path.join(cache_dir, ".leases")
+    try:
+        names = os.listdir(leases)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(leases, name)
+        try:
+            with open(os.path.join(path, "owner")) as handle:
+                owner = handle.read().strip()
+        except OSError:
+            continue
+        if owner == BUILD_ID:
+            shutil.rmtree(path, ignore_errors=True)
+            print("[kubesight] released cache slot", name)
+
+
+release_cache_slot()
 
 
 def request(url, data, headers):
@@ -535,7 +564,16 @@ def _cache_prep() -> str:
     return cache_layout.prep_script(
         gradle_init=not _is_off(_env("CI_CACHE_GRADLE_INIT", "1")),
         shared=cache_shared_tools() if cache_enabled() else (),
+        slots=_int_env("CI_CACHE_SLOTS", cache_layout.DEFAULT_SLOTS),
+        stale_seconds=_int_env("CI_CACHE_LEASE_STALE_SECONDS", cache_layout.DEFAULT_LEASE_STALE_SECONDS),
     )
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(_env(name, str(default))))
+    except ValueError:
+        return default
 
 
 def _node_modules_cached(execution: StageExecution) -> bool:
@@ -574,6 +612,7 @@ def _command_stage_body(execution: StageExecution) -> str:
             image=execution.image or "",
             workdir=execution.working_directory or "",
             keep=_node_modules_keep(),
+            stage=execution.stage_name or "",
         )
     return f"cd {_q(workdir)}\n{commands}"
 
@@ -1702,7 +1741,40 @@ LEGACY_CACHE_MOUNT_PATH = cache_layout.LEGACY_MOUNT_PATH
 CACHE_FS_GROUP = cache_layout.CACHE_FS_GROUP
 
 
+# One build's cache settings, read once. A Job manifest asks "is the cache on?"
+# a dozen times - volumes, every container's mounts, env and prep, fsGroup - and
+# each answer used to be its own database read. One read failing half way
+# through (and falling back to the environment) gave a Job whose containers
+# mount a "cache" volume the pod does not declare, or a cache directory on a
+# volume that is not there. Pinned, every part of one manifest agrees.
+_pinned_cache = threading.local()
+
+
+@contextlib.contextmanager
+def cache_settings_pinned():
+    """Read the cache settings once for everything inside this block.
+
+    Re-entrant: an inner block reuses the outer one's answer, so the claim
+    check in ``_create_job`` and the manifest it then builds cannot disagree.
+    """
+    if getattr(_pinned_cache, "value", None) is not None:
+        yield
+        return
+    _pinned_cache.value = {"runtime": _read_cache_runtime()}
+    try:
+        yield
+    finally:
+        _pinned_cache.value = None
+
+
 def _cache_runtime() -> Dict[str, str]:
+    pinned = getattr(_pinned_cache, "value", None)
+    if pinned is not None:
+        return pinned["runtime"]
+    return _read_cache_runtime()
+
+
+def _read_cache_runtime() -> Dict[str, str]:
     """What to cache into: what an operator saved in the UI, or the
     environment when nothing has been saved.
 
@@ -1772,12 +1844,18 @@ def cache_shared_tools() -> tuple:
     """
     if not cache_claim_override():
         return ()
+    pinned = getattr(_pinned_cache, "value", None)
+    if pinned is not None and "shared" in pinned:
+        return pinned["shared"]
     try:
         from .. import cache as cache_settings
 
-        return cache_settings.shared_tools()
+        shared = cache_settings.shared_tools()
     except Exception:  # pragma: no cover - depends on app/db state
-        return cache_layout.parse_shared(os.getenv("CI_CACHE_SHARED"))
+        shared = cache_layout.parse_shared(os.getenv("CI_CACHE_SHARED"))
+    if pinned is not None:
+        pinned["shared"] = shared
+    return shared
 
 
 def cache_shared_path() -> str:
@@ -1894,6 +1972,11 @@ def _secret_env(secret_name: str, execution: StageExecution) -> List[Dict[str, A
 
 def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
     """Secret + NetworkPolicy + Job for one build. ``first.plan`` is required."""
+    with cache_settings_pinned():
+        return _build_job_resources(first)
+
+
+def _build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
     plan = first.plan or []
     if not plan:
         raise RunnerError("The Kubernetes runner needs the full build plan.")
@@ -2147,6 +2230,8 @@ def build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
             {"name": "HOME", "value": "/tmp"},
             {"name": "TMPDIR", "value": "/tmp"},
             {"name": "KUBESIGHT_BUILD_ID", "value": str(first.build_id)},
+            # Only to release the build's cache slot (see the script).
+            {"name": "KUBESIGHT_CACHE_DIR", "value": cache_base_path(first.service_slug)},
             {"name": "KUBESIGHT_ARTIFACTS", "value": json.dumps(artifact_specs)},
             {"name": "KUBESIGHT_IMAGES", "value": json.dumps(image_specs)},
             {
@@ -2585,11 +2670,12 @@ class KubernetesJobRunnerAdapter:
         return RunnerHandle(runner_id=0, external_ref=ref)
 
     def _create_job(self, execution: StageExecution) -> None:
-        if cache_claim_override():
-            self._require_cache_claim()
-        elif cache_storage_class():
-            self._ensure_cache_claim(execution.service_slug)
-        resources = build_job_resources(execution)
+        with cache_settings_pinned():
+            if cache_claim_override():
+                self._require_cache_claim()
+            elif cache_storage_class():
+                self._ensure_cache_claim(execution.service_slug)
+            resources = build_job_resources(execution)
         manifest = json.dumps({"apiVersion": "v1", "kind": "List", "items": resources})
         rc, _, stderr = _kubectl(["apply", "-f", "-"], input_text=manifest, timeout=60)
         if rc != 0:

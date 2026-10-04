@@ -64,12 +64,11 @@ $KUBESIGHT_SHARED_CACHE_DIR = /kubesight-cache/_shared
 | Dependency-Check (`dependency-check`) | `DC_DATA_DIR` -> `dependency-check-data` |
 | Semgrep (`semgrep`) | `SEMGREP_CACHE_DIR`, `SEMGREP_VERSION_CACHE_PATH` -> `semgrep` |
 | npm (`npm`) | `npm_config_cache` -> `npm` |
-| yarn (`yarn`) | `YARN_CACHE_FOLDER` -> `yarn` |
 | pnpm (`pnpm`) | `npm_config_store_dir` -> `pnpm` |
 | pip (`pip`) | `PIP_CACHE_DIR` -> `pip` |
 | Go modules (`go`) | `GOMODCACHE` -> `go/mod` |
 
-All seven are shared by default. Pick them on the Runners page (Build cache ->
+All six are shared by default. Pick them on the Runners page (Build cache ->
 *Shared across services*) or with `CI_CACHE_SHARED` (`dependency-check,npm`,
 `all`, `none`). A change takes effect on the next build and moves nothing: the
 tool starts cold once in its new place.
@@ -77,7 +76,10 @@ tool starts cold once in its new place.
 **Never shared, and not offered:** Gradle's user home (its lock protocol pings
 the lock owner over localhost, which a build in another pod cannot hear, so
 builds time out on a lock nobody will release), Maven's local repository (not
-safe for concurrent writers, and leaks SNAPSHOTs between services), BuildKit's
+safe for concurrent writers, and leaks SNAPSHOTs between services), yarn
+classic's cache (two installs unpacking the same package at once corrupt it -
+`Extracting tar content ... the file appears to be corrupt` - and the bad entry
+then fails later builds too; a saved setting that still names `yarn` is ignored), BuildKit's
 export (a `type=local` export rewrites one `index.json`, so services would evict
 each other) and the Gradle build cache (keyed by task inputs, so there is almost
 nothing to reuse across services anyway).
@@ -97,6 +99,55 @@ is shared.
 The warm/cold line in each stage log marks shared directories, e.g.
 `warm: gradle/caches npm(shared)`. That's why a service's very first build can
 already be warm.
+
+### More than one thing at once
+
+**Parallel stages of one build** run as containers in the build's one pod, so
+they share the cache directories, the workspace and the network:
+
+- **Gradle** and **Trivy** coordinate between them with their own locks
+  (Gradle's lock protocol pings the lock holder over localhost, which works
+  inside one pod).
+- **Maven** gets file locks switched on in `MAVEN_OPTS`
+  (`-Daether.syncContext.named.factory=file-lock
+  -Daether.syncContext.named.nameMapper=file-gav`, Maven 3.9+; older Mavens
+  ignore them). Without them two Mavens writing the repository at once can leave
+  a truncated jar that fails every later build.
+- **Node installs take turns.** In a stage that installs, every `yarn`/`npm`/
+  `pnpm`/`corepack` install call, the `node_modules` restore and its save hold
+  one lock per pod (`/workspace/.kubesight/locks/node-install`). Two installs at
+  once break `node_modules` and the yarn cache, and a stage that saved its
+  `node_modules` while a sibling was still installing would archive a broken
+  tree under a key every later build trusts. Only the install waits; the build
+  and test commands still run side by side. A waiting stage says who it is
+  waiting for. An install run from inside your own script (`./install.sh`) is
+  not seen and not locked.
+
+**Two builds of the same service at once** (Max concurrent builds above 1) are
+two pods, often on two nodes, and Gradle, yarn and BuildKit cannot coordinate
+across that. So each build leases a **cache slot**:
+
+```
+/kubesight-cache/<slug>/            slot 0 - the service's own directories
+/kubesight-cache/<slug>/slots/1/    slot 1 - a second build running at the same time
+/kubesight-cache/<slug>/.leases/N   who holds slot N (the build id)
+```
+
+Gradle's user home, the Gradle build cache, Maven, yarn, BuildKit's export and
+Trivy move into the slot (`$KUBESIGHT_CACHE_SLOT_DIR`); everything else stays
+where it is, because it is safe with concurrent writers. A service that runs one
+build at a time is always on slot 0, so nothing changes for it. Slot 1 is cold
+the first time and warm after. The stage log says when a build is not on slot 0.
+
+A lease is renewed every minute while a stage runs and released by the
+collector when the build ends. A build whose pod was deleted (cancelled) cannot
+release it, so a lease nobody renewed for 15 minutes is taken over — measured
+on the cache volume's own clock, so node clock drift does not matter. If every
+slot is held, the build uses a private directory in its workspace and runs cold.
+
+**Different services at once** never meet: each has its own subtree, and the
+shared tools in `_shared/` are the ones built for concurrent use
+(Dependency-Check queues on its lock).
 
 ### When there is no cache
 
@@ -361,7 +412,7 @@ cause.
 |---|---|
 | **Storage class** | none — a hand-made NFS PersistentVolume, `ReadWriteMany`, `Retain` |
 | **Size** | 20Gi is comfortable for a handful of Java/Node services. Budget roughly 1–2Gi per Java service for Gradle, **plus ~6–8Gi once for `dependency-check-data`** — the NVD database is by far the largest single item; shared (the default) it is paid once for the whole volume, per service it is paid once per service. |
-| **Growth** | Gradle prunes its own caches; `removeUnusedEntriesAfterDays = 30` is set on the build cache by the init script. **BuildKit's local export prunes nothing** — if `CI_BUILDKIT_LOCAL_CACHE` is on, that directory grows until somebody empties it. |
+| **Growth** | Gradle prunes its own caches, the build cache included (Gradle's default: entries unused for 7 days). The init script sets only the directory — `removeUnusedEntriesAfterDays` was removed in Gradle 9 and set there it failed every Gradle 9 build. **BuildKit's local export prunes nothing** — if `CI_BUILDKIT_LOCAL_CACHE` is on, that directory grows until somebody empties it. |
 | **Cleanup policy** | none automatic. Watch the card on the Runners page (or `sh k8s/ci-cache.sh status`) and `clean` a service when it gets large. |
 | **Filling up** | NFS enforces no quota, so `capacity` on the PV is metadata only — it is the **export** that fills. Unlike a node-local volume this evicts nothing; builds just start failing to write, and the prep block reports it per stage. |
 | **Permissions** | stage containers run as uid/gid 65532 with a read-only root filesystem and no `CAP_CHOWN`. The Job sets `fsGroup: 65532` with `fsGroupChangePolicy: OnRootMismatch`. On NFS that chown is done by kubelet *as root against the server*, so the export must be `chown 65532:65532` and `chmod 2775` on the server itself — the setgid bit is what keeps the group on subdirectories the build tools create. |
@@ -376,10 +427,12 @@ cause.
 | `CI_CACHE_CLAIM_NAME` | — | Mount this existing claim. One volume, every service in its own subtree. Takes precedence over the storage class; KubeSight never creates, resizes or deletes it. |
 | `CI_CACHE_STORAGE_CLASS` | — | Provision one PVC per service from this class. |
 | `CI_CACHE_SIZE` | `10Gi` | Size of a per-service PVC (storage-class mode only). |
-| `CI_CACHE_SHARED` | all shareable | Which tools share `/kubesight-cache/_shared` (claim mode only): comma list of `dependency-check,semgrep,npm,yarn,pnpm,pip,go`, or `all` / `none`. |
+| `CI_CACHE_SHARED` | all shareable | Which tools share `/kubesight-cache/_shared` (claim mode only): comma list of `dependency-check,semgrep,npm,pnpm,pip,go`, or `all` / `none`. |
 | `CI_CACHE_GRADLE_INIT` | `1` | Write the Gradle init script. `0`/`off` to leave `init.d` alone. |
 | `CI_CACHE_NODE_MODULES` | `1` | Keep `node_modules` per lockfile for install stages. `0`/`off` to install cold every time. |
 | `CI_CACHE_NODE_MODULES_KEEP` | `3` | How many lockfiles' `node_modules` each service keeps; the least recently used go first. |
+| `CI_CACHE_SLOTS` | `4` | Cache slots per service, i.e. how many builds of one service can run at once with a warm Gradle/Maven/yarn/BuildKit/Trivy cache each. |
+| `CI_CACHE_LEASE_STALE_SECONDS` | `900` | How long a slot lease may go unrenewed before another build takes it over. |
 | `CI_BUILDKIT_LOCAL_CACHE` | `0` | Export image layers to `$BUILDKIT_CACHE_DIR`. |
 | `CI_BUILDKIT_REGISTRY_CACHE` | `0` | Export image layers to a `:buildcache` tag. |
 | `CI_BUILDKIT_CACHE_REPO` | — | Put those tags under one repository rather than beside each image. |

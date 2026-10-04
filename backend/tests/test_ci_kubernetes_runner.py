@@ -1218,7 +1218,7 @@ def test_every_known_build_tool_is_pointed_at_the_cache(monkeypatch):
     env = _env_map(job["spec"]["template"]["spec"]["initContainers"][1])
     base = "/kubesight-cache/payment-service"
 
-    assert env["MAVEN_OPTS"] == f"-Dmaven.repo.local={base}/maven"
+    assert env["MAVEN_OPTS"] == f"-Dmaven.repo.local={base}/maven {k8s.cache_layout.MAVEN_LOCK_OPTS}"
     assert env["GRADLE_USER_HOME"] == f"{base}/gradle"
     assert env["npm_config_cache"] == f"{base}/npm"
     assert env["YARN_CACHE_FOLDER"] == f"{base}/yarn"

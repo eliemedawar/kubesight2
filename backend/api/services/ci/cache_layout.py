@@ -28,7 +28,7 @@ The shape on disk
         maven/ npm/ yarn/ pnpm/ pip/ go/ cargo/ composer/ nuget/ xdg/
       _shared/                        KUBESIGHT_SHARED_CACHE_DIR - one subtree for everybody
         dependency-check-data/        the NVD database is the same for every service
-        npm/ yarn/ pnpm/ pip/ go/mod/ semgrep/
+        npm/ pnpm/ pip/ go/mod/ semgrep/
 
 Every service gets its own subtree **in both storage modes**. A per-service
 PersistentVolumeClaim is isolated already, but keeping the slug in the path
@@ -49,7 +49,10 @@ and strips leading dashes.
 NOT shared, on purpose: Gradle's user home (its cross-process locking pings the
 lock owner over localhost, which a build in another pod cannot hear, so builds
 time out waiting for a lock nobody will release), Maven's local repository (not
-safe for concurrent writers, and leaks SNAPSHOTs between services), BuildKit's
+safe for concurrent writers, and leaks SNAPSHOTs between services), yarn
+classic's cache (two installs unpacking the same package at once corrupt it -
+"Extracting tar content ... the file appears to be corrupt" - and the broken
+entry then fails every later build that needs it), BuildKit's
 export (``type=local`` rewrites one ``index.json``, so services would evict each
 other) and Gradle's build cache (keyed by task inputs, so services almost never
 hit each other's entries anyway).
@@ -124,7 +127,65 @@ WARMTH_PROBE_DIRS = (
     "node-modules",
 )
 
+# --- cache slots: two builds of ONE service at the same time -------------------
+#
+# A service's subtree is safe for one build at a time, and for the parallel
+# stages of that build: they share one pod, so one kernel and one network
+# namespace, and Gradle's lock protocol (a ping to the lock owner over
+# localhost) and Trivy's file locks work between them. Two BUILDS of the same
+# service are two pods, usually on two nodes, and those tools cannot coordinate
+# across that - Gradle times out on a lock its owner never hears about, yarn
+# classic corrupts its cache, two BuildKit exports overwrite one index.json.
+#
+# So each running build leases a SLOT: slot 0 is the service's own directories,
+# exactly as before, and a second build at the same time gets
+# ``<service>/slots/1/`` for these tools - cold the first time, warm after.
+# The lease is a directory under ``<service>/.leases/`` (mkdir is atomic on
+# NFS), owned by the build id, renewed while the build runs and released by the
+# collector at its end. A build that died without releasing goes stale.
+# Everything not listed here is either safe with concurrent writers (npm,
+# pnpm, pip and Go are content-addressed; node_modules archives are written
+# aside and renamed) or locked separately (Dependency-Check).
+SLOT_SUBDIRS = ("gradle", "gradle-build-cache", "maven", "buildkit", "trivy", "yarn")
+# The variables pointing into a slot directory, re-pointed by the stage prep
+# when this build holds a slot other than 0. MAVEN_OPTS is handled apart: it is
+# a string of flags with the path inside it.
+SLOT_VARS = (
+    ("GRADLE_USER_HOME", "gradle"),
+    ("GRADLE_BUILD_CACHE_DIR", "gradle-build-cache"),
+    ("BUILDKIT_CACHE_DIR", "buildkit"),
+    ("TRIVY_CACHE_DIR", "trivy"),
+    ("YARN_CACHE_FOLDER", "yarn"),
+)
+SLOTS_DIR_NAME = "slots"
+LEASES_DIR_NAME = ".leases"
+DEFAULT_SLOTS = 4
+# A lease nobody renewed for this long belongs to a build that is gone
+# (cancelled, its pod deleted). Renewed every minute while any stage runs; the
+# margin covers the gap between two stages, which includes an image pull.
+DEFAULT_LEASE_STALE_SECONDS = 900
+
+# Maven's local repository has no cross-process locking unless asked for. Two
+# Mavens writing it at once - parallel stages of one build - can leave a
+# truncated jar or pom that then fails every later build until the cache is
+# emptied. These turn on Maven Resolver's file locks (Maven 3.9 and newer;
+# older versions ignore the properties). The locks live in the repository's own
+# .locks/ directory.
+MAVEN_LOCK_OPTS = (
+    "-Daether.syncContext.named.factory=file-lock "
+    "-Daether.syncContext.named.nameMapper=file-gav"
+)
+
+
+def _top(name: str) -> str:
+    return name.split("/", 1)[0]
+
+
 GRADLE_INIT_SCRIPT_NAME = "kubesight-build-cache.gradle"
+# Only `directory`: it exists on every Gradle from 3.5 to 9. Retention is left
+# at Gradle's default (7 days) on purpose - `removeUnusedEntriesAfterDays` was
+# removed in Gradle 9.0, and setting it here failed every Gradle 9 build at
+# settings time, whether or not it used --build-cache.
 GRADLE_INIT_SCRIPT = """\
 // Written by KubeSight before every stage. Points Gradle's local build cache at
 // the persistent volume. It does NOT enable caching - that is still
@@ -136,7 +197,6 @@ if (kubesightCacheDir) {
         settings.buildCache {
             local {
                 directory = new File(kubesightCacheDir)
-                removeUnusedEntriesAfterDays = 30
             }
         }
     }
@@ -157,7 +217,6 @@ SHAREABLE_TOOLS = (
     ("dependency-check", "Dependency-Check (NVD)", "dependency-check-data", ("DC_DATA_DIR",)),
     ("semgrep", "Semgrep", "semgrep", ("SEMGREP_CACHE_DIR", "SEMGREP_VERSION_CACHE_PATH")),
     ("npm", "npm", "npm", ("npm_config_cache",)),
-    ("yarn", "yarn", "yarn", ("YARN_CACHE_FOLDER",)),
     ("pnpm", "pnpm", "pnpm", ("npm_config_store_dir",)),
     ("pip", "pip", "pip", ("PIP_CACHE_DIR",)),
     ("go", "Go modules", "go/mod", ("GOMODCACHE",)),
@@ -274,7 +333,7 @@ def _service_tool_env(base: str) -> Dict[str, str]:
         # --- JVM -------------------------------------------------------------
         # -Dmaven.repo.local as a JVM property works on every Maven version;
         # MAVEN_ARGS would only be read by 3.9+.
-        "MAVEN_OPTS": f"-Dmaven.repo.local={base}/maven",
+        "MAVEN_OPTS": f"-Dmaven.repo.local={base}/maven {MAVEN_LOCK_OPTS}",
         # Dependencies, wrapper distributions and Gradle's own caches.
         "GRADLE_USER_HOME": f"{base}/gradle",
         # Task outputs. Gradle has no environment variable for this, so the init
@@ -347,9 +406,7 @@ def _mismatch_checks(shared=()) -> List[str]:
     lines: List[str] = []
     shared_dirs = shared_subdirs(shared)
     for name, subdir in PATH_VARS:
-        parent = (
-            "$KUBESIGHT_SHARED_CACHE_DIR" if subdir in shared_dirs else "$KUBESIGHT_CACHE_DIR"
-        )
+        parent = _parent_var(subdir, shared_dirs)
         lines.extend(
             [
                 f'    if [ "${{{name}:-}}" != "{parent}/{subdir}" ]; then',
@@ -363,7 +420,162 @@ def _mismatch_checks(shared=()) -> List[str]:
     return lines
 
 
-def prep_script(*, gradle_init: bool = True, shared=()) -> str:
+def _parent_var(subdir: str, shared_dirs) -> str:
+    """Which directory variable a cache subdirectory lives under, in the shell."""
+    if subdir in shared_dirs:
+        return "$KUBESIGHT_SHARED_CACHE_DIR"
+    if _top(subdir) in SLOT_SUBDIRS:
+        return "$KUBESIGHT_CACHE_SLOT_DIR"
+    return "$KUBESIGHT_CACHE_DIR"
+
+
+def lease_script(*, slots: int = DEFAULT_SLOTS, stale_seconds: int = DEFAULT_LEASE_STALE_SECONDS) -> List[str]:
+    """Shell that picks this build's cache slot and exports where it is.
+
+    Sets ``KUBESIGHT_CACHE_SLOT`` (``0``, ``1``... or ``private``) and
+    ``KUBESIGHT_CACHE_SLOT_DIR``, and re-points the slot tools' variables when
+    the slot is not 0. Every stage runs it; the first takes a lease and every
+    later stage of the same build finds it again by the build id, so one build
+    keeps one slot from its first stage to its last.
+
+    Never fails a stage. Without a build id, or on a volume it cannot write,
+    the slot is 0 - what every build used before slots existed.
+
+    Staleness is measured on the cache volume's clock: a file created there now
+    against the lease's last renewal, both stamped by the NFS server. A node
+    whose clock is ten minutes off would otherwise break every lease, or none.
+    """
+    slots = max(1, int(slots or DEFAULT_SLOTS))
+    stale_seconds = max(60, int(stale_seconds or DEFAULT_LEASE_STALE_SECONDS))
+    stale_minutes = max(1, stale_seconds // 60)
+    repoint = []
+    for name, subdir in SLOT_VARS:
+        repoint.append(
+            f'    if [ "${{{name}:-}}" = "$KUBESIGHT_CACHE_DIR/{subdir}" ]; then'
+            f' {name}="$KUBESIGHT_CACHE_SLOT_DIR/{subdir}"; export {name}; fi'
+        )
+    return [
+        "  KUBESIGHT_CACHE_SLOT=0",
+        '  KUBESIGHT_CACHE_SLOT_DIR="$KUBESIGHT_CACHE_DIR"',
+        f'  KS_LEASES="$KUBESIGHT_CACHE_DIR/{LEASES_DIR_NAME}"',
+        "  KS_LEASE=",
+        '  KS_ME="${KUBESIGHT_BUILD_ID:-}"',
+        '  if [ -n "$KS_ME" ] && mkdir -p "$KS_LEASES" 2>/dev/null; then',
+        # The owner of a lease, allowing for the instant between another
+        # stage's mkdir and its write of the owner file - a sibling of the
+        # SAME build, starting in parallel, must not mistake it for a stranger.
+        "    ks_lease_owner() {",
+        "      KS_LO=",
+        "      for KS_TRY in 1 2 3; do",
+        '        KS_LO=$(cat "$1/owner" 2>/dev/null || true)',
+        '        if [ -n "$KS_LO" ] || [ ! -d "$1" ]; then return 0; fi',
+        "        sleep 1 2>/dev/null || return 0",
+        "      done",
+        "    }",
+        "    ks_lease_stale() {",
+        '      KS_REF="$KS_LEASES/.now.${HOSTNAME:-pod}.$$"',
+        "      KS_NOW=",
+        '      if : > "$KS_REF" 2>/dev/null; then',
+        '        KS_NOW=$(stat -c %Y "$KS_REF" 2>/dev/null || true)',
+        '        rm -f "$KS_REF" 2>/dev/null',
+        "      fi",
+        '      KS_THEN=$(stat -c %Y "$1" 2>/dev/null || true)',
+        '      if [ -n "$KS_NOW" ] && [ -n "$KS_THEN" ]; then',
+        f'        [ $((KS_NOW - KS_THEN)) -gt {stale_seconds} ]',
+        "        return",
+        "      fi",
+        f'      [ -n "$(find "$1" -maxdepth 0 -mmin +{stale_minutes} 2>/dev/null)" ]',
+        "    }",
+        # An earlier stage of this build already holds one: keep it.
+        "    KS_N=0",
+        f'    while [ "$KS_N" -lt {slots} ]; do',
+        '      if [ "$(cat "$KS_LEASES/$KS_N/owner" 2>/dev/null || true)" = "$KS_ME" ]; then',
+        '        KS_LEASE="$KS_LEASES/$KS_N"',
+        "        break",
+        "      fi",
+        "      KS_N=$((KS_N + 1))",
+        "    done",
+        # Otherwise the lowest free one, so a service that only ever runs one
+        # build at a time always lands on slot 0 - its existing warm cache.
+        '    if [ -z "$KS_LEASE" ]; then',
+        "      KS_N=0",
+        "      KS_BROKEN=0",
+        f'      while [ "$KS_N" -lt {slots} ]; do',
+        '        KS_L="$KS_LEASES/$KS_N"',
+        '        if mkdir "$KS_L" 2>/dev/null; then',
+        '          echo "$KS_ME" > "$KS_L/owner" 2>/dev/null',
+        '          KS_LEASE="$KS_L"',
+        "          break",
+        "        fi",
+        '        ks_lease_owner "$KS_L"',
+        '        if [ "$KS_LO" = "$KS_ME" ]; then',
+        '          KS_LEASE="$KS_L"',
+        "          break",
+        "        fi",
+        f'        if [ "$KS_BROKEN" -lt {slots} ] && ks_lease_stale "$KS_L"; then',
+        "          KS_BROKEN=$((KS_BROKEN + 1))",
+        '          echo "[kubesight] Cache slot $KS_N was held by build ${KS_LO:-?}, which stopped renewing it; taking it over."',
+        # Renamed away before it is deleted: only one of two stages breaking
+        # the same stale lease can win the rename, so they cannot both
+        # delete a lease the other has just re-made.
+        '          KS_GONE="$KS_LEASES/.stale-$KS_N-${HOSTNAME:-pod}-$$"',
+        '          if mv "$KS_L" "$KS_GONE" 2>/dev/null; then rm -rf "$KS_GONE" 2>/dev/null; fi',
+        "          continue",
+        "        fi",
+        "        KS_N=$((KS_N + 1))",
+        "      done",
+        "    fi",
+        '    if [ -n "$KS_LEASE" ]; then',
+        '      KUBESIGHT_CACHE_SLOT="${KS_LEASE##*/}"',
+        '      touch "$KS_LEASE" 2>/dev/null || true',
+        '      if [ "$KUBESIGHT_CACHE_SLOT" != 0 ]; then',
+        f'        KUBESIGHT_CACHE_SLOT_DIR="$KUBESIGHT_CACHE_DIR/{SLOTS_DIR_NAME}/$KUBESIGHT_CACHE_SLOT"',
+        "      fi",
+        # Renewed while this stage runs, and by a finished parallel stage
+        # while it waits for the pod to end. It stops on its own once the
+        # shell that started it is gone or the lease is no longer this
+        # build's - released by the collector, or broken by another build.
+        '      KS_HB="${KUBESIGHT_CACHE_LEASE_HEARTBEAT:-60}"',
+        '      if [ "$KS_HB" -gt 0 ] 2>/dev/null && command -v sleep >/dev/null 2>&1; then',
+        "        KS_HB_PARENT=$$",
+        '        ( while sleep "$KS_HB"; do',
+        '            kill -0 "$KS_HB_PARENT" 2>/dev/null || exit 0',
+        '            [ "$(cat "$KS_LEASE/owner" 2>/dev/null || true)" = "$KS_ME" ] || exit 0',
+        '            touch "$KS_LEASE" 2>/dev/null || exit 0',
+        "          done ) </dev/null >/dev/null 2>&1 &",
+        "      fi",
+        "    else",
+        "      KUBESIGHT_CACHE_SLOT=private",
+        '      KUBESIGHT_CACHE_SLOT_DIR="${KUBESIGHT_WORKSPACE:-/workspace}/.kubesight/cache-private"',
+        f'      echo "[kubesight] All {slots} cache slots of this service are held by other builds running now;'
+        ' Gradle, Maven, yarn, BuildKit and Trivy start cold in this build. CI_CACHE_SLOTS sets how many there are."',
+        "    fi",
+        "  fi",
+        "  export KUBESIGHT_CACHE_SLOT KUBESIGHT_CACHE_SLOT_DIR",
+        '  if [ "$KUBESIGHT_CACHE_SLOT_DIR" != "$KUBESIGHT_CACHE_DIR" ]; then',
+        *repoint,
+        # Only the injected repository path is moved; a stage that set its
+        # own MAVEN_OPTS without it keeps what it said.
+        '    case "${MAVEN_OPTS:-}" in',
+        '      *"-Dmaven.repo.local=$KUBESIGHT_CACHE_DIR/maven"*)',
+        '        MAVEN_OPTS=$(printf \'%s\' "$MAVEN_OPTS" | sed "s|-Dmaven.repo.local=$KUBESIGHT_CACHE_DIR/maven|-Dmaven.repo.local=$KUBESIGHT_CACHE_SLOT_DIR/maven|")',
+        "        export MAVEN_OPTS ;;",
+        "    esac",
+        '    if [ "$KUBESIGHT_CACHE_SLOT" != private ]; then',
+        '      echo "[kubesight] Another build of this service is running, so this one uses cache slot'
+        ' $KUBESIGHT_CACHE_SLOT for Gradle, Maven, yarn, BuildKit and Trivy: $KUBESIGHT_CACHE_SLOT_DIR"',
+        "    fi",
+        "  fi",
+    ]
+
+
+def prep_script(
+    *,
+    gradle_init: bool = True,
+    shared=(),
+    slots: int = DEFAULT_SLOTS,
+    stale_seconds: int = DEFAULT_LEASE_STALE_SECONDS,
+) -> str:
     """Shell that makes this service's subtree exist. Run by every stage.
 
     Runs OUTSIDE the stage's own ``set -e`` subshell and never exits non-zero: a
@@ -382,23 +594,49 @@ def prep_script(*, gradle_init: bool = True, shared=()) -> str:
     there instead. It is known at manifest time, so it shapes the text.
     """
     shared_dirs = shared_subdirs(shared)
-    paths = [
-        f'"$KUBESIGHT_SHARED_CACHE_DIR/{name}"' if name in shared_dirs
-        else f'"$KUBESIGHT_CACHE_DIR/{name}"'
-        for name in PRECREATED_SUBDIRS
-    ]
+    paths = [f'"{_parent_var(name, shared_dirs)}/{name}"' for name in PRECREATED_SUBDIRS]
     dirs = " ".join(paths)
-    own_probes = [name for name in WARMTH_PROBE_DIRS if name not in shared_dirs]
     shared_probes = [name for name in WARMTH_PROBE_DIRS if name in shared_dirs]
-    init_path = f'"$KUBESIGHT_CACHE_DIR/gradle/init.d/{GRADLE_INIT_SCRIPT_NAME}"'
-    lines = [
-        'if [ -n "${KUBESIGHT_CACHE_DIR:-}" ]; then',
-        f"  if mkdir -p {dirs} 2>/dev/null; then",
+    slot_probes = [
+        name for name in WARMTH_PROBE_DIRS
+        if name not in shared_dirs and _top(name) in SLOT_SUBDIRS
     ]
+    own_probes = [
+        name for name in WARMTH_PROBE_DIRS
+        if name not in shared_dirs and name not in slot_probes
+    ]
+    init_path = f'"$KUBESIGHT_CACHE_SLOT_DIR/gradle/init.d/{GRADLE_INIT_SCRIPT_NAME}"'
+    lines = (
+        ['if [ -n "${KUBESIGHT_CACHE_DIR:-}" ]; then']
+        + lease_script(slots=slots, stale_seconds=stale_seconds)
+        + [f"  if mkdir -p {dirs} 2>/dev/null; then"]
+    )
     if gradle_init:
-        lines.append(f"    cat > {init_path} <<'KS_GRADLE_INIT' 2>/dev/null || true")
+        # Written aside and renamed into place, and only when it changed. Every
+        # stage of every build of this service writes this one file, and a
+        # plain `cat >` truncates it first: a Gradle starting in a parallel
+        # stage at that moment read half a script and failed to compile it.
+        # The temporary name ends in .tmp, never .gradle, because Gradle runs
+        # every *.gradle in init.d.
+        lines.extend(
+            [
+                f"    KS_GI={init_path}",
+                '    KS_GI_TMP=$(mktemp "$KS_GI.XXXXXX.tmp" 2>/dev/null || echo "$KS_GI.$$.tmp")',
+                "    if cat > \"$KS_GI_TMP\" 2>/dev/null <<'KS_GRADLE_INIT'",
+            ]
+        )
         lines.extend(GRADLE_INIT_SCRIPT.rstrip("\n").split("\n"))
-        lines.append("KS_GRADLE_INIT")
+        lines.extend(
+            [
+                "KS_GRADLE_INIT",
+                "    then",
+                '      if cmp -s "$KS_GI_TMP" "$KS_GI" 2>/dev/null; then rm -f "$KS_GI_TMP";'
+                ' else mv -f "$KS_GI_TMP" "$KS_GI" 2>/dev/null || rm -f "$KS_GI_TMP"; fi',
+                "    else",
+                '      rm -f "$KS_GI_TMP" 2>/dev/null',
+                "    fi",
+            ]
+        )
     else:
         lines.append("    :")
     lines.extend(
@@ -425,13 +663,23 @@ def prep_script(*, gradle_init: bool = True, shared=()) -> str:
             # report warm on a first build — the build whose answer matters.
             "    KS_WARM=",
             "    KS_COLD=",
-            "    for KS_DIR in " + " ".join(own_probes) + "; do",
-            '      if [ -n "$(ls -A "$KUBESIGHT_CACHE_DIR/$KS_DIR" 2>/dev/null)" ]; then',
-            '        KS_WARM="$KS_WARM $KS_DIR"',
-            "      else",
-            '        KS_COLD="$KS_COLD $KS_DIR"',
-            "      fi",
-            "    done",
+        ]
+        + [
+            line
+            for parent, names in (
+                ("$KUBESIGHT_CACHE_SLOT_DIR", slot_probes),
+                ("$KUBESIGHT_CACHE_DIR", own_probes),
+            )
+            if names
+            for line in (
+                "    for KS_DIR in " + " ".join(names) + "; do",
+                f'      if [ -n "$(ls -A "{parent}/$KS_DIR" 2>/dev/null)" ]; then',
+                '        KS_WARM="$KS_WARM $KS_DIR"',
+                "      else",
+                '        KS_COLD="$KS_COLD $KS_DIR"',
+                "      fi",
+                "    done",
+            )
         ]
         + (
             [
@@ -514,8 +762,122 @@ def _sh_quote(value: str) -> str:
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
+# One install at a time per build pod. Parallel stages share the workspace and
+# the service's yarn cache, and two installs at once - into one node_modules,
+# or unpacking into one yarn cache - leave either broken. Worse, a stage that
+# saves its node_modules while a sibling is still installing into it archives a
+# half-built tree under a key that every later build trusts. So the restore,
+# each install command and the save take this lock; the rest of each stage
+# (the build, the tests) still runs side by side. The lock is in the
+# workspace, which is local to the pod, so staleness by mtime is safe there.
+NODE_INSTALL_LOCK_STALE_MINUTES = 2
+NODE_INSTALL_LOCK_HEARTBEAT_SECONDS = 20
+
+
+def _node_install_lock_lines(tag: str, stage: str) -> List[str]:
+    owner = _sh_quote(stage or "another stage")
+    return [
+        "ks_nm_lock() {",
+        "  KS_NM_LOCK=",
+        # Kubernetes and both agents set it. Without one there is no pod-wide
+        # place to lock in, and no sibling to lock against.
+        '  [ -n "${KUBESIGHT_WORKSPACE:-}" ] || return 0',
+        "  command -v sleep >/dev/null 2>&1 || return 0",
+        '  KS_NM_LOCKS="$KUBESIGHT_WORKSPACE/.kubesight/locks"',
+        '  mkdir -p "$KS_NM_LOCKS" 2>/dev/null || return 0',
+        '  KS_NM_TRY="$KS_NM_LOCKS/node-install"',
+        "  KS_NM_WAIT0=",
+        '  until mkdir "$KS_NM_TRY" 2>/dev/null; do',
+        f'    if [ -n "$(find "$KS_NM_TRY" -maxdepth 0 -mmin +{NODE_INSTALL_LOCK_STALE_MINUTES} 2>/dev/null)" ]; then',
+        f'      echo "{tag} the install lock held by $(cat "$KS_NM_TRY/owner" 2>/dev/null || echo a stage) is stale; taking it."',
+        '      rm -rf "$KS_NM_TRY" 2>/dev/null',
+        "      continue",
+        "    fi",
+        '    if [ -z "$KS_NM_WAIT0" ]; then KS_NM_WAIT0=$(date +%s); KS_NM_SAID=; KS_NM_TRIES=0; fi',
+        # Said once, naming the holder - which may take a moment to appear,
+        # between its mkdir and its write of the owner file.
+        "    KS_NM_TRIES=$((KS_NM_TRIES + 1))",
+        '    KS_NM_WHO=$(cat "$KS_NM_TRY/owner" 2>/dev/null || true)',
+        '    if [ -z "$KS_NM_SAID" ] && { [ -n "$KS_NM_WHO" ] || [ "$KS_NM_TRIES" -ge 3 ]; }; then',
+        "      KS_NM_SAID=1",
+        f'      echo "{tag} waiting for ${{KS_NM_WHO:-another stage}},'
+        ' which is installing in this build pod; two installs at once break node_modules and the yarn cache."',
+        "    fi",
+        "    sleep 1",
+        "  done",
+        f"  KS_NM_TOKEN={owner}\" (${{HOSTNAME:-pod}} $$ $(date +%s))\"",
+        '  echo "$KS_NM_TOKEN" > "$KS_NM_TRY/owner" 2>/dev/null',
+        '  KS_NM_LOCK="$KS_NM_TRY"',
+        '  if [ -n "$KS_NM_WAIT0" ]; then',
+        f'    echo "{tag} waited $(( $(date +%s) - KS_NM_WAIT0 ))s for the install lock."',
+        "  fi",
+        # Renewed while held. If the shell holding it dies part way through (a
+        # timeout's TERM), the renewer removes the lock itself - but only while
+        # it still carries this holder's token.
+        "  KS_NM_PARENT=$$",
+        "  ( while sleep " + str(NODE_INSTALL_LOCK_HEARTBEAT_SECONDS) + "; do",
+        '      [ "$(cat "$KS_NM_LOCK/owner" 2>/dev/null || true)" = "$KS_NM_TOKEN" ] || exit 0',
+        '      if ! kill -0 "$KS_NM_PARENT" 2>/dev/null; then rm -rf "$KS_NM_LOCK"; exit 0; fi',
+        '      touch "$KS_NM_LOCK" 2>/dev/null || exit 0',
+        "    done ) </dev/null >/dev/null 2>&1 &",
+        "  KS_NM_RENEW=$!",
+        "}",
+        "ks_nm_unlock() {",
+        '  if [ -n "${KS_NM_RENEW:-}" ]; then kill "$KS_NM_RENEW" 2>/dev/null || true; fi',
+        "  KS_NM_RENEW=",
+        '  if [ -n "${KS_NM_LOCK:-}" ]; then rm -rf "$KS_NM_LOCK" 2>/dev/null || true; fi',
+        "  KS_NM_LOCK=",
+        "  return 0",
+        "}",
+        # Which calls are installs. The same rules as runs_node_install, on the
+        # words of one call: npm ci|install|i|add, pnpm install|i|add, and
+        # yarn with nothing but flags, or install|add.
+        "ks_nm_is_install() {",
+        '  KS_NM_TOOL="$1"',
+        "  shift",
+        '  case "$KS_NM_TOOL" in',
+        '    npm) case "${1:-}" in ci|install|i|add) return 0 ;; esac ;;',
+        '    pnpm) case "${1:-}" in install|i|add) return 0 ;; esac ;;',
+        "    yarn)",
+        "      while [ $# -gt 0 ]; do",
+        '        case "$1" in',
+        "          --cwd|--modules-folder|--cache-folder|--mutex|--network-timeout) shift 2 ;;",
+        "          -*) shift ;;",
+        "          install|add) return 0 ;;",
+        "          *) return 1 ;;",
+        "        esac",
+        "      done",
+        "      return 0 ;;",
+        "  esac",
+        "  return 1",
+        "}",
+        # Runs one call, under the lock when it is an install. The status is
+        # captured with && || so `set -e` cannot leave with the lock held.
+        "ks_nm_run() {",
+        # The words to judge: the call itself, or what corepack is told to run.
+        '  KS_NM_PROBE="$*"',
+        '  if [ "$1" = corepack ]; then shift; KS_NM_PROBE="$*"; set -- corepack "$@"; fi',
+        '  if [ -z "${KS_NM_LOCK:-}" ] && ks_nm_is_install $KS_NM_PROBE; then',
+        "    ks_nm_lock || true",
+        '    command "$@" && KS_NM_RUN_RC=0 || KS_NM_RUN_RC=$?',
+        "    ks_nm_unlock",
+        '    return "$KS_NM_RUN_RC"',
+        "  fi",
+        '  command "$@"',
+        "}",
+        'yarn() { ks_nm_run yarn "$@"; }',
+        'pnpm() { ks_nm_run pnpm "$@"; }',
+        'corepack() { ks_nm_run corepack "$@"; }',
+    ]
+
+
 def node_modules_wrap(
-    commands: str, *, image: str = "", workdir: str = "", keep: int = NODE_MODULES_KEEP
+    commands: str,
+    *,
+    image: str = "",
+    workdir: str = "",
+    keep: int = NODE_MODULES_KEEP,
+    stage: str = "",
 ) -> str:
     """The stage's own commands, with a node_modules restore before them and a
     save after them.
@@ -659,20 +1021,25 @@ def node_modules_wrap(
         '  find "$KS_NM_DIR" -name ".*.partial" -mmin +60 -exec rm -f {} + 2>/dev/null',
         "  return 0",
         "}",
+    ]
+    lines.extend(_node_install_lock_lines(tag, stage))
+    lines.extend([
         "npm() {",
         '  if [ "${1:-}" = ci ] && [ -n "${KUBESIGHT_NODE_MODULES_RESTORED:-}" ]; then',
         "    shift",
         '    echo "[kubesight] npm ci -> npm install --no-save: node_modules was restored for'
         ' this exact lockfile, and npm ci would delete it first."',
-        '    command npm install --no-save --prefer-offline --no-audit --no-fund "$@"',
+        '    ks_nm_run npm install --no-save --prefer-offline --no-audit --no-fund "$@"',
         "    return",
         "  fi",
-        '  command npm "$@"',
+        '  ks_nm_run npm "$@"',
         "}",
+        "ks_nm_lock || true",
         "ks_nm_prepare || true",
+        "ks_nm_unlock",
         commands,
         "KS_NM_RC=$?",
-        'if [ "$KS_NM_RC" -eq 0 ]; then ks_nm_save || true; fi',
+        'if [ "$KS_NM_RC" -eq 0 ]; then ks_nm_lock || true; ks_nm_save || true; ks_nm_unlock; fi',
         '(exit "$KS_NM_RC")',
-    ]
+    ])
     return "\n".join(lines)
