@@ -569,6 +569,65 @@ def lease_script(*, slots: int = DEFAULT_SLOTS, stale_seconds: int = DEFAULT_LEA
     ]
 
 
+# Every variable tool_env points into the cache, as a path. MAVEN_OPTS is a
+# string of flags and is rewritten apart; the two KUBESIGHT_CACHE names are
+# the directory itself.
+_COLD_FALLBACK_VARS = tuple(
+    name
+    for name in _service_tool_env("/x")
+    if name not in ("KUBESIGHT_CACHE_DIR", "KUBESIGHT_CACHE", "MAVEN_OPTS")
+) + ("TRIVY_CACHE_DIR",)
+
+
+def _cold_fallback(dirs: str) -> List[str]:
+    """Shell that moves every tool off a cache it cannot write.
+
+    "Runs cold" has to be true. Leaving the variables pointing at the
+    unwritable volume does not give a cold build, it gives a failed one:
+    Gradle cannot unpack its native library into GRADLE_USER_HOME
+    ("Failed to load native library 'libnative-platform.so'"), Maven cannot
+    write its repository, Dependency-Check cannot create its database. So each
+    of them is pointed at the same layout under the workspace instead - empty,
+    gone with the pod, but writable. node_modules is not saved there: an
+    archive nobody will ever restore is only disk spent.
+    """
+    names = " ".join(_COLD_FALLBACK_VARS)
+    return [
+        '    KS_COLD_DIR="${KUBESIGHT_WORKSPACE:-/tmp}/.kubesight/cache-cold"',
+        '    KS_OLD="$KUBESIGHT_CACHE_DIR"',
+        '    KS_OLD_SHARED="${KUBESIGHT_SHARED_CACHE_DIR:-}"',
+        f"    for KS_VAR in {names}; do",
+        '      eval "KS_VAL=\\${$KS_VAR:-}"',
+        '      KS_NEW="$KS_VAL"',
+        '      case "$KS_VAL" in',
+        '        "$KS_OLD"/*) KS_NEW="$KS_COLD_DIR${KS_VAL#"$KS_OLD"}" ;;',
+        "      esac",
+        '      if [ -n "$KS_OLD_SHARED" ]; then',
+        '        case "$KS_VAL" in',
+        '          "$KS_OLD_SHARED"/*) KS_NEW="$KS_COLD_DIR/_shared${KS_VAL#"$KS_OLD_SHARED"}" ;;',
+        "        esac",
+        "      fi",
+        '      if [ "$KS_NEW" != "$KS_VAL" ]; then eval "$KS_VAR=\\$KS_NEW; export $KS_VAR"; fi',
+        "    done",
+        '    case "${MAVEN_OPTS:-}" in',
+        '      *"-Dmaven.repo.local=$KS_OLD"*)',
+        '        MAVEN_OPTS=$(printf \'%s\' "$MAVEN_OPTS" | sed "s|-Dmaven.repo.local=$KS_OLD|-Dmaven.repo.local=$KS_COLD_DIR|")',
+        "        export MAVEN_OPTS ;;",
+        "    esac",
+        '    KUBESIGHT_CACHE_DIR="$KS_COLD_DIR"',
+        '    KUBESIGHT_CACHE="$KS_COLD_DIR"',
+        '    KUBESIGHT_CACHE_SLOT=cold',
+        '    KUBESIGHT_CACHE_SLOT_DIR="$KS_COLD_DIR"',
+        '    if [ -n "$KS_OLD_SHARED" ]; then KUBESIGHT_SHARED_CACHE_DIR="$KS_COLD_DIR/_shared"; fi',
+        "    KUBESIGHT_NODE_MODULES_CACHE=0",
+        "    export KUBESIGHT_CACHE_DIR KUBESIGHT_CACHE KUBESIGHT_CACHE_SLOT KUBESIGHT_CACHE_SLOT_DIR"
+        " KUBESIGHT_SHARED_CACHE_DIR KUBESIGHT_NODE_MODULES_CACHE",
+        f"    mkdir -p {dirs} 2>/dev/null || true",
+        '    echo "[kubesight] Every tool uses $KS_COLD_DIR for this build instead.'
+        " Fix the volume's ownership to make the cache work: see CI-CACHE.md.\" >&2",
+    ]
+
+
 def prep_script(
     *,
     gradle_init: bool = True,
@@ -609,7 +668,10 @@ def prep_script(
     lines = (
         ['if [ -n "${KUBESIGHT_CACHE_DIR:-}" ]; then']
         + lease_script(slots=slots, stale_seconds=stale_seconds)
-        + [f"  if mkdir -p {dirs} 2>/dev/null; then"]
+        # The error is kept, not thrown away: "not writable" alone cannot tell
+        # a root-owned directory from a read-only export from an NFS server
+        # squashing every write to nobody, and each has a different fix.
+        + [f"  if KS_MKDIR_ERR=$(mkdir -p {dirs} 2>&1); then"]
     )
     if gradle_init:
         # Written aside and renamed into place, and only when it changed. Every
@@ -707,6 +769,12 @@ def prep_script(
             "  else",
             '    echo "[kubesight] Cache directory $KUBESIGHT_CACHE_DIR is not writable;'
             ' this build runs cold." >&2',
+            '    echo "[kubesight]   ${KS_MKDIR_ERR:-mkdir failed without saying why}" >&2',
+            '    echo "[kubesight]   running as $(id 2>/dev/null || echo "uid $(id -u 2>/dev/null)");'
+            ' $(ls -ld /kubesight-cache 2>/dev/null)" >&2',
+        ]
+        + _cold_fallback(dirs)
+        + [
             "  fi",
             "else",
             # The single most common reason a build is still slow, and until now

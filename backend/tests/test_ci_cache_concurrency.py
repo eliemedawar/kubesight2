@@ -453,3 +453,61 @@ def test_which_calls_count_as_installs(words, expected):
         capture_output=True, text=True, timeout=_TIMEOUT,
     )
     assert done.stdout.strip() == ("yes" if expected else "no")
+
+
+# ---------------------------------------------------------------------------
+# A cache that cannot be written
+# ---------------------------------------------------------------------------
+
+@needs_sh
+def test_an_unwritable_cache_really_runs_cold_instead_of_failing(tmp_path):
+    """Build jpts: "Cache directory /kubesight-cache/jpts is not writable; this
+    build runs cold" - and then Gradle failed with "Failed to load native
+    library 'libnative-platform.so'", because GRADLE_USER_HOME still pointed
+    at the volume it could not write. Every tool must move somewhere writable."""
+    blocker = tmp_path / "volume-is-a-file"
+    blocker.write_text("mkdir under me fails, like a volume this uid cannot write\n")
+    base = f"{blocker.as_posix()}/jpts"
+    shared_base = f"{blocker.as_posix()}/_shared"
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    env = dict(os.environ)
+    env.update(cache_layout.tool_env(base, shared_base, cache_layout.DEFAULT_SHARED))
+    env.update(
+        {
+            "KUBESIGHT_CACHE_DIR": base,
+            "KUBESIGHT_BUILD_ID": "7",
+            "KUBESIGHT_WORKSPACE": ws.as_posix(),
+            "TRIVY_CACHE_DIR": f"{base}/trivy",
+            "KUBESIGHT_CACHE_LEASE_HEARTBEAT": "0",
+        }
+    )
+    script = (
+        cache_layout.prep_script(shared=cache_layout.DEFAULT_SHARED)
+        + _REPORT
+        + 'echo "DC_DATA_DIR=$DC_DATA_DIR"\n'
+        + 'echo "KUBESIGHT_CACHE_DIR=$KUBESIGHT_CACHE_DIR"\n'
+        + 'echo "NM=$KUBESIGHT_NODE_MODULES_CACHE"\n'
+    )
+    done = subprocess.run(
+        [SH, _script_file("set -u\n" + script)], env=env, capture_output=True, text=True, timeout=_TIMEOUT
+    )
+    assert done.returncode == 0, done.stderr
+    assert "is not writable" in done.stderr
+    # The real reason is in the log, not just the verdict.
+    assert "mkdir" in done.stderr and "running as" in done.stderr
+    seen = _parse(done.stdout)
+    cold = f"{ws.as_posix()}/.kubesight/cache-cold"
+    assert seen["KUBESIGHT_CACHE_DIR"] == cold
+    assert seen["GRADLE_USER_HOME"] == f"{cold}/gradle"
+    assert seen["TRIVY_CACHE_DIR"] == f"{cold}/trivy"
+    assert seen["npm_config_cache"] == f"{cold}/_shared/npm"
+    assert seen["DC_DATA_DIR"] == f"{cold}/_shared/dependency-check-data"
+    assert f"-Dmaven.repo.local={cold}/maven" in seen["MAVEN_OPTS"]
+    assert cache_layout.MAVEN_LOCK_OPTS in seen["MAVEN_OPTS"]
+    assert seen["NM"] == "0"
+    # The directories a tool will not create for itself exist where it now looks.
+    assert (ws / ".kubesight/cache-cold/gradle/init.d").is_dir()
+    assert (ws / ".kubesight/cache-cold/_shared/dependency-check-data").is_dir()
+    # Nothing still names the volume it could not write.
+    assert blocker.as_posix() not in done.stdout.replace(done.stderr, "")
