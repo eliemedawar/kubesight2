@@ -85,6 +85,10 @@ def link_to_dict(row: CiServiceDeployment, live: Optional[Dict[str, Any]] = None
         "workloadName": row.workload_name,
         "containerName": row.container_name or "",
         "environment": row.environment or "",
+        # Created from this inventory template when it is not there yet.
+        "templateId": row.template_id or "",
+        "templateName": _template_name(row.template_id),
+        "templateAnswers": row.template_answers or {"env": {}, "volumes": {}},
         "source": row.source or "manual",
         # Whether a linked-mode Deploy stage can deploy here: only when whoever
         # linked it could deploy there. Re-checked when a build uses it.
@@ -98,6 +102,17 @@ def link_to_dict(row: CiServiceDeployment, live: Optional[Dict[str, Any]] = None
     if live is not None:
         data["live"] = live
     return data
+
+
+def _template_name(template_id: Optional[str]) -> str:
+    if not template_id:
+        return ""
+    from .deploy_templates import template_label
+
+    try:
+        return template_label(template_id)
+    except Exception:
+        return str(template_id)
 
 
 def service_ref(service: CiService, link: Optional[CiServiceDeployment] = None) -> Dict[str, Any]:
@@ -234,6 +249,29 @@ def _editable_fields(payload: Dict[str, Any], current: Optional[CiServiceDeploym
                 "dashes and underscores)."
             )
         out["environment"] = environment or None
+    if "templateId" in payload or current is None:
+        template_id = _clean(payload.get("templateId"), 120)
+        if template_id:
+            from .deploy_templates import lookup
+
+            template = lookup(template_id)
+            if template is None:
+                raise DeploymentLinkError(f"The inventory template '{template_id}' does not exist.")
+            if (template.get("workloadType") or "Deployment") != "Deployment":
+                raise DeploymentLinkError(
+                    f"The template '{template.get('name')}' is a {template.get('workloadType')}; "
+                    "a deployment link needs a Deployment template."
+                )
+        out["template_id"] = template_id or None
+    if "templateAnswers" in payload or current is None:
+        try:
+            out["template_answers"] = (
+                deploy_config.template_answers(payload.get("templateAnswers"), "This link")
+                if out.get("template_id", getattr(current, "template_id", None))
+                else None
+            )
+        except deploy_config.DeployConfigError as exc:
+            raise DeploymentLinkError(str(exc))
     return out
 
 
@@ -377,12 +415,16 @@ def _upsert_from_target(service: CiService, config: Dict[str, Any], actor, *, st
     workload = config.get("deploymentName") or ""
     if not (cluster_id and namespace and workload):
         return None
+    template_id, template_answers = _stage_template(config)
     row = find_link(cluster_id, namespace, workload)
     if row is not None:
         if row.service_id != service.id:
             return None
         if not row.container_name and config.get("containerName"):
             row.container_name = config["containerName"]
+        if not row.template_id and template_id:
+            row.template_id = template_id
+            row.template_answers = template_answers
         if not row.authorized_by and stamp:
             row.authorized_by = dict(stamp)
         db.session.add(row)
@@ -396,6 +438,10 @@ def _upsert_from_target(service: CiService, config: Dict[str, Any], actor, *, st
         workload_kind="Deployment",
         workload_name=workload,
         container_name=config.get("containerName") or None,
+        # The template the stage creates it from, so a "linked deployment"
+        # stage elsewhere (a shared pipeline) can create it the same way.
+        template_id=template_id,
+        template_answers=template_answers,
         source="deploy_stage",
         # The stage's own authority stamp is exactly "may deploy there".
         authorized_by=dict(stamp) if stamp else None,
@@ -404,6 +450,15 @@ def _upsert_from_target(service: CiService, config: Dict[str, Any], actor, *, st
     db.session.add(row)
     service.deployment_links.append(row)
     return row
+
+
+def _stage_template(config: Dict[str, Any]):
+    from .deploy_templates import uses_template
+
+    if config.get("createIfMissing") and uses_template(config):
+        create = config.get("create") or {}
+        return create.get("templateId"), dict(create.get("answers") or {"env": {}, "volumes": {}})
+    return None, None
 
 
 def record_from_stages(pipeline, normalized: List[Dict[str, Any]], actor) -> None:
@@ -488,6 +543,16 @@ def resolve_snapshot_targets(service: CiService, stage_definitions: List[Dict[st
                 "linkId": link.id,
             }
         )
+        if link.template_id:
+            # Not there yet → created from the template the link names.
+            config["createIfMissing"] = True
+            config["create"] = {
+                **(config.get("create") or {}),
+                "source": "template",
+                "templateId": link.template_id,
+                "templateName": _template_name(link.template_id),
+                "answers": link.template_answers or {"env": {}, "volumes": {}},
+            }
 
 
 def _pick_link(service: CiService, environment: str) -> Tuple[Optional[CiServiceDeployment], str]:

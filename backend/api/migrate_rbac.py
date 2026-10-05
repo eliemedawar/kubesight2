@@ -850,6 +850,11 @@ def _migrate_ci_columns() -> None:
         # A service pipeline that builds with a shared one. NULL = its own
         # stages, which is what every pipeline had before.
         _add_column_if_missing("ci_pipelines", "linked_pipeline_id", "INTEGER")
+    if "ci_service_deployments" in existing:
+        # Create-from-template for a linked deployment that is not there yet.
+        _add_column_if_missing("ci_service_deployments", "template_id", "VARCHAR(120)")
+        _add_column_if_missing("ci_service_deployments", "template_answers", "JSON")
+        _retype_json_column("ci_service_deployments", "template_answers")
     if "ci_pipeline_stages" in existing:
         # Added after the table shipped: db.create_all() will not alter an
         # existing table, so a deployed database needs this backfilled. Existing

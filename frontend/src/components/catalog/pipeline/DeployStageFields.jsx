@@ -14,6 +14,7 @@ import {
   setDeployTargetMode,
 } from "./deployModel.js";
 import { PlIcon } from "./icons.jsx";
+import TemplatePicker from "./TemplatePicker.jsx";
 import { timeoutLabel } from "./stageModel.js";
 
 /**
@@ -102,6 +103,7 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
   const imageStageBefore = stages.slice(0, index).some((other) => other.stageType === "container_image" && other.enabled !== false);
   const fixedImage = Boolean(deploy.image) || deploy.imageMode === "fixed";
   const form = deploy.create || {};
+  const fromTemplate = (form.source || "form") === "template";
   const service = form.service || {};
   const clusterName = (clusters.find((item) => item.id === deploy.clusterId) || {}).name || deploy.clusterId;
   const namespaceItems = namespaces.clusterId === deploy.clusterId ? namespaces.items : [];
@@ -385,7 +387,7 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
             <strong>Create it if it is missing</strong>
             <p>
               Used only when {deploy.deploymentName ? <code>{deploy.deploymentName}</code> : "the deployment"} is
-              not in the namespace. Once it exists, builds change nothing but its image.
+              not in the namespace{fromTemplate && form.templateName ? <> — created from the inventory template <strong>{form.templateName}</strong></> : ""}. Once it exists, builds change nothing but its image.
               {existing && deploy.createIfMissing && (
                 <>
                   {" "}
@@ -406,6 +408,47 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
         </div>
         {deploy.createIfMissing && (!existing || showCreate) && (
           <div className="pl-scan-body">
+            <Field label="Create it from">
+              <Segmented
+                label="Create it from"
+                value={fromTemplate ? "template" : "form"}
+                options={[
+                  { value: "template", label: "A template from the inventory" },
+                  { value: "form", label: "This form" },
+                ]}
+                disabled={!editable}
+                onChange={(source) => setCreate({ source })}
+              />
+            </Field>
+            {fromTemplate ? (
+              <Field
+                label="Inventory template"
+                hint="From Inventory → Templates. The deployment, its Service and storage come from it; the image is the one this build pushed."
+              >
+                <TemplatePicker
+                  id={`${ids}-template`}
+                  value={form.templateId}
+                  namespace={deploy.namespace}
+                  deploymentName={deploy.deploymentName}
+                  containerName={deploy.containerName}
+                  answers={form.answers}
+                  onAnswersChange={(answers) => set({ create: { answers } })}
+                  disabled={!editable}
+                  onChange={(template) =>
+                    set({
+                      create: {
+                        templateId: template?.id || "",
+                        templateName: template?.name || "",
+                        // Answers belong to one template's questions.
+                        ...(template?.id !== form.templateId ? { answers: { env: {}, volumes: {} } } : {}),
+                      },
+                      ...(template && !deploy.deploymentName ? { deploymentName: template.deploymentName } : {}),
+                    })
+                  }
+                />
+              </Field>
+            ) : (
+            <>
             {!form.customManifest && (
               <>
                 <div className="pl-grid pl-deploy-form">
@@ -498,6 +541,8 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
                 }
               />
             </Field>
+            </>
+            )}
           </div>
         )}
       </div>
@@ -583,6 +628,7 @@ function LinkedPreview({ isHome, links, environment }) {
       <p>
         <strong>Deploys to {link.clusterId} / {link.namespace} / {link.workloadName}</strong>
         {link.environment ? <> · {link.environment}</> : null}
+        {link.templateName ? <> · created from the template {link.templateName} if it is not there</> : null}
         <small>
           {link.canDeployThrough
             ? `With the rights of ${link.authorizedBy || "whoever linked it"}, re-checked when the build runs.`

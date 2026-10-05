@@ -906,6 +906,29 @@ def _stamp_deploy_authority(
         )
 
 
+def _check_deploy_templates(normalized: List[Dict[str, Any]]) -> None:
+    """A Deploy stage that creates its deployment from an inventory template
+    must name one a build can actually render — checked now, while someone is
+    looking at the editor, rather than when the first deployment is missing."""
+    from . import deploy_templates
+
+    for stage in normalized:
+        config = stage.get("deploy")
+        if stage["stage_type"] != "deploy" or not config or stage.get("enabled") is False:
+            continue
+        if deploy_config.is_linked(config) or not config.get("createIfMissing"):
+            continue
+        if not deploy_templates.uses_template(config):
+            continue
+        try:
+            deploy_templates.check(config, stage["name"])
+        except deploy_templates.DeployTemplateError as exc:
+            raise PipelineError(str(exc), code="invalid_deploy")
+        config["create"]["templateName"] = deploy_templates.template_label(
+            config["create"]["templateId"]
+        )
+
+
 def _stamp_linked_deploy(pipeline: CiPipeline, stage: Dict[str, Any], config: Dict[str, Any], actor) -> None:
     """A stage that deploys to the service's linked deployment.
 
@@ -1055,6 +1078,7 @@ def _apply_stages(
         )
     check_parallel_groups(normalized)
     check_deploy_stages_last(normalized)
+    _check_deploy_templates(normalized)
     _default_store_upload_apps(pipeline, normalized)
     # Before the clear below: the stamps being carried over live on the rows
     # that are about to be replaced.

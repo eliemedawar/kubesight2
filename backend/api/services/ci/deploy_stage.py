@@ -40,6 +40,7 @@ from ...db import db
 from ...k8s_provider import K8sCommandError, should_use_real_k8s
 from ...models_ci import CiArtifact, CiBuild, CiBuildStage
 from . import deploy_config
+from . import deploy_templates
 from . import logs as logs_service
 
 logger = logging.getLogger(__name__)
@@ -380,15 +381,17 @@ def _advance_resolve(
             )
             return
         try:
-            manifest, planned = deploy_config.render_manifest(config, image)
-        except deploy_config.DeployConfigError as exc:
-            _fail(stage, str(exc))
+            manifest, planned = _creation_manifest(config, image)
+        except (deploy_config.DeployConfigError, ValueError) as exc:
+            _fail(stage, f"{exc} Nothing was deployed.")
             return
         created = [item for item in planned if not _object_exists(config, item, real)]
         _save(
             stage,
             {
-                "containerName": config.get("containerName") or config["deploymentName"],
+                "containerName": _container_running(manifest, image)
+                or config.get("containerName")
+                or config["deploymentName"],
                 "previousImage": None,
                 "created": True,
                 "createdResources": created,
@@ -397,6 +400,11 @@ def _advance_resolve(
         _log(
             stage,
             f"Deployment '{config['deploymentName']}' is not there yet — creating "
+            + (
+                f"it from the inventory template '{(config.get('create') or {}).get('templateName') or config['create']['templateId']}': "
+                if deploy_templates.uses_template(config)
+                else ""
+            )
             + ", ".join(f"{item['kind']}/{item['name']}" for item in planned),
         )
 
@@ -897,6 +905,37 @@ def _apply(user, config: Dict[str, Any], manifest: str, note: str, real: bool):
     if queued is not None:
         return queued
     return {"applied": True, "output": "[mock] applied", **(validation or {})}, None, 200
+
+
+def _container_running(manifest: str, image: str) -> str:
+    """The container of the created Deployment that was given ``image`` — a
+    template's container is rarely named after the deployment."""
+    try:
+        for doc in deploy_config.parse_manifest(manifest):
+            if doc.get("kind") != "Deployment":
+                continue
+            for container in deploy_config._containers(doc):
+                if container.get("image") == image:
+                    return str(container.get("name") or "")
+    except deploy_config.DeployConfigError:
+        pass
+    return ""
+
+
+def _creation_manifest(config: Dict[str, Any], image: str):
+    """What creates a missing deployment: the stage's own manifest, or the
+    inventory template it names — read now, so the template's current
+    version is what gets created."""
+    if deploy_templates.uses_template(config):
+        return deploy_templates.render(
+            config["create"]["templateId"],
+            namespace=config["namespace"],
+            deployment_name=config["deploymentName"],
+            container_name=config.get("containerName") or "",
+            image=image,
+            answers=(config.get("create") or {}).get("answers"),
+        )
+    return deploy_config.render_manifest(config, image)
 
 
 def _earlier_failure(build: CiBuild, stage: CiBuildStage) -> str:

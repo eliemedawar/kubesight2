@@ -464,3 +464,16 @@ export const updateCiDeploymentLink = (serviceId, linkId, payload) =>
 
 export const deleteCiDeploymentLink = (serviceId, linkId) =>
   request(`${linksPath(serviceId)}/${encodeURIComponent(linkId)}`, { method: "DELETE" });
+
+// ---------------------------------------------------------------------------
+// Inventory templates a Deploy stage or a deployment link creates from
+// ---------------------------------------------------------------------------
+
+export const listCiDeployTemplates = () => request("/api/ci/deploy-templates");
+
+/** What a build would create from a template there — or why it cannot. */
+export const previewCiDeployTemplate = (templateId, { namespace, deploymentName, containerName = "", answers }) =>
+  request(`/api/ci/deploy-templates/${encodeURIComponent(templateId)}/preview`, {
+    method: "POST",
+    body: { namespace, deploymentName, containerName, answers },
+  });

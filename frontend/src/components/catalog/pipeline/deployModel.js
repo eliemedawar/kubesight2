@@ -22,6 +22,13 @@ export const SERVICE_TYPES = [
 ];
 
 export const blankCreateForm = () => ({
+  // "form": the manifest generated from the fields below. "template": an
+  // inventory template (Inventory → Templates), read when the build deploys.
+  // New stages start from the inventory: that is where the deployment's real
+  // definition lives. Stages saved before templates existed read as "form".
+  source: "template",
+  templateId: "",
+  templateName: "",
   port: 8080,
   replicas: 1,
   cpuRequest: "100m",
@@ -225,6 +232,9 @@ export function deployProblems(deploy) {
   }
   if (deploy.image && /\s/.test(deploy.image)) add("An image reference cannot contain spaces.");
   const form = deploy.create || {};
+  const fromTemplate = deploy.createIfMissing && form.source === "template";
+  if (fromTemplate && !form.templateId) add("Pick the inventory template to create the deployment from.");
+  if (fromTemplate) return problems;
   for (const [key, label] of [
     ["cpuRequest", "CPU request"],
     ["cpuLimit", "CPU limit"],

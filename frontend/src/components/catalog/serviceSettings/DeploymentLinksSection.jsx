@@ -13,6 +13,7 @@ import SearchableSelect from "../../common/SearchableSelect.jsx";
 import { formatRelative } from "../ciShared.jsx";
 import { Field } from "../pipeline/controls.jsx";
 import { PlIcon } from "../pipeline/icons.jsx";
+import TemplatePicker from "../pipeline/TemplatePicker.jsx";
 
 const SOURCE_LABELS = {
   manual: "Linked by hand",
@@ -20,7 +21,15 @@ const SOURCE_LABELS = {
   deploy_stage: "From the Deploy stage",
 };
 
-const blank = { clusterId: "", namespace: "", workloadName: "", containerName: "", environment: "" };
+const blank = {
+  clusterId: "",
+  namespace: "",
+  workloadName: "",
+  containerName: "",
+  environment: "",
+  templateId: "",
+  templateAnswers: { env: {}, volumes: {} },
+};
 
 /**
  * Which deployments in the inventory this service builds.
@@ -168,6 +177,8 @@ export default function DeploymentLinksSection({ service, canEdit, canDeploy, on
 function LinkRow({ link, canEdit, canDeploy, busy, labelling, onLabel, onCancelLabel, onSaveLabel, onReauthorize, onRemove }) {
   const [environment, setEnvironment] = useState(link.environment || "");
   const [container, setContainer] = useState(link.containerName || "");
+  const [templateId, setTemplateId] = useState(link.templateId || "");
+  const [templateAnswers, setTemplateAnswers] = useState(link.templateAnswers || { env: {}, volumes: {} });
   const live = link.live || null;
   const href = buildRoute({ key: "applicationDetails", params: { appId: link.inventoryId } });
   return (
@@ -181,6 +192,11 @@ function LinkRow({ link, canEdit, canDeploy, busy, labelling, onLabel, onCancelL
             {link.namespace}/{link.workloadName}
           </code>
           {link.environment && <span className="pl-tag is-info">{link.environment}</span>}
+          {link.templateName && (
+            <span className="pl-tag" title="Created from this inventory template if it is not there">
+              Template · {link.templateName}
+            </span>
+          )}
           <span className="pl-tag">{SOURCE_LABELS[link.source] || link.source}</span>
         </strong>
         <small>
@@ -189,7 +205,7 @@ function LinkRow({ link, canEdit, canDeploy, busy, labelling, onLabel, onCancelL
           {link.createdAt ? ` · linked ${formatRelative(link.createdAt)}` : ""}
           {link.createdBy ? ` by ${link.createdBy}` : ""}
         </small>
-        <LiveLine live={live} />
+        <LiveLine live={live} templateName={link.templateName} />
         {!link.canDeployThrough && (
           <small className="st-link-warn">
             <PlIcon name="alert" /> A Deploy stage set to “the service's linked deployment” cannot deploy here:
@@ -221,6 +237,31 @@ function LinkRow({ link, canEdit, canDeploy, busy, labelling, onLabel, onCancelL
                   autoFocus
                 />
               </Field>
+              <Field
+                label="Template if it is not there"
+                optional
+                wide
+                hint="The inventory template a Deploy stage creates it from when the deployment is missing."
+              >
+                <TemplatePicker
+                  id={`st-link-tpl-${link.id}`}
+                  value={templateId}
+                  namespace={link.namespace}
+                  deploymentName={link.workloadName}
+                  containerName={container}
+                  answers={templateAnswers}
+                  onAnswersChange={setTemplateAnswers}
+                  onChange={(template) => {
+                    if ((template?.id || "") !== templateId) setTemplateAnswers({ env: {}, volumes: {} });
+                    setTemplateId(template?.id || "");
+                  }}
+                />
+                {templateId && (
+                  <button type="button" className="btn-ghost pl-link" onClick={() => setTemplateId("")}>
+                    No template
+                  </button>
+                )}
+              </Field>
               <Field label="Container" htmlFor={`st-link-ct-${link.id}`} optional hint="The one whose image a build replaces.">
                 <input
                   id={`st-link-ct-${link.id}`}
@@ -240,7 +281,9 @@ function LinkRow({ link, canEdit, canDeploy, busy, labelling, onLabel, onCancelL
                 type="button"
                 className="primary btn-compact"
                 disabled={busy}
-                onClick={() => onSaveLabel({ environment: environment.trim(), containerName: container })}
+                onClick={() =>
+                  onSaveLabel({ environment: environment.trim(), containerName: container, templateId, templateAnswers })
+                }
               >
                 <PlIcon name="check" /> Save
               </button>
@@ -275,12 +318,15 @@ function LinkRow({ link, canEdit, canDeploy, busy, labelling, onLabel, onCancelL
   );
 }
 
-function LiveLine({ live }) {
+function LiveLine({ live, templateName }) {
   if (!live) return null;
   if (live.state === "missing") {
     return (
       <small className="st-link-live is-warn">
-        Not found in the inventory right now — removed, renamed, or not created yet.
+        Not on the cluster yet
+        {templateName
+          ? ` — the first deploy creates it from the template ${templateName}.`
+          : " — removed, renamed, or not created yet. Give it a template to have a deploy create it."}
       </small>
     );
   }
@@ -418,10 +464,42 @@ function LinkForm({ value, serviceId, busy, onChange, onCancel, onSave }) {
             aria-label="Deployment"
             value={value.workloadName}
             disabled={!value.namespace}
-            placeholder={value.namespace ? "Pick a deployment…" : "Pick a namespace first"}
-            searchPlaceholder="Search deployments…"
+            placeholder={value.namespace ? "Pick a deployment, or name a new one…" : "Pick a namespace first"}
+            searchPlaceholder="Search, or type a new name…"
+            allowCustom
+            customOptionLabel={(name) => `Not there yet: “${name.toLowerCase()}”`}
             options={options}
-            onChange={(event) => set({ workloadName: event.target.value, containerName: "" })}
+            onChange={(event) =>
+              set({ workloadName: String(event.target.value || "").trim().toLowerCase(), containerName: "" })
+            }
+          />
+        </Field>
+        <Field
+          label={picked ? "Template if it is ever removed" : "Create it from an inventory template"}
+          optional={Boolean(picked) || !value.workloadName}
+          wide
+          hint={
+            picked
+              ? "It exists, so builds only change its image. A template is used only if it disappears."
+              : "Not on the cluster yet: the first build that deploys to this link creates it from this template. Picking one with no name above names it after the template."
+          }
+        >
+          <TemplatePicker
+            id="st-link-template"
+            value={value.templateId}
+            namespace={value.namespace}
+            deploymentName={value.workloadName}
+            containerName={value.containerName}
+            answers={value.templateAnswers}
+            onAnswersChange={(templateAnswers) => set({ templateAnswers })}
+            disabled={!value.namespace}
+            onChange={(template) =>
+              set({
+                templateId: template?.id || "",
+                templateAnswers: { env: {}, volumes: {} },
+                ...(template && !value.workloadName ? { workloadName: template.deploymentName } : {}),
+              })
+            }
           />
         </Field>
         {containers.length > 1 ? (

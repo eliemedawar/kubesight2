@@ -455,6 +455,15 @@ def deploy_wizard_templates():
     templates = list_templates()
     if _can_manage_templates():
         templates = templates + list_user_template_summaries()
+    # "Built by": the CI services whose Deploy stage or deployment link creates
+    # their deployment from each template (services/ci/deploy_templates.py).
+    try:
+        from ..services.ci.deploy_templates import builders_by_template
+
+        builders = builders_by_template()
+    except Exception:  # The template list must load even if CI cannot be read.
+        builders = {}
+    templates = [{**item, "ciServices": builders.get(str(item.get("id")), [])} for item in templates]
     return success_response(templates)
 
 

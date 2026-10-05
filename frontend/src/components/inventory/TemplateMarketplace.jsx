@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import "../../styles/signal/sharedPipelines.css";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 
 import {
@@ -348,6 +349,14 @@ export default function TemplateMarketplace({
                             <span className="template-card__badge">{template.workloadType}</span>
                           </div>
                           <p className="template-card__description muted">{template.description}</p>
+                          {template.ciServices?.length ? (
+                            <span
+                              className="sp-builtby template-card__builtby"
+                              title="CI services whose Deploy stage or deployment link creates their deployment from this template"
+                            >
+                              Built by {template.ciServices.map((item) => item.name).join(", ")}
+                            </span>
+                          ) : null}
                         </button>
                         {onGenerateForm ? (
                           <button

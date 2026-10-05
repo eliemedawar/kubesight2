@@ -14,8 +14,10 @@ import {
 } from "./deployModel.js";
 import { blankStage, changeKindPatch, fieldsLostOnKindChange, stageProblems, stageSummary } from "./stageModel.js";
 
+// The form path; new stages default to an inventory template (tested below).
 const target = (extra = {}) => ({
   ...blankDeploy(),
+  create: { ...blankDeploy().create, source: "form" },
   clusterId: "prod",
   namespace: "payments",
   deploymentName: "payments-api",
@@ -78,7 +80,7 @@ describe("deployProblems", () => {
   });
 
   it("holds names and quantities to the Kubernetes rules", () => {
-    const bad = target({ namespace: "Payments", create: { ...blankDeploy().create, memoryLimit: "lots" } });
+    const bad = target({ namespace: "Payments", create: { ...blankDeploy().create, source: "form", memoryLimit: "lots" } });
     const messages = deployProblems(bad).map((item) => item.message).join(" ");
     expect(messages).toContain("namespace must be lowercase");
     expect(messages).toContain("“lots” is not a Kubernetes quantity");
@@ -161,5 +163,19 @@ describe("linked deploy targets", () => {
     expect(pickLinkedDeployment([prod, uat], "uat").link).toBe(uat);
     expect(pickLinkedDeployment([prod, uat], "SIT").problem).toMatch(/No linked deployment/);
     expect(pickLinkedDeployment([], "").problem).toMatch(/not linked/);
+  });
+});
+
+describe("creating from an inventory template", () => {
+  it("is what a new stage starts with", () => {
+    expect(blankDeploy().create.source).toBe("template");
+  });
+
+  it("needs a template, and then no manifest", () => {
+    const deploy = target({ create: { ...blankDeploy().create, source: "template", templateId: "" }, manifest: "" });
+    expect(deployProblems(deploy).map((p) => p.message)).toEqual([
+      "Pick the inventory template to create the deployment from.",
+    ]);
+    expect(deployProblems({ ...deploy, create: { ...deploy.create, templateId: "acquiring-ui" } })).toEqual([]);
   });
 });

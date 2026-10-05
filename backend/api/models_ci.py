@@ -1043,6 +1043,14 @@ class CiServiceDeployment(db.Model):
     # A free label (SIT, UAT, PROD...) a Deploy stage can select by when the
     # service is linked to more than one deployment.
     environment = db.Column(db.String(64), nullable=True)
+    # The inventory template (Inventory → Templates; a user_templates slug) to
+    # create the deployment from when it is not there yet. Lets a service be
+    # linked to a deployment that does not exist: its first linked deploy
+    # creates it. See services/ci/deploy_templates.py.
+    template_id = db.Column(db.String(120), nullable=True)
+    # Its answers ({env, volumes}; see deploy_config.template_answers) — names
+    # of existing Secrets/ConfigMaps and plain values, never a credential.
+    template_answers = db.Column(db.JSON, nullable=True)
     source = db.Column(db.String(16), nullable=False, default="manual")
     authorized_by = db.Column(db.JSON, nullable=True)
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)

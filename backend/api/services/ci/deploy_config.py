@@ -39,6 +39,9 @@ SERVICE_TYPES = ("ClusterIP", "NodePort")
 # one shared pipeline deploys each service that uses it to that service's own
 # deployment.
 TARGET_MODES = ("fixed", "linked")
+# Where a missing deployment comes from: the stage's own form/manifest, or an
+# inventory template.
+CREATE_SOURCES = ("form", "template")
 _ENVIRONMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 # The placeholder the generated manifest shows where the image goes. The
 # executor sets the image on the target container whatever the text says, so
@@ -80,6 +83,76 @@ def _quantity(value: Any, what: str, stage_name: str) -> str:
     return text
 
 
+# What a build may answer for an inventory template, by where the value comes
+# from. Never a Secret it would have to write: a credential is referenced by
+# the name of a Secret that already exists, so no value is stored here.
+ENV_ANSWER_SOURCES = ("value", "existingSecret", "existingConfigMap", "createConfigMap")
+VOLUME_ANSWER_SOURCES = ("existingConfigMap", "existingSecret")
+_ANSWER_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+
+
+def template_answers(value: Any, where: str) -> Dict[str, Any]:
+    """Answers for an inventory template's questions, kept on a Deploy stage
+    or a deployment link so a build can render the template unattended.
+
+    ``where`` names the stage/link in messages. Raises DeployConfigError.
+    """
+    value = value if isinstance(value, dict) else {}
+    env_in = value.get("env") if isinstance(value.get("env"), dict) else {}
+    env: Dict[str, Dict[str, str]] = {}
+    for key, raw in list(env_in.items())[:100]:
+        name = _clean(key, 128)
+        if not name or not isinstance(raw, dict):
+            continue
+        source = _clean(raw.get("source"), 32)
+        if not source:
+            continue
+        if source == "createSecret":
+            raise DeployConfigError(
+                f"{where}: '{name}' would create a Secret. A build never writes credentials — "
+                "choose an existing Secret by name instead."
+            )
+        if source not in ENV_ANSWER_SOURCES:
+            raise DeployConfigError(f"{where}: '{source}' is not a source for '{name}'.")
+        answer = {"source": source}
+        if source in ("value", "createConfigMap"):
+            answer["value"] = str(raw.get("value") if raw.get("value") is not None else "")[:4000]
+        if source in ("existingSecret",):
+            answer["secretName"] = _answer_name(raw.get("secretName"), name, "Secret", where)
+        if source in ("existingConfigMap", "createConfigMap"):
+            answer["configMapName"] = _answer_name(raw.get("configMapName"), name, "ConfigMap", where)
+        if source != "value":
+            answer["key"] = _clean(raw.get("key"), 253) or name
+        env[name] = answer
+    volumes_in = value.get("volumes") if isinstance(value.get("volumes"), dict) else {}
+    volumes: Dict[str, Dict[str, str]] = {}
+    for path, raw in list(volumes_in.items())[:50]:
+        mount = _clean(path, 512)
+        if not mount or not isinstance(raw, dict):
+            continue
+        source = _clean(raw.get("source"), 32)
+        if not source:
+            continue
+        if source not in VOLUME_ANSWER_SOURCES:
+            raise DeployConfigError(
+                f"{where}: the volume at '{mount}' must come from an existing ConfigMap or Secret — "
+                "a build does not create the files it mounts."
+            )
+        field = "configMapName" if source == "existingConfigMap" else "secretName"
+        kind = "ConfigMap" if source == "existingConfigMap" else "Secret"
+        volumes[mount] = {"source": source, field: _answer_name(raw.get(field), mount, kind, where)}
+    return {"env": env, "volumes": volumes}
+
+
+def _answer_name(value: Any, what: str, kind: str, where: str) -> str:
+    name = _clean(value, 253)
+    if not name:
+        raise DeployConfigError(f"{where}: name the {kind} '{what}' comes from.")
+    if not _ANSWER_NAME_RE.match(name):
+        raise DeployConfigError(f"{where}: '{name}' is not a valid {kind} name.")
+    return name
+
+
 def _create_form(value: Any, stage_name: str) -> Dict[str, Any]:
     """The form the manifest was generated from, kept so it can be re-edited.
 
@@ -102,7 +175,27 @@ def _create_form(value: Any, stage_name: str) -> Dict[str, Any]:
         raise DeployConfigError(
             f"Stage '{stage_name}': Service type must be one of {', '.join(SERVICE_TYPES)}."
         )
+    source = _clean(value.get("source"), 16).lower() or "form"
+    if source not in CREATE_SOURCES:
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{source}' is not a way to create the deployment."
+        )
+    template_id = _clean(value.get("templateId"), 120)
+    if source == "template" and not template_id:
+        raise DeployConfigError(
+            f"Stage '{stage_name}': pick the inventory template to create the deployment from."
+        )
     return {
+        # "form": the manifest below. "template": an inventory template, read
+        # when the build deploys (services/ci/deploy_templates.py).
+        "source": source,
+        "templateId": template_id if source == "template" else "",
+        "templateName": _clean(value.get("templateName"), 160) if source == "template" else "",
+        "answers": (
+            template_answers(value.get("answers"), f"Stage '{stage_name}'")
+            if source == "template"
+            else {"env": {}, "volumes": {}}
+        ),
         "port": _int_or_none(value.get("port"), low=1, high=65535, what="the container port", stage_name=stage_name),
         "replicas": _int_or_none(value.get("replicas"), low=0, high=100, what="replicas", stage_name=stage_name) or 1,
         "cpuRequest": _quantity(value.get("cpuRequest"), "CPU request", stage_name),
@@ -248,7 +341,10 @@ def normalize(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str
 
     create_if_missing = bool(value.get("createIfMissing"))
     manifest = str(value.get("manifest") or "").strip()
-    if create_if_missing:
+    create = _create_form(value.get("create"), stage_name)
+    # A template is rendered and checked by the pipeline validator, which can
+    # read the inventory; this module stays free of the database.
+    if create_if_missing and create["source"] != "template":
         check_manifest(
             manifest,
             namespace=namespace,
@@ -269,7 +365,7 @@ def normalize(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str
         # off, so a pipeline saved before links existed links on its next save.
         "linkToService": value.get("linkToService") is not False,
         "createIfMissing": create_if_missing,
-        "create": _create_form(value.get("create"), stage_name),
+        "create": create,
         # Kept when create-if-missing is off, so turning it back on does not lose
         # what was written. It is only ever applied while the switch is on.
         "manifest": manifest[:MAX_MANIFEST_CHARS],
@@ -343,6 +439,14 @@ def signature(config: Optional[Dict[str, Any]]) -> str:
         "createIfMissing": create,
         "manifest": (config.get("manifest") or "") if create else "",
     }
+    if create and (config.get("create") or {}).get("source") == "template":
+        # Creating from an inventory template authorizes that template, not
+        # the (unused) manifest text.
+        material["manifest"] = ""
+        material["templateId"] = (config.get("create") or {}).get("templateId") or ""
+        # Which Secret/ConfigMap the template's variables come from is part of
+        # what is deployed, so changing an answer needs someone who can deploy.
+        material["answers"] = (config.get("create") or {}).get("answers") or {}
     if is_linked(config):
         # Only for linked stages, so every fixed target saved before linked
         # mode existed keeps the signature its authority stamp was taken on.

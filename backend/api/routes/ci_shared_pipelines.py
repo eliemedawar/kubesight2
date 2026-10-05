@@ -25,6 +25,7 @@ from ..auth_utils import get_current_user
 from ..decorators import require_permission
 from ..response import error_response, success_response
 from ..services.ci import catalog as catalog_service
+from ..services.ci import deploy_templates as templates_service
 from ..services.ci import deployment_links as links_service
 from ..services.ci import pipelines as pipelines_service
 from ..services.ci import shared_pipelines as shared_service
@@ -131,6 +132,50 @@ def detach_shared_pipeline(service_id: int):
     except _USER_ERRORS as exc:
         return error_response(str(exc), 400)
     return success_response(data)
+
+
+# ---------------------------------------------------------------------------
+# Inventory templates a Deploy stage or a link can create from
+# ---------------------------------------------------------------------------
+
+@ci_shared_bp.route("/deploy-templates", methods=["GET"])
+@require_permission("ci_pipelines:view")
+def list_deploy_templates():
+    """The inventory's deployment templates, as a Deploy stage picker needs them.
+
+    Summaries only (name, category, containers, default image), so a person who
+    may edit pipelines can pick one without being able to manage templates.
+    """
+    items = templates_service.summaries()
+    return success_response({"items": items, "count": len(items)})
+
+
+@ci_shared_bp.route("/deploy-templates/<template_id>/preview", methods=["POST"])
+@require_permission("ci_pipelines:view")
+def preview_deploy_template(template_id: str):
+    """What a build would create from this template in that namespace, or why
+    it cannot. Never applies anything."""
+    payload = _payload()
+    try:
+        text, created = templates_service.render(
+            template_id,
+            namespace=str(payload.get("namespace") or "default"),
+            deployment_name=str(payload.get("deploymentName") or ""),
+            container_name=str(payload.get("containerName") or ""),
+            answers=_preview_answers(payload.get("answers")),
+        )
+    except templates_service.DeployTemplateError as exc:
+        return success_response({"ok": False, "error": str(exc)})
+    return success_response({"ok": True, "yaml": text, "creates": created})
+
+
+def _preview_answers(value):
+    from ..services.ci import deploy_config
+
+    try:
+        return deploy_config.template_answers(value, "The template")
+    except deploy_config.DeployConfigError as exc:
+        raise templates_service.DeployTemplateError(str(exc))
 
 
 # ---------------------------------------------------------------------------
