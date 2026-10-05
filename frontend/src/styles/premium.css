@@ -413,3 +413,15 @@ kbd {
   background: var(--accent-soft);
   color: var(--text-strong);
 }
+
+/* Terminals and log wells stay dark in both themes, so the page's selection
+   (dark text on a faint tint) would turn selected lines dark-on-dark there. */
+:is(.sg-ci-logs-body, .sg-mx-card-log, .sg-ci-help-block pre, .sg-ci-gen-commands,
+    .sg-tok-value, .al-logwell, .sg-cb-log, .sg-cb-cmdline,
+    .exec-pod-modal__terminal, .exec-pod-modal__form) ::selection,
+:is(.sg-ci-logs-body, .sg-mx-card-log, .sg-ci-help-block pre, .sg-ci-gen-commands,
+    .sg-tok-value, .al-logwell, .sg-cb-log, .sg-cb-cmdline,
+    .exec-pod-modal__terminal, .exec-pod-modal__form)::selection {
+  background: rgba(120, 160, 255, 0.4);
+  color: #ffffff;
+}
