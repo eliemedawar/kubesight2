@@ -145,6 +145,46 @@ Before you write:
   person to add it.
 - **`kubesight_pipeline_save` discards every existing stage.** Use it to rewrite
   a pipeline wholesale, never to change one thing.
+- **Never hardcode `/workspace` in commands.** It is the Kubernetes runner's
+  directory; on an agent the build lives elsewhere on that machine and the stage
+  fails with "No such file or directory". Write `$KUBESIGHT_SOURCE` for the
+  checkout (`/workspace/source` on Kubernetes) and `$KUBESIGHT_WORKSPACE` for
+  the workspace — both runners export them — and the cache paths as
+  `$KUBESIGHT_CACHE_DIR`, `$GRADLE_USER_HOME` and friends, which are already set.
+  Put them in `commands`, never in a stage's `env`: Kubernetes does not expand
+  `$VAR` in an environment value, so it arrives as that literal text.
+- **Commands run under `sh`, not bash** (`dash` in Debian-based images). Bash-only
+  syntax — `[[ ]]`, arrays, `${VAR//a/b}`, `${VAR^^}`, `${VAR:0:3}` — stops the
+  stage with `/bin/sh: N: Bad substitution`.
+- **Write a Gradle/Groovy file with a quoted heredoc, never `printf`/`echo` of
+  double-quoted lines.** The shell expands `${...}` inside double quotes, and a
+  Groovy `${p.path}` is not a shell variable — so the stage dies with
+  `Bad substitution` before Gradle starts. `\\${p.path}` is the same bug: `\\`
+  is one literal backslash and the `${` is still expanded. With `<<'EOF'` (the
+  quotes matter) the shell expands nothing and the Groovy is written exactly as
+  typed:
+
+  ```sh
+  init="$KUBESIGHT_WORKSPACE/kubesight-repositories-init.gradle"
+  cat > "$init" <<'EOF'
+  allprojects { p ->
+    repositories.all { r ->
+      if (r instanceof MavenArtifactRepository && (r.url?.toString() ?: '').contains('jpos.org/maven')) {
+        println "KubeSight: rewriting ${p.path} jpos repository to internal Maven mirror"
+        r.setUrl('https://registry.areeba.com:4443/repository/maven-public/')
+      }
+    }
+  }
+  EOF
+  ```
+
+  When a file genuinely needs both a shell value and a Groovy `${...}`, keep the
+  heredoc quoted and pass the shell value as an environment variable the Groovy
+  reads (`System.getenv('NEXUS_USER')`). If you must stay inside double quotes,
+  the Groovy one is `\${p.path}` — exactly one backslash.
+- **An init script in `init.d` already exists.** KubeSight writes
+  `$GRADLE_USER_HOME/init.d/kubesight-build-cache.gradle` before every stage;
+  give yours another name and pass it with `-I`, never write over that one.
 - **A scan is a field on the image stage, never a stage you add.** There is no
   `scan` stage to insert between "build" and "push", because build and push are
   one stage — `imageScan` is what splits them. A stage called "Scan" after the
@@ -261,7 +301,7 @@ yes before calling it. There is deliberately no tool that switches a service's
 checks off or re-sends a verdict: relaxing a gate to get a merge through is the
 failure the gate exists to prevent, and it stays a human action in the UI.
 
-## The two hard questions
+## The hard questions
 
 **"Why is this build stuck queued?"**
 Almost always one of three things, in this order of likelihood:
@@ -271,6 +311,31 @@ Almost always one of three things, in this order of likelihood:
    `kubesight_runners_list`. Remember it is a **superset** test: labels spread
    across two machines match neither.
 3. Every compatible runner is at capacity.
+
+**"`Could not find or load main class org.gradle.wrapper.GradleWrapperMain`"**
+The repository has `gradlew` and `gradle/wrapper/gradle-wrapper.properties` but
+not `gradle/wrapper/gradle-wrapper.jar` — almost always a `*.jar` line in
+`.gitignore` that swallowed it. Nothing in the pipeline or the cache causes this.
+Confirm before saying so: `kubesight_repo_tree {service, pathPrefix: "gradle/wrapper"}`
+(and the module's own `<module>/gradle/wrapper` in a monorepo).
+
+Two fixes; say both, and recommend the first:
+1. **Commit the jar** — a developer runs `gradle wrapper` once and
+   `git add -f gradle/wrapper/gradle-wrapper.jar`. KubeSight cannot commit; it is
+   a person's change to the repository.
+2. **Build with the image's Gradle instead** — the pipeline change you can make:
+   - The Gradle version is `distributionUrl` in
+     `kubesight_repo_file {service, path: "gradle/wrapper/gradle-wrapper.properties"}`
+     (`gradle-7.6.1-bin.zip` → `7.6.1`).
+   - The Java version is `sourceCompatibility`/`toolchain` in `build.gradle`, or
+     the JDK of the runtime image in the Dockerfile (`openjdk11` → `11`).
+   - The image is `<registry>/gradle:<gradle>-jdk<java>`, e.g.
+     `registry.areeba.com/gradle:7.6.1-jdk11` — the registry host is the one in
+     `kubesight_build_environments`, never Docker Hub directly. Prefer a catalog
+     entry when one matches. Old Gradle does not run on new JDKs, so not every
+     pair exists: `kubesight_image_check` the exact tag **before** saving it.
+   - Set that image on the stage, replace `./gradlew` with `gradle` in its
+     commands and drop any `chmod +x ./gradlew`. Keep the tasks and flags.
 
 **"Why did the push not happen when the build succeeded?"**
 Read the image stage's log. A blocked scan prints `Scan BLOCKED the push` and
