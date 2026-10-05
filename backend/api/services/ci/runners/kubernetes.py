@@ -53,6 +53,7 @@ import shlex
 import socket
 import subprocess
 import threading
+import time
 import zlib
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -1643,6 +1644,23 @@ _SECURITY_CONTEXT = {
 
 _DEFAULT_REQUESTS = {"cpu": "100m", "memory": "256Mi"}
 
+# Why a stage container can sit in "waiting" forever. Pull failures can be a
+# passing registry hiccup, so they get CI_IMAGE_PULL_GRACE_SECONDS; a name that
+# cannot be a valid image never will be.
+_PULL_REASONS = frozenset({"ErrImagePull", "ImagePullBackOff", "InvalidImageName", "ErrImageNeverPull"})
+_START_FAILURES = frozenset(
+    {"ErrImagePull", "ImagePullBackOff", "CreateContainerConfigError", "CreateContainerError"}
+)
+_START_FAILURES_AT_ONCE = frozenset({"InvalidImageName", "ErrImageNeverPull"})
+# When each stuck container was first seen, and the log lines explaining the
+# ones given up on - read once by drain_logs. In memory: a restarted backend
+# only restarts the grace.
+_start_trouble_since: Dict[str, float] = {}
+_start_failure_notes: Dict[str, List[str]] = {}
+# Jobs deleted because a stage could not start: the stages after it read as
+# skipped, not as "deleted out from under us".
+_abandoned_jobs: Dict[str, float] = {}
+
 
 def _scanning(execution: StageExecution) -> bool:
     return execution.stage_type == "container_image" and scanning_requested(execution)
@@ -2873,6 +2891,8 @@ class KubernetesJobRunnerAdapter:
         verdicts: Dict[str, Dict[int, str]],
     ) -> str:
         if job is None:
+            if job_name in _abandoned_jobs:
+                return SKIPPED  # An earlier stage could not start; see its log.
             return FAILED  # Deleted out from under us — the reaper's case.
 
         job_status = job.get("status") or {}
@@ -2894,6 +2914,8 @@ class KubernetesJobRunnerAdapter:
         status = self._container_status(pod, container)
         if status is None:
             return QUEUED
+        if self._cannot_start(job_name, container, status):
+            return FAILED
 
         terminated = (status.get("state") or {}).get("terminated")
         if terminated is not None:
@@ -2930,6 +2952,60 @@ class KubernetesJobRunnerAdapter:
         if int(job_status.get("failed") or 0) > 0:
             return FAILED  # An earlier container failed; this one never ran.
         return QUEUED
+
+    def _cannot_start(self, job_name: str, container: str, status: dict) -> bool:
+        """Whether this stage's container will never start, so the stage fails
+        now instead of sitting "running" until the Job's deadline.
+
+        A container kubelet cannot pull or create stays in ``waiting`` for good -
+        a tag the registry does not have, a layer the mirror lost - and nothing
+        in the pod ever terminates to say so. Pull errors get a short grace,
+        because one registry hiccup clears on kubelet's next try; a name that
+        can never resolve fails at once. When it gives up it says why in the
+        stage's log and deletes the Job, which would otherwise hold its node
+        resources retrying the pull until the deadline.
+        """
+        waiting = (status.get("state") or {}).get("waiting") or {}
+        reason = str(waiting.get("reason") or "")
+        key = f"{job_name}#{container}"
+        if reason not in _START_FAILURES and reason not in _START_FAILURES_AT_ONCE:
+            _start_trouble_since.pop(key, None)
+            return False
+        now = time.monotonic()
+        if len(_start_trouble_since) > 500:
+            _start_trouble_since.clear()
+        first_seen = _start_trouble_since.setdefault(key, now)
+        try:
+            grace = max(0, int(_env("CI_IMAGE_PULL_GRACE_SECONDS", "60")))
+        except ValueError:
+            grace = 60
+        if reason not in _START_FAILURES_AT_ONCE and now - first_seen < grace:
+            return False
+        _start_trouble_since.pop(key, None)
+        image = str(status.get("image") or "")
+        detail = str(waiting.get("message") or "").strip()
+        if len(_start_failure_notes) > 500:
+            _start_failure_notes.clear()
+        _start_failure_notes[key] = [
+            f"[kubesight] This stage never started: Kubernetes reports {reason} for {image or 'its image'}.",
+            *([f"[kubesight]   {detail}"] if detail else []),
+            "[kubesight] "
+            + (
+                "Check the stage's image name and tag, and that the registry has every layer of it "
+                "(a mirror that lost a layer answers 'not found' for a tag it lists)."
+                if reason in _PULL_REASONS
+                else "A Secret or ConfigMap the container needs is missing, or its settings are invalid."
+            ),
+        ]
+        logger.warning("CI stage %s cannot start (%s): %s", key, reason, detail[:500])
+        if len(_abandoned_jobs) > 500:
+            _abandoned_jobs.clear()
+        _abandoned_jobs[job_name] = now
+        _kubectl(
+            ["delete", "job", job_name, "-n", _namespace(), "--ignore-not-found=true", "--wait=false"],
+            timeout=30,
+        )
+        return True
 
     def _container_status(self, pod: dict, container: str) -> Optional[dict]:
         for status in (pod.get("status") or {}).get("initContainerStatuses") or []:
@@ -3017,6 +3093,8 @@ class KubernetesJobRunnerAdapter:
         group = self._group_of(pod, container) or []
         position = int(_STAGE_CONTAINER_RE.match(container).group(1))
         status = self._container_status(pod, container)
+        if status is not None and self._cannot_start(job_name, container, status):
+            return FAILED
         state = (status or {}).get("state") or {}
         started = bool(
             "running" in state or "terminated" in state or int((status or {}).get("restartCount") or 0)
@@ -3114,6 +3192,14 @@ class KubernetesJobRunnerAdapter:
 
     def drain_logs(self, handle: RunnerHandle, after_seq: int) -> Iterator[LogChunk]:
         job_name, container = _split_ref(handle.external_ref)
+        # A stage that never started has no log of its own; the reason poll
+        # found is its whole log.
+        note = _start_failure_notes.pop(f"{job_name}#{container}", None)
+        if note:
+            for index, content in enumerate(note, start=1):
+                if index > after_seq:
+                    yield LogChunk(seq=index, content=content)
+            return
         lines = self._container_log_lines(job_name, container)
         # The collector's output belongs to the last stage's log — it is the
         # only window into artifact upload problems.

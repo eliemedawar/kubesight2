@@ -19,6 +19,7 @@ from api.services.ci.runners.base import (
     FAILED,
     QUEUED,
     RUNNING,
+    SKIPPED,
     SUCCEEDED,
     TIMEOUT,
     RunnerHandle,
@@ -613,6 +614,85 @@ def test_poll_fails_when_the_job_disappeared():
 
     k8s.set_kubectl_runner(runner)
     assert adapter.poll(_handle("stage-0")) == FAILED
+
+
+def _stuck_cluster(reason, message="", image="registry.areeba.com/gradle:7.3.2-jdk11"):
+    """A pod whose stage-2 waits on an image pull; deleting the Job removes it."""
+    state = {"deleted": False, "calls": []}
+    pod = _pod([
+        {"name": "stage-0", "state": {"terminated": {"exitCode": 0}}},
+        {"name": "stage-1", "state": {"terminated": {"exitCode": 0}}},
+        {"name": "stage-2", "image": image,
+         "state": {"waiting": {"reason": reason, "message": message}}},
+        {"name": "stage-3", "state": {"waiting": {"reason": "PodInitializing"}}},
+    ])
+
+    def runner(args, input_text=None):
+        state["calls"].append(list(args))
+        if args[:2] == ["delete", "job"]:
+            state["deleted"] = True
+            return 0, "", ""
+        if state["deleted"] and args[0] in ("get", "logs"):
+            return 1, "", "NotFound"
+        if args[:2] == ["get", "job"]:
+            return 0, json.dumps({"metadata": {"name": args[2]}, "status": {"active": 1}}), ""
+        if args[:2] == ["get", "pods"]:
+            return 0, json.dumps({"items": [pod]}), ""
+        return 1, "", "container is waiting to start"
+
+    return runner, state
+
+
+def test_a_stage_whose_image_cannot_be_pulled_fails_instead_of_running_forever(monkeypatch):
+    """Build #8: ImagePullBackOff on registry.areeba.com/gradle:7.3.2-jdk11 and
+    the build sat "running" with no output. Past the grace it fails, says why in
+    its own log, and the stuck Job is deleted."""
+    monkeypatch.setenv("CI_IMAGE_PULL_GRACE_SECONDS", "0")
+    message = 'failed to pull and unpack image "registry.areeba.com/gradle:7.3.2-jdk11": not found'
+    runner, state = _stuck_cluster("ImagePullBackOff", message)
+    k8s.set_kubectl_runner(runner)
+    adapter = k8s.KubernetesJobRunnerAdapter()
+
+    assert adapter.poll(_handle("stage-2")) == FAILED
+    assert any(call[:2] == ["delete", "job"] for call in state["calls"])
+
+    log = [chunk.content for chunk in adapter.drain_logs(_handle("stage-2"), 0)]
+    assert any("ImagePullBackOff" in line and "gradle:7.3.2-jdk11" in line for line in log)
+    assert any(message in line for line in log)
+    # Read once: the engine's next drain finds nothing new.
+    assert list(adapter.drain_logs(_handle("stage-2"), len(log))) == []
+
+    # The stage after it never ran: skipped, not "failed".
+    assert adapter.poll(_handle("stage-3")) == SKIPPED
+
+
+def test_a_pull_error_gets_a_grace_before_the_stage_fails(monkeypatch):
+    """One registry hiccup clears on kubelet's next try."""
+    monkeypatch.setenv("CI_IMAGE_PULL_GRACE_SECONDS", "300")
+    runner, state = _stuck_cluster("ErrImagePull", "i/o timeout")
+    k8s.set_kubectl_runner(runner)
+    adapter = k8s.KubernetesJobRunnerAdapter()
+    assert adapter.poll(_handle("stage-2")) == QUEUED
+    assert not state["deleted"]
+
+
+def test_an_image_name_that_can_never_resolve_fails_at_once(monkeypatch):
+    monkeypatch.setenv("CI_IMAGE_PULL_GRACE_SECONDS", "300")
+    runner, state = _stuck_cluster("InvalidImageName", "couldn't parse image reference", image="Bad Image:")
+    k8s.set_kubectl_runner(runner)
+    adapter = k8s.KubernetesJobRunnerAdapter()
+    assert adapter.poll(_handle("stage-2")) == FAILED
+    assert state["deleted"]
+
+
+def test_an_ordinary_wait_is_not_a_failure(monkeypatch):
+    monkeypatch.setenv("CI_IMAGE_PULL_GRACE_SECONDS", "0")
+    runner, state = _stuck_cluster("ImagePullBackOff")
+    k8s.set_kubectl_runner(runner)
+    adapter = k8s.KubernetesJobRunnerAdapter()
+    # stage-3 waits behind the earlier containers (PodInitializing) - normal.
+    assert adapter.poll(_handle("stage-3")) == QUEUED
+    assert not state["deleted"]
 
 
 # ---------------------------------------------------------------------------
