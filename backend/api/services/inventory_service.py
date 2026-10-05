@@ -1016,9 +1016,45 @@ def list_inventory(user: Optional[User], filters: Optional[Dict[str, str]] = Non
         items = filter_inventory_for_user(user, items)
 
     items = _merge_catalog_metadata(items)
+    items = merge_ci_service_links(items)
     items = _apply_list_filters(items, filters)
     items.sort(key=lambda row: (row.get("cluster", ""), row.get("namespace", ""), row.get("name", "")))
     return items, None, 200
+
+
+def merge_ci_service_links(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Mark each row with the CI service that builds it (``ciService``), from
+    the explicit links (services/ci/deployment_links.py). One query for the
+    whole listing; a row no service is linked to gets ``None``."""
+    try:
+        from .ci.deployment_links import index_all, service_ref
+
+        index = index_all()
+    except Exception:  # The inventory must list even if CI is broken.
+        return items
+    for item in items:
+        item["ciService"] = None
+        if not index:
+            continue
+        names = [item.get("name")] + list(item.get("workloadNames") or [])
+        for name in names:
+            link = index.get((str(item.get("cluster") or ""), item.get("namespace") or "", name or ""))
+            if link is not None and link.service is not None:
+                item["ciService"] = service_ref(link.service, link)
+                break
+    return items
+
+
+def ci_service_link_for_detail(detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The ``ciService`` block for an inventory detail payload."""
+    summary = detail.get("summary") or {}
+    row = {
+        "cluster": summary.get("cluster"),
+        "namespace": summary.get("namespace"),
+        "name": summary.get("applicationName"),
+        "workloadNames": [w.get("name") for w in detail.get("workloads") or [] if isinstance(w, dict)],
+    }
+    return (merge_ci_service_links([row])[0] or {}).get("ciService")
 
 
 def summarize_inventory(items: List[Dict[str, Any]]) -> Dict[str, int]:

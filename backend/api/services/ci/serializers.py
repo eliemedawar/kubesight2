@@ -63,9 +63,17 @@ def service_to_dict(
     from . import default_pipelines
 
     pipeline = row.default_pipeline()
-    saved_stage_count = len(pipeline.stages) if pipeline else 0
+    linked = bool(pipeline is not None and pipeline.linked_pipeline_id)
+    # What a build actually runs: a shared pipeline's stages when the service
+    # uses one (shared_pipelines.py), else its own.
+    runs = pipeline.effective() if pipeline is not None else None
+    saved_stage_count = len(runs.stages) if runs is not None else 0
+    is_home = row.is_pipeline_home
     uses_generated_default = (
-        saved_stage_count == 0 and default_pipelines.is_available(row.application_type)
+        not linked
+        and not is_home
+        and saved_stage_count == 0
+        and default_pipelines.is_available(row.application_type)
     )
     effective_stage_count = (
         default_pipelines.stage_count(row.application_type)
@@ -81,6 +89,8 @@ def service_to_dict(
         "criticality": row.criticality,
         "applicationType": row.application_type,
         "status": row.status,
+        # 'service' (CI Services catalog) or 'pipeline' (the Pipelines page).
+        "kind": "pipeline" if is_home else "service",
         "repositoryProvider": row.repository_provider,
         "repositoryUrl": row.repository_url,
         "repositoryWorkspace": row.repository_workspace,
@@ -114,6 +124,14 @@ def service_to_dict(
         "usingDefaultPipeline": uses_generated_default,
         "pipelineId": pipeline.id if pipeline else None,
         "pipelineStageCount": effective_stage_count,
+        "sharedPipeline": _shared_pipeline_of(pipeline) if linked else None,
+        "deploymentLinkCount": len(row.deployment_links) if not is_home else 0,
+        # Pipelines page: how many services build with this one.
+        "usedByCount": (
+            CiPipeline.query.filter_by(linked_pipeline_id=pipeline.id).count()
+            if is_home and pipeline is not None
+            else 0
+        ),
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
     }
@@ -129,6 +147,12 @@ def service_to_dict(
         data["dockerfile"] = row.dockerfile or ""
     data["hasInlineDockerfile"] = bool(row.dockerfile)
     return data
+
+
+def _shared_pipeline_of(pipeline) -> Optional[Dict[str, Any]]:
+    from .shared_pipelines import shared_summary
+
+    return shared_summary(pipeline)
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +243,7 @@ def pipeline_to_dict(row: CiPipeline, *, with_stages: bool = True) -> Dict[str, 
         # What happens when a build ends — see services/ci/post_actions.py.
         # A generated default shows the ones saved on the row it stands in for.
         "postActions": _post_actions_of(row),
+        "linkedPipelineId": getattr(row, "linked_pipeline_id", None),
         "stageCount": len(row.stages),
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
@@ -346,6 +371,13 @@ def build_summary(row: CiBuild) -> Dict[str, Any]:
             if isinstance((row.pipeline_snapshot or {}).get("schedule"), dict)
             else None
         ),
+        # {id, slug, name, pipelineId, version} of the shared pipeline (the
+        # Pipelines page) this build ran with, or None for the service's own.
+        "sharedPipeline": (
+            (row.pipeline_snapshot or {}).get("sharedPipeline")
+            if isinstance((row.pipeline_snapshot or {}).get("sharedPipeline"), dict)
+            else None
+        ),
         "commitSha": row.commit_sha,
         "durationSeconds": row.duration_seconds,
         "queuedAt": _iso(row.queued_at),
@@ -371,6 +403,9 @@ def build_to_dict(row: CiBuild, *, with_stages: bool = True) -> Dict[str, Any]:
         {
             "serviceName": row.service.name if row.service else None,
             "serviceSlug": row.service.slug if row.service else None,
+            "serviceKind": (
+                "pipeline" if row.service is not None and row.service.is_pipeline_home else "service"
+            ),
             "pipelineId": row.pipeline_id,
             "commitMessage": row.commit_message,
             "retryOfBuildId": row.retry_of_build_id,

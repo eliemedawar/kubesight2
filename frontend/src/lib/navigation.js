@@ -19,6 +19,9 @@ export const WORKSPACES = {
     description: "Build pipelines, source analysis and mobile releases",
     tabs: [
       { pageKey: "serviceCatalog", label: "CI Services" },
+      // Pipelines that live outside any service: run on their own, or shared
+      // by the services that build with them.
+      { pageKey: "pipelines", label: "Pipelines" },
       { pageKey: "mobileApps", label: "Mobile Apps" },
     ],
   },

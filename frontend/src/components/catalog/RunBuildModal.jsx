@@ -48,6 +48,9 @@ const byVersionDesc = (a, b) =>
   b.value.localeCompare(a.value, undefined, { numeric: true, sensitivity: "base" });
 
 export default function RunBuildModal({ service, onClose, onStarted }) {
+  // A pipeline from the Pipelines page with no repository has nothing to check
+  // out: the dialog asks only for its build inputs.
+  const noRepository = service.kind === "pipeline" && !service.sourceConfigured;
   const remembered = useMemo(() => loadRemembered(service.id), [service.id]);
   const [refType, setRefType] = useState(remembered?.refType || "branch");
   const [value, setValue] = useState(
@@ -68,6 +71,10 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
 
   useEffect(() => {
     let cancelled = false;
+    if (noRepository) {
+      setLoadingRefs(false);
+      return undefined;
+    }
     (async () => {
       try {
         const data = await listCiBranches(service.id);
@@ -88,7 +95,7 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
     return () => {
       cancelled = true;
     };
-  }, [service.id]);
+  }, [service.id, noRepository]);
 
   useEffect(() => {
     let cancelled = false;
@@ -147,7 +154,7 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
   const exact = pool.some((item) => item.value === value.trim());
 
   const submit = async () => {
-    const ref = value.trim();
+    const ref = noRepository ? service.defaultBranch || "main" : value.trim();
     if (!ref || starting) return;
     setStarting(true);
     setError("");
@@ -157,7 +164,7 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
         refType,
         ...(parameters.length ? { variables: values } : {}),
       });
-      remember(service.id, refType, ref);
+      if (!noRepository) remember(service.id, refType, ref);
       onStarted(build);
     } catch (err) {
       setError(err.message || "Could not start the build.");
@@ -183,11 +190,22 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-card__header">
-          <h3>Run build — {service.name}</h3>
-          <p className="muted">What should this build check out?</p>
+          <h3>
+            {noRepository ? "Run" : "Run build"} — {service.name}
+          </h3>
+          <p className="muted">
+            {noRepository
+              ? parameters.length
+                ? "This pipeline has no repository. Answer its build inputs and it runs its stages."
+                : "This pipeline has no repository and asks nothing — it runs its stages as they are."
+              : "What should this build check out?"}
+          </p>
         </div>
 
         {error && <p className="banner-message error">{error}</p>}
+
+        {!noRepository && (
+          <>
 
         <div className="sg-cat-tabs sg-ci-run-modes" role="group" aria-label="Ref kind">
           <button
@@ -265,6 +283,8 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
             ))
           )}
         </div>
+          </>
+        )}
 
         {parameters.length > 0 && (
           <div className="sg-ci-run-params">
@@ -354,7 +374,7 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
             type="button"
             className="primary sg-cat-new"
             onClick={submit}
-            disabled={starting || !value.trim()}
+            disabled={starting || (!noRepository && !value.trim())}
             title={
               !exact && value.trim() && !loadingRefs && !refsError
                 ? `"${value.trim()}" is not in the list — it will be used as typed`
@@ -362,7 +382,7 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
             }
           >
             <PlayIcon />
-            {starting ? "Starting…" : "Run build"}
+            {starting ? "Starting…" : noRepository ? "Run" : "Run build"}
           </button>
         </div>
       </div>

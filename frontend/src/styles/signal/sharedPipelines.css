@@ -1,0 +1,707 @@
+/*
+ * Pipelines outside services (the Pipelines page), a service that builds with
+ * one, and a service's links to the deployments it builds.
+ *
+ * Scoped to its own sp-* classes, or under .pl-root / .st-root where it sits
+ * inside the pipeline and settings kits. Buttons drawn here carry btn-ghost so
+ * the global button rule in ui-polish.css leaves them alone.
+ */
+
+/* ── Pipelines page: empty intro ─────────────────────────────────────── */
+
+.sp-intro {
+  display: flex;
+  padding: var(--space-6);
+  background:
+    linear-gradient(110deg, var(--accent-soft), transparent 55%),
+    var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+}
+
+.sp-intro-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  max-width: 46rem;
+}
+
+.sp-intro-copy h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: var(--font-size-lg, 1.15rem);
+}
+
+.sp-intro-copy p {
+  margin: 0;
+  color: var(--text-subtle);
+}
+
+.sp-intro-copy ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sp-intro-copy li {
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr);
+  gap: var(--space-2);
+  color: var(--text-main);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+}
+
+.sp-intro-copy li svg {
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-top: 0.15rem;
+  color: var(--accent-strong);
+}
+
+.sp-intro-copy li strong {
+  color: var(--text-strong);
+}
+
+/* ── Pipeline cards ──────────────────────────────────────────────────── */
+
+.sp-card .sp-card-ico svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.sp-card .sp-card-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0 0 0.6rem;
+  padding: 0;
+  list-style: none;
+  counter-reset: sp-stage;
+}
+
+.sp-card .sp-card-stages li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 12rem;
+  padding: 0.1rem 0.5rem 0.1rem 0.2rem;
+  overflow: hidden;
+  color: var(--text-main);
+  background: var(--bg-interactive);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-full);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  counter-increment: sp-stage;
+}
+
+.sp-card .sp-card-stages li::before {
+  content: counter(sp-stage);
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.05rem;
+  height: 1.05rem;
+  color: var(--text-muted);
+  background: var(--bg-panel);
+  border-radius: var(--radius-full);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+}
+
+.sp-card .sp-card-stages li.is-more,
+.sp-card .sp-card-stages li.is-empty {
+  padding-left: 0.5rem;
+  color: var(--text-muted);
+  background: transparent;
+  border-style: dashed;
+  counter-increment: none;
+}
+
+.sp-card .sp-card-stages li.is-more::before,
+.sp-card .sp-card-stages li.is-empty::before {
+  content: none;
+}
+
+.sp-card .sp-tag {
+  gap: 0.3rem;
+  min-height: 0;
+  padding: 0.15rem 0.6rem;
+  color: var(--text-subtle);
+  font-size: 0.6875rem;
+  font-weight: 650;
+}
+
+.sp-card .sp-tag svg {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.sp-card .sp-tag.is-shared {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: var(--info-border, var(--border-strong));
+}
+
+.sp-card button.sp-tag:hover {
+  border-color: var(--border-strong);
+}
+
+.sg-tag.sg-ci-tag--shared {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: var(--info-border, var(--border-strong));
+}
+
+.sg-ci-kind-chip {
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
+/* ── New pipeline dialog ─────────────────────────────────────────────── */
+
+.sp-new {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 34rem;
+}
+
+.sp-new .modal-actions button,
+.sp-picker .modal-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+
+.sp-new .modal-actions svg,
+.sp-picker .modal-actions svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  flex: none;
+}
+
+.sp-start {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.sp-start legend {
+  margin-bottom: 0.35rem;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.sp-start-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+}
+
+.sp-start-option:hover {
+  border-color: var(--border-strong);
+}
+
+.sp-start-option.is-on {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.sp-start-option input {
+  margin-top: 0.2rem;
+}
+
+.sp-start-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.sp-start-option strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+}
+
+.sp-start-option small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.sp-start-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.sp-start-detail .field-hint {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* ── "Use a shared pipeline" picker ──────────────────────────────────── */
+
+.sp-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 38rem;
+}
+
+.sp-picker-empty p {
+  margin: 0;
+  color: var(--text-subtle);
+}
+
+.sp-picker-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 22rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.sp-picker-list li + li {
+  border-top: 1px solid var(--border-soft);
+}
+
+.sp-picker .sp-picker-item {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.7rem;
+  width: 100%;
+  padding: 0.65rem 0.8rem;
+  color: var(--text-main);
+  text-align: left;
+  border-radius: 0;
+}
+
+.sp-picker .sp-picker-item:hover:not(:disabled) {
+  background: var(--bg-interactive);
+}
+
+.sp-picker .sp-picker-item.is-on {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.sp-picker .sp-picker-item:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.sp-picker-glyph {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: var(--radius-md);
+}
+
+.sp-picker-glyph svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.sp-picker-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.sp-picker-copy strong {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+}
+
+.sp-picker-copy small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+}
+
+.sp-picker-copy .sp-picker-stages {
+  overflow: hidden;
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-picker-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.sp-picker-meta small {
+  font-family: var(--font-body, inherit);
+  color: var(--text-muted);
+}
+
+.sp-picker .pl-tag {
+  display: inline-flex;
+  padding: 0.05rem 0.45rem;
+  color: var(--text-subtle);
+  background: var(--bg-interactive);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  font-size: 0.65rem;
+  font-weight: 650;
+}
+
+.sp-picker .pl-tag.is-info {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: var(--info-border, var(--border));
+}
+
+/* ── A service that builds with a shared pipeline ───────────────────── */
+
+.pl-root .sp-shared {
+  border-color: var(--info-border, var(--accent-border));
+  background:
+    linear-gradient(100deg, var(--info-soft), transparent 60%),
+    var(--bg-panel);
+}
+
+.pl-root .sp-shared .pl-starter-glyph {
+  color: var(--info);
+  border-color: var(--info-border, var(--accent-border));
+}
+
+.pl-root .sp-shared-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.pl-root .sp-shared-off {
+  color: var(--warn);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.pl-root .sp-linkbtn,
+.sp-linkbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0.3rem 0.8rem;
+  color: var(--text-subtle);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.pl-root .sp-linkbtn:hover,
+.sp-linkbtn:hover {
+  color: var(--text-main);
+  background: var(--bg-interactive);
+  border-color: var(--border-strong);
+}
+
+.pl-root .sp-linkbtn svg,
+.sp-linkbtn svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.pl-root .sp-reach {
+  margin: 0;
+  border-color: var(--info-border, var(--border));
+  background: var(--info-soft);
+}
+
+.pl-root .sp-reach > svg {
+  color: var(--info);
+}
+
+.pl-root .pl-banner.is-ok {
+  border-color: var(--ok-border);
+  background: var(--ok-soft);
+}
+
+.pl-root .pl-banner.is-ok > svg {
+  color: var(--ok);
+}
+
+/* ── Used by ─────────────────────────────────────────────────────────── */
+
+.sp-usedby .sp-attach {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+}
+
+.sp-usedby .sp-attach-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.sp-usedby .sp-attach-copy strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+}
+
+.sp-usedby .sp-attach-copy small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.sp-usedby .sp-attach-row {
+  display: flex;
+  flex: 1 1 22rem;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 34rem;
+}
+
+.sp-usedby .sp-attach-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.sp-usedby .sp-users {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sp-usedby .sp-user {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem var(--space-5);
+}
+
+.sp-usedby .sp-user + .sp-user {
+  border-top: 1px solid var(--border-soft);
+}
+
+.sp-usedby .sp-user-glyph {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  color: var(--text-subtle);
+  background: var(--bg-interactive);
+  border-radius: var(--radius-md);
+}
+
+.sp-usedby .sp-user-glyph svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.sp-usedby .sp-user-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.sp-usedby .sp-user-copy a {
+  color: var(--text-strong);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.sp-usedby .sp-user-copy a:hover {
+  text-decoration: underline;
+}
+
+.sp-usedby .sp-user-copy small,
+.sp-usedby .sp-user-build small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.sp-usedby .sp-user-build {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* ── Settings → Deployments (the inventory links) ───────────────────── */
+
+.st-root .st-link-icon {
+  color: var(--text-subtle);
+  background: var(--bg-interactive);
+}
+
+.st-root .st-link-icon.is-found {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.st-root .st-link-icon.is-missing {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.st-root .st-link-live {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.st-root .st-link-live code {
+  font-size: 0.7rem;
+}
+
+.st-root .st-link-live.is-warn,
+.st-root .st-link-warn {
+  color: var(--warn);
+}
+
+.st-root .st-link-warn {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.st-root .st-link-warn svg {
+  width: 0.8rem;
+  height: 0.8rem;
+}
+
+.st-root .st-link-status {
+  color: var(--text-main);
+  font-weight: 650;
+}
+
+.st-root .st-link-edit {
+  margin-top: 0.4rem;
+}
+
+.st-root a.st-action {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+/* ── Inventory: "Built by" ───────────────────────────────────────────── */
+
+.sp-builtby {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 100%;
+  padding: 0.1rem 0.5rem;
+  overflow: hidden;
+  color: var(--info);
+  background: var(--info-soft);
+  border: 1px solid var(--info-border, var(--border));
+  border-radius: var(--radius-full);
+  font-size: 0.7rem;
+  font-weight: 650;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-builtby:hover {
+  text-decoration: underline;
+}
+
+.sp-builtby svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  flex: none;
+}
+
+@media (max-width: 640px) {
+  .sp-usedby .sp-user {
+    grid-template-columns: 2rem minmax(0, 1fr);
+  }
+
+  .sp-usedby .sp-user-build {
+    grid-column: 2;
+  }
+
+  .sp-picker .sp-picker-item {
+    grid-template-columns: 2rem minmax(0, 1fr);
+  }
+
+  .sp-picker-meta {
+    grid-column: 2;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.4rem;
+  }
+}
+
+.sp-inventory-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.sp-inventory-link > :first-child {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+/* (0,3,1): beats .sg-ccard > header .sg-ccard-sub, which sets the mono face
+   meant for an application type, not a sentence. */
+.sp-card.sg-ccard > header .sg-ccard-sub {
+  display: -webkit-box;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}

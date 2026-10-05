@@ -17,6 +17,7 @@ import RunBuildModal from "../components/catalog/RunBuildModal.jsx";
 import ServiceFormModal from "../components/catalog/ServiceFormModal.jsx";
 import ServiceOverview from "../components/catalog/ServiceOverview.jsx";
 import ServiceSettingsPanel from "../components/catalog/ServiceSettingsPanel.jsx";
+import SharedPipelineUsedBy from "../components/catalog/SharedPipelineUsedBy.jsx";
 import SourcePanel from "../components/catalog/SourcePanel.jsx";
 import { PlayIcon, StatusPill } from "../components/catalog/ciShared.jsx";
 
@@ -40,6 +41,18 @@ const TABS = [
   ["settings", "Settings"],
 ];
 
+// A pipeline from the Pipelines page is a service row of kind "pipeline", shown
+// by this page with the tabs that mean something for it: no application, merge
+// checks, Dockerfile or intelligence of its own. Its repository is optional.
+const PIPELINE_TABS = [
+  ["pipeline", "Pipeline"],
+  ["builds", "Runs"],
+  ["artifacts", "Artifacts"],
+  ["repository", "Repository"],
+  ["usedBy", "Used by"],
+  ["settings", "Settings"],
+];
+
 /**
  * One service, ten tabs.
  *
@@ -47,7 +60,16 @@ const TABS = [
  * disabled with a reason when the service is not ready — never silently
  * clickable into a 400.
  */
-export default function ServiceDetailPage({ serviceId, initialTab, initialBuildId, onBack, onDeleted }) {
+export default function ServiceDetailPage({
+  serviceId,
+  initialTab,
+  initialBuildId,
+  onBack,
+  onDeleted,
+  variant = "service",
+}) {
+  const isPipeline = variant === "pipeline";
+  const tabs = isPipeline ? PIPELINE_TABS : TABS;
   const { hasPermission } = useAuth();
   const can = {
     edit: hasPermission("ci_services:edit"),
@@ -72,7 +94,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
   // Whether the assisted path may be offered at all. Asked once, here, so the
   // Application tab can show a reason instead of a control that fails.
   const [assist, setAssist] = useState(null);
-  const [tab, changeTab] = useRouteParam("tab", initialTab || "overview");
+  const [tab, changeTab] = useRouteParam("tab", initialTab || (isPipeline ? "pipeline" : "overview"));
   // The Pipeline, Merge Checks and Settings tabs are drafts until saved. Leaving one —
   // another tab, or back to the catalog — asks first, because the draft does
   // not survive the trip.
@@ -132,12 +154,13 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
   }, [load]);
 
   useEffect(() => {
+    if (isPipeline) return;
     getCiAssistAvailability()
       .then(setAssist)
       .catch(() =>
         setAssist({ available: false, reason: "Hermes could not be reached." })
       );
-  }, []);
+  }, [isPipeline]);
 
   const service = summary?.service;
 
@@ -174,13 +197,13 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
     );
   };
 
-  if (loading) return <LoadingState label="Loading service…" />;
-  if (!service) {
+  if (loading) return <LoadingState label={isPipeline ? "Loading pipeline…" : "Loading service…"} />;
+  if (!service || (service.kind === "pipeline") !== isPipeline) {
     return (
       <div className="ops-page">
-        <ErrorBanner message={error || "Service not found."} />
+        <ErrorBanner message={error || (isPipeline ? "Pipeline not found." : "Service not found.")} />
         <button type="button" className="btn-outline" onClick={onBack}>
-          Back to catalog
+          {isPipeline ? "Back to pipelines" : "Back to catalog"}
         </button>
       </div>
     );
@@ -199,15 +222,20 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             className="sg-ci-back"
             onClick={() => confirmLeaveDraft() && onBack()}
           >
-            ← CI Services
+            {isPipeline ? "← Pipelines" : "← CI Services"}
           </button>
           <h2>
             {service.name} <StatusPill status={service.status} />
+            {isPipeline && <span className="chip sg-ci-kind-chip">Pipeline</span>}
           </h2>
           <p className="sg-ph-sub">
             {service.description || "No description."}
             {service.sourceConfigured &&
               ` · ${service.repositoryWorkspace}/${service.repositoryName} @ ${service.defaultBranch}`}
+            {isPipeline && !service.sourceConfigured && " · No repository"}
+            {isPipeline &&
+              ` · ${service.usedByCount ? `used by ${service.usedByCount} service${service.usedByCount === 1 ? "" : "s"}` : "not used by a service"}`}
+            {!isPipeline && service.sharedPipeline && ` · builds with the shared pipeline ${service.sharedPipeline.name}`}
           </p>
         </div>
         <div className="sg-ph-actions">
@@ -234,11 +262,12 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
               title={
                 pipelineDirty
                   ? "Save or discard your pipeline changes first — a build runs the saved pipeline"
-                  : blockedReason || "Run a build — pick a branch or tag"
+                  : blockedReason ||
+                    (isPipeline && !service.sourceConfigured ? "Run it now" : "Run a build — pick a branch or tag")
               }
             >
               <PlayIcon />
-              Run build
+              {isPipeline ? "Run" : "Run build"}
             </button>
           )}
         </div>
@@ -246,11 +275,11 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
 
       {error && <ErrorBanner message={error} />}
 
-      <div className="tab-bar" role="tablist" aria-label="Service sections">
+      <div className="tab-bar" role="tablist" aria-label={isPipeline ? "Pipeline sections" : "Service sections"}>
         {/* Merge checks is the one tab behind a permission of its own — it
             carries a webhook secret and the gate that decides what may be
             merged, so a role without that permission is not shown the door. */}
-        {TABS.filter(
+        {tabs.filter(
           ([value]) =>
             (value !== "mergeChecks" || can.viewMergeChecks) &&
             (value !== "intelligence" || can.viewIntelligence)
@@ -283,7 +312,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             onGoToTab={setTab}
           />
         )}
-        {tab === "source" && (
+        {(tab === "source" || (isPipeline && tab === "repository")) && (
           <SourcePanel
             service={service}
             canEdit={can.edit}
@@ -352,6 +381,9 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             refreshToken={refreshToken}
           />
         )}
+        {isPipeline && tab === "usedBy" && (
+          <SharedPipelineUsedBy pipeline={service} canAttach={can.editPipeline} onChanged={load} />
+        )}
         {tab === "settings" && (
           <ServiceSettingsPanel
             service={service}
@@ -363,6 +395,7 @@ export default function ServiceDetailPage({ serviceId, initialTab, initialBuildI
             canViewSchedules={hasPermission("ci_builds:view")}
             canEditSchedules={can.editPipeline && can.run}
             canRunSchedules={can.run}
+            canDeploy={can.deploy}
             onOpenBuild={(id) => setOpenBuildId(String(id))}
             onSaved={() => load()}
             onDeleted={onDeleted}

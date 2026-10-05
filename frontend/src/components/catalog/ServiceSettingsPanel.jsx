@@ -7,6 +7,7 @@ import { pageHref } from "../../routes/RouterContext.jsx";
 import { CRITICALITIES } from "./ciShared.jsx";
 import { Field, Segmented } from "./pipeline/controls.jsx";
 import { PlIcon } from "./pipeline/icons.jsx";
+import DeploymentLinksSection from "./serviceSettings/DeploymentLinksSection.jsx";
 import SchedulesSection from "./serviceSettings/SchedulesSection.jsx";
 import SecretsSection from "./serviceSettings/SecretsSection.jsx";
 import { railSummary } from "./serviceSettings/scheduleModel.js";
@@ -78,6 +79,7 @@ const modesFor = (resources) =>
 
 const SECTIONS = [
   { id: "st-general", label: "General", icon: "sparkle" },
+  { id: "st-deployments", label: "Deployments", icon: "rocket" },
   { id: "st-builds", label: "Builds", icon: "server" },
   { id: "st-schedules", label: "Schedules", icon: "clock" },
   { id: "st-registry", label: "Image registry", icon: "image" },
@@ -112,8 +114,15 @@ export default function ServiceSettingsPanel({
   canViewSchedules = false,
   canEditSchedules = false,
   canRunSchedules = false,
+  // Whether the viewer may deploy — offered "Deploy as me" on a link a build
+  // cannot deploy through.
+  canDeploy = false,
   onOpenBuild,
 }) {
+  // A pipeline from the Pipelines page uses this same panel: no deployments of
+  // its own (its services have theirs), no criticality, its own words.
+  const isPipeline = service.kind === "pipeline";
+  const noun = isPipeline ? "pipeline" : "service";
   const [saved, setSaved] = useState(() => toForm(service));
   const [form, setForm] = useState(() => toForm(service));
   // Which of the three the user picked, kept beside the value because the
@@ -124,6 +133,7 @@ export default function ServiceSettingsPanel({
   const [registries, setRegistries] = useState(null);
   const [secretCount, setSecretCount] = useState(null);
   const [schedules, setSchedules] = useState(null);
+  const [linkCount, setLinkCount] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -256,7 +266,7 @@ export default function ServiceSettingsPanel({
       await deleteCiService(service.id);
       onDeleted();
     } catch (err) {
-      setError(err.message || "Could not delete the service.");
+      setError(err.message || `Could not delete the ${noun}.`);
       setDeleting(false);
     }
   };
@@ -281,6 +291,7 @@ export default function ServiceSettingsPanel({
     "st-builds": `${form.maxConcurrentBuilds} at a time`,
     "st-registry": form.registryConnectionId ? registry?.name || "Linked" : "None",
     "st-schedules": railSummary(schedules).text,
+    "st-deployments": linkCount === null ? "" : linkCount.length ? `${linkCount.length}` : "None",
     "st-secrets": secretCount === null ? "" : `${secretCount.length}`,
     "st-danger": "",
   };
@@ -288,6 +299,7 @@ export default function ServiceSettingsPanel({
     "st-general": form.status === "active" ? "" : "warn",
     "st-registry": form.registryConnectionId ? "" : "warn",
     "st-schedules": railSummary(schedules).tone,
+    "st-deployments": linkCount && !linkCount.length ? "warn" : "",
   };
   const sectionDirty = {
     "st-general": changed.some((key) => ["status", "criticality", "ownerTeam"].includes(key)),
@@ -298,6 +310,7 @@ export default function ServiceSettingsPanel({
     (item) =>
       (item.id !== "st-secrets" || canViewSecrets) &&
       (item.id !== "st-schedules" || canViewSchedules) &&
+      (item.id !== "st-deployments" || !isPipeline) &&
       (item.id !== "st-danger" || canDelete)
   );
 
@@ -310,7 +323,7 @@ export default function ServiceSettingsPanel({
           </span>
           <div>
             <h3>
-              Service settings
+              {isPipeline ? "Pipeline settings" : "Service settings"}
               {!canEdit && (
                 <span className="pl-tag">
                   <PlIcon name="lock" /> View only
@@ -318,7 +331,8 @@ export default function ServiceSettingsPanel({
               )}
             </h3>
             <p className="pl-top-sentence">
-              <b>{STATUSES.find((item) => item.value === saved.status)?.label}</b>, {saved.criticality} criticality
+              <b>{STATUSES.find((item) => item.value === saved.status)?.label}</b>
+              {isPipeline ? "" : `, ${saved.criticality} criticality`}
               {saved.ownerTeam ? <>, owned by <b>{saved.ownerTeam}</b></> : ", no owner set"}. Up to{" "}
               <b>{saved.maxConcurrentBuilds}</b> {Number(saved.maxConcurrentBuilds) === 1 ? "build" : "builds"} at once,{" "}
               {resourceSummary} per stage; images{" "}
@@ -367,7 +381,7 @@ export default function ServiceSettingsPanel({
           ))}
           <p className="st-rail-note">
             <PlIcon name="lock" />
-            Secrets and schedules save on their own, as soon as they are added or changed. Everything else waits for Save.
+            {isPipeline ? "Secrets and schedules" : "Deployments, secrets and schedules"} save on their own, as soon as they are added or changed. Everything else waits for Save.
           </p>
         </nav>
 
@@ -376,17 +390,21 @@ export default function ServiceSettingsPanel({
           <section className="pl-panel st-card" id="st-general" aria-labelledby="st-general-title">
             <header className="st-card-head">
               <h4 id="st-general-title">General</h4>
-              <p>Whether the service takes builds, and who it belongs to.</p>
+              <p>Whether the {noun} takes builds, and who it belongs to.</p>
             </header>
             <div className="st-card-body">
               <Field
                 label="Status"
                 hint={
                   form.status === "active"
-                    ? "Builds, retries and merge checks run as usual."
-                    : form.status === "paused"
-                      ? "Run build is refused while paused. Pipelines, secrets and history are kept."
-                      : "Archived services take no builds and drop out of day-to-day lists. History is kept."
+                    ? isPipeline
+                      ? "It runs on its own, and every service that uses it builds with it."
+                      : "Builds, retries and merge checks run as usual."
+                    : isPipeline
+                      ? "Nothing runs it: its own runs are refused, and so are builds of every service that uses it, with this as the reason."
+                      : form.status === "paused"
+                        ? "Run build is refused while paused. Pipelines, secrets and history are kept."
+                        : "Archived services take no builds and drop out of day-to-day lists. History is kept."
                 }
               >
                 <Segmented
@@ -398,6 +416,7 @@ export default function ServiceSettingsPanel({
                 />
               </Field>
               <div className="pl-grid">
+                {!isPipeline && (
                 <Field label="Criticality" hint="How much a broken build of this service matters — shown on the catalog.">
                   <Segmented
                     label="Criticality"
@@ -410,7 +429,8 @@ export default function ServiceSettingsPanel({
                     onChange={(value) => set("criticality", value)}
                   />
                 </Field>
-                <Field label="Owner / team" htmlFor="st-owner" optional hint="Who to ask when a build of this service breaks.">
+                )}
+                <Field label="Owner / team" htmlFor="st-owner" optional hint={`Who to ask when a build of this ${noun} breaks.`}>
                   <input
                     id="st-owner"
                     value={form.ownerTeam}
@@ -422,6 +442,30 @@ export default function ServiceSettingsPanel({
               </div>
             </div>
           </section>
+
+          {/* ── Deployments (the inventory links) ───────────────────── */}
+          {!isPipeline && (
+            <section className="pl-panel st-card" id="st-deployments" aria-labelledby="st-deployments-title">
+              <header className="st-card-head">
+                <h4 id="st-deployments-title">Deployments</h4>
+                <p>
+                  The deployments in the inventory this service builds. The inventory names this service on
+                  them, ticket-driven deploys build it, and a Deploy stage set to “the service's linked
+                  deployment” deploys there.
+                </p>
+              </header>
+              <div className="st-card-body">
+                <DeploymentLinksSection
+                  service={service}
+                  canEdit={canEdit}
+                  canDeploy={canDeploy}
+                  onError={setError}
+                  onNotice={setNotice}
+                  onCount={setLinkCount}
+                />
+              </div>
+            </section>
+          )}
 
           {/* ── Builds ──────────────────────────────────────────────── */}
           <section className="pl-panel st-card" id="st-builds" aria-labelledby="st-builds-title">
@@ -611,7 +655,7 @@ export default function ServiceSettingsPanel({
                 </p>
               )}
               <div className="st-imageref">
-                <span>An image built by this service is pushed as</span>
+                <span>An image built by this {noun} is pushed as</span>
                 <code>
                   {registryHost || "<no registry>"}/{service.slug}:&lt;branch&gt;-&lt;build no.&gt;
                 </code>
@@ -626,8 +670,18 @@ export default function ServiceSettingsPanel({
               <header className="st-card-head">
                 <h4 id="st-secrets-title">Secrets</h4>
                 <p>
-                  Attached to stages by name on the Pipeline tab and injected as environment variables. One
-                  of this service's own wins over a global secret with the same name.
+                  {isPipeline ? (
+                    <>
+                      Attached to stages by name on the Pipeline tab and injected as environment variables.
+                      Every service that uses this pipeline can read them too; a service's own secret with the
+                      same name wins.
+                    </>
+                  ) : (
+                    <>
+                      Attached to stages by name on the Pipeline tab and injected as environment variables. One
+                      of this service's own wins over a global secret with the same name.
+                    </>
+                  )}
                 </p>
               </header>
               <div className="st-card-body">
@@ -649,8 +703,9 @@ export default function ServiceSettingsPanel({
               <header className="st-card-head">
                 <h4 id="st-danger-title">Danger zone</h4>
                 <p>
-                  Deleting removes the service with its pipelines, builds, logs and artifact records. Stored
-                  artifact files are left in place. This cannot be undone.
+                  {isPipeline
+                    ? "Deleting removes the pipeline with its builds, logs, secrets and artifact records. It is refused while any service still uses it. This cannot be undone."
+                    : "Deleting removes the service with its pipelines, builds, logs and artifact records. Stored artifact files are left in place. This cannot be undone."}
                 </p>
               </header>
               <div className="st-card-body">
@@ -677,7 +732,7 @@ export default function ServiceSettingsPanel({
                       disabled={confirmText.trim() !== service.slug || deleting}
                       onClick={removeService}
                     >
-                      <PlIcon name="trash" /> {deleting ? "Deleting…" : "Delete this service"}
+                      <PlIcon name="trash" /> {deleting ? "Deleting…" : `Delete this ${noun}`}
                     </button>
                   </div>
                 </Field>

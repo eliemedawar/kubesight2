@@ -1,3 +1,4 @@
+import "../../styles/signal/sharedPipelines.css";
 import {
   BranchIcon,
   PackageIcon,
@@ -165,6 +166,11 @@ export default function ServiceCard({ service, onOpen, onOpenBuild, onRun, canRu
           >
             {service.latestArtifact.artifactType}
             {service.latestArtifact.version ? ` · v${service.latestArtifact.version}` : ""}
+          </span>
+        )}
+        {service.sharedPipeline && !service.sharedPipeline.missing && (
+          <span className="sg-tag sg-ci-tag--shared" title="Builds with a pipeline from the Pipelines page">
+            uses {service.sharedPipeline.name}
           </span>
         )}
         {build?.triggerType === "automation" && (

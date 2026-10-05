@@ -2965,6 +2965,7 @@ from .models_ci import (  # noqa: E402,F401
     CiRunner,
     CiSecret,
     CiService,
+    CiServiceDeployment,
 )
 
 # Merge checks. Bolted onto the CI domain rather than inside it: the tables

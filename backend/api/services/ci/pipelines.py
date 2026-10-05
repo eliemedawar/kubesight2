@@ -865,6 +865,9 @@ def _stamp_deploy_authority(
         if kept:
             config["authorizedBy"] = dict(kept)
             continue
+        if deploy_config.is_linked(config):
+            _stamp_linked_deploy(pipeline, stage, config, actor)
+            continue
         where = f"{config['clusterId']}/{config['namespace']}"
         if actor is None:
             raise PipelineError(
@@ -901,6 +904,41 @@ def _stamp_deploy_authority(
             },
             commit=False,
         )
+
+
+def _stamp_linked_deploy(pipeline: CiPipeline, stage: Dict[str, Any], config: Dict[str, Any], actor) -> None:
+    """A stage that deploys to the service's linked deployment.
+
+    It has no namespace of its own to check: each build deploys where the
+    building service's link points, with the rights of whoever made that link
+    (re-checked at run time, see deployment_links.resolve_snapshot_targets).
+    Turning a stage into one still needs someone who may deploy at all.
+    """
+    from ...access_engine import user_has_permission
+
+    if actor is None or not user_has_permission(actor, "apps:deploy"):
+        raise PipelineError(
+            f"Stage '{stage['name']}' deploys to each service's linked deployment, and only "
+            "someone who can deploy applications can set that.",
+            code="deploy_not_authorized",
+        )
+    config["authorizedBy"] = {
+        "userId": actor.id,
+        "username": actor.username,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    log_audit(
+        "ci_deploy_target_authorized",
+        actor=actor,
+        target_type="ci_pipeline",
+        target_id=str(pipeline.id),
+        details={
+            "stage": stage["name"],
+            "target": "linked",
+            "environment": config.get("environment") or "",
+        },
+        commit=False,
+    )
 
 
 def _default_store_upload_apps(pipeline: CiPipeline, normalized: List[Dict[str, Any]]) -> None:
@@ -1022,6 +1060,11 @@ def _apply_stages(
     # that are about to be replaced.
     _stamp_deploy_authority(pipeline, normalized, actor)
     _stamp_store_upload_authority(pipeline, normalized, actor)
+    # The inventory link a fixed-target Deploy stage implies ("this service is
+    # that deployment"), unless the stage opts out. Never fails the save.
+    from . import deployment_links
+
+    deployment_links.record_from_stages(pipeline, normalized, actor)
 
     # Full replace. Stage ids are not stable across a save, which is why builds
     # snapshot their pipeline rather than pointing at live stage rows.
@@ -1121,13 +1164,51 @@ def list_pipelines(service: CiService | int) -> List[Dict[str, Any]]:
 
     items = []
     for row in rows:
-        if row.is_default and not row.stages:
+        if row.linked_pipeline_id:
+            items.append(_linked_pipeline_dict(row))
+        elif row.is_default and not row.stages:
             items.append(_generated_pipeline_dict(service, row))
         else:
             data = pipeline_to_dict(row)
             data["isGeneratedDefault"] = False
             items.append(data)
     return items
+
+
+def _linked_pipeline_dict(row: CiPipeline) -> Dict[str, Any]:
+    """A service pipeline that builds with a shared one, shown as what runs:
+    the shared stages, read-only here, with what it is linked to."""
+    from .shared_pipelines import shared_summary
+
+    shared = row.linked_pipeline
+    data = pipeline_to_dict(row)
+    data["isGeneratedDefault"] = False
+    data["linkedPipeline"] = shared_summary(row)
+    data["ownStageCount"] = len(row.stages)
+    if shared is not None:
+        shown = pipeline_to_dict(shared)
+        data["stages"] = shown["stages"]
+        data["stageCount"] = shown["stageCount"]
+        data["parameters"] = shown["parameters"]
+        data["postActions"] = shown["postActions"]
+    return data
+
+
+def _refuse_linked_edit(pipeline: CiPipeline, payload: Dict[str, Any]) -> None:
+    if not pipeline.linked_pipeline_id:
+        return
+    if not any(key in payload for key in ("stages", "parameters", "postActions")):
+        return
+    from .shared_pipelines import home_of
+
+    home = home_of(pipeline.linked_pipeline)
+    name = f"'{home.name}'" if home else "a shared pipeline"
+    raise PipelineError(
+        f"This service builds with the shared pipeline {name}, so its stages are edited there, "
+        "on the Pipelines page. To change them for this service only, stop using it here "
+        "(and copy its stages in) first.",
+        code="pipeline_is_shared",
+    )
 
 
 def get_pipeline(pipeline_id: int) -> CiPipeline:
@@ -1202,6 +1283,7 @@ def update_pipeline(
     if clash:
         raise PipelineError(f"This service already has a pipeline named '{name}'.")
 
+    _refuse_linked_edit(pipeline, payload)
     pipeline.name = name
     if "description" in payload:
         pipeline.description = _clean(payload.get("description"), 2000) or None
@@ -1538,6 +1620,8 @@ def resolve_for_build(
         pipeline = service.default_pipeline()
     if pipeline is not None and not pipeline.enabled:
         raise PipelineError(f"Pipeline '{pipeline.name}' is disabled.")
+    if pipeline is not None and pipeline.linked_pipeline_id:
+        return _shared_for_build(pipeline)
     if pipeline is None or not pipeline.stages:
         generated = _generated_pipeline(service, pipeline, revision)
         return generated, list(generated.stages)
@@ -1545,3 +1629,60 @@ def resolve_for_build(
     if not stages:
         raise PipelineError(f"Pipeline '{pipeline.name}' has no enabled stages.")
     return pipeline, stages
+
+
+def _shared_for_build(pipeline: CiPipeline) -> Tuple[Any, List[Any]]:
+    """A service pipeline that builds with a shared one: that pipeline's stages,
+    build inputs and post actions, under the service row's identity.
+
+    The build keeps ``pipeline_id`` = the service's own row, so its history,
+    stage matrix and default-pipeline lookups stay where they were; the
+    snapshot records which shared pipeline, at which version, actually ran.
+    """
+    from .shared_pipelines import home_of
+
+    shared = pipeline.linked_pipeline
+    home = home_of(shared)
+    if shared is None or home is None:
+        raise PipelineError(
+            "This service builds with a shared pipeline that no longer exists. "
+            "Pick another one, or go back to the service's own pipeline.",
+            code="shared_pipeline_missing",
+        )
+    if not shared.enabled or home.status != "active":
+        raise PipelineError(
+            f"The shared pipeline '{home.name}' is turned off, so services that use it cannot "
+            "build. Turn it back on from the Pipelines page.",
+            code="shared_pipeline_disabled",
+        )
+    stages = [stage for stage in shared.stages if stage.enabled]
+    if not stages:
+        raise PipelineError(
+            f"The shared pipeline '{home.name}' has no enabled stages.",
+            code="shared_pipeline_empty",
+        )
+    proxy = SimpleNamespace(
+        id=pipeline.id,
+        service_id=pipeline.service_id,
+        name=pipeline.name,
+        description=shared.description,
+        is_default=pipeline.is_default,
+        enabled=True,
+        version=shared.version,
+        parameters=shared.parameters,
+        # Never None: of_pipeline would otherwise fall back to the SERVICE
+        # row's own (dormant) post actions.
+        post_actions=list(shared.post_actions or []),
+        stages=list(shared.stages),
+        created_at=shared.created_at,
+        updated_at=shared.updated_at,
+        shared={
+            "id": home.id,
+            "slug": home.slug,
+            "name": home.name,
+            "pipelineId": shared.id,
+            "version": shared.version,
+            "homeServiceId": home.id,
+        },
+    )
+    return proxy, stages

@@ -413,3 +413,54 @@ export const runCiScheduleNow = (serviceId, scheduleId) =>
 
 export const previewCiSchedule = ({ cron, timezone, count }) =>
   request("/api/ci/schedules/preview", { method: "POST", body: { cron, timezone, count } });
+
+// ---------------------------------------------------------------------------
+// Pipelines outside services (the Pipelines page). Each one is stored as a
+// service row of kind "pipeline", so once it exists it is edited, run and
+// browsed through the ordinary service/pipeline/build calls above.
+// ---------------------------------------------------------------------------
+
+export const listSharedPipelines = (query = {}) => request("/api/ci/shared-pipelines", { query });
+
+export const getSharedPipeline = (id) =>
+  request(`/api/ci/shared-pipelines/${encodeURIComponent(id)}`);
+
+export const createSharedPipeline = (payload) =>
+  request("/api/ci/shared-pipelines", { method: "POST", body: payload });
+
+/** A service's pipeline as an unsaved draft for a shared pipeline's editor. */
+export const getSharedPipelineCopyFrom = (id, serviceId) =>
+  request(
+    `/api/ci/shared-pipelines/${encodeURIComponent(id)}/copy-from/${encodeURIComponent(serviceId)}`
+  );
+
+export const attachSharedPipeline = (serviceId, sharedPipelineId) =>
+  request(`/api/ci/services/${encodeURIComponent(serviceId)}/shared-pipeline`, {
+    method: "POST",
+    body: { sharedPipelineId },
+  });
+
+/** mode: "restore" (the service's own stages come back) or "copy". */
+export const detachSharedPipeline = (serviceId, mode = "restore") =>
+  request(`/api/ci/services/${encodeURIComponent(serviceId)}/shared-pipeline/detach`, {
+    method: "POST",
+    body: { mode },
+  });
+
+// ---------------------------------------------------------------------------
+// Deployment links — which inventory deployments a service builds
+// ---------------------------------------------------------------------------
+
+const linksPath = (serviceId) => `/api/ci/services/${encodeURIComponent(serviceId)}/deployments`;
+
+export const listCiDeploymentLinks = (serviceId, { live = true } = {}) =>
+  request(linksPath(serviceId), { query: { live: live ? "true" : "false" } });
+
+export const createCiDeploymentLink = (serviceId, payload) =>
+  request(linksPath(serviceId), { method: "POST", body: payload });
+
+export const updateCiDeploymentLink = (serviceId, linkId, payload) =>
+  request(`${linksPath(serviceId)}/${encodeURIComponent(linkId)}`, { method: "PUT", body: payload });
+
+export const deleteCiDeploymentLink = (serviceId, linkId) =>
+  request(`${linksPath(serviceId)}/${encodeURIComponent(linkId)}`, { method: "DELETE" });

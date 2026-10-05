@@ -10,6 +10,7 @@ import { getLogs, getNamespaceEvents, getResourceDescribe } from "../api/cluster
 import { formatAccessError } from "../utils/authz.js";
 import { formatLogLinesToLocalTime } from "../utils/logFormat.js";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
+import CiServiceLink from "../components/inventory/CiServiceLink.jsx";
 import {
   compareApplicationVersions,
   getApplicationVersion,
@@ -508,6 +509,17 @@ export default function ApplicationDetailsPage({
                 <MetadataItem label="Contact" value={summary.contactEmail || catalog.contactEmail || "Not set"} />
                 <MetadataItem label="Tags" value={tags.length ? tags.join(", ") : "Not set"} />
                 <MetadataItem label="Catalog entry" value={hasCatalog ? "Registered" : "Discovered only"} />
+                <div className="app-details-metadata-item">
+                  <dt>Built by</dt>
+                  <dd>
+                    <CiServiceLink
+                      ciService={detail?.ciService}
+                      clusterId={summary.cluster}
+                      namespace={summary.namespace}
+                      workloadName={primaryWorkload}
+                    />
+                  </dd>
+                </div>
               </dl>
               {catalog.description || summary.description ? (
                 <DetailRow label="Description" value={catalog.description || summary.description} />

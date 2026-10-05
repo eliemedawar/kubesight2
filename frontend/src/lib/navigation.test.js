@@ -36,14 +36,14 @@ describe("navigation layout", () => {
   });
 
   it("folds CI, application intelligence and mobile apps into the Build Center", () => {
-    ["serviceCatalog", "applicationIntelligence", "mobileApps"].forEach((key) => {
+    ["serviceCatalog", "pipelines", "applicationIntelligence", "mobileApps"].forEach((key) => {
       expect(workspaceOfPage(key)).toBe("buildCenter");
     });
     // Application Intelligence is a tab of each CI service, not of the workspace.
     const build = buildNavGroups(sidebarPages)
       .flatMap((group) => group.items)
       .find((item) => item.key === "buildCenter");
-    expect(build.tabs.map((tab) => tab.pageKey)).toEqual(["serviceCatalog", "mobileApps"]);
+    expect(build.tabs.map((tab) => tab.pageKey)).toEqual(["serviceCatalog", "pipelines", "mobileApps"]);
     expect(
       buildNavGroups(sidebarPages).some((group) => group.id === "more")
     ).toBe(false);

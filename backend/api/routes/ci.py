@@ -40,6 +40,7 @@ from ..services.ci import portability as portability_service
 from ..services.ci import queue as queue_service
 from ..services.ci import scheduler as scheduler_service
 from ..services.ci import secrets as secrets_service
+from ..services.ci import shared_pipelines as shared_pipelines_service
 from ..services.ci import stage_matrix as stage_matrix_service
 from ..services.ci import templates as templates_service
 from ..services.ci import test_summary as test_summary_service
@@ -59,6 +60,7 @@ ci_bp = Blueprint("ci", __name__, url_prefix="/api/ci")
 
 # Errors these services raise deliberately, with user-facing messages.
 _USER_ERRORS = (
+    shared_pipelines_service.SharedPipelineError,
     cache_service.CacheError,
     catalog_service.CatalogError,
     pipelines_service.PipelineError,
@@ -159,7 +161,10 @@ def update_service(service_id: int):
 @require_permission("ci_services:delete")
 def delete_service(service_id: int):
     row = catalog_service.get_service(service_id)
-    catalog_service.delete_service(row, actor=_actor())
+    try:
+        catalog_service.delete_service(row, actor=_actor())
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
     return success_response({"deleted": True, "id": service_id})
 
 
@@ -556,6 +561,20 @@ def describe_deploy_target():
         )
     except ValueError as exc:
         return error_response(str(exc), 400)
+    # Which CI service each deployment is linked to, so the editor can say
+    # "already linked to X" before the save quietly leaves the link alone.
+    from ..services.ci import deployment_links
+
+    cluster_id = request.args.get("clusterId") or ""
+    namespace = request.args.get("namespace") or ""
+    for item in (data or {}).get("deployments") or []:
+        if isinstance(item, dict):
+            link = deployment_links.find_link(cluster_id, namespace, item.get("name") or "")
+            item["linkedService"] = (
+                deployment_links.service_ref(link.service, link)
+                if link is not None and link.service is not None
+                else None
+            )
     return success_response(data)
 
 

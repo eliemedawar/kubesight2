@@ -605,7 +605,11 @@ def _start_cleanup(build: CiBuild, row: CiBuildStage, adapter, outcome: str) -> 
     row.external_ref = handle.external_ref
     db.session.add(row)
     if execution.secrets:
-        secrets_service.mark_used(build.service_id, list(execution.secrets))
+        secrets_service.mark_used(
+            build.service_id,
+            list(execution.secrets),
+            fallback_service_id=secrets_service.shared_home_id(build),
+        )
 
 
 def _poll_cleanup(build: CiBuild, row: CiBuildStage, adapter, whole_build: bool) -> bool:
@@ -1330,7 +1334,7 @@ def _send_webhook(build: CiBuild, action: Dict[str, Any]) -> str:
     from . import secrets as secrets_service
 
     name = str(action.get("urlSecret") or "")
-    url = (secrets_service.resolve_for_service(build.service_id).get(name) or "").strip()
+    url = (secrets_service.resolve_for_build(build).get(name) or "").strip()
     if not url:
         raise DeliveryError(
             f"The CI secret '{name}' that holds this webhook's URL does not exist any more, or is empty.",

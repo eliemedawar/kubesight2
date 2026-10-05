@@ -117,7 +117,11 @@ def _recent_builds(service_id: int, limit: int = 10) -> List[CiBuild]:
 def list_services(
     *, search: str = "", status: str = "", application_type: str = ""
 ) -> List[Dict[str, Any]]:
-    query = CiService.query
+    # Catalog services only. A pipeline on the Pipelines page is stored as a
+    # service row of kind 'pipeline' (shared_pipelines.py) and is listed there.
+    query = CiService.query.filter(
+        or_(CiService.kind == "service", CiService.kind.is_(None))
+    )
     if status and status != "all":
         query = query.filter(CiService.status == status)
     if application_type and application_type != "all":
@@ -265,9 +269,44 @@ def expected_secrets(row: CiService) -> List[Dict[str, Any]]:
     ]
 
 
+def _pipeline_home_readiness(row: CiService) -> Dict[str, Any]:
+    """A pipeline on the Pipelines page: a repository only if it checks one out."""
+    pipeline = row.default_pipeline()
+    stages = [stage for stage in (pipeline.stages if pipeline else []) if stage.enabled]
+    checks_out = any(stage.stage_type == "checkout" for stage in stages)
+    checks = [
+        {
+            "key": "pipeline",
+            "label": "Pipeline has stages",
+            "ok": bool(stages),
+            "hint": "Add at least one stage on the Pipeline tab.",
+        },
+        {
+            "key": "source",
+            "label": "Repository connected" if checks_out else "No repository needed",
+            "ok": row.source_ready() or not checks_out,
+            "hint": (
+                "A Checkout stage needs a repository: connect one on the Repository tab, "
+                "or remove the stage."
+            ),
+        },
+        {
+            "key": "active",
+            "label": "Pipeline turned on",
+            "ok": row.status == "active",
+            "hint": "Turn the pipeline back on in Settings.",
+        },
+    ]
+    return {"ready": all(check["ok"] for check in checks), "checks": checks}
+
+
 def readiness(row: CiService) -> Dict[str, Any]:
     """What still has to be true before this service can build."""
+    if row.is_pipeline_home:
+        return _pipeline_home_readiness(row)
     pipeline = row.default_pipeline()
+    if pipeline is not None and pipeline.linked_pipeline_id:
+        return _linked_readiness(row, pipeline)
     saved_stages = list(pipeline.stages) if pipeline else []
     generated_available = not saved_stages and default_pipelines.is_available(
         row.application_type
@@ -310,18 +349,63 @@ def readiness(row: CiService) -> Dict[str, Any]:
     return {"ready": all(check["ok"] for check in checks), "checks": checks}
 
 
+def _linked_readiness(row: CiService, pipeline: CiPipeline) -> Dict[str, Any]:
+    """A service that builds with a shared pipeline."""
+    from .shared_pipelines import shared_summary
+
+    shared = shared_summary(pipeline) or {}
+    usable = not shared.get("missing") and shared.get("enabled") and shared.get("stageCount")
+    checks = [
+        {
+            "key": "source",
+            "label": "Source connected",
+            "ok": row.source_ready(),
+            "hint": "Connect a repository and credential on the Source tab.",
+        },
+        {
+            "key": "pipeline",
+            "label": f"Uses the shared pipeline {shared.get('name') or ''}".strip(),
+            "ok": bool(usable),
+            "hint": (
+                "The shared pipeline this service uses no longer exists — pick another, or go "
+                "back to the service's own pipeline on the Pipeline tab."
+                if shared.get("missing")
+                else f"The shared pipeline '{shared.get('name')}' is turned off or has no stages."
+            ),
+        },
+        {
+            "key": "active",
+            "label": "Service active",
+            "ok": row.status == "active",
+            "hint": "Set the service back to active in Settings.",
+        },
+    ]
+    return {"ready": all(check["ok"] for check in checks), "checks": checks}
+
+
 def can_run_build(row: CiService, *, pipeline_id: Optional[int] = None) -> Optional[str]:
     """Readiness for the selected pipeline, or the normal build when omitted."""
     if row.status != "active":
+        if row.is_pipeline_home:
+            return "This pipeline is turned off. Turn it on in Settings before running it."
         return f"This service is {row.status}. Set it to active before running builds."
-    if not row.source_ready():
-        return "Connect a repository and credential before running a build."
     if pipeline_id:
         pipeline = db.session.get(CiPipeline, int(pipeline_id))
         if pipeline is None or pipeline.service_id != row.id:
             return "That pipeline does not belong to this service."
     else:
         pipeline = row.default_pipeline()
+    if row.is_pipeline_home:
+        failing = next(
+            (check for check in _pipeline_home_readiness(row)["checks"] if not check["ok"]),
+            None,
+        )
+        return failing["hint"] if failing else None
+    if not row.source_ready():
+        return "Connect a repository and credential before running a build."
+    if pipeline is not None and pipeline.linked_pipeline_id:
+        # resolve_for_build gives the precise reason if the shared one is unusable.
+        return None
     stages = list(pipeline.stages) if pipeline else []
     if row.application_type == "generic" and not any(
         stage.enabled and stage.stage_type == "command" and list(stage.commands or [])
@@ -609,7 +693,13 @@ def delete_service(row: CiService, *, actor=None) -> None:
     are left in the store — removing bytes a deployment may still reference is
     not something a catalog delete should do silently.
     """
+    if row.is_pipeline_home:
+        from .shared_pipelines import assert_deletable
+
+        assert_deletable(row)
     identity = {"name": row.name, "slug": row.slug, "id": row.id}
+    if row.is_pipeline_home:
+        identity["kind"] = "pipeline"
     db.session.delete(row)
     db.session.commit()
     log_audit(

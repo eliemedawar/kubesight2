@@ -422,6 +422,7 @@ export default function StageSheet({
         {stage.stageType === "deploy" && (
           <DeployStageFields
             ids={ids}
+            service={service}
             stage={stage}
             stages={stages}
             index={index}

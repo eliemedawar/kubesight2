@@ -88,6 +88,16 @@ def start(build: CiBuild, stage: CiBuildStage, definition: Dict[str, Any]) -> No
     if config is None:
         _fail(stage, "This Deploy stage has no target. Pick a cluster, namespace and deployment.")
         return
+    if deploy_config.is_linked(config):
+        if config.get("unresolved"):
+            _fail(stage, f"Nothing was deployed: {config['unresolved']}")
+            return
+        if not config.get("clusterId"):
+            # A snapshot taken before linked targets were resolved at build time.
+            _fail(stage, "Nothing was deployed: this stage's linked deployment was never resolved.")
+            return
+        label = f" ({config['environment']})" if config.get("environment") else ""
+        _log(stage, f"Deploying to the service's linked deployment{label}")
 
     where = f"{config['clusterId']} / {config['namespace']} / {config['deploymentName']}"
     _log(stage, f"Deploying to {where}")
@@ -613,6 +623,11 @@ def _succeed(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any], detail
     _log(stage, f"✓ Rolled out: {detail}")
     user, _ = _authorizing_user(config)
     _audit("ci_deploy_succeeded", build, stage, user, config, image, pods=detail)
+    # The service is that deployment now: record the inventory link (fixed
+    # targets only, unless the stage opts out; never takes another service's).
+    from . import deployment_links
+
+    deployment_links.record_from_deploy(build, config)
     _finish(stage, "success", f"{image} is running on {config['deploymentName']} ({detail}).", outcome="deployed")
 
 

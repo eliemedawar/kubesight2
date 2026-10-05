@@ -13,6 +13,8 @@ export const IMAGE_PLACEHOLDER = "${IMAGE}";
 const DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
 const QUANTITY = /^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|Ti|k|M|G|T)?$/;
+// deploy_config._ENVIRONMENT_RE
+const ENVIRONMENT = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/;
 
 export const SERVICE_TYPES = [
   { value: "ClusterIP", label: "Inside the cluster" },
@@ -137,8 +139,48 @@ export function patchDeploy(deploy, patch) {
   return next;
 }
 
+/** The stage deploys to the building service's linked deployment (resolved
+ * when a build starts) rather than a target saved on the stage. */
+export const isLinkedDeploy = (deploy) => deploy?.target === "linked";
+
+/** Switch a stage between a picked target and the service's linked one. The
+ * picked target is kept while linked, so switching back loses nothing. */
+export function setDeployTargetMode(deploy, mode) {
+  const base = deploy || blankDeploy();
+  if (mode === "linked") return { ...base, target: "linked", createIfMissing: false };
+  const { target: _target, ...rest } = base;
+  return { ...rest, target: "fixed" };
+}
+
+/** Which of a service's links a linked stage would deploy to — the same
+ * choice deployment_links._pick_link makes when a build starts. */
+export function pickLinkedDeployment(links, environment) {
+  const items = links || [];
+  const wanted = String(environment || "").trim().toLowerCase();
+  if (wanted) {
+    const matching = items.filter((link) => String(link.environment || "").trim().toLowerCase() === wanted);
+    if (matching.length === 1) return { link: matching[0], problem: "" };
+    return {
+      link: null,
+      problem: matching.length
+        ? `${matching.length} linked deployments are labelled “${environment}”. Give them distinct labels.`
+        : `No linked deployment is labelled “${environment}”.`,
+    };
+  }
+  if (items.length === 1) return { link: items[0], problem: "" };
+  return {
+    link: null,
+    problem: items.length
+      ? `This service is linked to ${items.length} deployments. Set an environment to say which one.`
+      : "This service is not linked to a deployment yet.",
+  };
+}
+
 /** "prod / payments / payments-api" — the target in one line. */
 export function deployTarget(deploy) {
+  if (isLinkedDeploy(deploy)) {
+    return `the service's linked deployment${deploy.environment ? ` (${deploy.environment})` : ""}`;
+  }
   if (!deploy?.clusterId && !deploy?.deploymentName) return "";
   return [deploy.clusterId || "?", deploy.namespace || "?", deploy.deploymentName || "?"].join(" / ");
 }
@@ -157,6 +199,16 @@ export function deployProblems(deploy) {
   const add = (message) => problems.push({ field: "deploy", message });
   if (!deploy) {
     add("Pick the cluster, namespace and deployment this stage deploys to.");
+    return problems;
+  }
+  if (isLinkedDeploy(deploy)) {
+    if (deploy.environment && !ENVIRONMENT.test(deploy.environment)) {
+      add("The environment label may hold letters, digits, spaces, dots, dashes and underscores.");
+    }
+    if (deploy.containerName && !DNS_LABEL.test(deploy.containerName)) {
+      add("The container name must be lowercase letters, digits and '-'.");
+    }
+    if (deploy.image && /\s/.test(deploy.image)) add("An image reference cannot contain spaces.");
     return problems;
   }
   if (!deploy.clusterId) add("Pick a cluster to deploy to.");

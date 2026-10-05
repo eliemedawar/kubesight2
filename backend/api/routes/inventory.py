@@ -201,6 +201,10 @@ def inventory_detail(inventory_id: str):
     data, error, status = get_inventory_detail(user, inventory_id)
     if error:
         return error_response(error, status)
+    if isinstance(data, dict):
+        from ..services.inventory_service import ci_service_link_for_detail
+
+        data["ciService"] = ci_service_link_for_detail(data)
     return success_response(data)
 
 

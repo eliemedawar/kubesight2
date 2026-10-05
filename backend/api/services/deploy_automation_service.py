@@ -1667,6 +1667,8 @@ def _native_ci_service(run: DeployAutomationRun):
 
     In order, the first that answers:
 
+    0. the service this deployment is LINKED to (the service's Settings →
+       Deployments, or the inventory) — the explicit answer, asked first;
     1. a service whose build pipeline has a Deploy stage aimed at exactly this
        cluster / namespace / deployment — the pipeline says outright that it
        ships this application;
@@ -1697,6 +1699,17 @@ def _native_ci_match(run: DeployAutomationRun):
         return _re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")[:180]
 
     if not _is_custom_run(run):
+        from .ci import deployment_links
+
+        linked = deployment_links.service_for(
+            str(run.cluster_id or ""), run.namespace or "", run.deployment_name or ""
+        )
+        if linked is not None and not linked.is_pipeline_home:
+            # Build with the pipeline that deploys here, when one of its own
+            # does; otherwise its default (which may be a shared pipeline whose
+            # Deploy stage targets the linked deployment).
+            _, pipeline = _ci_service_deploying(run, only_service_id=linked.id)
+            return linked, pipeline
         service, pipeline = _ci_service_deploying(run)
         if service is not None:
             return service, pipeline
@@ -1704,28 +1717,41 @@ def _native_ci_match(run: DeployAutomationRun):
     for candidate in (_slug(run.deployment_name), _slug(image_name), _slug(run.namespace)):
         if not candidate:
             continue
-        row = CiService.query.filter_by(slug=candidate, status="active").first()
+        # Catalog services only: a pipeline on the Pipelines page is not an
+        # application, whatever its slug happens to be.
+        row = (
+            CiService.query.filter_by(slug=candidate, status="active")
+            .filter(db.or_(CiService.kind == "service", CiService.kind.is_(None)))
+            .first()
+        )
         if row is not None:
             return row, None
     return None, None
 
 
-def _ci_service_deploying(run: DeployAutomationRun):
+def _ci_service_deploying(run: DeployAutomationRun, *, only_service_id=None):
     """``(service, pipeline)`` of the active build pipeline that deploys this
     run's target, or ``(None, None)``. A service's default pipeline wins over
     another of its pipelines that deploys the target too."""
     from ..models_ci import CiPipeline, CiPipelineStage, CiService
 
-    rows = (
+    query = (
         db.session.query(CiPipelineStage, CiPipeline, CiService)
         .join(CiPipeline, CiPipelineStage.pipeline_id == CiPipeline.id)
         .join(CiService, CiPipeline.service_id == CiService.id)
         .filter(CiPipelineStage.stage_type == "deploy", CiService.status == "active")
-        .order_by(CiService.id.asc(), CiPipeline.is_default.desc(), CiPipeline.id.asc())
-        .all()
+        .filter(db.or_(CiService.kind == "service", CiService.kind.is_(None)))
     )
+    if only_service_id is not None:
+        query = query.filter(CiService.id == only_service_id)
+    rows = query.order_by(
+        CiService.id.asc(), CiPipeline.is_default.desc(), CiPipeline.id.asc()
+    ).all()
     for stage, pipeline, service in rows:
         if (pipeline.purpose or "build") != "build" or pipeline.enabled is False:
+            continue
+        if pipeline.linked_pipeline_id:
+            # Its own stages are dormant while it builds with a shared pipeline.
             continue
         if stage.enabled is False:
             continue

@@ -46,6 +46,21 @@ APPLICATION_TYPES = (
 SERVICE_STATUSES = ("active", "paused", "archived")
 CRITICALITIES = ("low", "medium", "high", "critical")
 
+# What a CiService row stands for. ``service`` is an application in the CI
+# Services catalog. ``pipeline`` is the home of a pipeline that lives outside
+# any service (the Pipelines page): it runs on its own — with its own builds,
+# schedules, secrets and an optional repository — and services can attach it
+# as their build pipeline. Modelled as a service row so every build-path
+# feature keyed by service (numbering, logs, caches, runners, schedules) works
+# for it unchanged; the catalog, slug matching and pickers list only
+# ``service`` rows. See services/ci/shared_pipelines.py.
+SERVICE_KINDS = ("service", "pipeline")
+
+# Where a service ↔ deployment link came from: picked by a person (on the
+# service, or from the inventory), or recorded by a Deploy stage of the
+# service's pipeline. See services/ci/deployment_links.py.
+DEPLOYMENT_LINK_SOURCES = ("manual", "inventory", "deploy_stage")
+
 # Stage kinds a stored pipeline may carry. ``checkout`` and ``command`` run on
 # every runner; ``container_image`` on the Kubernetes runner with BuildKit;
 # ``scan`` on the Kubernetes runner, with a script KubeSight generates around
@@ -192,6 +207,9 @@ class CiService(db.Model):
     criticality = db.Column(db.String(32), nullable=True)
     application_type = db.Column(db.String(32), nullable=False, default="generic")
     status = db.Column(db.String(16), nullable=False, default="active", index=True)
+    # See SERVICE_KINDS. NULL on rows written before the column existed, which
+    # reads as 'service' (``is_pipeline_home`` treats anything else that way).
+    kind = db.Column(db.String(16), nullable=False, default="service", index=True)
 
     # --- Source (Bitbucket in Phase 1; the provider column keeps GitLab/GitHub
     # a data change rather than a schema change) -----------------------------
@@ -301,6 +319,18 @@ class CiService(db.Model):
         lazy="dynamic",
     )
 
+    deployment_links = db.relationship(
+        "CiServiceDeployment",
+        back_populates="service",
+        cascade="all, delete-orphan",
+        order_by="CiServiceDeployment.id",
+    )
+
+    @property
+    def is_pipeline_home(self) -> bool:
+        """This row is a standalone pipeline's home, not a catalog service."""
+        return (self.kind or "service") == "pipeline"
+
     def source_ready(self) -> bool:
         """Whether this service has enough source configuration to build."""
         return bool(self.repository_url and self.credential_profile_id)
@@ -364,6 +394,18 @@ class CiPipeline(db.Model):
     # every pipeline saved before post actions existed, which reads as none.
     # Copied into each build's snapshot like the stages.
     post_actions = db.Column(db.JSON, nullable=True)
+    # A service pipeline that builds with a shared pipeline instead of its own
+    # stages: the default pipeline of a pipeline home (CiService.kind
+    # 'pipeline'). While set, builds take stages, parameters and post actions
+    # from that pipeline, and this row's own stages are kept untouched so
+    # "stop using it" can put them back. SET NULL is only the backstop — a
+    # shared pipeline in use cannot be deleted (shared_pipelines.delete_home).
+    linked_pipeline_id = db.Column(
+        db.Integer,
+        db.ForeignKey("ci_pipelines.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
     updated_at = db.Column(
@@ -377,6 +419,15 @@ class CiPipeline(db.Model):
         cascade="all, delete-orphan",
         order_by="CiPipelineStage.position",
     )
+    linked_pipeline = db.relationship(
+        "CiPipeline", remote_side=[id], foreign_keys=[linked_pipeline_id]
+    )
+
+    def effective(self) -> "CiPipeline":
+        """The pipeline a build of this one actually runs: the shared pipeline
+        it is linked to, or itself."""
+        linked = self.linked_pipeline if self.linked_pipeline_id else None
+        return linked if linked is not None else self
 
 
 class CiPipelineStage(db.Model):
@@ -950,4 +1001,55 @@ class CiSecret(db.Model):
     )
 
     service = db.relationship("CiService", back_populates="secrets")
+    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+
+
+class CiServiceDeployment(db.Model):
+    """One workload in the inventory that a CI service builds.
+
+    The explicit answer to "which deployment is this service?" — before it, the
+    deploy automation guessed from Deploy stage targets and slugs. A workload
+    belongs to at most one service (the unique constraint), so the inventory can
+    say "built by X" without ambiguity; a service may have many (SIT, UAT and
+    PROD copies, or several modules of one monorepo).
+
+    ``authorized_by`` is whoever linked it, stamped only when that person could
+    deploy there. A Deploy stage set to "the service's linked deployment"
+    deploys with those rights, the same rule as a fixed target's
+    ``deploy.authorizedBy``: whoever chose where it goes answers for it.
+    """
+
+    __tablename__ = "ci_service_deployments"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "cluster_id", "namespace", "workload_name", name="uq_ci_service_deployment_target"
+        ),
+        db.Index("ix_ci_service_deployment_service", "service_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(
+        db.Integer,
+        db.ForeignKey("ci_services.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    cluster_id = db.Column(db.String(128), nullable=False)
+    namespace = db.Column(db.String(63), nullable=False)
+    workload_kind = db.Column(db.String(32), nullable=False, default="Deployment")
+    workload_name = db.Column(db.String(253), nullable=False)
+    # The container whose image a build replaces. Empty = the only container,
+    # or the one named like the deployment.
+    container_name = db.Column(db.String(63), nullable=True)
+    # A free label (SIT, UAT, PROD...) a Deploy stage can select by when the
+    # service is linked to more than one deployment.
+    environment = db.Column(db.String(64), nullable=True)
+    source = db.Column(db.String(16), nullable=False, default="manual")
+    authorized_by = db.Column(db.JSON, nullable=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
+    )
+
+    service = db.relationship("CiService", back_populates="deployment_links")
     created_by = db.relationship("User", foreign_keys=[created_by_user_id])

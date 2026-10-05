@@ -4,6 +4,10 @@ import {
   blankDeploy,
   deployOutcome,
   deployProblems,
+  deployTarget,
+  isLinkedDeploy,
+  pickLinkedDeployment,
+  setDeployTargetMode,
   generateManifest,
   orderProblem,
   patchDeploy,
@@ -124,5 +128,38 @@ describe("deployOutcome", () => {
     expect(deployOutcome({ outcome: "rolled_back" }).tone).toBe("error");
     expect(deployOutcome({ phase: "waiting_approval" }).label).toBe("Waiting for approval");
     expect(deployOutcome(null)).toBeNull();
+  });
+});
+
+describe("linked deploy targets", () => {
+  const linked = (extra = {}) => ({ ...setDeployTargetMode(target(), "linked"), ...extra });
+
+  it("switching to linked keeps the picked target for switching back", () => {
+    const next = setDeployTargetMode(target(), "linked");
+    expect(isLinkedDeploy(next)).toBe(true);
+    expect(next.createIfMissing).toBe(false);
+    const back = setDeployTargetMode(next, "fixed");
+    expect(isLinkedDeploy(back)).toBe(false);
+    expect(back.deploymentName).toBe("payments-api");
+  });
+
+  it("needs no cluster, namespace or deployment", () => {
+    expect(deployProblems({ ...linked(), clusterId: "", namespace: "", deploymentName: "" })).toEqual([]);
+    expect(deployProblems(linked({ environment: "<prod>" }))[0].message).toMatch(/environment label/);
+  });
+
+  it("reads as the service's linked deployment", () => {
+    expect(deployTarget(linked())).toBe("the service's linked deployment");
+    expect(deployTarget(linked({ environment: "PROD" }))).toBe("the service's linked deployment (PROD)");
+  });
+
+  it("picks the link the backend would", () => {
+    const prod = { id: 1, environment: "PROD" };
+    const uat = { id: 2, environment: "UAT" };
+    expect(pickLinkedDeployment([prod], "").link).toBe(prod);
+    expect(pickLinkedDeployment([prod, uat], "").problem).toMatch(/2 deployments/);
+    expect(pickLinkedDeployment([prod, uat], "uat").link).toBe(uat);
+    expect(pickLinkedDeployment([prod, uat], "SIT").problem).toMatch(/No linked deployment/);
+    expect(pickLinkedDeployment([], "").problem).toMatch(/not linked/);
   });
 });

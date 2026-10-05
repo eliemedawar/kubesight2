@@ -228,6 +228,15 @@ export default function BuildDetailDrawer({
                     · <span className="status-pill ok">deployed → {build.automation.clusterId}</span>
                   </>
                 )}
+                {build.sharedPipeline && (
+                  <>
+                    {" "}
+                    ·{" "}
+                    <span className="chip" title="Ran the stages of a pipeline from the Pipelines page, at this version">
+                      shared pipeline {build.sharedPipeline.name} v{build.sharedPipeline.version}
+                    </span>
+                  </>
+                )}
               </p>
             )}
           </div>

@@ -207,25 +207,49 @@ def delete_secret(row: CiSecret, *, actor=None) -> None:
 # Build-time resolution
 # ---------------------------------------------------------------------------
 
-def resolve_for_service(service_id: int) -> Dict[str, str]:
+def resolve_for_service(
+    service_id: int, *, fallback_service_id: Optional[int] = None
+) -> Dict[str, str]:
     """``{key: plaintext}`` for one service — service scope shadows global.
+
+    ``fallback_service_id`` is the home of a shared pipeline the service builds
+    with: its secrets sit between the two, so a credential stored on the shared
+    pipeline reaches every service using it and a service can still override
+    it by name.
 
     The result is held in memory for the duration of a dispatch and is never
     written to the database, an API response, or a log.
     """
+    owners = [service_id] + ([fallback_service_id] if fallback_service_id else [])
+    rows = CiSecret.query.filter(
+        db.or_(CiSecret.service_id.in_(owners), CiSecret.scope == "global")
+    ).all()
+
+    def rank(row) -> int:
+        if row.scope == "global":
+            return 0
+        return 2 if row.service_id == service_id else 1
+
     resolved: Dict[str, str] = {}
-    rows = (
-        CiSecret.query.filter(
-            db.or_(CiSecret.service_id == service_id, CiSecret.scope == "global")
-        )
-        # Global first so a same-named service secret overwrites it.
-        .order_by(CiSecret.scope.asc())
-        .all()
-    )
-    for row in rows:
-        if row.scope == "global" or row.service_id == service_id:
+    # Lowest rank first, so a closer scope overwrites a same-named wider one.
+    for row in sorted(rows, key=rank):
+        if row.scope == "global" or row.service_id in owners:
             resolved[row.key] = decrypt_secret(row.value_cipher or "")
     return resolved
+
+
+def shared_home_id(build) -> Optional[int]:
+    """The shared pipeline home a build ran with, from its snapshot."""
+    shared = (getattr(build, "pipeline_snapshot", None) or {}).get("sharedPipeline")
+    try:
+        return int(shared.get("homeServiceId")) if isinstance(shared, dict) and shared.get("homeServiceId") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_for_build(build) -> Dict[str, str]:
+    """The secrets a build's stages may read — see :func:`resolve_for_service`."""
+    return resolve_for_service(build.service_id, fallback_service_id=shared_home_id(build))
 
 
 def env_for_stage(
@@ -242,12 +266,13 @@ def env_for_stage(
     return env
 
 
-def mark_used(service_id: int, keys: List[str]) -> None:
+def mark_used(service_id: int, keys: List[str], *, fallback_service_id: Optional[int] = None) -> None:
     """Record that a build consumed these secrets — feeds an unused-secret audit."""
     if not keys:
         return
     now = datetime.now(timezone.utc)
+    owners = [service_id] + ([fallback_service_id] if fallback_service_id else [])
     CiSecret.query.filter(
         CiSecret.key.in_(list(keys)),
-        db.or_(CiSecret.service_id == service_id, CiSecret.scope == "global"),
+        db.or_(CiSecret.service_id.in_(owners), CiSecret.scope == "global"),
     ).update({"last_used_at": now}, synchronize_session=False)

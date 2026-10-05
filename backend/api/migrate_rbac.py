@@ -823,6 +823,11 @@ def _migrate_ci_columns() -> None:
         # so there is nothing to backfill.
         _add_column_if_missing("ci_services", "build_resources", "JSON")
         _retype_json_column("ci_services", "build_resources")
+        # Standalone pipelines live on a service row of kind 'pipeline'.
+        # Every row that existed before is a catalog service.
+        _add_column_if_missing("ci_services", "kind", "VARCHAR(16) DEFAULT 'service'")
+        with db.engine.begin() as conn:
+            conn.execute(text("UPDATE ci_services SET kind = 'service' WHERE kind IS NULL"))
     if "ci_pipelines" in existing:
         # JSON, not TEXT: on PostgreSQL a db.JSON attribute over a text column
         # reads back as the raw string and then iterates as characters.
@@ -842,6 +847,9 @@ def _migrate_ci_columns() -> None:
         # every pipeline that predates them, which reads as "none".
         _add_column_if_missing("ci_pipelines", "post_actions", "JSON")
         _retype_json_column("ci_pipelines", "post_actions")
+        # A service pipeline that builds with a shared one. NULL = its own
+        # stages, which is what every pipeline had before.
+        _add_column_if_missing("ci_pipelines", "linked_pipeline_id", "INTEGER")
     if "ci_pipeline_stages" in existing:
         # Added after the table shipped: db.create_all() will not alter an
         # existing table, so a deployed database needs this backfilled. Existing

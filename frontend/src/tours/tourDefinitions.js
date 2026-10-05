@@ -317,6 +317,25 @@ const PAGE_TOURS = {
     },
   ],
 
+  pipelines: [
+    {
+      target: ".sg-ph",
+      title: "Pipelines outside services",
+      body: "A pipeline here belongs to no CI service. Run it on its own (a nightly job, a cleanup, a release train), or let services build with it — each still builds its own repository and keeps its own history.",
+    },
+    {
+      target: ".sg-ci-health",
+      title: "Tiles are filters",
+      body: "How many pipelines there are, how many services build with them, and what is running or failing. Click a tile to filter the cards.",
+    },
+    {
+      target: ".sg-cat-new.primary",
+      title: "New pipeline",
+      body: "Start empty, from an application type's starter, or from a copy of what a CI service builds with today.",
+      when: (ctx) => ctx.hasPermission("ci_services:create") && ctx.hasPermission("ci_pipelines:edit"),
+    },
+  ],
+
   blueprints: [
     {
       target: ".ws-tabs",

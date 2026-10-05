@@ -55,6 +55,7 @@ from . import build_inputs
 from . import build_status as build_status_service
 from . import code_scan
 from . import deploy_stage
+from . import deployment_links
 from . import logs as logs_service
 from . import parallel_groups
 from . import pipelines as pipelines_service
@@ -396,6 +397,8 @@ def trigger_build(
         "pipelineSource": (
             "kubesight_default"
             if getattr(pipeline, "generated_default", False)
+            else "shared"
+            if getattr(pipeline, "shared", None)
             else "configured"
         ),
         "variables": clean_variables,
@@ -405,6 +408,14 @@ def trigger_build(
         "refType": ref_type if ref_type in ("branch", "tag") else "branch",
         "stages": [stage_definition(stage) for stage in stages],
     }
+    shared = getattr(pipeline, "shared", None)
+    if shared:
+        # Which shared pipeline (Pipelines page) ran, at which version. Its home
+        # also widens secret resolution for this build (secrets.resolve_for_build).
+        snapshot["sharedPipeline"] = dict(shared)
+    # "Deploy to the service's linked deployment" stages get a concrete target
+    # now, so the build records where it deployed even if links change later.
+    deployment_links.resolve_snapshot_targets(service, snapshot["stages"])
     if schedule:
         snapshot["schedule"] = dict(schedule)
     # What happens when the build ends (post_actions.py) — snapshotted with the
@@ -461,6 +472,7 @@ def trigger_build(
             "branch": build.branch,
             "refType": snapshot["refType"],
             "pipeline": pipeline.name,
+            **({"sharedPipeline": shared.get("slug")} if shared else {}),
             "trigger": build.trigger_type,
             "retryOf": retry_of.number if retry_of else None,
             **({"schedule": schedule.get("name")} if schedule else {}),
@@ -1422,6 +1434,10 @@ def _skip_reason(build: CiBuild, adapter, definition: Dict[str, Any]) -> Optiona
     build) contains exactly the containers the engine will actually advance.
     """
     stage_type = definition.get("stageType") or "command"
+    if stage_type == "checkout" and build.service is not None and not build.service.source_ready():
+        # Only a pipeline on the Pipelines page can get here — a catalog
+        # service cannot build without a repository (catalog.can_run_build).
+        return _NO_REPOSITORY_REASON
     if stage_type == "scan" and not scan_stage.configured(definition.get("scan")):
         # Before the runner question: whichever runner this is, there is
         # nothing to run, and the fix is in the editor, not the fleet.
@@ -1439,6 +1455,12 @@ def _skip_reason(build: CiBuild, adapter, definition: Dict[str, Any]) -> Optiona
         if reason:
             return reason
     return _condition_reason(build, definition)
+
+
+_NO_REPOSITORY_REASON = (
+    "This pipeline has no repository, so there is nothing to check out. Connect one on its "
+    "Repository tab, or remove the Checkout stage."
+)
 
 
 def _condition_reason(build: CiBuild, definition: Dict[str, Any]) -> Optional[str]:
@@ -1550,7 +1572,11 @@ def _start_stage(build: CiBuild, stage: CiBuildStage) -> None:
     db.session.add(stage)
 
     if execution.secrets:
-        secrets_service.mark_used(build.service_id, list(execution.secrets))
+        secrets_service.mark_used(
+            build.service_id,
+            list(execution.secrets),
+            fallback_service_id=secrets_service.shared_home_id(build),
+        )
 
 
 def _start_server_stage(build: CiBuild, stage: CiBuildStage, definition: Dict[str, Any]) -> None:
@@ -1812,7 +1838,7 @@ def _build_execution(
     cannot surface in output.
     """
     service = build.service
-    resolved = secrets_service.resolve_for_service(service.id)
+    resolved = secrets_service.resolve_for_build(build)
     stage_secrets = secrets_service.env_for_stage(definition, resolved)
     stage_type = definition.get("stageType") or stage.stage_type
 
@@ -2033,7 +2059,7 @@ def _mask_values(build: CiBuild) -> List[str]:
 
     values: List[str] = []
     try:
-        values.extend(secrets_service.resolve_for_service(build.service_id).values())
+        values.extend(secrets_service.resolve_for_build(build).values())
     except Exception:
         pass
     service = build.service

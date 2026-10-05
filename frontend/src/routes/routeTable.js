@@ -63,6 +63,9 @@ export const TAB_VALUES = {
     "artifacts",
     "settings",
   ],
+  // pages/ServiceDetailPage.jsx PIPELINE_TABS — a pipeline on the Pipelines
+  // page is shown by the same page with fewer tabs.
+  pipelineDetail: ["pipeline", "builds", "artifacts", "repository", "usedBy", "settings"],
   // pages/ApplicationIntelligencePage.jsx:72 — spaces and "&" are slugified
   applicationIntelligence: [
     "Overview",
@@ -179,6 +182,15 @@ export const ROUTES = [
     query: ["build", "stage", "view", "section"],
   },
   { key: "serviceCatalog", path: "/service-catalog" },
+  {
+    key: "pipelineDetail",
+    path: "/pipelines/:pipelineId/:tab?",
+    pageKey: "pipelines",
+    params: { tab: { values: TAB_VALUES.pipelineDetail } },
+    defaults: { tab: "pipeline" },
+    query: ["build", "stage", "view"],
+  },
+  { key: "pipelines", path: "/pipelines" },
   { key: "blueprintDetail", path: "/blueprints/:blueprintId", pageKey: "blueprints" },
   { key: "blueprints", path: "/blueprints" },
   {

@@ -37,6 +37,7 @@ from .ci_agent import ci_agent_bp
 from .ci_assist import ci_assist_bp
 from .ci_merge_checks import ci_merge_checks_bp
 from .ci_schedules import ci_schedules_bp
+from .ci_shared_pipelines import ci_shared_bp
 from .mcp import mcp_bp
 from .ci_worker import ci_worker_bp
 
@@ -81,4 +82,5 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(ci_assist_bp)
     app.register_blueprint(ci_merge_checks_bp)
     app.register_blueprint(ci_schedules_bp)
+    app.register_blueprint(ci_shared_bp)
     app.register_blueprint(mcp_bp)

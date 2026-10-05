@@ -2,14 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "../../styles/signal/pipelineWorkspace.css";
 import BuildParameters from "./BuildParameters.jsx";
 import JenkinsfileImportModal from "./JenkinsfileImportModal.jsx";
+import "../../styles/signal/sharedPipelines.css";
 import {
   applyCiPipelineTemplate,
   createCiPipeline,
+  detachSharedPipeline,
   lintCiPipeline,
   listCiPipelines,
   listCiSecrets,
   updateCiPipeline,
 } from "../../api/ciApi.js";
+import { buildRoute } from "../../routes/routeUrl.js";
+import { CopyFromServiceModal, SharedPipelinePicker } from "./pipeline/SharedPipelinePicker.jsx";
 import LoadingState from "../common/LoadingState.jsx";
 import { useRouter } from "../../routes/RouterContext.jsx";
 import { applicationTypeLabel, formatRelative } from "./ciShared.jsx";
@@ -112,6 +116,10 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
   // the list is the to-do for finishing the port, and it is only actionable
   // next to the stages it is about.
   const [importNotes, setImportNotes] = useState(null);
+  // "Use a shared pipeline" (a service) / "Copy stages from a CI service" (a
+  // pipeline on the Pipelines page).
+  const [picking, setPicking] = useState(false);
+  const [copyingFrom, setCopyingFrom] = useState(false);
   const menuRef = useRef(null);
   const rootRef = useRef(null);
 
@@ -131,7 +139,11 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
   const setView = (next) => setQuery({ view: next === "inputs" ? "inputs" : null });
 
   const generated = Boolean(pipeline?.isGeneratedDefault);
-  const editable = canEdit && !generated && !saving;
+  // This service builds with a pipeline from the Pipelines page: its stages are
+  // shown read-only here and edited there (the API refuses an edit here too).
+  const linked = pipeline?.linkedPipeline || null;
+  const isHome = service.kind === "pipeline";
+  const editable = canEdit && !generated && !linked && !saving;
 
   const diff = useMemo(() => pipelineDiff(stages, parameters, saved), [stages, parameters, saved]);
   const postDirty = useMemo(
@@ -276,7 +288,10 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
   useEffect(
     () => () => {
       const active = getRoute();
-      if (active.key === "serviceDetail" && (active.query?.stage || active.query?.view)) {
+      if (
+        (active.key === "serviceDetail" || active.key === "pipelineDetail") &&
+        (active.query?.stage || active.query?.view)
+      ) {
         const { stage: _stage, view: _view, ...rest } = active.query;
         navigate({ key: active.key, params: active.params, query: rest }, { replace: true });
       }
@@ -688,6 +703,42 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
     setNotice("Jenkinsfile imported as a draft. Review the stages, then save.");
   };
 
+  const attached = (result, picked) => {
+    setPicking(false);
+    adopt({ ...result, isGeneratedDefault: false });
+    setImportNotes(null);
+    setNotice(`From the next build, ${service.name} builds with “${picked.name}”.`);
+    onChanged?.();
+  };
+
+  const stopUsing = async (mode) => {
+    setMenuOpen(false);
+    const message =
+      mode === "copy"
+        ? `Copy the stages of “${linked?.name}” into ${service.name} and stop using the shared pipeline? The copy becomes this service's own to edit, and later changes to the shared pipeline no longer reach it. This saves immediately.`
+        : `Stop using “${linked?.name}”? ${service.name} goes back to its own pipeline as it was before${pipeline?.ownStageCount ? "" : " (the KubeSight starter, since it never had stages of its own)"}. This saves immediately.`;
+    if (!window.confirm(message)) return;
+    setSaving(true);
+    setError("");
+    try {
+      const result = await detachSharedPipeline(service.id, mode);
+      adopt(result);
+      setNotice(mode === "copy" ? "Copied. These stages are this service's own now." : "Back to this service's own pipeline.");
+      onChanged?.();
+    } catch (err) {
+      setError(err.message || "Could not stop using the shared pipeline.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const copiedDraft = (draft, from) => {
+    setCopyingFrom(false);
+    applyDraft({ stages: draft.stages || [], parameters: draft.parameters || [], notes: [], blocking: [] });
+    setPostActions((draft.postActions || []).map(withPostKey));
+    setNotice(`Copied from ${from.name} as a draft. Review the stages, then save.`);
+  };
+
   if (loading) return <LoadingState label="Loading pipeline…" />;
 
   const current = selectedIndex !== null ? stages[selectedIndex] : null;
@@ -700,6 +751,17 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
 
   return (
     <div className={`pl-root${dirty ? " is-dirty" : ""}`} ref={rootRef}>
+      {picking && (
+        <SharedPipelinePicker
+          service={service}
+          currentId={linked?.id}
+          onClose={() => setPicking(false)}
+          onAttached={attached}
+        />
+      )}
+      {copyingFrom && (
+        <CopyFromServiceModal pipeline={service} onClose={() => setCopyingFrom(false)} onDraft={copiedDraft} />
+      )}
       {importing && (
         <JenkinsfileImportModal
           service={service}
@@ -716,8 +778,13 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
           </span>
           <div>
             <h3>
-              Build pipeline
+              {isHome ? "Pipeline" : "Build pipeline"}
               {generated && <span className="pl-tag is-accent">Starter · managed by KubeSight</span>}
+              {linked && (
+                <span className="pl-tag is-info">
+                  <PlIcon name="link" /> Shared · {linked.name}
+                </span>
+              )}
               {!generated && pipeline?.id == null && stages.length > 0 && <span className="pl-tag">Not saved yet</span>}
               {!canEdit && (
                 <span className="pl-tag">
@@ -748,10 +815,16 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
               ) : (
                 "No stages yet — a build has nothing to run."
               )}
-              {pipeline?.id && !generated && (
+              {pipeline?.id && !generated && !linked && (
                 <span className="pl-top-meta">
                   Version {pipeline.version}
                   {pipeline.updatedAt && <> · saved {formatRelative(pipeline.updatedAt)}</>}
+                </span>
+              )}
+              {linked && !linked.missing && (
+                <span className="pl-top-meta">
+                  {linked.name} version {linked.version}
+                  {linked.updatedAt && <> · saved {formatRelative(linked.updatedAt)}</>}
                 </span>
               )}
             </p>
@@ -793,8 +866,80 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
                 <PlIcon name="more" />
                 <span className="pl-sr">More pipeline actions</span>
               </button>
-              {menuOpen && (
+              {menuOpen && linked && (
                 <div className="pl-menu-list" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="btn-ghost"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setPicking(true);
+                    }}
+                  >
+                    <PlIcon name="link" />
+                    <span>
+                      <strong>Use a different shared pipeline</strong>
+                      <small>Pick another one from the Pipelines page · saves immediately</small>
+                    </span>
+                  </button>
+                  <button type="button" role="menuitem" className="btn-ghost" onClick={() => stopUsing("copy")}>
+                    <PlIcon name="copy" />
+                    <span>
+                      <strong>Copy its stages here to edit</strong>
+                      <small>Stop using it; this service owns a copy · saves immediately</small>
+                    </span>
+                  </button>
+                  <button type="button" role="menuitem" className="btn-ghost" onClick={() => stopUsing("restore")}>
+                    <PlIcon name="undo" />
+                    <span>
+                      <strong>Go back to this service's own pipeline</strong>
+                      <small>
+                        {pipeline?.ownStageCount
+                          ? `Its ${pipeline.ownStageCount} own stage${pipeline.ownStageCount === 1 ? "" : "s"} come back`
+                          : "The KubeSight starter, as before"}{" "}
+                        · saves immediately
+                      </small>
+                    </span>
+                  </button>
+                </div>
+              )}
+              {menuOpen && !linked && (
+                <div className="pl-menu-list" role="menu">
+                  {!isHome && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="btn-ghost"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setPicking(true);
+                      }}
+                    >
+                      <PlIcon name="link" />
+                      <span>
+                        <strong>Use a shared pipeline</strong>
+                        <small>Build with one from the Pipelines page instead · saves immediately</small>
+                      </span>
+                    </button>
+                  )}
+                  {isHome && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="btn-ghost"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setCopyingFrom(true);
+                      }}
+                    >
+                      <PlIcon name="copy" />
+                      <span>
+                        <strong>Copy stages from a CI service</strong>
+                        <small>What a service builds with today, as a draft to review</small>
+                      </span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="menuitem"
@@ -832,6 +977,57 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
             <PlIcon name="x" />
           </button>
         </div>
+      )}
+
+      {/* ── A shared pipeline, said plainly ───────────────────────────── */}
+      {linked && (
+        <section className="pl-starter sp-shared" aria-label="Shared pipeline">
+          <span className="pl-starter-glyph" aria-hidden="true">
+            <PlIcon name="link" />
+          </span>
+          <div>
+            <strong>
+              {linked.missing
+                ? "This service builds with a shared pipeline that no longer exists"
+                : `${service.name} builds with the shared pipeline “${linked.name}”`}
+            </strong>
+            <p>
+              {linked.missing
+                ? "Its builds are refused until it uses another one or goes back to its own pipeline."
+                : "These are that pipeline's stages, run against this service's own repository, Dockerfile and registry. They are edited on the Pipelines page, and a change there reaches this service from its next build. Its own stages are kept for if it stops using it."}
+              {!linked.missing && !linked.enabled && <strong className="sp-shared-off"> It is turned off right now, so builds are refused.</strong>}
+            </p>
+          </div>
+          <div className="sp-shared-actions">
+            {!linked.missing && (
+              <a
+                className="sp-linkbtn"
+                href={buildRoute({ key: "pipelineDetail", params: { pipelineId: String(linked.id), tab: "pipeline" } })}
+              >
+                <PlIcon name="forward" /> Open {linked.name}
+              </a>
+            )}
+            {canEdit && (
+              <button type="button" className="btn-outline btn-compact" disabled={saving} onClick={() => stopUsing("copy")}>
+                <PlIcon name="copy" /> Copy stages here
+              </button>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* ── A pipeline others build with: say who saving reaches ──────── */}
+      {isHome && service.usedByCount > 0 && (
+        <p className="pl-note sp-reach">
+          <PlIcon name="link" />
+          <span>
+            <strong>
+              {service.usedByCount} service{service.usedByCount === 1 ? " builds" : "s build"} with this pipeline.
+            </strong>{" "}
+            Saving changes what {service.usedByCount === 1 ? "it builds" : "they build"} from the next build on. A
+            Deploy stage set to “the service's linked deployment” deploys each one to its own.
+          </span>
+        </p>
       )}
 
       {/* ── The starter pipeline, said plainly ─────────────────────────── */}
@@ -1023,6 +1219,15 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
                     <button type="button" className="btn-outline btn-compact" onClick={() => setImporting(true)}>
                       <PlIcon name="upload" /> Import a Jenkinsfile
                     </button>
+                    {isHome ? (
+                      <button type="button" className="btn-outline btn-compact" onClick={() => setCopyingFrom(true)}>
+                        <PlIcon name="copy" /> Copy from a CI service
+                      </button>
+                    ) : (
+                      <button type="button" className="btn-outline btn-compact" onClick={() => setPicking(true)}>
+                        <PlIcon name="link" /> Use a shared pipeline
+                      </button>
+                    )}
                   </div>
                 )}
               </>

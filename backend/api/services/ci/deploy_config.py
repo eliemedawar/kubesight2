@@ -33,6 +33,13 @@ MAX_MANIFEST_CHARS = 64000
 # what makes one reachable. Anything else belongs in a reviewed apply.
 MANIFEST_KINDS = ("Deployment", "Service")
 SERVICE_TYPES = ("ClusterIP", "NodePort")
+# Where a Deploy stage deploys. ``fixed``: the cluster / namespace / deployment
+# saved on the stage. ``linked``: the deployment linked to the service being
+# built (services/ci/deployment_links.py), resolved when the build starts — how
+# one shared pipeline deploys each service that uses it to that service's own
+# deployment.
+TARGET_MODES = ("fixed", "linked")
+_ENVIRONMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 # The placeholder the generated manifest shows where the image goes. The
 # executor sets the image on the target container whatever the text says, so
 # this is for the reader, not a template language.
@@ -204,6 +211,14 @@ def normalize(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str
             "namespace and deployment it deploys to."
         )
 
+    mode = _clean(value.get("target"), 16).lower() or "fixed"
+    if mode not in TARGET_MODES:
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{mode}' is not a deploy target. Use fixed or linked."
+        )
+    if mode == "linked":
+        return _normalize_linked(value, stage_name)
+
     cluster_id = _clean(value.get("clusterId"), 128)
     if not cluster_id:
         raise DeployConfigError(f"Stage '{stage_name}' needs a cluster to deploy to.")
@@ -243,17 +258,70 @@ def normalize(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str
         )
 
     return {
+        "target": "fixed",
         "clusterId": cluster_id,
         "namespace": namespace,
         "deploymentName": deployment_name,
         "containerName": container_name,
         "image": image,
+        # Record this deployment as the service's (the inventory link) when the
+        # pipeline is saved and whenever the stage deploys. On unless switched
+        # off, so a pipeline saved before links existed links on its next save.
+        "linkToService": value.get("linkToService") is not False,
         "createIfMissing": create_if_missing,
         "create": _create_form(value.get("create"), stage_name),
         # Kept when create-if-missing is off, so turning it back on does not lose
         # what was written. It is only ever applied while the switch is on.
         "manifest": manifest[:MAX_MANIFEST_CHARS],
     }
+
+
+def _image(value: Dict[str, Any], stage_name: str) -> str:
+    image = _clean(value.get("image"), 512)
+    if image and not _IMAGE_RE.match(image):
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{image}' is not an image reference. Leave it empty to deploy "
+            "the image this build pushed."
+        )
+    return image
+
+
+def _normalize_linked(value: Dict[str, Any], stage_name: str) -> Dict[str, Any]:
+    """A stage that deploys to the deployment linked to the service being built.
+
+    No cluster, namespace or manifest: those come from the link when a build
+    starts. Never creates anything — the link names a deployment that exists.
+    ``environment`` picks one link when a service has several (SIT/UAT/PROD).
+    """
+    environment = _clean(value.get("environment"), 64)
+    if environment and not _ENVIRONMENT_RE.match(environment):
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{environment}' is not an environment label "
+            "(letters, digits, spaces, dots, dashes and underscores)."
+        )
+    container_name = _clean(value.get("containerName"), 63)
+    if container_name:
+        try:
+            validate_container_name(container_name)
+        except K8sNameError as exc:
+            raise DeployConfigError(f"Stage '{stage_name}': {exc}")
+    return {
+        "target": "linked",
+        "environment": environment,
+        "clusterId": "",
+        "namespace": "",
+        "deploymentName": "",
+        "containerName": container_name,
+        "image": _image(value, stage_name),
+        "linkToService": False,
+        "createIfMissing": False,
+        "create": _create_form({}, stage_name),
+        "manifest": "",
+    }
+
+
+def is_linked(config: Optional[Dict[str, Any]]) -> bool:
+    return isinstance(config, dict) and config.get("target") == "linked"
 
 
 def signature(config: Optional[Dict[str, Any]]) -> str:
@@ -275,6 +343,11 @@ def signature(config: Optional[Dict[str, Any]]) -> str:
         "createIfMissing": create,
         "manifest": (config.get("manifest") or "") if create else "",
     }
+    if is_linked(config):
+        # Only for linked stages, so every fixed target saved before linked
+        # mode existed keeps the signature its authority stamp was taken on.
+        material["target"] = "linked"
+        material["environment"] = config.get("environment") or ""
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
 
 

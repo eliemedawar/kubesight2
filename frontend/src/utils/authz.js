@@ -114,6 +114,14 @@ export const NAV_PAGES = [
     permission: "ci_services:view",
     section: "Services",
   },
+  // Pipelines outside any service: standalone jobs, and pipelines CI services
+  // share. Stored as services of kind "pipeline", so the CI keys apply.
+  {
+    key: "pipelines",
+    label: "Pipelines",
+    permission: "ci_pipelines:view",
+    section: "Services",
+  },
   {
     key: "blueprints",
     label: "Blueprints",

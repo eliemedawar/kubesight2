@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import { getCiDeployTarget } from "../../../api/ciApi.js";
+import { getCiDeployTarget, listCiDeploymentLinks } from "../../../api/ciApi.js";
 import { listClusters, listNamespacesByCluster } from "../../../api/clustersApi.js";
 import SearchableSelect from "../../common/SearchableSelect.jsx";
 import { formatRelative } from "../ciShared.jsx";
 import { CommandEditor, EnvRows, Field, Segmented, Switch } from "./controls.jsx";
-import { blankDeploy, generateManifest, patchDeploy, SERVICE_TYPES } from "./deployModel.js";
+import {
+  blankDeploy,
+  generateManifest,
+  isLinkedDeploy,
+  patchDeploy,
+  pickLinkedDeployment,
+  SERVICE_TYPES,
+  setDeployTargetMode,
+} from "./deployModel.js";
 import { PlIcon } from "./icons.jsx";
 import { timeoutLabel } from "./stageModel.js";
 
@@ -16,10 +24,14 @@ import { timeoutLabel } from "./stageModel.js";
  * deploy, and who is it done as — so the safety rules are on the page, not
  * discovered from a failed build.
  */
-export default function DeployStageFields({ ids, stage, stages, index, editable, onChange }) {
+export default function DeployStageFields({ ids, service: ciService, stage, stages, index, editable, onChange }) {
   const deploy = stage.deploy || blankDeploy();
   const set = (patch) => onChange({ deploy: patchDeploy(deploy, patch) });
   const setCreate = (patch) => set({ create: patch });
+  const linkedMode = isLinkedDeploy(deploy);
+  // A pipeline from the Pipelines page has no deployment of its own: each
+  // service that builds with it has its own.
+  const isHome = ciService?.kind === "pipeline";
 
   const [clusters, setClusters] = useState([]);
   const [namespaces, setNamespaces] = useState({ clusterId: "", items: [], error: "" });
@@ -68,6 +80,19 @@ export default function DeployStageFields({ ids, stage, stages, index, editable,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetKey]);
 
+  // The service's own links, for "the service's linked deployment".
+  const [links, setLinks] = useState(null);
+  useEffect(() => {
+    if (!linkedMode || isHome || !ciService?.id) return undefined;
+    let cancelled = false;
+    listCiDeploymentLinks(ciService.id, { live: false })
+      .then((data) => !cancelled && setLinks(data.items || []))
+      .catch(() => !cancelled && setLinks([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [linkedMode, isHome, ciService?.id]);
+
   const info = target.key === targetKey ? target.data : null;
   const existing = useMemo(
     () => (info?.deployments || []).find((item) => item.name === deploy.deploymentName) || null,
@@ -81,8 +106,97 @@ export default function DeployStageFields({ ids, stage, stages, index, editable,
   const clusterName = (clusters.find((item) => item.id === deploy.clusterId) || {}).name || deploy.clusterId;
   const namespaceItems = namespaces.clusterId === deploy.clusterId ? namespaces.items : [];
 
+  const modeSwitch = (
+    <Field
+      label="Deploys to"
+      hint={
+        linkedMode
+          ? isHome
+            ? "Each service that builds with this pipeline deploys to its own linked deployment."
+            : "Whatever deployment this service is linked to under Settings → Deployments, looked up when the build starts."
+          : undefined
+      }
+    >
+      <Segmented
+        label="Deploy target"
+        value={linkedMode ? "linked" : "fixed"}
+        options={[
+          { value: "fixed", label: "A deployment I pick" },
+          { value: "linked", label: "The service's linked deployment" },
+        ]}
+        disabled={!editable}
+        onChange={(mode) => onChange({ deploy: setDeployTargetMode(deploy, mode) })}
+      />
+    </Field>
+  );
+
+  if (linkedMode) {
+    return (
+      <div className="pl-deploy">
+        {modeSwitch}
+        <div className="pl-grid pl-deploy-target">
+          <Field
+            label="Environment"
+            htmlFor={`${ids}-environment`}
+            optional
+            hint="Needed when a service is linked to several deployments: the link with this label is used."
+          >
+            <input
+              id={`${ids}-environment`}
+              value={deploy.environment || ""}
+              placeholder="PROD"
+              disabled={!editable}
+              onChange={(event) => onChange({ deploy: { ...deploy, environment: event.target.value } })}
+            />
+          </Field>
+          <Field
+            label="Container"
+            htmlFor={`${ids}-container`}
+            optional
+            hint="Empty uses the link's container, or the deployment's only one."
+          >
+            <input
+              id={`${ids}-container`}
+              className="is-mono"
+              value={deploy.containerName || ""}
+              placeholder="app"
+              disabled={!editable}
+              spellCheck={false}
+              onChange={(event) => onChange({ deploy: { ...deploy, containerName: event.target.value.trim().toLowerCase() } })}
+            />
+          </Field>
+        </div>
+        <LinkedPreview isHome={isHome} links={links} environment={deploy.environment} />
+        <ImageChoice deploy={deploy} editable={editable} set={set} imageStageBefore={imageStageBefore} fixedImage={fixedImage} />
+        <ul className="pl-deploy-guards" aria-label="What this stage checks">
+          <Guard
+            icon="shield"
+            title="The image must be in the cluster's registry"
+            text="Checked against the registries linked to the deployment's cluster before anything is applied. Missing or unconfirmable means nothing is deployed."
+          />
+          <Guard
+            icon="lock"
+            title="Approval"
+            text="If that cluster needs approval, the change is queued as a change bundle and this stage waits for it."
+          />
+          <Guard
+            icon="undo"
+            title="Watched, and rolled back if it fails"
+            text={`Passes only when every replica runs the new image. Crash loops, image pull errors or not ready within ${timeoutLabel(stage.timeoutSeconds)} put the previous image back.`}
+          />
+          <Guard
+            icon="key"
+            title="Deploys with the rights of whoever linked the deployment"
+            text="The person who linked it to the service must still be able to deploy there. If they cannot, the stage stops and says who has to link it again. It never creates a deployment."
+          />
+        </ul>
+      </div>
+    );
+  }
+
   return (
     <div className="pl-deploy">
+      {modeSwitch}
       {/* ── Where ─────────────────────────────────────────────────────── */}
       <div className="pl-grid pl-deploy-target">
         <Field label="Cluster">
@@ -204,40 +318,28 @@ export default function DeployStageFields({ ids, stage, stages, index, editable,
 
       <TargetStatus deploy={deploy} info={info} target={target} targetKey={targetKey} existing={existing} clusterName={clusterName} />
 
-      {/* ── Which image ───────────────────────────────────────────────── */}
-      <Field label="Image" hint={fixedImage ? "Deployed as written. ${VAR} expands from build inputs." : undefined}>
-        <Segmented
-          label="Which image"
-          value={fixedImage ? "fixed" : "built"}
-          options={[
-            { value: "built", label: "The image this build pushed" },
-            { value: "fixed", label: "A fixed image" },
-          ]}
-          disabled={!editable}
-          onChange={(mode) => set(mode === "built" ? { image: "", imageMode: undefined } : { imageMode: "fixed" })}
+      {/* ── Is this the service's deployment (the inventory link) ──────── */}
+      {!isHome && deploy.deploymentName && (
+        <LinkToService
+          deploy={deploy}
+          existing={existing}
+          service={ciService}
+          editable={editable}
+          onChange={(linkToService) => onChange({ deploy: { ...deploy, linkToService } })}
         />
-      </Field>
-      {fixedImage ? (
-        <input
-          aria-label="Image to deploy"
-          className="is-mono pl-deploy-image"
-          value={deploy.image}
-          placeholder="registry.areeba.com/payments-api:${IMAGE_TAG}"
-          disabled={!editable}
-          spellCheck={false}
-          onChange={(event) => set({ image: event.target.value.trim(), imageMode: "fixed" })}
-        />
-      ) : (
-        !imageStageBefore && (
-          <div className="pl-note is-warn">
-            <PlIcon name="alert" />
-            <p>
-              <strong>No “Build an image” stage comes before this one.</strong> A build would have
-              nothing to deploy and fail here. Add one above, or deploy a fixed image.
-            </p>
-          </div>
-        )
       )}
+      {isHome && (
+        <p className="pl-note is-muted">
+          <PlIcon name="link" />
+          <span>
+            Every service that builds with this pipeline would deploy to this one deployment. To send each
+            service to its own, choose “The service's linked deployment” above.
+          </span>
+        </p>
+      )}
+
+      {/* ── Which image ───────────────────────────────────────────────── */}
+      <ImageChoice deploy={deploy} editable={editable} set={set} imageStageBefore={imageStageBefore} fixedImage={fixedImage} />
 
       {/* ── What stops a bad deploy ───────────────────────────────────── */}
       <ul className="pl-deploy-guards" aria-label="What this stage checks">
@@ -400,6 +502,130 @@ export default function DeployStageFields({ ids, stage, stages, index, editable,
         )}
       </div>
     </div>
+  );
+}
+
+function ImageChoice({ deploy, editable, set, imageStageBefore, fixedImage }) {
+  return (
+    <>
+      <Field label="Image" hint={fixedImage ? "Deployed as written. ${VAR} expands from build inputs." : undefined}>
+        <Segmented
+          label="Which image"
+          value={fixedImage ? "fixed" : "built"}
+          options={[
+            { value: "built", label: "The image this build pushed" },
+            { value: "fixed", label: "A fixed image" },
+          ]}
+          disabled={!editable}
+          onChange={(mode) => set(mode === "built" ? { image: "", imageMode: undefined } : { imageMode: "fixed" })}
+        />
+      </Field>
+      {fixedImage ? (
+        <input
+          aria-label="Image to deploy"
+          className="is-mono pl-deploy-image"
+          value={deploy.image}
+          placeholder="registry.areeba.com/payments-api:${IMAGE_TAG}"
+          disabled={!editable}
+          spellCheck={false}
+          onChange={(event) => set({ image: event.target.value.trim(), imageMode: "fixed" })}
+        />
+      ) : (
+        !imageStageBefore && (
+          <div className="pl-note is-warn">
+            <PlIcon name="alert" />
+            <p>
+              <strong>No “Build an image” stage comes before this one.</strong> A build would have
+              nothing to deploy and fail here. Add one above, or deploy a fixed image.
+            </p>
+          </div>
+        )
+      )}
+    </>
+  );
+}
+
+/** Which link a build would use right now — the same pick the backend makes. */
+function LinkedPreview({ isHome, links, environment }) {
+  if (isHome) {
+    return (
+      <p className="pl-note is-muted">
+        <PlIcon name="link" />
+        <span>
+          Run on its own, this pipeline has no service behind it, so this stage stops with that reason. It
+          deploys when a CI service that uses the pipeline builds, to that service's linked deployment.
+        </span>
+      </p>
+    );
+  }
+  if (links === null) {
+    return (
+      <p className="pl-deploy-status is-loading">
+        <span className="sg-ci-pulse" aria-hidden="true" /> Reading this service's linked deployments…
+      </p>
+    );
+  }
+  const { link, problem } = pickLinkedDeployment(links, environment);
+  if (!link) {
+    return (
+      <div className="pl-note is-warn">
+        <PlIcon name="alert" />
+        <p>
+          <strong>{problem}</strong> A build stops at this stage until it is. Link deployments under Settings →
+          Deployments.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="pl-deploy-status is-exists">
+      <PlIcon name="check" />
+      <p>
+        <strong>Deploys to {link.clusterId} / {link.namespace} / {link.workloadName}</strong>
+        {link.environment ? <> · {link.environment}</> : null}
+        <small>
+          {link.canDeployThrough
+            ? `With the rights of ${link.authorizedBy || "whoever linked it"}, re-checked when the build runs.`
+            : "Whoever linked it could not deploy there, so the stage will stop. Someone who can must choose “Deploy as me” on the link."}
+        </small>
+      </p>
+    </div>
+  );
+}
+
+/** "Link this deployment to the service": the inventory link a fixed target
+ * implies. On by default; never takes a deployment another service has. */
+function LinkToService({ deploy, existing, service, editable, onChange }) {
+  const owner = existing?.linkedService || null;
+  const ours = owner && service && String(owner.id) === String(service.id);
+  if (owner && !ours) {
+    return (
+      <p className="pl-note is-muted">
+        <PlIcon name="link" />
+        <span>
+          <code>{deploy.deploymentName}</code> is linked to <strong>{owner.name}</strong>, so it stays that
+          service's in the inventory. This stage still deploys to it.
+        </span>
+      </p>
+    );
+  }
+  return (
+    <label className="pl-check">
+      <input
+        type="checkbox"
+        checked={deploy.linkToService !== false}
+        disabled={!editable}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      <span>
+        <strong>{ours ? "Linked to this service" : "Link this deployment to the service"}</strong>
+        <small>
+          {ours
+            ? "The inventory names this service on it, and ticket-driven deploys build this service."
+            : "When the pipeline is saved, and whenever this stage deploys. The inventory then names this service on it."}
+        </small>
+      </span>
+    </label>
   );
 }
 
