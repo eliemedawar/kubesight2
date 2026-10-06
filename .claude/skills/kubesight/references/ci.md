@@ -365,6 +365,124 @@ yes before calling it. There is deliberately no tool that switches a service's
 checks off or re-sends a verdict: relaxing a gate to get a merge through is the
 failure the gate exists to prevent, and it stays a human action in the UI.
 
+## Moving a Jenkins pipeline here — the mobile build on the Mac
+
+Learned porting the areebapay-v2 React Native Jenkinsfile (Android AAB/APK + iOS
+IPA, every stage `agent { label 'mac' }`) onto a macOS agent. Each rule below is
+a failure that happened, not a style preference. Read the Jenkinsfile in full
+first (`kubesight_repo_file {service, path: "Jenkinsfile"}` when it is in the
+repo, otherwise the person pastes it), then translate:
+
+| Jenkins | KubeSight |
+|---|---|
+| `agent { label 'mac' }` | `runnerType: "agent_macos"`, `runnerLabels: ["macos"]` (+ `"xcode"` for iOS) — on **every** stage, the checkout included: the workspace lives on the machine that cloned it |
+| `cleanWs()` + `checkout(... refs/tags/${repotag})` | a `checkout` stage; the person runs the build on the tag (`kubesight_build_run {service, branch: "<tag>"}`) and `$KUBESIGHT_TAG` holds it |
+| string / text / boolean parameters | `parameters` on `kubesight_pipeline_save`: `text`, `multiline` (a whole `.env` or Fastfile, newlines kept), `boolean`, `choice`. A stage reads each as `$<name>`, **case-sensitive, exactly the name** — not the label |
+| `when { equals expected: 'true', actual: DeployIos }` | `runCondition: {variable: "DeployIos", operator: "equals", value: "true"}` on a `boolean` parameter |
+| `BUILD_NUMBER` | `$KUBESIGHT_BUILD_NUMBER` (so `700 + BUILD_NUMBER` becomes `$((700 + KUBESIGHT_BUILD_NUMBER))`) |
+| Groovy values from `script {}` (`Build_Version`, `BUILD_CODE_NUMBER`) | recompute in shell in each stage that needs them — stages share files, not variables (or append to `$KUBESIGHT_ENV`) |
+| `dir("./android") { sh ... }` | `cd android` inside the commands |
+| `archiveArtifacts 'app/build/outputs/bundle/release/app-release.aab'` | `artifacts: [{path: "android/app/build/outputs/bundle/release/app-release.aab", type: "aab"}]` — the path is from the checkout root, so add the `dir()` prefix; `apk`/`ipa` likewise |
+| `withCredentials([usernamePassword(credentialsId: 'MacDevops', ...)])` | `secretRefs: [{name: "MAC_KEYCHAIN_PASSWORD", envVar: "MAC_KEYCHAIN_PASSWORD"}]` — the secret must already exist on the service; ask a person to add it |
+| `try { ... } catch { echo "pipeline continues" }` | `continueOnFailure: true` on that stage |
+| `${var}` interpolated into `sh """..."""` | plain `"$var"` in the shell; drop Groovy's `\$` escapes |
+
+What breaks if you translate literally:
+
+- **Never copy `export PATH=/usr/local/bin:$PATH` or `/opt/homebrew/bin` lines
+  into commands.** The agent's own environment (its launchd plist) already puts
+  nvm's Node 20.19.4, rbenv's Ruby 4.0.6, Homebrew and `ANDROID_HOME` on the
+  path, in the right order. Prepending `/usr/local/bin` brought back an older
+  Node 20.10.0, and `yarn install` died with `The engine "node" is incompatible
+  with this module. Expected version ">=20.19.4"`. Drop the `source nvm.sh` /
+  `nvm use` / rbenv exports too. A tool that is genuinely missing is the
+  machine's `PATH`, not the stage's: check the runner's `capabilities` in
+  `kubesight_runners_list` and tell the person to add the folder to the agent's
+  plist and reload it.
+- **No image, and never `KUBESIGHT_CONTAINER=always`, on a Mac stage.** The Mac
+  has no docker or podman: an image is ignored (`stage image ... ignored: no
+  container runtime here`), and `always` fails the stage outright (`This stage
+  requires a container ... no usable docker or podman`). Xcode cannot run in a
+  container anyway.
+- **Signing files live on the Mac, by absolute path** — the keystore at
+  `/Users/devops/jenkins/.certs/app/areebapay.keystore`, the Play JSON key under
+  `/Users/devops/jenkins/.certs/android/`. Use the path the parameter gives and
+  test it with `[ -f "$STORE_FILE" ]`. Do not write a check that only looks
+  inside the repository; that is how the stage failed with `No keystore at ...
+  looked in the repo root, android/ and android/app/`.
+- **The `.env` files are not in the repo.** Jenkins' CONFIG stage wrote them from
+  the `envuat` / `envprod` / `envpreprod` parameters. Write them before anything
+  copies them — in a first config stage on the Mac (files carry to later stages)
+  or at the top of each build stage. Copy Jenkins' `printf` exactly:
+  `printf "$envuat" > .env.uat` (the value as the *format*). That turns the
+  `\\r\\n` inside the PEM keys into what the app received under Jenkins;
+  `printf '%s'` would write them differently.
+- **A Fastfile or fastlane `.env` is written verbatim:** `printf '%s\n'
+  "$FASTFILE_BUILD_ONLY" > fastlane/Fastfile` (Jenkins used a quoted heredoc).
+- **Read signing values out of a multiline `KEY=VALUE` parameter like this**,
+  and never `cat .env` or `echo` a password. Jenkins printed the whole env file,
+  but **parameter values are not masked in KubeSight logs — only secrets are**:
+  ```sh
+  ks_get() { printf '%s\n' "$fastenvandroid" | grep "^$1=" | head -n 1 | cut -d'=' -f2- | tr -d ' "\r'; }
+  STORE_FILE=$(ks_get AREEBA_STORE_FILE)
+  ```
+  Suggest moving the passwords to service secrets; a parameter's default is
+  shown to everyone who opens Run Build.
+- **It is macOS's userland:** `sed -i ''` (BSD sed, as the Jenkinsfile already
+  has it), and `/bin/sh` is bash 3.2. Keep commands POSIX.
+- **Port the intent, not the bugs, and say which you fixed.** In that
+  Jenkinsfile, pre-prod copied a `.env.preprod` nothing ever wrote; the iOS
+  build-only stage picked its `.env` from `DeployAndroidUAT`; npmrc went to
+  `.nmprc`. Name each one and ask before changing what a build produces.
+
+The Android AAB stage that worked, as its `commands` (they run as one script,
+joined by newlines):
+
+```sh
+set -e
+printf "$envuat"  > .env.uat
+printf "$envprod" > .env.prod
+if [ -n "${envpreprod:-}" ]; then printf "$envpreprod" > .env.preprod; fi
+
+ks_get() { printf '%s\n' "$fastenvandroid" | grep "^$1=" | head -n 1 | cut -d'=' -f2- | tr -d ' "\r'; }
+STORE_FILE=$(ks_get AREEBA_STORE_FILE); STORE_PASS=$(ks_get AREEBA_STORE_PASS)
+KEY_ALIAS=$(ks_get AREEBA_KEY_ALIAS);   KEY_PASS=$(ks_get AREEBA_KEY_PASS)
+[ -f "$STORE_FILE" ] || { echo "No keystore at $STORE_FILE"; exit 1; }
+printf '%s\n' "$fastenvandroid" > android/fastlane/.env
+
+BUILD_CODE=$((700 + KUBESIGHT_BUILD_NUMBER))
+BUILD_VERSION=$(grep '"version"' package.json | head -n 1 | cut -d '"' -f 4)
+sed -i '' '/release {/,/^    }/ s/.*signingConfig.*//' android/app/build.gradle
+yarn install
+
+if [ "${deploypreprod:-}" = "true" ]; then cp .env.preprod android/.env
+elif [ "${DeployAndroidUAT:-}" = "true" ]; then cp .env.uat android/.env
+else cp .env.prod android/.env
+fi
+
+cd android
+./gradlew bundleRelease -PversionCode="$BUILD_CODE" -PversionName="$BUILD_VERSION" \
+  -Pandroid.injected.signing.store.file="$STORE_FILE" \
+  -Pandroid.injected.signing.store.password="$STORE_PASS" \
+  -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+  -Pandroid.injected.signing.key.password="$KEY_PASS"
+```
+
+The iOS build-only stage follows the same shape: write the `.env` files,
+`yarn install`, copy the chosen `.env`, `yarn ios:build`, then in `ios/` write
+the Fastfile and `fastlane/.env` from `$FASTFILE_BUILD_ONLY` / `$fastenvios`,
+`security unlock-keychain -p "$MAC_KEYCHAIN_PASSWORD" login.keychain`,
+`RCT_NEW_ARCH_ENABLED=1 pod install`, `xcrun agvtool new-version -all
+"$BUILD_CODE"`, `xcrun agvtool new-marketing-version "$BUILD_VERSION"`,
+`fastlane build_only`, `mv *.ipa app-release.ipa` — artifact
+`ios/app-release.ipa`, type `ipa`. Keychain signing needs the agent to run as a
+LaunchAgent in the logged-in user's session, which is the machine's setup, not
+the pipeline's.
+
+Before saving: say which stages you are creating, which parameters and secrets
+they expect, and which Jenkins bugs you corrected. A missing secret is a
+person's job to add, and the pipeline is not proven until a build has run it.
+
 ## The hard questions
 
 **"Why is this build stuck queued?"**
