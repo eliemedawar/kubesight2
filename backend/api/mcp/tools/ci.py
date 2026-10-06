@@ -255,6 +255,9 @@ def _pipeline_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "name": pipeline["name"],
         "version": pipeline.get("version"),
         "isGeneratedDefault": bool(pipeline.get("isGeneratedDefault")),
+        # Set when the service builds with a standalone pipeline: these stages
+        # are that pipeline's, edited under its own slug, not this service's.
+        "sharedPipeline": pipeline.get("linkedPipeline"),
         "parameters": pipeline.get("parameters") or [],
         "stages": [
             {

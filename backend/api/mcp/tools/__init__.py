@@ -40,6 +40,7 @@ from .registry import (  # noqa: F401  (the package's public surface)
 
 # Registration happens on import. Ordered as the table above reads.
 from . import ci  # noqa: F401,E402
+from . import ci_setup  # noqa: F401,E402  (ci domain: creating services and standalone pipelines)
 from . import clusters  # noqa: F401,E402
 from . import workloads  # noqa: F401,E402
 from . import deploys  # noqa: F401,E402

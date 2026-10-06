@@ -208,6 +208,70 @@ fix: a secret referenced by the *saved* pipeline that has since been deleted
 blocks every edit, including ones that never touched it. The message says so;
 relay it and ask for the secret back.
 
+## Setting up — a new service, or a pipeline outside any service
+
+**A new CI service.** `kubesight_service_create {name, applicationType,
+repositoryUrl?, credential?, defaultBranch?, workingDirectory?, registry?}`
+registers an application in the catalog. With a repository and a credential it
+can build at once, on the starter pipeline for its type (and the type's starter
+Dockerfile when the type builds an image). Without a repository it is
+registered but blocked, which `blockedReason` says.
+
+```
+kubesight_ci_credentials_list                        → which credential clones it
+kubesight_registries_list                            → where its image goes
+kubesight_service_create {name: "Payments API", applicationType: "java_gradle",
+                          repositoryUrl: "https://bitbucket.org/areeba/payments-api",
+                          credential: "ci-token", registry: "nexus"}
+kubesight_pipeline_get   {service: "payments-api"}   → what it will run
+```
+
+It refuses a second service with the same name or the same repository (and
+working directory): that is almost always a duplicate nobody meant, and the
+slug would quietly become `payments-api-2`. Ask before passing
+`allowDuplicate: true`. Say what you are about to register before you call it.
+
+**A standalone pipeline** (the Pipelines page) belongs to no service. It runs
+on its own (a nightly job, a cleanup, a release train), with a repository only
+if it checks code out. Services can also build with it.
+
+```
+kubesight_shared_pipelines_list                       → what exists, who uses each
+kubesight_shared_pipeline_create {name: "Java standard", startFrom: "template",
+                                  applicationType: "java_gradle"}
+kubesight_shared_pipeline_create {name: "Copy of payments", startFrom: "service",
+                                  fromService: "payments-api"}
+```
+
+Once created, **its slug works in every tool above**: it is stored as a
+service of its own kind, so `kubesight_pipeline_stage_add {service:
+"java-standard", …}` edits it and `kubesight_build_run {service:
+"java-standard"}` runs it on its own. It never appears in
+`kubesight_services_list`; `kubesight_shared_pipelines_list` is where it is
+listed.
+
+**Making a service build with one.** `kubesight_shared_pipeline_attach {service,
+pipeline}` changes what that service builds from its next build on: its
+stages, build inputs and post actions come from the shared pipeline, while its
+repository, Dockerfile, registry, secrets and history stay its own. Its own
+stages are kept. `kubesight_shared_pipeline_detach {service, mode: "restore"}`
+puts them back, and `mode: "copy"` copies the shared stages in for the service
+to own. Both change what gets built, so confirm with the person first.
+
+Things that follow from this, which you will be asked about:
+
+- `kubesight_pipeline_get` on a service that uses one returns `sharedPipeline`
+  (name, version). The stages shown are the shared pipeline's. A stage edit
+  aimed at the *service* is refused, and the message says to edit the shared
+  pipeline, under its own slug, or detach first. Editing the shared pipeline
+  changes every service that uses it.
+- Secrets resolve service first, then the shared pipeline, then global. A
+  secret stored on the shared pipeline reaches every service that uses it.
+- A Deploy stage in a shared pipeline usually targets **"the service's linked
+  deployment"**, so each service deploys to its own (Settings → Deployments).
+  Run on its own, such a stage stops with that reason; that is expected.
+- A shared pipeline that services use cannot be deleted.
+
 ## The Dockerfile — which of the two, and which one you can edit
 
 A service's image recipe lives in **one of two places**, and the answer to "edit

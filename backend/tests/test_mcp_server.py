@@ -220,6 +220,14 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         "kubesight_build_run",
         "kubesight_build_cancel",
         "kubesight_build_retry",
+        # CI setup: a new service in the catalog, a standalone pipeline, and
+        # which pipeline a service builds with. Creating refuses a duplicate
+        # service unless told; attaching keeps the service's own stages so
+        # detaching can put them back.
+        "kubesight_service_create",
+        "kubesight_shared_pipeline_create",
+        "kubesight_shared_pipeline_attach",
+        "kubesight_shared_pipeline_detach",
         # Merge checks: moves the quality gate for every service that inherits
         # it. Nothing here can switch a service's checks off or re-send a
         # verdict — an agent relaxing a gate to get a merge through is the exact

@@ -15,6 +15,7 @@ costs a page and loading all seven costs the answer.
 | The question is about… | Read |
 |---|---|
 | a build, a pipeline, a runner, a service's source | [references/ci.md](references/ci.md) |
+| registering a CI service, a standalone/shared pipeline | [references/ci.md](references/ci.md) |
 | a pull request that was blocked, the quality gate | [references/ci.md](references/ci.md) |
 | a slow build, the build cache, a corrupt cache error | [references/ci.md](references/ci.md) |
 | a cluster, a namespace, a pod's state, events, topology | [references/clusters.md](references/clusters.md) |
