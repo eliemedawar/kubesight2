@@ -1868,6 +1868,8 @@ export default function App() {
             canCreate={hasPermission("cluster_builds:create")}
             canExecute={hasPermission("cluster_builds:execute")}
             canDownloadKubeconfig={hasPermission("cluster_builds:kubeconfig")}
+            canManageTemplates={hasPermission("cluster_templates:manage")}
+            currentUserId={authUser?.id ?? null}
             canManageVSphere={hasPermission("vsphere:manage")}
             canManageSSH={hasPermission("ssh_credentials:manage")}
             canManageBuildProfiles={hasPermission("cluster_builds:create")}

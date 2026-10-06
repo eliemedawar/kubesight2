@@ -12,6 +12,12 @@ import AddonsPanel from "./AddonsPanel.jsx";
 import GrowPanel from "./GrowPanel.jsx";
 import WorkloadsPanel from "./WorkloadsPanel.jsx";
 import PhaseRail from "./PhaseRail.jsx";
+import {
+  DestroyPanel,
+  ProvisionCard,
+  ProvisionGrowPanel,
+  SaveTemplatePanel,
+} from "./ProvisionPanels.jsx";
 import { AddonChips, LiveBadge, StatusPill } from "./common.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import { parseApiTime } from "../../lib/apiTime";
@@ -27,8 +33,15 @@ import {
   isGrowing,
   runStartedAt,
   addonDisplayName,
+  machinesBlueprint,
   workloadReceipt,
 } from "../../utils/clusterBuilder.js";
+import {
+  PROVISION_STATUS_LABELS,
+  provisioningActive,
+  vmRows,
+  vmSlotState,
+} from "../../utils/clusterProvisioning.js";
 import {
   cancelClusterBuild,
   deleteClusterBuild,
@@ -92,7 +105,7 @@ function FailureHero({ point, build, log, canExecute, onRetry, busy }) {
 
 function DayTwo({
   build, canCreate, canDownloadKubeconfig, onOpenCluster, onGrow, onBringWorkloads,
-  onAddAddons, notify, busy, setBusy,
+  onAddAddons, onSaveTemplate, onDestroy, notify, busy, setBusy,
 }) {
   const download = async () => {
     setBusy(true);
@@ -148,6 +161,16 @@ function DayTwo({
           onClick={() => onOpenCluster(build.resultClusterId)}
         >
           Open in Clusters
+        </button>
+      ) : null}
+      {onSaveTemplate ? (
+        <button className="btn-outline btn-sm" type="button" onClick={onSaveTemplate}>
+          Save as template
+        </button>
+      ) : null}
+      {onDestroy ? (
+        <button className="btn-outline btn-sm sg-cb-pv-destroybtn" type="button" onClick={onDestroy}>
+          Destroy cluster…
         </button>
       ) : null}
       {canDownloadKubeconfig ? (
@@ -322,8 +345,12 @@ export default function BuildDetail({
   onEdit = null,
   addonCatalog = [],
   buildProfiles = [],
+  canManageTemplates = false,
+  currentUserId = null,
 }) {
   const [growing, setGrowing] = useState(false);
+  const [destroyOpen, setDestroyOpen] = useState(false);
+  const [savingTemplate, setSavingTemplate] = useState(false);
   const [bringing, setBringing] = useState(false);
   const [addingAddons, setAddingAddons] = useState(false);
   const [build, setBuild] = useState(null);
@@ -355,12 +382,14 @@ export default function BuildDetail({
   useEffect(() => { load(); }, [load]);
 
   const isRunning = build?.status === "building" || build?.status === "preflighting";
+  // OpenTofu planning, applying or waiting for SSH is work worth watching too.
+  const isPolling = isRunning || provisioningActive(build);
 
   useEffect(() => {
-    if (!isRunning) return undefined;
+    if (!isPolling) return undefined;
     const id = setInterval(load, DETAIL_POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [isRunning, load]);
+  }, [isPolling, load]);
 
   useEffect(() => {
     if (!isRunning) return undefined;
@@ -438,7 +467,32 @@ export default function BuildDetail({
     stickToBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
   };
 
-  const plan = useMemo(() => (build ? buildBlueprint(build) : null), [build]);
+  const plan = useMemo(() => {
+    if (!build) return null;
+    // Until the phase machine has nodes to report on, a VMware build's drawing
+    // is OpenTofu's: the planned machines, coloured by what is happening to each.
+    const machines = build.provisioning?.spec?.machines || [];
+    if (
+      build.machineSource === "vmware"
+      && machines.length
+      && ["draft", "provisioning", "provision_failed", "destroying"].includes(build.status)
+    ) {
+      const rows = Object.fromEntries(vmRows(build).map((row) => [row.name, row]));
+      return machinesBlueprint({
+        machines,
+        vip: build.vipAddress,
+        endpoint: build.controlPlaneEndpoint,
+        state: build.status === "provisioning" ? "live"
+          : build.status === "provision_failed" ? "stopped" : "stamped",
+        slotState: (machine) => vmSlotState(rows[machine.name]),
+        stamp: (machine) => {
+          const state = vmSlotState(rows[machine.name]);
+          return state === "joined" ? "ok" : state === "failed" ? "bad" : state === "live" ? "live" : null;
+        },
+      });
+    }
+    return buildBlueprint(build);
+  }, [build]);
   const progress = useMemo(() => (build ? buildProgress(build) : null), [build]);
   const point = useMemo(
     () => (build && (build.status === "failed" || build.status === "cancelled")
@@ -448,6 +502,15 @@ export default function BuildDetail({
   );
 
   if (!build) return <div className="card sg-cb-card"><p className="muted">Loading…</p></div>;
+
+  const isVmware = build.machineSource === "vmware";
+  const vmCount = build.provisioning?.state?.vmCount || 0;
+  // While OpenTofu works on the VMs, or waits on someone to approve deleting
+  // them, nothing else may change the build underneath it.
+  const provisionBusy = ["planning", "awaiting_approval", "applying", "connecting"]
+    .includes(build.provisioning?.job?.status);
+  const destroyable = Boolean(isVmware && build.canDestroy && canExecute && !provisionBusy);
+  const destroyed = build.status === "destroyed";
 
   const nodeById = Object.fromEntries((build.nodes || []).map((node) => [node.id, node]));
   const steps = build.steps || [];
@@ -545,7 +608,8 @@ export default function BuildDetail({
               Cancel build
             </button>
           ) : null}
-          {canCreate && onEdit && ["draft", "preflight_failed", "preflight_passed"].includes(build.status) ? (
+          {canCreate && onEdit && !provisionBusy
+            && ["draft", "preflight_failed", "preflight_passed", "provision_failed"].includes(build.status) ? (
             <button
               className="btn-outline"
               type="button"
@@ -555,7 +619,8 @@ export default function BuildDetail({
               Edit draft
             </button>
           ) : null}
-          {canExecute && ["draft", "preflight_failed"].includes(build.status) ? (
+          {canExecute && ["draft", "preflight_failed"].includes(build.status)
+            && (!isVmware || (vmCount > 0 && !provisionBusy)) ? (
             <button
               className="primary"
               type="button"
@@ -565,7 +630,7 @@ export default function BuildDetail({
               Run preflight
             </button>
           ) : null}
-          {canExecute && build.status === "preflight_passed" ? (
+          {canExecute && build.status === "preflight_passed" && !provisionBusy ? (
             <button
               className="primary"
               type="button"
@@ -575,7 +640,14 @@ export default function BuildDetail({
               Start build
             </button>
           ) : null}
-          {canCreate && !["building", "preflighting", "completed"].includes(build.status) ? (
+          {destroyable && !["completed"].includes(build.status) ? (
+            <button className="btn-outline" type="button" disabled={busy}
+                    onClick={() => setDestroyOpen(true)}>
+              Destroy VMs…
+            </button>
+          ) : null}
+          {canCreate && !["building", "preflighting", "completed", "provisioning", "destroying", "destroyed"]
+            .includes(build.status) && !(isVmware && vmCount > 0) ? (
             <button
               className="btn-danger"
               type="button"
@@ -588,9 +660,37 @@ export default function BuildDetail({
         </span>
       </div>
 
-      {build.error && !point ? <ErrorBanner message={build.error} /> : null}
+      {build.error && !point && build.status !== "provision_failed"
+        ? <ErrorBanner message={build.error} /> : null}
 
-      {progress?.timeline?.length ? (
+      {isVmware && build.provisionStatus ? (
+        <p className="muted sg-cb-pv-status">
+          <span className="sg-cb-pill is-brand">OpenTofu</span>{" "}
+          {PROVISION_STATUS_LABELS[build.provisionStatus] || build.provisionStatus}
+          {build.provisioning?.state?.exists
+            ? ` · state version ${build.provisioning.state.version} · ${vmCount} VM${vmCount === 1 ? "" : "s"}`
+              + `${build.provisioning.state.locked ? " · locked by a running job" : " · unlocked"}`
+            : ""}
+        </p>
+      ) : null}
+
+      {isVmware ? (
+        <ProvisionCard
+          build={build}
+          canExecute={canExecute}
+          canCreate={canCreate}
+          currentUserId={currentUserId}
+          notify={notify}
+          onChanged={load}
+          onRequestDestroy={destroyable ? () => setDestroyOpen(true) : null}
+        />
+      ) : null}
+
+      {destroyOpen && destroyable ? (
+        <DestroyPanel build={build} notify={notify} onChanged={load} onClose={() => setDestroyOpen(false)} />
+      ) : null}
+
+      {progress?.timeline?.length && !destroyed ? (
         <div className="card sg-cb-railcard">
           <PhaseRail
             timeline={progress.timeline}
@@ -656,6 +756,8 @@ export default function BuildDetail({
                 setGrowing(false); setAddingAddons(false); setBringing(true);
               }}
               onAddAddons={() => { setGrowing(false); setBringing(false); setAddingAddons(true); }}
+              onSaveTemplate={canManageTemplates ? () => setSavingTemplate(true) : null}
+              onDestroy={destroyable ? () => setDestroyOpen(true) : null}
               notify={notify}
               busy={busy}
               setBusy={setBusy}
@@ -664,7 +766,23 @@ export default function BuildDetail({
         />
       ) : null}
 
-      {isDone && growing ? (
+      {isDone && savingTemplate ? (
+        <SaveTemplatePanel build={build} notify={notify} onClose={() => setSavingTemplate(false)} />
+      ) : null}
+
+      {/* New VMs come from OpenTofu; machines it already created that are still
+          waiting to join are finished in the ordinary grow panel. */}
+      {isDone && growing && isVmware && !build.pendingNodeCount ? (
+        <ProvisionGrowPanel
+          build={build}
+          canExecute={canExecute}
+          notify={notify}
+          onChanged={load}
+          onClose={() => setGrowing(false)}
+        />
+      ) : null}
+
+      {isDone && growing && (!isVmware || build.pendingNodeCount) ? (
         <GrowPanel
           build={build}
           canExecute={canExecute}
@@ -695,7 +813,7 @@ export default function BuildDetail({
         />
       ) : null}
 
-      <div className="sg-cb-split">
+      <div className={`sg-cb-split ${destroyed ? "is-solo" : ""}`}>
         <div className="sg-cb-vstack">
           {logs ? (
             <div className="card sg-cb-card sg-cb-well">
@@ -798,7 +916,7 @@ export default function BuildDetail({
           </details>
         </div>
 
-        <Blueprint
+        {destroyed ? null : <Blueprint
           plan={plan}
           facts={[
             {
@@ -836,7 +954,7 @@ export default function BuildDetail({
                     + "each — which is why that phase is the slow one.",
                 }
                 : null}
-        />
+        />}
       </div>
 
       {(build.addons || []).length && !isDone && !pendingAddons.length ? (

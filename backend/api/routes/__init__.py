@@ -31,6 +31,7 @@ from .ticket_agent import ticket_agent_bp
 from .mobile_apps import mobile_apps_bp
 from .infra_connections import infra_bp
 from .cluster_builds import cluster_builds_bp
+from .cluster_provisioning import cluster_provisioning_bp
 from .application_intelligence import application_intelligence_bp
 from .ci import ci_bp
 from .ci_agent import ci_agent_bp
@@ -76,6 +77,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(mobile_apps_bp)
     app.register_blueprint(infra_bp)
     app.register_blueprint(cluster_builds_bp)
+    app.register_blueprint(cluster_provisioning_bp)
     app.register_blueprint(application_intelligence_bp)
     app.register_blueprint(ci_bp)
     app.register_blueprint(ci_worker_bp)

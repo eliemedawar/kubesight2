@@ -32,12 +32,16 @@ from . import profiles as build_profile_service
 from . import storage as storage_copy
 from . import workloads as workload_copy
 from .profiles import resolve as resolve_profile
+from .provisioning import service as provisioning_service
+from .provisioning import state_store as provisioning_state
+from .provisioning import templates as cluster_templates
 from .scrub import scrub
 
 _ENDPOINT_MODES = {"managed_haproxy", "external_lb", "manual_endpoint"}
 _TOPOLOGIES = {"single_cp", "stacked_ha"}
 _ROLES = {"control_plane", "worker", "loadbalancer"}
-_EDITABLE_STATUSES = {"draft", "preflight_passed", "preflight_failed"}
+_EDITABLE_STATUSES = {"draft", "preflight_passed", "preflight_failed", "provision_failed"}
+_MACHINE_SOURCES = {"existing", "vmware"}
 
 # The versions KubeSight ships when upstream release discovery is unreachable.
 # The live list served to the wizard is discovered per supported minor — see
@@ -141,6 +145,10 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
         "addons": list(build.addons_json or []),
         "workloads": workload_copy.summarize(workload_copy.selection_of(build)),
         "vsphereConnectionId": build.vsphere_connection_id,
+        # existing | vmware — whether KubeSight creates the VMs (OpenTofu).
+        "machineSource": build.machine_source or "existing",
+        "templateId": build.template_id,
+        "provisionStatus": build.provision_status,
         "buildProfileId": build.build_profile_id,
         "connectionProfileId": build.connection_profile_id,
         "resultClusterId": build.result_cluster_id,
@@ -159,6 +167,12 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
             if n.status in ("pending", "preflight_passed", "preflight_failed")
         ),
         "canGrow": bool(build.status == "completed" and build.result_cluster_id),
+        "canDestroy": bool(
+            (build.machine_source or "existing") == "vmware"
+            and build.status not in ("building", "preflighting", "provisioning",
+                                     "destroying", "destroyed")
+            and provisioning_state.has_resources(build.id)
+        ),
         "nodeCounts": {
             "controlPlane": sum(1 for n in build.nodes if n.role == "control_plane"),
             "worker": sum(1 for n in build.nodes if n.role == "worker"),
@@ -177,6 +191,10 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
             )
         ],
     }
+    data["provisioning"] = (
+        provisioning_service.detail(build) if include_detail
+        else provisioning_service.summary_for_list(build)
+    )
     if include_detail:
         data["nodes"] = [serialize_node(n) for n in build.nodes]
         data["steps"] = [serialize_step(s) for s in build.steps]
@@ -495,6 +513,26 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         raise ValueError("name must be at most 120 printable characters.")
     build.name = name
 
+    machine_source = str(
+        payload.get("machineSource", build.machine_source or "existing") or "existing"
+    ).strip()
+    if machine_source not in _MACHINE_SOURCES:
+        raise ValueError("machineSource must be 'existing' or 'vmware'.")
+    if (
+        build.id
+        and machine_source != (build.machine_source or "existing")
+        and provisioning_state.has_resources(build.id)
+    ):
+        raise ValueError("KubeSight already created VMs for this build; it stays a VMware build.")
+    build.machine_source = machine_source
+    if "templateId" in payload:
+        template_id = str(payload.get("templateId") or "").strip() or None
+        if template_id and not cluster_templates.is_known_template_id(template_id):
+            raise ValueError("Unknown cluster template.")
+        build.template_id = template_id
+    if machine_source == "vmware":
+        provisioning_service.validate_cluster_name(build.name)
+
     # Same policy the options endpoint publishes, so every version the wizard
     # offers is accepted here. Minor-scoped rather than list-scoped on purpose:
     # a draft pinned to 1.32.4 must stay editable once 1.32.5 is discovered,
@@ -502,6 +540,29 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
     build.k8s_version = k8s_versions.validate_version(
         payload.get("k8sVersion", build.k8s_version or "")
     )
+
+    if machine_source == "vmware":
+        # The shape comes from the role counts, and the API address from the
+        # network range when the plan is made: neither is typed in.
+        if "provisioning" in payload or not build.provisioning_json:
+            build.provisioning_json = provisioning_service.normalize_spec(
+                build, payload.get("provisioning")
+            )
+            build.vsphere_connection_id = build.provisioning_json["vsphereConnectionId"]
+        provisioning_service.apply_shape_to_build(build)
+        for key in ("vipInterface", "diskCheckPath"):
+            if key not in payload:
+                continue
+            value = str(payload.get(key) or "").strip()
+            if key == "vipInterface":
+                build.vip_interface = _validate_interface(value) if value else None
+            else:
+                path = _validate_disk_check_path(value) if value else ""
+                build.disk_check_path = (
+                    path if path and path != preflight.DEFAULT_DISK_PATH else None
+                )
+        _apply_cluster_settings(build, payload)
+        return
 
     topology = str(payload.get("topologyType", build.topology_type or "single_cp")).strip()
     if topology not in _TOPOLOGIES:
@@ -574,7 +635,12 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         if router_id < 1 or router_id > 255:
             raise ValueError("vrrpRouterId must be 1-255.")
         build.vrrp_router_id = router_id
+    _apply_cluster_settings(build, payload)
 
+
+def _apply_cluster_settings(build: ClusterBuild, payload: Dict[str, Any]) -> None:
+    """Networking, add-ons, workloads and sources: the same for every build,
+    whoever provides the machines."""
     cni_plugin = str(payload.get("cniPlugin", build.cni_plugin or "calico")).strip()
     descriptor = cni_registry.get(cni_plugin)
     if descriptor is None:
@@ -663,6 +729,8 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         ("buildProfileId", "build_profile_id"),
         ("connectionProfileId", "connection_profile_id"),
     ):
+        if key == "vsphereConnectionId" and build.machine_source == "vmware":
+            continue  # follows the provisioning spec
         if key in payload:
             value = payload.get(key)
             setattr(build, attr, int(value) if value else None)
@@ -797,7 +865,7 @@ def create_build(
     if workload_copy.selection_of(build):
         workload_copy.authorize_selection(build.workloads_json, user)
     nodes_payload = payload.get("nodes") or []
-    if nodes_payload:
+    if nodes_payload and build.machine_source != "vmware":
         _apply_nodes_payload(build, nodes_payload)
         _validate_topology(
             build,
@@ -815,13 +883,26 @@ def update_build(build_id: int, payload: Dict[str, Any], user=None) -> Dict[str,
     build = get_build(build_id)
     if build.status not in _EDITABLE_STATUSES:
         raise ValueError(f"Build cannot be edited in status '{build.status}'.")
+    from .provisioning import jobs as provisioning_jobs
+
+    current = provisioning_jobs.open_job(build.id)
+    if current is not None and current.status != "planned":
+        raise ValueError("Wait for the current OpenTofu job to finish before editing.")
+    if current is not None:
+        # The plan was made for the old settings; it must not be applied now.
+        current.status = "discarded"
+        current.decision_note = "Discarded because the build was edited."
+        current.finished_at = datetime.now(timezone.utc)
+        build.provision_status = (
+            "ready" if provisioning_state.has_resources(build.id) else None
+        )
     _apply_build_payload(build, payload)
     if "workloads" in payload and workload_copy.selection_of(build):
         workload_copy.authorize_selection(build.workloads_json, user)
         build.execution_user_id = None
-    if "nodes" in payload:
+    if "nodes" in payload and build.machine_source != "vmware":
         _apply_nodes_payload(build, payload.get("nodes") or [])
-    if build.nodes:
+    if build.nodes and build.machine_source != "vmware":
         _validate_topology(
             build,
             [
@@ -837,8 +918,15 @@ def update_build(build_id: int, payload: Dict[str, Any], user=None) -> Dict[str,
 
 def delete_build(build_id: int) -> None:
     build = get_build(build_id)
-    if build.status in ("building", "preflighting"):
+    if build.status in ("building", "preflighting", "provisioning", "destroying"):
         raise ValueError("Cancel the build before deleting it.")
+    if provisioning_state.has_resources(build.id):
+        raise ValueError(
+            "KubeSight created VMs for this build and they still exist. Destroy "
+            "the cluster first, so nothing is left running in vCenter."
+        )
+    if build.status == "destroyed":
+        raise ValueError("A destroyed cluster's history is retained for audit.")
     if build.status == "completed" or build.result_cluster_id:
         raise ValueError(
             "Completed build history is retained for audit and cannot be deleted."
@@ -857,6 +945,7 @@ def run_preflight(build_id: int, user=None) -> Dict[str, Any]:
         raise ValueError("Build is already running.")
     if not build.nodes:
         raise ValueError("Add nodes before running preflight.")
+    _require_machines_exist(build)
     if workload_copy.selection_of(build):
         workload_copy.authorize_selection(build.workloads_json, user)
     warnings = _validate_topology(
@@ -944,11 +1033,29 @@ def run_preflight(build_id: int, user=None) -> Dict[str, Any]:
     return merged
 
 
+def _require_machines_exist(build: ClusterBuild) -> None:
+    """A VMware build's machines exist only once OpenTofu created them."""
+    if build.machine_source != "vmware":
+        return
+    names = {
+        m["name"] for m in (build.provisioning_json or {}).get("machines") or []
+    }
+    created = set(provisioning_state.vm_instances(build.id))
+    missing = sorted(names - created)
+    if not names or missing:
+        raise ValueError(
+            "KubeSight has not created this build's VMs yet"
+            + (f" ({', '.join(missing[:4])} missing)" if missing and names else "")
+            + ". Make and apply the plan first."
+        )
+
+
 def start_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
                 actor: str = "", user=None) -> Dict[str, Any]:
     build = get_build(build_id)
     if build.status == "building":
         raise ValueError("Build is already running.")
+    _require_machines_exist(build)
     if build.status not in ("preflight_passed",):
         raise ValueError(
             "Preflight must pass before starting (current status: "
@@ -1529,6 +1636,11 @@ def retry_build(build_id: int, user=None) -> Dict[str, Any]:
 
 def cancel_build(build_id: int) -> Dict[str, Any]:
     build = get_build(build_id)
+    if build.status in ("provisioning", "destroying"):
+        raise ValueError(
+            "OpenTofu is changing VMs in vCenter and cannot be stopped halfway "
+            "safely. Wait for it to finish; a failure can be planned again."
+        )
     if build.status not in ("building", "preflighting"):
         raise ValueError("Only a running build can be cancelled.")
     build.status = "cancelled"
@@ -1579,6 +1691,11 @@ def wizard_options() -> Dict[str, Any]:
              "shape": "1 control plane · 1 managed LB when selected · N workers"},
         ],
         "defaults": {"podCidr": "10.244.0.0/16", "serviceCidr": "10.96.0.0/12"},
+        "clusterTemplates": cluster_templates.catalog(),
+        "provisioning": {
+            "engine": provisioning_service.tofu_runner.engine_status(),
+            "simulated": provisioning_service.inventory.simulation_enabled(),
+        },
         # Builders need to select these records but must not need permission to
         # manage or inspect connection details. Mutation and full records remain
         # on the dedicated manage endpoints.
@@ -1588,6 +1705,7 @@ def wizard_options() -> Dict[str, Any]:
                     key: row.get(key)
                     for key in (
                         "id", "name", "lastConnectionStatus", "lastTestedAt",
+                        "provisioningConfigured", "provisioningLastTestStatus",
                     )
                 }
                 for row in vsphere_service.list_connections()

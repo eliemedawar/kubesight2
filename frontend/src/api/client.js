@@ -96,6 +96,9 @@ async function performRequest(path, { method = "GET", body, query, auth = true, 
     // structured detail payload (e.g. account-lock kind + retry seconds).
     error.status = response.status;
     error.data = payload.data ?? null;
+    // A 403 is shown generically above; callers that can explain it (an
+    // approval rule, "someone else must approve") read the server's words here.
+    error.serverMessage = payload.error || payload.message || "";
     throw error;
   }
 

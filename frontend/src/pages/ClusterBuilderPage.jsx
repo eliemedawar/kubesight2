@@ -33,6 +33,8 @@ export default function ClusterBuilderPage({
   canManageSSH = false,
   canManageBuildProfiles = false,
   canDownloadKubeconfig = false,
+  canManageTemplates = false,
+  currentUserId = null,
   onOpenCluster = null,
 }) {
   // Tab and open build are both addresses: /cluster-builder/:tab and
@@ -127,10 +129,16 @@ export default function ClusterBuilderPage({
       .catch((err) => setError(err.message));
   }, [reloadBuilds, reloadInfra]);
 
+  // Templates saved, renamed or deleted change what the wizard offers.
+  const reloadOptions = useCallback(() => {
+    getBuilderOptions().then(setOptions).catch((err) => setError(err.message));
+  }, []);
+
   const canManageInfra = canManageVSphere || canManageSSH || canManageBuildProfiles;
 
   const active = builds.some(
-    (build) => build.status === "building" || build.status === "preflighting"
+    (build) => ["building", "preflighting", "provisioning", "destroying"].includes(build.status)
+      || ["planning", "applying", "connecting"].includes(build.provisioning?.job?.status)
   );
 
   useEffect(() => {
@@ -169,7 +177,7 @@ export default function ClusterBuilderPage({
     <div className="sg-cb-page">
       <PageTitle
         title="Cluster Builder"
-        subtitle="Pick machines from vCenter, assign roles, and KubeSight builds the cluster."
+        subtitle="Start from a template, let KubeSight create the VMs in vCenter or pick machines you have, and it builds the cluster."
       />
       {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
       {notice ? <div className="sg-cb-notice">{notice}</div> : null}
@@ -203,6 +211,8 @@ export default function ClusterBuilderPage({
           }}
           addonCatalog={options?.addons || []}
           buildProfiles={infra.buildProfiles}
+          canManageTemplates={canManageTemplates}
+          currentUserId={currentUserId}
         />
       ) : null}
 
@@ -226,6 +236,9 @@ export default function ClusterBuilderPage({
           options={options}
           infra={infra}
           canExecute={canExecute}
+          canManageTemplates={canManageTemplates}
+          currentUserId={currentUserId}
+          onOptionsChanged={reloadOptions}
           initialBuild={editingBuild}
           notify={notify}
           onCancel={() => {
@@ -250,6 +263,7 @@ export default function ClusterBuilderPage({
           canManageVSphere={canManageVSphere}
           canManageSSH={canManageSSH}
           canManageBuildProfiles={canManageBuildProfiles}
+          onOptionsChanged={reloadOptions}
         />
       ) : null}
     </div>

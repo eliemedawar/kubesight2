@@ -14,6 +14,32 @@ RUN apt-get update \
     && rm -rf /tmp/linux-amd64 \
     && rm -rf /var/lib/apt/lists/*
 
+# OpenTofu creates the Cluster Builder's VMware VMs. The binary is checked
+# against the release's SHA256SUMS, and the vSphere provider is mirrored into
+# the image (`tofu providers mirror` verifies its checksums) so provisioning
+# never downloads anything at runtime — the generated CLI config installs that
+# provider from this mirror only. Keep VSPHERE_PROVIDER_VERSION in step with
+# tofu_config.PROVIDER_VERSION.
+ARG TOFU_VERSION=1.13.1
+ARG VSPHERE_PROVIDER_VERSION=2.17.1
+ENV KUBESIGHT_TOFU_PROVIDER_MIRROR=/opt/kubesight/tofu/providers \
+    KUBESIGHT_TOFU_VSPHERE_PROVIDER_VERSION=${VSPHERE_PROVIDER_VERSION} \
+    CHECKPOINT_DISABLE=1
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends unzip \
+    && cd /tmp \
+    && curl -fsSLO "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_amd64.zip" \
+    && curl -fsSLO "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_SHA256SUMS" \
+    && grep " tofu_${TOFU_VERSION}_linux_amd64.zip$" "tofu_${TOFU_VERSION}_SHA256SUMS" | sha256sum -c - \
+    && unzip -o "tofu_${TOFU_VERSION}_linux_amd64.zip" tofu -d /usr/local/bin \
+    && chmod +x /usr/local/bin/tofu \
+    && mkdir -p /tmp/tofu-mirror "${KUBESIGHT_TOFU_PROVIDER_MIRROR}" \
+    && printf 'terraform {\n  required_providers {\n    vsphere = {\n      source  = "vmware/vsphere"\n      version = "= %s"\n    }\n  }\n}\n' "${VSPHERE_PROVIDER_VERSION}" > /tmp/tofu-mirror/main.tf \
+    && (cd /tmp/tofu-mirror && tofu providers mirror -platform=linux_amd64 "${KUBESIGHT_TOFU_PROVIDER_MIRROR}") \
+    && rm -rf /tmp/tofu-mirror /tmp/tofu_* \
+    && apt-get purge -y unzip && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

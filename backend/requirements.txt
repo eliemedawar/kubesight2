@@ -13,6 +13,9 @@ cryptography>=42.0.0,<44.0.0
 gunicorn>=21.2.0,<23.0.0
 tzdata>=2024.1
 paramiko>=3.4.0,<4.0.0
+# Cluster Builder provisioning: lists vCenter VM templates and checks the
+# provisioning account's privileges (the REST API cannot list folder templates).
+pyvmomi>=8.0.3,<10
 fpdf2>=2.8.0,<3.0.0
 # Every CI test/coverage report is untrusted XML; parsed only through defusedxml.
 defusedxml>=0.7,<1

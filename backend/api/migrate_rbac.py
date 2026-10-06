@@ -128,6 +128,22 @@ def _migrate_cluster_build_columns() -> None:
     _add_column_if_missing("cluster_builds", "build_seconds", "INTEGER")
     _add_column_if_missing("cluster_builds", "execution_user_id", "INTEGER")
     _add_column_if_missing("cluster_builds", "disk_check_path", "VARCHAR(255)")
+    # OpenTofu provisioning: KubeSight creates the VMs itself.
+    _add_column_if_missing(
+        "cluster_builds", "machine_source", "VARCHAR(16) DEFAULT 'existing'"
+    )
+    _add_column_if_missing("cluster_builds", "template_id", "VARCHAR(64)")
+    _add_column_if_missing("cluster_builds", "provisioning_json", "JSON")
+    _add_column_if_missing("cluster_builds", "provision_status", "VARCHAR(24)")
+    for col, sql_type in [
+        ("provisioning_username", "VARCHAR(255)"),
+        ("provisioning_password_cipher", "TEXT"),
+        ("provisioning_last_test_at", "DATETIME"),
+        ("provisioning_last_test_status", "VARCHAR(16)"),
+        ("provisioning_last_test_message", "TEXT"),
+        ("provisioning_privileges_json", "JSON"),
+    ]:
+        _add_column_if_missing("vsphere_connections", col, sql_type)
     for col, sql_type in [
         ("last_test_at", "DATETIME"),
         ("last_test_status", "VARCHAR(16)"),

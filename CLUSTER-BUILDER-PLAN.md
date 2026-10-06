@@ -537,3 +537,59 @@ a "reserve a VIP" button without a migration), kube-vip endpoint mode, VM creati
 template, DRS anti-affinity rule creation, Cilium promotion to supported, change-bundle-style
 approval gate before execute, cluster teardown. (The offline bundle builder CLI shipped — see
 §4.5.)
+
+---
+
+## 14. Creating the VMs with OpenTofu (built 2026-10-06)
+
+VM creation from a template, DRS anti-affinity rules and cluster teardown — three of the v2
+items above — are now built. KubeSight runs OpenTofu itself, then hands the new machines to
+the phase machine in §7 exactly as if someone had picked them.
+
+### Flow
+
+```
+Template (Lab / Small / Standard HA / saved / Custom)
+  → Machines: "Create new VMs in VMware" — vCenter placement, VM template, sizes, addresses
+  → Add-ons → Workloads
+  → Plan:   vCenter checks → address probes → main.tf.json → tofu init / plan / show
+  → Apply:  the saved plan, exactly (stale plan = stop and re-plan)
+  → SSH:    every new VM answers with the build's SSH route
+  → Hand-off: run_preflight → start_build when it passes clean
+Day two: Add workers (grow plan, refused if it would touch an existing VM) and
+Destroy (destroy plan → a second person with cluster_builds:execute approves).
+```
+
+### Decisions worth knowing before changing anything
+
+| Decision | Why |
+|---|---|
+| OpenTofu runs **inside the backend** as background jobs (`provisioning/jobs.py`) | The backend already reaches vCenter and SSHes to the VMs; no extra runner to keep alive. |
+| State lives in **KubeSight's DB** (`cluster_infra_states`, Fernet-encrypted), served to `tofu` through an **HTTP state backend** at `/api/internal/tofu-state/<build_id>` | OpenTofu persists state as it applies, so a restart mid-apply loses nothing it recorded. The route only answers loopback callers holding the running job's one-time token. |
+| **Locking** is OpenTofu's own lock protocol, plus the job that took it | Recovery releases a lock only on behalf of the dead job that held it. Sources → OpenTofu has a manual release, refused while the holder still runs. |
+| **Restart recovery** (`advance_provision_jobs`, scheduler tick) | Planning and SSH-waiting rerun. An interrupted apply is never resumed blind: a new plan is made and applied on its own only if it does nothing but finish what the approved job set out to do. |
+| Objects by **managed-object id**, template by **UUID**, no data sources | A renamed datastore or deleted template cannot block a later destroy plan. |
+| VMs keyed by **name** (`for_each`), `ignore_changes` on everything cloned from the template | Growth adds keys and never renumbers; replacing the template never plans to rebuild a cluster. |
+| **Static addresses** from per-network ranges (`vsphere_network_ranges`), reserved in `vsphere_ip_reservations` before the plan, then TCP-probed | Two builds can never share an address; a hand-configured machine on a "free" address is caught before cloning. |
+| **Separate provisioning account** on the vCenter connection | Browsing stays Read-Only. `inventory.REQUIRED_PRIVILEGES` lists the 23 privileges; plans check them on the exact folder, pool, datastore, network, template and cluster. |
+| Templates: built-in in code (`provisioning/templates.py`), saved ones in `cluster_templates` (`cluster_templates:manage`) | Built-ins cannot be edited away; a template carries shape, sizes, networking and add-ons — never placement or addresses. |
+| pyvmomi for templates and placement | vCenter's REST API cannot list VM templates kept in folders. |
+
+### Deploying it
+
+- `backend/Dockerfile` installs OpenTofu (checked against SHA256SUMS) and mirrors
+  `vmware/vsphere` into `/opt/kubesight/tofu/providers`; the generated CLI config installs the
+  provider from that mirror only. Bump `TOFU_VERSION` / `VSPHERE_PROVIDER_VERSION` together with
+  `tofu_config.PROVIDER_VERSION`.
+- `requirements.txt` gains `pyvmomi`.
+- Env: `KUBESIGHT_INTERNAL_URL` (default `http://127.0.0.1:5000`, where `tofu` reaches the state
+  backend), `KUBESIGHT_TOFU_WORKDIR` (scratch dir for job working copies),
+  `KUBESIGHT_PROVISIONING_SIMULATE=1` (demo only: simulated OpenTofu, demo vCenter inventory,
+  simulated SSH wait — never set it in production).
+- The VM template must contain open-vm-tools plus cloud-init or perl (guest customization), and
+  must accept the build's SSH credential.
+
+### Not covered yet
+
+Content Library templates, standalone ESXi hosts (clusters only), stopping an apply part-way,
+adding control planes or load balancers, and validation against a real vCenter.

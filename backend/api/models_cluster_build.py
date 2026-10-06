@@ -21,11 +21,14 @@ def _utcnow():
 
 
 class VSphereConnection(db.Model):
-    """A read-only vCenter link used to browse VM inventory in the builder.
+    """A vCenter link: browsed read-only, and optionally provisioned into.
 
-    v1 never mutates vSphere — the account only needs the Read-Only role.
+    Browsing uses the Read-Only account (``username``/``password_cipher``).
     Inventory (name, power, IP, CPU/mem, guest OS, Tools state, ESXi host,
     datastore) feeds the VM picker and the placement/anti-affinity preflight.
+    Creating and deleting VMs — OpenTofu provisioning — uses the separate
+    ``provisioning_*`` account, so the browsing account never needs more than
+    the Read-Only role.
     """
 
     __tablename__ = "vsphere_connections"
@@ -44,6 +47,103 @@ class VSphereConnection(db.Model):
     last_connection_status = db.Column(db.String(32), nullable=True)
     last_connection_error = db.Column(db.Text, nullable=True)
     last_tested_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # A second, separate account that may create and delete VMs. Browsing keeps
+    # using the read-only one above; only OpenTofu provisioning jobs use this.
+    provisioning_username = db.Column(db.String(255), nullable=True)
+    provisioning_password_cipher = db.Column(db.Text, nullable=True)
+    provisioning_last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    provisioning_last_test_status = db.Column(db.String(16), nullable=True)
+    provisioning_last_test_message = db.Column(db.Text, nullable=True)
+    # [{"privilege": "Folder.Create", "entity": "DC-Beirut", "granted": true}]
+    provisioning_privileges_json = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class VSphereNetworkRange(db.Model):
+    """The addresses KubeSight may hand to VMs it creates on one vCenter network.
+
+    New VMs only ever get a static address from a range set here; nothing is
+    taken from DHCP. Reservations against a range are rows in
+    ``vsphere_ip_reservations``, so two builds can never be handed one address.
+    """
+
+    __tablename__ = "vsphere_network_ranges"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "connection_id", "network_name", name="uq_vsphere_network_range"
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    connection_id = db.Column(
+        db.Integer, db.ForeignKey("vsphere_connections.id"), nullable=False
+    )
+    # The port group / network name exactly as vCenter shows it.
+    network_name = db.Column(db.String(255), nullable=False, default="")
+    cidr = db.Column(db.String(64), nullable=False, default="")
+    range_start = db.Column(db.String(64), nullable=False, default="")
+    range_end = db.Column(db.String(64), nullable=False, default="")
+    gateway = db.Column(db.String(64), nullable=False, default="")
+    # Comma-separated resolver addresses.
+    dns_servers = db.Column(db.String(512), nullable=False, default="")
+    # The DNS domain written into each VM's guest customization.
+    dns_domain = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class VSphereIpReservation(db.Model):
+    """One address taken out of a range for one build.
+
+    ``reserved`` from the moment a plan names it until the VM exists, then
+    ``in_use`` until the VM is destroyed. Discarding a plan or destroying the
+    cluster deletes the row, which is what returns the address to the range.
+    """
+
+    __tablename__ = "vsphere_ip_reservations"
+    __table_args__ = (
+        db.UniqueConstraint("range_id", "address", name="uq_vsphere_ip_reservation"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    range_id = db.Column(
+        db.Integer, db.ForeignKey("vsphere_network_ranges.id"), nullable=False
+    )
+    address = db.Column(db.String(64), nullable=False)
+    build_id = db.Column(
+        db.Integer,
+        db.ForeignKey("cluster_builds.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # vip | node
+    purpose = db.Column(db.String(16), nullable=False, default="node")
+    node_name = db.Column(db.String(253), nullable=True)
+    # reserved | in_use
+    status = db.Column(db.String(16), nullable=False, default="reserved")
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class ClusterTemplate(db.Model):
+    """A cluster shape an admin saved. The built-in templates live in code.
+
+    ``spec_json`` holds what a template decides — role counts, per-role VM
+    sizes, networking and add-ons — and never where in vCenter the machines go
+    or which addresses they get, so one template works on any vCenter.
+    """
+
+    __tablename__ = "cluster_templates"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    description = db.Column(db.Text, nullable=True)
+    spec_json = db.Column(db.JSON, nullable=False, default=dict)
+    created_by = db.Column(db.String(120), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = db.Column(
         db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
@@ -170,6 +270,14 @@ class ClusterBuild(db.Model):
         draft -> preflighting -> preflight_passed | preflight_failed
         preflight_passed -> building -> completed | failed
         any non-terminal -> cancelled
+
+    When KubeSight creates the VMs (``machine_source == "vmware"``), OpenTofu
+    runs first:
+        draft -> provisioning -> preflighting -> ...   (as above)
+        provisioning -> provision_failed
+    and a cluster whose VMs KubeSight created can be taken down again:
+        completed | failed | provision_failed -> destroying -> destroyed
+    ``provision_status`` says what OpenTofu is doing inside those states.
     """
 
     __tablename__ = "cluster_builds"
@@ -262,6 +370,21 @@ class ClusterBuild(db.Model):
     # finished_at and would otherwise turn "built in 18 min" into "built in 5 d".
     growth_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     build_seconds = db.Column(db.Integer, nullable=True)
+
+    # existing | vmware. "vmware" means KubeSight creates the machines itself
+    # with OpenTofu before the phase machine below ever runs.
+    machine_source = db.Column(db.String(16), nullable=False, default="existing")
+    # The template the wizard started from: a built-in id ("lab", "small",
+    # "standard-ha"), "custom:<id>" for a saved one, or "custom".
+    template_id = db.Column(db.String(64), nullable=True)
+    # Where and how the VMs are created (vCenter placement, VM template, role
+    # counts and sizes, network range). Never secrets.
+    provisioning_json = db.Column(db.JSON, nullable=True)
+    # What OpenTofu is doing for this build, alongside ``status``:
+    # planning | planned | plan_failed | applying | connecting | apply_failed |
+    # connect_failed | ready | grow_* | destroy_planning | destroy_pending |
+    # destroy_plan_failed | destroying | destroy_failed | destroyed
+    provision_status = db.Column(db.String(24), nullable=True)
 
     nodes = db.relationship(
         "ClusterBuildNode",
@@ -358,3 +481,110 @@ class ClusterBuildStep(db.Model):
     # certificate keys appear in init output).
     log_tail = db.Column(db.Text, nullable=True)
     error = db.Column(db.Text, nullable=True)
+
+
+class ClusterInfraState(db.Model):
+    """OpenTofu's state for one build's VMs, and the lock that guards it.
+
+    Served to the ``tofu`` process through KubeSight's own HTTP state backend,
+    so every write OpenTofu makes during an apply lands here as it happens —
+    a KubeSight restart mid-apply loses nothing that OpenTofu had recorded.
+    The state is Fernet-encrypted at rest like every other secret-bearing
+    column: it names VMs, addresses and vCenter object ids.
+    """
+
+    __tablename__ = "cluster_infra_states"
+
+    id = db.Column(db.Integer, primary_key=True)
+    build_id = db.Column(
+        db.Integer,
+        db.ForeignKey("cluster_builds.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    state_cipher = db.Column(db.Text, nullable=True)
+    # From the state document itself; serial moves on every OpenTofu write.
+    serial = db.Column(db.Integer, nullable=True)
+    lineage = db.Column(db.String(64), nullable=True)
+    resource_count = db.Column(db.Integer, nullable=False, default=0)
+    # KubeSight's own write counter, shown as "state version N".
+    version = db.Column(db.Integer, nullable=False, default=0)
+    # The OpenTofu lock: its id, the lock info OpenTofu sent, and the job that
+    # took it — recovery releases a lock only on behalf of the job that held it.
+    lock_id = db.Column(db.String(64), nullable=True)
+    lock_info_json = db.Column(db.JSON, nullable=True)
+    lock_job_id = db.Column(db.Integer, nullable=True)
+    locked_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class ClusterProvisionJob(db.Model):
+    """One OpenTofu operation on a build's VMs: plan, then (maybe) apply.
+
+    Status lifecycle:
+        planning -> planned | plan_failed
+        planned -> applying (create/grow, by anyone allowed to execute)
+        planned -> awaiting_approval -> applying (destroy, by a second person)
+        applying -> connecting -> succeeded           (create/grow)
+        applying -> succeeded                         (destroy)
+        applying | connecting -> apply_failed | connect_failed
+        planned | awaiting_approval -> discarded | rejected
+        planning | applying | connecting -> interrupted (backend restart;
+            a recovery job takes over, see ``provisioning.jobs``)
+    """
+
+    __tablename__ = "cluster_provision_jobs"
+    __table_args__ = (
+        db.Index("ix_cluster_provision_job_build", "build_id", "created_at"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    build_id = db.Column(
+        db.Integer,
+        db.ForeignKey("cluster_builds.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # create | grow | destroy
+    operation = db.Column(db.String(16), nullable=False, default="create")
+    status = db.Column(db.String(24), nullable=False, default="planning", index=True)
+    # The rendered OpenTofu configuration (main.tf.json) this job planned with,
+    # plus what the job needs to finish (new node specs for growth). No secrets:
+    # vCenter credentials reach OpenTofu through its environment only.
+    config_json = db.Column(db.JSON, nullable=True)
+    # The saved plan file (binary), base64 then Fernet-encrypted.
+    plan_cipher = db.Column(db.Text, nullable=True)
+    # {"add": n, "change": n, "destroy": n, "resources": [...], "checks": [...]}
+    plan_summary_json = db.Column(db.JSON, nullable=True)
+    # OpenTofu's own human-readable plan, scrubbed.
+    plan_text = db.Column(db.Text, nullable=True)
+    log_tail = db.Column(db.Text, nullable=True)
+    # {"phase": "...", "vms": {name: {"state": ..., "detail": ...}}}
+    progress_json = db.Column(db.JSON, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+    # The build status to return to when a grow or destroy does not go through.
+    prior_build_status = db.Column(db.String(24), nullable=True)
+    requested_by = db.Column(db.String(120), nullable=True)
+    requested_by_user_id = db.Column(db.Integer, nullable=True)
+    reason = db.Column(db.Text, nullable=True)
+    applied_by = db.Column(db.String(120), nullable=True)
+    applied_by_user_id = db.Column(db.Integer, nullable=True)
+    approved_by = db.Column(db.String(120), nullable=True)
+    approved_by_user_id = db.Column(db.Integer, nullable=True)
+    approved_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    decision_note = db.Column(db.Text, nullable=True)
+    # sha256 of the per-job secret OpenTofu presents to the state backend.
+    auth_token_hash = db.Column(db.String(64), nullable=True)
+    # Recovery jobs apply on their own when the new plan only finishes what
+    # the interrupted, already-approved job set out to do.
+    auto_apply = db.Column(db.Boolean, nullable=False, default=False)
+    recovered_from_job_id = db.Column(db.Integer, nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
+    started_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # Heartbeat while a worker drives the job.
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )

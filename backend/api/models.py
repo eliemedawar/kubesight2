@@ -2931,10 +2931,15 @@ from .models_cluster_build import (  # noqa: E402,F401
     ClusterBuild,
     ClusterBuildNode,
     ClusterBuildStep,
+    ClusterInfraState,
+    ClusterProvisionJob,
+    ClusterTemplate,
     SshConnectionProfile,
     SshCredential,
     SshHostKey,
     VSphereConnection,
+    VSphereIpReservation,
+    VSphereNetworkRange,
 )
 
 # Application Intelligence has its own bounded domain model but remains part of

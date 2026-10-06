@@ -95,6 +95,10 @@ PERMISSIONS = [
     ),
     ("ssh_credentials:manage", "Manage SSH credentials and connection profiles"),
     ("vsphere:manage", "Manage vSphere connections and browse VM inventory"),
+    (
+        "cluster_templates:manage",
+        "Save, rename and delete the cluster templates offered by the Cluster Builder",
+    ),
     ("applications:view", "View Application Intelligence applications and analyses"),
     ("applications:manage", "Create and update Application Intelligence applications"),
     ("applications:analyze", "Request source-code analysis through Hermes"),
@@ -147,7 +151,7 @@ PERMISSION_GROUPS = [
         "keys": [
             "cluster_builds:view", "cluster_builds:create", "cluster_builds:execute",
             "cluster_builds:kubeconfig",
-            "ssh_credentials:manage", "vsphere:manage",
+            "ssh_credentials:manage", "vsphere:manage", "cluster_templates:manage",
         ],
     },
     {"id": "namespaces", "label": "Namespaces", "keys": ["namespaces:view"]},
@@ -271,6 +275,8 @@ DANGEROUS_PERMISSION_KEYS = {
     # own RBAC, for as long as the certificate lives.
     "cluster_builds:kubeconfig",
     "ssh_credentials:manage", "vsphere:manage",
+    # A saved template is what every builder is offered as a starting shape.
+    "cluster_templates:manage",
     # Running a build executes repository-controlled commands on a runner, and
     # editing a pipeline decides which commands those are.
     "ci_services:delete", "ci_pipelines:edit", "ci_builds:run", "ci_secrets:manage",

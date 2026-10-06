@@ -348,7 +348,15 @@ export function groupChecks(preflightResult) {
 // Blueprint — one object across configure → verify → build → done
 // ---------------------------------------------------------------------------
 
-function tierTargets({ topologyType, endpointMode }) {
+function tierTargets({ topologyType, endpointMode, counts }) {
+  // A template fixes every tier, workers included.
+  if (counts) {
+    return {
+      loadbalancer: counts.loadbalancer || 0,
+      control_plane: counts.controlPlane || 0,
+      worker: counts.worker || 0,
+    };
+  }
   if (topologyType === "single_cp") {
     return {
       loadbalancer: endpointMode === "managed_haproxy" ? 1 : 0,
@@ -485,6 +493,46 @@ export function draftBlueprint({ basics, picked = {}, manualNodes = [], vms = []
     targets,
     bus: busFor(basics || {}, "idle"),
     state: "outline",
+  });
+}
+
+/**
+ * Blueprint for machines KubeSight will create (or is creating): the names and
+ * addresses come from the plan, not from a picker.
+ * @param machines  [{name, role: loadbalancer|controlPlane|worker, ip}]
+ * @param slotState (machine) => Blueprint slot state ("set", "live", …)
+ */
+export function machinesBlueprint({
+  machines = [], vip = null, endpoint = "", state = "outline", slotState = () => "set",
+  busState = "idle", stamp = () => null,
+}) {
+  const roleOf = { loadbalancer: "loadbalancer", controlPlane: "control_plane", worker: "worker" };
+  const tiers = { loadbalancer: [], control_plane: [], worker: [] };
+  machines.forEach((machine) => {
+    const tier = tiers[roleOf[machine.role] || machine.role];
+    if (!tier) return;
+    tier.push({
+      key: `m-${machine.name}`,
+      name: machine.name,
+      host: null,
+      sub: machine.ip || "address on plan",
+      state: slotState(machine),
+      stamp: stamp(machine),
+      tie: false,
+    });
+  });
+  const targets = {
+    loadbalancer: tiers.loadbalancer.length,
+    control_plane: tiers.control_plane.length,
+    worker: tiers.worker.length,
+  };
+  return assemble({
+    tiers,
+    targets,
+    bus: vip
+      ? { managed: true, address: vip, port: "6443", label: "VIP", state: busState }
+      : { managed: false, address: endpoint || "", port: "", label: "Endpoint", state: busState },
+    state,
   });
 }
 
@@ -853,11 +901,12 @@ export function deriveReadiness({
 // Builds list
 // ---------------------------------------------------------------------------
 
-const IN_FLIGHT_STATUSES = new Set(["building", "preflighting"]);
+const IN_FLIGHT_STATUSES = new Set(["building", "preflighting", "provisioning", "destroying"]);
 /** Statuses that are waiting on a person: a failure to look at, a draft to
     finish, a preflight that passed and never got launched. */
 const ATTENTION_STATUSES = new Set([
   "failed", "cancelled", "preflight_failed", "draft", "preflight_passed",
+  "provision_failed",
 ]);
 
 /** Split the library by what each build wants from you, not by date. */

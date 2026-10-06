@@ -26,6 +26,7 @@ export const PERMISSION_GROUPS = [
       "cluster_builds:execute",
       "ssh_credentials:manage",
       "vsphere:manage",
+      "cluster_templates:manage",
     ],
   },
   {

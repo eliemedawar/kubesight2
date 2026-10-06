@@ -1,4 +1,5 @@
-/** The new-build wizard: Shape → Machines → Add-ons → Workloads → Verify.
+/** The new-build wizard: Template → Machines → Add-ons → Workloads → Verify
+ *  (or, when KubeSight creates the VMs with OpenTofu, Plan & create).
  *
  *  The old step 1 held eleven fields plus the whole add-on catalog in one grid,
  *  mixing what the cluster *is* with the infrastructure plumbing a build
@@ -10,6 +11,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Blueprint from "./Blueprint.jsx";
 import WorkloadsPicker from "./WorkloadsPicker.jsx";
+import { ProvisionCard } from "./ProvisionPanels.jsx";
+import { CountsEditor, TemplateGallery } from "./TemplateStep.jsx";
+import VmwareMachines, { useVmwarePlacement } from "./VmwareMachines.jsx";
 import { Field, StatusPill } from "./common.jsx";
 import { addonSelectionError, ipRangeListError } from "../../utils/addonConfig.js";
 import {
@@ -20,6 +24,7 @@ import {
   draftBlueprint,
   groupChecks,
   hostByAddress,
+  machinesBlueprint,
   preferredSources,
   preflightBlueprint,
   versionsForK8s,
@@ -30,14 +35,48 @@ import {
   workloadSelectionSummary,
 } from "../../utils/clusterBuilder.js";
 import {
+  DEFAULT_MINIMUMS,
+  EMPTY_VM_PLACEMENT,
+  countsError,
+  defaultPlacement,
+  findTemplate,
+  machineCount,
+  placementFromSpec,
+  placementProblem,
+  previewMachines,
+  provisioningPayload,
+  resolvePlacement,
+  shapeFor,
+  shapeLabel,
+  sizeErrors,
+  totals,
+  vmwareNameError,
+} from "../../utils/clusterProvisioning.js";
+import {
   createClusterBuild,
+  getClusterBuild,
   listVSphereVms,
+  planClusterVms,
   preflightClusterBuild,
+  previewNetworkAddresses,
   startClusterBuild,
   updateClusterBuild,
 } from "../../api/clusterBuildsApi.js";
 
-const STEPS = ["Shape", "Machines", "Add-ons", "Workloads", "Verify & build"];
+function stepLabels(machineSource) {
+  return [
+    "Template", "Machines", "Add-ons", "Workloads",
+    machineSource === "vmware" ? "Plan & create" : "Verify & build",
+  ];
+}
+
+// The Small template — what a wizard opened before the catalog arrives shows.
+const DEFAULT_COUNTS = { loadbalancer: 1, controlPlane: 1, worker: 2 };
+const DEFAULT_SIZES = {
+  loadbalancer: { cpu: 2, memoryGb: 2, diskGb: 40 },
+  controlPlane: { cpu: 4, memoryGb: 8, diskGb: 80 },
+  worker: { cpu: 4, memoryGb: 8, diskGb: 100 },
+};
 
 // Named because the rail, the right-hand footer and the preflight hand-off
 // all reference them, and off-by-one there is a silent wrong-panel bug.
@@ -62,7 +101,12 @@ const DEFAULT_DISK_CHECK_PATH = "/var";
 const EMPTY_BASICS = {
   name: "",
   k8sVersion: "",
-  topologyType: "stacked_ha",
+  templateId: "small",
+  counts: DEFAULT_COUNTS,
+  sizes: DEFAULT_SIZES,
+  machineSource: "existing",
+  vm: EMPTY_VM_PLACEMENT,
+  topologyType: "single_cp",
   endpointMode: "managed_haproxy",
   vipAddress: "",
   controlPlaneEndpoint: "",
@@ -79,8 +123,20 @@ const EMPTY_BASICS = {
 
 function basicsFromBuild(build) {
   if (!build) return { ...EMPTY_BASICS, workloads: { ...EMPTY_WORKLOADS } };
+  const spec = build.provisioning?.spec;
+  const vmware = build.machineSource === "vmware";
+  const nodeCounts = build.nodeCounts || {};
   return {
     ...EMPTY_BASICS,
+    templateId: build.templateId || "custom",
+    machineSource: vmware ? "vmware" : "existing",
+    counts: spec?.counts || {
+      loadbalancer: nodeCounts.loadbalancer || 0,
+      controlPlane: nodeCounts.controlPlane || 1,
+      worker: nodeCounts.worker || 1,
+    },
+    sizes: spec?.sizes || DEFAULT_SIZES,
+    vm: vmware ? placementFromSpec(spec) : EMPTY_VM_PLACEMENT,
     name: build.name || "",
     k8sVersion: build.k8sVersion || "",
     topologyType: build.topologyType || "stacked_ha",
@@ -131,10 +187,10 @@ const ROLE_KEYS = [
   ["worker", "W"],
 ];
 
-function StepRail({ current, onGoBack }) {
+function StepRail({ current, onGoBack, labels }) {
   return (
     <nav className="sg-cb-steps" aria-label="Build steps">
-      {STEPS.map((label, index) => {
+      {labels.map((label, index) => {
         const state = index === current ? "is-on" : index < current ? "is-done" : "";
         const reachable = index < current;
         return (
@@ -166,7 +222,8 @@ function SourcesBar({ basics, infra, onChange, editing, setEditing }) {
   );
 
   const chips = [
-    {
+    // When KubeSight creates the VMs, the vCenter is chosen with the placement.
+    ...(basics.machineSource === "vmware" ? [] : [{
       key: "vsphere",
       who: "vCenter",
       what: vsphere?.name || "None — manual hosts",
@@ -176,7 +233,7 @@ function SourcesBar({ basics, infra, onChange, editing, setEditing }) {
         { value: "", label: "None (manual hosts)" },
         ...infra.vsphere.map((row) => ({ value: String(row.id), label: row.name })),
       ],
-    },
+    }]),
     {
       key: "ssh",
       who: "SSH",
@@ -249,24 +306,95 @@ function SourcesBar({ basics, infra, onChange, editing, setEditing }) {
   );
 }
 
-function ChoiceCard({ selected, title, shape, description, onSelect }) {
-  return (
-    <button
-      type="button"
-      className="sg-cb-choice"
-      aria-pressed={selected}
-      onClick={onSelect}
-    >
-      <span className="ct">{title}</span>
-      {shape ? <span className="cs sg-cb-mono">{shape}</span> : null}
-      {description ? <span className="cd">{description}</span> : null}
-    </button>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Step 1 — Shape
 // ---------------------------------------------------------------------------
+
+/** For machines that already exist: how clients reach the API server. When
+    KubeSight creates the VMs, the address comes from the network range instead. */
+function EndpointFields({ basics, setBasic, primaryAddress }) {
+  if (basics.endpointMode === "managed_haproxy") {
+    return (
+      <div className="card sg-cb-card sg-cb-fields">
+        <Field
+          label="VIP address"
+          htmlFor="cb-vip"
+          hint={basics.topologyType === "single_cp"
+            ? "An unused address on the same L2 network. KubeSight assigns it to the single managed load balancer; this shape has no failover."
+            : "An unused address on the control-plane L2 segment. Keepalived floats it between the two load-balancer machines, and preflight confirms nothing answers on it yet."}
+        >
+          <input
+            id="cb-vip"
+            className="sg-cb-input sg-cb-mono"
+            value={basics.vipAddress}
+            onChange={(event) => setBasic("vipAddress", event.target.value)}
+            placeholder="10.0.0.100"
+          />
+        </Field>
+      </div>
+    );
+  }
+  return (
+    <div className="card sg-cb-card sg-cb-fields">
+      <Field label="API endpoint">
+        <div className="sg-cb-seg" role="group" aria-label="API endpoint">
+          <button type="button" aria-pressed={basics.endpointMode === "manual_endpoint"}
+                  onClick={() => setBasic("endpointMode", "manual_endpoint")}>
+            The control plane&apos;s own address
+          </button>
+          <button type="button" aria-pressed={basics.endpointMode === "external_lb"}
+                  onClick={() => setBasic("endpointMode", "external_lb")}>
+            A load balancer you already run
+          </button>
+        </div>
+      </Field>
+      <Field
+        label="Control-plane endpoint"
+        htmlFor="cb-endpoint"
+        hint="host:port. A stable endpoint is required even for a single control plane — it keeps the HA migration path open."
+      >
+        <input
+          id="cb-endpoint"
+          className="sg-cb-input sg-cb-mono"
+          value={basics.controlPlaneEndpoint}
+          onChange={(event) => setBasic("controlPlaneEndpoint", event.target.value)}
+          placeholder={primaryAddress ? `${primaryAddress}:6443` : "k8s-api.example.com:6443"}
+        />
+      </Field>
+      {primaryAddress && basics.endpointMode === "manual_endpoint"
+        && basics.controlPlaneEndpoint !== `${primaryAddress}:6443` ? (
+          <button className="btn-ghost btn-sm sg-cb-pv-usebtn" type="button"
+                  onClick={() => setBasic("controlPlaneEndpoint", `${primaryAddress}:6443`)}>
+            Use {primaryAddress}:6443
+          </button>
+        ) : null}
+    </div>
+  );
+}
+
+function SourceChoice({ value, onChange, canVmware }) {
+  return (
+    <div className="card sg-cb-card">
+      <div className="sg-cb-sect"><h2>Where the machines come from</h2></div>
+      <div className="sg-cb-choices">
+        <button type="button" className="sg-cb-choice" aria-pressed={value === "vmware"}
+                disabled={!canVmware} onClick={() => onChange("vmware")}>
+          <span className="ct">Create new VMs in VMware <span className="sg-cb-pill is-brand">OpenTofu</span></span>
+          <span className="cd">
+            {canVmware
+              ? "KubeSight clones a VM template, sets sizes and addresses, then installs Kubernetes on them."
+              : "Needs a vCenter with a provisioning account — an administrator adds one under Sources."}
+          </span>
+        </button>
+        <button type="button" className="sg-cb-choice" aria-pressed={value === "existing"}
+                onClick={() => onChange("existing")}>
+          <span className="ct">Use machines you already have</span>
+          <span className="cd">Pick running VMs from vCenter or add hosts by address. Nothing is created in vCenter.</span>
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function ShapeStep({ options, basics, setBasic }) {
   // CNI support windows move with Kubernetes, so only plugins with a version
@@ -277,7 +405,10 @@ function ShapeStep({ options, basics, setBasic }) {
       <Field
         label="Cluster name"
         htmlFor="cb-name"
-        hint="Becomes the cluster's name in Clusters, Dashboard and Inventory once it is alive."
+        hint={basics.machineSource === "vmware"
+          ? `Also names the VMs: ${basics.name || "name"}-cp-1, ${basics.name || "name"}-wk-1 …`
+          : "Becomes the cluster's name in Clusters, Dashboard and Inventory once it is alive."}
+        error={basics.machineSource === "vmware" ? vmwareNameError(basics.name) : ""}
       >
         <input
           id="cb-name"
@@ -309,72 +440,6 @@ function ShapeStep({ options, basics, setBasic }) {
           </p>
         )}
       </Field>
-
-      <Field label="Topology">
-        <div className="sg-cb-choices">
-          <ChoiceCard
-            selected={basics.topologyType === "stacked_ha"}
-            title="Highly available"
-            shape="2 LB · 3 CP · N workers"
-            description="Survives losing one control plane and one load balancer. etcd keeps quorum at 2 of 3."
-            onSelect={() => setBasic("topologyType", "stacked_ha")}
-          />
-          <ChoiceCard
-            selected={basics.topologyType === "single_cp"}
-            title="Single control plane"
-            shape="1 CP · N workers"
-            description="Lab shape. One machine failure takes the cluster with it, and there is no LB failover."
-            onSelect={() => setBasic("topologyType", "single_cp")}
-          />
-        </div>
-      </Field>
-
-      <Field label="API endpoint">
-        <div className="sg-cb-choices">
-          {options.endpointModes.map((mode) => (
-            <ChoiceCard
-              key={mode.id}
-              selected={basics.endpointMode === mode.id}
-              title={mode.id === "managed_haproxy" ? "KubeSight manages a VIP" : mode.label}
-              shape={mode.id === "managed_haproxy" ? "haproxy + keepalived" : "host:port"}
-              description={mode.description}
-              onSelect={() => setBasic("endpointMode", mode.id)}
-            />
-          ))}
-        </div>
-      </Field>
-
-      {basics.endpointMode === "managed_haproxy" ? (
-        <Field
-          label="VIP address"
-          htmlFor="cb-vip"
-          hint={basics.topologyType === "single_cp"
-            ? "An unused address on the same L2 network. KubeSight assigns it to the single managed load balancer; this lab shape has no failover."
-            : "An unused address on the control-plane L2 segment. Keepalived floats it between the two load-balancer machines, and preflight confirms nothing answers on it yet."}
-        >
-          <input
-            id="cb-vip"
-            className="sg-cb-input sg-cb-mono"
-            value={basics.vipAddress}
-            onChange={(event) => setBasic("vipAddress", event.target.value)}
-            placeholder="10.0.0.100"
-          />
-        </Field>
-      ) : (
-        <Field
-          label="Control-plane endpoint"
-          htmlFor="cb-endpoint"
-          hint="host:port. A stable endpoint is required even for a single control plane — it keeps the HA migration path open."
-        >
-          <input
-            id="cb-endpoint"
-            className="sg-cb-input sg-cb-mono"
-            value={basics.controlPlaneEndpoint}
-            onChange={(event) => setBasic("controlPlaneEndpoint", event.target.value)}
-            placeholder="k8s-api.example.com:6443"
-          />
-        </Field>
-      )}
 
       <details className="sg-cb-adv">
         <summary>
@@ -975,11 +1040,14 @@ export default function Wizard({
   options,
   infra,
   canExecute = false,
+  canManageTemplates = false,
+  currentUserId = null,
   initialBuild = null,
   notify,
   onBuildSaved,
   onBuildLaunched,
   onCancel,
+  onOptionsChanged,
 }) {
   const [step, setStep] = useState(0);
   const [basics, setBasics] = useState(() => basicsFromBuild(initialBuild));
@@ -997,9 +1065,22 @@ export default function Wizard({
   // The last image check from the Workloads step, so the Blueprint can report
   // it while the user is still standing on that step.
   const [workloadPlan, setWorkloadPlan] = useState(null);
+  // VMware: the build as the plan step last read it, and the address preview.
+  const [planBuild, setPlanBuild] = useState(null);
+  const [addresses, setAddresses] = useState([]);
+  const [previewError, setPreviewError] = useState("");
   const seeded = useRef(Boolean(initialBuild));
+  const sourceSeeded = useRef(Boolean(initialBuild));
 
   const setBasic = (key, value) => setBasics((previous) => ({ ...previous, [key]: value }));
+  const catalog = options?.clusterTemplates;
+  const minimums = catalog?.minimumSizes || DEFAULT_MINIMUMS;
+  const vmware = basics.machineSource === "vmware";
+  const provisioningConnections = useMemo(
+    () => (infra.vsphere || []).filter((row) => row.provisioningConfigured),
+    [infra.vsphere]
+  );
+  const labels = stepLabels(basics.machineSource);
 
   // Resolve the plumbing once, from whatever is already healthy. This is what
   // lets the Sources row be a statement rather than three questions.
@@ -1007,6 +1088,7 @@ export default function Wizard({
     if (seeded.current || !options) return;
     seeded.current = true;
     const { vcenter, route, buildProfile } = preferredSources(infra);
+    const small = findTemplate(options.clusterTemplates, "small");
     setBasics((previous) => ({
       ...previous,
       k8sVersion: previous.k8sVersion || options.k8sVersions[0] || "",
@@ -1015,8 +1097,37 @@ export default function Wizard({
       vsphereConnectionId: vcenter ? String(vcenter.id) : "",
       connectionProfileId: route ? String(route.id) : "",
       buildProfileId: buildProfile ? String(buildProfile.id) : "",
+      ...(small ? { counts: { ...small.counts }, sizes: JSON.parse(JSON.stringify(small.sizes)) } : {}),
     }));
   }, [options, infra]);
+
+  // A vCenter that can create VMs makes that the default — it is the reason
+  // this wizard has a second path at all. Decided once; the user can switch.
+  useEffect(() => {
+    if (sourceSeeded.current || !provisioningConnections.length) return;
+    sourceSeeded.current = true;
+    setBasics((previous) => ({
+      ...previous,
+      machineSource: "vmware",
+      vm: { ...previous.vm, connectionId: String(provisioningConnections[0].id) },
+    }));
+  }, [provisioningConnections]);
+
+  // Topology follows the template's role counts. For machines that exist, a
+  // shape with no load balancer may still sit behind one the user runs.
+  useEffect(() => {
+    const shape = shapeFor(basics.counts);
+    setBasics((previous) => {
+      const endpointMode = shape.endpointMode === "manual_endpoint"
+        && ["manual_endpoint", "external_lb"].includes(previous.endpointMode)
+        ? previous.endpointMode
+        : shape.endpointMode;
+      if (previous.topologyType === shape.topologyType && previous.endpointMode === endpointMode) {
+        return previous;
+      }
+      return { ...previous, topologyType: shape.topologyType, endpointMode };
+    });
+  }, [basics.counts]);
 
   // Changing the Kubernetes version can strand a CNI plugin or add-on version
   // that the new release does not cover. Realign those here rather than letting
@@ -1024,8 +1135,8 @@ export default function Wizard({
   // itself is never rewritten — only what depends on it.
   useEffect(() => {
     if (!options || !basics.k8sVersion) return;
-    const catalog = options.cniPlugins || [];
-    const usableCnis = cniPluginsForK8s(catalog, basics.k8sVersion);
+    const cniCatalog = options.cniPlugins || [];
+    const usableCnis = cniPluginsForK8s(cniCatalog, basics.k8sVersion);
     const addonCatalog = options.addons || [];
 
     setBasics((previous) => {
@@ -1057,15 +1168,58 @@ export default function Wizard({
 
   useEffect(() => {
     let ignore = false;
-    if (!basics.vsphereConnectionId) { setVms([]); return undefined; }
+    if (vmware || !basics.vsphereConnectionId) { setVms([]); return undefined; }
     setVmsLoading(true);
     listVSphereVms(basics.vsphereConnectionId)
       .then((data) => { if (!ignore) setVms(data.items || []); })
       .catch((error) => notify(`vCenter inventory failed: ${error.message}`, true))
       .finally(() => { if (!ignore) setVmsLoading(false); });
     return () => { ignore = true; };
-  }, [basics.vsphereConnectionId, notify]);
+  }, [vmware, basics.vsphereConnectionId, notify]);
 
+  // --- VMware placement -----------------------------------------------------
+  const placementState = useVmwarePlacement(vmware ? basics.vm.connectionId : "", notify);
+  const ranges = placementState.data?.networks || [];
+  useEffect(() => {
+    if (!placementState.data) return;
+    setBasics((previous) => {
+      const vm = defaultPlacement(placementState.data, previous.vm, placementState.data.networks || []);
+      return JSON.stringify(vm) === JSON.stringify(previous.vm) ? previous : { ...previous, vm };
+    });
+  }, [placementState.data]);
+  const resolved = useMemo(
+    () => resolvePlacement(placementState.data, basics.vm, ranges),
+    [placementState.data, basics.vm, ranges]
+  );
+  const neededAddresses = machineCount(basics.counts) + (basics.counts?.loadbalancer ? 1 : 0);
+  useEffect(() => {
+    if (!vmware || !resolved.range || !neededAddresses) { setAddresses([]); return undefined; }
+    let ignore = false;
+    const id = setTimeout(() => {
+      previewNetworkAddresses(resolved.range.id, neededAddresses)
+        .then((data) => {
+          if (ignore) return;
+          setAddresses(data.addresses || []);
+          setPreviewError(data.enough ? "" : `${resolved.range.networkName} does not have ${neededAddresses} free addresses.`);
+        })
+        .catch((error) => { if (!ignore) setPreviewError(error.message); });
+    }, 250);
+    return () => { ignore = true; clearTimeout(id); };
+  }, [vmware, resolved.range, neededAddresses]);
+  const preview = useMemo(
+    () => previewMachines(basics.name, basics.counts, basics.sizes, addresses),
+    [basics.name, basics.counts, basics.sizes, addresses]
+  );
+  const vmProblem = vmware
+    ? (countsError(basics.counts)
+      || vmwareNameError(basics.name)
+      || (placementState.loading && !placementState.data ? "Reading vCenter…" : "")
+      || placementProblem(resolved, basics.counts)
+      || sizeErrors(basics.counts, basics.sizes, minimums)[0]
+      || previewError)
+    : "";
+
+  // --- Existing machines -----------------------------------------------------
   const plan = useMemo(
     () => draftBlueprint({ basics, picked, manualNodes, vms }),
     [basics, picked, manualNodes, vms]
@@ -1088,6 +1242,17 @@ export default function Wizard({
     .filter((tier) => tier.target > 0)
     .every((tier) => tier.filled === tier.target);
 
+  const primaryAddress = useMemo(() => {
+    const vmByMoid = new Map(vms.map((vm) => [vm.moid, vm]));
+    const fromPick = Object.entries(picked).find(([, pick]) => pick.role === "control_plane");
+    if (fromPick) return fromPick[1].address || vmByMoid.get(fromPick[0])?.guestIp || "";
+    return manualNodes.find((node) => node.role === "control_plane")?.address || "";
+  }, [picked, manualNodes, vms]);
+
+  const endpointReady = basics.endpointMode === "managed_haproxy"
+    ? Boolean(basics.vipAddress.trim())
+    : Boolean(basics.controlPlaneEndpoint.trim());
+
   const addonError = useMemo(
     () => addonSelectionError(basics.addons, options?.addons || []),
     [basics.addons, options]
@@ -1097,29 +1262,107 @@ export default function Wizard({
     basics.name.trim()
     && basics.k8sVersion
     && basics.connectionProfileId
-    && (basics.endpointMode === "managed_haproxy" ? basics.vipAddress.trim() : basics.controlPlaneEndpoint.trim())
+    && !countsError(basics.counts)
+    && !(vmware && vmwareNameError(basics.name))
   );
+  const machinesReady = vmware
+    ? !vmProblem
+    : countsOk && !plan.conflictHosts.length && endpointReady;
 
-  const buildPayload = () => ({
-    ...basics,
-    vsphereConnectionId: basics.vsphereConnectionId || undefined,
-    buildProfileId: basics.buildProfileId || undefined,
-    connectionProfileId: basics.connectionProfileId || undefined,
-    workloads: basics.workloads.items.length ? basics.workloads : null,
-    nodes: nodesPayload,
-  });
+  // Why a Next button is disabled, said next to it rather than left to guess.
+  const shapeProblem = !basics.name.trim() ? "Name the cluster."
+    : vmware && vmwareNameError(basics.name) ? vmwareNameError(basics.name)
+      : !basics.k8sVersion ? "Choose a Kubernetes version."
+        : countsError(basics.counts) ? countsError(basics.counts)
+          : !basics.connectionProfileId
+            ? "Choose the SSH route in the Sources row above. KubeSight logs in to every machine with it."
+            : "";
+  const machinesProblem = vmware ? vmProblem
+    : !countsOk ? `Assign ${shapeLabel(basics.counts)}.`
+      : plan.conflictHosts.length ? "Move a machine off the shared ESXi host."
+        : !endpointReady
+          ? (basics.endpointMode === "managed_haproxy" ? "Give the VIP address." : "Give the control-plane endpoint.")
+          : "";
+
+  const chooseTemplate = (template) => {
+    if (template.id === "custom") {
+      setBasic("templateId", "custom");
+      return;
+    }
+    setBasics((previous) => {
+      const next = {
+        ...previous,
+        templateId: template.id,
+        counts: { ...template.counts },
+        sizes: JSON.parse(JSON.stringify(template.sizes || DEFAULT_SIZES)),
+      };
+      if (template.network?.cniPlugin) next.cniPlugin = template.network.cniPlugin;
+      if (template.network?.podCidr) next.podCidr = template.network.podCidr;
+      if (template.network?.serviceCidr) next.serviceCidr = template.network.serviceCidr;
+      if (!template.builtin && template.addons?.length) {
+        next.addons = template.addons
+          .map((addon) => {
+            const entry = (options?.addons || []).find((item) => item.id === addon.id);
+            if (!entry) return null;
+            const version = defaultVersionForK8s(entry, previous.k8sVersion) || entry.defaultVersion;
+            return version ? { id: addon.id, version, ...(addon.config ? { config: addon.config } : {}) } : null;
+          })
+          .filter(Boolean);
+      }
+      return next;
+    });
+  };
+
+  const buildPayload = () => {
+    const common = {
+      name: basics.name,
+      k8sVersion: basics.k8sVersion,
+      templateId: basics.templateId,
+      machineSource: basics.machineSource,
+      cniPlugin: basics.cniPlugin,
+      podCidr: basics.podCidr,
+      serviceCidr: basics.serviceCidr,
+      diskCheckPath: basics.diskCheckPath,
+      addons: basics.addons,
+      buildProfileId: basics.buildProfileId || undefined,
+      connectionProfileId: basics.connectionProfileId || undefined,
+      workloads: basics.workloads.items.length ? basics.workloads : null,
+    };
+    if (vmware) {
+      return {
+        ...common,
+        provisioning: provisioningPayload(
+          basics.vm.connectionId, resolved, basics.vm, basics.counts, basics.sizes
+        ),
+      };
+    }
+    return {
+      ...common,
+      topologyType: basics.topologyType,
+      endpointMode: basics.endpointMode,
+      vipAddress: basics.vipAddress,
+      controlPlaneEndpoint: basics.controlPlaneEndpoint,
+      vsphereConnectionId: basics.vsphereConnectionId || undefined,
+      nodes: nodesPayload,
+    };
+  };
+
+  const save = async () => {
+    let id = buildId;
+    const payload = buildPayload();
+    if (id) await updateClusterBuild(id, payload);
+    else {
+      const created = await createClusterBuild(payload);
+      id = created.id;
+      setBuildId(id);
+    }
+    return id;
+  };
 
   const saveDraft = async () => {
     setBusy(true);
     try {
-      let id = buildId;
-      const payload = buildPayload();
-      if (id) await updateClusterBuild(id, payload);
-      else {
-        const created = await createClusterBuild(payload);
-        id = created.id;
-        setBuildId(id);
-      }
+      const id = await save();
       notify(`Draft ${basics.name} saved.`);
       if (onBuildSaved) onBuildSaved(id);
       return id;
@@ -1135,14 +1378,7 @@ export default function Wizard({
     setBusy(true);
     setAcked(false);
     try {
-      let id = buildId;
-      const payload = buildPayload();
-      if (id) await updateClusterBuild(id, payload);
-      else {
-        const created = await createClusterBuild(payload);
-        id = created.id;
-        setBuildId(id);
-      }
+      const id = await save();
       setPreflightResult(await preflightClusterBuild(id));
       setStep(STEP_VERIFY);
     } catch (error) {
@@ -1151,6 +1387,39 @@ export default function Wizard({
       setBusy(false);
     }
   };
+
+  const makePlan = async () => {
+    setBusy(true);
+    try {
+      const id = await save();
+      setPlanBuild(await planClusterVms(id));
+      setStep(STEP_VERIFY);
+    } catch (error) {
+      notify(error.message || String(error), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refreshPlanBuild = async () => {
+    if (!buildId) return;
+    const data = await getClusterBuild(buildId);
+    setPlanBuild(data);
+    const jobStatus = data.provisioning?.job?.status;
+    if (data.status === "provisioning" || ["applying", "connecting"].includes(jobStatus)) {
+      onBuildLaunched(buildId);
+    }
+  };
+
+  // While OpenTofu plans, keep reading the build until it says how it went.
+  const planning = planBuild?.provisioning?.job?.status === "planning";
+  useEffect(() => {
+    if (step !== STEP_VERIFY || !planning || !buildId) return undefined;
+    const id = setInterval(() => {
+      getClusterBuild(buildId).then(setPlanBuild).catch(() => {});
+    }, 2000);
+    return () => clearInterval(id);
+  }, [step, planning, buildId]);
 
   const launch = async () => {
     setBusy(true);
@@ -1255,9 +1524,37 @@ export default function Wizard({
     }
     : countsOk
       ? { tone: "good", text: "✓ Placement is clean — every HA tier spans distinct ESXi hosts." }
-      : { tone: "plain", text: "Assign a machine to every slot. Nothing is reserved until preflight runs." };
+      : { tone: "plain", text: `Assign ${shapeLabel(basics.counts)}. Nothing is reserved until preflight runs.` };
+
+  const sum = totals(basics.counts, basics.sizes);
+  const vmwareFacts = [
+    { label: "Template", value: findTemplate(catalog, basics.templateId)?.name || "Custom" },
+    { label: "Machines", value: `${sum.machines} VMs · ${sum.cpu} vCPU · ${sum.memoryGb} GB` },
+    { label: "Disk (thin)", value: `up to ${sum.diskGb} GB` },
+    ...(resolved.template ? [{ label: "Clone of", value: resolved.template.name }] : []),
+    ...(resolved.datastore ? [{ label: "Datastore", value: resolved.datastore.name }] : []),
+  ];
 
   const rightRail = (() => {
+    if (step === STEP_VERIFY && vmware) {
+      const machines = planBuild?.provisioning?.spec?.machines || preview.machines;
+      return (
+        <Blueprint
+          plan={machinesBlueprint({
+            machines,
+            vip: planBuild?.vipAddress || preview.vip,
+            endpoint: planBuild?.controlPlaneEndpoint || preview.endpoint,
+            state: "stamped",
+          })}
+          caption={planning ? "planning" : "planned"}
+          facts={vmwareFacts}
+          note={{
+            tone: "plain",
+            text: "Creating the VMs takes a few minutes. Kubernetes starts on them right after, as a normal Cluster Builder build.",
+          }}
+        />
+      );
+    }
     if (step === STEP_VERIFY && stampedPlan && grouped) {
       return (
         <Blueprint
@@ -1269,23 +1566,30 @@ export default function Wizard({
       );
     }
     const footer = step === STEP_SHAPE ? (
-      <button
-        className="primary sg-cb-bp-cta"
-        type="button"
-        disabled={!shapeReady}
-        onClick={() => setStep(STEP_MACHINES)}
-      >
-        Next — pick machines
-      </button>
+      <>
+        {!shapeReady && shapeProblem ? <span className="sg-cb-field-hint">{shapeProblem}</span> : null}
+        <button
+          className="primary sg-cb-bp-cta"
+          type="button"
+          disabled={!shapeReady}
+          onClick={() => setStep(STEP_MACHINES)}
+        >
+          Next — machines
+        </button>
+      </>
     ) : step === STEP_MACHINES ? (
-      <button
-        className="primary sg-cb-bp-cta"
-        type="button"
-        disabled={!countsOk || Boolean(plan.conflictHosts.length)}
-        onClick={() => setStep(STEP_ADDONS)}
-      >
-        Next — add-ons
-      </button>
+      <>
+        {!machinesReady && machinesProblem && !vmware
+          ? <span className="sg-cb-field-hint">{machinesProblem}</span> : null}
+        <button
+          className="primary sg-cb-bp-cta"
+          type="button"
+          disabled={!machinesReady}
+          onClick={() => setStep(STEP_ADDONS)}
+        >
+          Next — add-ons
+        </button>
+      </>
     ) : step === STEP_ADDONS ? (
       <>
         {addonError ? <span className="sg-cb-field-error">{addonError}</span> : null}
@@ -1297,6 +1601,26 @@ export default function Wizard({
         >
           Next — workloads
         </button>
+      </>
+    ) : vmware ? (
+      <>
+        {workloadStorageErrors.length ? (
+          <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
+        ) : null}
+        {!canExecute ? (
+          <span className="muted">
+            Save this draft for a reviewer with execute permission to make the plan and create the VMs.
+          </span>
+        ) : null}
+        <button
+          className="primary sg-cb-bp-cta"
+          type="button"
+          disabled={busy || Boolean(vmProblem) || Boolean(addonError) || workloadStorageErrors.length > 0}
+          onClick={canExecute ? makePlan : saveDraft}
+        >
+          {canExecute ? (busy ? "Saving…" : "Make the plan") : "Save draft for review"}
+        </button>
+        <small className="muted">Nothing is created until you approve the plan.</small>
       </>
     ) : canExecute ? (
       <>
@@ -1333,6 +1657,32 @@ export default function Wizard({
         </button>
       </>
     );
+    if (vmware) {
+      return (
+        <Blueprint
+          plan={machinesBlueprint({
+            machines: preview.machines,
+            vip: preview.vip,
+            endpoint: preview.endpoint,
+            state: "outline",
+            slotState: () => "set",
+          })}
+          caption="new VMs · outline"
+          facts={step === STEP_ADDONS ? addonFacts : step === STEP_WORKLOADS ? workloadFacts : vmwareFacts}
+          note={step === STEP_WORKLOADS
+            ? workloadNote
+            : step === STEP_MACHINES
+              ? (vmProblem
+                ? { tone: "warn", text: vmProblem }
+                : { tone: "good", text: "Ready to plan. Nothing is created until you approve the plan." })
+              : {
+                tone: "plain",
+                text: `${shapeLabel(basics.counts)}. Addresses are previews until the plan reserves them.`,
+              }}
+          footer={footer}
+        />
+      );
+    }
     return (
       <Blueprint
         plan={plan}
@@ -1341,9 +1691,7 @@ export default function Wizard({
           : step === STEP_SHAPE
             ? {
               tone: "plain",
-              text: basics.topologyType === "stacked_ha"
-                ? "Nine machines is the usual production shape. The drawing fills in as you assign roles."
-                : "A lab cluster. The drawing fills in as you assign roles.",
+              text: `${shapeLabel(basics.counts)}. The drawing fills in as you assign machines.`,
             }
           : affinityNote}
         facts={step === STEP_ADDONS ? addonFacts
@@ -1358,7 +1706,7 @@ export default function Wizard({
   return (
     <div className="sg-cb-wizard">
       <div className="sg-cb-wizard-top">
-        <StepRail current={step} onGoBack={setStep} />
+        <StepRail current={step} onGoBack={setStep} labels={labels} />
         <button className="btn-ghost" type="button" onClick={onCancel}>Cancel</button>
       </div>
 
@@ -1373,25 +1721,84 @@ export default function Wizard({
       <div className="sg-cb-split">
         <div className="sg-cb-vstack">
           {step === STEP_SHAPE ? (
-            <ShapeStep options={options} basics={basics} setBasic={setBasic} />
+            <>
+              <div className="card sg-cb-card">
+                <div className="sg-cb-sect">
+                  <h2>Start from a template</h2>
+                  <span className="sg-cb-sect-right">sizes can change on the next step</span>
+                </div>
+                <p className="muted sg-cb-pv-lede">
+                  A template sets the shape, the machine sizes and, for saved ones, the add-ons. Next you choose
+                  whether KubeSight creates the VMs or uses machines you already have.
+                </p>
+                <TemplateGallery
+                  catalog={catalog}
+                  selectedId={basics.templateId}
+                  onSelect={chooseTemplate}
+                  canManage={canManageTemplates}
+                  notify={notify}
+                  onCatalogChanged={onOptionsChanged}
+                />
+                {basics.templateId === "custom" ? (
+                  <CountsEditor
+                    counts={basics.counts}
+                    onChange={(counts) => setBasic("counts", counts)}
+                  />
+                ) : null}
+              </div>
+              <ShapeStep options={options} basics={basics} setBasic={setBasic} />
+            </>
           ) : null}
 
           {step === STEP_MACHINES ? (
-            <MachinesStep
-              basics={basics}
-              infra={infra}
-              vms={vms}
-              vmsLoading={vmsLoading}
-              search={search}
-              setSearch={setSearch}
-              filters={filters}
-              toggleFilter={(key) => setFilters((previous) => ({ ...previous, [key]: !previous[key] }))}
-              picked={picked}
-              setPicked={setPicked}
-              manualNodes={manualNodes}
-              setManualNodes={setManualNodes}
-              conflictHosts={plan.conflictHosts}
-            />
+            <>
+              <SourceChoice
+                value={basics.machineSource}
+                canVmware={provisioningConnections.length > 0}
+                onChange={(source) => setBasics((previous) => ({
+                  ...previous,
+                  machineSource: source,
+                  vm: source === "vmware" && !previous.vm.connectionId && provisioningConnections[0]
+                    ? { ...previous.vm, connectionId: String(provisioningConnections[0].id) }
+                    : previous.vm,
+                }))}
+              />
+              {vmware ? (
+                <VmwareMachines
+                  connections={provisioningConnections}
+                  placementState={placementState}
+                  ranges={ranges}
+                  vm={basics.vm}
+                  setVm={(vm) => setBasic("vm", vm)}
+                  counts={basics.counts}
+                  sizes={basics.sizes}
+                  setSizes={(sizes) => setBasic("sizes", sizes)}
+                  minimums={minimums}
+                  resolved={resolved}
+                  preview={preview}
+                  previewError={previewError}
+                />
+              ) : (
+                <>
+                  <EndpointFields basics={basics} setBasic={setBasic} primaryAddress={primaryAddress} />
+                  <MachinesStep
+                    basics={basics}
+                    infra={infra}
+                    vms={vms}
+                    vmsLoading={vmsLoading}
+                    search={search}
+                    setSearch={setSearch}
+                    filters={filters}
+                    toggleFilter={(key) => setFilters((previous) => ({ ...previous, [key]: !previous[key] }))}
+                    picked={picked}
+                    setPicked={setPicked}
+                    manualNodes={manualNodes}
+                    setManualNodes={setManualNodes}
+                    conflictHosts={plan.conflictHosts}
+                  />
+                </>
+              )}
+            </>
           ) : null}
 
           {step === STEP_ADDONS ? (
@@ -1439,7 +1846,28 @@ export default function Wizard({
             </div>
           ) : null}
 
-          {step === STEP_VERIFY && preflightResult && grouped ? (
+          {step === STEP_VERIFY && vmware && planBuild ? (
+            <>
+              <ProvisionCard
+                build={planBuild}
+                canExecute={canExecute}
+                canCreate
+                currentUserId={currentUserId}
+                notify={notify}
+                onChanged={refreshPlanBuild}
+              />
+              <div className="sg-cb-actions">
+                <button className="btn-outline" type="button" onClick={() => setStep(STEP_MACHINES)}>
+                  Change something
+                </button>
+                <span className="muted">
+                  Changing anything throws this plan away; making the plan again reserves the same addresses.
+                </span>
+              </div>
+            </>
+          ) : null}
+
+          {step === STEP_VERIFY && !vmware && preflightResult && grouped ? (
             <>
               <VerifyStep
                 grouped={grouped}

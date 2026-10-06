@@ -13,6 +13,7 @@
 import { useState } from "react";
 import { Field, StatusPill } from "./common.jsx";
 import HostKeysPanel from "./HostKeysPanel.jsx";
+import { NetworkRanges, OpenTofuStatus, ProvisioningAccount } from "./ProvisioningSources.jsx";
 import {
   bundleCoverage,
   freshness,
@@ -436,7 +437,7 @@ export default function SourcesTab({
       {canManageVSphere ? (
       <Group
         title="vCenter"
-        description="A read-only link that powers the machine picker and the placement checks. The account needs nothing beyond the Read-Only role."
+        description="A read-only link powers the machine picker and the placement checks. To let KubeSight create VMs here, add a separate provisioning account."
         action={(
           <button
             className="btn-outline"
@@ -482,8 +483,8 @@ export default function SourcesTab({
         ) : null}
 
         {vsphere.length ? vsphere.map((row) => (
+          <div className="sg-cb-pv-vc" key={row.id}>
           <Entry
-            key={row.id}
             name={row.name}
             sub={`${row.baseUrl} · ${row.username}`}
             tone={row.lastConnectionStatus && row.lastConnectionStatus !== "ok" ? "is-bad" : ""}
@@ -511,8 +512,28 @@ export default function SourcesTab({
               </>
             )}
           />
+          <ProvisioningAccount row={row} notify={notify} reloadInfra={reloadInfra} />
+          </div>
         )) : <p className="muted">Nothing configured yet — machines can still be entered by hand.</p>}
       </Group>
+      ) : null}
+
+      {canManageVSphere ? (
+        <Group
+          title="Addresses for new VMs"
+          description="VMs KubeSight creates get static addresses from these ranges, never DHCP. A plan reserves its addresses first, so two builds can never be handed the same one, and skips any that already answer on the network."
+        >
+          <NetworkRanges connections={vsphere} notify={notify} />
+        </Group>
+      ) : null}
+
+      {canManageVSphere ? (
+        <Group
+          title="OpenTofu"
+          description="Creates and deletes the VMs. It runs inside KubeSight with the vSphere provider baked into the image, and keeps each cluster's state, encrypted and locked, in KubeSight's database."
+        >
+          <OpenTofuStatus notify={notify} canRelease={canManageVSphere} />
+        </Group>
       ) : null}
 
       {canManageSSH ? (

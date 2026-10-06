@@ -173,3 +173,69 @@ export const updateBuildProfile = (id, payload) =>
 
 export const deleteBuildProfile = (id) =>
   request(`/api/build-profiles/${id}`, { method: "DELETE" });
+
+// --- Cluster templates ------------------------------------------------------
+
+export const listClusterTemplates = () => request("/api/cluster-templates");
+
+/** Save a template from a payload ({name, description, spec}) or a build ({name, fromBuildId}). */
+export const createClusterTemplate = (payload) =>
+  request("/api/cluster-templates", { method: "POST", body: payload });
+
+export const updateClusterTemplate = (dbId, payload) =>
+  request(`/api/cluster-templates/${dbId}`, { method: "PUT", body: payload });
+
+export const deleteClusterTemplate = (dbId) =>
+  request(`/api/cluster-templates/${dbId}`, { method: "DELETE" });
+
+// --- OpenTofu provisioning --------------------------------------------------
+
+/** Ask OpenTofu for a plan for this build's VMs. Returns the build (202); poll it. */
+export const planClusterVms = (id) =>
+  request(`/api/cluster-builds/${id}/provision/plan`, { method: "POST" });
+
+export const planMoreWorkers = (id, payload) =>
+  request(`/api/cluster-builds/${id}/provision/grow-plan`, { method: "POST", body: payload });
+
+export const requestClusterDestroy = (id, payload) =>
+  request(`/api/cluster-builds/${id}/provision/destroy`, { method: "POST", body: payload });
+
+export const getProvisionJob = (id, jobId) =>
+  request(`/api/cluster-builds/${id}/provision/jobs/${jobId}`);
+
+const jobAction = (id, jobId, action, body = {}) =>
+  request(`/api/cluster-builds/${id}/provision/jobs/${jobId}/${action}`, { method: "POST", body });
+
+export const applyProvisionPlan = (id, jobId) => jobAction(id, jobId, "apply");
+export const approveClusterDestroy = (id, jobId, note = "") => jobAction(id, jobId, "approve", { note });
+export const rejectClusterDestroy = (id, jobId, note = "") => jobAction(id, jobId, "reject", { note });
+export const discardProvisionJob = (id, jobId) => jobAction(id, jobId, "discard");
+export const retryProvisionConnect = (id, jobId) => jobAction(id, jobId, "retry-connect");
+
+export const getProvisioningOverview = () => request("/api/cluster-provisioning");
+
+export const releaseProvisionLock = (buildId) =>
+  request(`/api/cluster-provisioning/locks/${buildId}/release`, { method: "POST" });
+
+// --- vCenter placement, networks, the provisioning account ------------------
+
+export const getVSpherePlacement = (id, refresh = false) =>
+  request(`/api/vsphere-connections/${id}/placement`, { query: refresh ? { refresh: 1 } : {} });
+
+export const testVSphereProvisioning = (id) =>
+  request(`/api/vsphere-connections/${id}/test-provisioning`, { method: "POST" });
+
+export const listVSphereNetworks = (id) => request(`/api/vsphere-connections/${id}/networks`);
+
+export const createVSphereNetwork = (id, payload) =>
+  request(`/api/vsphere-connections/${id}/networks`, { method: "POST", body: payload });
+
+export const updateVSphereNetwork = (id, rangeId, payload) =>
+  request(`/api/vsphere-connections/${id}/networks/${rangeId}`, { method: "PUT", body: payload });
+
+export const deleteVSphereNetwork = (id, rangeId) =>
+  request(`/api/vsphere-connections/${id}/networks/${rangeId}`, { method: "DELETE" });
+
+/** The next free addresses in a range — a preview, nothing is reserved. */
+export const previewNetworkAddresses = (rangeId, count) =>
+  request(`/api/vsphere-networks/${rangeId}/preview`, { query: { count } });

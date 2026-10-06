@@ -222,6 +222,15 @@ def run_scheduler_tick(app: Flask) -> None:
             advance_cluster_builds()
     except Exception:
         logger.exception("Cluster build tick failed")
+    try:
+        with app.app_context():
+            from .cluster_build.provisioning.jobs import advance_provision_jobs
+
+            # OpenTofu jobs whose worker died with the process: release the
+            # dead job's state lock and pick the work up again.
+            advance_provision_jobs()
+    except Exception:
+        logger.exception("Cluster provisioning tick failed")
 
 
 _scheduler_started = False
