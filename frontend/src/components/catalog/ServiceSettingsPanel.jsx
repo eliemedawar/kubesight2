@@ -10,7 +10,9 @@ import { PlIcon } from "./pipeline/icons.jsx";
 import DeploymentLinksSection from "./serviceSettings/DeploymentLinksSection.jsx";
 import SchedulesSection from "./serviceSettings/SchedulesSection.jsx";
 import SecretsSection from "./serviceSettings/SecretsSection.jsx";
+import WebhooksSection from "./serviceSettings/WebhooksSection.jsx";
 import { railSummary } from "./serviceSettings/scheduleModel.js";
+import { railSummary as webhookRailSummary } from "./serviceSettings/webhookModel.js";
 
 // What a build stage of this service may use. Each row is three-way: inherit the
 // installation default, name a value, or take the limit off entirely. Ephemeral
@@ -82,6 +84,7 @@ const SECTIONS = [
   { id: "st-deployments", label: "Deployments", icon: "rocket" },
   { id: "st-builds", label: "Builds", icon: "server" },
   { id: "st-schedules", label: "Schedules", icon: "clock" },
+  { id: "st-webhooks", label: "Webhooks", icon: "link" },
   { id: "st-registry", label: "Image registry", icon: "image" },
   { id: "st-secrets", label: "Secrets", icon: "key" },
   { id: "st-danger", label: "Danger zone", icon: "trash" },
@@ -109,7 +112,7 @@ export default function ServiceSettingsPanel({
   canDelete,
   canViewSecrets,
   canManageSecrets,
-  // Schedules: listed with ci_builds:view, changed with ci_pipelines:edit AND
+  // Schedules (and webhooks, same rule): listed with ci_builds:view, changed with ci_pipelines:edit AND
   // ci_builds:run (the API requires both), run now with ci_builds:run.
   canViewSchedules = false,
   canEditSchedules = false,
@@ -133,6 +136,7 @@ export default function ServiceSettingsPanel({
   const [registries, setRegistries] = useState(null);
   const [secretCount, setSecretCount] = useState(null);
   const [schedules, setSchedules] = useState(null);
+  const [webhooks, setWebhooks] = useState(null);
   const [linkCount, setLinkCount] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -291,6 +295,7 @@ export default function ServiceSettingsPanel({
     "st-builds": `${form.maxConcurrentBuilds} at a time`,
     "st-registry": form.registryConnectionId ? registry?.name || "Linked" : "None",
     "st-schedules": railSummary(schedules).text,
+    "st-webhooks": webhookRailSummary(webhooks).text,
     "st-deployments": linkCount === null ? "" : linkCount.length ? `${linkCount.length}` : "None",
     "st-secrets": secretCount === null ? "" : `${secretCount.length}`,
     "st-danger": "",
@@ -299,6 +304,7 @@ export default function ServiceSettingsPanel({
     "st-general": form.status === "active" ? "" : "warn",
     "st-registry": form.registryConnectionId ? "" : "warn",
     "st-schedules": railSummary(schedules).tone,
+    "st-webhooks": webhookRailSummary(webhooks).tone,
     "st-deployments": linkCount && !linkCount.length ? "warn" : "",
   };
   const sectionDirty = {
@@ -310,6 +316,7 @@ export default function ServiceSettingsPanel({
     (item) =>
       (item.id !== "st-secrets" || canViewSecrets) &&
       (item.id !== "st-schedules" || canViewSchedules) &&
+      (item.id !== "st-webhooks" || canViewSchedules) &&
       (item.id !== "st-deployments" || !isPipeline) &&
       (item.id !== "st-danger" || canDelete)
   );
@@ -381,7 +388,7 @@ export default function ServiceSettingsPanel({
           ))}
           <p className="st-rail-note">
             <PlIcon name="lock" />
-            {isPipeline ? "Secrets and schedules" : "Deployments, secrets and schedules"} save on their own, as soon as they are added or changed. Everything else waits for Save.
+            {isPipeline ? "Secrets, schedules and webhooks" : "Deployments, secrets, schedules and webhooks"} save on their own, as soon as they are added or changed. Everything else waits for Save.
           </p>
         </nav>
 
@@ -598,6 +605,31 @@ export default function ServiceSettingsPanel({
                   onError={setError}
                   onNotice={setNotice}
                   onSummary={setSchedules}
+                  onOpenBuild={onOpenBuild}
+                />
+              </div>
+            </section>
+          )}
+
+          {/* ── Webhooks ────────────────────────────────────────────── */}
+          {canViewSchedules && (
+            <section className="pl-panel st-card" id="st-webhooks" aria-labelledby="st-webhooks-title">
+              <header className="st-card-head">
+                <h4 id="st-webhooks-title">Webhooks</h4>
+                <p>
+                  Builds that start when something calls a URL — Bitbucket on a push, or any tool that can POST.
+                  Each one is an ordinary build, shown in Builds with the webhook's name, and runs as whoever last
+                  saved the webhook.
+                </p>
+              </header>
+              <div className="st-card-body">
+                <WebhooksSection
+                  service={service}
+                  canEdit={canEditSchedules}
+                  canRun={canRunSchedules && service.status === "active"}
+                  onError={setError}
+                  onNotice={setNotice}
+                  onSummary={setWebhooks}
                   onOpenBuild={onOpenBuild}
                 />
               </div>

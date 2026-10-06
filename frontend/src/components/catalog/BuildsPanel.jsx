@@ -336,6 +336,17 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
                       >
                         schedule{build.schedule?.name ? ` · ${build.schedule.name}` : ""}
                       </span>
+                    ) : build.webhook ? (
+                      <span
+                        className="sg-tag sg-ci-tag--auto"
+                        title={
+                          build.webhook.test
+                            ? `Test of the webhook “${build.webhook.name}”${build.requestedBy ? ` by ${build.requestedBy}` : ""}`
+                            : `Started by the webhook “${build.webhook.name}”${build.webhook.event ? ` (${build.webhook.event})` : ""}${build.requestedBy ? `, as ${build.requestedBy}` : ""}`
+                        }
+                      >
+                        webhook · {build.webhook.name}
+                      </span>
                     ) : build.triggerType === "retry" ? (
                       <span className="chip">retry{build.requestedBy ? ` · ${build.requestedBy}` : ""}</span>
                     ) : (

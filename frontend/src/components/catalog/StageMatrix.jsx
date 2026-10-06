@@ -417,7 +417,9 @@ export default function StageMatrix({
                           }`
                         : row.triggerType === "schedule"
                           ? `schedule · ${row.schedule?.name || "?"}`
-                          : row.requestedBy || "manual"}
+                          : row.webhook
+                            ? `webhook · ${row.webhook.name || "?"}`
+                            : row.requestedBy || "manual"}
                     </span>
                   </span>
                 </th>

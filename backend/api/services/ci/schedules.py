@@ -696,12 +696,13 @@ def _fire_one(schedule_id: int, due_at: datetime, now: datetime) -> bool:
     return True
 
 
-def _run_as(row: CiSchedule):
+def _run_as(row, noun: str = "schedule"):
     """The person a scheduled build runs as, still allowed to — or why not.
 
     Whoever last saved the schedule, re-checked at every fire, the rule a
     Deploy stage's target follows: somebody who has since left, or lost the
-    right to run builds, must not keep starting them every night.
+    right to run builds, must not keep starting them every night. Webhook
+    triggers apply the same rule to every delivery (``noun`` names which).
     """
     from ...access_engine import user_has_permission
     from ...auth_utils import auth_required_enabled
@@ -711,16 +712,16 @@ def _run_as(row: CiSchedule):
     if not auth_required_enabled():
         return (db.session.get(User, int(user_id)) if user_id else None), ""
     if not user_id:
-        return None, "Nobody owns this schedule. Someone who can run builds must save it again."
+        return None, f"Nobody owns this {noun}. Someone who can run builds must save it again."
     user = db.session.get(User, int(user_id))
     if user is None or not getattr(user, "is_active", True):
         return None, (
-            "This schedule runs as an account that is no longer active. "
+            f"This {noun} runs as an account that is no longer active. "
             "Someone who can run builds must save it again."
         )
     if not user_has_permission(user, "ci_builds:run"):
         return None, (
-            f"This schedule runs as {user.username}, who can no longer run builds. "
+            f"This {noun} runs as {user.username}, who can no longer run builds. "
             "Someone who can must save it again."
         )
     return user, ""

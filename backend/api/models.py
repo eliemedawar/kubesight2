@@ -2981,6 +2981,10 @@ from .models_merge_checks import (  # noqa: E402,F401
 # build with trigger_type 'schedule'. Imported here so create_all makes the
 # table on an existing database too.
 from .models_ci_schedules import CiSchedule  # noqa: E402,F401
+
+# Webhook triggers, the same arrangement: a delivery queues an ordinary build
+# with trigger_type 'webhook'.
+from .models_ci_webhooks import CiWebhookDelivery, CiWebhookTrigger  # noqa: E402,F401
 from .models_ticket_agent import (  # noqa: E402,F401
     TicketAgentPostedComment,
     TicketAgentSettings,

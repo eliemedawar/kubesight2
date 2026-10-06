@@ -211,6 +211,14 @@ export default function BuildDetailDrawer({
                           : ` as ${build.requestedBy}`
                         : ""
                     }`
+                  : build.webhook
+                  ? ` · webhook “${build.webhook.name || "?"}”${
+                      build.requestedBy
+                        ? build.webhook.test
+                          ? `, tested by ${build.requestedBy}`
+                          : ` as ${build.requestedBy}`
+                        : ""
+                    }`
                   : build.requestedBy
                   ? ` · by ${build.requestedBy}`
                   : ""}{" "}

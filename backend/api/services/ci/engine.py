@@ -353,12 +353,14 @@ def trigger_build(
     variables: Optional[Dict[str, str]] = None,
     ref_type: Optional[str] = None,
     schedule: Optional[Dict[str, Any]] = None,
+    webhook: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a queued build. Does not execute anything — the tick does that.
 
     ``schedule`` is the provenance of a scheduled build (``{"id", "name"}``),
     kept in the snapshot so the build still says which schedule queued it after
-    that schedule is renamed or deleted.
+    that schedule is renamed or deleted. ``webhook`` is the same for a build a
+    webhook trigger queued (``{"id", "name", "kind", "event", ...}``).
 
     ``variables`` are per-trigger environment overrides applied to every stage
     (and consulted for IMAGE_NAME/IMAGE_TAG on image stages) — how the deploy
@@ -418,6 +420,8 @@ def trigger_build(
     deployment_links.resolve_snapshot_targets(service, snapshot["stages"])
     if schedule:
         snapshot["schedule"] = dict(schedule)
+    if webhook:
+        snapshot["webhook"] = dict(webhook)
     # What happens when the build ends (post_actions.py) — snapshotted with the
     # stages for the same reason: editing the pipeline must not change what a
     # build already running will send or clean up.
@@ -476,6 +480,7 @@ def trigger_build(
             "trigger": build.trigger_type,
             "retryOf": retry_of.number if retry_of else None,
             **({"schedule": schedule.get("name")} if schedule else {}),
+            **({"webhook": webhook.get("name")} if webhook else {}),
         },
     )
     # Dispatch this build now instead of at the ticker's next interval: the

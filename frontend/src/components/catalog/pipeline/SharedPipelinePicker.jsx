@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { attachSharedPipeline, getSharedPipelineCopyFrom, listCiServices, listSharedPipelines } from "../../../api/ciApi.js";
+import SearchableSelect from "../../common/SearchableSelect.jsx";
 import { applicationTypeLabel } from "../ciShared.jsx";
 import { PlIcon } from "./icons.jsx";
 
@@ -167,17 +168,26 @@ export function CopyFromServiceModal({ pipeline, onClose, onDraft }) {
           </p>
         </div>
         {error && <p className="banner-message error">{error}</p>}
-        <label className="sp-start-detail">
-          CI service
-          <select value={picked} onChange={(event) => setPicked(event.target.value)} autoFocus>
-            <option value="">{services === null ? "Loading…" : "Pick a service…"}</option>
-            {(services || []).map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name} · {applicationTypeLabel(item.applicationType)}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="sp-start-detail">
+          <span>CI service</span>
+          <SearchableSelect
+            aria-label="CI service"
+            value={picked}
+            onChange={(event) => setPicked(event.target.value)}
+            disabled={services === null}
+            placeholder={services === null ? "Loading…" : "Pick a service…"}
+            searchPlaceholder="Search services…"
+            options={(services || []).map((item) => ({
+              value: item.id,
+              label: (
+                <span className="sp-option">
+                  <span className="sp-option__name">{item.name}</span>
+                  <span className="sp-option__meta">{applicationTypeLabel(item.applicationType)}</span>
+                </span>
+              ),
+            }))}
+          />
+        </div>
         <div className="modal-actions">
           <button type="button" className="btn-outline" onClick={onClose} disabled={busy}>
             Cancel

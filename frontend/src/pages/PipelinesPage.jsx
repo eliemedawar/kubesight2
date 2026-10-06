@@ -6,6 +6,7 @@ import { useRouter } from "../routes/RouterContext.jsx";
 import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
+import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import RunBuildModal from "../components/catalog/RunBuildModal.jsx";
 import ServiceDetailPage from "./ServiceDetailPage.jsx";
@@ -518,34 +519,47 @@ function NewPipelineModal({ onClose, onCreated }) {
         </fieldset>
 
         {start === "template" && (
-          <label className="sp-start-detail">
-            Application type
-            <select value={applicationType} onChange={(event) => setApplicationType(event.target.value)}>
-              {APPLICATION_TYPES.filter((type) => !type.legacy).map((type) => (
-                <option key={type.value} value={type.value}>
-                  {type.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="sp-start-detail">
+            <span>Application type</span>
+            <SearchableSelect
+              aria-label="Application type"
+              value={applicationType}
+              onChange={(event) => setApplicationType(event.target.value)}
+              searchPlaceholder="Search application types…"
+              options={APPLICATION_TYPES.filter((type) => !type.legacy).map((type) => ({
+                value: type.value,
+                label: type.label,
+              }))}
+            />
+          </div>
         )}
         {start === "service" && (
-          <label className="sp-start-detail">
-            CI service
-            <select value={serviceId} onChange={(event) => setServiceId(event.target.value)}>
-              <option value="">{services === null ? "Loading…" : "Pick a service…"}</option>
-              {(services || []).map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                  {item.sharedPipeline ? ` (uses ${item.sharedPipeline.name})` : ""}
-                </option>
-              ))}
-            </select>
+          <div className="sp-start-detail">
+            <span>CI service</span>
+            <SearchableSelect
+              aria-label="CI service"
+              value={serviceId}
+              onChange={(event) => setServiceId(event.target.value)}
+              disabled={services === null}
+              placeholder={services === null ? "Loading…" : "Pick a service…"}
+              searchPlaceholder="Search services…"
+              options={(services || []).map((item) => ({
+                value: item.id,
+                label: (
+                  <span className="sp-option">
+                    <span className="sp-option__name">{item.name}</span>
+                    {item.sharedPipeline && (
+                      <span className="sp-option__meta">uses {item.sharedPipeline.name}</span>
+                    )}
+                  </span>
+                ),
+              }))}
+            />
             <span className="field-hint">
               Its stages, build inputs and post actions are copied. The service itself is not changed. To make it
               use the new pipeline, open the Used by tab afterwards.
             </span>
-          </label>
+          </div>
         )}
 
         <div className="modal-actions">

@@ -415,6 +415,49 @@ export const previewCiSchedule = ({ cron, timezone, count }) =>
   request("/api/ci/schedules/preview", { method: "POST", body: { cron, timezone, count } });
 
 // ---------------------------------------------------------------------------
+// Webhooks — a URL that starts a build when something calls it (a generic
+// sender, or Bitbucket on push). Preview runs the server's own planner on a
+// sample body, so what the form predicts is what a delivery does.
+// ---------------------------------------------------------------------------
+
+const webhooksPath = (serviceId) =>
+  `/api/ci/services/${encodeURIComponent(serviceId)}/webhooks`;
+const webhookPath = (serviceId, webhookId) =>
+  `${webhooksPath(serviceId)}/${encodeURIComponent(webhookId)}`;
+
+export const listCiWebhooks = (serviceId) => request(webhooksPath(serviceId));
+
+export const createCiWebhook = (serviceId, payload) =>
+  request(webhooksPath(serviceId), { method: "POST", body: payload });
+
+export const updateCiWebhook = (serviceId, webhookId, payload) =>
+  request(webhookPath(serviceId, webhookId), { method: "PUT", body: payload });
+
+export const deleteCiWebhook = (serviceId, webhookId) =>
+  request(webhookPath(serviceId, webhookId), { method: "DELETE" });
+
+export const listCiWebhookDeliveries = (serviceId, webhookId) =>
+  request(`${webhookPath(serviceId, webhookId)}/deliveries`);
+
+export const revealCiWebhookSecret = (serviceId, webhookId) =>
+  request(`${webhookPath(serviceId, webhookId)}/secret`);
+
+export const rotateCiWebhookSecret = (serviceId, webhookId) =>
+  request(`${webhookPath(serviceId, webhookId)}/secret`, { method: "POST" });
+
+export const previewCiWebhook = (serviceId, webhookId, payload, event = "") =>
+  request(`${webhookPath(serviceId, webhookId)}/preview`, { method: "POST", body: { payload, event } });
+
+export const testCiWebhook = (serviceId, webhookId, payload) =>
+  request(`${webhookPath(serviceId, webhookId)}/test`, { method: "POST", body: { payload } });
+
+export const setupCiWebhookInSource = (serviceId, webhookId) =>
+  request(`${webhookPath(serviceId, webhookId)}/setup`, { method: "POST" });
+
+export const getCiWebhookSourceStatus = (serviceId, webhookId) =>
+  request(`${webhookPath(serviceId, webhookId)}/source-status`);
+
+// ---------------------------------------------------------------------------
 // Pipelines outside services (the Pipelines page). Each one is stored as a
 // service row of kind "pipeline", so once it exists it is edited, run and
 // browsed through the ordinary service/pipeline/build calls above.

@@ -576,7 +576,7 @@ function ScheduleEditor({ initial, pipelines, defaultBranch, busy, onCancel, onS
   );
 }
 
-function InputControl({ id, param, value, conditions, onChange }) {
+export function InputControl({ id, param, value, conditions, onChange }) {
   // The variable name is shown beside a friendly label, but not twice when
   // the label IS the name.
   const label = param.label || param.name;

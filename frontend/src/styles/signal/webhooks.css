@@ -1,0 +1,353 @@
+/* ══ Service Settings → Webhooks ══════════════════════════════════════════
+   Built on the Schedules section's row and editor (schedules.css): only the
+   connection details, the try-a-body panel, the delivery log and the mapping
+   rows are drawn here. Scoped under .st-root, tokens only, buttons carry
+   .btn-ghost — the same rules schedules.css states.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.st-root .wh-empty-actions,
+.st-root .wh-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.st-root .wh-builds {
+  font-weight: 550;
+}
+
+/* The details open under the row, across all three of its columns. */
+.st-root .wh-item .wh-details {
+  grid-column: 1 / -1;
+}
+
+.st-root .wh-item.is-open {
+  background: var(--bg-inset);
+}
+
+.st-root .wh-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+  min-width: 0;
+}
+
+.st-root .wh-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  min-width: 0;
+}
+
+.st-root .wh-block .pl-block-title {
+  margin: 0;
+}
+
+.st-root .wh-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+/* URL / secret: label, value that may wrap anywhere, actions. */
+.st-root .wh-kv {
+  display: grid;
+  grid-template-columns: 4rem minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.st-root .wh-k {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.st-root .wh-v {
+  min-width: 0;
+  padding: 0.3rem 0.5rem;
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  background: var(--bg-inset);
+  border-radius: var(--radius-sm, 4px);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .wh-fresh {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  color: var(--warn);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.st-root .wh-fresh svg,
+.st-root .wh-source svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: none;
+}
+
+.st-root .wh-source {
+  padding: 0.5rem 0.6rem;
+  background: var(--bg-inset);
+  border-radius: var(--radius-md);
+}
+
+.st-root .wh-source-text {
+  flex: 1 1 16rem;
+  min-width: 0;
+  color: var(--text-main);
+}
+
+.st-root .wh-howto {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.st-root .wh-code {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  overflow-x: auto;
+  color: var(--text-strong);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+  white-space: pre;
+}
+
+/* ── Try a body ─────────────────────────────────────────────────────── */
+
+.st-root .wh-body {
+  width: 100%;
+  min-height: 6rem;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  resize: vertical;
+}
+
+.st-root .wh-try-actions {
+  justify-content: flex-start;
+}
+
+.st-root .wh-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .wh-result.is-ok { border-left-color: var(--ok); }
+.st-root .wh-result.is-info { border-left-color: var(--info); }
+.st-root .wh-result.is-warn { border-left-color: var(--warn); }
+.st-root .wh-result.is-danger { border-left-color: var(--danger); }
+.st-root .wh-result.is-ok .sc-dot { background: var(--ok); }
+.st-root .wh-result.is-info .sc-dot { background: var(--info); }
+.st-root .wh-result.is-warn .sc-dot { background: var(--warn); }
+.st-root .wh-result.is-danger .sc-dot { background: var(--danger); }
+
+.st-root .wh-result-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  margin: 0;
+  color: var(--text-main);
+}
+
+.st-root .wh-result-head strong {
+  color: var(--text-strong);
+}
+
+.st-root .wh-plan,
+.st-root .wh-paths p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0;
+}
+
+.st-root .wh-plan code,
+.st-root .wh-paths code {
+  padding: 0.05rem 0.35rem;
+  background: var(--bg-inset);
+  border-radius: var(--radius-sm, 4px);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .wh-plan code:first-child {
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.st-root .wh-notes {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--text-subtle);
+}
+
+.st-root .wh-paths summary {
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.st-root .wh-paths p {
+  margin-top: 0.35rem;
+}
+
+/* ── Delivery log ───────────────────────────────────────────────────── */
+
+.st-root .wh-deliveries {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.st-root .wh-delivery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem 0.6rem;
+  padding: 0.4rem 0;
+  color: var(--text-subtle);
+  font-size: var(--font-size-xs);
+}
+
+.st-root .wh-delivery + .wh-delivery {
+  border-top: 1px solid var(--border-soft);
+}
+
+.st-root .wh-delivery.is-ok .sc-dot { background: var(--ok); }
+.st-root .wh-delivery.is-info .sc-dot { background: var(--info); }
+.st-root .wh-delivery.is-warn .sc-dot { background: var(--warn); }
+.st-root .wh-delivery.is-danger .sc-dot { background: var(--danger); }
+
+.st-root .wh-delivery-outcome {
+  min-width: 5.5rem;
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.st-root .wh-delivery.is-danger .wh-delivery-outcome { color: var(--danger); }
+
+.st-root .wh-delivery-when {
+  color: var(--text-muted);
+}
+
+.st-root .wh-delivery-refs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.st-root .wh-delivery-refs code {
+  padding: 0 0.3rem;
+  background: var(--bg-inset);
+  border-radius: var(--radius-sm, 4px);
+}
+
+.st-root .wh-delivery-message {
+  flex-basis: 100%;
+  padding-left: 1.1rem;
+  color: var(--text-muted);
+  white-space: normal;
+}
+
+/* ── Editor ─────────────────────────────────────────────────────────── */
+
+.st-root .wh-editor .pl-field .pl-switch {
+  margin-top: 0.15rem;
+}
+
+.st-root .wh-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.75rem;
+}
+
+.st-root .wh-input > .pl-switch {
+  margin-top: 1.4rem;
+  white-space: nowrap;
+}
+
+.st-root .wh-input.is-open .sc-input > label::after {
+  margin-left: 0.4rem;
+  color: var(--info);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  content: "default — request may override";
+}
+
+.st-root .wh-mappings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.st-root .wh-mappings .pl-block-title,
+.st-root .wh-mappings .sc-inputs-note {
+  margin: 0;
+}
+
+.st-root .wh-mapping {
+  display: grid;
+  grid-template-columns: minmax(8rem, 14rem) auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.st-root .wh-mapping > span {
+  color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .st-root .wh-kv {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .st-root .wh-kv .wh-k {
+    grid-column: 1 / -1;
+  }
+
+  .st-root .wh-mapping {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .st-root .wh-mapping > span {
+    display: none;
+  }
+
+  .st-root .wh-mapping input {
+    grid-column: 1;
+  }
+
+  .st-root .wh-input {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .st-root .wh-input > .pl-switch {
+    margin-top: 0;
+  }
+}

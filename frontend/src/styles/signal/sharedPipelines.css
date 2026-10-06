@@ -793,3 +793,29 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Service options in the "copy from a CI service" pickers: the name leads,
+   what it already uses / what kind of app it is trails, quieter. */
+.sp-start-detail .ss-wrap {
+  font-weight: 400;
+}
+
+.sp-option {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.sp-option__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-option__meta {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}

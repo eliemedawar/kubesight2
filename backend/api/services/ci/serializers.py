@@ -371,6 +371,13 @@ def build_summary(row: CiBuild) -> Dict[str, Any]:
             if isinstance((row.pipeline_snapshot or {}).get("schedule"), dict)
             else None
         ),
+        # {"id", "name", "kind", "event"} of the webhook trigger that queued
+        # this build — snapshot, for the same reason as ``schedule``.
+        "webhook": (
+            (row.pipeline_snapshot or {}).get("webhook")
+            if isinstance((row.pipeline_snapshot or {}).get("webhook"), dict)
+            else None
+        ),
         # {id, slug, name, pipelineId, version} of the shared pipeline (the
         # Pipelines page) this build ran with, or None for the service's own.
         "sharedPipeline": (
