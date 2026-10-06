@@ -891,7 +891,9 @@ def _node_install_lock_lines(tag: str, stage: str) -> List[str]:
         "  KS_NM_RENEW=$!",
         "}",
         "ks_nm_unlock() {",
-        '  if [ -n "${KS_NM_RENEW:-}" ]; then kill "$KS_NM_RENEW" 2>/dev/null || true; fi',
+        # Reaped straight away so bash (macOS /bin/sh) does not print a
+        # "Terminated: 15" job notice into the build log.
+        '  if [ -n "${KS_NM_RENEW:-}" ]; then kill "$KS_NM_RENEW" 2>/dev/null || true; wait "$KS_NM_RENEW" 2>/dev/null || true; fi',
         "  KS_NM_RENEW=",
         '  if [ -n "${KS_NM_LOCK:-}" ]; then rm -rf "$KS_NM_LOCK" 2>/dev/null || true; fi',
         "  KS_NM_LOCK=",
