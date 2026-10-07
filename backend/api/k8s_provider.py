@@ -55,8 +55,10 @@ _NAMESPACE_LIST_TTL_SECONDS = int(os.getenv("K8S_NAMESPACE_CACHE_TTL_SECONDS", "
 _RESOURCE_LIST_TTL_SECONDS = int(os.getenv("K8S_RESOURCE_CACHE_TTL_SECONDS", "10"))
 # How long an expired entry may still be served instantly while a background
 # thread refreshes it (stale-while-revalidate). Only used with compute
-# closures that are kubectl-only (no DB / app-context access).
-_STALE_SERVE_TTL_SECONDS = int(os.getenv("K8S_STALE_SERVE_TTL_SECONDS", "600"))
+# closures that are kubectl-only (no DB / app-context access). Kept short: if
+# a cluster stops answering, its refreshes fail quietly and this is how long
+# pages keep showing the old data before the failure surfaces (it was 10 min).
+_STALE_SERVE_TTL_SECONDS = int(os.getenv("K8S_STALE_SERVE_TTL_SECONDS", "120"))
 # Circuit-breaker window after a cluster times out: reads/writes to that
 # cluster fail immediately instead of hanging, until the window expires.
 _UNREACHABLE_BACKOFF_SECONDS = int(os.getenv("K8S_UNREACHABLE_BACKOFF_SECONDS", "20"))
