@@ -536,3 +536,28 @@ def test_dashboard_includes_alert_policy_stats(client, admin_token):
     data = response.get_json()["data"]
     assert "alertPolicies" in data
     assert "activeTotal" in data["alertPolicies"]
+
+
+def test_non_admin_can_read_policy_alert_history(client, admin_token, viewer_token):
+    # can_view_alert() takes (user, alert dict); the history readers used to
+    # call it with four positional arguments, so any non-admin got a 500 as
+    # soon as one policy alert existed.
+    create = client.post(
+        "/api/alert-policies",
+        headers=auth_headers(admin_token),
+        json={**SAMPLE_POLICY, "name": "Viewer History", "conditions": [{"metricKey": "cpu_usage_percent", "operator": ">", "threshold": 1}]},
+    )
+    assert create.status_code in (200, 201)
+    evaluate = client.post(
+        "/api/alert-policies/evaluate",
+        headers=auth_headers(admin_token),
+        json={"clusterId": "prod-us-east"},
+    )
+    assert evaluate.status_code == 200
+
+    admin_history = client.get("/api/alert-policies/history?cluster=prod-us-east", headers=auth_headers(admin_token))
+    assert admin_history.get_json()["data"]["items"], "the evaluation should have recorded history"
+
+    for path in ("/api/alert-policies/history?cluster=prod-us-east", "/api/alert-policies/history", "/api/alerts"):
+        response = client.get(path, headers=auth_headers(viewer_token))
+        assert response.status_code in (200, 403), (path, response.status_code)
