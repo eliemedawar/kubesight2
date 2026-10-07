@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,9 @@ class DashboardK8sSnapshot:
     # Why no node disk usage could be read (e.g. missing nodes/proxy), else None.
     node_fs_reason: Optional[str] = None
     reachable: bool = True
+    # When this snapshot was taken: lets per-user summaries built from it tell
+    # that a newer one exists without holding on to the (large) snapshot.
+    taken_at: float = field(default_factory=time.monotonic)
 
 
 def _safe_items(future, label: str) -> Tuple[List[Dict[str, Any]], bool]:

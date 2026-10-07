@@ -374,6 +374,8 @@ def main() -> None:
                 filters = [tracemalloc.Filter(False, tracemalloc.__file__)]
                 growth = snap.filter_traces(filters).compare_to(first.filter_traces(filters), "traceback")
                 current, peak = tracemalloc.get_traced_memory()
+                with open(os.path.join(args.out, "memory-series.txt"), "a", encoding="utf-8") as fh:
+                    fh.write(f"{time.strftime('%H:%M:%S')} live {current / 1e6:.0f} MB  peak {peak / 1e6:.0f} MB  rss {_rss_mb():.0f} MB\n")
                 with open(os.path.join(args.out, "memory.txt"), "w", encoding="utf-8") as fh:
                     fh.write(f"traced now {current / 1e6:.0f} MB, peak {peak / 1e6:.0f} MB, rss {_rss_mb():.0f} MB\n\n")
                     for stat in growth[:25]:

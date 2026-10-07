@@ -790,17 +790,20 @@ def _load_real_k8s_dashboard_data(
     )
 
 
-def _current_k8s_snapshot(cluster_id: str) -> Any:
-    """The shared cluster snapshot a summary is built from, or None (mock
-    cluster, unknown cluster, unreachable). Served from its cache — and asking
-    for it is what lets an expired snapshot refresh in the background."""
+def _current_k8s_snapshot_token(cluster_id: str) -> Optional[float]:
+    """When the shared cluster snapshot a summary is built from was taken, or
+    None (mock cluster, unknown cluster, unreachable). Served from its cache —
+    and asking for it is what lets an expired snapshot refresh in the
+    background. Only the token is kept with a cached summary: holding the
+    snapshot itself would pin a whole pod list per user."""
     if not should_use_real_k8s(cluster_id):
         return None
     try:
         from ..dashboard_k8s_snapshot import fetch_dashboard_k8s_snapshot
 
         access = resolve_cluster_access(cluster_id)
-        return fetch_dashboard_k8s_snapshot(access) if access else None
+        snapshot = fetch_dashboard_k8s_snapshot(access) if access else None
+        return getattr(snapshot, "taken_at", None)
     except Exception:
         return None
 
@@ -820,7 +823,7 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         # dashboard lags the cluster by the snapshot's age (~15 s), not by that
         # plus this cache's own 20-60 s.
         if cached and cached[0] > now_ts and cached[2] is not None:
-            if _current_k8s_snapshot(cluster_id) is not cached[2]:
+            if _current_k8s_snapshot_token(cluster_id) != cached[2]:
                 cached = None
         if cached and cached[0] > now_ts:
             logger.info(
@@ -1126,7 +1129,7 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
             _dashboard_summary_cache[cache_key] = (
                 time.time() + ttl,
                 payload,
-                _current_k8s_snapshot(cluster_id),
+                _current_k8s_snapshot_token(cluster_id),
             )
         logger.debug(
             "dashboard_summary cache TTL=%ds (clusterId=%s health=%s failed=%s)",
