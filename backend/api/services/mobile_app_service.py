@@ -23,9 +23,10 @@ import os
 import re
 import shutil
 import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..audit import log_audit
 from ..db import db
@@ -1152,6 +1153,60 @@ def _set_pub_step(pub: MobileAppPublish, key: str, status: str, detail: str = ""
     pub.steps = steps
 
 
+# How often an upload in progress rewrites its step. Each write is a commit the
+# CI stage and the Mobile Apps page read, and it keeps the row's updated_at
+# fresh so a long upload is never mistaken for one a restart orphaned.
+_PROGRESS_SECONDS = 10
+
+
+def _megabytes(count: int) -> str:
+    return f"{count / (1024 * 1024):.1f}"
+
+
+def _rate(count: int, seconds: float) -> str:
+    per_second = count / max(seconds, 0.001)
+    if per_second >= 1024 * 1024:
+        return f"{per_second / (1024 * 1024):.1f} MB/s"
+    return f"{per_second / 1024:.0f} KB/s"
+
+
+def _upload_progress(pub: MobileAppPublish, file_name: str, store: str) -> Callable[[int, int], None]:
+    """A progress callback that writes how far the upload is into its step.
+
+    Once every byte is sent the step says so and names who it is waiting on,
+    which is the difference between a slow network and a slow store.
+    """
+    started = time.monotonic()
+    last = {"at": started, "done": False}
+
+    def report(sent: int, total: int) -> None:
+        now = time.monotonic()
+        finished = total > 0 and sent >= total
+        if last["done"] or (not finished and now - last["at"] < _PROGRESS_SECONDS):
+            return
+        last["at"], last["done"] = now, finished
+        elapsed = now - started
+        if finished:
+            detail = (
+                f"sent all {_megabytes(total)} MB of {file_name} in {int(elapsed)}s "
+                f"({_rate(total, elapsed)}); waiting for {store} to accept it"
+            )
+        else:
+            detail = (
+                f"uploading {file_name}: {_megabytes(sent)} of {_megabytes(total)} MB "
+                f"({_rate(sent, elapsed)})"
+            )
+        try:
+            _set_pub_step(pub, "upload", "run", detail)
+            db.session.add(pub)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            logger.warning("Could not record upload progress: publish_id=%s", pub.id, exc_info=True)
+
+    return report
+
+
 def start_publish(build_id: int, store: str, target: str, user=None) -> Dict[str, Any]:
     build = MobileAppBuild.query.get(int(build_id))
     if build is None:
@@ -1310,7 +1365,8 @@ def _publish_google_play(pub: MobileAppPublish, app: MobileApplication, build: M
 
     path = binary_path(build)
     version_code = google_play_client.upload_binary(
-        cfg, token, edit_id, path, build.artifact_type
+        cfg, token, edit_id, path, build.artifact_type,
+        progress=_upload_progress(pub, build.file_name, "Google Play"),
     )
     pub.store_ref = {**(pub.store_ref or {}), "versionCode": version_code}
     _set_pub_step(pub, "upload", "done", f"uploaded (versionCode {version_code})")
@@ -1353,7 +1409,10 @@ def _publish_app_store(pub: MobileAppPublish, app: MobileApplication, build: Mob
     db.session.add(pub)
     db.session.commit()
 
-    upload_ref = app_store_client.upload_build(cfg, binary_path(build), build.file_name)
+    upload_ref = app_store_client.upload_build(
+        cfg, binary_path(build), build.file_name,
+        progress=_upload_progress(pub, build.file_name, "App Store Connect"),
+    )
     pub.store_ref = {**(pub.store_ref or {}), **upload_ref}
     _set_pub_step(pub, "upload", "done", "binary delivered — Apple is processing it")
     _set_pub_step(pub, "release", "run", "waiting for App Store Connect processing")

@@ -391,7 +391,7 @@ def test_publish_allows_unknown_signature_state(app, client, admin_token, artifa
 
     monkeypatch.setattr(google_play_client, "access_token", lambda cfg: "tok")
     monkeypatch.setattr(google_play_client, "create_edit", lambda cfg, tok: "edit-1")
-    monkeypatch.setattr(google_play_client, "upload_binary", lambda *a: 7)
+    monkeypatch.setattr(google_play_client, "upload_binary", lambda *a, **k: 7)
     monkeypatch.setattr(google_play_client, "assign_track", lambda *a: None)
     monkeypatch.setattr(google_play_client, "commit_edit", lambda *a: None)
 
@@ -431,7 +431,7 @@ def test_publish_google_play_happy_path(app, client, admin_token, artifact_dir, 
     calls = {}
     monkeypatch.setattr(google_play_client, "access_token", lambda cfg: "tok")
     monkeypatch.setattr(google_play_client, "create_edit", lambda cfg, tok: "edit-1")
-    def fake_upload(cfg, tok, edit, path, kind):
+    def fake_upload(cfg, tok, edit, path, kind, progress=None):
         calls["upload"] = (path, kind)
         return 42
 
@@ -517,7 +517,7 @@ def test_publish_app_store_processing_flow(app, client, admin_token, artifact_di
     monkeypatch.setattr(
         app_store_client,
         "upload_build",
-        lambda cfg, path, name: {"buildUploadId": "u1", "appId": "999", "bundleVersion": "42"},
+        lambda cfg, path, name, progress=None: {"buildUploadId": "u1", "appId": "999", "bundleVersion": "42"},
     )
     monkeypatch.setattr(
         app_store_client,

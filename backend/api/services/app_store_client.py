@@ -28,7 +28,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import jwt
@@ -186,12 +186,18 @@ def _put_chunk(op: Dict[str, Any], path: str) -> None:
         raise AscError(f"Could not reach Apple's upload endpoint ({exc.reason}).") from exc
 
 
-def upload_build(cfg: AscConfig, path: str, file_name: str) -> Dict[str, Any]:
+def upload_build(
+    cfg: AscConfig,
+    path: str,
+    file_name: str,
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> Dict[str, Any]:
     """Create the build upload, push the IPA, and mark it complete.
 
     Returns a store_ref: ``{buildUploadId, appId, shortVersion, bundleVersion}``.
     Processing continues asynchronously on Apple's side — poll with
-    :func:`processing_state`.
+    :func:`processing_state`. ``progress(sent, total)`` is called after each
+    part Apple asked for.
     """
     app_id = cfg.app_id or resolve_app_id(cfg)
     if not app_id:
@@ -245,8 +251,15 @@ def upload_build(cfg: AscConfig, path: str, file_name: str) -> Dict[str, Any]:
     operations = _upload_operations(file_entry)
     if not operations:
         raise AscError("App Store Connect returned no upload instructions for the binary.")
+    sent = 0
     for op in operations:
         _put_chunk(op, path)
+        sent += int(op.get("length") or 0) or (size - int(op.get("offset") or 0))
+        if progress:
+            try:
+                progress(min(sent, size), size)
+            except Exception:
+                pass  # describing the upload must never break it
 
     file_id = str(file_entry.get("id") or "")
     if not file_id:

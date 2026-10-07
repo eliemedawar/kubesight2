@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import quote, urlencode
 
 import jwt
@@ -165,8 +165,41 @@ def delete_edit(cfg: PlayConfig, token: str, edit_id: str) -> None:
     _request("DELETE", f"{_API}/{_pkg(cfg)}/edits/{quote(edit_id, safe='')}", token=token)
 
 
-def upload_binary(cfg: PlayConfig, token: str, edit_id: str, path: str, artifact_type: str) -> int:
-    """Upload the APK/AAB into the edit (streamed from disk). Returns versionCode."""
+class _ProgressReader:
+    """A file http.client streams from, reporting each block it hands over.
+
+    The upload is one request that can run for many minutes on a slow link;
+    without this the only thing anybody sees is "uploading". ``progress`` gets
+    (bytes sent, total) on every read and throttles for itself. A failing
+    callback must never break the upload it is describing.
+    """
+
+    def __init__(self, fh, total: int, progress: Callable[[int, int], None]):
+        self._fh, self._total, self._progress, self._sent = fh, total, progress, 0
+
+    def read(self, size: int = -1) -> bytes:
+        block = self._fh.read(size)
+        self._sent += len(block)
+        try:
+            self._progress(self._sent, self._total)
+        except Exception:
+            pass
+        return block
+
+
+def upload_binary(
+    cfg: PlayConfig,
+    token: str,
+    edit_id: str,
+    path: str,
+    artifact_type: str,
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> int:
+    """Upload the APK/AAB into the edit (streamed from disk). Returns versionCode.
+
+    ``progress(sent, total)`` is called as the bytes go out; once ``sent ==
+    total`` the remaining wait is Google processing the binary, not the network.
+    """
     resource = "bundles" if artifact_type == "aab" else "apks"
     url = (
         f"{_UPLOAD_API}/{_pkg(cfg)}/edits/{quote(edit_id, safe='')}/{resource}?uploadType=media"
@@ -179,7 +212,7 @@ def upload_binary(cfg: PlayConfig, token: str, edit_id: str, path: str, artifact
             token=token,
             content_type="application/octet-stream",
             timeout=_UPLOAD_TIMEOUT_SECONDS,
-            data_file=fh,
+            data_file=_ProgressReader(fh, size, progress) if progress else fh,
             data_len=size,
         )
     version_code = payload.get("versionCode")

@@ -61,7 +61,7 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 # Keep agent data off root's small filesystem by default. The directory remains
 # configurable from KubeSight, --workspace, or KUBESIGHT_AGENT_WORKSPACE.
@@ -148,26 +148,70 @@ class Client:
             detail = exc.read().decode("utf-8", "replace")[:400]
             raise RuntimeError("%s %s: %s" % (exc.code, path, detail)) from None
 
-    def post_file(self, path: str, fields: Dict[str, str], file_path: str, timeout: int = 900):
-        """Multipart upload, hand-rolled to avoid a dependency."""
+    def post_file(self, path: str, fields: Dict[str, str], file_path: str, timeout: int = 900,
+                  progress=None):
+        """Multipart upload, hand-rolled to avoid a dependency.
+
+        Streamed from disk rather than read into memory - an AAB or IPA can be
+        hundreds of megabytes - and ``progress(sent, total)`` hears about each
+        block, so a slow link shows up in the build log as a rate, not a pause.
+        """
         boundary = uuid.uuid4().hex
-        buffer = bytearray()
+        head = bytearray()
         for key, value in fields.items():
-            buffer += ("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
-                       % (boundary, key, value)).encode("utf-8")
+            head += ("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
+                     % (boundary, key, value)).encode("utf-8")
         filename = os.path.basename(file_path)
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        buffer += ("--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n"
-                   "Content-Type: %s\r\n\r\n" % (boundary, filename, content_type)).encode("utf-8")
+        head += ("--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n"
+                 "Content-Type: %s\r\n\r\n" % (boundary, filename, content_type)).encode("utf-8")
+        tail = ("\r\n--%s--\r\n" % boundary).encode("utf-8")
+        size = os.path.getsize(file_path)
         with open(file_path, "rb") as handle:
-            buffer += handle.read()
-        buffer += ("\r\n--%s--\r\n" % boundary).encode("utf-8")
-        with self._request(
-            path, bytes(buffer),
-            {"Content-Type": "multipart/form-data; boundary=" + boundary},
-            timeout=timeout,
-        ) as response:
-            response.read()
+            body = _MultipartBody(bytes(head), handle, tail, size, progress)
+            with self._request(
+                path, body,
+                {"Content-Type": "multipart/form-data; boundary=" + boundary,
+                 "Content-Length": str(body.length)},
+                timeout=timeout,
+            ) as response:
+                response.read()
+
+
+class _MultipartBody:
+    """The parts of a multipart request, read in order by http.client.
+
+    ``progress`` counts only the file's own bytes, which is what a person
+    compares against the size they know.
+    """
+
+    def __init__(self, head: bytes, handle, tail: bytes, size: int, progress=None):
+        self._parts = [head, handle, tail]
+        self.length = len(head) + size + len(tail)
+        self._size, self._sent, self._progress = size, 0, progress
+
+    def read(self, amount: int = -1) -> bytes:
+        while self._parts:
+            part = self._parts[0]
+            if isinstance(part, bytes):
+                if not part:
+                    self._parts.pop(0)
+                    continue
+                cut = len(part) if amount is None or amount < 0 else amount
+                block, self._parts[0] = part[:cut], part[cut:]
+                return block
+            block = part.read(amount)
+            if not block:
+                self._parts.pop(0)
+                continue
+            self._sent += len(block)
+            if self._progress is not None:
+                try:
+                    self._progress(self._sent, self._size)
+                except Exception:
+                    pass  # describing the upload must never break it
+            return block
+        return b""
 
 
 # ---------------------------------------------------------------------------
@@ -860,6 +904,7 @@ def upload_artifacts(client: Client, task: Dict[str, Any], workspace: str,
             shipper.add("[agent] no files matched artifact pattern: %s" % spec.get("path"))
             continue
         for path in matches:
+            started = time.monotonic()
             try:
                 client.post_file(
                     "/tasks/%d/artifacts" % task["taskId"],
@@ -871,10 +916,55 @@ def upload_artifacts(client: Client, task: Dict[str, Any], workspace: str,
                         "sourcePath": os.path.relpath(path, source),
                     },
                     path,
+                    progress=_upload_progress(shipper, os.path.basename(path), started),
                 )
-                shipper.add("[agent] uploaded %s (%d bytes)" % (path, os.path.getsize(path)))
+                size = os.path.getsize(path)
+                elapsed = time.monotonic() - started
+                shipper.add("[agent] uploaded %s (%d bytes) in %ds (%s)"
+                            % (path, size, int(elapsed), _rate(size, elapsed)))
             except Exception as exc:
                 shipper.add("[agent] artifact upload failed for %s: %s" % (path, exc), "stderr")
+
+
+# How often a long artifact upload says how far it is.
+UPLOAD_PROGRESS_SECONDS = 10.0
+
+
+def _megabytes(count: int) -> str:
+    return "%.1f" % (count / (1024.0 * 1024.0))
+
+
+def _rate(count: int, seconds: float) -> str:
+    per_second = count / max(seconds, 0.001)
+    if per_second >= 1024 * 1024:
+        return "%.1f MB/s" % (per_second / (1024.0 * 1024.0))
+    return "%.0f KB/s" % (per_second / 1024.0)
+
+
+def _upload_progress(shipper: "LogShipper", name: str, started: float):
+    """Progress lines for one artifact upload, at most every few seconds.
+
+    Once the last byte is sent it says so: what remains is KubeSight storing
+    the file, which separates a slow link from a slow server.
+    """
+    state = {"at": started, "done": False}
+
+    def report(sent: int, total: int) -> None:
+        now = time.monotonic()
+        finished = total > 0 and sent >= total
+        if state["done"] or (not finished and now - state["at"] < UPLOAD_PROGRESS_SECONDS):
+            return
+        state["at"], state["done"] = now, finished
+        elapsed = now - started
+        if finished:
+            if elapsed >= UPLOAD_PROGRESS_SECONDS:
+                shipper.add("[agent] sent all %s MB of %s in %ds (%s); waiting for KubeSight to store it"
+                            % (_megabytes(total), name, int(elapsed), _rate(total, elapsed)))
+            return
+        shipper.add("[agent] uploading %s to KubeSight: %s of %s MB (%s)"
+                    % (name, _megabytes(sent), _megabytes(total), _rate(sent, elapsed)))
+
+    return report
 
 
 # ---------------------------------------------------------------------------

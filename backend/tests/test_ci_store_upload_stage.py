@@ -47,7 +47,7 @@ def stores(tmp_path, monkeypatch):
     monkeypatch.setattr(google_play_client, "access_token", lambda cfg: "tok")
     monkeypatch.setattr(google_play_client, "create_edit", lambda cfg, tok: "edit-1")
 
-    def play_upload(cfg, tok, edit, path, kind):
+    def play_upload(cfg, tok, edit, path, kind, progress=None):
         calls["play_uploads"].append((os.path.basename(path), kind))
         return 42
 
@@ -59,7 +59,7 @@ def stores(tmp_path, monkeypatch):
     monkeypatch.setattr(google_play_client, "commit_edit", lambda cfg, tok, edit: None)
     monkeypatch.setattr(app_store_client, "resolve_app_id", lambda cfg: "999")
 
-    def asc_upload(cfg, path, name):
+    def asc_upload(cfg, path, name, progress=None):
         calls["asc_uploads"].append(name)
         return {"buildUploadId": "u1", "appId": "999", "bundleVersion": "42"}
 
@@ -477,7 +477,7 @@ def test_a_store_failure_fails_the_stage_with_the_reason(app, client, admin_toke
     _mobile_app(client, admin_token, service.id)
     _save(client, admin_token, service.pipeline_id, _stages())
 
-    def refuse(cfg, tok, edit, path, kind):
+    def refuse(cfg, tok, edit, path, kind, progress=None):
         raise google_play_client.PlayError("Google Play refused the request (403)", 403)
 
     monkeypatch.setattr(google_play_client, "upload_binary", refuse)

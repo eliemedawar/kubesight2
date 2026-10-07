@@ -328,7 +328,7 @@ def test_signed_result_becomes_a_publishable_child_build(
     target = "internal" if platform == "android" else "testflight"
     monkeypatch.setattr("api.services.google_play_client.access_token", lambda cfg: "tok")
     monkeypatch.setattr("api.services.google_play_client.create_edit", lambda c, t: "e1")
-    monkeypatch.setattr("api.services.google_play_client.upload_binary", lambda *a: 9)
+    monkeypatch.setattr("api.services.google_play_client.upload_binary", lambda *a, **k: 9)
     monkeypatch.setattr("api.services.google_play_client.assign_track", lambda *a: None)
     monkeypatch.setattr("api.services.google_play_client.commit_edit", lambda *a: None)
     monkeypatch.setattr("api.services.app_store_client.upload_build", lambda *a, **k: {"id": "u1"})

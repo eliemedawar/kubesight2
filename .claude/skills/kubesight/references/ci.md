@@ -580,6 +580,20 @@ Two fixes; say both, and recommend the first:
    - Set that image on the stage, replace `./gradlew` with `gradle` in its
      commands and drop any `chmod +x ./gradlew`. Keep the tasks and flags.
 
+**"Why did publishing (or a Mac build stage) take so long?"**
+A mobile binary makes two trips: the agent uploads it to KubeSight at the end
+of its stage, then a `store_upload` stage sends it from the KubeSight server to
+Google Play or App Store Connect. Both log their progress; quote the lines.
+- `[agent] uploading x to KubeSight: 6.0 of 60.0 MB (512 KB/s)` and `uploading
+  x: … MB (… KB/s)` in the store stage are the transfer rate. A rate in KB/s
+  for a binary of tens of MB is the network between those machines (a proxy, an
+  ingress, the server's uplink), not KubeSight and not the store.
+- `sent all N MB … waiting for Google Play to accept it` means the bytes have
+  arrived and the store is processing them. The time after that line is the
+  store's.
+- A build stage much longer than its tool's own `BUILD SUCCESSFUL in …` is
+  usually the artifact upload. Compare the two times.
+
 **"Why did the push not happen when the build succeeded?"**
 Read the image stage's log. A blocked scan prints `Scan BLOCKED the push` and
 the stage fails with nothing in the registry — the image was built and thrown
