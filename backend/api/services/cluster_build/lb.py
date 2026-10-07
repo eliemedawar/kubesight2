@@ -98,8 +98,29 @@ vrrp_instance KUBESIGHT_API {{
 """
 
 
-def lb_apply_script(haproxy_cfg_b64: str, keepalived_conf_b64: str) -> str:
-    """Install both configs and (re)start services, validating haproxy first."""
+def lb_apply_script(haproxy_cfg_b64: str, keepalived_conf_b64: str, *, live: bool = False) -> str:
+    """Install both configs and (re)start services, validating haproxy first.
+
+    ``live``: the cluster is already serving through this tier (day two —
+    adding a control plane or a second balancer). A restart would drop every
+    API connection and, on the VRRP master, the VIP itself; a reload swaps the
+    configuration in place (haproxy hands sockets to the new process,
+    keepalived re-reads its peers on SIGHUP). A balancer being configured for
+    the first time is not running yet, so ``enable --now`` starts it and the
+    reload that follows is a no-op.
+    """
+    if live:
+        return f"""set -e
+echo {haproxy_cfg_b64} | base64 -d > /etc/haproxy/haproxy.cfg
+echo {keepalived_conf_b64} | base64 -d > /etc/keepalived/keepalived.conf
+haproxy -c -f /etc/haproxy/haproxy.cfg
+systemctl enable --now haproxy keepalived
+systemctl reload haproxy
+systemctl reload keepalived
+sleep 2
+systemctl is-active haproxy
+systemctl is-active keepalived
+"""
     return f"""set -e
 echo {haproxy_cfg_b64} | base64 -d > /etc/haproxy/haproxy.cfg
 echo {keepalived_conf_b64} | base64 -d > /etc/keepalived/keepalived.conf

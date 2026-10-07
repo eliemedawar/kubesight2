@@ -136,7 +136,7 @@ function DayTwo({
       <span className="sg-cb-day2-label">Day two</span>
       {canCreate ? (
         <button className="btn-outline btn-sm" type="button" onClick={onGrow}>
-          Add worker machines
+          Add machines
         </button>
       ) : null}
       {canCreate ? (
@@ -329,7 +329,62 @@ function Receipt({
           </p>
         </div>
       ) : null}
+
+      <EtcdBackups backups={build.etcdBackups} />
     </>
+  );
+}
+
+const ETCD_RESTORE_DOC =
+  "https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#restoring-an-etcd-cluster";
+// The node keeps this many; older records point at files it has removed.
+const ETCD_SNAPSHOTS_ON_NODE = 5;
+
+function formatBytes(bytes) {
+  if (!bytes) return "size unknown";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Snapshots taken before control planes joined — newest first. */
+function EtcdBackups({ backups }) {
+  if (!backups?.length) return null;
+  const newestFirst = [...backups].reverse();
+  return (
+    <div className="card sg-cb-card">
+      <div className="sg-cb-sect">
+        <h2>etcd snapshots</h2>
+        <span className="sg-cb-sect-right">taken before control planes joined</span>
+      </div>
+      <ul className="sg-cb-proofs">
+        {newestFirst.map((backup, index) => {
+          const rotated = index >= ETCD_SNAPSHOTS_ON_NODE;
+          const taken = parseApiTime(backup.takenAt);
+          return (
+            <li className={`sg-cb-proof ${rotated ? "is-todo" : ""}`} key={backup.path}>
+              <span className="tick" aria-hidden="true">{rotated ? "–" : "✓"}</span>
+              <span className="what sg-cb-mono">{backup.path}</span>
+              <span className="how">
+                on {backup.node} · {formatBytes(backup.bytes)}
+                {Number.isFinite(taken) ? ` · ${new Date(taken).toLocaleString()}` : ""}
+                {backup.reason ? ` · ${backup.reason}` : ""}
+                {backup.sha256 ? (
+                  <span className="sg-cb-mono" title={`sha256 ${backup.sha256}`}>
+                    {" "}· sha256 {backup.sha256.slice(0, 12)}…
+                  </span>
+                ) : null}
+                {rotated ? " · removed from the node (only the newest 5 are kept)" : ""}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="muted sg-cb-proof-note">
+        Each file is on that control plane only, readable by root, and holds every Secret in
+        the cluster. Copy it somewhere safe if it has to outlive the machine.{" "}
+        <a href={ETCD_RESTORE_DOC} target="_blank" rel="noreferrer">How to restore from a snapshot</a>
+      </p>
+    </div>
   );
 }
 

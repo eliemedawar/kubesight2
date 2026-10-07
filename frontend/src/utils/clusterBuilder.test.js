@@ -967,6 +967,18 @@ describe("expectedPhases with a workload copy", () => {
   });
 });
 
+describe("expectedPhases with an etcd backup", () => {
+  it("shows the backup only once a control-plane growth has run it, before the joins", () => {
+    const base = {
+      endpointMode: "managed_haproxy", nodeCounts: { controlPlane: 3, worker: 1, loadbalancer: 2 },
+      addons: [], steps: [{ phase: "init" }],
+    };
+    expect(expectedPhases(base)).not.toContain("etcd_backup");
+    const grown = expectedPhases({ ...base, steps: [...base.steps, { phase: "etcd_backup" }] });
+    expect(grown.indexOf("etcd_backup")).toBe(grown.indexOf("join_cp") - 1);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Where copied volume claims land
 // ---------------------------------------------------------------------------
@@ -1070,5 +1082,31 @@ describe("storage decisions", () => {
   it("has no rows when nothing has volume claims", () => {
     expect(storageRows({ storage: { claims: [] } }, nfs)).toEqual([]);
     expect(storageRows(null, nfs)).toEqual([]);
+  });
+});
+
+describe("buildBlueprint on a cluster that is growing", () => {
+  it("draws queued machines as waiting and counts tiers from the machines", () => {
+    const plan = buildBlueprint({
+      status: "completed",
+      resultClusterId: "custom-1",
+      topologyType: "single_cp",
+      endpointMode: "managed_haproxy",
+      vipAddress: "10.0.0.100",
+      steps: [],
+      nodes: [
+        { id: 1, role: "loadbalancer", status: "ready", hostname: "lb-1" },
+        { id: 2, role: "loadbalancer", status: "preflight_passed", hostname: "lb-2" },
+        { id: 3, role: "control_plane", status: "joined", hostname: "cp-1" },
+        { id: 4, role: "control_plane", status: "pending", hostname: "cp-2" },
+        { id: 5, role: "control_plane", status: "pending", hostname: "cp-3" },
+      ],
+    });
+    const lbs = plan.tiers.find((tier) => tier.role === "loadbalancer");
+    const cps = plan.tiers.find((tier) => tier.role === "control_plane");
+    expect(lbs.target).toBe(2);
+    expect(cps.target).toBe(3);
+    expect(lbs.slots.map((slot) => slot.state)).toEqual(["joined", "waiting"]);
+    expect(cps.slots.map((slot) => slot.state)).toEqual(["joined", "waiting", "waiting"]);
   });
 });

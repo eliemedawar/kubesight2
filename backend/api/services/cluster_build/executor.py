@@ -460,6 +460,16 @@ def _phase_loadbalancer(build: ClusterBuild, resolved) -> None:
             [(n.hostname or f"cp{i}", n.address) for i, n in enumerate(cps, 1)]
         )
         haproxy_b64 = base64.b64encode(haproxy_cfg.encode()).decode()
+        # Day two (a control plane or a second balancer joining): the API is
+        # already served through these balancers, so they are reloaded in
+        # place. New control planes enter haproxy's rotation as soon as their
+        # health check passes, which is what keeps this safe before they join.
+        live = bool(build.result_cluster_id)
+        if live:
+            stream.header(
+                "Live update: reloading HAProxy and keepalived on "
+                f"{len(lbs)} balancer(s) for {len(cps)} control plane(s)"
+            )
 
         for node in lbs:
             target = _target_for(build, node)
@@ -488,7 +498,7 @@ def _phase_loadbalancer(build: ClusterBuild, resolved) -> None:
             keepalived_b64 = base64.b64encode(keepalived_conf.encode()).decode()
             _run_traced(
                 target,
-                lb.lb_apply_script(haproxy_b64, keepalived_b64),
+                lb.lb_apply_script(haproxy_b64, keepalived_b64, live=live),
                 timeout_s=180,
                 stream=stream,
                 display_command="install and validate HAProxy/Keepalived configuration",
@@ -799,6 +809,109 @@ def _ensure_join_secrets(
         ) from exc
     db.session.commit()
     return join_base, cert_key
+
+
+ETCD_BACKUP_DIR = "/var/backups/kubesight/etcd"
+_ETCD_BACKUPS_KEPT = 5
+_ETCD_PKI = (
+    "--cacert=/etc/kubernetes/pki/etcd/ca.crt "
+    "--cert=/etc/kubernetes/pki/etcd/server.crt "
+    "--key=/etc/kubernetes/pki/etcd/server.key"
+)
+
+
+def etcd_backup_script(etcd_pod: str) -> str:
+    """Snapshot etcd from inside its static pod, check it, keep it on the host.
+
+    The etcd image may have no shell, so each step is its own ``kubectl exec``
+    of etcdctl/etcdutl. The snapshot is written under /var/lib/etcd — the one
+    host path the pod mounts — then moved to a root-only directory. It holds
+    every Secret in the cluster, hence 0600 in a 0700 directory.
+    """
+    kubectl = "kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-system"
+    pod = shlex.quote(etcd_pod)
+    return f"""set -e
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+IN_POD=/var/lib/etcd/kubesight-snapshot-$TS.db
+OUT={ETCD_BACKUP_DIR}/etcd-$TS.db
+{kubectl} exec {pod} -- etcdctl --endpoints=https://127.0.0.1:2379 {_ETCD_PKI} snapshot save "$IN_POD"
+{kubectl} exec {pod} -- etcdutl snapshot status "$IN_POD" -w table
+mkdir -p {ETCD_BACKUP_DIR}
+chmod 700 {ETCD_BACKUP_DIR}
+mv "$IN_POD" "$OUT"
+chmod 600 "$OUT"
+ls -1t {ETCD_BACKUP_DIR}/etcd-*.db | tail -n +{_ETCD_BACKUPS_KEPT + 1} | xargs -r rm -f
+echo "KS_SNAPSHOT=$OUT"
+echo "KS_SNAPSHOT_BYTES=$(stat -c %s "$OUT")"
+echo "KS_SNAPSHOT_SHA256=$(sha256sum "$OUT" | cut -d' ' -f1)"
+"""
+
+
+def _phase_etcd_backup(build: ClusterBuild, primary: ClusterBuildNode) -> None:
+    """Snapshot etcd before a control plane joins a cluster that is serving.
+
+    Only on day two: a first build has nothing to protect. If the snapshot
+    cannot be taken, no control plane is added — the growth stops here, with
+    the cluster exactly as it was.
+    """
+    if not build.result_cluster_id:
+        return
+    cps, _, _ = _nodes_by_role(build)
+    joining = [
+        node for node in cps
+        if node.id != primary.id
+        and _get_step(build, "join_cp", node).status != "completed"
+    ]
+    if not joining:
+        return
+    step = _get_step(build, "etcd_backup")
+    if step.status == "completed":
+        return
+    _step_start(step)
+    stream = _StreamTail(step.id)
+    node_name = primary.hostname or primary.address
+    try:
+        stream.header(
+            f"etcd snapshot on {node_name} before {len(joining)} control plane(s) join"
+        )
+        result = _run_traced(
+            _target_for(build, primary),
+            etcd_backup_script(f"etcd-{node_name}"),
+            timeout_s=600,
+            stream=stream,
+            display_command=f"etcdctl snapshot save → {ETCD_BACKUP_DIR} on {node_name}",
+        )
+    except (SshCommandError, SshConnectionError) as exc:
+        _step_fail(
+            step,
+            "The etcd snapshot could not be taken, so no control plane was added.",
+            stream.text(),
+        )
+        raise _PhaseFailed(
+            f"etcd backup failed on {node_name}; no control plane was added. "
+            "Fix what the log shows (etcd must be healthy and /var/backups writable), "
+            "then retry."
+        ) from exc
+    facts = dict(
+        line.split("=", 1) for line in (result.output or "").splitlines()
+        if line.startswith("KS_SNAPSHOT") and "=" in line
+    )
+    if not facts.get("KS_SNAPSHOT"):
+        _step_fail(step, "The snapshot step did not report where it saved the file.", stream.text())
+        raise _PhaseFailed(f"etcd backup on {node_name} did not report a snapshot file.")
+    record = {
+        "path": facts["KS_SNAPSHOT"],
+        "node": node_name,
+        "address": primary.address,
+        "bytes": int(facts.get("KS_SNAPSHOT_BYTES") or 0) or None,
+        "sha256": facts.get("KS_SNAPSHOT_SHA256") or None,
+        "takenAt": _utcnow().isoformat(),
+        "reason": f"before {', '.join(n.hostname or n.address for n in joining)} joined",
+    }
+    build.etcd_backups_json = (list(build.etcd_backups_json or []) + [record])[-20:]
+    db.session.commit()
+    stream.write(f"\nSaved {record['path']} ({record['bytes'] or '?'} bytes) on {node_name}.\n")
+    _step_done(step, stream.text())
 
 
 def _phase_join_cp(build: ClusterBuild, primary: ClusterBuildNode) -> None:
@@ -2012,6 +2125,8 @@ def _run_build(app, build_id: int) -> None:
             primary = _phase_init(build, resolved)
             _check_cancelled(build)
             _phase_cni(build, resolved, primary)
+            _check_cancelled(build)
+            _phase_etcd_backup(build, primary)
             _check_cancelled(build)
             _phase_join_cp(build, primary)
             _check_cancelled(build)

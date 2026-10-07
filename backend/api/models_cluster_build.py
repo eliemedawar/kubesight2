@@ -370,6 +370,10 @@ class ClusterBuild(db.Model):
     # finished_at and would otherwise turn "built in 18 min" into "built in 5 d".
     growth_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     build_seconds = db.Column(db.Integer, nullable=True)
+    # etcd snapshots taken before control planes joined a running cluster:
+    # [{"path", "node", "address", "bytes", "sha256", "takenAt", "reason"}].
+    # The files live on that control plane; only their record is kept here.
+    etcd_backups_json = db.Column(db.JSON, nullable=True)
 
     # existing | vmware. "vmware" means KubeSight creates the machines itself
     # with OpenTofu before the phase machine below ever runs.

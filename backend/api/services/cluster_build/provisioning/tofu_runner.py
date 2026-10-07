@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -356,10 +357,14 @@ class SimulatedEngine:
         if change["type"] == "vsphere_virtual_machine":
             ip = (((change.get("after") or {}).get("clone") or [{}])[0].get("customize") or [{}])[0] \
                 .get("network_interface", [{}])[0].get("ipv4_address")
+            # What DRS keep-apart rules give a real cluster: the n-th machine of
+            # a role on the n-th of four ESXi hosts.
+            number = re.search(r"-(\d+)$", str(change.get("key") or ""))
+            spread = (int(number.group(1)) - 1) if number else len(resource["instances"])
             attributes.update({
                 "moid": f"vm-{900 + len(resource['instances'])}",
                 "default_ip_address": ip,
-                "host_system_id": f"host-{10 + len(resource['instances']) % 4}",
+                "host_system_id": f"host-{10 + spread % 4}",
                 "uuid": attributes["id"],
             })
         instance = {"schema_version": 0, "attributes": attributes}

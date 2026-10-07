@@ -337,6 +337,54 @@ export function vmSlotState(row) {
   return "set";
 }
 
+// ---------------------------------------------------------------------------
+// Growing a running cluster
+// ---------------------------------------------------------------------------
+
+export const GROW_ROLE_LABELS = {
+  worker: "Worker",
+  control_plane: "Control plane",
+  loadbalancer: "Load balancer",
+};
+
+/**
+ * What a running cluster may take, from the build's ``growthLimits`` and the
+ * machines already queued. The backend refuses the same things; this says so
+ * before anyone queues a machine.
+ */
+export function growthState(build) {
+  const limits = build?.growthLimits || {};
+  const counts = limits.counts || { control_plane: 0, worker: 0, loadbalancer: 0 };
+  const pendingStatuses = new Set(["pending", "preflight_passed", "preflight_failed"]);
+  const queued = { control_plane: 0, worker: 0, loadbalancer: 0 };
+  (build?.nodes || []).forEach((node) => {
+    if (pendingStatuses.has(node.status) && queued[node.role] !== undefined) queued[node.role] += 1;
+  });
+  const running = {
+    control_plane: counts.control_plane - queued.control_plane,
+    worker: counts.worker - queued.worker,
+    loadbalancer: counts.loadbalancer - queued.loadbalancer,
+  };
+  const cpTotal = counts.control_plane;
+  const oddProblem = [1, 3, 5].includes(cpTotal)
+    ? ""
+    : `That makes ${cpTotal} control planes. Queue one more — they join two at a time, so etcd keeps an odd number of members.`;
+  return {
+    running,
+    queued,
+    totals: counts,
+    controlPlane: {
+      allowed: Boolean(limits.controlPlane?.allowed) && cpTotal < 5,
+      reason: limits.controlPlane?.reason || (cpTotal >= 5 ? "Five control planes is the most." : null),
+    },
+    loadbalancer: {
+      allowed: Boolean(limits.loadbalancer?.allowed) && counts.loadbalancer < 2,
+      reason: limits.loadbalancer?.reason || (counts.loadbalancer >= 2 ? "Two load balancers is the most." : null),
+    },
+    oddProblem,
+  };
+}
+
 /** Who can act on a destroy request, from where the viewer stands. */
 export function destroyStance(job, currentUserId) {
   if (!job || job.operation !== "destroy") return "none";

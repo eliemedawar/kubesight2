@@ -289,12 +289,19 @@ def summarize_plan(document: Dict[str, Any], operation: str) -> Dict[str, Any]:
             "detail": detail,
         })
     blocked = None
-    existing_touched = [r for r in resources if r["action"] in ("update", "replace", "delete")]
+    # Growth may create machines and create or widen keep-apart rules (a third
+    # control plane joins the rule). It must never change, replace or delete a
+    # running VM, nor delete anything at all.
+    existing_touched = [
+        r for r in resources
+        if r["action"] in ("replace", "delete")
+        or (r["action"] == "update" and r["kind"] == "vm")
+    ]
     if operation == "grow" and existing_touched:
         names = ", ".join(r["title"] for r in existing_touched[:4])
         blocked = (
             "This plan would change machines that are already running "
-            f"({names}). Adding workers must only add. Ask an administrator to "
+            f"({names}). Adding machines must only add. Ask an administrator to "
             "check what changed in vCenter before going on."
         )
     elif operation == "create" and any(r["action"] == "delete" for r in resources):
@@ -924,10 +931,17 @@ def _record_created_vms(build: ClusterBuild, job: ClusterProvisionJob) -> List[C
         new_machines = list((job.config_json or {}).get("newMachines") or [])
         spec["machines"] = list(spec.get("machines") or []) + new_machines
         build.provisioning_json = spec
+        counts = dict(spec.get("counts") or {})
+        for machine in new_machines:
+            counts[machine["role"]] = int(counts.get(machine["role"], 0)) + 1
+        spec["counts"] = counts
+        build.provisioning_json = spec
         next_position = max((n.position for n in build.nodes), default=-1) + 1
         for offset, machine in enumerate(new_machines):
             db.session.add(ClusterBuildNode(
-                build_id=build.id, role="worker", position=next_position + offset,
+                build_id=build.id,
+                role=templates.ROLE_TO_NODE_ROLE.get(machine["role"], "worker"),
+                position=next_position + offset,
                 hostname=machine["name"], address=machine["ip"],
                 address_source="provisioned", vsphere_vm_name=machine["name"],
                 status="pending",
@@ -1069,6 +1083,30 @@ def _do_connect(job: ClusterProvisionJob) -> None:
         )
 
 
+# Preflight warnings that only restate a placement the approved plan chose —
+# every VM on the one datastore the person picked. Acknowledged in the plan's
+# name so the build is not held up asking again; anything else waits for a person.
+_PLAN_PLACEMENT_CHECKS = {"vs_cp_datastore"}
+
+
+def _plan_acknowledges(result: Dict[str, Any], job: ClusterProvisionJob) -> Optional[List[str]]:
+    """``ackWarnings`` for a preflight whose only warnings the plan already decided."""
+    if result.get("status") != "warn":
+        return None
+    warned = [
+        check for node in (result.get("nodes") or [])
+        for check in node.get("checks") or []
+        if check.get("status") not in ("pass", None)
+    ]
+    if not warned or any(
+        check.get("status") != "warn" or check.get("id") not in _PLAN_PLACEMENT_CHECKS
+        for check in warned
+    ):
+        return None
+    labels = sorted({check.get("label") or check.get("id") for check in warned})
+    return [f"Placement chosen in OpenTofu plan #{job.id}: {', '.join(labels)}"]
+
+
 def _handoff(job: ClusterProvisionJob) -> None:
     """Machines are up: run the Cluster Builder on them, as a person would."""
     from .. import service as build_service
@@ -1083,16 +1121,17 @@ def _handoff(job: ClusterProvisionJob) -> None:
         try:
             result = build_service.preflight_growth(build.id)
         except Exception as exc:  # noqa: BLE001 — the panel shows the machines; a person retries
-            _note(job, f"Preflight of the new workers could not run: {scrub(str(exc))}")
+            _note(job, f"Preflight of the new machines could not run: {scrub(str(exc))}")
             return
-        if result.get("status") == "pass":
+        ack = _plan_acknowledges(result, job)
+        if result.get("status") == "pass" or ack:
             try:
-                build_service.grow_build(build.id, actor=actor)
+                build_service.grow_build(build.id, ack_warnings=ack, actor=actor)
             except Exception as exc:  # noqa: BLE001
-                _note(job, f"Joining the new workers did not start: {scrub(str(exc))}")
+                _note(job, f"Joining the new machines did not start: {scrub(str(exc))}")
         else:
-            _note(job, "Preflight of the new workers needs a look before they join "
-                       f"({result.get('status')}). Open Add workers to review it.")
+            _note(job, "Preflight of the new machines needs a look before they join "
+                       f"({result.get('status')}). Open Add machines to review it.")
         return
 
     build.status = "draft"
@@ -1102,9 +1141,10 @@ def _handoff(job: ClusterProvisionJob) -> None:
     except Exception as exc:  # noqa: BLE001
         _note(job, f"Preflight could not run: {scrub(str(exc))}")
         return
-    if result.get("status") == "pass":
+    ack = _plan_acknowledges(result, job)
+    if result.get("status") == "pass" or ack:
         try:
-            build_service.start_build(build.id, actor=actor, user=user)
+            build_service.start_build(build.id, ack_warnings=ack, actor=actor, user=user)
         except Exception as exc:  # noqa: BLE001
             _note(job, f"The Kubernetes build did not start: {scrub(str(exc))}")
     else:

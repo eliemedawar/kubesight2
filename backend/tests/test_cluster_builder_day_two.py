@@ -168,21 +168,28 @@ class TestAddWorkerNodes:
         assert [n["status"] for n in data["nodes"] if n["address"] != "10.0.0.22"] == \
             ["joined", "joined"]
 
-    def test_refuses_a_control_plane_with_a_reason(
+    def test_control_planes_are_added_two_at_a_time(
         self, client, admin_token, finished_build
     ):
+        # Queuing one is allowed — the second may be queued next — but growing
+        # to an even number of etcd members is refused, with the reason.
+        build_id = finished_build["build"]["id"]
         response = client.post(
-            f"/api/cluster-builds/{finished_build['build']['id']}/nodes",
+            f"/api/cluster-builds/{build_id}/nodes",
             json={"nodes": [{"role": "control_plane", "hostname": "cp-2",
                              "address": "10.0.0.12"}]},
             headers=auth_headers(admin_token),
         )
-        assert response.status_code == 400
-        error = response.get_json()["error"]
-        assert "Only workers" in error
-        assert "etcd quorum" in error
+        assert response.status_code == 201, response.get_json()
+        preflight = client.post(
+            f"/api/cluster-builds/{build_id}/grow-preflight", headers=auth_headers(admin_token)
+        )
+        assert preflight.status_code == 400
+        assert "two at a time" in preflight.get_json()["error"]
 
-    def test_refuses_a_load_balancer(self, client, admin_token, finished_build):
+    def test_refuses_a_load_balancer_without_a_managed_vip(
+        self, client, admin_token, finished_build
+    ):
         response = client.post(
             f"/api/cluster-builds/{finished_build['build']['id']}/nodes",
             json={"nodes": [{"role": "loadbalancer", "hostname": "lb-9",
@@ -190,6 +197,7 @@ class TestAddWorkerNodes:
             headers=auth_headers(admin_token),
         )
         assert response.status_code == 400
+        assert "HAProxy and keepalived" in response.get_json()["error"]
 
     def test_refuses_a_machine_already_in_the_cluster(
         self, client, admin_token, finished_build

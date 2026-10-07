@@ -330,6 +330,30 @@ def request_create_plan(build: ClusterBuild, *, actor: str = "", user=None) -> C
     return job
 
 
+def _grow_counts(payload: Dict[str, Any]) -> Dict[str, int]:
+    """How many of each role to add. ``count`` alone means workers (the
+    original, workers-only form of this request)."""
+    def whole(key: str) -> int:
+        try:
+            value = int(payload.get(key) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be a whole number.") from exc
+        if value < 0:
+            raise ValueError(f"{key} cannot be negative.")
+        return value
+
+    counts = {
+        "worker": whole("workers") or whole("count"),
+        "controlPlane": whole("controlPlanes"),
+        "loadbalancer": whole("loadBalancers"),
+    }
+    if not any(counts.values()):
+        raise ValueError("Add at least one machine.")
+    if counts["worker"] > 20:
+        raise ValueError("Add at most 20 workers at a time.")
+    return counts
+
+
 def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: str = "", user=None) -> ClusterProvisionJob:
     from .. import service as build_service
 
@@ -339,28 +363,38 @@ def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: st
         raise ValueError("Machines are already queued to join. Finish or remove those first.")
     _require_no_open_job(build, supersede_planned=True)
     spec = build.provisioning_json or {}
-    try:
-        count = int(payload.get("count") or 0)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("count must be a whole number.") from exc
-    if count < 1 or count > 20:
-        raise ValueError("Add between 1 and 20 workers at a time.")
-    size = templates.normalize_sizes(
-        {"worker": payload.get("size") or (spec.get("sizes") or {}).get("worker")},
-        {"loadbalancer": 0, "controlPlane": 0, "worker": 1},
-    )["worker"]
-    existing = [m["name"] for m in spec.get("machines") or [] if m["role"] == "worker"]
-    numbers = [
-        int(match.group(1)) for name in existing
-        if (match := re.search(r"-wk-(\d+)$", name))
-    ]
-    start = max(numbers, default=0) + 1
-    new = [{
-        "name": f"{build.name}-wk-{start + offset}",
-        "role": "worker",
-        "cpu": size["cpu"], "memoryGb": size["memoryGb"], "diskGb": size["diskGb"],
-        "datastoreId": spec["datastoreId"],
-    } for offset in range(count)]
+    adding = _grow_counts(payload)
+    build_service.check_tier_growth(
+        build,
+        {templates.ROLE_TO_NODE_ROLE[role]: n for role, n in adding.items()},
+        final=True,
+    )
+    raw_sizes = dict(spec.get("sizes") or {})
+    for role, size in (payload.get("sizes") or {}).items():
+        if role in raw_sizes and isinstance(size, dict):
+            raw_sizes[role] = size
+    if payload.get("size") and isinstance(payload["size"], dict):
+        raw_sizes["worker"] = payload["size"]  # the workers-only form
+    sizes = templates.normalize_sizes(raw_sizes, adding)
+
+    new: List[Dict[str, Any]] = []
+    for role in ("loadbalancer", "controlPlane", "worker"):
+        if not adding[role]:
+            continue
+        short = templates.ROLE_SHORT[role]
+        taken = [m["name"] for m in spec.get("machines") or [] if m["role"] == role]
+        numbers = [
+            int(match.group(1)) for name in taken
+            if (match := re.search(rf"-{short}-(\d+)$", name))
+        ]
+        start = max(numbers, default=0) + 1
+        new.extend({
+            "name": f"{build.name}-{short}-{start + offset}",
+            "role": role,
+            "cpu": sizes[role]["cpu"], "memoryGb": sizes[role]["memoryGb"],
+            "diskGb": sizes[role]["diskGb"],
+            "datastoreId": spec["datastoreId"],
+        } for offset in range(adding[role]))
     range_row = ip_pool.get_range(int(spec["networkRangeId"]))
     addresses = ip_pool.reserve(range_row, build.id, [{"key": m["name"]} for m in new])
     for machine in new:

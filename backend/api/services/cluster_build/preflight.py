@@ -934,7 +934,23 @@ def _node_checks(
             ))
 
     vip_state = facts.get("KS_VIP_STATE")
-    if vip_state == "in_use":
+    if build.result_cluster_id:
+        # Adding a balancer to a running cluster: the VIP is the cluster's
+        # address and the current balancer holds it. It must answer, and the
+        # new machine must be on the segment where it does.
+        if vip_state == "in_use":
+            checks.append(_check(
+                "vip", "VIP held by the running balancer", "pass",
+                f"{build.vip_address} answers from this machine's network.",
+            ))
+        elif vip_state == "free":
+            checks.append(_check(
+                "vip", "VIP held by the running balancer", "fail",
+                f"{build.vip_address} does not answer from this machine.",
+                "The new balancer must sit on the same L2 segment as the one "
+                "holding the cluster's VIP, or keepalived cannot take it over.",
+            ))
+    elif vip_state == "in_use":
         checks.append(_check(
             "vip", "VIP address free", "fail",
             f"{build.vip_address} already answers ping — it must be unused.",

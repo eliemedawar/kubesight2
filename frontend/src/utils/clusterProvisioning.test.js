@@ -4,6 +4,7 @@ import {
   datastoreFit,
   defaultPlacement,
   destroyStance,
+  growthState,
   machineNames,
   minimumDisk,
   placementProblem,
@@ -215,5 +216,43 @@ describe("blueprints", () => {
   it("asks existing-machine builds for exactly the template's workers", () => {
     const plan = draftBlueprint({ basics: { counts: SMALL, endpointMode: "managed_haproxy" } });
     expect(plan.tiers.find((t) => t.role === "worker").target).toBe(2);
+  });
+});
+
+describe("growing a running cluster", () => {
+  const limits = (counts, cp = true, lb = true) => ({
+    counts,
+    controlPlane: { allowed: cp, reason: cp ? null : "The API address is a control plane's own address." },
+    loadbalancer: { allowed: lb, reason: lb ? null : "Two load balancers is the most." },
+  });
+
+  it("offers control planes and a second balancer to a Small cluster", () => {
+    const state = growthState({
+      growthLimits: limits({ control_plane: 1, worker: 2, loadbalancer: 1 }),
+      nodes: [],
+    });
+    expect(state.controlPlane.allowed).toBe(true);
+    expect(state.loadbalancer.allowed).toBe(true);
+    expect(state.oddProblem).toBe("");
+  });
+
+  it("asks for the second control plane before preflight", () => {
+    const state = growthState({
+      growthLimits: limits({ control_plane: 2, worker: 2, loadbalancer: 1 }),
+      nodes: [{ role: "control_plane", status: "pending" }],
+    });
+    expect(state.running.control_plane).toBe(1);
+    expect(state.queued.control_plane).toBe(1);
+    expect(state.oddProblem).toMatch(/Queue one more/);
+  });
+
+  it("stops at a keepalived pair and at five control planes", () => {
+    const state = growthState({
+      growthLimits: limits({ control_plane: 5, worker: 3, loadbalancer: 2 }, true, false),
+      nodes: [],
+    });
+    expect(state.loadbalancer.allowed).toBe(false);
+    expect(state.controlPlane.allowed).toBe(false);
+    expect(state.controlPlane.reason).toMatch(/Five/);
   });
 });

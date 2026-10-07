@@ -123,6 +123,14 @@ class FakeSshTransport:
         self.calls.append((target.host, f"PUT {remote_path}"))
 
 
+ETCD_SNAPSHOT_OUTPUT = (
+    "Snapshot saved at /var/lib/etcd/kubesight-snapshot-20261006T101500Z.db\n"
+    "KS_SNAPSHOT=/var/backups/kubesight/etcd/etcd-20261006T101500Z.db\n"
+    "KS_SNAPSHOT_BYTES=4210688\n"
+    "KS_SNAPSHOT_SHA256=" + "c0ffee" * 10 + "abcd\n"
+)
+
+
 def build_default_fake(hosts_roles):
     """A transport that makes a full build succeed for the given
     {address: (hostname, role)} map."""
@@ -158,6 +166,7 @@ def build_default_fake(hosts_roles):
              "applied")
     fake.add(lambda h, s: "kubeadm join" in s, "This node has joined the cluster")
     fake.add(lambda h, s: "kubeadm config images pull" in s, "pulled")
+    fake.add(lambda h, s: "snapshot save" in s, ETCD_SNAPSHOT_OUTPUT)
     return fake
 
 

@@ -593,3 +593,45 @@ Destroy (destroy plan → a second person with cluster_builds:execute approves).
 
 Content Library templates, standalone ESXi hosts (clusters only), stopping an apply part-way,
 adding control planes or load balancers, and validation against a real vCenter.
+
+---
+
+## 15. Growing the control plane and the load-balancer tier (built 2026-10-06)
+
+Day two used to add workers only. A running cluster can now also take control planes and a
+second load balancer, from machines that already exist (Add machines → role) or VMs OpenTofu
+creates (Add machines → steppers).
+
+| Adding | Allowed when | Why |
+|---|---|---|
+| Workers | always | — |
+| Control planes | to 3 or 5 in total (two at a time), and the API address is not a control plane's own address | 2 or 4 etcd members survive no more failures than one fewer; a Lab's endpoint *is* cp-1, so extra masters would still hang off it |
+| Load balancers | KubeSight runs the tier (`managed_haproxy`), at most 2 | keepalived floats one VIP between a pair |
+
+`service.check_tier_growth` enforces this (queue-time: caps; grow-time: the odd total), and
+`growthLimits` on the build tells the UI what to offer.
+
+What a growth run does differently:
+
+- **The balancer tier is reloaded, not restarted.** `grow_build` reopens the `loadbalancer` step
+  when control planes or balancers join; on a live cluster `lb.lb_apply_script(live=True)` writes
+  the new HAProxy backends and keepalived peers and runs `systemctl reload`, so the VIP and open
+  API connections survive. A new control plane enters rotation when its health check passes.
+- **Control planes join one at a time** through the existing `join_cp` phase, with fresh join
+  secrets (`kubeadm init phase upload-certs`) and an etcd `/readyz` gate between members.
+- **etcd is snapshotted first.** A cluster-level `etcd_backup` step (between `cni` and `join_cp`,
+  day two only, reopened by every control-plane growth) runs `etcdctl snapshot save` inside the
+  first control plane's etcd static pod, checks the file with `etcdutl snapshot status`, and moves
+  it to `/var/backups/kubesight/etcd/etcd-<UTC>.db` (dir 0700, file 0600; the newest 5 are kept).
+  Path, size, sha256 and time are recorded in `ClusterBuild.etcd_backups_json` (`etcdBackups`) and
+  shown on the receipt. If the snapshot fails, the run stops before any control plane joins;
+  Retry takes it again. The file stays on that node — copying it off is the operator's call.
+- **Preflight flips the VIP check** for a new balancer on a live cluster: the address must answer
+  from the new machine's segment (`preflight._node_checks`).
+- **VMware:** a grow plan may create and widen DRS keep-apart rules but is refused if it touches a
+  running VM. The OpenTofu hand-off acknowledges only warnings the approved plan itself chose (all
+  control planes on the one datastore picked); anything else waits for a person.
+
+Verified by `tests/test_cluster_zero_to_hero.py` (build Small → add MetalLB → add balancer + two
+control planes + worker → add Metrics Server, on both machine sources) and by a browser run of the
+same life against a scripted SSH stand-in. Not yet run against real machines.

@@ -14,7 +14,9 @@ import { formatClock, timeAgo } from "../../utils/clusterBuilder.js";
 import {
   ACTION_SIGN,
   ROLE_ONE,
+  ROLE_TITLE,
   destroyStance,
+  growthState,
   shapeLabel,
   planGroups,
   provisionRail,
@@ -439,17 +441,19 @@ export function ProvisionCard({
   // create / grow
   const grow = job.operation === "grow";
   if (job.status === "planned") {
-    const add = job.summary?.add || 0;
+    // The button names VMs; folders and keep-apart rules ride along in the plan.
+    const add = (job.summary?.resources || [])
+      .filter((r) => r.kind === "vm" && ["create", "replace"].includes(r.action)).length;
     return (
       <PlanReview
         job={job}
-        title={grow ? `Add ${add} worker${add === 1 ? "" : "s"} to ${build.name}` : `Plan for ${build.name}`}
+        title={grow ? `Add ${add} machine${add === 1 ? "" : "s"} to ${build.name}` : `Plan for ${build.name}`}
         lede={grow
-          ? "The existing VMs must stay untouched — the plan is refused if it would change one. The new workers join once they answer SSH."
+          ? "The existing VMs must stay untouched — the plan is refused if it would change one. The new machines join once they answer SSH."
           : "Applying runs exactly this plan. If anything in vCenter changes first, OpenTofu stops and asks for a new one."}
         applyLabel={grow
           ? `Create ${add} VM${add === 1 ? "" : "s"} and join them`
-          : add ? `Create ${add} resource${add === 1 ? "" : "s"}` : "Continue"}
+          : add ? `Create ${add} VM${add === 1 ? "" : "s"}` : "Continue"}
         onApply={canExecute ? () => act(() => applyProvisionPlan(build.id, job.id)) : null}
         onDiscard={canCreate ? () => act(() => discardProvisionJob(build.id, job.id)) : null}
         busy={busy}
@@ -505,17 +509,48 @@ export function ProvisionCard({
   return null;
 }
 
-/** Day two: ask OpenTofu for more workers. The card above takes over from the plan. */
+const GROW_ROLES = [
+  // [spec role, node role, payload key]
+  ["worker", "worker", "workers"],
+  ["controlPlane", "control_plane", "controlPlanes"],
+  ["loadbalancer", "loadbalancer", "loadBalancers"],
+];
+
+/** Day two: ask OpenTofu for more machines. The card above takes over from the plan. */
 export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClose }) {
   const spec = build.provisioning?.spec || {};
-  const [count, setCount] = useState(1);
-  const [size, setSize] = useState(() => ({ ...(spec.sizes?.worker || { cpu: 4, memoryGb: 8, diskGb: 100 }) }));
+  const growth = growthState(build);
+  const [counts, setCounts] = useState({ worker: 1, controlPlane: 0, loadbalancer: 0 });
+  const [sizes, setSizes] = useState(() => JSON.parse(JSON.stringify(spec.sizes || {})));
   const [busy, setBusy] = useState(false);
-  const workers = (spec.machines || []).filter((m) => m.role === "worker").length;
+  const total = counts.worker + counts.controlPlane + counts.loadbalancer;
+  // Control planes in steps of two, balancers up to the pair.
+  const options = {
+    worker: Array.from({ length: 21 }, (_, n) => n),
+    controlPlane: growth.controlPlane.allowed ? [0, 2] : [0],
+    loadbalancer: growth.loadbalancer.allowed
+      ? Array.from({ length: Math.max(0, 2 - growth.totals.loadbalancer) + 1 }, (_, n) => n)
+      : [0],
+  };
+  const reasons = {
+    worker: null,
+    controlPlane: growth.controlPlane.allowed ? null : growth.controlPlane.reason,
+    loadbalancer: growth.loadbalancer.allowed ? null : growth.loadbalancer.reason,
+  };
+  const step = (role, delta) => setCounts((current) => {
+    const list = options[role];
+    const index = Math.min(Math.max(list.indexOf(current[role]) + delta, 0), list.length - 1);
+    return { ...current, [role]: list[index] };
+  });
   const submit = async () => {
     setBusy(true);
     try {
-      await planMoreWorkers(build.id, { count, size });
+      await planMoreWorkers(build.id, {
+        workers: counts.worker,
+        controlPlanes: counts.controlPlane,
+        loadBalancers: counts.loadbalancer,
+        sizes,
+      });
       await onChanged();
       onClose();
     } catch (error) {
@@ -527,34 +562,64 @@ export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClo
   return (
     <div className="card sg-cb-card sg-cb-pv-panel">
       <div className="sg-cb-sect">
-        <h2>Add workers to {build.name}</h2>
+        <h2>Add machines to {build.name}</h2>
         <button className="btn-ghost btn-sm" type="button" onClick={onClose}>Close</button>
       </div>
       <p className="muted sg-cb-pv-lede">
-        New VMs are cloned like the first {workers} worker{workers === 1 ? "" : "s"}, in{" "}
-        <span className="sg-cb-mono">{spec.datastoreName}</span> on <span className="sg-cb-mono">{spec.networkName}</span>,
-        then join the cluster. Running workloads are not touched. Control planes and load balancers cannot be added this way.
+        New VMs are cloned from the same template, in <span className="sg-cb-mono">{spec.datastoreName}</span> on{" "}
+        <span className="sg-cb-mono">{spec.networkName}</span>, then join the running cluster. The plan is refused if it
+        would change a VM that already runs. New control planes join two at a time, one after another with an etcd
+        health check between them; a new balancer becomes keepalived&apos;s backup and both balancers are reloaded, not
+        restarted.
       </p>
-      <div className="sg-cb-pv-growrow">
-        <div className="sg-cb-field">
-          <span className="sg-cb-field-label">How many</span>
-          <div className="sg-cb-stepper" role="group" aria-label="Number of workers">
-            <button type="button" className="btn-ghost" aria-label="Fewer" onClick={() => setCount((n) => Math.max(1, n - 1))}>−</button>
-            <output>{count}</output>
-            <button type="button" className="btn-ghost" aria-label="More" onClick={() => setCount((n) => Math.min(20, n + 1))}>+</button>
-          </div>
-        </div>
-        {[["cpu", "vCPU"], ["memoryGb", "Memory GB"], ["diskGb", "Disk GB"]].map(([key, label]) => (
-          <div className="sg-cb-field" key={key}>
-            <label className="sg-cb-field-label" htmlFor={`grow-${key}`}>{label}</label>
-            <input id={`grow-${key}`} type="number" min={1} className="sg-cb-input sg-cb-mono sg-cb-pv-num"
-                   value={size[key]} onChange={(e) => setSize({ ...size, [key]: Number(e.target.value) })} />
-          </div>
-        ))}
+      <div className="table-wrap">
+        <table className="sg-cb-sizes">
+          <thead>
+            <tr><th>Role</th><th>Now</th><th>Add</th><th>vCPU</th><th>Memory GB</th><th>Disk GB</th></tr>
+          </thead>
+          <tbody>
+            {GROW_ROLES.map(([role, nodeRole]) => (
+              <tr key={role}>
+                <td><span className={`sg-cb-rolechip is-${role}`}><i />{ROLE_TITLE[role]}</span></td>
+                <td className="sg-cb-mono">{growth.running[nodeRole]}</td>
+                <td>
+                  {options[role].length > 1 ? (
+                    <div className="sg-cb-stepper" role="group" aria-label={`${ROLE_TITLE[role]} to add`}>
+                      <button type="button" className="btn-ghost" aria-label={`Fewer ${ROLE_TITLE[role].toLowerCase()}`}
+                              onClick={() => step(role, -1)}>−</button>
+                      <output>{counts[role]}</output>
+                      <button type="button" className="btn-ghost" aria-label={`More ${ROLE_TITLE[role].toLowerCase()}`}
+                              onClick={() => step(role, 1)}>+</button>
+                    </div>
+                  ) : <span className="muted sg-cb-growrole-note">{reasons[role] || "—"}</span>}
+                </td>
+                {["cpu", "memoryGb", "diskGb"].map((key) => (
+                  <td key={key}>
+                    <input type="number" min={1} className="sg-cb-input sg-cb-mono sg-cb-pv-num"
+                           aria-label={`${ROLE_TITLE[role]} ${key}`}
+                           disabled={!counts[role]}
+                           value={sizes[role]?.[key] ?? ""}
+                           onChange={(e) => setSizes({ ...sizes, [role]: { ...sizes[role], [key]: Number(e.target.value) } })} />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
+      {counts.controlPlane && growth.totals.loadbalancer + counts.loadbalancer < 2 ? (
+        <p className="sg-cb-topowarn">
+          ⚠ With one load balancer the API address still has a single point of failure. Add the second balancer too.
+        </p>
+      ) : null}
+      {counts.controlPlane ? (
+        <p className="muted sg-cb-growrole-note">
+          Before the new control planes join, an etcd snapshot is saved on the first control plane. If it cannot be taken, none of them is added.
+        </p>
+      ) : null}
       <div className="sg-cb-actions">
-        <button className="primary" type="button" disabled={busy || !canExecute} onClick={submit}>
-          {busy ? "Planning…" : "Preview plan"}
+        <button className="primary" type="button" disabled={busy || !canExecute || !total} onClick={submit}>
+          {busy ? "Planning…" : `Preview plan for ${total} VM${total === 1 ? "" : "s"}`}
         </button>
       </div>
     </div>

@@ -104,7 +104,7 @@ def serialize_step(step: ClusterBuildStep) -> Dict[str, Any]:
 
 
 _PHASE_ORDER = (
-    "base_prep", "loadbalancer", "pull_images", "init", "cni",
+    "base_prep", "loadbalancer", "pull_images", "init", "cni", "etcd_backup",
     "join_cp", "join_workers", "verify", "onboard", "addons", "workloads",
 )
 
@@ -161,12 +161,15 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
         # Growth reuses the phase machine, so it needs its own clock; the
         # original build's duration is banked and never recomputed.
         "growthStartedAt": _iso(build.growth_started_at),
+        "etcdBackups": list(build.etcd_backups_json or []),
         "buildSeconds": build.build_seconds,
         "pendingNodeCount": sum(
             1 for n in build.nodes
             if n.status in ("pending", "preflight_passed", "preflight_failed")
         ),
         "canGrow": bool(build.status == "completed" and build.result_cluster_id),
+        # What a running cluster may still take, so the UI offers only that.
+        "growthLimits": _growth_limits(build),
         "canDestroy": bool(
             (build.machine_source or "existing") == "vmware"
             and build.status not in ("building", "preflighting", "provisioning",
@@ -204,6 +207,34 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
         # source cluster.
         data["workloadSelection"] = build.workloads_json or None
     return data
+
+
+def _growth_limits(build: ClusterBuild) -> Dict[str, Any]:
+    counts = tier_counts(build)
+    cp_reason = None
+    if endpoint_is_a_control_plane(build):
+        cp_reason = "The API address is a control plane's own address."
+    elif counts["control_plane"] >= 5:
+        cp_reason = "Five control planes is the most."
+    lb_reason = None
+    if build.endpoint_mode != "managed_haproxy":
+        lb_reason = "KubeSight does not manage this cluster's load balancer."
+    elif counts["loadbalancer"] >= 2:
+        lb_reason = "Two load balancers is the most."
+    return {
+        "counts": counts,
+        "controlPlane": {
+            "allowed": cp_reason is None,
+            "reason": cp_reason,
+            # Always two at a time, to keep the etcd member count odd.
+            "step": 2,
+        },
+        "loadbalancer": {
+            "allowed": lb_reason is None,
+            "reason": lb_reason,
+            "max": max(0, 2 - counts["loadbalancer"]),
+        },
+    }
 
 
 def list_builds() -> List[Dict[str, Any]]:
@@ -1119,37 +1150,121 @@ def _require_growable(build: ClusterBuild) -> None:
         )
 
 
-def add_worker_nodes(build_id: int, nodes_payload: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Attach new worker machines to a finished build, ready for preflight.
+def tier_counts(build: ClusterBuild) -> Dict[str, int]:
+    """Machines per role that are, or are queued to become, part of the cluster."""
+    counts = {"control_plane": 0, "worker": 0, "loadbalancer": 0}
+    for node in build.nodes:
+        if node.status != "removed" and node.role in counts:
+            counts[node.role] += 1
+    return counts
 
-    Workers only. Growing the control plane changes etcd quorum arithmetic
-    (3 → 4 members is *worse* than 3) and adding a load balancer means
-    re-forming VRRP on a live VIP; neither is a safe side effect of an
-    "add machines" button, so both are refused with a reason.
+
+def endpoint_is_a_control_plane(build: ClusterBuild) -> bool:
+    """Is the API address simply one control plane's own address (a Lab)?"""
+    if build.endpoint_mode == "managed_haproxy":
+        return False
+    host = (build.control_plane_endpoint or "").rsplit(":", 1)[0].strip().lower()
+    return any(
+        host and host in {(n.address or "").lower(), (n.hostname or "").lower()}
+        for n in build.nodes
+        if n.role == "control_plane"
+    )
+
+
+def check_tier_growth(build: ClusterBuild, adding: Dict[str, int], *, final: bool = False) -> List[str]:
+    """Whether a running cluster may take these machines. Raises; returns warnings.
+
+    Workers: always. Control planes: only behind an address that is not one
+    of them, and to 3 or 5 in total — 2 or 4 etcd members tolerate no more
+    failures than one fewer, and lose quorum more easily. Load balancers: only
+    where KubeSight runs the balancer tier, and at most a keepalived pair.
+
+    ``final`` is the check before the phase machine runs: queued machines are
+    counted and the control-plane total must be odd. While machines are still
+    being queued, 2 of the 3 are allowed to sit in the queue.
+    """
+    counts = tier_counts(build)
+    totals = {role: counts[role] + int(adding.get(role, 0) or 0) for role in counts}
+    # What this growth adds: the machines asked for now plus any already queued.
+    adding = dict(adding)
+    for node in growth_nodes(build):
+        adding[node.role] = int(adding.get(node.role, 0) or 0) + 1
+    warnings: List[str] = []
+    if adding.get("control_plane"):
+        if endpoint_is_a_control_plane(build):
+            raise ValueError(
+                f"This cluster's API address ({build.control_plane_endpoint}) is "
+                "a control plane's own address, so every extra control plane "
+                "would still depend on that one machine. Clusters built with a "
+                "load balancer (Small, Standard HA) can grow their control plane."
+            )
+        if totals["control_plane"] > 5:
+            raise ValueError("Five control planes is the most etcd should run.")
+        if build.endpoint_mode != "managed_haproxy":
+            warnings.append(
+                f"The API address {build.control_plane_endpoint} is not a load "
+                "balancer KubeSight runs: add the new control planes to whatever "
+                "serves that address yourself, or they take no API traffic."
+            )
+    if final and totals["control_plane"] not in (1, 3, 5):
+        raise ValueError(
+            f"That makes {totals['control_plane']} control planes. Add them two at "
+            "a time — 1 to 3, or 3 to 5: an even number of etcd members survives "
+            "no more failures than one fewer, and loses quorum more easily."
+        )
+    if adding.get("loadbalancer"):
+        if build.endpoint_mode != "managed_haproxy":
+            raise ValueError(
+                "Only clusters whose API address KubeSight manages (HAProxy and "
+                "keepalived) can take another load balancer."
+            )
+        if totals["loadbalancer"] > 2:
+            raise ValueError(
+                "Two load balancers is the most: keepalived floats one address "
+                "between a pair."
+            )
+    if (
+        build.endpoint_mode == "managed_haproxy"
+        and totals["control_plane"] > 1
+        and totals["loadbalancer"] < 2
+    ):
+        warnings.append(
+            "With one load balancer the API address still has a single point "
+            "of failure. Add the second balancer too."
+        )
+    return warnings
+
+
+def add_worker_nodes(build_id: int, nodes_payload: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Attach new machines to a finished build, ready for preflight.
+
+    Workers, control planes and load balancers, held to ``check_tier_growth``.
+    (The name predates control-plane and balancer growth.)
     """
     build = get_build(build_id)
     _require_growable(build)
     if not nodes_payload:
         raise ValueError("Select at least one machine to add.")
 
+    adding = {"control_plane": 0, "worker": 0, "loadbalancer": 0}
     for payload in nodes_payload:
         role = str(payload.get("role") or "worker").strip() or "worker"
-        if role != "worker":
-            raise ValueError(
-                "Only workers can be added to a running cluster. Changing the "
-                "control-plane or load-balancer tier of a live cluster is a "
-                "separate operation, because it re-forms etcd quorum or the VIP."
-            )
+        if role not in adding:
+            raise ValueError(f"node role must be one of: {', '.join(sorted(adding))}.")
+        adding[role] += 1
+    check_tier_growth(build, adding)
 
     inventory_by_moid = _resolve_vsphere_inventory(build, nodes_payload)
     existing_addresses = {node.address for node in build.nodes}
     existing_moids = {node.vsphere_vm_moid for node in build.nodes if node.vsphere_vm_moid}
     next_position = max((node.position for node in build.nodes), default=-1) + 1
 
+    existing_names = {node.hostname for node in build.nodes if node.hostname}
     added: List[ClusterBuildNode] = []
     for offset, payload in enumerate(nodes_payload):
+        role = str(payload.get("role") or "worker").strip() or "worker"
         node = _node_from_payload(
-            build, {**payload, "role": "worker"}, next_position + offset, inventory_by_moid
+            build, {**payload, "role": role}, next_position + offset, inventory_by_moid
         )
         if node.address in existing_addresses:
             raise ValueError(
@@ -1159,6 +1274,13 @@ def add_worker_nodes(build_id: int, nodes_payload: List[Dict[str, Any]]) -> Dict
             raise ValueError(
                 f"{node.hostname or node.address} is already part of this cluster."
             )
+        if node.hostname and node.hostname in existing_names:
+            raise ValueError(
+                f"{node.hostname} is already a node name in this cluster; "
+                "Kubernetes node names must be unique."
+            )
+        if node.hostname:
+            existing_names.add(node.hostname)
         existing_addresses.add(node.address)
         if node.vsphere_vm_moid:
             existing_moids.add(node.vsphere_vm_moid)
@@ -1198,6 +1320,7 @@ def preflight_growth(build_id: int) -> Dict[str, Any]:
     pending = growth_nodes(build)
     if not pending:
         raise ValueError("Add machines before running preflight.")
+    tier_warnings = check_tier_growth(build, {}, final=True)
 
     profile_row = (
         db.session.get(BuildProfile, build.build_profile_id)
@@ -1231,7 +1354,7 @@ def preflight_growth(build_id: int) -> Dict[str, Any]:
         safe_error = scrub(str(exc))
         raise ValueError(f"Preflight failed to run: {safe_error}") from exc
 
-    merged["topologyWarnings"] = []
+    merged["topologyWarnings"] = tier_warnings
     merged["buildChecks"] = build_checks
     db.session.commit()
     return merged
@@ -1251,6 +1374,8 @@ def grow_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
         raise ValueError(
             "Run preflight on the new machines before growing the cluster."
         )
+    # The whole new shape, now that nothing more is being queued.
+    check_tier_growth(build, {}, final=True)
     failed = [n for n in pending if n.status == "preflight_failed"]
     if failed:
         names = ", ".join(n.hostname or n.address for n in failed)
@@ -1272,6 +1397,17 @@ def grow_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
     # Reopen verification so the cluster is re-checked with the new machines in
     # it. Everything else that already completed stays completed and is skipped.
     reopen = ["verify"]
+    new_roles = {node.role for node in pending}
+    if build.endpoint_mode == "managed_haproxy" and new_roles & {"control_plane", "loadbalancer"}:
+        # Every balancer must list every control plane, and keepalived peers
+        # must know each other: the balancer tier is reconfigured (reloaded,
+        # not restarted — see lb.lb_apply_script) before anything joins.
+        reopen.append("loadbalancer")
+    if "control_plane" in new_roles:
+        # A fresh snapshot for every control-plane growth, not the last one's.
+        reopen.append("etcd_backup")
+    if sum(1 for n in build.nodes if n.role == "control_plane") > 1:
+        build.topology_type = "stacked_ha"
     build.addons_json = _stamp_installed_addons(build)
     if any(item.get("id") == "metrics-server" for item in build.addons_json):
         # The kubelet serving-certificate approver names every machine; the

@@ -8,7 +8,7 @@
 import { parseApiTime } from "../lib/apiTime";
 
 export const PHASE_ORDER = [
-  "base_prep", "loadbalancer", "pull_images", "init", "cni",
+  "base_prep", "loadbalancer", "pull_images", "init", "cni", "etcd_backup",
   "join_cp", "join_workers", "verify", "onboard", "addons", "workloads",
 ];
 
@@ -18,6 +18,7 @@ export const PHASE_LABELS = {
   pull_images: "Image pull",
   init: "kubeadm init",
   cni: "CNI install",
+  etcd_backup: "etcd backup",
   join_cp: "Join control planes",
   join_workers: "Join workers",
   verify: "Cluster verification",
@@ -33,6 +34,7 @@ export const PHASE_SHORT = {
   pull_images: "Image pull",
   init: "kubeadm init",
   cni: "CNI",
+  etcd_backup: "etcd backup",
   join_cp: "Join control planes",
   join_workers: "Join workers",
   verify: "Verify",
@@ -47,6 +49,7 @@ export const PHASE_NOTES = {
   pull_images: "fails early if the registry is missing anything",
   init: "through the stable endpoint — it goes into the certs",
   cni: "network plugin, pod CIDR applied",
+  etcd_backup: "snapshot on the first control plane before new ones join",
   join_cp: "one at a time, etcd quorum checked between",
   join_workers: "in parallel",
   verify: "nodes Ready · CoreDNS · etcd · smoke pod",
@@ -175,6 +178,10 @@ export function expectedPhases(build) {
   return PHASE_ORDER.filter((phase) => {
     if (phase === "loadbalancer") return build?.endpointMode === "managed_haproxy";
     if (phase === "join_cp") return (build?.nodeCounts?.controlPlane || 0) > 1;
+    // Day two only: taken before control planes join a running cluster.
+    if (phase === "etcd_backup") {
+      return (build?.steps || []).some((step) => step.phase === "etcd_backup");
+    }
     if (phase === "join_workers") return (build?.nodeCounts?.worker || 0) > 0;
     if (phase === "addons") return (build?.addons || []).length > 0;
     if (phase === "workloads") return (build?.workloads?.itemCount || 0) > 0;
@@ -578,8 +585,17 @@ export function preflightBlueprint(basics, preflightResult, hosts = {}) {
 }
 
 /** Blueprint for a persisted build — the same drawing, now reporting reality. */
+const QUEUED_STATUSES = new Set(["pending", "preflight_passed", "preflight_failed"]);
+
 export function buildBlueprint(build) {
-  const targets = tierTargets(build || {});
+  // A running cluster's tiers are whatever it has now — it may have grown past
+  // the shape it was built as — so its targets are its own machine counts.
+  const targets = build?.resultClusterId
+    ? (build.nodes || []).reduce((acc, node) => {
+      if (node.status !== "removed" && acc[node.role] !== undefined) acc[node.role] += 1;
+      return acc;
+    }, { loadbalancer: 0, control_plane: 0, worker: 0 })
+    : tierTargets(build || {});
   const steps = build?.steps || [];
   const runningNodeIds = new Set(
     steps.filter((step) => step.status === "running" && step.nodeId).map((step) => step.nodeId)
@@ -595,13 +611,15 @@ export function buildBlueprint(build) {
   const tiers = { loadbalancer: [], control_plane: [], worker: [] };
   (build?.nodes || []).forEach((node) => {
     if (!tiers[node.role]) return;
-    const joined = completed || JOINED_STATUSES.has(node.status);
+    // Machines queued to join a running cluster have not joined it yet.
+    const queued = Boolean(build?.resultClusterId) && QUEUED_STATUSES.has(node.status);
+    const joined = (completed && !queued) || JOINED_STATUSES.has(node.status);
     const failed = node.status === "failed";
     const live = !joined && !failed && runningNodeIds.has(node.id);
     // Once a build has begun, a machine nobody has touched must not wear its
     // role colour — a red control-plane box reads as a problem, and the only
     // thing separating it from a failed one would be a 17px badge.
-    const untouched = started && node.status === "pending";
+    const untouched = (started && node.status === "pending") || queued;
     const state = failed
       ? "failed"
       : joined ? "joined" : live ? "live" : untouched ? "waiting" : "set";

@@ -283,6 +283,14 @@
 
 .sg-cb-pv-usebtn.btn-ghost { align-self: flex-start; }
 
+/* Day two: which role the queued machines take */
+.sg-cb-growrole { display: flex; flex-direction: column; gap: 6px; }
+.sg-cb-growrole .sg-cb-seg button[disabled] { opacity: .45; cursor: not-allowed; }
+.sg-cb-growrole-note { font-size: 12px; line-height: 1.45; }
+.sg-cb-growrole-pill { margin-left: 8px; vertical-align: 1px; }
+.sg-cb-vm.is-picked.is-control_plane { border-color: var(--accent); }
+.sg-cb-vm.is-picked.is-loadbalancer { border-color: var(--text-muted); }
+
 /* A destroyed build has no blueprint to stand beside. */
 .sg-cb-split.is-solo { grid-template-columns: minmax(0, 1fr); }
 

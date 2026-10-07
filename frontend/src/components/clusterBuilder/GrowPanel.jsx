@@ -1,16 +1,21 @@
-/** Day two: adding workers to a cluster that is already running.
+/** Day two: adding machines to a cluster that is already running.
  *
  *  Deliberately the same three moves as the wizard — pick machines, preflight
  *  them, acknowledge what it found — because it is the same decision, and the
  *  phase machine it drives is literally the same one. What differs is the
- *  scope: only the new machines are probed and prepared, and only workers are
- *  offered, because changing a live cluster's control-plane or load-balancer
- *  tier re-forms etcd quorum or the VIP.
+ *  scope: only the new machines are probed and prepared.
+ *
+ *  Workers can always be added. Control planes join two at a time (1 → 3,
+ *  3 → 5) so etcd keeps an odd number of members, and only behind an address
+ *  that is not a control plane's own. A second load balancer joins the
+ *  keepalived pair; the running one keeps the VIP, and both are reloaded in
+ *  place rather than restarted.
  */
 
 import { useEffect, useMemo, useState } from "react";
 import { StatusPill } from "./common.jsx";
 import { groupChecks } from "../../utils/clusterBuilder.js";
+import { GROW_ROLE_LABELS, growthState } from "../../utils/clusterProvisioning.js";
 import {
   addClusterBuildNodes,
   listVSphereVms,
@@ -32,6 +37,13 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
   const [preflight, setPreflight] = useState(null);
   const [acked, setAcked] = useState(false);
   const [error, setError] = useState("");
+  const [role, setRole] = useState("worker");
+  const growth = growthState(build);
+  const roleAllowed = {
+    worker: true,
+    control_plane: growth.controlPlane.allowed,
+    loadbalancer: growth.loadbalancer.allowed,
+  };
 
   const pending = (build.nodes || []).filter((node) => PENDING_STATUSES.has(node.status));
   const inCluster = useMemo(
@@ -90,13 +102,13 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
 
   const addPicked = () => {
     const nodes = Object.entries(picked).map(([moid, entry]) => ({
-      role: "worker",
+      role,
       vsphereVmMoid: moid,
       address: entry.address || undefined,
     }));
     if (manual.address.trim()) {
       nodes.push({
-        role: "worker",
+        role,
         hostname: manual.hostname.trim() || undefined,
         address: manual.address.trim(),
       });
@@ -119,7 +131,7 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
   return (
     <div className="card sg-cb-grow">
       <div className="sg-cb-sect">
-        <h2>Add worker machines</h2>
+        <h2>Add machines</h2>
         <span className="sg-cb-sect-right">
           <button className="btn-ghost btn-sm" type="button" onClick={onClose}>Close</button>
         </span>
@@ -129,9 +141,40 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
       <p className="muted sg-cb-grow-lede">
         The same preparation and join phases this cluster was built with run again,
         scoped to the new machines. Nothing that already joined is touched, and the
-        cluster keeps serving throughout. Workers only — changing the control-plane
-        or load-balancer tier of a live cluster re-forms etcd quorum or the VIP.
+        cluster keeps serving throughout.
       </p>
+
+      <div className="sg-cb-growrole">
+        <span className="sg-cb-field-label">Add as</span>
+        <div className="sg-cb-seg" role="group" aria-label="Role for the machines you queue">
+          {Object.entries(GROW_ROLE_LABELS).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              aria-pressed={role === key}
+              disabled={!roleAllowed[key]}
+              title={roleAllowed[key] ? "" : (key === "control_plane"
+                ? growth.controlPlane.reason : growth.loadbalancer.reason) || ""}
+              onClick={() => setRole(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <span className="muted sg-cb-growrole-note">
+          {role === "control_plane"
+            ? `Control planes join two at a time (now ${growth.running.control_plane}), one after another with an etcd health check between them. Each joins etcd as a non-voting learner and only gets a vote once it has caught up, so a join that fails leaves the cluster as it was. Before the first one joins, an etcd snapshot is saved on the first control plane — if that fails, none is added.`
+            : role === "loadbalancer"
+              ? "The new balancer becomes keepalived's backup; the running one keeps the cluster's address. Both are reloaded in place, not restarted."
+              : "Workers join in parallel and start taking pods once Ready."}
+        </span>
+        {!growth.controlPlane.allowed && growth.controlPlane.reason ? (
+          <span className="muted sg-cb-growrole-note">Control planes: {growth.controlPlane.reason}</span>
+        ) : null}
+        {!growth.loadbalancer.allowed && growth.loadbalancer.reason ? (
+          <span className="muted sg-cb-growrole-note">Load balancers: {growth.loadbalancer.reason}</span>
+        ) : null}
+      </div>
 
       {pending.length ? (
         <div className="sg-cb-grow-queue">
@@ -142,7 +185,10 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
           {pending.map((node) => (
             <div className="sg-cb-entry" key={node.id}>
               <span className="sg-cb-entry-id">
-                <span className="en">{node.hostname || node.vsphereVmName || node.address}</span>
+                <span className="en">
+                  {node.hostname || node.vsphereVmName || node.address}
+                  <span className="sg-cb-pill is-muted sg-cb-growrole-pill">{GROW_ROLE_LABELS[node.role] || node.role}</span>
+                </span>
                 <span className="ea sg-cb-mono">
                   {node.address}{node.vsphereHost ? ` · ${node.vsphereHost}` : ""}
                 </span>
@@ -185,7 +231,7 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
               const selection = picked[vm.moid];
               const toolsOk = vm.toolsRunState === "RUNNING";
               return (
-                <div key={vm.moid} className={`sg-cb-vm ${selection ? "is-picked is-worker" : ""}`}>
+                <div key={vm.moid} className={`sg-cb-vm ${selection ? `is-picked is-${role}` : ""}`}>
                   <label className="sg-cb-vm-id sg-cb-grow-pick">
                     <input
                       type="checkbox"
@@ -269,18 +315,23 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
           onClick={addPicked}
         >
           {pickedCount || manual.address.trim()
-            ? `Queue ${pickedCount + (manual.address.trim() ? 1 : 0)} machine${
+            ? `Queue ${pickedCount + (manual.address.trim() ? 1 : 0)} ${
+              GROW_ROLE_LABELS[role].toLowerCase()}${
               pickedCount + (manual.address.trim() ? 1 : 0) === 1 ? "" : "s"}`
             : "Queue machines"}
         </button>
       </div>
+
+      {pending.length && growth.oddProblem ? (
+        <p className="sg-cb-grow-error" role="status">{growth.oddProblem}</p>
+      ) : null}
 
       {pending.length ? (
         <div className="sg-cb-grow-run">
           <button
             className="btn-outline"
             type="button"
-            disabled={busy || !canExecute}
+            disabled={busy || !canExecute || Boolean(growth.oddProblem)}
             onClick={() => run(
               () => preflightClusterGrowth(build.id),
               (result) => { setPreflight(result); setAcked(false); onChanged(); }
@@ -299,6 +350,10 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
           ) : null}
         </div>
       ) : null}
+
+      {(preflight?.topologyWarnings || []).map((warning) => (
+        <p key={warning} className="sg-cb-topowarn">⚠ {warning}</p>
+      ))}
 
       {grouped?.attention.length ? (
         <div className="sg-cb-grow-checks">
