@@ -691,6 +691,18 @@ def apply_yaml(
         )
         return None, image_err, 422
 
+    # The promotion ladder: into an enforcing environment only images that
+    # passed the previous one. An approved change (approval_context) was
+    # checked when it was staged and again by the executor — and an approved
+    # promotion exception must not be refused here.
+    promotion = None
+    if approval_context is None:
+        from .promotion_service import gate_yaml
+
+        refusal, promotion = gate_yaml(cluster_id, namespace, yaml_content, user=user, path="deploy")
+        if refusal:
+            return None, refusal[0], refusal[1]
+
     # The cluster's approval rule. Checked after validation so only a manifest
     # this user could apply is ever queued: without a live approved request, the
     # change is sent for approval as a change bundle and applied automatically
@@ -729,7 +741,10 @@ def apply_yaml(
                 "result": "success",
             },
         )
-        return {"applied": True, "output": output, "imageChecks": image_checks, **(validation or {})}, None, 200
+        data = {"applied": True, "output": output, "imageChecks": image_checks, **(validation or {})}
+        if promotion and promotion.get("warning"):
+            data["promotionWarning"] = promotion.get("message")
+        return data, None, 200
     except K8sCommandError as exc:
         log_audit(
             "deployment_failed",

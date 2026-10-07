@@ -44,6 +44,7 @@ from . import ci_setup  # noqa: F401,E402  (ci domain: creating services and sta
 from . import clusters  # noqa: F401,E402
 from . import workloads  # noqa: F401,E402
 from . import deploys  # noqa: F401,E402
+from . import promotions  # noqa: F401,E402  (deploys domain: the environment ladder)
 from . import observability  # noqa: F401,E402
 from . import apps  # noqa: F401,E402
 from . import platform  # noqa: F401,E402

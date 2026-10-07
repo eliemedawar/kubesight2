@@ -90,6 +90,8 @@ export const TAB_VALUES = {
   // pages/ChangeBundlesPage.jsx:243 — the visible set is RBAC-filtered, the
   // page falls back when a tab is not available to this user
   changeBundles: ["mine", "pending", "all"],
+  // pages/PromotionsPage.jsx — the ladder board, its activity, its setup
+  promotions: ["timetable", "applications", "releases", "ladder"],
   // lib/settingsSections.js — the preference sections, plus the Administration
   // rows that are PANELS of this page. The remaining Administration rows are
   // `link:` navigations to other pages and are not sections of this one.
@@ -151,6 +153,16 @@ export const ROUTES = [
     path: "/my-requests/:tab?",
     params: { tab: { values: TAB_VALUES.requests } },
     defaults: { tab: "active" },
+  },
+  {
+    key: "promotions",
+    path: "/promotions/:tab?",
+    params: { tab: { values: TAB_VALUES.promotions } },
+    defaults: { tab: "timetable" },
+    // dep = the selected departure/release on the timetable; track = the
+    // application in "Where's my application?"; q = search; app = the
+    // application panel open over the page (its repository)
+    query: ["dep", "track", "q", "app"],
   },
   {
     key: "changeBundles",

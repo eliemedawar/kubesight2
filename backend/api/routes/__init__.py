@@ -42,6 +42,7 @@ from .ci_webhooks import ci_webhooks_bp
 from .ci_shared_pipelines import ci_shared_bp
 from .mcp import mcp_bp
 from .ci_worker import ci_worker_bp
+from .promotions import promotions_bp
 
 
 def register_blueprints(app: Flask) -> None:
@@ -88,3 +89,4 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(ci_webhooks_bp)
     app.register_blueprint(ci_shared_bp)
     app.register_blueprint(mcp_bp)
+    app.register_blueprint(promotions_bp)

@@ -16,6 +16,7 @@ import { formatAccessError, isAccessDeniedError } from "../../utils/authz.js";
 import HelmDeployForm from "./HelmDeployForm.jsx";
 import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 import NamespaceSelect from "./NamespaceSelect.jsx";
+import PromotionBlockedNotice, { promotionRefusal } from "../promotions/PromotionBlockedNotice.jsx";
 import { clusterOptionLabel, normalizeClusterOptions } from "../../utils/clusterOptions.js";
 
 function describeDeployDiffError(err) {
@@ -126,6 +127,8 @@ export default function AddAppModal({
   const [error, setError] = useState("");
   // Set when the change was sent for approval instead of applied.
   const [queuedMessage, setQueuedMessage] = useState("");
+  // The promotion ladder refused the last apply: { verdict, changes }.
+  const [promotionBlock, setPromotionBlock] = useState(null);
   // Typed "APPLY <namespace>" — the server checks the same phrase.
   const [confirmation, setConfirmation] = useState("");
 
@@ -140,6 +143,7 @@ export default function AddAppModal({
       setPreview(null);
       setDeployDiff(null);
       setError("");
+      setPromotionBlock(null);
       setConfirmation("");
     }
   }, [open]);
@@ -288,6 +292,7 @@ export default function AddAppModal({
   const applyYaml = async () => {
     setBusy(true);
     setError("");
+    setPromotionBlock(null);
     try {
       const result = await applyDeployYaml({
         clusterId: yamlForm.clusterId,
@@ -304,7 +309,15 @@ export default function AddAppModal({
       onSuccess?.();
       onClose();
     } catch (err) {
-      setError(err.message || "Apply failed");
+      const verdict = promotionRefusal(err);
+      if (verdict) {
+        setPromotionBlock({
+          verdict,
+          changes: [{ clusterId: yamlForm.clusterId, namespace: yamlForm.namespace, yaml: yamlForm.yaml }],
+        });
+      } else {
+        setError(err.message || "Apply failed");
+      }
     } finally {
       setBusy(false);
     }
@@ -335,6 +348,7 @@ export default function AddAppModal({
   const applyImage = async () => {
     setBusy(true);
     setError("");
+    setPromotionBlock(null);
     try {
       const result = await applyDeployImage({
         ...imageForm,
@@ -349,7 +363,17 @@ export default function AddAppModal({
       onSuccess?.();
       onClose();
     } catch (err) {
-      setError(err.message || "Apply failed");
+      const verdict = promotionRefusal(err);
+      if (verdict) {
+        setPromotionBlock({
+          verdict,
+          changes: preview?.yaml
+            ? [{ clusterId: imageForm.clusterId, namespace: imageForm.namespace, yaml: preview.yaml }]
+            : [],
+        });
+      } else {
+        setError(err.message || "Apply failed");
+      }
     } finally {
       setBusy(false);
     }
@@ -385,6 +409,13 @@ export default function AddAppModal({
 
         {error ? <p className="banner-message error">{error}</p> : null}
         {queuedMessage ? <p className="banner-message" role="status">{queuedMessage}</p> : null}
+        {promotionBlock ? (
+          <PromotionBlockedNotice
+            verdict={promotionBlock.verdict}
+            changes={promotionBlock.changes}
+            onRequested={(data) => setQueuedMessage(data.message)}
+          />
+        ) : null}
 
         {step === "choose" ? (
           <div className="add-app-choices">

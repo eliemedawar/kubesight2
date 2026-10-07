@@ -1295,6 +1295,11 @@ class ChangeBundle(db.Model):
     approved_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     approved_at = db.Column(db.DateTime(timezone=True), nullable=True)
     rejection_reason = db.Column(db.Text, nullable=True)
+    # A deploy the promotion ladder refused, sent to approvers as an exception:
+    # {"reason", "environment", "previousEnvironment", "images", "requestedBy"}.
+    # Such a bundle needs at least one approval even on a cluster that needs
+    # none, and its approval is what lets the deploy skip the ladder.
+    promotion_exception = db.Column(db.JSON, nullable=True)
     execution_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     execution_finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
     created_at = db.Column(
@@ -2998,3 +3003,15 @@ from .models_ticket_agent import (  # noqa: E402,F401
 
 # Upgrade Center jobs — persisted so a restart cannot lose an upgrade's record.
 from .models_upgrade import UpgradeJob  # noqa: E402,F401
+
+# Promotion rules — the environment ladder, its namespace bindings and the
+# ledger of images that passed each environment.
+from .models_promotion import (  # noqa: E402,F401
+    PromotionBinding,
+    PromotionDeparture,
+    PromotionEnvironment,
+    PromotionEvent,
+    PromotionPolicy,
+    PromotionRecord,
+    PromotionRelease,
+)

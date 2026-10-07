@@ -92,6 +92,14 @@ export const NAV_PAGES = [
     permission: "deployment_requests:request",
     section: "Inventory",
   },
+  // The environment ladder (Dev → SIT → UAT → Pre-prod): what runs where, and
+  // promoting the image that passed one environment to the next.
+  {
+    key: "promotions",
+    label: "Promotions",
+    permission: "promotions:view",
+    section: "Inventory",
+  },
   {
     key: "changeBundles",
     label: "Change Bundles",

@@ -82,6 +82,12 @@ export const NAV_ICONS = {
       <path d="M12 18h.01" />
     </svg>
   ),
+  promotions: (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 17h4v-4h4V9h4V5h2" />
+      <path d="m14.5 2.5 2.5 2.5-2.5 2.5" />
+    </svg>
+  ),
   pipelines: (
     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <circle cx="4.5" cy="5" r="2" />

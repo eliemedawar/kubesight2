@@ -105,6 +105,18 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optio
         if blocking:
             return image_err, "image"
 
+    if mode in ("apply", "helm"):
+        # The promotion ladder, again: an image that passed the previous
+        # environment when this was staged still has (the ledger only grows),
+        # but a bundle staged before the environment switched to enforce has
+        # not been checked yet. An exception bundle is exempt — its approval
+        # is the exception.
+        from .change_bundle_service import promotion_refusal
+
+        refusal = promotion_refusal(item)
+        if refusal:
+            return refusal, "promotion"
+
     invalid = _target_name_error(item, mode)
     if invalid:
         return invalid, "validation"
@@ -236,6 +248,45 @@ def _apply_item(item: ChangeBundleItem, mode: str) -> str:
     raise K8sCommandError(f"Unknown execution mode: {mode}")
 
 
+def _after_applied_for_promotion(bundle: ChangeBundle, item: ChangeBundleItem, mode: str) -> None:
+    """Promotion bookkeeping once an item is applied. Never raises.
+
+    An exception bundle's deploy goes in the activity feed. On a mock cluster
+    there is no rollout to watch, so the mock ladder moves to the new image
+    here (a real cluster's rollout watch records it once it is healthy)."""
+    if mode != "apply":
+        return
+    try:
+        from . import promotion_service
+
+        images = promotion_service.images_in_yaml(item.yaml_preview or "")
+        if bundle.promotion_exception:
+            promotion_service.record_event(
+                "exception_applied",
+                None,
+                path="bundle",
+                actor=(bundle.promotion_exception or {}).get("requestedBy"),
+                cluster_id=item.cluster_id,
+                namespace=item.namespace,
+                workload=item.resource_name,
+                images=[{"image": i, "status": "exception"} for i in images],
+                message=(bundle.promotion_exception or {}).get("reason"),
+                bundle_id=bundle.id,
+                environment=promotion_service.environment_for(item.cluster_id, item.namespace),
+            )
+        if not should_use_real_k8s(item.cluster_id) and item.resource_name and images:
+            from . import promotion_mock
+
+            if promotion_mock.get(item.cluster_id, item.namespace, item.resource_name) is not None:
+                promotion_mock.set_image(item.cluster_id, item.namespace, item.resource_name, images[0])
+                promotion_service.record_rollout(
+                    item.cluster_id, item.namespace, images,
+                    kind=item.resource_kind, name=item.resource_name, source="bundle",
+                )
+    except Exception:  # noqa: BLE001
+        logger.exception("Promotion bookkeeping failed for bundle item #%s", item.id)
+
+
 def _record_helm_catalog(item: ChangeBundleItem) -> None:
     """After a queued Helm install/upgrade ran, register it in the App Catalog
     as the direct route would have (best-effort, as the requester)."""
@@ -320,6 +371,7 @@ def execute_bundle(bundle: ChangeBundle) -> str:
                 item.execution_result["diff"] = diff_text
             db.session.commit()
             _audit_item(ACTION_ITEM_APPLIED, bundle, item, {"mode": mode})
+            _after_applied_for_promotion(bundle, item, mode)
         except (K8sCommandError, Exception) as exc:  # noqa: BLE001 — record any failure
             failed += 1
             item.status = "failed"
@@ -557,6 +609,21 @@ def _finish_watch(watch, status: str, detail: str) -> None:
     watch.status = status
     watch.detail = detail
     watch.finished_at = _now()
+    if status == "healthy" and watch.item_id:
+        # Healthy on the new images: they passed this environment.
+        item = db.session.get(ChangeBundleItem, watch.item_id)
+        if item is not None:
+            from . import promotion_service
+
+            promotion_service.record_rollout(
+                watch.cluster_id,
+                watch.namespace,
+                promotion_service.images_in_yaml(item.yaml_preview or ""),
+                kind="Deployment",
+                name=watch.deployment_name,
+                source="bundle",
+                commit=False,
+            )
     log_audit(
         ACTION_ROLLOUT_HEALTHY if status == "healthy" else ACTION_ROLLOUT_FAILED,
         actor=None,

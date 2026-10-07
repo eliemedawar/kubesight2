@@ -1,0 +1,1864 @@
+/*
+ * Promotions → Timetable. Scoped under .pr-root (the page).
+ *
+ * Status colour is strict: green promoted/healthy, blue boarding/ready/in
+ * progress, amber awaiting approval/cut-off risk, red failed/blocked/refused.
+ * Cardinal stays the brand and the primary button only. The departures board
+ * is a physical object and keeps its dark look in both themes. Type is set a
+ * notch larger than the rest of the app: people watch this all day.
+ */
+
+.pr-root {
+  --tt-go: #1f5fd1;
+  --tt-go-soft: rgba(31, 95, 209, 0.1);
+  --tt-board: #121016;
+  --tt-board-2: #1b1820;
+  --tt-tile: #24212a;
+  --tt-tile-hi: #2c2833;
+  --tt-board-line: #2e2a35;
+  --tt-flap: #f4efe6;
+  --tt-flap-dim: #a39cad;
+  --tt-flap-ok: #4fd08d;
+  --tt-flap-go: #6aaeff;
+  --tt-flap-wait: #f2b33d;
+  --tt-flap-bad: #ff6b6b;
+}
+
+:root[data-theme="dark"] .pr-root {
+  --tt-go: #6aaeff;
+  --tt-go-soft: rgba(106, 174, 255, 0.15);
+  --tt-board: #0a090c;
+  --tt-board-2: #131117;
+  --tt-tile: #1c1a21;
+  --tt-tile-hi: #232029;
+  --tt-board-line: #26222c;
+}
+
+.pr-root .tt-root {
+  display: flex;
+  flex-direction: column;
+  gap: 1.15rem;
+}
+
+.pr-root .tt-eyebrow {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.pr-root .tt-link {
+  min-height: 0;
+  padding: 0;
+  color: var(--accent-strong);
+  background: none;
+  border: 0;
+  font-size: 0.86rem;
+  font-weight: 650;
+  text-decoration: underline;
+  text-decoration-color: var(--accent-border);
+  text-underline-offset: 2px;
+}
+
+.pr-root .tt-link:hover {
+  background: none;
+  color: var(--accent-hover);
+}
+
+.pr-root .tt-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.88rem;
+  text-decoration: none;
+}
+
+.pr-root .tt-btn svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.pr-root .pr-tab-count.is-wait {
+  color: #fff;
+  background: var(--warn);
+}
+
+.pr-root .tt-clock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.1;
+}
+
+.pr-root .tt-clock b {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 1.35rem;
+}
+
+.pr-root .tt-clock span {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+/* ── The environment line ─────────────────────────────────────────── */
+
+.pr-root .tt-line {
+  padding: 1.15rem 1.4rem 1.05rem;
+  overflow-x: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+}
+
+.pr-root .tt-line-track {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--tt-stations, 4), minmax(11rem, 1fr));
+  min-width: calc(var(--tt-stations, 4) * 11.5rem);
+}
+
+.pr-root .tt-line-track::before {
+  content: "";
+  position: absolute;
+  left: 1.05rem;
+  right: calc(100% / var(--tt-stations, 4) - 1.05rem);
+  top: 0.95rem;
+  height: 6px;
+  background: var(--text-strong);
+  border-radius: 6px;
+}
+
+.pr-root .tt-stn {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.pr-root .tt-stn-dot {
+  position: relative;
+  z-index: 1;
+  width: 2.1rem;
+  height: 2.1rem;
+  background: var(--bg-panel);
+  border: 6px solid var(--text-strong);
+  border-radius: 50%;
+}
+
+.pr-root .tt-stn h3 {
+  margin: 0.5rem 0 0;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.pr-root .tt-stn small {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.pr-root .tt-stn small em {
+  color: var(--warn);
+  font-style: normal;
+  font-weight: 650;
+}
+
+.pr-root .tt-mode {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 0.25rem;
+  padding: 0.06rem 0.45rem;
+  color: var(--bg-panel);
+  background: var(--text-strong);
+  border-radius: var(--radius-chip);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.pr-root .tt-mode svg {
+  width: 0.72rem;
+  height: 0.72rem;
+}
+
+.pr-root .tt-mode--entry {
+  color: var(--text-subtle);
+  background: var(--bg-interactive);
+}
+
+.pr-root .tt-mode--warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.pr-root .tt-mode--off {
+  color: var(--text-muted);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.pr-root .tt-next {
+  position: absolute;
+  top: -0.05rem;
+  left: 2.6rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 0;
+  padding: 0.2rem 0.65rem 0.2rem 0.45rem;
+  color: var(--text-main);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.pr-root .tt-next:hover {
+  background: var(--bg-panel);
+  border-color: var(--tt-go);
+}
+
+.pr-root .tt-next b {
+  font-family: var(--font-mono);
+}
+
+.pr-root .tt-next i {
+  width: 0.6rem;
+  height: 0.6rem;
+  background: var(--tt-go);
+  border-radius: 50%;
+  animation: tt-pulse 1.4s ease-in-out infinite;
+}
+
+.pr-root .tt-next.is-wait i {
+  background: var(--warn);
+  animation: none;
+}
+
+@keyframes tt-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* ── Board + tracker ─────────────────────────────────────────────── */
+
+.pr-root .tt-concourse {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22rem;
+  align-items: start;
+  gap: 1.15rem;
+}
+
+.pr-root .tt-board {
+  min-width: 0;
+  padding: 1rem 1rem 0.6rem;
+  color: var(--tt-flap);
+  background: var(--tt-board);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 30px 60px -30px rgba(10, 9, 12, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.pr-root .tt-board-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  padding: 0 0.35rem 0.8rem;
+}
+
+.pr-root .tt-board-head h2 {
+  margin: 0;
+  color: var(--tt-flap);
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.pr-root .tt-board-sub {
+  color: var(--tt-flap-dim);
+  font-size: 0.82rem;
+}
+
+.pr-root .tt-board-filter {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.pr-root .tt-board-filter button {
+  min-height: 0;
+  padding: 0.25rem 0.75rem;
+  color: var(--tt-flap-dim);
+  background: transparent;
+  border: 1px solid var(--tt-board-line);
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.pr-root .tt-board-filter button:hover,
+.pr-root .tt-board-filter button.is-on {
+  color: var(--tt-flap);
+  background: var(--tt-tile);
+  border-color: var(--tt-flap-dim);
+}
+
+.pr-root .tt-board-scroll {
+  overflow-x: auto;
+}
+
+.pr-root .tt-board-table {
+  min-width: 51rem;
+}
+
+.pr-root .tt-brow {
+  display: grid;
+  grid-template-columns: 5.4rem 10.3rem minmax(7.5rem, 1fr) 2.8rem 9.6rem minmax(12rem, 1.5fr);
+  align-items: center;
+  justify-content: stretch;
+  justify-items: start;
+  gap: 0.7rem;
+  width: 100%;
+  min-height: 0;
+  padding: 0.6rem 0.4rem;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--tt-board-line);
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  font-weight: 500;
+  text-align: left;
+}
+
+.pr-root .tt-brow--head {
+  padding-bottom: 0.6rem;
+  color: var(--tt-flap-dim);
+  border-top: 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+}
+
+.pr-root button.tt-brow:hover {
+  background: var(--tt-board-2);
+}
+
+.pr-root button.tt-brow.is-sel {
+  background: var(--tt-board-2);
+  border-left-color: var(--tt-flap-go);
+}
+
+.pr-root .tt-brow.is-past {
+  opacity: 0.62;
+}
+
+.pr-root .tt-board-empty {
+  margin: 0;
+  padding: 1rem 0.4rem;
+  color: var(--tt-flap-dim);
+}
+
+.pr-root .tt-tiles {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.pr-root .tt-ch {
+  display: inline-grid;
+  place-items: center;
+  width: 0.95em;
+  height: 1.5em;
+  color: var(--tt-flap);
+  background: linear-gradient(180deg, var(--tt-tile-hi) 0 49%, var(--tt-board) 49% 51%, var(--tt-tile) 51% 100%);
+  border-radius: 2px;
+  font: 700 0.92rem/1 var(--font-mono);
+}
+
+.pr-root .tt-ch::before {
+  content: attr(data-show);
+}
+
+.pr-root .tt-ch--sp {
+  width: 0.45em;
+  background: transparent;
+}
+
+.pr-root .tt-tiles--ok .tt-ch {
+  color: var(--tt-flap-ok);
+}
+
+.pr-root .tt-tiles--go .tt-ch {
+  color: var(--tt-flap-go);
+}
+
+.pr-root .tt-tiles--wait .tt-ch {
+  color: var(--tt-flap-wait);
+}
+
+.pr-root .tt-tiles--bad .tt-ch {
+  color: var(--tt-flap-bad);
+}
+
+.pr-root .tt-tiles--dim .tt-ch {
+  color: var(--tt-flap-dim);
+}
+
+.pr-root .tt-tcell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+}
+
+.pr-root .tt-tcell em {
+  color: var(--tt-flap-dim);
+  font: 700 0.66rem var(--font-mono);
+  font-style: normal;
+  letter-spacing: 0.12em;
+}
+
+.pr-root .tt-route {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--tt-flap);
+  font: 600 0.9rem/1.25 var(--font-mono);
+}
+
+.pr-root .tt-route em {
+  color: var(--tt-flap-dim);
+  font-style: normal;
+}
+
+.pr-root .tt-num {
+  justify-self: end;
+  text-align: right;
+}
+
+.pr-root .tt-apps {
+  color: var(--tt-flap);
+  font: 700 1rem var(--font-mono);
+}
+
+.pr-root .tt-remark {
+  display: flex;
+  flex-direction: column;
+  color: var(--tt-flap-dim);
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.pr-root .tt-remark b {
+  color: var(--tt-flap);
+  font-weight: 650;
+}
+
+.pr-root .tt-remark span {
+  font-size: 0.8rem;
+}
+
+.pr-root .tt-board-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.3rem;
+  padding: 0.8rem 0.4rem 0.3rem;
+  color: var(--tt-flap-dim);
+  border-top: 1px solid var(--tt-board-line);
+  font-size: 0.8rem;
+}
+
+.pr-root .tt-board-foot span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.pr-root .tt-board-foot i {
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 2px;
+}
+
+.pr-root .tt-dot--go {
+  background: var(--tt-flap-go);
+}
+
+.pr-root .tt-dot--wait {
+  background: var(--tt-flap-wait);
+}
+
+.pr-root .tt-dot--ok {
+  background: var(--tt-flap-ok);
+}
+
+.pr-root .tt-dot--bad {
+  background: var(--tt-flap-bad);
+}
+
+/* Tracker */
+
+.pr-root .tt-tracker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  min-width: 0;
+  padding: 1.15rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+}
+
+.pr-root .tt-tracker h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 1.12rem;
+  font-weight: 800;
+}
+
+.pr-root .tt-tracker-copy {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.pr-root .tt-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+}
+
+.pr-root .tt-search:focus-within {
+  border-color: var(--tt-go);
+  box-shadow: 0 0 0 3px var(--tt-go-soft);
+}
+
+.pr-root .tt-search svg {
+  width: 1rem;
+  height: 1rem;
+  color: var(--text-muted);
+}
+
+.pr-root .tt-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  font-size: 0.95rem;
+}
+
+.pr-root .tt-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.pr-root .tt-quick button {
+  min-height: 0;
+  padding: 0.15rem 0.55rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-full);
+  font: 500 0.78rem var(--font-mono);
+}
+
+.pr-root .tt-quick button:hover {
+  color: var(--tt-go);
+  border-color: var(--tt-go);
+}
+
+.pr-root .tt-journey {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pr-root .tt-jstop {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.4rem minmax(0, 1fr);
+  gap: 0.65rem;
+  padding-bottom: 0.9rem;
+}
+
+.pr-root .tt-jstop:last-child {
+  padding-bottom: 0;
+}
+
+.pr-root .tt-jstop::before {
+  content: "";
+  position: absolute;
+  top: 1.2rem;
+  bottom: -0.1rem;
+  left: calc(0.7rem - 1.5px);
+  width: 3px;
+  background: var(--border-strong);
+}
+
+.pr-root .tt-jstop:last-child::before {
+  display: none;
+}
+
+.pr-root .tt-jstop--done::before {
+  background: var(--ok);
+}
+
+.pr-root .tt-jstop--next::before {
+  background: repeating-linear-gradient(180deg, var(--tt-go) 0 4px, transparent 4px 8px);
+}
+
+.pr-root .tt-jdot {
+  position: relative;
+  z-index: 1;
+  width: 1.4rem;
+  height: 1.4rem;
+  background: var(--bg-panel);
+  border: 3px solid var(--border-strong);
+  border-radius: 50%;
+}
+
+.pr-root .tt-jstop--done .tt-jdot {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.pr-root .tt-jstop--next .tt-jdot {
+  border-color: var(--tt-go);
+  box-shadow: 0 0 0 4px var(--tt-go-soft);
+}
+
+.pr-root .tt-jstop--absent .tt-jdot {
+  border-style: dashed;
+}
+
+.pr-root .tt-jstop b {
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 0.98rem;
+}
+
+.pr-root .tt-jver {
+  margin-left: 0.4rem;
+  color: var(--text-subtle);
+  font: 600 0.8rem var(--font-mono);
+}
+
+.pr-root .tt-jstop small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.pr-root .tt-eta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.75rem 0.85rem;
+  background: var(--bg-inset);
+  border-radius: var(--radius-md);
+}
+
+.pr-root .tt-eta span {
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+.pr-root .tt-eta b {
+  color: var(--text-strong);
+  font: 700 1.1rem var(--font-mono);
+}
+
+/* ── The selected release ─────────────────────────────────────────── */
+
+.pr-root .tt-release {
+  min-width: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+}
+
+.pr-root .tt-r-top {
+  display: flex;
+  flex-direction: column;
+  gap: 0.95rem;
+  padding: 1.25rem 1.4rem 1rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.pr-root .tt-r-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.9rem;
+}
+
+.pr-root .tt-r-title h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 850;
+  letter-spacing: -0.02em;
+}
+
+.pr-root .tt-r-title code {
+  font: 700 1.15rem var(--font-mono);
+}
+
+.pr-root .tt-arrow {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.pr-root .tt-pill {
+  padding: 0.2rem 0.65rem;
+  border-radius: var(--radius-full);
+  font-size: 0.82rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pr-root .tt-pill--go {
+  color: var(--tt-go);
+  background: var(--tt-go-soft);
+}
+
+.pr-root .tt-pill--ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.pr-root .tt-pill--wait {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.pr-root .tt-pill--bad {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.pr-root .tt-pill--dim {
+  color: var(--text-subtle);
+  background: var(--bg-interactive);
+}
+
+.pr-root .tt-r-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.5rem;
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 0.95rem;
+}
+
+.pr-root .tt-r-meta span + span::before {
+  content: "·";
+  margin-right: 0.5rem;
+  color: var(--text-muted);
+}
+
+.pr-root .tt-r-meta b {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-weight: 650;
+}
+
+.pr-root .tt-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.pr-root .tt-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  padding: 0.75rem 0.9rem;
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.pr-root .tt-lbl {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pr-root .tt-val {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--text-strong);
+  font: 700 1.15rem/1.25 var(--font-display);
+}
+
+.pr-root .tt-val svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.pr-root .tt-sub {
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+.pr-root .tt-fact--ok {
+  background: var(--ok-soft);
+  border-color: var(--ok-border);
+}
+
+.pr-root .tt-fact--ok .tt-val svg {
+  color: var(--ok);
+}
+
+.pr-root .tt-fact--wait {
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+}
+
+.pr-root .tt-fact--wait .tt-val svg {
+  color: var(--warn);
+}
+
+.pr-root .tt-fact--go {
+  background: var(--tt-go-soft);
+  border-color: color-mix(in srgb, var(--tt-go) 35%, transparent);
+}
+
+.pr-root .tt-health {
+  font-size: 1rem;
+}
+
+.pr-root .tt-health b {
+  font-family: var(--font-mono);
+}
+
+.pr-root .tt-h-ok {
+  color: var(--ok);
+}
+
+.pr-root .tt-h-wait {
+  color: var(--warn);
+}
+
+.pr-root .tt-h-bad {
+  color: var(--danger);
+}
+
+.pr-root .tt-r-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.pr-root .tt-hint {
+  margin-right: auto;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.pr-root .tt-capacity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.9rem 1.4rem 1rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.pr-root .tt-cap-bar {
+  display: flex;
+  height: 0.65rem;
+  overflow: hidden;
+  background: var(--bg-inset);
+  border-radius: var(--radius-full);
+}
+
+.pr-root .tt-cap-bar i {
+  display: block;
+  height: 100%;
+}
+
+.pr-root .tt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.pr-root .tt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 0;
+  padding: 0.3rem 0.75rem;
+  color: var(--text-subtle);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.pr-root .tt-chip b {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+}
+
+.pr-root .tt-chip i {
+  width: 0.62rem;
+  height: 0.62rem;
+  border-radius: 50%;
+}
+
+.pr-root .tt-chip.is-on {
+  background: var(--bg-interactive);
+  border-color: var(--text-strong);
+}
+
+.pr-root .tt-rule-line {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.pr-root .tt-rule-line b {
+  color: var(--text-subtle);
+}
+
+/* Seat colours: one per application state. */
+.pr-root .tt-seat--eligible,
+.pr-root .tt-seat--scheduled {
+  background: var(--tt-go);
+}
+
+.pr-root .tt-seat--soaking {
+  background: var(--bg-panel);
+  box-shadow: inset 0 0 0 2px var(--tt-go);
+}
+
+.pr-root .tt-seat--approval,
+.pr-root .tt-seat--late {
+  background: var(--warn);
+}
+
+.pr-root .tt-seat--blocked,
+.pr-root .tt-seat--refused,
+.pr-root .tt-seat--failed {
+  background: var(--danger);
+}
+
+.pr-root .tt-seat--promoted {
+  background: var(--ok);
+}
+
+.pr-root .tt-seat--unchanged,
+.pr-root .tt-seat--sent {
+  background: var(--border-strong);
+}
+
+.pr-root .tt-seat--moved {
+  background: repeating-linear-gradient(45deg, var(--border-strong) 0 3px, transparent 3px 5px);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.pr-root .tt-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2.25rem 1.25rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.pr-root .tt-empty svg {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.pr-root .tt-empty p {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.pr-root .tt-systems {
+  display: flex;
+  flex-direction: column;
+}
+
+.pr-root .tt-sys + .tt-sys {
+  border-top: 1px solid var(--border-soft);
+}
+
+.pr-root .tt-sys-head {
+  display: grid;
+  grid-template-columns: 1.3rem minmax(9rem, 14rem) minmax(0, 1fr) auto;
+  align-items: center;
+  justify-content: stretch;
+  gap: 0.8rem;
+  width: 100%;
+  min-height: 0;
+  padding: 0.7rem 1.4rem;
+  color: inherit;
+  background: var(--bg-panel-strong);
+  border: 0;
+  border-radius: 0;
+  text-align: left;
+}
+
+.pr-root .tt-sys-head:hover {
+  background: var(--bg-interactive);
+}
+
+.pr-root .tt-sys-head > svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  color: var(--text-muted);
+  transition: transform var(--dur) var(--ease);
+}
+
+.pr-root .tt-sys[data-open="false"] .tt-sys-head > svg {
+  transform: rotate(-90deg);
+}
+
+.pr-root .tt-sys-name {
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 750;
+}
+
+.pr-root .tt-seats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.pr-root .tt-seat {
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 2px 2px 4px 4px;
+}
+
+.pr-root .tt-sys-count {
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  white-space: nowrap;
+}
+
+.pr-root .tt-sys-count b {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+}
+
+.pr-root .tt-app {
+  display: grid;
+  grid-template-columns: 1.3rem minmax(11rem, 1.3fr) minmax(9rem, 0.9fr) minmax(12rem, 1.7fr) 9rem 6.5rem;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.55rem 1.4rem;
+  border-top: 1px solid var(--border-soft);
+  font-size: 0.92rem;
+}
+
+.pr-root .tt-app:hover {
+  background: var(--bg-panel-strong);
+}
+
+.pr-root .tt-who {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  color: inherit;
+  background: none;
+  border: 0;
+  text-align: left;
+}
+
+.pr-root .tt-who:hover {
+  background: none;
+}
+
+.pr-root .tt-who b {
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.pr-root .tt-who:hover b {
+  text-decoration: underline;
+}
+
+.pr-root .tt-who span {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-muted);
+  font: 0.74rem var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pr-root .tt-ver {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font: 600 0.86rem var(--font-mono);
+}
+
+.pr-root .tt-ver-from {
+  color: var(--text-muted);
+}
+
+.pr-root .tt-ver-to {
+  padding: 0.05rem 0.4rem;
+  color: var(--text-strong);
+  background: var(--bg-interactive);
+  border-radius: var(--radius-chip);
+}
+
+.pr-root .tt-why {
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.pr-root .tt-status {
+  justify-self: start;
+  padding: 0.15rem 0.55rem;
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pr-root .tt-status--go {
+  color: var(--tt-go);
+  background: var(--tt-go-soft);
+}
+
+.pr-root .tt-status--go-outline {
+  color: var(--tt-go);
+  box-shadow: inset 0 0 0 1.5px var(--tt-go);
+}
+
+.pr-root .tt-status--ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.pr-root .tt-status--wait {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.pr-root .tt-status--bad {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.pr-root .tt-status--dim {
+  color: var(--text-subtle);
+  background: var(--bg-interactive);
+}
+
+.pr-root .tt-row-act {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.pr-root .tt-x {
+  width: 1.9rem;
+  height: 1.9rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 50%;
+}
+
+.pr-root .tt-x:hover:not(:disabled) {
+  color: var(--text-strong);
+  background: var(--bg-interactive);
+  border-color: var(--border);
+}
+
+.pr-root .tt-x svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.pr-root .tt-menu-anchor {
+  position: relative;
+}
+
+.pr-root .tt-r-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1.3rem;
+  padding: 0.9rem 1.4rem;
+  color: var(--text-muted);
+  background: var(--bg-panel-strong);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
+  font-size: 0.86rem;
+}
+
+.pr-root .tt-r-foot b {
+  color: var(--text-strong);
+}
+
+/* Confirmation */
+
+.pr-root .tt-modal-root {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.pr-root .tt-scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--backdrop);
+  backdrop-filter: blur(2px);
+}
+
+.pr-root .tt-modal {
+  position: relative;
+  width: min(32rem, 100%);
+  overflow: hidden;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  animation: tt-zoom var(--dur-slow) var(--ease);
+}
+
+@keyframes tt-zoom {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+
+.pr-root .tt-modal header {
+  padding: 1.3rem 1.4rem 0.4rem;
+}
+
+.pr-root .tt-modal h3 {
+  margin: 0.15rem 0 0;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 850;
+}
+
+.pr-root .tt-modal dl {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  gap: 0.55rem 1rem;
+  margin: 0;
+  padding: 0.6rem 1.4rem 1rem;
+  font-size: 0.95rem;
+}
+
+.pr-root .tt-modal dt {
+  color: var(--text-muted);
+}
+
+.pr-root .tt-modal dd {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin: 0;
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.pr-root .tt-modal dd svg {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.2rem;
+  color: var(--ok);
+}
+
+.pr-root .tt-modal dd .tt-icon-wait svg {
+  color: var(--warn);
+}
+
+.pr-root .tt-modal dd code {
+  font-family: var(--font-mono);
+}
+
+.pr-root .tt-left-out {
+  margin: 0 1.4rem 1rem;
+  padding: 0.7rem 0.85rem;
+  color: var(--text-subtle);
+  background: var(--bg-inset);
+  border-radius: var(--radius-md);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.pr-root .tt-modal footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  padding: 0.9rem 1.4rem;
+  background: var(--bg-panel-strong);
+  border-top: 1px solid var(--border);
+}
+
+/* ── Graph ────────────────────────────────────────────────────────── */
+
+.pr-root .tt-graph,
+.pr-root .tt-card {
+  min-width: 0;
+  padding: 1.15rem 1.4rem 1rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+}
+
+.pr-root .tt-sec-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem 1.5rem;
+  margin-bottom: 0.8rem;
+}
+
+.pr-root .tt-sec-head h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.pr-root .tt-sec-head p {
+  flex: 1 1 24rem;
+  max-width: 54rem;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.pr-root .tt-graph-scroll {
+  overflow-x: auto;
+}
+
+.pr-root .tt-graph svg {
+  display: block;
+  width: 100%;
+  min-width: 50rem;
+  height: auto;
+  font-family: var(--font-sans);
+}
+
+.pr-root .tt-graph-line {
+  cursor: pointer;
+}
+
+.pr-root .tt-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.3rem;
+  margin-top: 0.6rem;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+.pr-root .tt-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.pr-root .tt-legend i {
+  display: inline-block;
+  width: 1.4rem;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.pr-root .tt-legend .tt-legend-dash {
+  background: repeating-linear-gradient(90deg, var(--text-muted) 0 5px, transparent 5px 9px);
+}
+
+/* Schedule summary */
+
+.pr-root .tt-sched-scroll {
+  overflow-x: auto;
+}
+
+.pr-root table.tt-sched {
+  width: 100%;
+  min-width: 44rem;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.pr-root .tt-sched th,
+.pr-root .tt-sched td {
+  padding: 0.6rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.pr-root .tt-sched thead th {
+  color: var(--text-muted);
+  border-bottom: 2px solid var(--text-strong);
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.pr-root .tt-sched tbody th {
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.pr-root .tt-sched tbody th small {
+  display: block;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.pr-root .tt-t {
+  display: block;
+  color: var(--text-strong);
+  font: 700 0.9rem var(--font-mono);
+}
+
+.pr-root .tt-none {
+  color: var(--border-strong);
+}
+
+.pr-root .tt-rules {
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+/* ── Schedule editor (Ladder) ─────────────────────────────────────── */
+
+.pr-root .tt-sched-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.pr-root .tt-sched-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 1rem 1.15rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.pr-root .tt-sched-card.is-on {
+  border-left: 3px solid var(--tt-go);
+}
+
+.pr-root .tt-sched-card header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+
+.pr-root .tt-sched-card h4 {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-weight: 750;
+}
+
+.pr-root .tt-sched-card h4 svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  color: var(--text-muted);
+}
+
+.pr-root .tt-sched-card header p {
+  margin: 0.15rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.pr-root .tt-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+  color: var(--text-subtle);
+  font-size: 0.86rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.pr-root .tt-switch input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--tt-go);
+}
+
+.pr-root .tt-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.pr-root .tt-preset {
+  min-height: 0;
+  padding: 0.2rem 0.65rem;
+  color: var(--text-subtle);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.pr-root .tt-preset:hover:not(:disabled) {
+  color: var(--tt-go);
+  border-color: var(--tt-go);
+  background: var(--tt-go-soft);
+}
+
+.pr-root .tt-week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(7rem, 1fr));
+  gap: 0.4rem;
+  overflow-x: auto;
+}
+
+.pr-root .tt-day {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 7rem;
+  padding: 0.55rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+}
+
+.pr-root .tt-day-name {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pr-root .tt-time {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem;
+  padding: 0.12rem 0.2rem 0.12rem 0.5rem;
+  color: var(--text-strong);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: 700 0.86rem var(--font-mono);
+}
+
+.pr-root .tt-time-x {
+  width: 1.3rem;
+  height: 1.3rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+}
+
+.pr-root .tt-time-x svg {
+  width: 0.65rem;
+  height: 0.65rem;
+}
+
+.pr-root .tt-time-x:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.pr-root .tt-add-time {
+  display: flex;
+  gap: 0.2rem;
+}
+
+.pr-root .tt-add-time input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.12rem 0.3rem;
+  font-size: 0.8rem;
+}
+
+.pr-root .tt-add-btn {
+  width: 1.7rem;
+  min-height: 0;
+  padding: 0;
+  color: var(--tt-go);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.pr-root .tt-add-btn svg {
+  width: 0.8rem;
+  height: 0.8rem;
+}
+
+.pr-root .tt-sched-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+}
+
+.pr-root .tt-sched-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-subtle);
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.pr-root .tt-sched-row select,
+.pr-root .tt-sched-row input {
+  width: auto;
+  min-width: 10rem;
+  font-size: 0.86rem;
+}
+
+.pr-root .tt-sched-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.pr-root .tt-sched-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.86rem;
+}
+
+.pr-root .tt-sched-save {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.pr-root .tt-sched-save > span {
+  margin-right: auto;
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.pr-root .tt-saved {
+  color: var(--ok);
+}
+
+.pr-root .tt-unsaved {
+  color: var(--warn);
+}
+
+/* Toast */
+
+.pr-root .tt-toast {
+  position: fixed;
+  bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  z-index: 80;
+  max-width: calc(100% - 2rem);
+  padding: 0.7rem 1.05rem;
+  color: var(--bg-panel);
+  background: var(--text-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.92rem;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 1rem);
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+
+.pr-root .tt-toast.is-on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* ── Narrow screens ───────────────────────────────────────────────── */
+
+@media (max-width: 1180px) {
+  .pr-root .tt-concourse {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pr-root .tt-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  /* The board folds each departure into three short lines so the status
+     never scrolls out of sight: time + release, status + route, detail. */
+  .pr-root .tt-board {
+    padding-inline: 0.75rem;
+  }
+
+  .pr-root .tt-board-table {
+    min-width: 0;
+  }
+
+  .pr-root .tt-brow--head,
+  .pr-root .tt-brow .tt-apps {
+    display: none;
+  }
+
+  .pr-root .tt-brow {
+    grid-template-columns: 8.2rem minmax(0, 1fr);
+    grid-template-areas:
+      "time code"
+      "status route"
+      "remark remark";
+    gap: 0.45rem 0.7rem;
+  }
+
+  .pr-root .tt-brow > :nth-child(1) {
+    grid-area: time;
+  }
+
+  .pr-root .tt-brow > :nth-child(2) {
+    grid-area: code;
+  }
+
+  .pr-root .tt-brow > :nth-child(3) {
+    grid-area: route;
+    align-self: center;
+  }
+
+  .pr-root .tt-brow > :nth-child(5) {
+    grid-area: status;
+  }
+
+  .pr-root .tt-brow > :nth-child(6) {
+    grid-area: remark;
+  }
+
+  .pr-root .tt-ch {
+    font-size: 0.8rem;
+  }
+
+  .pr-root .tt-line-track {
+    grid-template-columns: repeat(var(--tt-stations, 4), minmax(17rem, 1fr));
+    min-width: calc(var(--tt-stations, 4) * 17rem);
+  }
+
+  .pr-root .tt-app {
+    grid-template-columns: 1.3rem minmax(0, 1fr) 7.5rem;
+    padding-inline: 1rem;
+  }
+
+  .pr-root .tt-ver,
+  .pr-root .tt-why,
+  .pr-root .tt-row-act {
+    display: none;
+  }
+
+  .pr-root .tt-sys-head {
+    grid-template-columns: 1.3rem minmax(0, 1fr) auto;
+    padding-inline: 1rem;
+  }
+
+  .pr-root .tt-seats {
+    display: none;
+  }
+
+  .pr-root .tt-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pr-root .tt-hint {
+    flex-basis: 100%;
+  }
+
+  .pr-root .tt-modal dl {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 0.15rem;
+  }
+
+  .pr-root .tt-modal dd {
+    margin-bottom: 0.45rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pr-root .tt-next i {
+    animation: none;
+  }
+}

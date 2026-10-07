@@ -335,6 +335,25 @@ def _advance_resolve(
         _fail(stage, verdict)
         return
 
+    # 2b. Promotion — an enforcing environment takes only images that passed
+    # the one before it. Checked here so the build says so plainly, before any
+    # manifest is prepared (apply_yaml checks again on the way in).
+    if not state.get("promotionChecked"):
+        from .. import promotion_service
+
+        refusal, promotion = promotion_service.gate(
+            config["clusterId"], config["namespace"], [image],
+            user=user, path="ci", workload=config.get("deploymentName"),
+        )
+        if refusal:
+            _fail(stage, f"{refusal[0]} Nothing was deployed.")
+            return
+        if promotion.get("warning"):
+            _log(stage, f"⚠ {promotion['message']}")
+        elif promotion.get("applies") and promotion.get("environment"):
+            _log(stage, f"Promotion: {promotion['message']}")
+        _save(stage, {"promotionChecked": True})
+
     # 3. Namespace — must exist; a build never creates one.
     exists, problem = _namespace_exists(config, real)
     if problem:
@@ -636,6 +655,14 @@ def _succeed(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any], detail
     from . import deployment_links
 
     deployment_links.record_from_deploy(build, config)
+    # Healthy on the new image: it passed this environment of the ladder.
+    from .. import promotion_service
+
+    promotion_service.record_rollout(
+        config["clusterId"], config["namespace"], [image],
+        kind="Deployment", name=config["deploymentName"], source="ci_deploy",
+        actor=getattr(user, "username", None),
+    )
     _finish(stage, "success", f"{image} is running on {config['deploymentName']} ({detail}).", outcome="deployed")
 
 

@@ -272,6 +272,8 @@ def serialize_bundle(row: ChangeBundle, *, include_items: bool = True) -> Dict[s
         "approvedByName": (approver.full_name or approver.username) if approver else None,
         "approvedAt": _iso(row.approved_at),
         "rejectionReason": row.rejection_reason,
+        # Set when the bundle carries a deploy the promotion ladder refused.
+        "promotionException": row.promotion_exception or None,
         "executionStartedAt": _iso(row.execution_started_at),
         "executionFinishedAt": _iso(row.execution_finished_at),
         "clusters": clusters,
@@ -611,6 +613,29 @@ def _revalidate_draft_items(bundle: ChangeBundle) -> None:
         db.session.commit()
 
 
+def promotion_refusal(item: ChangeBundleItem) -> Optional[str]:
+    """Why the promotion ladder refuses this item's images, or None.
+
+    A bundle sent as a promotion exception is never refused: its approval is
+    the exception. Shared by staging (here) and the executor's revalidation."""
+    if item.action_type not in ("apply_yaml", "change_image", "edit_deployment", "helm_install", "helm_upgrade"):
+        return None
+    bundle = item.bundle if getattr(item, "bundle", None) is not None else (
+        db.session.get(ChangeBundle, item.bundle_id) if item.bundle_id else None
+    )
+    if bundle is not None and bundle.promotion_exception:
+        return None
+    from .promotion_service import evaluate, images_in_yaml
+
+    try:
+        verdict = evaluate(item.cluster_id, item.namespace, images_in_yaml(item.yaml_preview or ""))
+    except Exception:  # noqa: BLE001 — fail open, like the direct path
+        return None
+    if verdict["applies"] and not verdict["allowed"]:
+        return verdict["message"]
+    return None
+
+
 def _validate_item_now(item: ChangeBundleItem) -> None:
     """Static (submission-time) validation. Live cluster state is re-checked at execution."""
     mode = (item.new_payload_json or {}).get("execution", {}).get("mode")
@@ -624,6 +649,10 @@ def _validate_item_now(item: ChangeBundleItem) -> None:
             _checks, blocking, image_err = check_registry_images(item.yaml_preview or "", item.cluster_id)
             if blocking:
                 err = image_err
+        if not err:
+            # An image that has not passed the previous environment (enforcing
+            # environments only) — early feedback; execution re-checks too.
+            err = promotion_refusal(item)
         if err:
             item.validation_status = "invalid"
             item.validation_message = err
@@ -634,8 +663,9 @@ def _validate_item_now(item: ChangeBundleItem) -> None:
         # The rendered manifest (when helm could render it) is checked against
         # the linked registries like a YAML apply; execution re-checks too.
         _checks, blocking, image_err = check_registry_images(item.yaml_preview or "", item.cluster_id)
-        item.validation_status = "invalid" if blocking else "valid"
-        item.validation_message = image_err if blocking else None
+        refusal = None if blocking else promotion_refusal(item)
+        item.validation_status = "invalid" if (blocking or refusal) else "valid"
+        item.validation_message = image_err if blocking else refusal
     else:
         # scale / delete: identifiers already checked when building the preview.
         item.validation_status = "valid"
@@ -895,11 +925,17 @@ def delete_bundle(user: Optional[User], bundle_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 def _bundle_required_approvals(bundle: ChangeBundle) -> int:
-    """Strictest per-cluster requirement across all the bundle's clusters."""
+    """Strictest per-cluster requirement across all the bundle's clusters.
+
+    A promotion exception needs at least one approval whatever the clusters
+    say — skipping an environment is never self-service."""
     clusters = {item.cluster_id for item in bundle.items}
     if not clusters:
         return 0
-    return max(cluster_required_approvals(c) for c in clusters)
+    required = max(cluster_required_approvals(c) for c in clusters)
+    if bundle.promotion_exception:
+        required = max(required, 1)
+    return required
 
 
 def submit_bundle(
@@ -1336,7 +1372,27 @@ def queue_for_approval(
     *,
     source: str = "",
 ) -> Dict[str, Any]:
+    """One direct change sent for approval — see :func:`queue_many_for_approval`."""
+    return queue_many_for_approval(
+        user, [payload], source=source or payload.get("actionType") or "change"
+    )
+
+
+def queue_many_for_approval(
+    user: Optional[User],
+    payloads: List[Dict[str, Any]],
+    *,
+    source: str = "",
+    promotion_exception: Optional[Dict[str, Any]] = None,
+    note: str = "",
+    start_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
     """Turn one direct change into a submitted, single-item change bundle.
+
+    ``start_at`` (a promotion release's departure) opens the window at that
+    moment instead of now: approvers can vote ahead, and the executor applies
+    it no earlier than ``start_at``. A cluster that needs no approval is
+    approved on submission and simply waits for its window.
 
     Used when somebody (a person in the UI, or Hermes over MCP) makes a change on
     a cluster that requires approvals and has no live approved request. Instead
@@ -1346,28 +1402,45 @@ def queue_for_approval(
     alone: this is a bundle of its own. The window is open from now, so once
     approved the scheduler's next tick applies it.
     """
-    bundle = ChangeBundle(requester_user_id=user.id if user else None, status="draft")
+    bundle = ChangeBundle(
+        requester_user_id=user.id if user else None,
+        status="draft",
+        promotion_exception=promotion_exception,
+    )
     db.session.add(bundle)
     db.session.commit()
     try:
-        add_item(user, bundle.id, payload)
+        for payload in payloads:
+            add_item(user, bundle.id, payload)
         db.session.refresh(bundle)
         invalid = [i for i in bundle.items if i.validation_status == "invalid"]
         if invalid:
             raise ChangeBundleError(invalid[0].validation_message or "The change failed validation.", 400)
         now = datetime.now(timezone.utc)
-        what = source or payload.get("actionType") or "change"
+        what = source or "change"
+        note = note or f"Sent for approval automatically: {what}."
+        if promotion_exception:
+            skipped = promotion_exception.get("previousEnvironment") or "the previous environment"
+            target = promotion_exception.get("environment") or "this environment"
+            note = (
+                f"Promotion exception: skips {skipped} on the way to {target}. "
+                f"Reason: {promotion_exception.get('reason')}"
+                + (f" ({promotion_exception['release']})" if promotion_exception.get("release") else "")
+            )
+        later = start_at is not None and start_at > now + timedelta(minutes=1)
+        opens = start_at if later else now + timedelta(minutes=1)
         result = submit_bundle(
             user,
             bundle.id,
-            note=f"Sent for approval automatically: {what}.",
-            window_start=(now + timedelta(minutes=1)).isoformat(),
-            window_end=(now + timedelta(hours=_approval_ttl_hours())).isoformat(),
+            note=note,
+            window_start=opens.isoformat(),
+            window_end=(opens + timedelta(hours=_approval_ttl_hours())).isoformat(),
         )
         # Submitting needs a future start; a queued change has no reason to
-        # wait once approved, so its window is open from now.
+        # wait once approved, so its window is open from now — unless it was
+        # scheduled for later.
         row = ChangeBundle.query.get(bundle.id)
-        if row is not None and row.requested_start_time is not None:
+        if not later and row is not None and row.requested_start_time is not None:
             row.requested_start_time = now
             db.session.commit()
             result = {**serialize_bundle(row), "emailResult": result.get("emailResult")}

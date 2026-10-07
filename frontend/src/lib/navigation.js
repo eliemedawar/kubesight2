@@ -59,6 +59,7 @@ export const NAV_GROUPS = [
     label: "Delivery",
     items: [
       { page: "inventory" },
+      { page: "promotions" },
       { page: "myRequests" },
       { page: "changeBundles" },
       { page: "deploymentRequests", label: "Approvals" },

@@ -241,6 +241,10 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         "kubesight_pod_exec",
         # Deploys, and asking to be allowed one
         "kubesight_deploy_apply",
+        # The promotion ladder: moves the image that passed one environment up
+        # to the next, through apply_yaml. Asking for an exception (skipping an
+        # environment) is deliberately NOT a tool.
+        "kubesight_promotion_promote",
         "kubesight_deployment_request_create",
         "kubesight_helm_upgrade",
         "kubesight_helm_rollback",
@@ -1163,6 +1167,7 @@ _SMOKE_ARGUMENTS = {
     "provider": "zoho",
     "ticketRecordId": 1,
     "image": "registry.example.com/app:1.0.0",
+    "images": ["registry.example.com/app:1.0.0"],
     "path": "README.md",
     "yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n",
 }

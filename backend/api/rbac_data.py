@@ -40,6 +40,12 @@ PERMISSIONS = [
     ("inventory:update", "Update application catalog metadata"),
     ("inventory:remove", "Remove applications from inventory metadata"),
     ("apps:deploy", "Deploy applications to clusters"),
+    ("promotions:view", "View the environment ladder and what runs in each environment"),
+    (
+        "promotions:manage",
+        "Define the environment ladder, bind namespaces to environments and set how strictly "
+        "promotion is enforced",
+    ),
     ("apps:dryrun", "Run deployment dry-run validation"),
     ("apps:diff", "View deployment diffs"),
     ("apps:delete", "Delete applications from clusters"),
@@ -172,6 +178,7 @@ PERMISSION_GROUPS = [
         "keys": [
             "inventory:view", "inventory:register", "inventory:update", "inventory:remove",
             "apps:deploy", "apps:dryrun", "apps:diff", "apps:delete",
+            "promotions:view", "promotions:manage",
             "helm:view", "helm:install", "helm:upgrade", "helm:rollback", "helm:uninstall",
             "helm:values:view", "helm:values:update",
         ],
@@ -259,6 +266,9 @@ DANGEROUS_PERMISSION_KEYS = {
     "users:manage", "users:create", "users:update", "users:disable", "users:delete",
     "roles:manage", "clusters:add", "clusters:update", "clusters:remove",
     "settings:manage", "upgrades:start", "apps:deploy", "apps:delete", "inventory:remove",
+    # Loosening the ladder (a mode set to Off, a namespace unbound) lets an
+    # untested image reach a later environment.
+    "promotions:manage",
     # Starts deploy-automation runs (through the catalog guard rails).
     "ticketing:agent",
     "helm:install", "helm:upgrade", "helm:rollback", "helm:uninstall", "helm:values:update",
@@ -329,6 +339,7 @@ VIEWER_PERMISSIONS = [
     "namespaces:view",
     "resources:view",
     "inventory:view",
+    "promotions:view",
     "pods:view",
     "deployments:view",
     *WORKLOAD_VIEW_PERMISSIONS,
@@ -358,6 +369,7 @@ OPERATOR_PERMISSIONS = [
     "namespaces:view",
     "resources:view",
     "inventory:view",
+    "promotions:view",
     "inventory:register",
     "apps:dryrun",
     "apps:diff",
@@ -413,6 +425,7 @@ CLUSTER_ADMIN_PERMISSIONS = [
     "namespaces:view",
     "resources:view",
     "inventory:view",
+    "promotions:view",
     "inventory:register",
     "inventory:update",
     "inventory:remove",
@@ -508,6 +521,9 @@ HERMES_AGENT_PERMISSIONS = [
     "applications:execute",
     "ticketing:view",
     "ticketing:agent",
+    # Read the ladder so a ticket that skips an environment can be answered
+    # with what is running where, before anything is started.
+    "promotions:view",
 ]
 
 ROLE_DEFINITIONS = {

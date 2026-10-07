@@ -670,6 +670,14 @@ def install_or_upgrade_release(
                     details={"error": image_err, "reason": "image_not_in_registry"},
                 )
                 return None, image_err, 422
+            # The promotion ladder, on the images the chart would run. An
+            # approved change was checked when staged and by the executor.
+            if approval_context is None:
+                from .promotion_service import gate_yaml
+
+                refusal, _promotion = gate_yaml(cluster_id, namespace, rendered, user=user, path="helm")
+                if refusal:
+                    return None, refusal[0], refusal[1]
 
         # The cluster's approval rule — checked after validation so only a
         # change this user could make is ever queued.

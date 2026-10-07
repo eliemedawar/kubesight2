@@ -2033,9 +2033,38 @@ def _do_poll_native_build(run: DeployAutomationRun) -> None:
     )
 
 
+def _promotion_refused(run: DeployAutomationRun, step: str, *, final: bool = True) -> bool:
+    """Fail an image run the promotion ladder refuses. True when it did.
+
+    Checked before anything is built (a ticket asking UAT for a version SIT
+    never ran fails at once, not after a build) and again at the handoff."""
+    if _is_env_run(run) or _is_restart_run(run) or _is_custom_run(run):
+        return False
+    from . import promotion_service
+
+    refusal, _verdict = promotion_service.gate(
+        run.cluster_id,
+        run.namespace,
+        [_target_image(run)],
+        actor=f"ticket {run.ticket_number}" if run.ticket_number else "deploy automation",
+        path="ticket",
+        workload=run.deployment_name,
+        commit=False,
+        # The early check may repeat (registry retries); the handoff's records it.
+        record_warning=final,
+    )
+    if refusal:
+        _fail(run, step, refusal[0])
+        return True
+    return False
+
+
 def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     """checking_image → handoff (found) | building (missing) | failed."""
     from .registry_service import check_image
+
+    if _promotion_refused(run, "image_check", final=False):
+        return
 
     # The registries linked to the run's cluster decide (any one of them holding
     # the tag is enough); a cluster with no linked registry falls back to the
@@ -2294,6 +2323,11 @@ def _do_verify(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
 
 def _do_handoff(run: DeployAutomationRun) -> None:
     from .deployment_request_service import cluster_required_approvals
+
+    # Both handoffs below skip apply_yaml (a bundle submitted directly, or
+    # `kubectl set image`), so the ladder is checked here for them.
+    if _promotion_refused(run, "approval"):
+        return
 
     required = cluster_required_approvals(run.cluster_id)
     if required > 0:
@@ -2698,6 +2732,16 @@ def _complete_deployed(run: DeployAutomationRun, pods_detail: str) -> None:
     run.status = "deployed"
     run.finished_at = datetime.now(timezone.utc)
     _set_step(run, "pods", "done", pods_detail)
+    if not (_is_env_run(run) or _is_restart_run(run) or _is_custom_run(run)):
+        # Healthy on the new image: it passed this environment of the ladder.
+        from . import promotion_service
+
+        promotion_service.record_rollout(
+            run.cluster_id, run.namespace, [_target_image(run)],
+            kind="Deployment", name=run.deployment_name, source="automation",
+            actor=f"ticket {run.ticket_number}" if run.ticket_number else None,
+            commit=False,
+        )
     log_audit(
         "automation_run_deployed",
         actor=None,

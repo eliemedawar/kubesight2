@@ -32,6 +32,41 @@ that: "sent for approval as bundle #N; it will be applied once approved". Never
 report it as done. Helm install/upgrade/rollback/uninstall has no bundle form
 and is still refused on a gated cluster.
 
+## The promotion ladder
+
+Images climb an ordered ladder of environments — typically Dev → SIT → UAT →
+Pre-prod — and each environment is a set of namespaces (or whole clusters). An
+image may enter an environment only once it **ran healthy in the one below**;
+an image that already ran in the environment (a rollback, a redeploy) is always
+allowed, and the first environment takes anything. Images are built once, so
+what moves up is the exact `repository:tag`.
+
+```
+kubesight_promotion_board   {application?}                 ← what runs where, and what is ready to move
+kubesight_promotion_check   {cluster, namespace, images}   ← what the ladder says about one deploy
+kubesight_promotion_promote {application, environment, image?, note?}
+```
+
+- Check before deploying anywhere above the first environment. In an
+  environment set to **enforce**, a deploy that skips one is refused (HTTP 409,
+  or a failed ticket run / CI Deploy stage) with the reason — that refusal is a
+  rule, say so: "UAT only takes images that passed SIT; v2.9.0 has not run in
+  SIT yet". In **warn** it goes ahead and is flagged; **off** has no rule.
+- A step's state on the board: `ready` (promote it), `in_sync`, `waiting` (not
+  healthy below yet), `soaking` (healthy, but the environment's minimum soak
+  time has not passed), `pending_approval` (already promoted, waiting in a
+  change bundle — do not promote it again), `blocked` (a mutable tag such as `latest`),
+  `not_deployed` (the app has no workload in that environment yet — deploy it
+  there once normally). `drift` lists an environment running an image that never
+  passed the one below.
+- `promote` deploys the board's image to that app's workloads in the target
+  environment through the normal deploy path, so the cluster's approval rule
+  still applies — a result may say `pending_approval` with a bundle id. Report
+  each workload's result, never "promoted" for one that was queued or refused.
+- **There is no exception tool.** Skipping an environment is a person's call:
+  they ask for one in the UI (Promotions board) with a written reason, and
+  somebody else approves it. Tell them that rather than looking for a way round.
+
 ## Preview before applying
 
 ```

@@ -594,6 +594,19 @@ def _migrate_change_bundle_columns() -> None:
         _add_column_if_missing("change_bundles", "execution_finished_at", "DATETIME")
         _add_column_if_missing("change_bundles", "rejection_reason", "TEXT")
         _add_column_if_missing("change_bundles", "requested_window_timezone", "VARCHAR(64)")
+        # Set on a bundle that carries a deploy the promotion ladder refused:
+        # it always needs at least one approval, whatever the cluster's rule.
+        _add_column_if_missing("change_bundles", "promotion_exception", "JSON")
+    if "promotion_events" in table_names:
+        _add_column_if_missing("promotion_events", "release_id", "INTEGER")
+    if "promotion_environments" in table_names:
+        _add_column_if_missing("promotion_environments", "schedule", "JSON")
+        _add_column_if_missing("promotion_environments", "schedule_owner_id", "INTEGER")
+        _add_column_if_missing("promotion_environments", "schedule_owner", "VARCHAR(120)")
+    if "promotion_releases" in table_names:
+        _add_column_if_missing("promotion_releases", "code", "VARCHAR(40)")
+        _add_column_if_missing("promotion_releases", "version", "VARCHAR(40)")
+        _add_column_if_missing("promotion_releases", "departs_at", "DATETIME")
     if "change_bundle_items" in table_names:
         _add_column_if_missing("change_bundle_items", "cluster_name", "VARCHAR(255)")
         _add_column_if_missing("change_bundle_items", "validation_message", "TEXT")

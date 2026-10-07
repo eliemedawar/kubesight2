@@ -143,6 +143,25 @@ def run_scheduler_tick(app: Flask) -> None:
         logger.exception("Bundle rollout watch tick failed")
     try:
         with app.app_context():
+            from .promotion_service import observe_due
+
+            # Promotion ledger: record which images run healthy in each
+            # environment's namespaces, including ones deployed outside
+            # KubeSight. Self-throttled (PROMOTION_OBSERVE_SECONDS).
+            observe_due()
+    except Exception:
+        logger.exception("Promotion observer tick failed")
+    try:
+        with app.app_context():
+            from .promotion_timetable import tick as promotion_timetable_tick
+
+            # Scheduled releases: close every departure whose cut-off has
+            # passed into one change bundle that opens at departure.
+            promotion_timetable_tick()
+    except Exception:
+        logger.exception("Promotion timetable tick failed")
+    try:
+        with app.app_context():
             from . import ticketing
 
             # Self-gating per provider: each only runs when its integration

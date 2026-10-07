@@ -98,6 +98,7 @@ const ApplicationIntelligencePage = lazy(() => import("./pages/ApplicationIntell
 const ClientsPage = lazy(() => import("./pages/ClientsPage.jsx"));
 const ServiceCatalogPage = lazy(() => import("./pages/ServiceCatalogPage.jsx"));
 const PipelinesPage = lazy(() => import("./pages/PipelinesPage.jsx"));
+const PromotionsPage = lazy(() => import("./pages/PromotionsPage.jsx"));
 const BlueprintsPage = lazy(() => import("./pages/BlueprintsPage.jsx"));
 const ComponentsPage = lazy(() => import("./pages/ComponentsPage.jsx"));
 
@@ -1935,6 +1936,8 @@ export default function App() {
         return <DeploymentRequestsPage />;
       case "myRequests":
         return <MyRequestsPage />;
+      case "promotions":
+        return <PromotionsPage />;
       case "changeBundles":
         return <ChangeBundlesPage />;
       case "integrations":
