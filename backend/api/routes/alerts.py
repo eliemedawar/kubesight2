@@ -3,7 +3,7 @@ from flask import Blueprint, request
 from ..alert_notifier import alert_delivery_status, send_test_alert_email
 from ..services.alert_policy_evaluator import list_active_policy_alerts
 from ..email_delivery import EmailDeliveryError
-from ..k8s_provider import K8sCommandError, list_alerts_from_k8s, should_use_real_k8s
+from ..k8s_provider import K8sCommandError, list_alerts_for_clusters, list_alerts_from_k8s, should_use_real_k8s
 from ..mock_data import ALERTS
 from ..access import get_user_cluster_ids, is_admin
 from ..auth_utils import get_current_user
@@ -56,15 +56,14 @@ def list_alerts():
             return error_response("Forbidden", 403)
         if not cluster_id and allowed:
             combined_items = []
+            real_ids = [cid for cid in allowed if should_use_real_k8s(cid)]
             for cid in allowed:
-                if should_use_real_k8s(cid):
-                    try:
-                        payload = list_alerts_from_k8s(cluster_id=cid)
-                        combined_items.extend(payload.get("items") or [])
-                    except Exception:
-                        pass
-                else:
+                if cid not in real_ids:
                     combined_items.extend(_filter_mock_alerts(cid))
+            # Scanned side by side; a cluster that fails is skipped as before.
+            for payload in list_alerts_for_clusters(real_ids).values():
+                if payload:
+                    combined_items.extend(payload.get("items") or [])
             combined_items = _merge_policy_alerts(combined_items, user, None)
             return success_response(
                 _attach_email_delivery(

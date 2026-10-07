@@ -18,10 +18,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import or_
+from sqlalchemy.orm import selectinload
 
 from ...audit import log_audit
 from ...db import db
-from ...models import RegistryConnection, ServiceBlueprint
+from ...models import RegistryConnection, ServiceBlueprint, user_display_loader
 from ...models_application_intelligence import BitbucketCredentialProfile
 from ...models_ci import (
     APPLICATION_TYPES,
@@ -103,17 +104,6 @@ def _latest_build(service_id: int) -> Optional[CiBuild]:
     )
 
 
-def _recent_builds(service_id: int, limit: int = 10) -> List[CiBuild]:
-    """Newest-first recent builds — the first one is the card's verdict, the
-    statuses of all of them are its sparkline."""
-    return (
-        CiBuild.query.filter_by(service_id=service_id)
-        .order_by(CiBuild.number.desc())
-        .limit(limit)
-        .all()
-    )
-
-
 def list_services(
     *, search: str = "", status: str = "", application_type: str = ""
 ) -> List[Dict[str, Any]]:
@@ -137,19 +127,120 @@ def list_services(
                 db.func.lower(db.func.coalesce(CiService.repository_name, "")).like(like),
             )
         )
-    rows = query.order_by(CiService.name.asc()).all()
+    # Everything a card reads, loaded for all cards at once: a fixed handful of
+    # queries however many services the catalog holds, where it used to be a
+    # batch of them per service.
+    rows = (
+        query.options(
+            selectinload(CiService.credential_profile),
+            selectinload(CiService.deployment_links),
+            selectinload(CiService.pipelines).selectinload(CiPipeline.stages),
+            selectinload(CiService.pipelines)
+            .selectinload(CiPipeline.linked_pipeline)
+            .options(
+                selectinload(CiPipeline.stages),
+                selectinload(CiPipeline.service),
+            ),
+        )
+        .order_by(CiService.name.asc())
+        .all()
+    )
+    service_ids = [row.id for row in rows]
+    statuses = _recent_build_statuses(service_ids)
+    latest_builds = _latest_builds(service_ids)
+    latest_artifacts = _latest_artifacts(service_ids)
     items = []
     for row in rows:
-        recent = _recent_builds(row.id)
         items.append(
             service_to_dict(
                 row,
-                latest_build=recent[0] if recent else None,
-                latest_artifact=artifacts_service.latest_for_service(row.id),
-                recent_statuses=[b.status for b in recent],
+                latest_build=latest_builds.get(row.id),
+                latest_artifact=latest_artifacts.get(row.id),
+                recent_statuses=statuses.get(row.id, []),
             )
         )
     return items
+
+
+def _newest_first_rank(partition_column, *order_by):
+    """1 for each partition's first row in ``order_by``, 2 for the next..."""
+    return (
+        db.func.row_number()
+        .over(partition_by=partition_column, order_by=list(order_by))
+        .label("rank")
+    )
+
+
+def _recent_build_statuses(service_ids: List[int], limit: int = 10) -> Dict[int, List[str]]:
+    """Each service's last ``limit`` build statuses, newest first — the card
+    sparkline — for every service in one query."""
+    if not service_ids:
+        return {}
+    ranked = (
+        db.session.query(
+            CiBuild.service_id.label("service_id"),
+            CiBuild.status.label("status"),
+            CiBuild.number.label("number"),
+            _newest_first_rank(CiBuild.service_id, CiBuild.number.desc()),
+        )
+        .filter(CiBuild.service_id.in_(service_ids))
+        .subquery()
+    )
+    statuses: Dict[int, List[str]] = {}
+    for service_id, status in (
+        db.session.query(ranked.c.service_id, ranked.c.status)
+        .filter(ranked.c.rank <= limit)
+        .order_by(ranked.c.service_id, ranked.c.number.desc())
+    ):
+        statuses.setdefault(service_id, []).append(status)
+    return statuses
+
+
+def _latest_builds(service_ids: List[int]) -> Dict[int, CiBuild]:
+    """Each service's newest build (:func:`_latest_build`), in one query, with
+    what its card summary reads: the stages and who asked for it."""
+    if not service_ids:
+        return {}
+    ranked = (
+        db.session.query(
+            CiBuild.id.label("id"),
+            _newest_first_rank(CiBuild.service_id, CiBuild.number.desc()),
+        )
+        .filter(CiBuild.service_id.in_(service_ids))
+        .subquery()
+    )
+    builds = (
+        CiBuild.query.options(
+            selectinload(CiBuild.stages),
+            user_display_loader(CiBuild.requested_by),
+        )
+        .join(ranked, ranked.c.id == CiBuild.id)
+        .filter(ranked.c.rank == 1)
+        .all()
+    )
+    return {build.service_id: build for build in builds}
+
+
+def _latest_artifacts(service_ids: List[int]) -> Dict[int, CiArtifact]:
+    """Each service's newest artifact (``artifacts.latest_for_service``), in one query."""
+    if not service_ids:
+        return {}
+    ranked = (
+        db.session.query(
+            CiArtifact.id.label("id"),
+            _newest_first_rank(
+                CiArtifact.service_id, CiArtifact.created_at.desc(), CiArtifact.id.desc()
+            ),
+        )
+        .filter(CiArtifact.service_id.in_(service_ids))
+        .subquery()
+    )
+    artifacts = (
+        CiArtifact.query.join(ranked, ranked.c.id == CiArtifact.id)
+        .filter(ranked.c.rank == 1)
+        .all()
+    )
+    return {artifact.service_id: artifact for artifact in artifacts}
 
 
 def catalog_summary(items: List[Dict[str, Any]]) -> Dict[str, int]:

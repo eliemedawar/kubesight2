@@ -56,6 +56,7 @@ class TTLCache:
         # key -> (fresh_until, stale_until, value)
         self._entries: Dict[Any, Tuple[float, float, Any]] = {}
         self._inflight: Dict[Any, _Flight] = {}
+        self._last_sweep = time.monotonic()
 
     def get(self, key: Any) -> Optional[Any]:
         with self._lock:
@@ -64,10 +65,19 @@ class TTLCache:
                 return entry[2]
         return None
 
+    # Entries past their stale window are useless but used to stay in memory
+    # until the same key was computed again — a big cluster's parsed pod list
+    # can be ~100 MB. Every sweep interval, the next write drops them.
+    _SWEEP_INTERVAL_SECONDS = 60.0
+
     def set(self, key: Any, value: Any, ttl: float, stale_ttl: float = 0) -> None:
         now = time.monotonic()
         with self._lock:
             self._entries[key] = (now + ttl, now + ttl + max(stale_ttl, 0), value)
+            if now - self._last_sweep > self._SWEEP_INTERVAL_SECONDS:
+                self._last_sweep = now
+                for dead in [k for k, entry in self._entries.items() if entry[1] <= now]:
+                    del self._entries[dead]
 
     def _spawn_background_refresh(
         self, key: Any, ttl: float, stale_ttl: float, compute: Callable[[], Any]

@@ -7,6 +7,7 @@ import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import RequestsTable from "../components/clusters/RequestsTable.jsx";
 
 import { useRouteParam } from "../routes/RouterContext.jsx";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 const TABS = [
   { key: "active", label: "Active" },
@@ -45,8 +46,8 @@ export default function MyRequestsPage() {
   // manager). Poll quietly so a request that reaches its quorum flips status
   // here without needing a manual refresh.
   useEffect(() => {
-    const id = setInterval(() => load({ silent: true }), 15000);
-    return () => clearInterval(id);
+    const stopPolling = setVisibleInterval(() => load({ silent: true }), 15000);
+    return stopPolling;
   }, [load]);
 
   // A request is "active" while it still needs a decision (pending) or while it

@@ -753,7 +753,12 @@ def evaluate_policies_for_cluster(
     policies_evaluated = False
     now = datetime.now(timezone.utc)
 
-    for policy in policies:
+    for index, policy in enumerate(policies):
+        if persist and index and db.session.dirty | db.session.new:
+            # Commit each policy's result before the next one's cluster reads:
+            # one transaction across every policy held its row locks (and a
+            # pooled connection) through all of their kubectl calls.
+            db.session.commit()
         if not _policy_due_for_evaluation(policy, now):
             continue
 
@@ -883,7 +888,7 @@ def evaluate_policies_for_cluster(
                     resource_name = sample.get("resourceName") or target.get("resourceName")
 
                 if user and not is_admin(user):
-                    if not can_view_alert(user, cluster_id, namespace, resource_name or ""):
+                    if not can_view_alert(user, {"clusterId": cluster_id, "namespace": namespace, "resourceName": resource_name or ""}):
                         continue
 
                 if matched:
@@ -986,14 +991,22 @@ def list_active_policy_alerts(
 
     from .alert_policy_service import policy_show_on_dashboard
 
+    rows = query.order_by(AlertHistory.fired_at.desc()).all()
+    # Every row's policy in one query (the alert list is polled from each page).
+    policy_ids = {row.policy_id for row in rows if row.policy_id}
+    policies = (
+        {p.id: p for p in AlertPolicy.query.filter(AlertPolicy.id.in_(policy_ids)).all()}
+        if policy_ids
+        else {}
+    )
     items: List[Dict[str, Any]] = []
-    for row in query.order_by(AlertHistory.fired_at.desc()).all():
+    for row in rows:
         if row.policy_id:
-            policy = AlertPolicy.query.get(row.policy_id)
+            policy = policies.get(row.policy_id)
             if policy and not policy_show_on_dashboard(policy):
                 continue
         if user and not is_admin(user):
-            if not can_view_alert(user, row.cluster_id, row.namespace, row.resource_name or ""):
+            if not can_view_alert(user, {"clusterId": row.cluster_id, "namespace": row.namespace, "resourceName": row.resource_name or ""}):
                 continue
         items.append(_history_to_alert_dict(row))
     return items
@@ -1016,7 +1029,7 @@ def list_alert_history(
     results: List[Dict[str, Any]] = []
     for row in rows:
         if user and not is_admin(user):
-            if not can_view_alert(user, row.cluster_id, row.namespace, row.resource_name or ""):
+            if not can_view_alert(user, {"clusterId": row.cluster_id, "namespace": row.namespace, "resourceName": row.resource_name or ""}):
                 continue
         payload = _history_to_alert_dict(row)
         payload["status"] = row.status

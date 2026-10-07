@@ -22,6 +22,7 @@ import {
   listSshProfiles,
   listVSphereConnections,
 } from "../api/clusterBuildsApi.js";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 const POLL_INTERVAL_MS = 5000;
 const EMPTY_INFRA = { vsphere: [], credentials: [], profiles: [], buildProfiles: [] };
@@ -143,8 +144,8 @@ export default function ClusterBuilderPage({
 
   useEffect(() => {
     if (!active) return undefined;
-    const id = setInterval(reloadBuilds, POLL_INTERVAL_MS);
-    return () => clearInterval(id);
+    const stopPolling = setVisibleInterval(reloadBuilds, POLL_INTERVAL_MS);
+    return stopPolling;
   }, [active, reloadBuilds]);
 
   // The Floor's live strip shows a ticking clock; nothing else needs a second hand.

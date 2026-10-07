@@ -53,6 +53,7 @@ import {
   retryClusterBuild,
   startClusterBuild,
 } from "../../api/clusterBuildsApi.js";
+import { setVisibleInterval } from "../../lib/visibleInterval";
 
 const DETAIL_POLL_INTERVAL_MS = 2500;
 const LOG_REFRESH_MS = 2500;
@@ -442,8 +443,8 @@ export default function BuildDetail({
 
   useEffect(() => {
     if (!isPolling) return undefined;
-    const id = setInterval(load, DETAIL_POLL_INTERVAL_MS);
-    return () => clearInterval(id);
+    const stopPolling = setVisibleInterval(load, DETAIL_POLL_INTERVAL_MS);
+    return stopPolling;
   }, [isPolling, load]);
 
   useEffect(() => {
@@ -507,8 +508,8 @@ export default function BuildDetail({
     if (!logStep || !build || build.status !== "building") return undefined;
     const step = (build.steps || []).find((item) => item.id === logStep.id);
     if (!step || step.status !== "running") return undefined;
-    const id = setInterval(() => fetchLog(logStep), LOG_REFRESH_MS);
-    return () => clearInterval(id);
+    const stopPolling = setVisibleInterval(() => fetchLog(logStep), LOG_REFRESH_MS);
+    return stopPolling;
   }, [logStep, build, fetchLog]);
 
   useEffect(() => {

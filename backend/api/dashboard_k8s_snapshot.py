@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ from .k8s_provider import (
     _run_for_access,
     build_namespaces_from_data,
     build_node_health,
+    cluster_list_items,
     compute_pod_display_status,
     is_failed_pod_status,
     list_cpu_alerts_from_pod_data,
@@ -61,12 +63,14 @@ class DashboardK8sSnapshot:
     # Why no node disk usage could be read (e.g. missing nodes/proxy), else None.
     node_fs_reason: Optional[str] = None
     reachable: bool = True
+    # When this snapshot was taken: lets per-user summaries built from it tell
+    # that a newer one exists without holding on to the (large) snapshot.
+    taken_at: float = field(default_factory=time.monotonic)
 
 
-def _safe_json_items(future, label: str) -> Tuple[List[Dict[str, Any]], bool]:
+def _safe_items(future, label: str) -> Tuple[List[Dict[str, Any]], bool]:
     try:
-        result = json.loads(future.result()).get("items", [])
-        return result, True
+        return future.result(), True
     except Exception:
         logger.warning("dashboard snapshot: failed to load %s for cluster", label, exc_info=True)
         return [], False
@@ -127,30 +131,28 @@ def _fetch_dashboard_k8s_snapshot_uncached(access: ClusterAccess) -> DashboardK8
     _kt = _DASHBOARD_KUBECTL_TIMEOUT
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        nodes_future = pool.submit(_run_for_access, access, ["get", "nodes", "-o", "json"], _kt)
-        pods_future = pool.submit(
-            _run_for_access, access, ["get", "pods", "--all-namespaces", "-o", "json"], _kt
-        )
+        nodes_future = pool.submit(cluster_list_items, access, "nodes", _kt)
+        pods_future = pool.submit(cluster_list_items, access, "pods", _kt)
         version_future = pool.submit(_run_for_access, access, ["version", "-o", "json"], _kt)
-        ns_raw_future = pool.submit(_run_for_access, access, ["get", "namespaces", "-o", "json"], _kt)
-        dep_future = pool.submit(_run_for_access, access, ["get", "deployments", "-A", "-o", "json"], _kt)
-        svc_future = pool.submit(_run_for_access, access, ["get", "services", "-A", "-o", "json"], _kt)
+        ns_raw_future = pool.submit(cluster_list_items, access, "namespaces", _kt)
+        dep_future = pool.submit(cluster_list_items, access, "deployments", _kt)
+        svc_future = pool.submit(cluster_list_items, access, "services", _kt)
         # Per-node usage (not just the aggregate): summed it gives the same
         # cluster totals the utilization panel needs, and the per-node breakdown
         # feeds Node Health without a second `kubectl top nodes` round-trip.
         node_top_future = pool.submit(fetch_node_top_per_node, access, _TOP_TIMEOUT)
         pod_top_future = pool.submit(fetch_pod_top_metrics, access, False, _TOP_TIMEOUT)
 
-        node_items, nodes_ok = _safe_json_items(nodes_future, "nodes")
+        node_items, nodes_ok = _safe_items(nodes_future, "nodes")
         # Disk needs the node list; it starts as soon as that lands and runs
         # alongside the pod/top reads still in flight.
         node_fs_future = pool.submit(_fetch_node_fs, access, ready_node_names(node_items))
-        pod_items_raw, pods_ok = _safe_json_items(pods_future, "pods")
+        pod_items_raw, pods_ok = _safe_items(pods_future, "pods")
         pod_items = [_strip_pod(p) for p in pod_items_raw]
         version_data, version_ok = _safe_json_object(version_future)
-        namespaces_raw, _ = _safe_json_items(ns_raw_future, "namespaces")
-        deployments_raw, _ = _safe_json_items(dep_future, "deployments")
-        services_raw, _ = _safe_json_items(svc_future, "services")
+        namespaces_raw, _ = _safe_items(ns_raw_future, "namespaces")
+        deployments_raw, _ = _safe_items(dep_future, "deployments")
+        services_raw, _ = _safe_items(svc_future, "services")
 
         try:
             node_top_by_name = node_top_future.result()

@@ -39,6 +39,7 @@ import {
   uploadMobileBuild,
 } from "../api/mobileAppsApi.js";
 import { useEntityRoute } from "../routes/RouterContext.jsx";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 /** URL ids are strings; record ids usually are not. Compare through this. */
 const sameId = (a, b) => a !== null && a !== undefined && String(a) === String(b);
@@ -188,7 +189,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
 
   useEffect(() => {
     if (!hasActiveWork) return undefined;
-    const timer = setInterval(async () => {
+    const stopPolling = setVisibleInterval(async () => {
       try {
         const [b, p, r, listRes] = await Promise.all([
           listMobileAppBuilds(selectedAppId),
@@ -204,7 +205,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
         /* transient — the next tick retries */
       }
     }, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
+    return stopPolling;
   }, [hasActiveWork, selectedAppId]);
 
   // ── Actions ────────────────────────────────────────────────────────

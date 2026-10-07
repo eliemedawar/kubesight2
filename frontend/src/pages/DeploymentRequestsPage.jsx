@@ -20,6 +20,7 @@ import RequestsTable, {
 } from "../components/clusters/RequestsTable.jsx";
 
 import { useRouteParam } from "../routes/RouterContext.jsx";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 const TABS = [
   { key: "active", label: "Active Requests" },
@@ -165,8 +166,8 @@ export default function DeploymentRequestsPage() {
   // manager in-app). Poll quietly so a request that reaches its quorum flips to
   // "approved" here without needing a manual refresh.
   useEffect(() => {
-    const id = setInterval(() => load({ silent: true }), 15000);
-    return () => clearInterval(id);
+    const stopPolling = setVisibleInterval(() => load({ silent: true }), 15000);
+    return stopPolling;
   }, [load]);
 
   const decide = async (request, action) => {

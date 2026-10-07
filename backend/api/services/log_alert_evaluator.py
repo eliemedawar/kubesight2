@@ -330,7 +330,7 @@ def evaluate_log_policy(
 
                 if user and not is_admin(user):
                     view_resource = deployment_name or pod_name
-                    if not can_view_alert(user, cluster_id, pod_ns, view_resource):
+                    if not can_view_alert(user, {"clusterId": cluster_id, "namespace": pod_ns, "resourceName": view_resource}):
                         continue
 
                 alert_key = _log_alert_key(policy.id, cluster_id, pod_ns, pod_name, container_name, log_hash)

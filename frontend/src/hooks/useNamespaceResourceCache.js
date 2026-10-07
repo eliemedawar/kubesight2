@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getResourceListByType } from "../api/clustersApi.js";
 import { emptyNamespaceResources } from "../lib/resourceTypes.js";
 import { resourceCache, RESOURCE_CACHE_TTL_MS } from "../services/resourceCacheService.js";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 function setsEqual(a, b) {
   if (a.size !== b.size) {
@@ -215,7 +216,7 @@ export function useNamespaceResourceCache({
       return undefined;
     }
 
-    const timer = window.setInterval(() => {
+    const stopPolling = setVisibleInterval(() => {
       const cached = resourceCache.get(clusterId, namespace, activeListKey);
       if (!cached || resourceCache.isStale(cached, RESOURCE_CACHE_TTL_MS)) {
         void fetchListKey(activeListKey, {
@@ -225,7 +226,7 @@ export function useNamespaceResourceCache({
       }
     }, RESOURCE_CACHE_TTL_MS);
 
-    return () => window.clearInterval(timer);
+    return stopPolling;
   }, [enabled, clusterId, namespace, activeListKey, fetchListKey]);
 
   // Live mode: poll the active tab straight from the cluster. Skips while the

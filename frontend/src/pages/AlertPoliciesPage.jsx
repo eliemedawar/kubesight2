@@ -25,6 +25,7 @@ import {
   logWindowSecondsForEvaluationInterval,
   shouldShowLogReceiverWarning,
 } from "../lib/logPolicyDefaults.js";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 const RECEIVER_TYPE_LABELS = {
   email: "Email",
@@ -914,10 +915,10 @@ export default function AlertPoliciesPage({
     if (!clusterId) {
       return undefined;
     }
-    const timer = window.setInterval(() => {
+    const stopPolling = setVisibleInterval(() => {
       loadData();
     }, 30000);
-    return () => window.clearInterval(timer);
+    return stopPolling;
   }, [clusterId, loadData]);
 
   const openCreate = () => {

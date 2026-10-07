@@ -21,13 +21,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import jwt
+from sqlalchemy.orm import selectinload
 
 from ..access_engine import can_access_namespace, is_admin
 from ..audit import log_audit
 from ..auth_utils import _jwt_secret
 from ..db import db
 from ..email_delivery import EmailDeliveryError, send_email, smtp_is_configured
-from ..models import ChangeBundle, ChangeBundleItem, ChangeBundleVote, User
+from ..models import ChangeBundle, ChangeBundleItem, ChangeBundleVote, User, user_display_loader
 from .deployment_request_service import (
     _clean_timezone,
     _html_escape,
@@ -239,13 +240,21 @@ def _vote_tally(row: ChangeBundle) -> Tuple[int, int]:
     return approvals, declines
 
 
-def serialize_bundle(row: ChangeBundle, *, include_items: bool = True) -> Dict[str, Any]:
+def serialize_bundle(
+    row: ChangeBundle,
+    *,
+    include_items: bool = True,
+    known_cluster_names: Optional[Dict[str, Optional[str]]] = None,
+) -> Dict[str, Any]:
     requester = row.requester
     approver = row.approved_by
     approvals, declines = _vote_tally(row)
     clusters = sorted({item.cluster_id for item in row.items})
     cluster_names = sorted(
-        {_resolve_cluster_name(item.cluster_id, item.cluster_name) for item in row.items}
+        {
+            _resolve_cluster_name(item.cluster_id, item.cluster_name, known_cluster_names)
+            for item in row.items
+        }
     )
     payload: Dict[str, Any] = {
         "id": row.id,
@@ -291,16 +300,55 @@ def serialize_bundle(row: ChangeBundle, *, include_items: bool = True) -> Dict[s
 # Lookup helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_cluster_name(cluster_id: str, provided: str = "") -> str:
-    """Best display name for a cluster id (real name > caller value > id)."""
-    try:
-        from ..cluster_store import get_active_cluster_by_public_id
+def _active_cluster_names(cluster_ids) -> Dict[str, Optional[str]]:
+    """The registered name of each active cluster among ``cluster_ids``, in one query.
 
-        cluster = get_active_cluster_by_public_id(cluster_id)
-        if cluster and cluster.name:
-            return cluster.name
-    except Exception:  # noqa: BLE001 — name resolution must never block staging
-        pass
+    A list serializes hundreds of items that name a handful of clusters; asking
+    the database once per item is what made the bundle lists slow. Maps each id
+    to the name :func:`_resolve_cluster_name` would find for it, or None when it
+    would find none. Empty on any failure, which sends every id back to the
+    one-by-one lookup.
+    """
+    try:
+        from ..cluster_access import parse_custom_cluster_db_id
+        from ..models import Cluster
+
+        db_ids = {cid: parse_custom_cluster_db_id(cid) for cid in set(cluster_ids)}
+        wanted = {db_id for db_id in db_ids.values() if db_id is not None}
+        clusters = (
+            {row.id: row for row in Cluster.query.filter(Cluster.id.in_(wanted)).all()}
+            if wanted
+            else {}
+        )
+    except Exception:  # noqa: BLE001 — name resolution must never block a listing
+        return {}
+    names: Dict[str, Optional[str]] = {}
+    for cluster_id, db_id in db_ids.items():
+        cluster = clusters.get(db_id) if db_id is not None else None
+        names[cluster_id] = cluster.name if cluster and cluster.is_active and cluster.name else None
+    return names
+
+
+def _resolve_cluster_name(
+    cluster_id: str, provided: str = "", names: Optional[Dict[str, Optional[str]]] = None
+) -> str:
+    """Best display name for a cluster id (real name > caller value > id).
+
+    ``names`` is a prefetched :func:`_active_cluster_names` map; an id it does
+    not cover is looked up on its own.
+    """
+    if names is not None and cluster_id in names:
+        if names[cluster_id]:
+            return names[cluster_id]
+    else:
+        try:
+            from ..cluster_store import get_active_cluster_by_public_id
+
+            cluster = get_active_cluster_by_public_id(cluster_id)
+            if cluster and cluster.name:
+                return cluster.name
+        except Exception:  # noqa: BLE001 — name resolution must never block staging
+            pass
     provided = (provided or "").strip()
     if provided and provided != cluster_id:
         return provided
@@ -354,22 +402,46 @@ def list_my_bundles(user: Optional[User], *, limit: int = 200) -> List[Dict[str,
     if not user:
         return []
     rows = (
-        ChangeBundle.query.filter(ChangeBundle.requester_user_id == user.id)
+        ChangeBundle.query.options(*_list_loaders())
+        .filter(ChangeBundle.requester_user_id == user.id)
         .order_by(ChangeBundle.created_at.desc())
         .limit(max(1, min(int(limit), 500)))
         .all()
     )
-    return [serialize_bundle(row, include_items=False) for row in rows]
+    return _serialize_list(rows)
 
 
 def list_bundles_for_approval(*, status: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
-    query = ChangeBundle.query
+    query = ChangeBundle.query.options(*_list_loaders())
     if status:
         query = query.filter(ChangeBundle.status == status)
     else:
         query = query.filter(ChangeBundle.status != "draft")
     rows = query.order_by(ChangeBundle.created_at.desc()).limit(max(1, min(int(limit), 500))).all()
-    return [serialize_bundle(row, include_items=False) for row in rows]
+    return _serialize_list(rows)
+
+
+def _list_loaders() -> tuple:
+    """How a bundle list loads what its rows summarize.
+
+    Items and votes are joined eager loads by default, and joined together they
+    multiply (a bundle with 4 items and 3 votes is 12 rows); a list only counts
+    them, so each comes in its own SELECT ... IN. The requester and approver are
+    batched the same way, without their access collections.
+    """
+    return (
+        selectinload(ChangeBundle.items),
+        selectinload(ChangeBundle.votes),
+        user_display_loader(ChangeBundle.requester),
+        user_display_loader(ChangeBundle.approved_by),
+    )
+
+
+def _serialize_list(rows: List[ChangeBundle]) -> List[Dict[str, Any]]:
+    names = _active_cluster_names(item.cluster_id for row in rows for item in row.items)
+    return [
+        serialize_bundle(row, include_items=False, known_cluster_names=names) for row in rows
+    ]
 
 
 # ---------------------------------------------------------------------------

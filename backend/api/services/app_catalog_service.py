@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..access_engine import can_access_namespace, is_admin, user_has_permission
 from ..audit import log_audit
@@ -79,6 +79,15 @@ def get_entry_for_inventory(
         namespace=namespace,
         is_active=True,
     ).all()
+    return match_catalog_entry(entries, app_name, workload_name)
+
+
+def match_catalog_entry(
+    entries: Iterable[AppCatalogEntry],
+    app_name: str,
+    workload_name: Optional[str] = None,
+) -> Optional[AppCatalogEntry]:
+    """The first of one namespace's entries that names the app or its workload."""
     for entry in entries:
         if entry.display_name == app_name:
             return entry

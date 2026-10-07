@@ -23,7 +23,7 @@ from ..k8s_provider import (
     should_use_real_k8s,
 )
 from ..mock_data import ALERTS, CLUSTER_NODES, CLUSTER_OVERVIEWS, CLUSTERS, NAMESPACES
-from ..models import AuditLog, User
+from ..models import AuditLog, User, user_display_loader
 from ..serializers import audit_log_to_dict
 from ..dashboard_intelligence import evaluate_version_status, utilization_from_overview_resources
 from ..upgrade_provider import _fetch_latest_k8s_version
@@ -283,8 +283,15 @@ def _activity_message(entry: Dict[str, Any]) -> str:
 
 def _load_recent_audit_entries(limit: int = 200) -> List[AuditLog]:
     """One shared audit-log fetch per dashboard request — the activity,
-    operational-events, and user-activity widgets all filter the same rows."""
-    return AuditLog.query.order_by(AuditLog.created_at.desc()).limit(limit).all()
+    operational-events, and user-activity widgets all filter the same rows.
+    The actors (shown by name only) come in one query, without their access
+    collections."""
+    return (
+        AuditLog.query.options(user_display_loader(AuditLog.actor))
+        .order_by(AuditLog.created_at.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 # Routine sign-ins drown out the changes an operator cares about on the
@@ -783,6 +790,24 @@ def _load_real_k8s_dashboard_data(
     )
 
 
+def _current_k8s_snapshot_token(cluster_id: str) -> Optional[float]:
+    """When the shared cluster snapshot a summary is built from was taken, or
+    None (mock cluster, unknown cluster, unreachable). Served from its cache —
+    and asking for it is what lets an expired snapshot refresh in the
+    background. Only the token is kept with a cached summary: holding the
+    snapshot itself would pin a whole pod list per user."""
+    if not should_use_real_k8s(cluster_id):
+        return None
+    try:
+        from ..dashboard_k8s_snapshot import fetch_dashboard_k8s_snapshot
+
+        access = resolve_cluster_access(cluster_id)
+        snapshot = fetch_dashboard_k8s_snapshot(access) if access else None
+        return getattr(snapshot, "taken_at", None)
+    except Exception:
+        return None
+
+
 def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     if not cluster_id:
         return None, "clusterId is required.", 400
@@ -793,6 +818,13 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
         now_ts = time.time()
         with _dashboard_summary_cache_lock:
             cached = _dashboard_summary_cache.get(cache_key)
+        # A user's cached summary is only as good as the cluster snapshot it
+        # was built from: once a newer snapshot exists, rebuild from it, so the
+        # dashboard lags the cluster by the snapshot's age (~15 s), not by that
+        # plus this cache's own 20-60 s.
+        if cached and cached[0] > now_ts and cached[2] is not None:
+            if _current_k8s_snapshot_token(cluster_id) != cached[2]:
+                cached = None
         if cached and cached[0] > now_ts:
             logger.info(
                 "dashboard_summary cache hit (clusterId=%s userId=%s)",
@@ -1097,6 +1129,7 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
             _dashboard_summary_cache[cache_key] = (
                 time.time() + ttl,
                 payload,
+                _current_k8s_snapshot_token(cluster_id),
             )
         logger.debug(
             "dashboard_summary cache TTL=%ds (clusterId=%s health=%s failed=%s)",
