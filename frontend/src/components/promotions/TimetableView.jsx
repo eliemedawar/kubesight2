@@ -55,10 +55,23 @@ export default function TimetableView({ overview, timetable, selectedKey, onSele
               <div key={env.id} className="tt-stn">
                 <span className="tt-stn-dot" aria-hidden="true" />
                 {next && (
-                  <button type="button" className={`btn-ghost tt-next${waiting ? " is-wait" : ""}`} onClick={() => onSelect(next.key)}>
+                  <button
+                    type="button"
+                    className={`btn-ghost tt-next${waiting ? " is-wait" : ""}`}
+                    onClick={() => onSelect(next.key)}
+                    title={`${next.code} — ${next.kind === "ondemand" ? "on demand" : fmtWhen(next.departsAt, tz, timetable.now)}`}
+                  >
                     <i aria-hidden="true" />
-                    <b>{next.kind === "ondemand" ? "on demand" : fmtWhen(next.departsAt, tz, timetable.now)}</b> {next.code}
-                    {next.status === "held" ? " · held" : waiting ? " · awaiting approval" : next.status === "boarding" ? " · boarding" : ""}
+                    <span className="tt-next-text">
+                      <b>{next.kind === "ondemand" ? "On demand" : fmtWhen(next.departsAt, tz, timetable.now)}</b> {next.code}
+                      {next.status === "held"
+                        ? " · held"
+                        : waiting
+                          ? " · awaiting approval"
+                          : next.kind !== "ondemand" && next.status === "boarding"
+                            ? " · boarding"
+                            : ""}
+                    </span>
                   </button>
                 )}
                 <h3>{env.name}</h3>

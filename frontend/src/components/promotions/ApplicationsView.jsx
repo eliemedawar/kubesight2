@@ -113,12 +113,14 @@ export default function ApplicationsView({ overview, search, onSearch, onOpenApp
                     onClick={() => toggleGroup(group.key)}
                     aria-expanded={!isCollapsed}
                   >
-                    {isCollapsed ? <PrIcon.ChevronRight /> : <PrIcon.ChevronDown />}
-                    <b>{group.label}</b>
-                    <em>
-                      {group.items.length} {group.items.length === 1 ? "application" : "applications"}
-                      {behind > 0 && ` · ${behind} behind`}
-                    </em>
+                    <span className="pr-grid-group-label">
+                      {isCollapsed ? <PrIcon.ChevronRight /> : <PrIcon.ChevronDown />}
+                      <b>{group.label}</b>
+                      <em>
+                        {group.items.length} {group.items.length === 1 ? "application" : "applications"}
+                        {behind > 0 && ` · ${behind} behind`}
+                      </em>
+                    </span>
                   </button>
                 )}
                 {!isCollapsed && (

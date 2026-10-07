@@ -3935,3 +3935,62 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ── Narrow widths ────────────────────────────────────────────────────
+ * The version matrix is a real table: it scrolls sideways when the
+ * environments do not fit, with the application column pinned so every row
+ * stays readable. The ladder's environment cards wrap instead of scrolling.
+ */
+.pr-root .pr-grid-row > span:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg-panel);
+}
+
+.pr-root .pr-grid-row--head > span:first-child {
+  background: var(--bg-panel-strong);
+}
+
+.pr-root .pr-grid-row--app:hover > span:first-child {
+  background: var(--bg-panel-strong);
+}
+
+.pr-root .pr-grid-row > span:first-child::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-soft);
+}
+
+.pr-root .pr-ladder-view {
+  container: pr-ladder / inline-size;
+}
+
+@container pr-ladder (max-width: 1240px) {
+  .pr-root .pr-envs {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+    gap: 0.75rem;
+    overflow: visible;
+  }
+
+  .pr-root .pr-envs-arrow {
+    display: none;
+  }
+
+  .pr-root .pr-env {
+    min-width: 0;
+  }
+}
+
+.pr-root .pr-grid-group-label {
+  position: sticky;
+  left: 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
