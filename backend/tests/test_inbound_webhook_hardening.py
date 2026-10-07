@@ -178,8 +178,11 @@ def test_hermes_agent_role_is_the_ticket_agent_and_nothing_that_manages(app):
         "applications:execute",
         "ticketing:view",
         "ticketing:agent",
+        # Read-only: answer a ticket that skips an environment with what runs where.
+        "promotions:view",
     }
     assert "ticketing:manage" not in HERMES_AGENT_PERMISSIONS
+    assert "promotions:manage" not in HERMES_AGENT_PERMISSIONS
     with app.app_context():
         hermes = User.query.filter_by(username="hermes-agent").one()
         assert {p.key for p in hermes.role.permissions} == set(HERMES_AGENT_PERMISSIONS)
