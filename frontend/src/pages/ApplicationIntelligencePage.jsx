@@ -53,6 +53,7 @@ import {
   validateApplicationForm,
 } from "../utils/applicationIntelligence";
 import "./ApplicationIntelligencePage.css";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 const EMPTY_FORM = {
   name: "",
@@ -2393,7 +2394,7 @@ export function ApplicationIntelligenceWorkspace({
 
   useEffect(() => {
     if (!analysis?.id || !isAnalysisActive(analysis.status)) return undefined;
-    const timer = window.setInterval(async () => {
+    const stopPolling = setVisibleInterval(async () => {
       try {
         const next = await getApplicationAnalysis(analysis.id);
         setAnalysis(next);
@@ -2403,18 +2404,18 @@ export function ApplicationIntelligenceWorkspace({
         }
       } catch { /* polling resumes on next interval */ }
     }, 5000);
-    return () => window.clearInterval(timer);
+    return stopPolling;
   }, [analysis?.id, analysis?.status, loadDetail, onChanged]);
 
   useEffect(() => {
     if (!analysis?.id || !pullRequests.some((item) => item.status === "Queued")) return undefined;
-    const timer = window.setInterval(async () => {
+    const stopPolling = setVisibleInterval(async () => {
       try {
         const data = await listApplicationPullRequests(analysis.id);
         setPullRequests(data.items || []);
       } catch { /* polling resumes on next interval */ }
     }, 5000);
-    return () => window.clearInterval(timer);
+    return stopPolling;
   }, [analysis?.id, pullRequests]);
 
   if (!selected || String(selected.id) !== String(applicationId)) {

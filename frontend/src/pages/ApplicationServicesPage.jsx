@@ -21,6 +21,7 @@ import TopologyViewer, {
   rectExitPoint,
 } from "../components/common/TopologyViewer.jsx";
 import { useEntityRoute, useRouteParam } from "../routes/RouterContext.jsx";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 /** URL ids are strings; record ids usually are not. Compare through this. */
 const sameId = (a, b) => a !== null && a !== undefined && String(a) === String(b);
@@ -1577,7 +1578,7 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
   // paused while the edit modal is open so a refresh can't clobber a draft.
   useEffect(() => {
     if (modalOpen) return undefined;
-    const timer = window.setInterval(async () => {
+    const stopPolling = setVisibleInterval(async () => {
       try {
         const svcRes = await listApplicationServices();
         setServices(svcRes.items || []);
@@ -1585,7 +1586,7 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
         // Keep showing the last known health if a poll fails.
       }
     }, 30000);
-    return () => window.clearInterval(timer);
+    return stopPolling;
   }, [modalOpen]);
 
   const openCreate = () => { setEditingService(null); setSaveError(""); setModalOpen(true); };

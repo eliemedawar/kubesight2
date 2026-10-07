@@ -14,6 +14,7 @@ import LoadingState from "../components/common/LoadingState.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 const STATUS_BADGE = { healthy: "pass", degraded: "warning", unhealthy: "fail", unknown: "pending" };
 const STATUS_LABEL = { healthy: "Healthy", degraded: "Degraded", unhealthy: "Unhealthy", unknown: "Unknown" };
@@ -243,7 +244,7 @@ export default function ComponentsPage() {
   // Health checks now auto-run on the backend; poll so statuses stay current
   // without pressing "Check now". Silent refresh — no loading spinner flicker.
   useEffect(() => {
-    const timer = window.setInterval(async () => {
+    const stopPolling = setVisibleInterval(async () => {
       try {
         const res = await listComponents();
         setComponents(res.items || []);
@@ -251,7 +252,7 @@ export default function ComponentsPage() {
         // Keep showing the last known statuses if a poll fails.
       }
     }, 30000);
-    return () => window.clearInterval(timer);
+    return stopPolling;
   }, []);
 
   const stats = useMemo(() => {

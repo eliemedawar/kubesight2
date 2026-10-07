@@ -13,6 +13,7 @@ import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { usePermission } from "../hooks/usePermission.js";
 import { useRouteParam } from "../routes/RouterContext.jsx";
 import { useChangeBundle } from "../context/ChangeBundleContext";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 const STATUS_STYLE = {
   draft: { bg: "var(--bg-interactive)", fg: "var(--text-muted)", label: "Draft" },
@@ -290,8 +291,8 @@ export default function ChangeBundlesPage() {
 
   // Statuses change out-of-band (other approvers, scheduled execution). Poll quietly.
   useEffect(() => {
-    const id = setInterval(() => load({ silent: true }), 15000);
-    return () => clearInterval(id);
+    const stopPolling = setVisibleInterval(() => load({ silent: true }), 15000);
+    return stopPolling;
   }, [load]);
 
   const approve = async (bundle) => {

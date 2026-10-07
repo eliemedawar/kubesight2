@@ -30,6 +30,7 @@ import {
   toForm,
   watchedBranches,
 } from "./mergeChecks/mergeCheckModel.js";
+import { setVisibleInterval } from "../../lib/visibleInterval";
 
 const SECTIONS = ["checks", "gate", "connection", "history"];
 
@@ -140,8 +141,8 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
   const hasRunning = runs.some((run) => run.state === "queued" || run.state === "running");
   useEffect(() => {
     if (!hasRunning) return undefined;
-    const timer = setInterval(loadRuns, 5000);
-    return () => clearInterval(timer);
+    const stopPolling = setVisibleInterval(loadRuns, 5000);
+    return stopPolling;
   }, [hasRunning, loadRuns]);
 
   const changed = useMemo(() => dirtyKeys(form, saved), [form, saved]);

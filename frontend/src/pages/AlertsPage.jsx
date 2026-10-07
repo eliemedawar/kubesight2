@@ -23,6 +23,7 @@ import {
   severitySeries,
 } from "../lib/alertFeed.js";
 import { EMPTY_MESSAGES, isAccessDeniedError } from "../utils/authz.js";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
 const AlertPoliciesPage = lazy(() => import("./AlertPoliciesPage.jsx"));
 
@@ -205,8 +206,8 @@ export default function AlertsPage({
       return undefined;
     }
     fetchHistory();
-    const timer = window.setInterval(fetchHistory, HISTORY_REFRESH_MS);
-    return () => window.clearInterval(timer);
+    const stopPolling = setVisibleInterval(fetchHistory, HISTORY_REFRESH_MS);
+    return stopPolling;
   }, [fetchHistory, selectedClusterId, hasClusters, accessError]);
 
   /* ── derived feed data ── */

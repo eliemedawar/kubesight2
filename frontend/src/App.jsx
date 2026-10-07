@@ -55,6 +55,7 @@ import { applyTheme, readThemePreference, storeThemePreference } from "./utils/t
 import CoachMarks from "./components/tour/CoachMarks.jsx";
 import { getTourSteps, getWelcomeSteps, WELCOME_TOUR_KEY } from "./tours/tourDefinitions.js";
 import { markTourSeen, readTourState, setToursMuted } from "./utils/tourStorage.js";
+import { setVisibleInterval } from "./lib/visibleInterval";
 
 // Theme is a per-browser preference: the locally stored choice always wins
 // over the workspace value returned by the API, so one user's theme never
@@ -1039,10 +1040,10 @@ export default function App() {
       }
     };
     loadRequestUpdates();
-    const timer = window.setInterval(loadRequestUpdates, 30000);
+    const stopPolling = setVisibleInterval(loadRequestUpdates, 30000);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      stopPolling();
     };
   }, [isAuthenticated, authUser?.id, hasPermission]);
 
@@ -1209,10 +1210,10 @@ export default function App() {
       }
     };
     poll();
-    const timer = setInterval(poll, 3000);
+    const stopPolling = setVisibleInterval(poll, 3000);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      stopPolling();
     };
   }, [activePage, upgradeResult?.status, upgradeResult?.upgradeId, upgradeResult?.jobId]);
 
@@ -1289,11 +1290,11 @@ export default function App() {
     loadDashboardSummary(selectedClusterId);
     const intervalSeconds = Number(settingsDraft.refreshIntervalSeconds) || 30;
     const intervalMs = Math.min(Math.max(intervalSeconds, 30), 60) * 1000;
-    const timer = window.setInterval(() => {
+    const stopPolling = setVisibleInterval(() => {
       loadDashboardSummary(selectedClusterId, { background: true });
     }, intervalMs);
     return () => {
-      window.clearInterval(timer);
+      stopPolling();
     };
   }, [resolvedActivePage, selectedClusterId, selectedClusterIsAllowed, settingsDraft.refreshIntervalSeconds]);
 

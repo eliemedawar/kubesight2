@@ -15,6 +15,7 @@ import {
   rejectAgentTask,
 } from "../../api/ticketAgentApi.js";
 import { useTicketing } from "./TicketingContext.jsx";
+import { setVisibleInterval } from "../../lib/visibleInterval";
 
 // One provider's workspace: command bar → flow strip → three rooms. This is the
 // page the Ticketing tab opens when a provider card is picked, and it is
@@ -132,7 +133,7 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   const hasActiveRun = runs.some((r) => ACTIVE_RUN_STATUSES.has(r.status));
   useEffect(() => {
     if (!hasActiveRun) return undefined;
-    const timer = setInterval(async () => {
+    const stopPolling = setVisibleInterval(async () => {
       try {
         const res = await api.listAutomationRuns(50);
         setRuns(res?.items || []);
@@ -140,7 +141,7 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
         /* transient — next poll retries */
       }
     }, 10000);
-    return () => clearInterval(timer);
+    return stopPolling;
   }, [hasActiveRun, api]);
 
   // While Hermes is reading a ticket (or a task waits on a human), poll the
@@ -152,7 +153,7 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   );
   useEffect(() => {
     if (!agentBusy) return undefined;
-    const timer = setInterval(async () => {
+    const stopPolling = setVisibleInterval(async () => {
       try {
         const [inbound, res] = await Promise.all([
           api.listInboundTickets(10),
@@ -164,7 +165,7 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
         /* transient — next poll retries */
       }
     }, 10000);
-    return () => clearInterval(timer);
+    return stopPolling;
   }, [agentBusy, api]);
 
   const refreshTickets = async () => {
