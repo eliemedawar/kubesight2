@@ -18,7 +18,7 @@ costs a page and loading all seven costs the answer.
 | registering a CI service, a standalone/shared pipeline | [references/ci.md](references/ci.md) |
 | a pull request that was blocked, the quality gate | [references/ci.md](references/ci.md) |
 | a slow build, the build cache, a corrupt cache error | [references/ci.md](references/ci.md) |
-| moving a Jenkinsfile here, a mobile build on the Mac agent | [references/ci.md](references/ci.md) |
+| moving a Jenkinsfile here; a mobile (Android/iOS) build on a Mac agent | [references/ci.md](references/ci.md) |
 | a cluster, a namespace, a pod's state, events, topology | [references/clusters.md](references/clusters.md) |
 | what is running and what version; restart, scale, roll back, exec | [references/workloads.md](references/workloads.md) |
 | deploying, Helm, approvals, change bundles | [references/deploys.md](references/deploys.md) |

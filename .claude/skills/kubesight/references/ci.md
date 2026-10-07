@@ -365,123 +365,184 @@ yes before calling it. There is deliberately no tool that switches a service's
 checks off or re-sends a verdict: relaxing a gate to get a merge through is the
 failure the gate exists to prevent, and it stays a human action in the UI.
 
-## Moving a Jenkins pipeline here — the mobile build on the Mac
+## Moving a Jenkins pipeline here, and mobile builds on a Mac agent
 
-Learned porting the areebapay-v2 React Native Jenkinsfile (Android AAB/APK + iOS
-IPA, every stage `agent { label 'mac' }`) onto a macOS agent. Each rule below is
-a failure that happened, not a style preference. Read the Jenkinsfile in full
-first (`kubesight_repo_file {service, path: "Jenkinsfile"}` when it is in the
-repo, otherwise the person pastes it), then translate:
+Every rule here is a failure that has already happened on a real port, not a
+style preference. It applies to any Jenkinsfile, and the second half to any
+build that has to run on a macOS agent: React Native, native iOS, Flutter,
+native Android on a Mac.
+
+### First, read what you are porting
+
+1. The whole Jenkinsfile: `kubesight_repo_file {service, path: "Jenkinsfile"}`
+   when it is in the repository, otherwise the person pastes it. Its
+   parameters with their real default values usually live only in the Jenkins
+   job, so ask for them. Never invent a value.
+2. The project's layout: `kubesight_repo_tree {service}`. Where `gradlew` is
+   (repository root for native Android, `android/` for React Native and
+   Flutter), whether there is an `ios/` with a `Podfile`, a `package.json`, a
+   `pubspec.yaml`, a `fastlane/` directory. Commands run from the checkout root,
+   so this decides every `cd`.
+3. The runner: `kubesight_runners_list`. Its `capabilities` are the tools the
+   agent actually found on the machine (`node`, `yarn`, `java`, `xcode`,
+   `fastlane`, `pod`…). A tool missing there will be missing in the stage.
+
+### Translating
 
 | Jenkins | KubeSight |
 |---|---|
-| `agent { label 'mac' }` | `runnerType: "agent_macos"`, `runnerLabels: ["macos"]` (+ `"xcode"` for iOS) — on **every** stage, the checkout included: the workspace lives on the machine that cloned it |
-| `cleanWs()` + `checkout(... refs/tags/${repotag})` | a `checkout` stage; the person runs the build on the tag (`kubesight_build_run {service, branch: "<tag>"}`) and `$KUBESIGHT_TAG` holds it |
-| string / text / boolean parameters | `parameters` on `kubesight_pipeline_save`: `text`, `multiline` (a whole `.env` or Fastfile, newlines kept), `boolean`, `choice`. A stage reads each as `$<name>`, **case-sensitive, exactly the name** — not the label |
-| `when { equals expected: 'true', actual: DeployIos }` | `runCondition: {variable: "DeployIos", operator: "equals", value: "true"}` on a `boolean` parameter |
-| `BUILD_NUMBER` | `$KUBESIGHT_BUILD_NUMBER` (so `700 + BUILD_NUMBER` becomes `$((700 + KUBESIGHT_BUILD_NUMBER))`) |
-| Groovy values from `script {}` (`Build_Version`, `BUILD_CODE_NUMBER`) | recompute in shell in each stage that needs them — stages share files, not variables (or append to `$KUBESIGHT_ENV`) |
-| `dir("./android") { sh ... }` | `cd android` inside the commands |
-| `archiveArtifacts 'app/build/outputs/bundle/release/app-release.aab'` | `artifacts: [{path: "android/app/build/outputs/bundle/release/app-release.aab", type: "aab"}]` — the path is from the checkout root, so add the `dir()` prefix; `apk`/`ipa` likewise |
-| `withCredentials([usernamePassword(credentialsId: 'MacDevops', ...)])` | `secretRefs: [{name: "MAC_KEYCHAIN_PASSWORD", envVar: "MAC_KEYCHAIN_PASSWORD"}]` — the secret must already exist on the service; ask a person to add it |
-| `try { ... } catch { echo "pipeline continues" }` | `continueOnFailure: true` on that stage |
-| `${var}` interpolated into `sh """..."""` | plain `"$var"` in the shell; drop Groovy's `\$` escapes |
+| `agent { label 'mac' }` | `runnerType: "agent_macos"`, `runnerLabels: ["macos"]`, plus `"xcode"` on iOS stages. Put it on **every** stage, the checkout included: the workspace lives on the machine that cloned it. |
+| `cleanWs()` + `checkout(...)` | one `checkout` stage. Every build starts in a fresh workspace, so `cleanWs` has no equivalent and needs none. |
+| a tag or branch parameter fed to the checkout | the ref the build is started on (`kubesight_build_run {service, branch: "<tag>"}`). Read it as `$KUBESIGHT_TAG` / `$KUBESIGHT_BRANCH`. `$KUBESIGHT_REF_TYPE` is `tag` or `branch`. |
+| `string` / `text` / `booleanParam` / `choice` parameters | `parameters` on `kubesight_pipeline_save`: `text`, `multiline` (a whole `.env`, Fastfile or `.npmrc`, newlines kept), `boolean`, `choice`. A stage reads each as `$<name>`. The name is **case-sensitive**, and it is the name, not the label. |
+| `when { equals expected: 'true', actual: X }` | `runCondition: {variable: "X", operator: "equals", value: "true"}`. The stage then shows as skipped. An `exit 0` at the top of the script instead shows a green "passed" that built nothing. |
+| `BUILD_NUMBER` | `$KUBESIGHT_BUILD_NUMBER`. Shell arithmetic: `$((700 + KUBESIGHT_BUILD_NUMBER))`. |
+| values computed in `script {}` (a version, a build code) | recompute them in shell in each stage that needs them. Stages share files, not variables. Or append `NAME=value` to `$KUBESIGHT_ENV` once, and later stages read it. |
+| `dir("sub") { sh ... }` | `cd sub` inside the commands, or the stage's `workingDirectory`. Forgetting it gives `./gradlew: No such file or directory`. |
+| `archiveArtifacts 'x/y.apk'` | `artifacts: [{path, type}]`, the path counted from the checkout root (add the `dir()` prefix). `type` is `apk`, `aab`, `ipa`, `binary`… |
+| `withCredentials([...])` | `secretRefs: [{name, envVar}]`. The secret must already exist on the service. You cannot create one, so ask a person. |
+| `try { ... } catch { echo }` with no rethrow | `continueOnFailure: true` if the person really wants it. Say out loud that the Jenkins stage swallowed its failures: it may have been failing for months behind a green job. |
+| `${var}` interpolated into `sh """..."""` | plain `"$var"` in the shell. Groovy filled values into the text, so a heredoc of `${PARAM}` worked there. Here a quoted heredoc writes the literal text `${PARAM}`. |
 
-What breaks if you translate literally:
+### What breaks when you translate literally
 
-- **Never copy `export PATH=/usr/local/bin:$PATH` or `/opt/homebrew/bin` lines
-  into commands.** The agent's own environment (its launchd plist) already puts
-  nvm's Node 20.19.4, rbenv's Ruby 4.0.6, Homebrew and `ANDROID_HOME` on the
-  path, in the right order. Prepending `/usr/local/bin` brought back an older
-  Node 20.10.0, and `yarn install` died with `The engine "node" is incompatible
-  with this module. Expected version ">=20.19.4"`. Drop the `source nvm.sh` /
-  `nvm use` / rbenv exports too. A tool that is genuinely missing is the
-  machine's `PATH`, not the stage's: check the runner's `capabilities` in
-  `kubesight_runners_list` and tell the person to add the folder to the agent's
-  plist and reload it.
-- **No image, and never `KUBESIGHT_CONTAINER=always`, on a Mac stage.** The Mac
-  has no docker or podman: an image is ignored (`stage image ... ignored: no
-  container runtime here`), and `always` fails the stage outright (`This stage
-  requires a container ... no usable docker or podman`). Xcode cannot run in a
-  container anyway.
-- **Signing files live on the Mac, by absolute path** — the keystore at
-  `/Users/devops/jenkins/.certs/app/areebapay.keystore`, the Play JSON key under
-  `/Users/devops/jenkins/.certs/android/`. Use the path the parameter gives and
-  test it with `[ -f "$STORE_FILE" ]`. Do not write a check that only looks
-  inside the repository; that is how the stage failed with `No keystore at ...
-  looked in the repo root, android/ and android/app/`.
-- **The `.env` files are not in the repo.** Jenkins' CONFIG stage wrote them from
-  the `envuat` / `envprod` / `envpreprod` parameters. Write them before anything
-  copies them — in a first config stage on the Mac (files carry to later stages)
-  or at the top of each build stage. Copy Jenkins' `printf` exactly:
-  `printf "$envuat" > .env.uat` (the value as the *format*). That turns the
-  `\\r\\n` inside the PEM keys into what the app received under Jenkins;
-  `printf '%s'` would write them differently.
-- **A Fastfile or fastlane `.env` is written verbatim:** `printf '%s\n'
-  "$FASTFILE_BUILD_ONLY" > fastlane/Fastfile` (Jenkins used a quoted heredoc).
-- **Read signing values out of a multiline `KEY=VALUE` parameter like this**,
-  and never `cat .env` or `echo` a password. Jenkins printed the whole env file,
-  but **parameter values are not masked in KubeSight logs — only secrets are**:
+- **Do not copy `export PATH=...`, `source nvm.sh` / `nvm use` or rbenv
+  exports into commands.** On an agent, tool locations belong to the machine:
+  its service definition (the launchd plist on a Mac) sets `PATH`,
+  `ANDROID_HOME` and the Ruby variables once, in the right order. A stage
+  that prepends `/usr/local/bin` can bring back an older tool, e.g. `The
+  engine "node" is incompatible with this module. Expected version ">=X"`. A
+  tool that is genuinely missing is the machine's `PATH` to fix. Tell the
+  person which folder to add to the plist (`which <tool>` in their own
+  Terminal finds it). Don't work around it in the stage.
+- **No image, and never `KUBESIGHT_CONTAINER=always`, on a Mac stage.** A Mac
+  has no usable container runtime for this, and Xcode cannot run in one. An
+  image is ignored with a log line saying so. `always` fails the stage with
+  `This stage requires a container ... no usable docker or podman`.
+- **Signing files live on the machine, by absolute path**: a keystore, a Play
+  service-account JSON, an App Store Connect `.p8`, provisioning profiles. Use
+  the path the parameter or secret gives and test it with `[ -f "$FILE" ]`.
+  Never write a check that only looks inside the repository.
+- **Files the Jenkins job wrote from parameters are not in the repository.**
+  `.env*`, `.npmrc`, `fastlane/.env`, a Fastfile. Write them before anything
+  reads them, either in a first "configuration" stage on the same machine
+  (files carry to later stages) or at the top of each stage.
+  - Jenkins' `printf '${envX}' > .env.x` used the value as printf's *format*,
+    which turns `\\` into `\` (PEM keys stored as `\\r\\n` came out as `\r\n`).
+    Reproduce that with `printf '%b\n' "$envX" > .env.x`. `%b` interprets the
+    same escapes, and a `%` in a value cannot break it. `printf '%s'` writes the
+    double backslashes and the app gets a different key.
+  - A Fastfile, an `.npmrc` or a fastlane `.env` is written verbatim:
+    `printf '%s\n' "$FASTFILE" > fastlane/Fastfile`.
+  - **Never** `cat <<'EOF'` around `${PARAM}`. The quotes stop all expansion,
+    and the file contains the literal text. fastlane then finds no lane.
+- **Read a `KEY=VALUE` multiline parameter without sourcing it.** `set -a; .
+  file.env` runs the file as shell, so a value with spaces, quotes or `$`
+  breaks the stage. fastlane reads `fastlane/.env` by itself. When the script
+  needs one value:
   ```sh
-  ks_get() { printf '%s\n' "$fastenvandroid" | grep "^$1=" | head -n 1 | cut -d'=' -f2- | tr -d ' "\r'; }
-  STORE_FILE=$(ks_get AREEBA_STORE_FILE)
+  kv() { printf '%s\n' "$PARAM" | grep "^$1=" | head -n 1 | cut -d'=' -f2- | tr -d ' "\r'; }
+  STORE_FILE=$(kv STORE_FILE_KEY)
   ```
-  Suggest moving the passwords to service secrets; a parameter's default is
-  shown to everyone who opens Run Build.
-- **It is macOS's userland:** `sed -i ''` (BSD sed, as the Jenkinsfile already
-  has it), and `/bin/sh` is bash 3.2. Keep commands POSIX.
-- **Port the intent, not the bugs, and say which you fixed.** In that
-  Jenkinsfile, pre-prod copied a `.env.preprod` nothing ever wrote; the iOS
-  build-only stage picked its `.env` from `DeployAndroidUAT`; npmrc went to
-  `.nmprc`. Name each one and ask before changing what a build produces.
+- **Parameter values are not masked in logs; only secrets are.** Never `cat` a
+  `.env` or `echo` a password, even though the Jenkinsfile did. A parameter's
+  default is also shown to everyone who opens Run Build. Suggest moving
+  passwords into service secrets.
+- **Don't hide a failure with `|| true`** on anything that matters (keychain
+  unlock, a signing step). It moves the error to a later, more confusing line.
+  Fail at once with a sentence that says what to fix.
+- **macOS userland.** `sed -i ''` (BSD sed), `/bin/sh` is bash 3.2. Keep
+  commands POSIX.
+- **Port the intent, not the bugs, and name what you fixed.** Look for files
+  copied that nothing ever wrote, a condition reading another platform's flag,
+  a typo'd filename that made a step a silent no-op (e.g. `.nmprc`). Ask
+  before changing what a build produces.
 
-The Android AAB stage that worked, as its `commands` (they run as one script,
-joined by newlines):
+### Mobile build errors and their fixes
+
+| Error in the log | Cause | Fix |
+|---|---|---|
+| `add_subdirectory given source ".../node_modules/<lib>/android/build/generated/source/codegen/jni/" which is not an existing directory` | React Native New Architecture: the app's CMake configure ran before the libraries generated their codegen. A fresh workspace exposes it; Jenkins workspaces often had leftovers. | `./gradlew generateCodegenArtifactsFromSchema` as its own invocation before `assembleRelease` / `bundleRelease` (fallback: `./gradlew clean` first). |
+| `./gradlew: No such file or directory` | Ran from the checkout root; `gradlew` is in `android/`. | `cd android` first. |
+| `./gradlew: Permission denied` | Execute bit lost in git. | `chmod +x gradlew`. |
+| `The engine "node" is incompatible ... Expected version` | A stage `PATH` export put an older Node first. | Remove the stage's PATH/nvm lines; the agent's PATH decides. |
+| `node: command not found` (or java, pod, fastlane) | Not on the agent's PATH. | The person adds the folder to the agent's plist and reloads it. |
+| `errSecInternalComponent`, `User interaction is not allowed` | Login keychain locked, or codesign waiting on an "allow access" dialog nobody can click. | See the keychain note below. |
+
+### The Mac itself (advise; you cannot change a machine)
+
+When the runner is offline, or tools or signing fail on every stage, the cause
+is usually the agent's setup. Tell the person:
+
+- The agent runs as a **LaunchAgent** of the build user (plist in
+  `~/Library/LaunchAgents/`), loaded with `launchctl bootstrap gui/$(id -u)
+  <plist>` **as that user, not root**. Root, a `~` path under sudo, or the
+  deprecated `launchctl load` give `Load failed: 5: Input/output error`.
+- `--workspace` must point under the user's home. The default `/data/...`
+  cannot be created on macOS, so the agent exits with code 1 in a loop
+  (`launchctl print` shows `spawn scheduled`, `last exit code = 1`).
+- The plist's `EnvironmentVariables` carry the token (never `--token` on the
+  command line, where `ps` shows it), `PATH` with the nvm/rbenv/Homebrew
+  folders in front, `ANDROID_HOME`, `LANG`/`LC_ALL=en_US.UTF-8`, and the
+  `StandardOutPath` / `StandardErrorPath` log file to read when it dies.
+- **Keychain:** a LaunchAgent in the logged-in session signs with the
+  already-unlocked login keychain. Then no password is needed in the pipeline,
+  as long as the user logs in automatically at boot and the keychain does not
+  auto-lock (`security set-keychain-settings
+  ~/Library/Keychains/login.keychain-db` once). Run `security
+  set-key-partition-list -S apple-tool:,apple:,codesign: -s -k '<password>'
+  ~/Library/Keychains/login.keychain-db` once by hand, so codesign never waits
+  on a dialog. Make a keychain-password secret optional in the stage: unlock
+  only when it is set, and fail loudly if the unlock fails.
+
+### The shape that works
+
+A configuration stage, then one stage per artifact, each guarded by a
+`runCondition` on its boolean parameter, all on `agent_macos`:
 
 ```sh
+# configuration: check the tag, write the files the old job wrote
 set -e
-printf "$envuat"  > .env.uat
-printf "$envprod" > .env.prod
-if [ -n "${envpreprod:-}" ]; then printf "$envpreprod" > .env.preprod; fi
+test "${KUBESIGHT_REF_TYPE:-}" = "tag" || { echo "Start this build on a release tag."; exit 1; }
+VERSION="$(grep '"version"' package.json | head -n 1 | cut -d '"' -f 4)"
+test "$VERSION" = "$KUBESIGHT_TAG" || { echo "package.json $VERSION does not match tag $KUBESIGHT_TAG"; exit 1; }
+umask 077
+printf '%b\n' "$ENV_PROD" > .env.prod     # one line per .env parameter
+printf '%s\n' "$ANDROID_FASTLANE_ENV" > android/fastlane/.env
 
-ks_get() { printf '%s\n' "$fastenvandroid" | grep "^$1=" | head -n 1 | cut -d'=' -f2- | tr -d ' "\r'; }
-STORE_FILE=$(ks_get AREEBA_STORE_FILE); STORE_PASS=$(ks_get AREEBA_STORE_PASS)
-KEY_ALIAS=$(ks_get AREEBA_KEY_ALIAS);   KEY_PASS=$(ks_get AREEBA_KEY_PASS)
-[ -f "$STORE_FILE" ] || { echo "No keystore at $STORE_FILE"; exit 1; }
-printf '%s\n' "$fastenvandroid" > android/fastlane/.env
-
-BUILD_CODE=$((700 + KUBESIGHT_BUILD_NUMBER))
-BUILD_VERSION=$(grep '"version"' package.json | head -n 1 | cut -d '"' -f 4)
-sed -i '' '/release {/,/^    }/ s/.*signingConfig.*//' android/app/build.gradle
-yarn install
-
-if [ "${deploypreprod:-}" = "true" ]; then cp .env.preprod android/.env
-elif [ "${DeployAndroidUAT:-}" = "true" ]; then cp .env.uat android/.env
-else cp .env.prod android/.env
-fi
-
+# Android: install, pick the .env, codegen, build, prove the artifact exists
+set -e
+yarn install --frozen-lockfile --non-interactive
+cp .env.prod .env && cp .env android/.env
 cd android
-./gradlew bundleRelease -PversionCode="$BUILD_CODE" -PversionName="$BUILD_VERSION" \
-  -Pandroid.injected.signing.store.file="$STORE_FILE" \
-  -Pandroid.injected.signing.store.password="$STORE_PASS" \
-  -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-  -Pandroid.injected.signing.key.password="$KEY_PASS"
+./gradlew --no-daemon generateCodegenArtifactsFromSchema
+./gradlew --no-daemon bundleRelease -PversionCode="$((OFFSET + KUBESIGHT_BUILD_NUMBER))" \
+  -Pandroid.injected.signing.store.file="$STORE_FILE" ...   # values read with kv()
+test -s app/build/outputs/bundle/release/app-release.aab
+
+# iOS: install, JS bundle step, write Fastfile + fastlane/.env verbatim, pods, version, lane
+set -e
+yarn install --frozen-lockfile --non-interactive
+cd ios
+printf '%s\n' "$FASTFILE" > fastlane/Fastfile
+printf '%s\n' "$IOS_FASTLANE_ENV" > fastlane/.env
+if [ -n "${KEYCHAIN_PASSWORD:-}" ]; then security unlock-keychain -p "$KEYCHAIN_PASSWORD" login.keychain || exit 1; fi
+RCT_NEW_ARCH_ENABLED=1 pod install
+xcrun agvtool new-version -all "$BUILD_CODE"; xcrun agvtool new-marketing-version "$VERSION"
+fastlane <lane>
 ```
 
-The iOS build-only stage follows the same shape: write the `.env` files,
-`yarn install`, copy the chosen `.env`, `yarn ios:build`, then in `ios/` write
-the Fastfile and `fastlane/.env` from `$FASTFILE_BUILD_ONLY` / `$fastenvios`,
-`security unlock-keychain -p "$MAC_KEYCHAIN_PASSWORD" login.keychain`,
-`RCT_NEW_ARCH_ENABLED=1 pod install`, `xcrun agvtool new-version -all
-"$BUILD_CODE"`, `xcrun agvtool new-marketing-version "$BUILD_VERSION"`,
-`fastlane build_only`, `mv *.ipa app-release.ipa` — artifact
-`ios/app-release.ipa`, type `ipa`. Keychain signing needs the agent to run as a
-LaunchAgent in the logged-in user's session, which is the machine's setup, not
-the pipeline's.
+For other project kinds, keep the same shape and swap the build lines: native
+Android has `gradlew` at the root (no `cd`, no codegen step unless it uses
+React Native); Flutter is `flutter pub get` then `flutter build appbundle` /
+`flutter build ipa` (needs `flutter` on the agent's PATH); native iOS is
+`pod install` (if there is a Podfile) then the fastlane lane or `xcodebuild
+archive` + `-exportArchive`.
 
 Before saving: say which stages you are creating, which parameters and secrets
-they expect, and which Jenkins bugs you corrected. A missing secret is a
-person's job to add, and the pipeline is not proven until a build has run it.
+they expect (names exactly as the stages read them), and which Jenkins bugs you
+corrected. A pipeline is not proven until a build has run it, and the first
+build of a fresh workspace is the one that finds what Jenkins' leftovers hid.
 
 ## The hard questions
 
