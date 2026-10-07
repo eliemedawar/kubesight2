@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy.orm import selectinload
+
 from ..audit import log_audit
 from ..auth_utils import get_current_user, revoke_user_sessions
 from ..db import db
@@ -117,7 +119,19 @@ def active_admin_count() -> int:
 
 
 def list_users() -> Dict[str, Any]:
-    users = User.query.order_by(User.username.asc()).all()
+    # The three access collections are joined eager loads by default, and joined
+    # together they multiply: a user with 6 cluster entries and 200 rules is
+    # 1,200 rows, the whole user table a few hundred thousand. Each in its own
+    # SELECT ... IN instead — same collections, rows added rather than multiplied.
+    users = (
+        User.query.options(
+            selectinload(User.cluster_access_entries),
+            selectinload(User.namespace_access_entries),
+            selectinload(User.access_rules),
+        )
+        .order_by(User.username.asc())
+        .all()
+    )
     return {"items": [user_list_item(u) for u in users], "count": len(users)}
 
 

@@ -115,23 +115,46 @@ class User(db.Model):
     interactive_login_enabled = db.Column(db.Boolean, nullable=False, default=True)
 
     role = db.relationship("Role", back_populates="users")
+    # Loaded eagerly with every User (RBAC reads them on each request), each in
+    # its own SELECT ... IN. As joined loads the three collections multiplied:
+    # 6 cluster entries x 100 rules came back as 600 rows for every request's
+    # current-user load, half of the API's CPU under load.
     cluster_access_entries = db.relationship(
         "UserClusterAccess",
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     namespace_access_entries = db.relationship(
         "UserNamespaceAccess",
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     access_rules = db.relationship(
         "AccessRule",
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
+    )
+
+
+def user_display_loader(relationship_attr):
+    """Loader option for a list that only shows the name of a related user.
+
+    Loading a User drags its three access collections along as joined eager
+    loads, and joined together they multiply: a user with 6 cluster entries and
+    200 access rules arrives as 1,200 rows. A list that names its requesters
+    would pay that once per distinct user. This batches the users into one
+    SELECT ... IN and leaves the collections to load lazily, which nothing that
+    prints a name ever triggers — and anything that does still gets them.
+    """
+    from sqlalchemy.orm import lazyload, selectinload
+
+    return selectinload(relationship_attr).options(
+        lazyload(User.cluster_access_entries),
+        lazyload(User.namespace_access_entries),
+        lazyload(User.access_rules),
     )
 
 

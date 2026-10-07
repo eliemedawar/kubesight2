@@ -28,6 +28,7 @@ from ..models import (
     DeploymentRequestSetting,
     DeploymentRequestVote,
     User,
+    user_display_loader,
 )
 
 # Audit action names (kept stable so audit log filters can target them).
@@ -786,12 +787,21 @@ def create_request(
     return payload
 
 
+# A list names each request's requester and decider: batch those users into one
+# query each instead of one (access-collection-laden) load per distinct user.
+_LIST_USER_LOADERS = (
+    user_display_loader(DeploymentRequest.requester),
+    user_display_loader(DeploymentRequest.decided_by),
+)
+
+
 def list_requests(*, limit: int = 200) -> List[Dict[str, Any]]:
     # Reflect any window-start expirations immediately, even if the background
     # scheduler has not ticked yet.
     auto_decline_overdue_requests()
     rows = (
-        DeploymentRequest.query.order_by(DeploymentRequest.created_at.desc())
+        DeploymentRequest.query.options(*_LIST_USER_LOADERS)
+        .order_by(DeploymentRequest.created_at.desc())
         .limit(max(1, min(int(limit), 500)))
         .all()
     )
@@ -805,7 +815,8 @@ def list_requests_for_user(user: Optional[User], *, limit: int = 200) -> List[Di
     if not user:
         return []
     rows = (
-        DeploymentRequest.query.filter(DeploymentRequest.requester_id == user.id)
+        DeploymentRequest.query.options(*_LIST_USER_LOADERS)
+        .filter(DeploymentRequest.requester_id == user.id)
         .order_by(DeploymentRequest.created_at.desc())
         .limit(max(1, min(int(limit), 500)))
         .all()
@@ -851,7 +862,10 @@ def _finalize(
 
 def _window_start_passed(req: DeploymentRequest, now: Optional[datetime] = None) -> bool:
     """True if the request has a window whose start time is now or in the past."""
-    start = req.requested_window_start
+    return _start_passed(req.requested_window_start, now)
+
+
+def _start_passed(start: Optional[datetime], now: Optional[datetime] = None) -> bool:
     if start is None:
         return False
     if start.tzinfo is None:
@@ -867,15 +881,23 @@ def auto_decline_overdue_requests(now: Optional[datetime] = None) -> int:
     Returns the number of requests declined. Safe to call repeatedly.
     """
     now = now or datetime.now(timezone.utc)
-    pending = (
-        DeploymentRequest.query.filter(
+    # Every request list (polled from each page) runs this first, so read just
+    # id + window start; only requests actually overdue are loaded as entities
+    # (an entity drags its requester and their access collections along).
+    candidates = (
+        db.session.query(DeploymentRequest.id, DeploymentRequest.requested_window_start)
+        .filter(
             DeploymentRequest.status == "pending",
             DeploymentRequest.requested_window_start.isnot(None),
-        ).all()
+        )
+        .all()
     )
+    overdue_ids = [request_id for request_id, start in candidates if _start_passed(start, now)]
+    if not overdue_ids:
+        return 0
     declined = 0
-    for req in pending:
-        if _window_start_passed(req, now):
+    for req in DeploymentRequest.query.filter(DeploymentRequest.id.in_(overdue_ids)).all():
+        if req.status == "pending" and _window_start_passed(req, now):
             _finalize(req, "declined", actor=None, reason="window_start_passed")
             declined += 1
     return declined

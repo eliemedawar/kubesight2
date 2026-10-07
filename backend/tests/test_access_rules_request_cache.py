@@ -124,8 +124,10 @@ def test_access_rules_loaded_once_per_request(app):
                 access_engine._load_rules = real_load_rules
 
     # _load_rules() is invoked per permission check; request cache reuses the first load.
+    # At most the user's own (selectin) collection load reads access_rules —
+    # never one query per check.
     assert load_calls >= NAMESPACE_COUNT
-    assert query_count == 0
+    assert query_count <= 1
 
 
 def test_uncached_load_rules_baseline_query_count(app):

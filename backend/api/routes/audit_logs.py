@@ -6,7 +6,7 @@ from flask import Blueprint, Response, request
 from sqlalchemy import func
 
 from ..decorators import require_permission
-from ..models import AuditLog
+from ..models import AuditLog, user_display_loader
 from ..response import success_response
 from ..serializers import audit_log_to_dict
 
@@ -21,6 +21,9 @@ AUTOMATION_ACTOR = "KubeSight automation"
 _CLUSTER_PREFIXED_TARGETS = {"namespace", "pod", "deployment", "service", "resource"}
 # Cap on rows scanned for an export so a huge history can't exhaust memory.
 _EXPORT_SCAN_LIMIT = 10000
+# Each entry prints its actor's username: one batched user query per page
+# instead of one access-collection-laden load per distinct actor.
+_ACTOR_LOADER = user_display_loader(AuditLog.actor)
 
 
 @audit_bp.route("", methods=["GET"])
@@ -30,7 +33,7 @@ def list_audit_logs():
     offset = max(int(request.args.get("offset", 0)), 0)
     query = AuditLog.query.order_by(AuditLog.created_at.desc())
     total = query.count()
-    entries = query.offset(offset).limit(limit).all()
+    entries = query.options(_ACTOR_LOADER).offset(offset).limit(limit).all()
     return success_response(
         {
             "items": [audit_log_to_dict(e) for e in entries],
@@ -77,7 +80,10 @@ def export_audit_logs():
     query = AuditLog.query.order_by(AuditLog.created_at.desc())
     if action:
         query = query.filter(func.lower(AuditLog.action).like(f"%{action}%"))
-    rows = [audit_log_to_dict(e) for e in query.limit(_EXPORT_SCAN_LIMIT).all()]
+    rows = [
+        audit_log_to_dict(e)
+        for e in query.options(_ACTOR_LOADER).limit(_EXPORT_SCAN_LIMIT).all()
+    ]
 
     filtered = []
     for entry in rows:
